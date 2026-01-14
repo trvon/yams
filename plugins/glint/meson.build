@@ -6,6 +6,7 @@ cpp = meson.get_compiler('cpp')
 
 spdlog_dep = dependency('spdlog', required: true)
 nlohmann_json_dep = dependency('nlohmann_json', required: true)
+yams_config_dep = dependency('yams_config', required: true)
 
 # ONNX Runtime is optional - Glint works in mock mode without it
 # Try 'onnxruntime' first (pkg-config name), then 'libonnxruntime' as fallback
@@ -14,7 +15,7 @@ if not onnxruntime_dep.found()
   onnxruntime_dep = dependency('libonnxruntime', required: false)
 endif
 
-glint_deps = [spdlog_dep, nlohmann_json_dep]
+glint_deps = [spdlog_dep, nlohmann_json_dep, yams_config_dep]
 glint_cpp_args = ['-std=c++23']
 
 if onnxruntime_dep.found()

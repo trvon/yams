@@ -117,6 +117,7 @@ yams_onnx_plugin_srcs = [
   'onnx_plugin.cpp',
   'model_provider.cpp',
   'onnx_model_pool.cpp',
+  'onnx_reranker_session.cpp',
   '../../src/genai/onnx_genai_adapter.cpp',
 ]
 

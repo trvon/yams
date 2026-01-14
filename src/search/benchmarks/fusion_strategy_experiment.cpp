@@ -234,7 +234,8 @@ enum class FusionStrategy {
     TWO_STAGE_TEXT_FIRST,
     SCORE_GATED_080,
     DOMINANCE_DETECTION,
-    ADAPTIVE_ROUTING
+    ADAPTIVE_ROUTING,
+    HYBRID_RERANK
 };
 
 const char* strategyName(FusionStrategy s) {
@@ -251,6 +252,8 @@ const char* strategyName(FusionStrategy s) {
             return "dominance_detection";
         case FusionStrategy::ADAPTIVE_ROUTING:
             return "adaptive_routing";
+        case FusionStrategy::HYBRID_RERANK:
+            return "hybrid_rerank";
     }
     return "unknown";
 }
@@ -563,12 +566,164 @@ QueryResult executeAdaptiveRouting(yams::daemon::DaemonClient& client, const std
 }
 
 // ============================================================================
+// Simple Mock Reranker (word-overlap scoring for benchmark demonstration)
+// For production, use OnnxRerankerSession from the ONNX plugin with BGE reranker
+// ============================================================================
+
+struct MockRerankerResult {
+    float score;
+    size_t document_index;
+};
+
+/**
+ * Compute word-overlap score between query and document
+ * This is a simple baseline - real cross-encoder reranking would use BGE model
+ */
+float computeWordOverlapScore(const std::string& query, const std::string& document) {
+    auto tokenize = [](const std::string& text) {
+        std::set<std::string> words;
+        std::string word;
+        for (char c : text) {
+            if (std::isalnum(static_cast<unsigned char>(c))) {
+                word += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            } else if (!word.empty()) {
+                words.insert(word);
+                word.clear();
+            }
+        }
+        if (!word.empty())
+            words.insert(word);
+        return words;
+    };
+
+    auto queryWords = tokenize(query);
+    auto docWords = tokenize(document);
+
+    if (queryWords.empty() || docWords.empty())
+        return 0.0f;
+
+    size_t overlap = 0;
+    for (const auto& w : queryWords) {
+        if (docWords.count(w))
+            ++overlap;
+    }
+
+    // Jaccard-like score normalized to [0, 1]
+    float score = static_cast<float>(overlap) / static_cast<float>(queryWords.size());
+    return std::min(1.0f, score);
+}
+
+/**
+ * Mock rerank function using word overlap scoring
+ * Returns document indices sorted by score (highest first)
+ */
+std::vector<MockRerankerResult>
+mockRerank(const std::string& query, const std::vector<std::string>& documents, size_t topK = 0) {
+    std::vector<MockRerankerResult> results;
+    results.reserve(documents.size());
+
+    for (size_t i = 0; i < documents.size(); ++i) {
+        results.push_back({computeWordOverlapScore(query, documents[i]), i});
+    }
+
+    // Sort by score descending
+    std::sort(
+        results.begin(), results.end(),
+        [](const MockRerankerResult& a, const MockRerankerResult& b) { return a.score > b.score; });
+
+    // Limit to topK if specified
+    if (topK > 0 && topK < results.size()) {
+        results.resize(topK);
+    }
+
+    return results;
+}
+
+/**
+ * Hybrid + Rerank: Get top-N candidates from hybrid, rerank with word-overlap scoring
+ *
+ * NOTE: This uses a simple word-overlap mock scorer for demonstration.
+ * For production use, integrate OnnxRerankerSession with BGE reranker model.
+ * Install model with: yams model download bge-reranker-base
+ */
+QueryResult executeHybridRerank(yams::daemon::DaemonClient& client, const std::string& query,
+                                const std::set<std::string>& relevant_ids, int k,
+                                const BEIRDataset& dataset) {
+    QueryResult result;
+    result.query = query;
+    result.relevant_doc_ids = relevant_ids;
+
+    auto start = std::chrono::steady_clock::now();
+
+    // Stage 1: Get candidates from hybrid search (retrieve more than k)
+    const int candidateK = k * 5; // Get 5x candidates for reranking
+    auto hybridResult = executeSearch(client, query, relevant_ids, candidateK, "hybrid");
+
+    if (hybridResult.returned_doc_ids.empty()) {
+        auto end = std::chrono::steady_clock::now();
+        result.latency_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        return result;
+    }
+
+    // Stage 2: Get document texts for reranking
+    std::vector<std::string> docTexts;
+    std::vector<std::string> docIds;
+    docTexts.reserve(hybridResult.returned_doc_ids.size());
+    docIds.reserve(hybridResult.returned_doc_ids.size());
+
+    for (const auto& docId : hybridResult.returned_doc_ids) {
+        auto it = dataset.documents.find(docId);
+        if (it != dataset.documents.end()) {
+            std::string text = it->second.title.empty()
+                                   ? it->second.text
+                                   : (it->second.title + " " + it->second.text);
+            // Truncate to reasonable length for reranker
+            if (text.size() > 1000) {
+                text = text.substr(0, 1000);
+            }
+            docTexts.push_back(text);
+            docIds.push_back(docId);
+        }
+    }
+
+    if (docTexts.empty()) {
+        auto end = std::chrono::steady_clock::now();
+        result.latency_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        return result;
+    }
+
+    // Stage 3: Rerank with mock word-overlap scorer
+    // (In production, use OnnxRerankerSession with BGE model)
+    auto rerankResults = mockRerank(query, docTexts, static_cast<size_t>(k));
+
+    auto end = std::chrono::steady_clock::now();
+    result.latency_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+
+    // Build final results from reranked order
+    for (const auto& rr : rerankResults) {
+        if (rr.document_index < docIds.size()) {
+            const auto& docId = docIds[rr.document_index];
+            result.returned_doc_ids.push_back(docId);
+            result.returned_scores.push_back(rr.score);
+
+            if (result.reciprocal_rank == 0.0 && relevant_ids.count(docId)) {
+                result.reciprocal_rank = 1.0 / static_cast<double>(result.returned_doc_ids.size());
+            }
+        }
+    }
+
+    return result;
+}
+
+// ============================================================================
 // Experiment Runner
 // ============================================================================
 
 ExperimentMetrics runExperiment(yams::daemon::DaemonClient& client,
                                 const std::vector<TestQuery>& queries, FusionStrategy strategy,
-                                int k) {
+                                int k, const BEIRDataset* dataset = nullptr) {
     ExperimentMetrics metrics;
     metrics.num_queries = static_cast<int>(queries.size());
 
@@ -599,6 +754,13 @@ ExperimentMetrics runExperiment(yams::daemon::DaemonClient& client,
                 break;
             case FusionStrategy::ADAPTIVE_ROUTING:
                 qr = executeAdaptiveRouting(client, tq.query, tq.relevantDocIds, k);
+                break;
+            case FusionStrategy::HYBRID_RERANK:
+                if (dataset) {
+                    qr = executeHybridRerank(client, tq.query, tq.relevantDocIds, k, *dataset);
+                } else {
+                    qr = executeSearch(client, tq.query, tq.relevantDocIds, k, "hybrid");
+                }
                 break;
         }
 
@@ -901,13 +1063,14 @@ int main(int argc, char** argv) {
     std::vector<FusionStrategy> strategies = {
         FusionStrategy::BASELINE_KEYWORD,     FusionStrategy::BASELINE_HYBRID,
         FusionStrategy::TWO_STAGE_TEXT_FIRST, FusionStrategy::SCORE_GATED_080,
-        FusionStrategy::DOMINANCE_DETECTION,  FusionStrategy::ADAPTIVE_ROUTING};
+        FusionStrategy::DOMINANCE_DETECTION,  FusionStrategy::ADAPTIVE_ROUTING,
+        FusionStrategy::HYBRID_RERANK};
 
     std::map<std::string, ExperimentMetrics> results;
 
     for (auto strategy : strategies) {
         std::cout << "Running: " << strategyName(strategy) << "..." << std::flush;
-        auto metrics = runExperiment(*client, queries, strategy, k);
+        auto metrics = runExperiment(*client, queries, strategy, k, &dataset);
         results[strategyName(strategy)] = metrics;
 
         std::cout << " MRR=" << std::fixed << std::setprecision(4) << metrics.mrr << " Recall@" << k

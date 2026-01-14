@@ -41,6 +41,7 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'YAMS_DISABLE_VECTORS': '1',
+      'TSAN_OPTIONS': _test_tsan_options,
     },
     is_parallel: false,
     timeout: get_option('integration-smoke-timeout'),

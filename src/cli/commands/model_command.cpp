@@ -43,10 +43,11 @@ struct ModelInfo {
     std::string url;
     std::string description;
     size_t size_mb;
-    std::string type; // "embedding" or "generation"
+    std::string type; // "embedding", "reranker", or "generation"
 };
 
 static const std::vector<ModelInfo> AVAILABLE_MODELS = {
+    // Embedding models
     {"all-MiniLM-L6-v2",
      "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
      "Lightweight 384-dim embeddings for semantic search", 90, "embedding"},
@@ -55,7 +56,14 @@ static const std::vector<ModelInfo> AVAILABLE_MODELS = {
      "High-quality 768-dim embeddings", 420, "embedding"},
     {"jina-embeddings-v2-base-code",
      "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/main/onnx/model.onnx",
-     "Code-aware 768-dim embeddings for 30+ programming languages", 550, "embedding"}
+     "Code-aware 768-dim embeddings for 30+ programming languages", 550, "embedding"},
+    // Reranker models (cross-encoder for two-stage retrieval)
+    {"bge-reranker-base",
+     "https://huggingface.co/BAAI/bge-reranker-base/resolve/main/onnx/model.onnx",
+     "Cross-encoder reranker for hybrid search refinement (512 max tokens)", 278, "reranker"},
+    {"bge-reranker-large",
+     "https://huggingface.co/BAAI/bge-reranker-large/resolve/main/onnx/model.onnx",
+     "High-quality cross-encoder reranker (512 max tokens)", 560, "reranker"}
     // Note: Nomic ONNX embedding model is currently not recommended due to provider limitations
     // (no batch embeddings/preload). You can still download via --hf or --url manually.
 };
@@ -1167,11 +1175,36 @@ private:
                 std::cout << "  - Max sequence length: 512 tokens\n";
                 std::cout << "  - Architecture: MPNet\n";
                 std::cout << "  - Higher quality than MiniLM but slower\n";
+            } else if (model.name.find("jina") != std::string::npos) {
+                std::cout << "  - Embedding dimension: 768\n";
+                std::cout << "  - Max sequence length: 8192 tokens\n";
+                std::cout << "  - Architecture: BERT-based with ALiBi\n";
+                std::cout << "  - Optimized for code search across 30+ languages\n";
             }
+            std::cout << "\nHint: set this as your preferred embedding model with:\n";
+            std::cout << "  yams config embeddings model " << model.name << "\n";
+        } else if (model.type == "reranker") {
+            std::cout << "\nReranker Model Details:\n";
+            std::cout << "  - Max input length: 512 tokens\n";
+            std::cout << "  - Architecture: Cross-encoder (BERT-based)\n";
+            std::cout << "  - Use case: Two-stage retrieval for hybrid search\n\n";
+            std::cout << "How it works:\n";
+            std::cout << "  1. First stage: Fast retrieval using keyword + vector search\n";
+            std::cout << "  2. Second stage: Reranker scores query-document pairs with\n";
+            std::cout << "     cross-attention, improving ranking quality\n\n";
+            if (model.name.find("large") != std::string::npos) {
+                std::cout << "Note: The 'large' model provides higher accuracy but\n";
+                std::cout << "      is slower than 'base'. Use for quality-critical tasks.\n\n";
+            } else {
+                std::cout << "Note: This is the recommended model for most use cases.\n";
+                std::cout << "      Good balance of speed and accuracy.\n\n";
+            }
+            std::cout << "To enable reranking:\n";
+            std::cout << "  1. Download the model: yams model download " << model.name << "\n";
+            std::cout << "  2. Configure YAMS:\n";
+            std::cout << "     yams config set search.reranker_model_path <path>/model.onnx\n";
+            std::cout << "     yams config set search.enable_reranking true\n";
         }
-
-        std::cout << "\nHint: set this as your preferred embedding model with:\n";
-        std::cout << "  yams config embeddings model " << model.name << "\n";
 
         return Result<void>{};
     }
@@ -1257,9 +1290,14 @@ Examples:
   yams model check
 
 Available Models:
+  Embedding models:
   - all-MiniLM-L6-v2: Fast 384-dim embeddings (90MB)
   - all-mpnet-base-v2: High-quality 768-dim embeddings (420MB)
   - nomic-embed-text-v1.5: Nomic embedding model (URL override supported)
+
+  Reranker models (cross-encoder for hybrid search):
+  - bge-reranker-base: Cross-encoder reranker (278MB)
+  - bge-reranker-large: High-quality reranker (560MB)
 
 Default download location: <data-dir>/models/<model-name>/
   (typically ~/.local/share/yams/models/ or $XDG_DATA_HOME/yams/models/)

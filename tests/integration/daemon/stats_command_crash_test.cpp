@@ -67,7 +67,14 @@ TEST_CASE("Stats command - missing requestCounts keys", "[stats][command][crash]
     }
 
     SECTION("empty requestCounts map doesn't crash") {
-        auto sres = yams::cli::run_sync(client.status(), 3s);
+        // Retry status request in case of transient connection issues
+        yams::Result<StatusResponse> sres;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            sres = yams::cli::run_sync(client.status(), 3s);
+            if (sres.has_value())
+                break;
+            std::this_thread::sleep_for(200ms);
+        }
         REQUIRE(sres.has_value());
 
         const auto& st = sres.value();

@@ -127,6 +127,20 @@ TEST_F(DaemonIngestionReliabilitySmoke, IngestRetriesUntilDaemonReady) {
     auto started = daemon.start();
     ASSERT_TRUE(started) << started.error().message;
 
+    // Start runLoop in background thread - REQUIRED for daemon to process requests
+    std::thread runLoopThread([&daemon]() { daemon.runLoop(); });
+
+    // Wait for daemon to reach Ready state before allowing client requests to complete
+    // Without this, the client might connect before services are fully initialized
+    auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto lifecycle = daemon.getLifecycle().snapshot();
+        if (lifecycle.state == yams::daemon::LifecycleState::Ready) {
+            break;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+
     // Wait for result (bounded)
     ASSERT_EQ(fut.wait_for(5s), std::future_status::ready);
     auto addRes = fut.get();
@@ -139,4 +153,5 @@ TEST_F(DaemonIngestionReliabilitySmoke, IngestRetriesUntilDaemonReady) {
 
     // Shutdown daemon cleanly
     daemon.stop();
+    runLoopThread.join();
 }

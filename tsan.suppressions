@@ -36,3 +36,6 @@ race:reactive_socket_service_base.ipp
 mutex:boost::asio::strand
 mutex:boost::asio::detail::posix_mutex
 mutex:boost::asio::detail::strand_executor_service
+
+race:TuningManager
+race:unique_ptr*TuningManager

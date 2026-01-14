@@ -27,7 +27,13 @@ struct GlintPluginContext {
                                                "event",  "product",      "technology", "concept"};
 };
 
-static GlintPluginContext g_ctx;
+// Use leaky singleton pattern to avoid static destruction order issues
+// The context will be allocated once and never freed - this is intentional
+// to prevent crashes during program exit when other statics may still reference it
+static GlintPluginContext& get_ctx() {
+    static GlintPluginContext* ctx = new GlintPluginContext();
+    return *ctx;
+}
 
 char* dup_cstr(const std::string& s) {
     if (s.empty())
@@ -40,23 +46,23 @@ char* dup_cstr(const std::string& s) {
 
 // Initialize session lazily
 bool ensure_session() {
-    std::lock_guard<std::mutex> lock(g_ctx.mutex);
+    std::lock_guard<std::mutex> lock(get_ctx().mutex);
 
-    if (g_ctx.session && g_ctx.session->is_ready()) {
+    if (get_ctx().session && get_ctx().session->is_ready()) {
         return true;
     }
 
     // Create session with config
-    g_ctx.config.entity_labels = g_ctx.default_labels;
-    g_ctx.session = std::make_unique<yams::glint::GlinerSession>(g_ctx.config);
+    get_ctx().config.entity_labels = get_ctx().default_labels;
+    get_ctx().session = std::make_unique<yams::glint::GlinerSession>(get_ctx().config);
 
-    if (!g_ctx.session->initialize()) {
-        g_ctx.last_error = std::string(g_ctx.session->last_error());
-        spdlog::error("[Glint] Failed to initialize session: {}", g_ctx.last_error);
+    if (!get_ctx().session->initialize()) {
+        get_ctx().last_error = std::string(get_ctx().session->last_error());
+        spdlog::error("[Glint] Failed to initialize session: {}", get_ctx().last_error);
         return false;
     }
 
-    g_ctx.initialized = true;
+    get_ctx().initialized = true;
     spdlog::info("[Glint] Session initialized successfully");
     return true;
 }
@@ -93,7 +99,7 @@ int extract_abi(void*, const char* content, size_t content_len,
 
     // Ensure session is initialized
     if (!ensure_session()) {
-        r->error = dup_cstr(g_ctx.last_error);
+        r->error = dup_cstr(get_ctx().last_error);
         *out = r;
         return YAMS_PLUGIN_OK; // Return OK but with error message
     }
@@ -114,11 +120,11 @@ int extract_abi(void*, const char* content, size_t content_len,
     std::vector<yams::glint::EntitySpan> spans;
 
     {
-        std::lock_guard<std::mutex> lock(g_ctx.mutex);
+        std::lock_guard<std::mutex> lock(get_ctx().mutex);
         if (labels.empty()) {
-            spans = g_ctx.session->extract(text);
+            spans = get_ctx().session->extract(text);
         } else {
-            spans = g_ctx.session->extract(text, labels);
+            spans = get_ctx().session->extract(text, labels);
         }
     }
 
@@ -186,12 +192,12 @@ int get_capabilities_json_abi(void*, char** out_json) {
 
     nlohmann::json caps;
     caps["content_types"] = {"text/plain", "text/markdown", "application/json"};
-    caps["entity_types"] = g_ctx.default_labels;
+    caps["entity_types"] = get_ctx().default_labels;
     caps["model"] = "gliner";
     caps["version"] = "0.1.0";
     caps["supports_custom_labels"] = true;
-    caps["max_width"] = g_ctx.config.max_width;
-    caps["threshold"] = g_ctx.config.threshold;
+    caps["max_width"] = get_ctx().config.max_width;
+    caps["threshold"] = get_ctx().config.threshold;
 
     *out_json = dup_cstr(caps.dump(2));
     return *out_json ? YAMS_PLUGIN_OK : YAMS_PLUGIN_ERR_INVALID;
@@ -238,22 +244,22 @@ YAMS_PLUGIN_API int yams_plugin_init(const char* config_json, const void* host_c
             auto cfg = nlohmann::json::parse(config_json, nullptr, false);
             if (!cfg.is_discarded()) {
                 if (cfg.contains("model_path") && cfg["model_path"].is_string()) {
-                    g_ctx.config.model_path = cfg["model_path"].get<std::string>();
+                    get_ctx().config.model_path = cfg["model_path"].get<std::string>();
                 }
                 if (cfg.contains("tokenizer_path") && cfg["tokenizer_path"].is_string()) {
-                    g_ctx.config.tokenizer_path = cfg["tokenizer_path"].get<std::string>();
+                    get_ctx().config.tokenizer_path = cfg["tokenizer_path"].get<std::string>();
                 }
                 if (cfg.contains("threshold") && cfg["threshold"].is_number()) {
-                    g_ctx.config.threshold = cfg["threshold"].get<float>();
+                    get_ctx().config.threshold = cfg["threshold"].get<float>();
                 }
                 if (cfg.contains("max_width") && cfg["max_width"].is_number()) {
-                    g_ctx.config.max_width = cfg["max_width"].get<size_t>();
+                    get_ctx().config.max_width = cfg["max_width"].get<size_t>();
                 }
                 if (cfg.contains("entity_labels") && cfg["entity_labels"].is_array()) {
-                    g_ctx.default_labels.clear();
+                    get_ctx().default_labels.clear();
                     for (const auto& label : cfg["entity_labels"]) {
                         if (label.is_string()) {
-                            g_ctx.default_labels.push_back(label.get<std::string>());
+                            get_ctx().default_labels.push_back(label.get<std::string>());
                         }
                     }
                 }
@@ -268,9 +274,9 @@ YAMS_PLUGIN_API int yams_plugin_init(const char* config_json, const void* host_c
 }
 
 YAMS_PLUGIN_API void yams_plugin_shutdown(void) {
-    std::lock_guard<std::mutex> lock(g_ctx.mutex);
-    g_ctx.session.reset();
-    g_ctx.initialized = false;
+    std::lock_guard<std::mutex> lock(get_ctx().mutex);
+    get_ctx().session.reset();
+    get_ctx().initialized = false;
     spdlog::info("[Glint] Plugin shutdown");
 }
 
@@ -302,14 +308,14 @@ YAMS_PLUGIN_API int yams_plugin_get_health_json(char** out_json) {
         return YAMS_PLUGIN_ERR_INVALID;
 
     nlohmann::json health;
-    health["status"] = g_ctx.initialized ? "ready" : "not_initialized";
-    health["model_path"] = g_ctx.config.model_path;
-    health["threshold"] = g_ctx.config.threshold;
+    health["status"] = get_ctx().initialized ? "ready" : "not_initialized";
+    health["model_path"] = get_ctx().config.model_path;
+    health["threshold"] = get_ctx().config.threshold;
 
-    if (g_ctx.session) {
-        health["session_ready"] = g_ctx.session->is_ready();
-        if (!g_ctx.session->last_error().empty()) {
-            health["last_error"] = std::string(g_ctx.session->last_error());
+    if (get_ctx().session) {
+        health["session_ready"] = get_ctx().session->is_ready();
+        if (!get_ctx().session->last_error().empty()) {
+            health["last_error"] = std::string(get_ctx().session->last_error());
         }
     }
 

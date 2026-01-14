@@ -81,7 +81,9 @@ struct ConfigCommandFixture {
     }
 
     void createModel(const std::string& modelName) {
-        fs::path modelsRoot = testDataHome / "yams" / "models";
+        // get_data_dir() returns YAMS_DATA_DIR directly (without /yams suffix)
+        // getAvailableModels() searches get_data_dir() / "models"
+        fs::path modelsRoot = testDataHome / "models";
         fs::path modelDir = modelsRoot / modelName;
         fs::create_directories(modelDir);
         std::ofstream(modelDir / "model.onnx").close();

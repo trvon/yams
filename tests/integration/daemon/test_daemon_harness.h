@@ -84,7 +84,13 @@ public:
         cleanup();
     }
 
-    bool start(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    // Pre-runLoop callback type: called after daemon->start() succeeds but before runLoop thread
+    // starts. Use this to set signal check hooks or external shutdown flags BEFORE the runLoop
+    // begins reading them, avoiding race conditions.
+    using PreRunLoopCallback = std::function<void(yams::daemon::YamsDaemon*)>;
+
+    bool start(std::chrono::milliseconds timeout = std::chrono::seconds(10),
+               PreRunLoopCallback preRunLoopCallback = nullptr) {
         // Always create new daemon instance on start()
         // (daemon cannot be restarted after stop() - must create new instance)
         spdlog::info("[DaemonHarness] Creating new daemon instance...");
@@ -125,6 +131,13 @@ public:
             return false;
         }
         spdlog::info("[DaemonHarness] daemon_->start() succeeded, starting runLoop thread...");
+
+        // Call pre-runLoop callback if provided (for setting up signal hooks, etc.)
+        // This runs BEFORE the runLoop thread starts, avoiding race conditions.
+        if (preRunLoopCallback) {
+            spdlog::info("[DaemonHarness] Invoking pre-runLoop callback...");
+            preRunLoopCallback(daemon_.get());
+        }
 
         // Start runLoop in background thread - this triggers async initialization
         // Without runLoop(), ServiceManager::startAsyncInit() is never called

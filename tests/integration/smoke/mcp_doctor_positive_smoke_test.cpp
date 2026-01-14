@@ -103,6 +103,9 @@ TEST(MCPDoctorPositiveSmoke, DoctorReportsReadyWithLiveDaemon) {
     auto started = daemon.start();
     ASSERT_TRUE(started) << started.error().message;
 
+    // Start runLoop in background thread - REQUIRED for daemon to process requests
+    std::thread runLoopThread([&daemon]() { daemon.runLoop(); });
+
     ASSERT_TRUE(wait_for_daemon_ready(socketPath)) << "daemon readiness wait failed";
 
     // Build an MCP server with a dummy transport and call the doctor tool
@@ -111,8 +114,9 @@ TEST(MCPDoctorPositiveSmoke, DoctorReportsReadyWithLiveDaemon) {
     svr.setDaemonClientSocketPathForTest(socketPath);
     auto res = svr.callToolPublic("doctor", json::object());
 
-    // Stop daemon before assertions to avoid lingering processes
+    // Stop daemon and join runLoop thread before assertions
     daemon.stop();
+    runLoopThread.join();
 
     // Validate the doctor result shape and readiness
     ASSERT_FALSE(res.contains("error")) << res.dump();

@@ -37,6 +37,7 @@ else
       suite: ['integration', 'search', 'hybrid', 'semantic', 'catch2'],
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'TSAN_OPTIONS': _test_tsan_options,
         # Note: Do NOT set YAMS_DISABLE_VECTORS - we need vector search for hybrid tests
       },
       is_parallel: false,
@@ -60,6 +61,7 @@ else
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
         'YAMS_DISABLE_VECTORS': '1',  # Don't need embeddings for symbol tests
+        'TSAN_OPTIONS': _test_tsan_options,
       },
       is_parallel: false,
       timeout: 120,  # 2 minutes - symbol extraction can be slow
@@ -81,6 +83,7 @@ else
       suite: ['integration', 'search', 'fsm', 'tuning', 'benchmark', 'catch2'],
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'TSAN_OPTIONS': _test_tsan_options,
         # Some tests need embeddings for hybrid search validation
       },
       is_parallel: false,

@@ -83,6 +83,26 @@ static const std::vector<GlinerModel> GLINER_MODELS = {
 static const std::vector<std::string> GLINER_TOKENIZER_FILES = {"tokenizer.json", "config.json",
                                                                 "gliner_config.json"};
 
+// Available reranker models for hybrid search two-stage retrieval
+struct RerankerModel {
+    std::string name;
+    std::string repo;       // HuggingFace repo (e.g., "BAAI/bge-reranker-base")
+    std::string model_file; // Model filename (e.g., "onnx/model.onnx")
+    std::string description;
+    size_t size_mb;
+    int max_tokens; // Maximum input length
+};
+
+static const std::vector<RerankerModel> RERANKER_MODELS = {
+    {"bge-reranker-base", "BAAI/bge-reranker-base", "onnx/model.onnx",
+     "Cross-encoder reranker for hybrid search (recommended)", 278, 512},
+    {"bge-reranker-large", "BAAI/bge-reranker-large", "onnx/model.onnx",
+     "High-quality cross-encoder reranker (larger, more accurate)", 560, 512}};
+
+// Files required for reranker model
+static const std::vector<std::string> RERANKER_TOKENIZER_FILES = {"tokenizer.json", "config.json",
+                                                                  "tokenizer_config.json"};
+
 // Available tree-sitter grammars for symbol extraction
 struct GrammarInfo {
     std::string_view language;
@@ -381,9 +401,10 @@ public:
                 spdlog::info("YAMS is already initialized at {} (use --force to overwrite).",
                              dataPath.string());
 
-                // Still offer GLiNER model, grammar download, and skill install even if already
-                // initialized
+                // Still offer GLiNER model, reranker model, grammar download, and skill install
+                // even if already initialized
                 maybeSetupGlinerModel(dataPath, configPath);
+                maybeSetupRerankerModel(dataPath, configPath);
                 maybeSetupGrammars(dataPath);
                 maybeSetupAgentSkill();
                 maybeBootstrapProjectSession();
@@ -576,6 +597,9 @@ public:
 
                 // 7a) GLiNER Model Setup (for NER in Glint plugin)
                 maybeSetupGlinerModel(dataPath, configPath);
+
+                // 7b) Reranker Model Setup (for two-stage hybrid search)
+                maybeSetupRerankerModel(dataPath, configPath);
             }
 
             // 7) Tree-sitter Grammar Setup (for symbol extraction)
@@ -1676,6 +1700,289 @@ private:
             spdlog::info("Configured [plugins.glint].model_path");
         } catch (const std::exception& e) {
             spdlog::debug("Skipping GLiNER config write: {}", e.what());
+        }
+    }
+
+    // ==========================================================================
+    // Reranker Model Setup (for two-stage hybrid search)
+    // ==========================================================================
+
+    /**
+     * @brief Download reranker model files using the unified downloader.
+     */
+    Result<void> downloadRerankerModelFiles(const RerankerModel& model, const fs::path& outputDir) {
+        fs::create_directories(outputDir);
+        fs::path modelFile = outputDir / "model.onnx";
+
+        // Check if already downloaded
+        if (fs::exists(modelFile) && fs::exists(outputDir / "tokenizer.json")) {
+            std::cout << "  Reranker model already exists at: " << outputDir.string() << "\n";
+            return Result<void>{};
+        }
+
+        // Setup downloader
+        yams::downloader::StorageConfig storage{};
+        try {
+            fs::path dataDir = cli_ ? cli_->getDataPath() : fs::path{};
+            if (!dataDir.empty()) {
+                storage.objectsDir = dataDir / "storage" / "objects";
+                storage.stagingDir = dataDir / "staging" / "downloader";
+            } else {
+                auto tmp = fs::temp_directory_path();
+                storage.objectsDir = tmp / "yams" / "objects";
+                storage.stagingDir = tmp / "yams" / "downloader";
+            }
+        } catch (...) {
+            try {
+                auto tmp = fs::temp_directory_path();
+                storage.objectsDir = tmp / "yams" / "objects";
+                storage.stagingDir = tmp / "yams" / "downloader";
+            } catch (...) {
+            }
+        }
+
+        yams::downloader::DownloaderConfig dcfg{};
+        auto manager = yams::downloader::makeDownloadManager(storage, dcfg);
+
+        // Download helper with progress
+        auto downloadFile = [&](const std::string& url, const fs::path& outPath,
+                                const std::string& label) -> Result<void> {
+            yams::downloader::DownloadRequest req{};
+            req.url = url;
+            req.storeOnly = true;
+            req.exportPath = outPath;
+
+            size_t lastLen = 0;
+            auto onProgress = [&label, &lastLen](const yams::downloader::ProgressEvent& ev) {
+                auto stageName = [](yams::downloader::ProgressStage s) {
+                    switch (s) {
+                        case yams::downloader::ProgressStage::Resolving:
+                            return "resolving";
+                        case yams::downloader::ProgressStage::Connecting:
+                            return "connecting";
+                        case yams::downloader::ProgressStage::Downloading:
+                            return "downloading";
+                        case yams::downloader::ProgressStage::Verifying:
+                            return "verifying";
+                        case yams::downloader::ProgressStage::Finalizing:
+                            return "finalizing";
+                        default:
+                            return "";
+                    }
+                };
+                float pct = ev.percentage.value_or(0.0f);
+                double done_mb = static_cast<double>(ev.downloadedBytes) / (1024.0 * 1024.0);
+                std::string content;
+                if (ev.totalBytes) {
+                    double total_mb = static_cast<double>(*ev.totalBytes) / (1024.0 * 1024.0);
+                    content = fmt::format("  {} {:11s} {:3.0f}% [{:.1f}/{:.1f} MB]", label,
+                                          stageName(ev.stage), pct, done_mb, total_mb);
+                } else {
+                    content =
+                        fmt::format("  {} {:11s} [{:.1f} MB]", label, stageName(ev.stage), done_mb);
+                }
+                std::string out = "\r" + content;
+                if (lastLen > content.size())
+                    out += std::string(lastLen - content.size(), ' ');
+                fmt::print("{}", out);
+                std::fflush(stdout);
+                lastLen = content.size();
+                if (ev.stage == yams::downloader::ProgressStage::Finalizing) {
+                    fmt::print("\n");
+                    lastLen = 0;
+                }
+            };
+
+            auto res = manager->download(req, onProgress, [] { return false; }, {});
+            if (!res.ok() || !res.value().success) {
+                std::string msg =
+                    res.ok() ? (res.value().error ? res.value().error->message : "download failed")
+                             : res.error().message;
+                return Error{ErrorCode::InternalError, label + ": " + msg};
+            }
+            return Result<void>{};
+        };
+
+        std::cout << "\n" << cli::ui::section_header("Downloading Reranker Model") << "\n";
+        std::cout << cli::ui::key_value("Model", model.name) << "\n";
+        std::cout << cli::ui::key_value("Size", "~" + std::to_string(model.size_mb) + " MB")
+                  << "\n";
+        std::cout << cli::ui::key_value("Max tokens", std::to_string(model.max_tokens)) << "\n\n";
+
+        // Build base URL
+        std::string baseUrl = "https://huggingface.co/" + model.repo + "/resolve/main/";
+
+        // Download model.onnx
+        std::string modelUrl = baseUrl + model.model_file;
+        auto result = downloadFile(modelUrl, modelFile, "model.onnx");
+        if (!result) {
+            return Error{ErrorCode::NetworkError,
+                         "Failed to download model.onnx: " + result.error().message};
+        }
+
+        // Download tokenizer files (required for reranker)
+        for (const auto& filename : RERANKER_TOKENIZER_FILES) {
+            std::string url = baseUrl + filename;
+            auto r = downloadFile(url, outputDir / filename, filename);
+            // tokenizer.json is required, others are optional
+            if (!r && filename == "tokenizer.json") {
+                return Error{ErrorCode::NetworkError,
+                             "Failed to download tokenizer.json: " + r.error().message};
+            }
+        }
+
+        std::cout << ui::status_ok("Reranker model downloaded successfully") << "\n";
+        std::cout << "\n"
+                  << ui::status_info("Reranker improves hybrid search by re-scoring "
+                                     "candidates with cross-attention")
+                  << "\n";
+        return Result<void>{};
+    }
+
+    /**
+     * @brief Prompt user to select a reranker model.
+     */
+    std::string promptForRerankerModel(const fs::path& dataPath) {
+        // Build choice items
+        std::vector<ChoiceItem> items;
+        items.reserve(RERANKER_MODELS.size());
+        for (const auto& m : RERANKER_MODELS) {
+            ChoiceItem ci;
+            ci.value = m.name;
+            ci.label = m.name + " (" + std::to_string(m.size_mb) + " MB)";
+            ci.description = m.description;
+            items.push_back(std::move(ci));
+        }
+
+        size_t defaultIndex = 0; // bge-reranker-base is first (recommended)
+
+        size_t chosenIdx = prompt_choice("\nAvailable reranker models:", items,
+                                         ChoiceOptions{.defaultIndex = defaultIndex,
+                                                       .allowEmpty = true,
+                                                       .retryOnInvalid = true});
+
+        const auto& selectedModel = RERANKER_MODELS[chosenIdx];
+
+        // Check if model already exists
+        fs::path modelDir = dataPath / "models" / "reranker" / selectedModel.name;
+        fs::path modelPath = modelDir / "model.onnx";
+
+        if (fs::exists(modelPath)) {
+            std::cout << "\nReranker model already downloaded at: " << modelPath.string() << "\n";
+        } else {
+            // Ask if user wants to download now
+            bool downloadNow = prompt_yes_no("\nDownload the reranker model now? [Y/n]: ",
+                                             YesNoOptions{.defaultYes = true});
+
+            if (downloadNow) {
+                auto result = downloadRerankerModelFiles(selectedModel, modelDir);
+                if (!result) {
+                    spdlog::warn("Reranker model download failed: {}", result.error().message);
+                    std::cout << "\nYou can download the model later with:\n"
+                              << "  yams model download " << selectedModel.name << "\n";
+                }
+            } else {
+                std::cout << "\nTo download this model later:\n"
+                          << "  yams model download " << selectedModel.name << "\n";
+            }
+        }
+        return selectedModel.name;
+    }
+
+    /**
+     * @brief Unified reranker model setup entry point for both init and already-initialized states.
+     *
+     * Handles the prompt logic based on nonInteractive_ and autoInit_ flags:
+     * - Interactive mode: prompts user for model selection
+     * - Auto mode: downloads default model without prompting
+     * - Non-interactive (non-auto): skips reranker setup entirely
+     */
+    void maybeSetupRerankerModel(const fs::path& dataPath, const fs::path& configPath) {
+        std::string selectedRerankerModel;
+
+        if (autoInit_) {
+            // Auto mode: download the base model by default
+            selectedRerankerModel = RERANKER_MODELS[0].name;
+            spdlog::info("Using default reranker model: {}", selectedRerankerModel);
+            fs::path rerankerModelDir = dataPath / "models" / "reranker" / selectedRerankerModel;
+            auto result = downloadRerankerModelFiles(RERANKER_MODELS[0], rerankerModelDir);
+            if (!result) {
+                spdlog::warn("Reranker model download failed: {}", result.error().message);
+                spdlog::warn(
+                    "You can download the model later with: yams model download bge-reranker-base");
+            }
+        } else if (!nonInteractive_) {
+            // Interactive mode: prompt user
+            bool setupReranker =
+                prompt_yes_no("\nDownload reranker model for improved hybrid search? [Y/n]: ",
+                              YesNoOptions{.defaultYes = true});
+            if (setupReranker) {
+                selectedRerankerModel = promptForRerankerModel(dataPath);
+            }
+        }
+        // Non-interactive non-auto: skip reranker setup
+
+        // Update config with reranker model path if selected
+        if (!selectedRerankerModel.empty()) {
+            updateRerankerConfig(configPath, dataPath, selectedRerankerModel);
+        }
+    }
+
+    /**
+     * @brief Updates config.toml with reranker model path.
+     */
+    void updateRerankerConfig(const fs::path& configPath, const fs::path& dataPath,
+                              const std::string& selectedRerankerModel) {
+        try {
+            std::ifstream in(configPath);
+            std::stringstream buf;
+            buf << in.rdbuf();
+            in.close();
+            std::string content = buf.str();
+
+            // Ensure [search] section exists
+            if (content.find("[search]") == std::string::npos) {
+                content.append("\n[search]\n");
+            }
+
+            // Set reranker_model_path in [search]
+            fs::path rerankerModelPath =
+                dataPath / "models" / "reranker" / selectedRerankerModel / "model.onnx";
+            auto secPos = content.find("[search]");
+            if (secPos != std::string::npos) {
+                auto nextSec = content.find("\n[", secPos + 1);
+                auto rangeEnd = (nextSec == std::string::npos) ? content.size() : nextSec;
+
+                // Add reranker_model_path
+                auto keyPos = content.find("reranker_model_path", secPos);
+                std::string modelPathLine = "reranker_model_path = \"" +
+                                            escapeTomlString(rerankerModelPath.string()) + "\"";
+                if (keyPos == std::string::npos || keyPos > rangeEnd) {
+                    content.insert(rangeEnd, modelPathLine + "\n");
+                } else {
+                    auto lineEnd = content.find('\n', keyPos);
+                    if (lineEnd == std::string::npos)
+                        lineEnd = content.size();
+                    content.replace(keyPos, lineEnd - keyPos, modelPathLine);
+                }
+
+                // Also enable reranking by default
+                auto enablePos = content.find("enable_reranking", secPos);
+                if (enablePos == std::string::npos || enablePos > rangeEnd) {
+                    // Find position after reranker_model_path (re-find since string changed)
+                    secPos = content.find("[search]");
+                    nextSec = content.find("\n[", secPos + 1);
+                    rangeEnd = (nextSec == std::string::npos) ? content.size() : nextSec;
+                    content.insert(rangeEnd, "enable_reranking = true\n");
+                }
+            }
+
+            std::ofstream outCfg(configPath, std::ios::trunc);
+            outCfg << content;
+            outCfg.close();
+            spdlog::info("Configured [search].reranker_model_path");
+        } catch (const std::exception& e) {
+            spdlog::debug("Skipping reranker config write: {}", e.what());
         }
     }
 

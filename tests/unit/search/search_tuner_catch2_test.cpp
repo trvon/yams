@@ -46,10 +46,11 @@ TEST_CASE("TunedParams: SMALL_CODE parameters", "[unit][search_tuner][params]") 
     auto params = getTunedParams(TuningState::SMALL_CODE);
 
     CHECK(params.rrfK == 20);
-    CHECK(params.textWeight == Approx(0.50f));
+    CHECK(params.textWeight == Approx(0.45f));
     CHECK(params.vectorWeight == Approx(0.15f));
-    CHECK(params.pathTreeWeight == Approx(0.20f));
-    CHECK(params.kgWeight == Approx(0.10f));
+    CHECK(params.entityVectorWeight == Approx(0.15f));
+    CHECK(params.pathTreeWeight == Approx(0.15f));
+    CHECK(params.kgWeight == Approx(0.05f));
     CHECK(params.tagWeight == Approx(0.03f));
     CHECK(params.metadataWeight == Approx(0.02f));
 }
@@ -58,10 +59,11 @@ TEST_CASE("TunedParams: LARGE_CODE parameters", "[unit][search_tuner][params]") 
     auto params = getTunedParams(TuningState::LARGE_CODE);
 
     CHECK(params.rrfK == 60);
-    CHECK(params.textWeight == Approx(0.45f));
+    CHECK(params.textWeight == Approx(0.40f));
     CHECK(params.vectorWeight == Approx(0.20f));
-    CHECK(params.pathTreeWeight == Approx(0.15f));
-    CHECK(params.kgWeight == Approx(0.10f));
+    CHECK(params.entityVectorWeight == Approx(0.15f));
+    CHECK(params.pathTreeWeight == Approx(0.10f));
+    CHECK(params.kgWeight == Approx(0.05f));
     CHECK(params.tagWeight == Approx(0.05f));
     CHECK(params.metadataWeight == Approx(0.05f));
 }
@@ -72,6 +74,7 @@ TEST_CASE("TunedParams: SMALL_PROSE parameters", "[unit][search_tuner][params]")
     CHECK(params.rrfK == 25);
     CHECK(params.textWeight == Approx(0.50f));
     CHECK(params.vectorWeight == Approx(0.40f));
+    CHECK(params.entityVectorWeight == Approx(0.00f));
     CHECK(params.pathTreeWeight == Approx(0.00f));
     CHECK(params.kgWeight == Approx(0.00f));
     CHECK(params.tagWeight == Approx(0.05f));
@@ -84,6 +87,7 @@ TEST_CASE("TunedParams: LARGE_PROSE parameters", "[unit][search_tuner][params]")
     CHECK(params.rrfK == 60);
     CHECK(params.textWeight == Approx(0.40f));
     CHECK(params.vectorWeight == Approx(0.45f));
+    CHECK(params.entityVectorWeight == Approx(0.00f));
     CHECK(params.pathTreeWeight == Approx(0.05f));
     CHECK(params.kgWeight == Approx(0.00f));
     CHECK(params.tagWeight == Approx(0.05f));
@@ -96,6 +100,7 @@ TEST_CASE("TunedParams: SCIENTIFIC parameters", "[unit][search_tuner][params]") 
     CHECK(params.rrfK == 30);
     CHECK(params.textWeight == Approx(0.55f));
     CHECK(params.vectorWeight == Approx(0.40f));
+    CHECK(params.entityVectorWeight == Approx(0.00f));
     CHECK(params.pathTreeWeight == Approx(0.00f));
     CHECK(params.kgWeight == Approx(0.00f));
     CHECK(params.tagWeight == Approx(0.00f));
@@ -106,10 +111,11 @@ TEST_CASE("TunedParams: MIXED parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::MIXED);
 
     CHECK(params.rrfK == 45);
-    CHECK(params.textWeight == Approx(0.45f));
+    CHECK(params.textWeight == Approx(0.40f));
     CHECK(params.vectorWeight == Approx(0.25f));
+    CHECK(params.entityVectorWeight == Approx(0.10f));
     CHECK(params.pathTreeWeight == Approx(0.10f));
-    CHECK(params.kgWeight == Approx(0.10f));
+    CHECK(params.kgWeight == Approx(0.05f));
     CHECK(params.tagWeight == Approx(0.05f));
     CHECK(params.metadataWeight == Approx(0.05f));
 }
@@ -118,8 +124,9 @@ TEST_CASE("TunedParams: MINIMAL parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::MINIMAL);
 
     CHECK(params.rrfK == 15);
-    CHECK(params.textWeight == Approx(0.60f));
+    CHECK(params.textWeight == Approx(0.55f));
     CHECK(params.vectorWeight == Approx(0.30f));
+    CHECK(params.entityVectorWeight == Approx(0.05f));
     CHECK(params.pathTreeWeight == Approx(0.05f));
     CHECK(params.kgWeight == Approx(0.00f));
     CHECK(params.tagWeight == Approx(0.03f));
@@ -131,10 +138,11 @@ TEST_CASE("TunedParams: JSON serialization", "[unit][search_tuner][params]") {
     auto json = params.toJson();
 
     CHECK(json["rrf_k"] == 20);
-    CHECK(json["text_weight"].get<float>() == Approx(0.50f));
+    CHECK(json["text_weight"].get<float>() == Approx(0.45f));
     CHECK(json["vector_weight"].get<float>() == Approx(0.15f));
-    CHECK(json["path_tree_weight"].get<float>() == Approx(0.20f));
-    CHECK(json["kg_weight"].get<float>() == Approx(0.10f));
+    CHECK(json["entity_vector_weight"].get<float>() == Approx(0.15f));
+    CHECK(json["path_tree_weight"].get<float>() == Approx(0.15f));
+    CHECK(json["kg_weight"].get<float>() == Approx(0.05f));
     CHECK(json["tag_weight"].get<float>() == Approx(0.03f));
     CHECK(json["metadata_weight"].get<float>() == Approx(0.02f));
 }
@@ -147,6 +155,7 @@ TEST_CASE("TunedParams: applyTo SearchEngineConfig", "[unit][search_tuner][param
 
     CHECK(config.textWeight == Approx(0.40f));
     CHECK(config.vectorWeight == Approx(0.45f));
+    CHECK(config.entityVectorWeight == Approx(0.00f));
     CHECK(config.pathTreeWeight == Approx(0.05f));
     CHECK(config.kgWeight == Approx(0.00f));
     CHECK(config.tagWeight == Approx(0.05f));
@@ -307,7 +316,7 @@ TEST_CASE("SearchTuner: getParams returns correct params", "[unit][search_tuner]
 
     // Should be LARGE_CODE
     CHECK(params.rrfK == 60);
-    CHECK(params.textWeight == Approx(0.45f));
+    CHECK(params.textWeight == Approx(0.40f));
     CHECK(params.vectorWeight == Approx(0.20f));
 }
 
@@ -327,7 +336,7 @@ TEST_CASE("SearchTuner: getConfig returns valid SearchEngineConfig", "[unit][sea
     CHECK(config.pathTreeWeight == Approx(0.00f));
     CHECK(config.kgWeight == Approx(0.00f));
     CHECK(config.corpusProfile == SearchEngineConfig::CorpusProfile::CUSTOM);
-    CHECK(config.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
+    CHECK(config.fusionStrategy == SearchEngineConfig::FusionStrategy::COMB_MNZ);
 }
 
 TEST_CASE("SearchTuner: toJson serialization", "[unit][search_tuner]") {
@@ -346,7 +355,7 @@ TEST_CASE("SearchTuner: toJson serialization", "[unit][search_tuner]") {
     CHECK(json["state"] == "MIXED");
     CHECK_FALSE(json["reason"].get<std::string>().empty());
     CHECK(json["rrf_k"] == 45);
-    CHECK(json["params"]["text_weight"].get<float>() == Approx(0.45f));
+    CHECK(json["params"]["text_weight"].get<float>() == Approx(0.40f));
     CHECK(json["corpus"]["doc_count"] == 1000);
     CHECK(json["corpus"]["code_ratio"].get<float>() == Approx(0.4f));
     CHECK(json["corpus"]["prose_ratio"].get<float>() == Approx(0.4f));
@@ -430,8 +439,9 @@ TEST_CASE("TunedParams: weights sum to approximately 1.0", "[unit][search_tuner]
 
     for (auto state : states) {
         auto params = getTunedParams(state);
-        float sum = params.textWeight + params.vectorWeight + params.pathTreeWeight +
-                    params.kgWeight + params.tagWeight + params.metadataWeight;
+        float sum = params.textWeight + params.vectorWeight + params.entityVectorWeight +
+                    params.pathTreeWeight + params.kgWeight + params.tagWeight +
+                    params.metadataWeight;
 
         INFO("State: " << tuningStateToString(state));
         CHECK(sum == Approx(1.0f).margin(0.01f));

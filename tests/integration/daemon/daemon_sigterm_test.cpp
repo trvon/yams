@@ -45,30 +45,32 @@ TEST_CASE("Daemon responds to external shutdown flag", "[daemon][sigterm][shutdo
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     SECTION("daemon stops promptly when external shutdown flag set") {
-        DaemonHarness harness;
-        REQUIRE(harness.start());
-
-        // Reset test flag
+        // Reset test flag before starting daemon
         g_test_shutdown_requested.store(false);
 
-        // Set up the signal check hook to use our test flag
+        DaemonHarness harness;
+        // Use pre-runLoop callback to set up signal hook BEFORE runLoop starts.
+        // This avoids the race condition where runLoop reads signalCheckHook_ while
+        // the main thread is writing to it via setSignalCheckHook().
+        REQUIRE(harness.start(std::chrono::seconds(10), [](yams::daemon::YamsDaemon* daemon) {
+            // Install hook that checks our test shutdown flag (for when loop iterates)
+            daemon->setSignalCheckHook([daemon]() {
+                if (g_test_shutdown_requested.load(std::memory_order_relaxed)) {
+                    spdlog::info("[Test] Signal check: shutdown requested via test flag");
+                    daemon->requestStop();
+                    return true;
+                }
+                return false;
+            });
+
+            // KEY FIX (yams-qe6r): Bind external shutdown flag to CV predicate
+            // This allows immediate wake-up from CV wait when flag is set
+            daemon->setExternalShutdownFlag(&g_test_shutdown_requested);
+        }));
+
         auto* daemon = harness.daemon();
         REQUIRE(daemon != nullptr);
         REQUIRE(daemon->isRunning());
-
-        // Install hook that checks our test shutdown flag (for when loop iterates)
-        daemon->setSignalCheckHook([daemon]() {
-            if (g_test_shutdown_requested.load(std::memory_order_relaxed)) {
-                spdlog::info("[Test] Signal check: shutdown requested via test flag");
-                daemon->requestStop();
-                return true;
-            }
-            return false;
-        });
-
-        // KEY FIX (yams-qe6r): Bind external shutdown flag to CV predicate
-        // This allows immediate wake-up from CV wait when flag is set
-        daemon->setExternalShutdownFlag(&g_test_shutdown_requested);
 
         // Verify daemon is running
         auto client = createClient(harness.socketPath());
@@ -110,25 +112,29 @@ TEST_CASE("Daemon shutdown timing with external flag", "[daemon][sigterm][timing
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     SECTION("shutdown completes within reasonable time after flag set") {
-        DaemonHarness harness;
-        REQUIRE(harness.start());
-
+        // Reset test flag before starting daemon
         g_test_shutdown_requested.store(false);
+
+        DaemonHarness harness;
+        // Use pre-runLoop callback to set up signal hook BEFORE runLoop starts.
+        // This avoids the race condition where runLoop reads signalCheckHook_ while
+        // the main thread is writing to it via setSignalCheckHook().
+        REQUIRE(harness.start(std::chrono::seconds(10), [](yams::daemon::YamsDaemon* daemon) {
+            // Install hook (for when loop iterates)
+            daemon->setSignalCheckHook([daemon]() {
+                if (g_test_shutdown_requested.load(std::memory_order_relaxed)) {
+                    daemon->requestStop();
+                    return true;
+                }
+                return false;
+            });
+
+            // KEY FIX (yams-qe6r): Bind external shutdown flag to CV predicate
+            daemon->setExternalShutdownFlag(&g_test_shutdown_requested);
+        }));
 
         auto* daemon = harness.daemon();
         REQUIRE(daemon != nullptr);
-
-        // Install hook (for when loop iterates)
-        daemon->setSignalCheckHook([daemon]() {
-            if (g_test_shutdown_requested.load(std::memory_order_relaxed)) {
-                daemon->requestStop();
-                return true;
-            }
-            return false;
-        });
-
-        // KEY FIX (yams-qe6r): Bind external shutdown flag to CV predicate
-        daemon->setExternalShutdownFlag(&g_test_shutdown_requested);
 
         // Do some operations first
         auto client = createClient(harness.socketPath());

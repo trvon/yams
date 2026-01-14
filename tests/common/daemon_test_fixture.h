@@ -30,6 +30,7 @@ protected:
     std::filesystem::path socketPath_;
     std::unique_ptr<FixtureManager> fixtures_;
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
+    std::thread runLoopThread_; // Background thread for daemon runLoop
 
     void SetUp() override {
         // Create unique temp directories
@@ -66,6 +67,10 @@ protected:
         // Stop daemon if running
         if (daemon_) {
             daemon_->stop();
+            // Join runLoop thread after stop() - stop() causes runLoop() to return
+            if (runLoopThread_.joinable()) {
+                runLoopThread_.join();
+            }
             daemon_.reset();
         }
 
@@ -106,25 +111,29 @@ protected:
             return false;
         }
 
-        // Poll for daemon to be fully ready by attempting to connect
-        auto client = yams::daemon::DaemonClient(
-            yams::daemon::ClientConfig{.socketPath = socketPath_,
-                                       .connectTimeout = std::chrono::milliseconds(500),
-                                       .autoStart = false});
+        // Start runLoop in background thread - this is REQUIRED for daemon to process requests
+        // Without runLoop(), the daemon stays in "initializing" state forever
+        runLoopThread_ = std::thread([this]() { daemon_->runLoop(); });
 
+        // Give runLoop time to enter and trigger async init
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        // Poll for daemon to reach Ready state in lifecycle FSM
         auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-            // Try to connect - successful connection means daemon is ready
-            auto connectResult =
-                yams::cli::run_sync(client.connect(), std::chrono::milliseconds(300));
-            if (connectResult) {
+            // Check lifecycle state
+            auto lifecycle = daemon_->getLifecycle().snapshot();
+            if (lifecycle.state == yams::daemon::LifecycleState::Ready) {
                 return true;
+            } else if (lifecycle.state == yams::daemon::LifecycleState::Failed) {
+                ADD_FAILURE() << "Daemon lifecycle reached Failed state: " << lifecycle.lastError;
+                return false;
             }
         }
 
-        ADD_FAILURE() << "Daemon failed to become ready within timeout";
+        ADD_FAILURE() << "Daemon failed to reach Ready state within timeout";
         return false;
     }
 
@@ -132,6 +141,10 @@ protected:
     void stopDaemon() {
         if (daemon_) {
             daemon_->stop();
+            // Join runLoop thread after stop() - stop() causes runLoop() to return
+            if (runLoopThread_.joinable()) {
+                runLoopThread_.join();
+            }
             daemon_.reset();
         }
     }

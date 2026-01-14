@@ -244,8 +244,8 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
         // With code ratio > 0.7 and doc count < 1000, should be SMALL_CODE
         CHECK(tuner.currentState() == TuningState::SMALL_CODE);
         CHECK(tuner.getRrfK() == 20);
-        CHECK(tuner.getParams().textWeight == Approx(0.50f));
-        CHECK(tuner.getParams().pathTreeWeight == Approx(0.20f));
+        CHECK(tuner.getParams().textWeight == Approx(0.45f));
+        CHECK(tuner.getParams().pathTreeWeight == Approx(0.15f));
     }
 
     SECTION("Prose-heavy corpus selects PROSE state") {
@@ -315,7 +315,7 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
         // Very small corpus should use MINIMAL state
         CHECK(tuner.currentState() == TuningState::MINIMAL);
         CHECK(tuner.getRrfK() == 15);
-        CHECK(tuner.getParams().textWeight == Approx(0.60f));
+        CHECK(tuner.getParams().textWeight == Approx(0.55f));
     }
 }
 

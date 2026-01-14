@@ -142,6 +142,47 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                      SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy));
     }
 
+    // Allow candidate limit overrides for recall benchmarking
+    // YAMS_CANDIDATE_MULTIPLIER scales all maxResults values (e.g., 2.0 = 2x candidates)
+    if (const char* multiplierEnv = std::getenv("YAMS_CANDIDATE_MULTIPLIER")) {
+        try {
+            float multiplier = std::stof(multiplierEnv);
+            cfg.textMaxResults = static_cast<size_t>(cfg.textMaxResults * multiplier);
+            cfg.vectorMaxResults = static_cast<size_t>(cfg.vectorMaxResults * multiplier);
+            cfg.entityVectorMaxResults =
+                static_cast<size_t>(cfg.entityVectorMaxResults * multiplier);
+            cfg.pathTreeMaxResults = static_cast<size_t>(cfg.pathTreeMaxResults * multiplier);
+            cfg.kgMaxResults = static_cast<size_t>(cfg.kgMaxResults * multiplier);
+            cfg.tagMaxResults = static_cast<size_t>(cfg.tagMaxResults * multiplier);
+            cfg.metadataMaxResults = static_cast<size_t>(cfg.metadataMaxResults * multiplier);
+            spdlog::info(
+                "SearchEngine candidate limits scaled by {:.2f}x via env (text={}, vec={})",
+                multiplier, cfg.textMaxResults, cfg.vectorMaxResults);
+        } catch (...) {
+            spdlog::warn("Invalid YAMS_CANDIDATE_MULTIPLIER value '{}', ignoring", multiplierEnv);
+        }
+    }
+
+    // Individual maxResults overrides
+    if (const char* textMaxEnv = std::getenv("YAMS_TEXT_MAX_RESULTS")) {
+        try {
+            cfg.textMaxResults = static_cast<size_t>(std::stoi(textMaxEnv));
+            spdlog::info("SearchEngine textMaxResults overridden to {} via env",
+                         cfg.textMaxResults);
+        } catch (...) {
+            spdlog::warn("Invalid YAMS_TEXT_MAX_RESULTS value '{}', ignoring", textMaxEnv);
+        }
+    }
+    if (const char* vectorMaxEnv = std::getenv("YAMS_VECTOR_MAX_RESULTS")) {
+        try {
+            cfg.vectorMaxResults = static_cast<size_t>(std::stoi(vectorMaxEnv));
+            spdlog::info("SearchEngine vectorMaxResults overridden to {} via env",
+                         cfg.vectorMaxResults);
+        } catch (...) {
+            spdlog::warn("Invalid YAMS_VECTOR_MAX_RESULTS value '{}', ignoring", vectorMaxEnv);
+        }
+    }
+
     // Create the SearchEngine using the factory function
     // Factory returns unique_ptr, convert to shared_ptr for builder interface
     auto engine =

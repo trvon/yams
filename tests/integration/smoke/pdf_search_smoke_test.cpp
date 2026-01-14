@@ -74,6 +74,30 @@ TEST_F(PdfSearchSmoke, PdfKeywordSearchFindsGeneratedToken) {
     auto started = daemon.start();
     ASSERT_TRUE(started) << started.error().message;
 
+    // Start runLoop in background thread - REQUIRED for daemon to process requests
+    std::thread runLoopThread([&daemon]() { daemon.runLoop(); });
+
+    // Wait for daemon to reach Ready state before using services
+    auto deadline = std::chrono::steady_clock::now() + 15s;
+    bool ready = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto lifecycle = daemon.getLifecycle().snapshot();
+        if (lifecycle.state == yams::daemon::LifecycleState::Ready) {
+            ready = true;
+            break;
+        } else if (lifecycle.state == yams::daemon::LifecycleState::Failed) {
+            daemon.stop();
+            runLoopThread.join();
+            FAIL() << "Daemon failed to initialize: " << lifecycle.lastError;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    if (!ready) {
+        daemon.stop();
+        runLoopThread.join();
+        FAIL() << "Daemon did not reach Ready state within timeout";
+    }
+
     // Ingest the PDF via daemon
     yams::app::services::DocumentIngestionService ing;
     yams::app::services::AddOptions opts;
@@ -122,12 +146,14 @@ TEST_F(PdfSearchSmoke, PdfKeywordSearchFindsGeneratedToken) {
         std::this_thread::sleep_for(50ms);
     }
 
+    // Cleanup: stop daemon and join runLoop thread (must happen before skip/assertion)
+    daemon.stop();
+    runLoopThread.join();
+
     // If this runner remains degraded, skip to keep smoke green; otherwise assert success
     if (!got) {
         GTEST_SKIP() << "SearchService degraded on this runner; skipping PDF search smoke";
     }
 
     EXPECT_TRUE(got);
-
-    daemon.stop();
 }

@@ -699,43 +699,8 @@ private:
         attention_mask.push_back(1);
         words_mask.push_back(0); // Special token
 
-        spdlog::info("[Glint] Input sequence length: {}, first 20 ids: [{}]", input_ids.size(),
-                     [&]() {
-                         std::string s;
-                         for (size_t i = 0; i < std::min(input_ids.size(), size_t(20)); ++i) {
-                             if (i > 0)
-                                 s += ", ";
-                             s += std::to_string(input_ids[i]);
-                         }
-                         return s;
-                     }());
-
-        // Debug: print words_mask to verify word-to-token mapping
-        spdlog::info("[Glint] words_mask (token->word): [{}]", [&]() {
-            std::string s;
-            for (size_t i = 0; i < std::min(words_mask.size(), size_t(50)); ++i) {
-                if (i > 0)
-                    s += ", ";
-                s += std::to_string(words_mask[i]);
-            }
-            return s;
-        }());
-
-        // Debug: print which words map to which token ranges (1-based indexing)
-        spdlog::info("[Glint] Word token mapping (1-based words_mask):");
-        for (size_t i = 0; i < std::min(num_words, size_t(9)); ++i) {
-            std::string token_range;
-            const int64_t expected_mask = static_cast<int64_t>(i + 1); // 1-based
-            for (size_t j = 0; j < words_mask.size(); ++j) {
-                if (words_mask[j] == expected_mask) {
-                    if (!token_range.empty())
-                        token_range += ",";
-                    token_range += std::to_string(j);
-                }
-            }
-            spdlog::info("[Glint]   word {} '{}' (mask={}) -> tokens [{}]", i, words[i].text,
-                         expected_mask, token_range);
-        }
+        spdlog::debug("[Glint] Input sequence length: {}, num_words: {}", input_ids.size(),
+                      num_words);
 
         // Prepare text_lengths tensor
         std::vector<int64_t> text_lengths = {static_cast<int64_t>(num_words)};
@@ -792,148 +757,37 @@ private:
 
         // Run inference
         try {
-            spdlog::info("[Glint] Running ONNX inference with {} inputs, {} outputs",
-                         input_tensors.size(), output_names_.size());
+            spdlog::debug("[Glint] Running ONNX inference");
             auto outputs = session_->Run(Ort::RunOptions{nullptr}, input_names_cstr_.data(),
                                          input_tensors.data(), input_tensors.size(),
                                          output_names_cstr_.data(), output_names_.size());
-            spdlog::info("[Glint] ONNX inference returned {} outputs", outputs.size());
 
             if (outputs.empty()) {
                 spdlog::warn("[Glint] No outputs returned from ONNX model");
                 return {};
             }
 
-            spdlog::debug("[Glint] Getting output[0] tensor info...");
             // Parse output logits
             // Expected shape: [batch, num_words, max_width, num_classes]
             auto& logits_tensor = outputs[0];
-            spdlog::debug("[Glint] Got tensor, getting type info...");
             auto type_info = logits_tensor.GetTensorTypeAndShapeInfo();
-            spdlog::debug("[Glint] Got type info, getting shape...");
             auto shape = type_info.GetShape();
-            spdlog::debug("[Glint] Got shape with {} dimensions", shape.size());
-
-            // Log each dimension individually to avoid potential formatting issues
-            for (size_t i = 0; i < shape.size(); ++i) {
-                spdlog::debug("[Glint] shape[{}] = {}", i, shape[i]);
-            }
 
             if (shape.size() != 4) {
                 spdlog::warn("[Glint] Unexpected output shape: {} dims (expected 4)", shape.size());
                 return {};
             }
 
-            spdlog::info("[Glint] Output shape: [{}, {}, {}, {}]", shape[0], shape[1], shape[2],
-                         shape[3]);
+            spdlog::debug("[Glint] Output shape: [{}, {}, {}, {}]", shape[0], shape[1], shape[2],
+                          shape[3]);
 
             const float* logits = logits_tensor.GetTensorData<float>();
             const size_t out_words = static_cast<size_t>(shape[1]);
             const size_t out_width = static_cast<size_t>(shape[2]);
             const size_t out_classes = static_cast<size_t>(shape[3]);
 
-            // Debug: print logit values for expected entity positions
-            // For "Sundar Pichai is CEO of Google in Mountain View."
-            // Expected: person at w=0,k=1 (Sundar Pichai), org at w=5,k=0 (Google), loc at w=7,k=1
-            // (Mountain View)
-            spdlog::info("[Glint] DEBUG - Checking expected entity positions:");
-            auto get_logit = [&](size_t w, size_t k, size_t c) {
-                return logits[w * out_width * out_classes + k * out_classes + c];
-            };
-            auto sigmoid = [](float x) { return 1.0f / (1.0f + std::exp(-x)); };
-
-            // Print logits for word 0 (Sundar), span widths 0-2, all classes
-            spdlog::info("[Glint]   Word 0 (Sundar) - checking spans:");
-            for (size_t k = 0; k < std::min(size_t(3), out_width); ++k) {
-                std::string probs_str;
-                for (size_t c = 0; c < std::min(size_t(8), out_classes); ++c) {
-                    float logit = get_logit(0, k, c);
-                    float prob = sigmoid(logit);
-                    if (!probs_str.empty())
-                        probs_str += ", ";
-                    probs_str += fmt::format("{}={:.3f}", labels[c], prob);
-                }
-                spdlog::info("[Glint]     k={}: [{}]", k, probs_str);
-            }
-
-            // Print logits for word 5 (Google), span width 0, all classes
-            if (num_words > 5) {
-                spdlog::info("[Glint]   Word 5 (Google) - checking span k=0:");
-                std::string probs_str;
-                for (size_t c = 0; c < std::min(size_t(8), out_classes); ++c) {
-                    float logit = get_logit(5, 0, c);
-                    float prob = sigmoid(logit);
-                    if (!probs_str.empty())
-                        probs_str += ", ";
-                    probs_str += fmt::format("{}={:.3f}", labels[c], prob);
-                }
-                spdlog::info("[Glint]     k=0: [{}]", probs_str);
-            }
-
-            // Also print what we're finding at word 2 (is) and word 4 (of)
-            spdlog::info("[Glint]   Word 2 (is) - what model sees:");
-            for (size_t k = 0; k < std::min(size_t(2), out_width); ++k) {
-                std::string probs_str;
-                for (size_t c = 0; c < std::min(size_t(8), out_classes); ++c) {
-                    float logit = get_logit(2, k, c);
-                    float prob = sigmoid(logit);
-                    if (!probs_str.empty())
-                        probs_str += ", ";
-                    probs_str += fmt::format("{}={:.3f}", labels[c], prob);
-                }
-                spdlog::info("[Glint]     k={}: [{}]", k, probs_str);
-            }
-
-            spdlog::info("[Glint] Processing: out_words={}, out_width={}, out_classes={}, "
-                         "num_words={}, num_labels={}, threshold={}",
-                         out_words, out_width, out_classes, num_words, num_labels,
-                         config_.threshold);
-
-            // Debug: find max logit value
-            float max_logit = -1000.0f;
-            float max_prob = 0.0f;
-            size_t total_elements = shape[0] * out_words * out_width * out_classes;
-            for (size_t i = 0; i < total_elements; ++i) {
-                float prob = 1.0f / (1.0f + std::exp(-logits[i]));
-                if (prob > max_prob) {
-                    max_prob = prob;
-                    max_logit = logits[i];
-                }
-            }
-            spdlog::info("[Glint] Max logit={:.4f}, max_prob={:.4f}", max_logit, max_prob);
-
-            // Debug: Print top-5 spans by probability
-            struct SpanDebug {
-                size_t w, k, c;
-                float prob;
-            };
-            std::vector<SpanDebug> all_spans;
-            for (size_t w = 0; w < out_words && w < num_words; ++w) {
-                for (size_t k = 0; k < out_width && (w + k) < num_words; ++k) {
-                    for (size_t c = 0; c < out_classes && c < num_labels; ++c) {
-                        size_t idx = w * out_width * out_classes + k * out_classes + c;
-                        float logit = logits[idx];
-                        float prob = 1.0f / (1.0f + std::exp(-logit));
-                        if (prob > 0.1f) { // Low threshold for debug
-                            all_spans.push_back({w, k, c, prob});
-                        }
-                    }
-                }
-            }
-            std::sort(all_spans.begin(), all_spans.end(),
-                      [](const auto& a, const auto& b) { return a.prob > b.prob; });
-            spdlog::info("[Glint] Top candidate spans (prob > 0.1):");
-            for (size_t i = 0; i < std::min(all_spans.size(), size_t(10)); ++i) {
-                auto& s = all_spans[i];
-                std::string span_text;
-                for (size_t j = s.w; j <= s.w + s.k && j < num_words; ++j) {
-                    if (!span_text.empty())
-                        span_text += " ";
-                    span_text += words[j].text;
-                }
-                spdlog::info("[Glint]   #{}: w={}, k={}, c={} ({}), prob={:.4f} -> \"{}\"", i, s.w,
-                             s.k, s.c, labels[s.c], s.prob, span_text);
-            }
+            spdlog::debug("[Glint] Processing output: words={}, width={}, classes={}, threshold={}",
+                          out_words, out_width, out_classes, config_.threshold);
 
             // Decode spans
             std::vector<EntitySpan> spans;

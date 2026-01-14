@@ -6,10 +6,12 @@
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/crypto/hasher.h>
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/request_context_registry.h>
 #include <yams/profiling.h>
 #include <yams/vector/embedding_service.h>
@@ -526,7 +528,7 @@ boost::asio::awaitable<Response>
 RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
     YAMS_ZONE_SCOPED_N("handleAddDocumentRequest");
     co_return co_await yams::daemon::dispatch::guard_await(
-        "add_document", [req]() -> boost::asio::awaitable<Response> {
+        "add_document", [this, req]() -> boost::asio::awaitable<Response> {
             // Be forgiving: if the path is a directory but recursive was not set, treat it as
             // a directory ingestion with recursive=true to avoid file_size errors sent by clients
             // that didn't set the flag (common with LLM-driven clients).
@@ -535,46 +537,103 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 co_return ErrorResponse{ErrorCode::InvalidArgument,
                                         "Provide either 'path' or 'content' + 'name'"};
             }
-            auto channel = InternalEventBus::instance()
-                               .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
-                                   "store_document_tasks", 4096);
-            InternalEventBus::StoreDocumentTask task{req};
-            if (channel->try_push(std::move(task))) {
-                AddDocumentResponse response;
-                response.hash = "";
-                response.path = req.path.empty() ? req.name : req.path;
-                response.documentsAdded = isDir ? 0 : 1;
-                response.message = "Request accepted for asynchronous processing.";
 
-                // For in-memory content, compute hash inline (small/fast).
-                // For file paths, skip blocking I/O - hash is computed by async processor.
-                if (!isDir && !req.content.empty()) {
-                    try {
-                        auto hasher = yams::crypto::createSHA256Hasher();
-                        hasher->init();
-                        auto data = std::span<const std::byte>(
-                            reinterpret_cast<const std::byte*>(req.content.data()),
-                            req.content.size());
-                        hasher->update(data);
-                        response.hash = hasher->finalize();
-                        response.size = req.content.size();
-                    } catch (...) {
-                    }
-                } else if (!isDir && !req.path.empty()) {
-                    // Return file size but skip blocking hash computation
-                    std::error_code ec;
-                    if (std::filesystem::is_regular_file(req.path, ec) && !ec) {
-                        response.size =
-                            static_cast<size_t>(std::filesystem::file_size(req.path, ec));
-                        if (ec)
-                            response.size = 0;
-                    }
+            // Check if daemon is ready for synchronous operations
+            bool daemonReady = false;
+            if (daemon_) {
+                try {
+                    auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+                    daemonReady = (lifecycleSnapshot.state == LifecycleState::Ready ||
+                                   lifecycleSnapshot.state == LifecycleState::Degraded);
+                } catch (...) {
+                    daemonReady = false;
                 }
-                co_return response;
-            } else {
-                co_return ErrorResponse{ErrorCode::ResourceExhausted,
-                                        "Ingestion queue is full. Please try again later."};
             }
+
+            // For directories or if daemon not ready, use async queue
+            if (isDir || req.recursive || !daemonReady) {
+                auto channel = InternalEventBus::instance()
+                                   .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+                                       "store_document_tasks", 4096);
+                InternalEventBus::StoreDocumentTask task{req};
+                if (channel->try_push(std::move(task))) {
+                    AddDocumentResponse response;
+                    response.path = req.path.empty() ? req.name : req.path;
+                    response.documentsAdded = 0;
+
+                    // Compute hash for single files/content even with async storage
+                    // This allows callers to get the hash immediately while processing continues
+                    if (!isDir && !req.recursive) {
+                        try {
+                            auto hasher = yams::crypto::createSHA256Hasher();
+                            if (!req.content.empty()) {
+                                response.hash = hasher->hash(req.content);
+                            } else if (!req.path.empty()) {
+                                response.hash = hasher->hashFile(req.path);
+                            }
+                        } catch (...) {
+                            response.hash = "";
+                        }
+                    } else {
+                        response.hash = "";
+                    }
+
+                    if (isDir || req.recursive) {
+                        response.message =
+                            "Directory ingestion accepted for asynchronous processing.";
+                    } else {
+                        response.message =
+                            "Ingestion accepted for asynchronous processing (daemon initializing).";
+                    }
+                    co_return response;
+                } else {
+                    co_return ErrorResponse{ErrorCode::ResourceExhausted,
+                                            "Ingestion queue is full. Please try again later."};
+                }
+            }
+
+            // For single files when daemon is ready, store synchronously for immediate availability
+            auto appContext = serviceManager_->getAppContext();
+            auto docService = app::services::makeDocumentService(appContext);
+            app::services::StoreDocumentRequest serviceReq;
+            serviceReq.path = req.path;
+            serviceReq.content = req.content;
+            serviceReq.name = req.name;
+            serviceReq.mimeType = req.mimeType;
+            serviceReq.disableAutoMime = req.disableAutoMime;
+            serviceReq.tags = req.tags;
+            for (const auto& [key, value] : req.metadata) {
+                serviceReq.metadata[key] = value;
+            }
+            serviceReq.collection = req.collection;
+            serviceReq.snapshotId = req.snapshotId;
+            serviceReq.snapshotLabel = req.snapshotLabel;
+            serviceReq.sessionId = req.sessionId;
+            serviceReq.noEmbeddings = req.noEmbeddings;
+
+            // Store document synchronously
+            // Note: This may block the async context briefly, but ensures reliable completion
+            auto result = docService->store(serviceReq);
+
+            if (!result) {
+                co_return ErrorResponse{result.error().code, result.error().message};
+            }
+
+            const auto& serviceResp = result.value();
+            AddDocumentResponse response;
+            response.hash = serviceResp.hash;
+            response.path = req.path.empty() ? req.name : req.path;
+            response.documentsAdded = 1;
+            response.size = serviceResp.bytesStored;
+            response.message = "Document stored successfully.";
+
+            // Enqueue for post-ingest processing (embeddings, etc.)
+            if (serviceManager_ && serviceManager_->getPostIngestQueue() &&
+                !serviceResp.hash.empty()) {
+                serviceManager_->enqueuePostIngest(serviceResp.hash, req.mimeType);
+            }
+
+            co_return response;
         });
 }
 

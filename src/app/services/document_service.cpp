@@ -469,8 +469,9 @@ Result<CompressedPayload> makeCompressedPayload(std::span<const std::byte> data)
     compression::CompressionHeader header{};
     header.magic = compression::CompressionHeader::MAGIC;
     header.version = compression::CompressionHeader::VERSION;
-    header.algorithm = static_cast<uint8_t>(compression::CompressionAlgorithm::Zstandard);
-    header.level = kDefaultLevel;
+    // Use the actual algorithm from compression result - may be None if compression was ineffective
+    header.algorithm = static_cast<uint8_t>(compressedVal.algorithm);
+    header.level = compressedVal.level;
     header.uncompressedSize = static_cast<uint64_t>(compressedVal.originalSize);
     header.compressedSize = static_cast<uint64_t>(compressedVal.compressedSize);
     header.uncompressedCRC32 = compression::calculateCRC32(data);

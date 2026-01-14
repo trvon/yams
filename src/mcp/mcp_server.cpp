@@ -2,6 +2,8 @@
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
+#include <yams/compression/compressor_interface.h>
+#include <yams/compression/compression_header.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/core/task.h>
@@ -2008,6 +2010,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 if (idx != static_cast<size_t>(-1)) {
                     yams::app::services::RetrievalService rsvc;
                     yams::app::services::RetrievalOptions ropts;
+                    ropts.socketPath = daemon_client_config_.socketPath;
                     if (auto appc = app::services::makeSessionService(nullptr); appc) {
                         // no-op placeholder for future per-session retrieval options
                     }
@@ -2220,6 +2223,7 @@ MCPServer::handleGrepDocuments(const MCPGrepRequest& req) {
     // Use service facade for grep (daemon-first)
     yams::app::services::RetrievalService rsvc;
     yams::app::services::RetrievalOptions ropts;
+    ropts.socketPath = daemon_client_config_.socketPath;
     ropts.enableStreaming = true;
     ropts.requestTimeoutMs = 30000;
     ropts.headerTimeoutMs = 30000;
@@ -2906,8 +2910,8 @@ MCPServer::handleStoreDocument(const MCPStoreDocumentRequest& req) {
             }
             _p = resolved ? chosen.string() : (_p.rfind("./", 0) == 0 ? _p.substr(2) : _p);
         }
-        // Best-effort canonicalization
-        {
+        // Best-effort canonicalization (only when path is non-empty)
+        if (!_p.empty()) {
             std::error_code __canon_ec;
             auto __canon = std::filesystem::weakly_canonical(_p, __canon_ec);
             if (!__canon_ec && !__canon.empty()) {
@@ -3015,6 +3019,7 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     // Unified path: use RetrievalService name-smart get when name provided, else direct get
     yams::app::services::RetrievalService rsvc;
     yams::app::services::RetrievalOptions ropts;
+    ropts.socketPath = daemon_client_config_.socketPath;
     ropts.requestTimeoutMs = 60000;
     ropts.headerTimeoutMs = 30000;
     ropts.bodyTimeoutMs = 120000;
@@ -3054,7 +3059,55 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
         mcp_response.compressionHeader = oss.str();
     }
     if (resp.hasContent) {
-        mcp_response.content = resp.content;
+        // Handle compressed content - need to decompress or strip header for JSON response
+        constexpr size_t headerSize = compression::CompressionHeader::SIZE;
+        if (resp.compressed && resp.content.size() > headerSize) {
+            // Parse the compression header
+            std::span<const std::byte> headerSpan(
+                reinterpret_cast<const std::byte*>(resp.content.data()), headerSize);
+            auto headerRes = compression::CompressionHeader::parse(headerSpan);
+            if (headerRes && headerRes.value().validate()) {
+                const auto& header = headerRes.value();
+                auto algo = static_cast<compression::CompressionAlgorithm>(header.algorithm);
+
+                if (algo == compression::CompressionAlgorithm::None) {
+                    // Content stored uncompressed with header - strip header and return raw data
+                    mcp_response.content = std::string(resp.content.data() + headerSize,
+                                                       resp.content.size() - headerSize);
+                } else {
+                    // Content is compressed - decompress it
+                    auto compressor =
+                        compression::CompressionRegistry::instance().createCompressor(algo);
+                    if (compressor && header.compressedSize > 0 &&
+                        headerSize + header.compressedSize <= resp.content.size()) {
+                        std::span<const std::byte> compressedSpan(
+                            reinterpret_cast<const std::byte*>(resp.content.data() + headerSize),
+                            header.compressedSize);
+                        auto decompRes =
+                            compressor->decompress(compressedSpan, header.uncompressedSize);
+                        if (decompRes) {
+                            const auto& decompData = decompRes.value();
+                            mcp_response.content =
+                                std::string(reinterpret_cast<const char*>(decompData.data()),
+                                            decompData.size());
+                        } else {
+                            spdlog::warn("[MCP] Decompression failed: {}",
+                                         decompRes.error().message);
+                            mcp_response.content = resp.content;
+                        }
+                    } else {
+                        spdlog::warn("[MCP] Invalid header sizes or no compressor for algo={}",
+                                     static_cast<int>(algo));
+                        mcp_response.content = resp.content;
+                    }
+                }
+            } else {
+                // Header invalid - return content as-is
+                mcp_response.content = resp.content;
+            }
+        } else {
+            mcp_response.content = resp.content;
+        }
     }
     mcp_response.graphEnabled = resp.graphEnabled;
     for (const auto& rel : resp.related) {
@@ -3121,6 +3174,7 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     // Use service facade for list (daemon-first)
     yams::app::services::RetrievalService rsvc;
     yams::app::services::RetrievalOptions ropts;
+    ropts.socketPath = daemon_client_config_.socketPath;
     ropts.enableStreaming = true;
     ropts.requestTimeoutMs = 30000;
     ropts.headerTimeoutMs = 30000;
@@ -3598,6 +3652,7 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
         }
         yams::app::services::RetrievalService rsvc;
         yams::app::services::RetrievalOptions ropts;
+        ropts.socketPath = daemon_client_config_.socketPath;
         ropts.requestTimeoutMs = 60000;
         ropts.headerTimeoutMs = 30000;
         ropts.bodyTimeoutMs = 120000;
@@ -4765,6 +4820,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
                 // Retrieve content by hash via RetrievalService
                 yams::app::services::RetrievalService rsvc;
                 yams::app::services::RetrievalOptions ropts;
+                ropts.socketPath = daemon_client_config_.socketPath;
                 yams::app::services::GetOptions greq;
                 greq.hash = pick.hash;
                 greq.metadataOnly = false;
@@ -4793,6 +4849,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
 
             yams::app::services::RetrievalService rsvc;
             yams::app::services::RetrievalOptions ropts;
+            ropts.socketPath = daemon_client_config_.socketPath;
             yams::app::services::GetOptions greq;
             greq.hash = chosen.hash;
             greq.metadataOnly = false;
@@ -4818,6 +4875,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
     // Try smart retrieval first, then fallback to base-name list + fuzzy selection
     yams::app::services::RetrievalService rsvc;
     yams::app::services::RetrievalOptions ropts;
+    ropts.socketPath = daemon_client_config_.socketPath;
     ropts.requestTimeoutMs = 60000;
     ropts.headerTimeoutMs = 30000;
     ropts.bodyTimeoutMs = 120000;
@@ -4965,6 +5023,7 @@ boost::asio::awaitable<yams::Result<yams::mcp::MCPCatDocumentResponse>>
 yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& req) {
     yams::app::services::RetrievalService rsvc;
     yams::app::services::RetrievalOptions ropts;
+    ropts.socketPath = daemon_client_config_.socketPath;
     ropts.requestTimeoutMs = 60000;
     ropts.headerTimeoutMs = 30000;
     ropts.bodyTimeoutMs = 120000;

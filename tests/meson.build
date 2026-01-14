@@ -860,6 +860,25 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Reranker session test (uses mock mode by default, real model optional)
+  # Compile the reranker session source directly into the test to avoid plugin linking issues
+  reranker_test_deps = [catch2_dep, catch2_main_dep] + test_deps
+  if onnx_dep.found()
+    reranker_test_deps += onnx_dep
+  endif
+
+  catch2_daemon_reranker_exe = executable('catch2_daemon_reranker',
+    files(
+      'unit/daemon/onnx_reranker_session_test.cpp',
+      '../plugins/onnx/onnx_reranker_session.cpp',
+    ),
+    include_directories: incs,
+    dependencies: reranker_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_plugin_infrastructure_exe = executable('catch2_plugin_infrastructure',
     files('unit/daemon/plugin_infrastructure_test.cpp'),
     include_directories: incs,
@@ -2194,6 +2213,17 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
+  )
+
+  # Reranker session test - uses mock mode by default, enabling quick CI runs
+  test('daemon_reranker_session', catch2_daemon_reranker_exe,
+    suite: ['catch2', 'unit', 'daemon', 'reranker'],
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'YAMS_TEST_MODE': '1',  # Enable mock mode for CI
+    },
+    timeout: 60,
+    is_parallel: true
   )
 
   test('plugin_infrastructure', catch2_plugin_infrastructure_exe,
