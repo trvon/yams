@@ -75,13 +75,13 @@ struct SearchEngineConfig {
     } corpusProfile = CorpusProfile::MIXED;
 
     // Component weights (0.0 = disabled, 1.0 = full weight)
-    float textWeight = 0.40f;     // Full-text search weight (merged FTS5 + symbol)
-    float pathTreeWeight = 0.15f; // Path tree hierarchical weight
-    float kgWeight = 0.10f;       // Knowledge graph weight
-    float vectorWeight = 0.20f;   // Vector similarity weight (HNSW indexed, fast)
-    float entityVectorWeight =
-        0.10f;               // Entity (symbol) vector similarity weight (enabled for better recall)
-    float tagWeight = 0.10f; // Tag-based search weight (modifier, not standalone)
+    // Restored higher vector weight from main branch for better embedding-based ranking
+    float textWeight = 0.30f;         // Full-text search weight (merged FTS5 + symbol)
+    float pathTreeWeight = 0.10f;     // Path tree hierarchical weight
+    float kgWeight = 0.05f;           // Knowledge graph weight
+    float vectorWeight = 0.55f;       // Vector similarity weight (HNSW indexed, fast) - increased
+    float entityVectorWeight = 0.05f; // Entity (symbol) vector similarity weight
+    float tagWeight = 0.05f;          // Tag-based search weight (modifier, not standalone)
     float metadataWeight = 0.05f; // Metadata attribute matching weight (modifier, not standalone)
 
     // Search parameters
@@ -93,8 +93,8 @@ struct SearchEngineConfig {
 
     // RRF (Reciprocal Rank Fusion) parameter
     // Lower k = more weight on top-ranked items
-    // Higher k = smoother ranking across positions
-    float rrfK = 30.0f;
+    // Higher k = smoother ranking across positions (better recall)
+    float rrfK = 60.0f; // Restored from main branch for better recall
 
     // Benchmarking support
     bool enableProfiling = false;
@@ -107,7 +107,7 @@ struct SearchEngineConfig {
         WEIGHTED_RECIPROCAL, // Weighted RRF (custom)
         COMB_MNZ,            // CombMNZ: score * num_components (recall-focused)
         TEXT_ANCHOR          // Text-anchored: FTS5 as primary, vector for re-ranking only
-    } fusionStrategy = FusionStrategy::COMB_MNZ;
+    } fusionStrategy = FusionStrategy::RECIPROCAL_RANK; // Restored from main branch
 
     /// Convert FusionStrategy to string for logging/debugging
     [[nodiscard]] static constexpr const char*

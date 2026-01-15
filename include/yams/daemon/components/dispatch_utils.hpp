@@ -413,7 +413,7 @@ build_typed_providers(const ServiceManager* sm, const yams::daemon::StateCompone
     } catch (...) {
         spdlog::error("[build_typed_providers] Unknown exception");
     }
-    spdlog::info("[build_typed_providers] Returning {} providers", providers.size());
+    spdlog::debug("[build_typed_providers] Returning {} providers", providers.size());
     return providers;
 }
 

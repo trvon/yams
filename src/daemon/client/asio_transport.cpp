@@ -366,10 +366,10 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     co_await pool->ensure_read_loop_started(conn);
 
     auto frame_size = frame.size();
-    spdlog::info("AsioTransportAdapter::send_request about to write frame req_id={} type={} "
-                 "socket_open={} bytes={}",
-                 msg.requestId, static_cast<int>(req_type), conn->socket && conn->socket->is_open(),
-                 frame_size);
+    spdlog::debug("AsioTransportAdapter::send_request about to write frame req_id={} type={} "
+                  "socket_open={} bytes={}",
+                  msg.requestId, static_cast<int>(req_type),
+                  conn->socket && conn->socket->is_open(), frame_size);
 
     auto wres = co_await conn->async_write_frame(std::move(frame));
     if (!wres) {
@@ -381,8 +381,8 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
                       msg.requestId, wres.error().message);
         co_return wres.error();
     }
-    spdlog::info("AsioTransportAdapter::send_request wrote frame req_id={} type={} bytes={}",
-                 msg.requestId, static_cast<int>(req_type), frame_size);
+    spdlog::debug("AsioTransportAdapter::send_request wrote frame req_id={} type={} bytes={}",
+                  msg.requestId, static_cast<int>(req_type), frame_size);
 
     // Release connection AFTER writing frame - connection can now be reused while we wait for
     // response
@@ -486,8 +486,8 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
             conn->in_use.store(false, std::memory_order_release);
             co_return wres.error();
         }
-        spdlog::info("AsioTransportAdapter::send_request_streaming wrote frame req_id={} type={}",
-                     msg.requestId, static_cast<int>(getMessageType(req)));
+        spdlog::debug("AsioTransportAdapter::send_request_streaming wrote frame req_id={} type={}",
+                      msg.requestId, static_cast<int>(getMessageType(req)));
 
         conn->in_use.store(false, std::memory_order_release);
 

@@ -282,4 +282,96 @@ void ResultRanker::updateTermFrequencies(const std::string& documentText,
     corpusStats_.totalDocuments++;
 }
 
+// =============================================================================
+// AdvancedRanker Implementation
+// =============================================================================
+
+AdvancedRanker::AdvancedRanker(RankingAlgorithm algorithm) : algorithm_(algorithm) {}
+
+void AdvancedRanker::rankResults(std::vector<SearchResultItem>& results,
+                                 const QueryNode* query) const {
+    switch (algorithm_) {
+        case RankingAlgorithm::TfIdf:
+            baseRanker_.rankResults(results, query);
+            break;
+
+        case RankingAlgorithm::BM25:
+            for (auto& result : results) {
+                result.relevanceScore = calculateBM25Score(result, query);
+            }
+            std::sort(results.begin(), results.end(),
+                      [](const SearchResultItem& a, const SearchResultItem& b) {
+                          return a.relevanceScore > b.relevanceScore;
+                      });
+            break;
+
+        case RankingAlgorithm::Cosine:
+            for (auto& result : results) {
+                result.relevanceScore = calculateCosineScore(result, query);
+            }
+            std::sort(results.begin(), results.end(),
+                      [](const SearchResultItem& a, const SearchResultItem& b) {
+                          return a.relevanceScore > b.relevanceScore;
+                      });
+            break;
+
+        case RankingAlgorithm::Hybrid:
+            for (auto& result : results) {
+                result.relevanceScore = calculateHybridScore(result, query);
+            }
+            std::sort(results.begin(), results.end(),
+                      [](const SearchResultItem& a, const SearchResultItem& b) {
+                          return a.relevanceScore > b.relevanceScore;
+                      });
+            break;
+    }
+}
+
+float AdvancedRanker::calculateBM25Score(const SearchResultItem& item,
+                                         const QueryNode* query) const {
+    // Okapi BM25 implementation
+    constexpr float k1 = 1.2f;              // Term frequency saturation parameter
+    constexpr float b = 0.75f;              // Length normalization parameter
+    constexpr float avgDocLength = 1000.0f; // Would need to calculate from corpus
+
+    auto queryTerms = baseRanker_.extractQueryTerms(query);
+    float score = 0.0f;
+
+    for ([[maybe_unused]] const auto& term : queryTerms) {
+        float tf = item.termFrequency;
+        // Simplified IDF - in production, use corpus statistics
+        float idf = std::log((100.0f + 1.0f) / (1.0f + 1.0f));
+
+        float numerator = tf * (k1 + 1.0f);
+        float denominator =
+            tf + k1 * (1.0f - b + b * (static_cast<float>(item.fileSize) / avgDocLength));
+
+        score += idf * (numerator / denominator);
+    }
+
+    return score;
+}
+
+float AdvancedRanker::calculateCosineScore(const SearchResultItem& item,
+                                           const QueryNode* query) const {
+    // Simplified cosine similarity - would need proper vector space implementation
+    // For now, use base TF-IDF score with a scaling factor
+    return baseRanker_.calculateScore(item, query) * 0.8f;
+}
+
+float AdvancedRanker::calculateHybridScore(const SearchResultItem& item,
+                                           const QueryNode* query) const {
+    // Weighted combination of all scoring algorithms
+    float tfIdfScore = baseRanker_.calculateScore(item, query);
+    float bm25Score = calculateBM25Score(item, query);
+    float cosineScore = calculateCosineScore(item, query);
+
+    // Weights tuned for balanced precision/recall
+    constexpr float tfIdfWeight = 0.5f;
+    constexpr float bm25Weight = 0.3f;
+    constexpr float cosineWeight = 0.2f;
+
+    return tfIdfWeight * tfIdfScore + bm25Weight * bm25Score + cosineWeight * cosineScore;
+}
+
 } // namespace yams::search

@@ -338,14 +338,14 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 }
             }
         }
-        spdlog::info("[StatusRequest] About to check search engine degradation");
+        spdlog::debug("[StatusRequest] About to check search engine degradation");
         try {
             bool searchDegraded = true;
             if (serviceManager_) {
-                spdlog::info("[StatusRequest] Calling getSearchEngineSnapshot()");
+                spdlog::debug("[StatusRequest] Calling getSearchEngineSnapshot()");
                 auto engine = serviceManager_->getSearchEngineSnapshot();
-                spdlog::info("[StatusRequest] getSearchEngineSnapshot() returned, engine={}",
-                             static_cast<void*>(engine.get()));
+                spdlog::debug("[StatusRequest] getSearchEngineSnapshot() returned, engine={}",
+                              static_cast<void*>(engine.get()));
                 searchDegraded = (engine == nullptr);
             }
             res.readinessStates["search_engine_degraded"] = searchDegraded;
@@ -394,9 +394,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
         // Populate typed provider details (always send, let UI filter if needed)
         try {
             res.providers = yams::daemon::dispatch::build_typed_providers(serviceManager_, state_);
-            spdlog::info("[StatusRequest] built {} providers", res.providers.size());
+            spdlog::debug("[StatusRequest] built {} providers", res.providers.size());
             for (const auto& p : res.providers) {
-                spdlog::info(
+                spdlog::debug(
                     "[StatusRequest]   provider: name='{}' ready={} degraded={} isProvider={}",
                     p.name, p.ready, p.degraded, p.isProvider);
             }

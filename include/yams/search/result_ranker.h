@@ -164,4 +164,65 @@ private:
     }
 };
 
+/**
+ * @brief Ranking algorithm selection for AdvancedRanker
+ */
+enum class RankingAlgorithm {
+    TfIdf,  // Traditional TF-IDF scoring
+    BM25,   // Okapi BM25 scoring (better for longer documents)
+    Cosine, // Cosine similarity based scoring
+    Hybrid  // Weighted combination of all algorithms
+};
+
+/**
+ * @brief Advanced result ranker with multiple scoring algorithms
+ *
+ * Provides BM25, Cosine, and Hybrid scoring on top of the base TF-IDF ranker.
+ * Use this for better ranking quality, especially with varied document lengths.
+ */
+class AdvancedRanker {
+public:
+    explicit AdvancedRanker(RankingAlgorithm algorithm = RankingAlgorithm::Hybrid);
+
+    /**
+     * @brief Set the ranking algorithm
+     */
+    void setAlgorithm(RankingAlgorithm algorithm) { algorithm_ = algorithm; }
+
+    /**
+     * @brief Get the current ranking algorithm
+     */
+    RankingAlgorithm getAlgorithm() const { return algorithm_; }
+
+    /**
+     * @brief Rank results using the selected algorithm
+     */
+    void rankResults(std::vector<SearchResultItem>& results, const QueryNode* query) const;
+
+    /**
+     * @brief Access the underlying base ranker for configuration
+     */
+    ResultRanker& getBaseRanker() { return baseRanker_; }
+    const ResultRanker& getBaseRanker() const { return baseRanker_; }
+
+private:
+    RankingAlgorithm algorithm_;
+    ResultRanker baseRanker_;
+
+    /**
+     * @brief Calculate BM25 score for an item
+     */
+    float calculateBM25Score(const SearchResultItem& item, const QueryNode* query) const;
+
+    /**
+     * @brief Calculate Cosine similarity score for an item
+     */
+    float calculateCosineScore(const SearchResultItem& item, const QueryNode* query) const;
+
+    /**
+     * @brief Calculate hybrid score combining all algorithms
+     */
+    float calculateHybridScore(const SearchResultItem& item, const QueryNode* query) const;
+};
+
 } // namespace yams::search

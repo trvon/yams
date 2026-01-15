@@ -279,6 +279,10 @@ private:
     std::optional<boost::asio::any_io_executor> write_strand_exec_;
     std::atomic<size_t> inflight_{0};
 
+    // Socket closure coordination flag - prevents TSAN race between is_open() and close()
+    // Set to true before close(), checked before is_open() in concurrent coroutines
+    std::atomic<bool> connection_closing_{false};
+
     // Fair writer (multiplexing): per-request queues and round-robin scheduler
     struct FrameItem {
         std::vector<uint8_t> data;

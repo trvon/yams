@@ -231,6 +231,8 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                          conn_token, socket->is_open(), token.stop_requested());
         }
         auto sock = std::move(socket);
+        // Reset socket closure flag for this new connection
+        connection_closing_.store(false, std::memory_order_release);
         // Initialize per-connection FSM (adapter kept internal to source file)
         ConnectionFsm fsm;
         fsm.enable_metrics(true);
@@ -632,9 +634,9 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                     } cleanup{self, req_id};
 
                                     try {
-                                        spdlog::info("[MUX_SPAWN] req_id={} type={} expects={}",
-                                                     req_id, static_cast<int>(getMessageType(req)),
-                                                     expects);
+                                        spdlog::debug("[MUX_SPAWN] req_id={} type={} expects={}",
+                                                      req_id, static_cast<int>(getMessageType(req)),
+                                                      expects);
                                         auto r = co_await self->handle_streaming_request(
                                             *sock, req, req_id, nullptr, expects);
                                         if (!r) {
@@ -857,7 +859,7 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
         auto frame_result = framer_.frame_message_into(message, frame);
         if (!frame_result)
             co_return frame_result.error();
-        spdlog::info("[WRITE_MSG] req_id={} enqueuing frame", message.requestId);
+        spdlog::debug("[WRITE_MSG] req_id={} enqueuing frame", message.requestId);
         auto enq = co_await enqueue_frame(message.requestId, std::move(frame), true);
         if (!enq) {
             spdlog::warn("[WRITE_MSG] req_id={} enqueue failed: {}", message.requestId,
@@ -866,10 +868,10 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
         }
         bool should_start_writer = enq.value();
         if (should_start_writer) {
-            spdlog::info("[WRITE_MSG] req_id={} starting writer_drain", message.requestId);
+            spdlog::debug("[WRITE_MSG] req_id={} starting writer_drain", message.requestId);
             co_await writer_drain(socket);
         } else {
-            spdlog::info("[WRITE_MSG] req_id={} writer already running", message.requestId);
+            spdlog::debug("[WRITE_MSG] req_id={} writer already running", message.requestId);
         }
         co_return Result<void>();
     } else {
@@ -1028,8 +1030,8 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
     auto start_time = std::chrono::steady_clock::now();
 
     try {
-        // Check socket is open before processing
-        if (!socket.is_open()) {
+        // Check socket is open before processing (check atomic flag first to avoid TSAN race)
+        if (connection_closing_.load(std::memory_order_acquire) || !socket.is_open()) {
             spdlog::debug("handle_streaming_request: socket closed before processing request_id={}",
                           request_id);
             co_return Error{ErrorCode::NetworkError, "Socket closed"};
@@ -1068,18 +1070,18 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                                   std::holds_alternative<PrepareSessionRequest>(request);
 
         if (!client_expects_streaming || force_unary || always_unary) {
-            spdlog::info("[HSR] req_id={} taking unary path", request_id);
+            spdlog::debug("[HSR] req_id={} taking unary path", request_id);
             response_opt = co_await proc->process(request);
-            spdlog::info("[HSR] req_id={} process returned has_value={}", request_id,
-                         response_opt.has_value());
+            spdlog::debug("[HSR] req_id={} process returned has_value={}", request_id,
+                          response_opt.has_value());
         } else {
             // Default behavior: attempt streaming (processor may return std::nullopt to indicate
             // chunked mode) so header is emitted early and progress can be delivered.
-            spdlog::info("[HSR] req_id={} taking STREAMING path (type={})", request_id,
-                         request.index());
+            spdlog::debug("[HSR] req_id={} taking STREAMING path (type={})", request_id,
+                          request.index());
             response_opt = co_await proc->process_streaming(request);
-            spdlog::info("[HSR] req_id={} process_streaming returned has_value={}", request_id,
-                         response_opt.has_value());
+            spdlog::debug("[HSR] req_id={} process_streaming returned has_value={}", request_id,
+                          response_opt.has_value());
         }
 
         spdlog::debug(
@@ -1089,9 +1091,9 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             // No response means we should use the streaming interface
             // Force streaming for stream-capable requests to guarantee header-first behavior
             bool can_stream = can_stream_request(request);
-            spdlog::info("[HSR] req_id={} streaming mode: can_stream={}", request_id, can_stream);
+            spdlog::debug("[HSR] req_id={} streaming mode: can_stream={}", request_id, can_stream);
             if (proc && can_stream) {
-                spdlog::info("[HSR] req_id={} entering stream_chunks", request_id);
+                spdlog::debug("[HSR] req_id={} entering stream_chunks", request_id);
                 // Inform FSM we are transitioning to write header for streaming
                 if (fsm) {
                     ConnectionFsm::FrameInfo finfo{};
@@ -1318,12 +1320,14 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                     },
                     boost::asio::use_awaitable);
                 // Close regardless after drain/timeout
+                connection_closing_.store(true, std::memory_order_release);
                 socket.close();
                 spdlog::debug("graceful half-close complete (request_id={} fd={})", request_id,
                               sock_fd);
             } else {
                 spdlog::debug("closing socket after response (request_id={} fd={})", request_id,
                               sock_fd);
+                connection_closing_.store(true, std::memory_order_release);
                 socket.close();
             }
         } else {
@@ -1564,8 +1568,9 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
     spdlog::debug("stream: write_header req_id={} type={} flush={}", request_id,
                   static_cast<int>(getMessageType(std::get<Response>(response_msg.payload))),
                   flush);
-    // Early check: if socket is closed, abort immediately
-    if (!socket.is_open()) {
+    // Early check: if socket is closed, abort immediately (check atomic flag first to avoid TSAN
+    // race)
+    if (connection_closing_.load(std::memory_order_acquire) || !socket.is_open()) {
         co_return Error{ErrorCode::NetworkError, "Socket closed before write_header"};
     }
     if (config_.enable_multiplexing) {
@@ -1607,8 +1612,9 @@ boost::asio::awaitable<Result<void>>
 RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket, Response response,
                             uint64_t request_id, bool last_chunk, bool flush, ConnectionFsm* fsm) {
     using boost::asio::use_awaitable;
-    // Early check: if socket is closed, abort immediately
-    if (!socket.is_open()) {
+    // Early check: if socket is closed, abort immediately (check atomic flag first to avoid TSAN
+    // race)
+    if (connection_closing_.load(std::memory_order_acquire) || !socket.is_open()) {
         co_return Error{ErrorCode::NetworkError, "Socket closed before write_chunk"};
     }
     // Create message envelope for response chunk
@@ -1714,12 +1720,14 @@ RequestHandler::write_error_immediate(boost::asio::local::stream_protocol::socke
                                       uint64_t request_id, ErrorCode code,
                                       const std::string& message, ConnectionFsm* fsm) {
     using boost::asio::use_awaitable;
-    // Early check: if socket is closed, abort immediately
-    if (!socket.is_open()) {
+    // Early check: if socket is closed, abort immediately (check atomic flag first to avoid TSAN
+    // race)
+    if (connection_closing_.load(std::memory_order_acquire) || !socket.is_open()) {
         co_return Error{ErrorCode::NetworkError, "Socket closed before write_error_immediate"};
     }
     // Honor write strand if present
-    if (write_strand_exec_ && socket.is_open()) {
+    if (write_strand_exec_ && !connection_closing_.load(std::memory_order_acquire) &&
+        socket.is_open()) {
         co_await boost::asio::dispatch(*write_strand_exec_, use_awaitable);
     }
     // FSM guard
@@ -2187,12 +2195,14 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                         });
                 },
                 boost::asio::use_awaitable);
+            connection_closing_.store(true, std::memory_order_release);
             socket.close();
             spdlog::debug("graceful half-close complete (streaming) (request_id={} fd={})",
                           request_id, sock_fd);
         } else {
             spdlog::debug("closing socket after streaming response (request_id={} fd={})",
                           request_id, sock_fd);
+            connection_closing_.store(true, std::memory_order_release);
             socket.close();
         }
         if (fsm) {

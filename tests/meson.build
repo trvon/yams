@@ -1114,6 +1114,7 @@ if catch2_dep.found()
     files(
       'unit/search/chunk_coverage_catch2_test.cpp',
       'unit/search/entity_linker_catch2_test.cpp',
+      'unit/search/fusion_strategy_comparison_catch2_test.cpp',
       'unit/search/kg_scorer_simple_catch2_test.cpp',
       'unit/search/query_parser_catch2_test.cpp',
       'unit/search/query_qualifiers_catch2_test.cpp',
