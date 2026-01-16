@@ -741,7 +741,11 @@ public:
         }
 
         try {
-            // TODO: Optimize LanceDB index
+            auto result = backend_->optimize();
+            if (!result) {
+                setError("Backend optimize failed: " + result.error().message);
+                return false;
+            }
             has_error_ = false;
             return true;
 

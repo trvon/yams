@@ -1331,9 +1331,11 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                 socket.close();
             }
         } else {
-            const uint64_t sock_fd = socket.is_open()
-                                         ? static_cast<uint64_t>(socket.native_handle())
-                                         : static_cast<uint64_t>(-1);
+            // Check connection_closing_ before is_open() to avoid TSAN race with handle_connection
+            const uint64_t sock_fd =
+                (!connection_closing_.load(std::memory_order_acquire) && socket.is_open())
+                    ? static_cast<uint64_t>(socket.native_handle())
+                    : static_cast<uint64_t>(-1);
             spdlog::debug("keeping socket open after response (request_id={} fd={})", request_id,
                           sock_fd);
         }
@@ -1575,13 +1577,14 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
     }
     if (config_.enable_multiplexing) {
         // Frame and enqueue for fair writer
-        spdlog::info("[WRITE_HDR] req_id={} multiplexed path, framing header", request_id);
+        spdlog::debug("[WRITE_HDR] req_id={} multiplexed path, framing header", request_id);
         std::vector<uint8_t> frame;
         frame.reserve(MessageFramer::HEADER_SIZE + 1024);
         auto framed = framer_.frame_message_header_into(response_msg, frame);
         if (!framed)
             co_return framed.error();
-        spdlog::info("[WRITE_HDR] req_id={} enqueueing frame ({} bytes)", request_id, frame.size());
+        spdlog::debug("[WRITE_HDR] req_id={} enqueueing frame ({} bytes)", request_id,
+                      frame.size());
         auto enq = co_await enqueue_frame(request_id, std::move(frame), false, fsm);
         if (!enq) {
             spdlog::warn("[WRITE_HDR] req_id={} enqueue failed: {}", request_id,
@@ -1593,12 +1596,12 @@ RequestHandler::write_header(boost::asio::local::stream_protocol::socket& socket
             }
             co_return enq.error();
         }
-        spdlog::info("[WRITE_HDR] req_id={} enqueue returned should_start={}", request_id,
-                     enq.value());
+        spdlog::debug("[WRITE_HDR] req_id={} enqueue returned should_start={}", request_id,
+                      enq.value());
         if (enq.value()) {
-            spdlog::info("[WRITE_HDR] req_id={} starting writer_drain", request_id);
+            spdlog::debug("[WRITE_HDR] req_id={} starting writer_drain", request_id);
             co_await writer_drain(socket, fsm);
-            spdlog::info("[WRITE_HDR] req_id={} writer_drain completed", request_id);
+            spdlog::debug("[WRITE_HDR] req_id={} writer_drain completed", request_id);
         }
         co_return Result<void>{};
     } else {
@@ -1624,15 +1627,15 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
     response_msg.timestamp = std::chrono::steady_clock::now();
     response_msg.payload = std::move(response);
     if (config_.enable_multiplexing) {
-        spdlog::info("[WRITE_CHUNK] req_id={} last={} multiplexed path", request_id, last_chunk);
+        spdlog::debug("[WRITE_CHUNK] req_id={} last={} multiplexed path", request_id, last_chunk);
         std::vector<uint8_t> frame;
         frame.reserve(MessageFramer::HEADER_SIZE + config_.chunk_size + 1024);
         auto framed = framer_.frame_message_chunk_into(response_msg, frame, last_chunk);
         if (!framed)
             co_return framed.error();
         // Skip dispatch to avoid deadlock (matching write_header pattern)
-        spdlog::info("[WRITE_CHUNK] req_id={} enqueueing frame ({} bytes)", request_id,
-                     frame.size());
+        spdlog::debug("[WRITE_CHUNK] req_id={} enqueueing frame ({} bytes)", request_id,
+                      frame.size());
         auto enq = co_await enqueue_frame(request_id, std::move(frame), last_chunk, fsm);
         if (!enq) {
             spdlog::warn("[WRITE_CHUNK] req_id={} enqueue failed: {}", request_id,
@@ -1650,12 +1653,12 @@ RequestHandler::write_chunk(boost::asio::local::stream_protocol::socket& socket,
             }
             co_return enq.error();
         }
-        spdlog::info("[WRITE_CHUNK] req_id={} enqueue returned should_start={}", request_id,
-                     enq.value());
+        spdlog::debug("[WRITE_CHUNK] req_id={} enqueue returned should_start={}", request_id,
+                      enq.value());
         if (enq.value()) {
-            spdlog::info("[WRITE_CHUNK] req_id={} starting writer_drain", request_id);
+            spdlog::debug("[WRITE_CHUNK] req_id={} starting writer_drain", request_id);
             co_await writer_drain(socket, fsm);
-            spdlog::info("[WRITE_CHUNK] req_id={} writer_drain completed", request_id);
+            spdlog::debug("[WRITE_CHUNK] req_id={} writer_drain completed", request_id);
         }
         co_return Result<void>{};
     } else {

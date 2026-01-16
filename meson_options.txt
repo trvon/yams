@@ -5,6 +5,7 @@ option('enable-lzma', type: 'feature', value: 'auto', description: 'Enable LZMA 
 option('enable-onnx', type: 'feature', value: 'auto', description: 'ONNX Runtime integration in vector library (auto-detect)')
 option('require-fts5', type: 'boolean', value: true, description: 'Fail configure if sqlite3 lacks FTS5')
 option('require-sqlite-vec', type: 'boolean', value: true, description: 'Require sqlite-vec-cpp submodule for static vector DB; when true and not found, Meson will error out (recommended). Set to false only if providing a runtime module via YAMS_SQLITE_VEC_MODULE.')
+option('database-backend', type: 'combo', choices: ['libsql', 'sqlite'], value: 'libsql', description: 'Database backend: libsql (default, MVCC concurrent writes) or sqlite (standard SQLite3)')
 option('conan-generators-dir', type: 'string', value: '', description: 'Optional path (relative to source root) to Conan generator outputs; when empty Meson searches under the build directory (e.g. build/debug/conan).')
 option('cli11-cmake-path', type: 'string', value: '', description: 'Optional path to CLI11 CMake package directory (e.g., /opt/homebrew/Cellar/cli11/2.4.1/lib/cmake/CLI11). When set, Meson will add this to cmake_module_path for CLI11 discovery.')
 option('onnxruntime-cmake-path', type: 'string', value: '', description: 'Optional path to onnxruntime CMake package dir (e.g., /opt/homebrew/opt/onnxruntime/lib/cmake/onnxruntime). Used to augment cmake_module_path for ORT discovery in Meson.')

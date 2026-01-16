@@ -200,7 +200,8 @@ private:
 
     yams::Result<EntityNodeBatch>
     createEntityNodes(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-                      const Job& job, const yams_entity_extraction_result_v2* result);
+                      yams::metadata::KnowledgeGraphStore::WriteBatch* writeBatch, const Job& job,
+                      const yams_entity_extraction_result_v2* result);
 
     /**
      * Generate embeddings for NL entities.

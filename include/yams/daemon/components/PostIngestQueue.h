@@ -1,10 +1,12 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
@@ -42,6 +44,31 @@ public:
         std::string session;
         std::chrono::steady_clock::time_point enqueuedAt;
         enum class Stage : uint8_t { Metadata = 0, KnowledgeGraph = 1 } stage;
+    };
+
+    /// Result of successful text extraction, ready for batch DB insertion.
+    struct PreparedMetadataEntry {
+        int64_t documentId = 0;
+        std::string hash;
+        std::string fileName;
+        std::string extractedText;
+        std::string mimeType;
+        std::string extension;
+        std::vector<std::string> tags;
+        std::string language;
+
+        // Dispatch flags (determined during preparation)
+        bool shouldDispatchKg = true;
+        bool shouldDispatchSymbol = false;
+        std::string symbolLanguage;
+        bool shouldDispatchEntity = false;
+    };
+
+    /// Result of failed text extraction, requires status update.
+    struct ExtractionFailure {
+        int64_t documentId = 0;
+        std::string hash;
+        std::string errorMessage;
     };
 
     PostIngestQueue(std::shared_ptr<api::IContentStore> store,
@@ -101,6 +128,14 @@ public:
         entityProviders_ = std::move(providers);
     }
 
+    /// Set callback to be invoked when the queue drains (all stages become idle).
+    /// Used by ServiceManager to trigger search engine rebuild.
+    using DrainCallback = std::function<void()>;
+    void setDrainCallback(DrainCallback callback) {
+        std::lock_guard<std::mutex> lock(drainCallbackMutex_);
+        drainCallback_ = std::move(callback);
+    }
+
 private:
     boost::asio::awaitable<void> channelPoller();
     boost::asio::awaitable<void> kgPoller();
@@ -114,6 +149,14 @@ private:
         const std::vector<std::string>* tagsOverride = nullptr,
         const std::unordered_map<std::string, std::string>& symbolExtensionMap = {},
         const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders = {});
+
+    /// Prepare metadata for batch insertion (extraction only, no DB writes).
+    /// Returns PreparedMetadataEntry on success, ExtractionFailure on failure.
+    std::variant<PreparedMetadataEntry, ExtractionFailure> prepareMetadataEntry(
+        const std::string& hash, const std::string& mime, const metadata::DocumentInfo& info,
+        const std::vector<std::string>& tags,
+        const std::unordered_map<std::string, std::string>& symbolExtensionMap,
+        const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders);
 
     void processKnowledgeGraphStage(const std::string& hash, int64_t docId,
                                     const std::string& filePath,
@@ -130,6 +173,7 @@ private:
     void processEntityExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& extension);
     std::size_t resolveChannelCapacity() const;
+    void checkDrainAndSignal(); // Check if drained and signal corpus stats stale
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
@@ -155,6 +199,9 @@ private:
     std::size_t capacity_{1000};
     // Concurrency limits now dynamic via TuneAdvisor (PBI-05a)
 
+    // Drain detection: signals corpus stats stale once per drain cycle
+    std::atomic<bool> wasActive_{false}; // True if we had work since last drain
+
     std::chrono::steady_clock::time_point lastCompleteTs_{};
     static constexpr double kAlpha_ = 0.2;
 
@@ -163,6 +210,9 @@ private:
 
     mutable std::mutex entityMutex_;
     std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders_;
+
+    mutable std::mutex drainCallbackMutex_;
+    DrainCallback drainCallback_;
 };
 
 } // namespace yams::daemon

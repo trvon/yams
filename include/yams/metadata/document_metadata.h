@@ -199,6 +199,21 @@ struct DocumentContent {
 };
 
 /**
+ * @brief Entry for batch content insertion and indexing.
+ *
+ * Used by batchInsertContentAndIndex() to wrap multiple documents in a single
+ * transaction, reducing connection pool contention during bulk ingestion.
+ */
+struct BatchContentEntry {
+    int64_t documentId = 0;       ///< Document ID in database
+    std::string title;            ///< Document title (for FTS)
+    std::string contentText;      ///< Extracted text content
+    std::string mimeType;         ///< MIME type for FTS content_type
+    std::string extractionMethod; ///< Method used for extraction
+    std::string language;         ///< Detected language code
+};
+
+/**
  * @brief Document relationship information
  */
 struct DocumentRelationship {

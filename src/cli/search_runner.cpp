@@ -14,9 +14,8 @@ static bool is_parse_like_error(const yams::Error& err) {
            contains("tokenize");
 }
 
-boost::asio::awaitable<Result<DaemonSearchResult>> daemon_search(yams::daemon::DaemonClient& client,
-                                                                 const DaemonSearchOptions& opts,
-                                                                 bool enableStreaming) {
+boost::asio::awaitable<Result<DaemonSearchResult>>
+daemon_search(yams::daemon::DaemonClient& client, DaemonSearchOptions opts, bool enableStreaming) {
     yams::daemon::SearchRequest req;
     req.query = opts.query;
     req.limit = opts.limit;

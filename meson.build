@@ -69,19 +69,13 @@ if enable_tsan
   if buildtype == 'release' or buildtype == 'plain'
     warning('ThreadSanitizer enabled in non-debug build. This will significantly impact performance.')
   endif
-  
-  tsan_flags = [
-    '-fsanitize=thread',
-    '-g',  # Debug symbols for better stack traces
-    '-fno-omit-frame-pointer',  # Better stack traces
-  ]
-  
+
   # Check if compiler supports TSan
   if cpp.has_argument('-fsanitize=thread')
-    add_project_arguments(tsan_flags, language: 'cpp')
-    add_project_arguments(tsan_flags, language: 'c')
-    add_project_link_arguments(['-fsanitize=thread'], language: 'cpp')
-    add_project_link_arguments(['-fsanitize=thread'], language: 'c')
+    # Use additional flags for better stack traces (sanitizer is set via b_sanitize option)
+    tsan_extra_flags = ['-fno-omit-frame-pointer']
+    add_project_arguments(tsan_extra_flags, language: 'cpp')
+    add_project_arguments(tsan_extra_flags, language: 'c')
     message('ThreadSanitizer enabled - expect significant performance impact')
     message('Note: TSan requires all code (including dependencies) to be compiled with -fsanitize=thread')
   else
@@ -238,14 +232,60 @@ endif
 
 onnx_opt = get_option('enable-onnx')
 
-# Enforce sqlite3 FTS5 presence at configure time (configurable)
+# Database backend selection (libsql or sqlite)
+db_backend = get_option('database-backend')
 require_fts5 = get_option('require-fts5')
-sqlite_dep = dependency('sqlite3', required: true)
+
+# Try to find the selected database backend
+using_libsql = false
+if db_backend == 'libsql'
+  # Try to find libsql (provides sqlite3-compatible API)
+  # 1. First try system-installed libsql via pkg-config
+  libsql_dep = dependency('libsql', required: false)
+  if not libsql_dep.found()
+    libsql_dep = dependency('libsql-sqlite3', required: false)
+  endif
+
+  # 2. If not found, try building from subproject (requires Rust toolchain)
+  if not libsql_dep.found()
+    cargo_prog = find_program('cargo', required: false)
+    if cargo_prog.found()
+      message('libSQL not found on system, building from subproject (requires Rust)...')
+      libsql_subproj = subproject('libsql', required: false)
+      if libsql_subproj.found()
+        libsql_dep = libsql_subproj.get_variable('libsql_dep')
+      endif
+    endif
+  endif
+
+  if libsql_dep.found()
+    sqlite_dep = libsql_dep
+    using_libsql = true
+    message('Using libSQL database backend (MVCC concurrent writes enabled)')
+  else
+    warning('libSQL not found and subproject build failed. Falling back to standard SQLite3.')
+    warning('To use libSQL: install Rust toolchain (rustup) or system libsql package.')
+    sqlite_dep = dependency('sqlite3', required: true)
+  endif
+else
+  sqlite_dep = dependency('sqlite3', required: true)
+  message('Using standard SQLite3 database backend')
+endif
+
+# Add compile definition for backend detection
+if using_libsql
+  add_project_arguments('-DYAMS_LIBSQL_BACKEND=1', language: 'cpp')
+else
+  add_project_arguments('-DYAMS_LIBSQL_BACKEND=0', language: 'cpp')
+endif
+
 # Skip runtime test when cross-compiling or using subproject sqlite (internal dep can't be used with cpp.run in newer meson)
 if meson.is_cross_build()
   warning('Cross-compiling: skipping SQLite FTS5 runtime check. Ensure FTS5 is enabled in your target SQLite build.')
 elif sqlite_dep.type_name() == 'internal'
   warning('Using subproject sqlite3: skipping FTS5 runtime check. Subproject sqlite3 has FTS5 enabled by default.')
+elif using_libsql
+  message('Using libSQL: skipping FTS5 runtime check. libSQL includes FTS5 support.')
 else
   fts5_prog = cpp.run(files('meson/fts5_check.cpp'), dependencies: sqlite_dep, name: 'sqlite3 FTS5 check')
   if fts5_prog.returncode() != 0

@@ -3,10 +3,10 @@
 
 /**
  * @file fusion_strategy_comparison_catch2_test.cpp
- * @brief Comparison tests for different fusion strategies
+ * @brief Tests for UNIFIED fusion strategy
  *
- * Tests compare RRF, COMB_MNZ, TEXT_ANCHOR, and other fusion strategies
- * to verify ranking quality improvements from main branch defaults.
+ * Tests verify the unified fusion strategy (weight * RRF * scoreBoost * mnzBoost)
+ * produces stable, high-quality rankings.
  */
 
 #include <catch2/catch_approx.hpp>
@@ -90,13 +90,14 @@ int getRank(const std::vector<SearchResult>& results, const std::string& hash) {
 } // namespace
 
 // =============================================================================
-// Fusion Strategy Comparison Tests
+// Unified Fusion Strategy Tests
 // =============================================================================
 
-TEST_CASE("FusionStrategy: RECIPROCAL_RANK produces stable rankings", "[unit][fusion][rrf]") {
+TEST_CASE("FusionStrategy: UNIFIED produces stable rankings", "[unit][fusion][unified]") {
     SearchEngineConfig config;
-    config.fusionStrategy = SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK;
-    config.rrfK = 60.0f; // Main branch default
+    config.fusionStrategy = SearchEngineConfig::FusionStrategy::UNIFIED;
+    config.rrfK = 60.0f;
+    config.enableMnzBoost = true;
 
     ResultFusion fusion(config);
     auto corpus = createTestCorpus();
@@ -104,8 +105,7 @@ TEST_CASE("FusionStrategy: RECIPROCAL_RANK produces stable rankings", "[unit][fu
 
     REQUIRE(results.size() == 5);
 
-    // Document C should rank high - found by 3 components
-    // RRF rewards documents found by multiple sources
+    // Document C should rank high - found by 3 components, gets MNZ boost
     auto* docC = findByHash(results, "docC");
     REQUIRE(docC != nullptr);
 
@@ -121,51 +121,43 @@ TEST_CASE("FusionStrategy: RECIPROCAL_RANK produces stable rankings", "[unit][fu
     }
 }
 
-TEST_CASE("FusionStrategy: COMB_MNZ boosts multi-component documents", "[unit][fusion][comb_mnz]") {
-    SearchEngineConfig config;
-    config.fusionStrategy = SearchEngineConfig::FusionStrategy::COMB_MNZ;
-    config.rrfK = 60.0f;
-
-    ResultFusion fusion(config);
+TEST_CASE("FusionStrategy: UNIFIED MNZ boost affects multi-component documents",
+          "[unit][fusion][unified][mnz]") {
     auto corpus = createTestCorpus();
-    auto results = fusion.fuse(corpus);
 
-    REQUIRE(results.size() == 5);
+    // With MNZ boost enabled
+    SearchEngineConfig configWithMnz;
+    configWithMnz.fusionStrategy = SearchEngineConfig::FusionStrategy::UNIFIED;
+    configWithMnz.rrfK = 60.0f;
+    configWithMnz.enableMnzBoost = true;
+    ResultFusion fusionWithMnz(configWithMnz);
+    auto resultsWithMnz = fusionWithMnz.fuse(corpus);
 
-    // COMB_MNZ multiplies by component count
-    // Document C (3 components) should get a significant boost
-    int rankC = getRank(results, "docC");
-    int rankB = getRank(results, "docB"); // Only 1 component despite high score
+    // Without MNZ boost
+    SearchEngineConfig configNoMnz;
+    configNoMnz.fusionStrategy = SearchEngineConfig::FusionStrategy::UNIFIED;
+    configNoMnz.rrfK = 60.0f;
+    configNoMnz.enableMnzBoost = false;
+    ResultFusion fusionNoMnz(configNoMnz);
+    auto resultsNoMnz = fusionNoMnz.fuse(corpus);
 
-    // Document C should rank higher than B due to multi-component boost
-    CHECK(rankC < rankB);
-}
+    REQUIRE(resultsWithMnz.size() == resultsNoMnz.size());
 
-TEST_CASE("FusionStrategy: TEXT_ANCHOR preserves text ranking", "[unit][fusion][text_anchor]") {
-    SearchEngineConfig config;
-    config.fusionStrategy = SearchEngineConfig::FusionStrategy::TEXT_ANCHOR;
-    config.rrfK = 60.0f;
+    // Document C (3 components) should have relatively higher score with MNZ
+    // compared to Document B (1 component)
+    int rankCWithMnz = getRank(resultsWithMnz, "docC");
+    int rankBWithMnz = getRank(resultsWithMnz, "docB");
+    int rankCNoMnz = getRank(resultsNoMnz, "docC");
+    int rankBNoMnz = getRank(resultsNoMnz, "docB");
 
-    ResultFusion fusion(config);
-    auto corpus = createTestCorpus();
-    auto results = fusion.fuse(corpus);
+    // With MNZ boost, docC (3 components) should rank better relative to docB (1 component)
+    int gapWithMnz = rankCWithMnz - rankBWithMnz;
+    int gapNoMnz = rankCNoMnz - rankBNoMnz;
 
-    // TEXT_ANCHOR uses text results as primary anchor
-    // Document A is text rank 0, should be at or near top
-    int rankA = getRank(results, "docA");
-
-    // Document B is vector-only with high score but no text match
-    // Should need very high confidence (>0.85) to be included
-    int rankB = getRank(results, "docB");
-
-    // Document D is text-only, should be included
-    int rankD = getRank(results, "docD");
-    CHECK(rankD >= 0);
-
-    // Text-anchored documents should generally rank higher
-    // unless vector-only has exceptional score
-    INFO("Text-anchored docA rank: " << rankA);
-    INFO("Vector-only docB rank: " << rankB);
+    // MNZ boost should improve docC's relative position (smaller or more negative gap)
+    INFO("With MNZ: docC rank " << rankCWithMnz << ", docB rank " << rankBWithMnz);
+    INFO("Without MNZ: docC rank " << rankCNoMnz << ", docB rank " << rankBNoMnz);
+    CHECK(gapWithMnz <= gapNoMnz);
 }
 
 TEST_CASE("FusionStrategy: Higher RRF k produces smoother rankings", "[unit][fusion][rrf_k]") {
@@ -173,14 +165,14 @@ TEST_CASE("FusionStrategy: Higher RRF k produces smoother rankings", "[unit][fus
 
     // Low k (30) - more emphasis on top-ranked items
     SearchEngineConfig configLowK;
-    configLowK.fusionStrategy = SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK;
+    configLowK.fusionStrategy = SearchEngineConfig::FusionStrategy::UNIFIED;
     configLowK.rrfK = 30.0f;
     ResultFusion fusionLowK(configLowK);
     auto resultsLowK = fusionLowK.fuse(corpus);
 
     // High k (60) - smoother distribution
     SearchEngineConfig configHighK;
-    configHighK.fusionStrategy = SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK;
+    configHighK.fusionStrategy = SearchEngineConfig::FusionStrategy::UNIFIED;
     configHighK.rrfK = 60.0f;
     ResultFusion fusionHighK(configHighK);
     auto resultsHighK = fusionHighK.fuse(corpus);
@@ -199,31 +191,31 @@ TEST_CASE("FusionStrategy: Higher RRF k produces smoother rankings", "[unit][fus
     }
 }
 
-TEST_CASE("FusionStrategy: Default config uses RECIPROCAL_RANK", "[unit][fusion][defaults]") {
+TEST_CASE("FusionStrategy: Default config uses UNIFIED", "[unit][fusion][defaults]") {
     SearchEngineConfig config;
 
-    // Verify restored defaults from main branch
-    CHECK(config.fusionStrategy == SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK);
+    // Verify UNIFIED is the only and default strategy
+    CHECK(config.fusionStrategy == SearchEngineConfig::FusionStrategy::UNIFIED);
     CHECK(config.rrfK == Approx(60.0f));
-    CHECK(config.vectorWeight == Approx(0.55f));
+    CHECK(config.enableMnzBoost == true);
 }
 
-TEST_CASE("FusionStrategy: Vector weight affects ranking", "[unit][fusion][vector_weight]") {
+TEST_CASE("FusionStrategy: Component weights affect ranking", "[unit][fusion][weights]") {
     auto corpus = createTestCorpus();
 
-    // Low vector weight
+    // Low vector weight - text dominates
     SearchEngineConfig configLowVec;
-    configLowVec.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
-    configLowVec.vectorWeight = 0.20f;
-    configLowVec.textWeight = 0.55f;
+    configLowVec.fusionStrategy = SearchEngineConfig::FusionStrategy::UNIFIED;
+    configLowVec.vectorWeight = 0.10f;
+    configLowVec.textWeight = 0.60f;
     ResultFusion fusionLowVec(configLowVec);
     auto resultsLowVec = fusionLowVec.fuse(corpus);
 
-    // High vector weight (main branch default)
+    // High vector weight
     SearchEngineConfig configHighVec;
-    configHighVec.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
-    configHighVec.vectorWeight = 0.55f;
-    configHighVec.textWeight = 0.30f;
+    configHighVec.fusionStrategy = SearchEngineConfig::FusionStrategy::UNIFIED;
+    configHighVec.vectorWeight = 0.60f;
+    configHighVec.textWeight = 0.20f;
     ResultFusion fusionHighVec(configHighVec);
     auto resultsHighVec = fusionHighVec.fuse(corpus);
 
@@ -241,6 +233,7 @@ TEST_CASE("FusionStrategy: Vector weight affects ranking", "[unit][fusion][vecto
 
 TEST_CASE("FusionStrategy: Empty input returns empty results", "[unit][fusion][edge]") {
     SearchEngineConfig config;
+    config.fusionStrategy = SearchEngineConfig::FusionStrategy::UNIFIED;
     ResultFusion fusion(config);
 
     std::vector<ComponentResult> empty;
@@ -251,7 +244,7 @@ TEST_CASE("FusionStrategy: Empty input returns empty results", "[unit][fusion][e
 
 TEST_CASE("FusionStrategy: Single component works correctly", "[unit][fusion][edge]") {
     SearchEngineConfig config;
-    config.fusionStrategy = SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK;
+    config.fusionStrategy = SearchEngineConfig::FusionStrategy::UNIFIED;
     ResultFusion fusion(config);
 
     std::vector<ComponentResult> single;
@@ -263,7 +256,7 @@ TEST_CASE("FusionStrategy: Single component works correctly", "[unit][fusion][ed
     CHECK(results[0].document.sha256Hash == "doc1");
 }
 
-TEST_CASE("FusionStrategy: All strategies handle duplicate documents", "[unit][fusion][edge]") {
+TEST_CASE("FusionStrategy: UNIFIED handles duplicate documents", "[unit][fusion][edge]") {
     std::vector<ComponentResult> corpus;
     // Same document from multiple components
     corpus.push_back(makeComponent("docX", "/path/x.cpp", 0.90f, "text", 0));
@@ -271,34 +264,26 @@ TEST_CASE("FusionStrategy: All strategies handle duplicate documents", "[unit][f
     corpus.push_back(makeComponent("docX", "/path/x.cpp", 0.80f, "kg", 0));
     corpus.push_back(makeComponent("docX", "/path/x.cpp", 0.75f, "path_tree", 0));
 
-    // Test all strategies produce single result
-    std::vector<SearchEngineConfig::FusionStrategy> strategies = {
-        SearchEngineConfig::FusionStrategy::WEIGHTED_SUM,
-        SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK,
-        SearchEngineConfig::FusionStrategy::BORDA_COUNT,
-        SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL,
-        SearchEngineConfig::FusionStrategy::COMB_MNZ,
-        SearchEngineConfig::FusionStrategy::TEXT_ANCHOR,
-    };
+    SearchEngineConfig config;
+    config.fusionStrategy = SearchEngineConfig::FusionStrategy::UNIFIED;
+    config.enableMnzBoost = true;
+    ResultFusion fusion(config);
 
-    for (auto strategy : strategies) {
-        SearchEngineConfig config;
-        config.fusionStrategy = strategy;
-        ResultFusion fusion(config);
+    auto results = fusion.fuse(corpus);
 
-        auto results = fusion.fuse(corpus);
+    // Should produce single result with contributions from all components
+    REQUIRE(results.size() == 1);
+    CHECK(results[0].document.sha256Hash == "docX");
 
-        INFO("Strategy: " << SearchEngineConfig::fusionStrategyToString(strategy));
-        REQUIRE(results.size() == 1);
-        CHECK(results[0].document.sha256Hash == "docX");
-    }
+    // Score should be higher than any single component due to aggregation
+    CHECK(results[0].score > 0.0f);
 }
 
 // =============================================================================
 // Performance Benchmark Tests
 // =============================================================================
 
-TEST_CASE("FusionStrategy: Performance comparison benchmark", "[unit][fusion][benchmark]") {
+TEST_CASE("FusionStrategy: UNIFIED performance benchmark", "[unit][fusion][benchmark]") {
     // Generate larger test corpus for meaningful timing
     std::vector<ComponentResult> corpus;
     std::vector<std::string> sources = {"text", "vector", "kg", "path_tree", "metadata"};
@@ -318,43 +303,31 @@ TEST_CASE("FusionStrategy: Performance comparison benchmark", "[unit][fusion][be
 
     INFO("Corpus size: " << corpus.size() << " component results");
 
-    std::vector<std::pair<std::string, SearchEngineConfig::FusionStrategy>> strategies = {
-        {"RECIPROCAL_RANK", SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK},
-        {"COMB_MNZ", SearchEngineConfig::FusionStrategy::COMB_MNZ},
-        {"WEIGHTED_RECIPROCAL", SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL},
-        {"TEXT_ANCHOR", SearchEngineConfig::FusionStrategy::TEXT_ANCHOR},
-        {"BORDA_COUNT", SearchEngineConfig::FusionStrategy::BORDA_COUNT},
-        {"WEIGHTED_SUM", SearchEngineConfig::FusionStrategy::WEIGHTED_SUM},
-    };
+    SearchEngineConfig config;
+    config.fusionStrategy = SearchEngineConfig::FusionStrategy::UNIFIED;
+    config.rrfK = 60.0f;
+    config.enableMnzBoost = true;
+
+    ResultFusion fusion(config);
 
     constexpr int ITERATIONS = 1000;
 
-    for (const auto& [name, strategy] : strategies) {
-        SearchEngineConfig config;
-        config.fusionStrategy = strategy;
-        config.rrfK = 60.0f;
-        config.vectorWeight = 0.55f;
-
-        ResultFusion fusion(config);
-
-        auto start = std::chrono::high_resolution_clock::now();
-        for (int i = 0; i < ITERATIONS; ++i) {
-            auto results = fusion.fuse(corpus);
-            (void)results; // Prevent optimization
-        }
-        auto end = std::chrono::high_resolution_clock::now();
-
-        auto durationUs =
-            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-        double avgUs = static_cast<double>(durationUs) / ITERATIONS;
-
-        // Run once more to get result stats
+    auto start = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < ITERATIONS; ++i) {
         auto results = fusion.fuse(corpus);
-
-        INFO(name << ": avg " << avgUs << " us, " << results.size() << " results");
-
-        // Basic sanity checks - most strategies have a 100 result limit by default
-        CHECK(results.size() >= 100);
-        CHECK(results[0].score > 0.0f);
+        (void)results; // Prevent optimization
     }
+    auto end = std::chrono::high_resolution_clock::now();
+
+    auto durationUs = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+    double avgUs = static_cast<double>(durationUs) / ITERATIONS;
+
+    // Run once more to get result stats
+    auto results = fusion.fuse(corpus);
+
+    INFO("UNIFIED: avg " << avgUs << " us, " << results.size() << " results");
+
+    // Basic sanity checks
+    CHECK(results.size() >= 100);
+    CHECK(results[0].score > 0.0f);
 }

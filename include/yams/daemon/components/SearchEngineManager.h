@@ -105,6 +105,37 @@ public:
      */
     bool isReady() const { return fsm_.isReady(); }
 
+    /**
+     * Check if engine is waiting for indexing to drain before rebuild.
+     */
+    bool isAwaitingDrain() const { return fsm_.isAwaitingDrain(); }
+
+    /**
+     * Request a search engine rebuild. If waitForDrain is true, the rebuild
+     * will be deferred until indexing completes (PostIngestQueue drained).
+     * Returns true if the request was accepted (not already building/awaiting).
+     */
+    bool requestRebuild(const std::string& reason, bool includeVector, bool waitForDrain = true) {
+        SearchEngineRebuildRequestedEvent ev;
+        ev.reason = reason;
+        ev.includeVectorSearch = includeVector;
+        ev.waitForDrain = waitForDrain;
+        return fsm_.dispatch(ev);
+    }
+
+    /**
+     * Signal that indexing has drained. If the FSM is in AwaitingDrain state,
+     * this will trigger the deferred rebuild.
+     */
+    void signalIndexingDrained() { fsm_.dispatch(SearchEngineIndexingDrainedEvent{}); }
+
+    /**
+     * Set callback to be invoked when the FSM determines a rebuild should start.
+     */
+    void setRebuildCallback(SearchEngineFsm::RebuildCallback callback) {
+        fsm_.setRebuildCallback(std::move(callback));
+    }
+
 private:
     void refreshSnapshot();
 

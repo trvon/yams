@@ -1,0 +1,323 @@
+---
+name: yams
+description: Code indexing, semantic search, and knowledge graph for project memory
+license: GPL-3.0
+compatibility: claude-code, opencode
+metadata:
+  tools: cli, mcp
+  categories: search, indexing, memory, knowledge-graph
+install: |
+  # Copy to skills directory (Claude Code)
+  mkdir -p ~/.claude/skills/yams && cp docs/skills/yams/SKILL.md ~/.claude/skills/yams/
+  # Or for OpenCode
+  mkdir -p ~/.opencode/skills/yams && cp docs/skills/yams/SKILL.md ~/.opencode/skills/yams/
+---
+
+# YAMS Skill
+
+## Quick Reference
+
+```bash
+# Status & Health
+yams status                    # Check daemon and index status
+yams daemon start              # Start background daemon
+yams doctor                    # Diagnose issues
+
+# Indexing
+yams add <file>                # Index single file
+yams add . -r --include "*.py" # Index directory recursively
+yams watch                     # Auto-index on file changes
+
+# Search (use grep first, search for semantic)
+yams grep "pattern"            # Code pattern search (fast, exact)
+yams search "query"            # Semantic/hybrid search
+
+# Graph
+yams graph --name <file>       # Show file relationships
+yams graph --list-types        # List node types with counts
+yams graph --relations         # List relation types with counts
+yams graph --search "pattern"  # Search nodes by label
+```
+
+## Code Indexing
+
+### Index Project Files
+
+```bash
+# Index specific file types
+yams add . -r --include "*.ts,*.tsx,*.js"
+
+# Index with exclusions
+yams add . -r --include "*.py" --exclude "venv/**,__pycache__/**"
+
+# Index with metadata for tracking
+yams add src/ -r --metadata "task=feature-auth"
+```
+
+### Auto-Index with Watch
+
+```bash
+yams watch                     # Start watching current directory
+yams watch --interval 2000     # Custom interval (ms)
+yams watch --stop              # Stop watching
+```
+
+### Verify Indexing
+
+```bash
+yams status                    # Shows indexed file count
+yams list --limit 10           # Recent indexed files
+```
+
+## Search Patterns
+
+### Decision Tree
+
+1. **Code patterns** → `yams grep` (fast, regex)
+2. **Semantic/concept** → `yams search` (embeddings)
+3. **No results from grep** → Try `yams search`
+
+### grep (Code Search)
+
+```bash
+# Exact pattern
+yams grep "function authenticate"
+
+# Regex pattern
+yams grep "async.*await.*fetch"
+
+# Fuzzy matching
+yams grep "authentcation" --fuzzy
+
+# With context lines
+yams grep "TODO" -A 2 -B 2
+
+# Filter by extension
+yams grep "import" --ext py
+
+# Literal text (no regex)
+yams grep "user?.name" -F
+```
+
+### search (Semantic Search)
+
+```bash
+# Concept search
+yams search "error handling patterns"
+
+# Hybrid search (default)
+yams search "authentication flow" --type hybrid
+
+# Limit results
+yams search "database connection" --limit 5
+
+# Filter by file type
+yams search "API endpoint" --ext ts
+```
+
+## Knowledge Management
+
+### Store Research
+
+```bash
+# Index documentation
+curl -s "https://docs.example.com/api" | yams add - --name "api-docs.md"
+
+# Store with metadata
+yams add notes.md --metadata "source=research,topic=auth"
+```
+
+### Store Decisions
+
+```bash
+# Pipe decision record
+echo "## Decision: Use JWT for auth
+
+### Context
+Need stateless authentication for microservices.
+
+### Decision
+JWT with RS256, 15min expiry, refresh tokens.
+
+### Rationale
+Stateless, scalable, industry standard.
+" | yams add - --name "decision-jwt-auth.md"
+```
+
+### Retrieve Knowledge
+
+```bash
+# Find related decisions
+yams search "authentication decision"
+
+# Find by metadata
+yams grep "JWT" --ext md
+```
+
+## Session Management
+
+### Create Work Sessions
+
+```bash
+# Start named session
+yams session start --name "feature-auth"
+
+# List sessions
+yams session ls
+
+# Switch session
+yams session use "feature-auth"
+
+# Show current session
+yams session show --json
+```
+
+### Session Scope
+
+```bash
+# Add files to session scope
+yams session add --path "src/auth/**"
+
+# Warm session cache (faster searches)
+yams session warm --limit 100
+
+# Search within session
+yams search "login" --session
+```
+
+### Session Lifecycle
+
+```bash
+# Save session state
+yams session save
+
+# Load previous session
+yams session load --name "feature-auth"
+
+# Clear session cache
+yams session clear
+
+# End session
+yams session close
+```
+
+## Graph Queries
+
+### Explore Graph Structure
+
+```bash
+# List available node types with counts
+yams graph --list-types
+
+# List relation types with counts
+yams graph --relations
+
+# Search nodes by label pattern (wildcards: * any chars, ? single char)
+yams graph --search "*Controller*"
+yams graph --search "auth*"
+yams graph --search "handle?Request"
+```
+
+### File Relationships
+
+```bash
+# Show file dependencies
+yams graph --name src/auth/login.ts --depth 2
+
+# Output as JSON
+yams graph --name src/auth/login.ts --format json
+
+# Output as DOT (for visualization)
+yams graph --name src/auth/login.ts --format dot > graph.dot
+```
+
+### Symbol Navigation
+
+```bash
+# List all nodes of a type
+yams graph --list-type function --limit 50
+
+# Find isolated nodes (potential dead code)
+yams graph --list-type function --isolated
+
+# Filter by relation type
+yams graph --name src/main.ts --relation imports
+```
+
+### Dead Code Detection
+
+```bash
+# Find unreferenced functions
+yams graph --list-type function --isolated --limit 100
+
+# Generate dead-code report (scoped to src/**)
+yams graph --dead-code-report
+
+# Inspect suspicious node
+yams graph --node-key "func:authenticate" --depth 2
+```
+
+## MCP Integration
+
+YAMS exposes tools via Model Context Protocol for programmatic access.
+
+### Start MCP Server
+
+```bash
+yams serve                     # Start MCP server (quiet mode)
+yams serve --verbose           # With logging
+```
+
+### Available MCP Tools
+
+| Tool | Purpose |
+|------|---------|
+| `yams_search` | Semantic/hybrid search |
+| `yams_grep` | Code pattern search |
+| `yams_add` | Index content |
+| `yams_get` | Retrieve by hash |
+| `yams_list` | List indexed items |
+| `yams_graph` | Query relationships, list types, search nodes |
+| `yams_session_*` | Session management |
+| `yams_status` | Health check |
+
+### MCP Configuration
+
+```json
+{
+  "mcpServers": {
+    "yams": {
+      "command": "yams",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+## Troubleshooting
+
+```bash
+# Check daemon status
+yams daemon status -d
+
+# View daemon logs
+yams daemon log -n 50
+
+# Full diagnostic
+yams doctor
+
+# Repair index
+yams doctor repair --all
+
+# Fix embedding dimensions
+yams doctor --fix-config-dims
+```
+
+## Environment Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `YAMS_DATA_DIR` | Storage directory |
+| `YAMS_SOCKET` | Daemon socket path |
+| `YAMS_LOG_LEVEL` | Logging verbosity |
+| `YAMS_SESSION_CURRENT` | Default session |

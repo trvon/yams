@@ -6,6 +6,7 @@
 #include <cstring>
 #include <shared_mutex>
 #include <span>
+#include <thread>
 #include <unordered_set>
 
 #include <nlohmann/json.hpp>
@@ -28,6 +29,90 @@ namespace {
 inline std::string safeColumnText(sqlite3_stmt* stmt, int col) {
     const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, col));
     return text ? text : "";
+}
+
+// ============================================================================
+// Libsql-aware database helpers
+// ============================================================================
+
+// Retry parameters vary by backend:
+// - libsql MVCC: fewer retries needed since concurrent writers don't block
+// - SQLite: more retries with longer backoff for single-writer model
+#if YAMS_LIBSQL_BACKEND
+constexpr int kMaxRetries = 3;
+constexpr int kInitialBackoffMs = 5;
+#else
+constexpr int kMaxRetries = 5;
+constexpr int kInitialBackoffMs = 10;
+#endif
+
+// Begin transaction with retry logic and backend-appropriate semantics
+inline bool beginTransactionWithRetry(sqlite3* db) {
+    auto backoff = std::chrono::milliseconds(kInitialBackoffMs);
+
+    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+#if YAMS_LIBSQL_BACKEND
+        // libsql MVCC: use regular BEGIN (deferred) for better concurrency
+        int rc = sqlite3_exec(db, "BEGIN", nullptr, nullptr, nullptr);
+#else
+        // SQLite: use BEGIN IMMEDIATE to acquire write lock immediately
+        int rc = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+#endif
+        if (rc == SQLITE_OK) {
+            return true;
+        }
+        // Check for transient lock errors
+        if ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && attempt + 1 < kMaxRetries) {
+            std::this_thread::sleep_for(backoff);
+            backoff *= 2;
+            continue;
+        }
+        spdlog::warn("[VectorDB] beginTransaction failed: {} (attempt {}/{})", sqlite3_errstr(rc),
+                     attempt + 1, kMaxRetries);
+        break;
+    }
+    return false;
+}
+
+// Execute SQL with retry logic for transient lock errors
+inline bool execWithRetry(sqlite3* db, const char* sql) {
+    auto backoff = std::chrono::milliseconds(kInitialBackoffMs);
+
+    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+        int rc = sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+        if (rc == SQLITE_OK) {
+            return true;
+        }
+        if ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && attempt + 1 < kMaxRetries) {
+            std::this_thread::sleep_for(backoff);
+            backoff *= 2;
+            continue;
+        }
+        spdlog::warn("[VectorDB] exec '{}' failed: {} (attempt {}/{})", sql, sqlite3_errstr(rc),
+                     attempt + 1, kMaxRetries);
+        break;
+    }
+    return false;
+}
+
+// Step statement with retry logic (for statements expecting SQLITE_DONE)
+inline int stepWithRetry(sqlite3_stmt* stmt) {
+    auto backoff = std::chrono::milliseconds(kInitialBackoffMs);
+
+    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+        int rc = sqlite3_step(stmt);
+        if (rc == SQLITE_DONE || rc == SQLITE_ROW) {
+            return rc;
+        }
+        if ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && attempt + 1 < kMaxRetries) {
+            sqlite3_reset(stmt);
+            std::this_thread::sleep_for(backoff);
+            backoff *= 2;
+            continue;
+        }
+        return rc; // Non-retryable error
+    }
+    return SQLITE_BUSY; // Max retries exceeded
 }
 
 // SQL statements
@@ -439,9 +524,8 @@ public:
             return Result<void>{};
         }
 
-        // Begin transaction
-        int rc = sqlite3_exec(db_, "BEGIN TRANSACTION", nullptr, nullptr, nullptr);
-        if (rc != SQLITE_OK) {
+        // Begin transaction with libsql-aware retry logic
+        if (!beginTransactionWithRetry(db_)) {
             return Error{ErrorCode::DatabaseError, "Failed to begin transaction"};
         }
 
@@ -451,15 +535,14 @@ public:
         for (const auto& record : records) {
             auto rowid_result = insertVectorUnlocked(record);
             if (!rowid_result) {
-                sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+                execWithRetry(db_, "ROLLBACK");
                 return rowid_result.error();
             }
             rowids.push_back(rowid_result.value());
         }
 
-        // Commit transaction
-        rc = sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr);
-        if (rc != SQLITE_OK) {
+        // Commit transaction with retry
+        if (!execWithRetry(db_, "COMMIT")) {
             return Error{ErrorCode::DatabaseError, "Failed to commit transaction"};
         }
 
@@ -529,7 +612,7 @@ public:
         if (stmt_delete_by_chunk_id_) {
             sqlite3_reset(stmt_delete_by_chunk_id_);
             sqlite3_bind_text(stmt_delete_by_chunk_id_, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(stmt_delete_by_chunk_id_);
+            stepWithRetry(stmt_delete_by_chunk_id_);
         }
 
         // Remove from HNSW (soft delete from old dimension's index)
@@ -601,7 +684,7 @@ public:
         if (stmt_delete_by_chunk_id_) {
             sqlite3_reset(stmt_delete_by_chunk_id_);
             sqlite3_bind_text(stmt_delete_by_chunk_id_, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(stmt_delete_by_chunk_id_);
+            stepWithRetry(stmt_delete_by_chunk_id_);
         }
 
         // Soft delete from HNSW (dimension-specific index)
@@ -648,7 +731,7 @@ public:
         if (stmt_delete_by_doc_) {
             sqlite3_reset(stmt_delete_by_doc_);
             sqlite3_bind_text(stmt_delete_by_doc_, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(stmt_delete_by_doc_);
+            stepWithRetry(stmt_delete_by_doc_);
         }
 
         // Soft delete from HNSW (dimension-specific indices)
@@ -762,21 +845,47 @@ public:
         std::vector<VectorRecord> records;
         records.reserve(std::min(results.size(), k));
 
+        // Debug: log HNSW search statistics
+        size_t filtered_count = 0;
+        float min_dist = std::numeric_limits<float>::max();
+        float max_dist = std::numeric_limits<float>::lowest();
+        float min_sim = std::numeric_limits<float>::max();
+        float max_sim = std::numeric_limits<float>::lowest();
+
         for (const auto& [node_id, distance] : results) {
-            if (records.size() >= k)
-                break;
+            min_dist = std::min(min_dist, distance);
+            max_dist = std::max(max_dist, distance);
 
             // Convert distance to similarity (cosine distance = 1 - similarity)
             float similarity = 1.0f - distance;
+            min_sim = std::min(min_sim, similarity);
+            max_sim = std::max(max_sim, similarity);
 
-            if (similarity < similarity_threshold)
+            if (records.size() >= k)
+                break;
+
+            if (similarity < similarity_threshold) {
+                ++filtered_count;
                 continue;
+            }
 
             auto record_opt = getVectorByRowidUnlocked(static_cast<int64_t>(node_id));
             if (record_opt) {
                 record_opt->relevance_score = similarity;
                 records.push_back(std::move(*record_opt));
             }
+        }
+
+        // Log search statistics for debugging retrieval quality
+        if (!results.empty()) {
+            spdlog::info("[HNSW Search] dim={} k={} hnsw_results={} returned={} filtered={} "
+                         "dist=[{:.4f},{:.4f}] sim=[{:.4f},{:.4f}] threshold={:.4f}",
+                         query_embedding.size(), k, results.size(), records.size(), filtered_count,
+                         min_dist, max_dist, min_sim, max_sim, similarity_threshold);
+        } else {
+            spdlog::info("[HNSW Search] dim={} k={} - no results from HNSW (index may be empty or "
+                         "not built)",
+                         query_embedding.size(), k);
         }
 
         return records;
@@ -959,8 +1068,8 @@ public:
             return Error{ErrorCode::InvalidState, "Already in transaction"};
         }
 
-        int rc = sqlite3_exec(db_, "BEGIN TRANSACTION", nullptr, nullptr, nullptr);
-        if (rc != SQLITE_OK) {
+        // Use libsql-aware transaction begin with retry
+        if (!beginTransactionWithRetry(db_)) {
             return Error{ErrorCode::DatabaseError, "Failed to begin transaction"};
         }
 
@@ -979,8 +1088,7 @@ public:
             return Error{ErrorCode::InvalidState, "Not in transaction"};
         }
 
-        int rc = sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr);
-        if (rc != SQLITE_OK) {
+        if (!execWithRetry(db_, "COMMIT")) {
             return Error{ErrorCode::DatabaseError, "Failed to commit transaction"};
         }
 
@@ -999,8 +1107,7 @@ public:
             return Error{ErrorCode::InvalidState, "Not in transaction"};
         }
 
-        int rc = sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
-        if (rc != SQLITE_OK) {
+        if (!execWithRetry(db_, "ROLLBACK")) {
             return Error{ErrorCode::DatabaseError, "Failed to rollback transaction"};
         }
 
@@ -1154,7 +1261,7 @@ public:
         sqlite3_bind_text(stmt, 11, record.file_path.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 12, record.document_hash.c_str(), -1, SQLITE_TRANSIENT);
 
-        rc = sqlite3_step(stmt);
+        rc = stepWithRetry(stmt);
         sqlite3_finalize(stmt);
 
         if (rc != SQLITE_DONE) {
@@ -1176,13 +1283,15 @@ public:
             return Result<void>{};
         }
 
-        // Begin transaction for batch insert
-        sqlite3_exec(db_, "BEGIN TRANSACTION", nullptr, nullptr, nullptr);
+        // Begin transaction with libsql-aware retry logic
+        if (!beginTransactionWithRetry(db_)) {
+            return Error{ErrorCode::DatabaseError, "Failed to begin transaction"};
+        }
 
         sqlite3_stmt* stmt = nullptr;
         int rc = sqlite3_prepare_v2(db_, kInsertEntityVector, -1, &stmt, nullptr);
         if (rc != SQLITE_OK) {
-            sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+            execWithRetry(db_, "ROLLBACK");
             return Error{ErrorCode::DatabaseError, "Failed to prepare entity insert"};
         }
 
@@ -1205,16 +1314,16 @@ public:
             sqlite3_bind_text(stmt, 11, record.file_path.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt, 12, record.document_hash.c_str(), -1, SQLITE_TRANSIENT);
 
-            rc = sqlite3_step(stmt);
+            rc = stepWithRetry(stmt);
             if (rc != SQLITE_DONE) {
                 sqlite3_finalize(stmt);
-                sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+                execWithRetry(db_, "ROLLBACK");
                 return Error{ErrorCode::DatabaseError, "Failed to insert entity vector batch"};
             }
         }
 
         sqlite3_finalize(stmt);
-        sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr);
+        execWithRetry(db_, "COMMIT");
 
         return Result<void>{};
     }
@@ -1233,7 +1342,7 @@ public:
         }
 
         sqlite3_bind_text(stmt, 1, node_key.c_str(), -1, SQLITE_TRANSIENT);
-        rc = sqlite3_step(stmt);
+        rc = stepWithRetry(stmt);
         sqlite3_finalize(stmt);
 
         if (rc != SQLITE_DONE) {
@@ -1257,7 +1366,7 @@ public:
         }
 
         sqlite3_bind_text(stmt, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
-        rc = sqlite3_step(stmt);
+        rc = stepWithRetry(stmt);
         sqlite3_finalize(stmt);
 
         if (rc != SQLITE_DONE) {
@@ -1456,7 +1565,7 @@ public:
         }
 
         sqlite3_bind_text(stmt, 1, node_key.c_str(), -1, SQLITE_TRANSIENT);
-        rc = sqlite3_step(stmt);
+        rc = stepWithRetry(stmt);
         sqlite3_finalize(stmt);
 
         if (rc != SQLITE_DONE) {
@@ -1548,7 +1657,7 @@ private:
         std::string child_hashes_json = serializeStringVector(record.child_document_hashes);
         sqlite3_bind_text(stmt_insert_, 19, child_hashes_json.c_str(), -1, SQLITE_TRANSIENT);
 
-        int rc = sqlite3_step(stmt_insert_);
+        int rc = stepWithRetry(stmt_insert_);
         if (rc != SQLITE_DONE) {
             std::string err = sqlite3_errmsg(db_);
             return Error{ErrorCode::DatabaseError, "Failed to insert vector: " + err};
@@ -1837,11 +1946,13 @@ private:
                 }
                 sqlite3_finalize(stmt);
 
-                // Log what we built
+                // Log what we built and save immediately
                 for (const auto& [dim, idx] : hnsw_indices_) {
                     spdlog::info("[HNSW] Built index for dim={} with {} vectors", dim, idx->size());
-                    hnsw_dirty_[dim] = true; // Needs to be saved
+                    hnsw_dirty_[dim] = true;
                 }
+                // Save indices immediately after building to ensure persistence
+                saveAllHnswUnlocked();
             }
         }
 

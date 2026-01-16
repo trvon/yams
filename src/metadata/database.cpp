@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstring>
 #include <sstream>
+#include <thread>
 #include <yams/metadata/database.h>
 
 namespace yams::metadata {
@@ -111,24 +112,65 @@ Result<void> Statement::bind(int index, std::chrono::sys_seconds tp) {
 }
 
 Result<void> Statement::execute() {
-    int rc = sqlite3_step(stmt_);
-    if (rc != SQLITE_DONE) {
+    // Retry logic for transient lock errors (SQLITE_BUSY, SQLITE_LOCKED)
+    // libsql MVCC reduces lock contention but FTS5/schema ops can still encounter locks
+#if YAMS_LIBSQL_BACKEND
+    constexpr int kMaxRetries = 3;               // Fewer retries with MVCC
+    auto backoff = std::chrono::milliseconds(5); // Shorter initial backoff
+#else
+    constexpr int kMaxRetries = 5;                // More retries for SQLite
+    auto backoff = std::chrono::milliseconds(10); // Standard backoff
+#endif
+
+    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+        int rc = sqlite3_step(stmt_);
+        if (rc == SQLITE_DONE) {
+            return {};
+        }
+        // Check for transient lock errors that are worth retrying
+        if ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && attempt + 1 < kMaxRetries) {
+            sqlite3_reset(stmt_); // Reset statement for retry
+            std::this_thread::sleep_for(backoff);
+            backoff *= 2; // Exponential backoff
+            continue;
+        }
+        // Non-retryable error or max retries exceeded
         return Error{ErrorCode::DatabaseError,
                      "Failed to execute statement: " + std::string(sqlite3_errstr(rc))};
     }
-    return {};
+    return Error{ErrorCode::DatabaseError, "Failed to execute statement: max retries exceeded"};
 }
 
 Result<bool> Statement::step() {
-    int rc = sqlite3_step(stmt_);
-    if (rc == SQLITE_ROW) {
-        return true;
-    } else if (rc == SQLITE_DONE) {
-        return false;
-    } else {
+    // Retry logic for transient lock errors (SQLITE_BUSY, SQLITE_LOCKED)
+    // libsql MVCC reduces lock contention but FTS5/schema ops can still encounter locks
+#if YAMS_LIBSQL_BACKEND
+    constexpr int kMaxRetries = 3;               // Fewer retries with MVCC
+    auto backoff = std::chrono::milliseconds(5); // Shorter initial backoff
+#else
+    constexpr int kMaxRetries = 5;                // More retries for SQLite
+    auto backoff = std::chrono::milliseconds(10); // Standard backoff
+#endif
+
+    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+        int rc = sqlite3_step(stmt_);
+        if (rc == SQLITE_ROW) {
+            return true;
+        } else if (rc == SQLITE_DONE) {
+            return false;
+        }
+        // Check for transient lock errors that are worth retrying
+        if ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && attempt + 1 < kMaxRetries) {
+            sqlite3_reset(stmt_); // Reset statement for retry
+            std::this_thread::sleep_for(backoff);
+            backoff *= 2; // Exponential backoff
+            continue;
+        }
+        // Non-retryable error or max retries exceeded
         return Error{ErrorCode::DatabaseError,
                      "Failed to step statement: " + std::string(sqlite3_errstr(rc))};
     }
+    return Error{ErrorCode::DatabaseError, "Failed to step statement: max retries exceeded"};
 }
 
 int Statement::getInt(int column) const {
@@ -181,6 +223,9 @@ std::string Statement::columnName(int column) const {
 }
 
 Result<void> Statement::reset() {
+    if (!stmt_) {
+        return Error{ErrorCode::DatabaseError, "Statement is null"};
+    }
     int rc = sqlite3_reset(stmt_);
     if (rc != SQLITE_OK) {
         return Error{ErrorCode::DatabaseError, "Failed to reset statement"};
@@ -189,6 +234,9 @@ Result<void> Statement::reset() {
 }
 
 Result<void> Statement::clearBindings() {
+    if (!stmt_) {
+        return Error{ErrorCode::DatabaseError, "Statement is null"};
+    }
     int rc = sqlite3_clear_bindings(stmt_);
     if (rc != SQLITE_OK) {
         return Error{ErrorCode::DatabaseError, "Failed to clear bindings"};

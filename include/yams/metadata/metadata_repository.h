@@ -170,6 +170,14 @@ public:
     virtual Result<void> updateContent(const DocumentContent& content) = 0;
     virtual Result<void> deleteContent(int64_t documentId) = 0;
 
+    /// Batch insert content and FTS index for multiple documents in a single transaction.
+    /// This reduces connection pool contention during bulk ingestion by performing:
+    /// 1. Insert/update document_content for all entries
+    /// 2. Insert/update documents_fts for all entries
+    /// 3. Update extraction status for all entries
+    virtual Result<void>
+    batchInsertContentAndIndex(const std::vector<BatchContentEntry>& entries) = 0;
+
     // Metadata operations
     virtual Result<void> setMetadata(int64_t documentId, const std::string& key,
                                      const MetadataValue& value) = 0;
@@ -276,6 +284,12 @@ public:
     // Corpus statistics for adaptive search tuning (PBI: Adaptive Tuning Epic)
     virtual Result<storage::CorpusStats> getCorpusStats() = 0;
 
+    /// Signal that corpus stats cache should be invalidated.
+    /// Called by PostIngestQueue on batch completion, embedding updates, etc.
+    /// This is a lightweight operation that just sets a flag - actual recomputation
+    /// is deferred to the next getCorpusStats() call.
+    virtual void signalCorpusStatsStale() = 0;
+
     // Embedding status operations
     virtual Result<void> updateDocumentEmbeddingStatus(int64_t documentId, bool hasEmbedding,
                                                        const std::string& modelId = "") = 0;
@@ -354,6 +368,7 @@ public:
     Result<std::optional<DocumentContent>> getContent(int64_t documentId) override;
     Result<void> updateContent(const DocumentContent& content) override;
     Result<void> deleteContent(int64_t documentId) override;
+    Result<void> batchInsertContentAndIndex(const std::vector<BatchContentEntry>& entries) override;
 
     // Metadata operations
     Result<void> setMetadata(int64_t documentId, const std::string& key,
@@ -415,6 +430,46 @@ public:
      */
     Result<void> ensureSymSpellInitialized();
 
+    // ==========================================================================
+    // Term Statistics for IDF (Dense-First Retrieval)
+    // ==========================================================================
+
+    /**
+     * @brief Get IDF (Inverse Document Frequency) score for a term
+     * IDF = log(N / df) where N = total docs, df = docs containing term
+     * Returns 0.0 if term not found or corpus empty.
+     * @param term The term to look up (case-sensitive, should be lowercased)
+     */
+    [[nodiscard]] Result<float> getTermIDF(const std::string& term);
+
+    /**
+     * @brief Get IDF scores for multiple terms in batch
+     * More efficient than individual lookups for query processing.
+     * @param terms Vector of terms to look up
+     * @return Map of term -> IDF score (missing terms have IDF = 0)
+     */
+    [[nodiscard]] Result<std::unordered_map<std::string, float>>
+    getTermIDFBatch(const std::vector<std::string>& terms);
+
+    /**
+     * @brief Update term statistics during FTS5 indexing
+     * Called after indexing a document to update term frequencies.
+     * @param terms Map of term -> count in the document
+     */
+    Result<void> updateTermStats(const std::unordered_map<std::string, int64_t>& terms);
+
+    /**
+     * @brief Update corpus-level statistics
+     * Called after document additions/deletions to update totals.
+     */
+    Result<void> updateCorpusTermStats();
+
+    /**
+     * @brief Get total number of documents for IDF computation
+     * Uses cached corpus_term_stats table.
+     */
+    [[nodiscard]] Result<int64_t> getCorpusDocumentCount();
+
     // Bulk operations
     Result<std::vector<DocumentInfo>> findDocumentsByHashPrefix(const std::string& hashPrefix,
                                                                 std::size_t limit = 100) override;
@@ -462,6 +517,7 @@ public:
     Result<std::unordered_map<std::string, int64_t>> getDocumentCountsByExtension() override;
     Result<int64_t> getDocumentCountByExtractionStatus(ExtractionStatus status) override;
     Result<storage::CorpusStats> getCorpusStats() override;
+    void signalCorpusStatsStale() override;
 
     // Component-owned metrics (lock-free, updated on insert/delete)
     uint64_t getCachedDocumentCount() const noexcept {
@@ -615,6 +671,7 @@ private:
     mutable std::chrono::steady_clock::time_point corpusStatsCachedAt_{};
     mutable uint64_t corpusStatsDocCount_{0}; // docCount at cache time for change detection
     mutable std::shared_mutex corpusStatsMutex_;
+    mutable std::atomic<bool> corpusStatsStale_{false};        // Signal-based invalidation flag
     static constexpr std::chrono::seconds kCorpusStatsTtl{30}; // Base TTL
 
     // Approximate LRU hit recording (lock-free ring of path hashes)

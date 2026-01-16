@@ -42,7 +42,7 @@ struct VectorDatabaseConfig {
     bool enable_checkpoints = true;
     size_t checkpoint_frequency = 1000; // Operations between checkpoints
     size_t max_batch_size = 1000;
-    float default_similarity_threshold = 0.7f;
+    float default_similarity_threshold = 0.35f;
     bool use_in_memory = false; // For testing
 };
 

@@ -168,6 +168,51 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         }
     }
 
+    // 6. Last resort: try YAMS_PREFERRED_MODEL env var directly for model name heuristic
+    // This handles cases where resolvePreferredModel callback isn't ready yet
+    if (!dim) {
+        if (const char* envModel = std::getenv("YAMS_PREFERRED_MODEL")) {
+            std::string modelName(envModel);
+            if (!modelName.empty()) {
+                if (auto nameDim = vector::dimres::dim_from_model_name(modelName)) {
+                    dim = *nameDim;
+                    spdlog::info("[VectorInit] probe: env model name heuristic dim={} for '{}'",
+                                 *dim, modelName);
+                }
+            }
+        }
+    }
+
+    // 7. Final fallback: check preload_models from config for model name heuristic
+    if (!dim) {
+        auto cfgPath = ConfigResolver::resolveDefaultConfigPath();
+        if (!cfgPath.empty()) {
+            try {
+                auto kv = ConfigResolver::parseSimpleTomlFlat(cfgPath);
+                // Check preload_models list for known model names
+                auto preload = kv.find("daemon.models.preload_models");
+                if (preload != kv.end() && !preload->second.empty()) {
+                    // Try known models in order of commonality
+                    const std::vector<std::string> knownModels = {
+                        "all-MiniLM-L6-v2",    "all-mpnet-base-v2", "jina-embeddings-v2-small-en",
+                        "nomic-embed-text-v1", "bge-small-en-v1.5", "bge-base-en-v1.5"};
+                    for (const auto& model : knownModels) {
+                        if (preload->second.find(model) != std::string::npos) {
+                            if (auto nameDim = vector::dimres::dim_from_model_name(model)) {
+                                dim = *nameDim;
+                                spdlog::info(
+                                    "[VectorInit] probe: preload list heuristic dim={} for '{}'",
+                                    *dim, model);
+                                break;
+                            }
+                        }
+                    }
+                }
+            } catch (...) {
+            }
+        }
+    }
+
     if (!dim) {
         spdlog::info("[VectorInit] deferring initialization (provider dim unresolved)");
         if (deps_.state) {

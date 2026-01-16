@@ -325,7 +325,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"enable_checkpoints", "true"},
               {"checkpoint_frequency", "1000"},
               {"max_batch_size", "1000"},
-              {"default_similarity_threshold", "0.7"},
+              {"default_similarity_threshold", "0.35"},
               {"use_in_memory", "false"},
               {"auto_create", "true"},
               {"auto_repair", "true"}}},

@@ -52,8 +52,7 @@ struct DaemonSearchResult {
 // - tries streamingSearch when enabled
 // - retries with fuzzy when 0 results and fuzzy==false
 // - retries with literalText when parse-like errors and literalText==false
-boost::asio::awaitable<Result<DaemonSearchResult>> daemon_search(yams::daemon::DaemonClient& client,
-                                                                 const DaemonSearchOptions& opts,
-                                                                 bool enableStreaming);
+boost::asio::awaitable<Result<DaemonSearchResult>>
+daemon_search(yams::daemon::DaemonClient& client, DaemonSearchOptions opts, bool enableStreaming);
 
 } // namespace yams::cli::search_runner

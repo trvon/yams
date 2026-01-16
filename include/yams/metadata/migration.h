@@ -215,6 +215,9 @@ private:
 
     // Version 23: SymSpell fuzzy search tables for fast edit-distance queries
     static Migration createSymSpellSchema();
+
+    // Version 24: Term statistics for IDF computation and query weighting
+    static Migration createTermStatsSchema();
 };
 
 /**

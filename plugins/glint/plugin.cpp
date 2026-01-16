@@ -23,8 +23,17 @@ struct GlintPluginContext {
     std::string last_error;
 
     // Default entity labels for NL text
-    std::vector<std::string> default_labels = {"person", "organization", "location",   "date",
-                                               "event",  "product",      "technology", "concept"};
+    // GLiNER is zero-shot and can extract any entity type. Labels should be lower/title case.
+    // See: https://github.com/urchade/GLiNER, https://arxiv.org/html/2504.00676v1
+    std::vector<std::string> default_labels = {
+        // General entities (standard NER)
+        "person", "organization", "location", "date", "time", "event", "money", "percent",
+        // Products and technology
+        "product", "technology", "software", "hardware", "programming language", "framework",
+        // Scientific/biomedical entities (from GLiNER-biomed research)
+        "gene", "protein", "disease", "chemical", "drug", "species", "cell type", "method",
+        // Abstract concepts
+        "concept", "topic", "field of study", "theory", "algorithm"};
 };
 
 // Use leaky singleton pattern to avoid static destruction order issues

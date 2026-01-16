@@ -608,6 +608,23 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
                      results.size(), tq.query, run.value().attempts, run.value().usedStreaming,
                      run.value().usedFuzzyRetry, run.value().usedLiteralTextRetry);
 
+        // Detailed result logging for debugging retrieval quality
+        if (benchDiagEnabled) {
+            spdlog::info("  [{}] Expected relevant: {}", searchType,
+                         fmt::join(tq.relevantDocIds, ", "));
+            for (size_t i = 0; i < std::min((size_t)5, results.size()); ++i) {
+                std::string filename = fs::path(results[i].path).filename().string();
+                std::string docId = filename;
+                if (docId.size() > 4 && docId.substr(docId.size() - 4) == ".txt") {
+                    docId = docId.substr(0, docId.size() - 4);
+                }
+                bool relevant = tq.relevantDocIds.count(docId) > 0;
+                spdlog::info("  [{}] Result {}: path='{}' docId='{}' score={:.4f} {}", searchType,
+                             i, results[i].path, docId, results[i].score,
+                             relevant ? "RELEVANT" : "");
+            }
+        }
+
         DebugLogEntry debugEntry;
         debugEntry.query = tq.query;
         debugEntry.attempts = run.value().attempts;
@@ -1259,6 +1276,29 @@ struct BenchFixture {
             }
         } else {
             spdlog::info("Vectors disabled - skipping embedding generation wait");
+        }
+
+        // Wait for search engine to be ready (critical for hybrid search!)
+        // Without this, all hybrid searches fall back to keyword-only
+        spdlog::info("Waiting for search engine to be ready...");
+        const auto searchEngineDeadline = std::chrono::steady_clock::now() + 60s;
+        bool searchEngineReady = false;
+        while (std::chrono::steady_clock::now() < searchEngineDeadline) {
+            auto statusCheck = yams::cli::run_sync(client->status(), 5s);
+            if (statusCheck) {
+                auto it = statusCheck.value().readinessStates.find("search_engine");
+                if (it != statusCheck.value().readinessStates.end() && it->second) {
+                    searchEngineReady = true;
+                    spdlog::info("Search engine is ready for hybrid search");
+                    break;
+                }
+            }
+            std::this_thread::sleep_for(500ms);
+        }
+        if (!searchEngineReady) {
+            spdlog::error("Search engine not ready after 60s - hybrid searches will fall back to "
+                          "keyword-only!");
+            spdlog::error("This is likely due to search engine build not completing.");
         }
 
         // Verify document count using status metrics (avoids degraded search false negatives)

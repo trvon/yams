@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <chrono>
 #include <filesystem>
 #include <sstream>
@@ -253,6 +254,9 @@ bool EntityGraphService::populateKnowledgeGraph(
         if (!commitRes) {
             spdlog::warn("EntityGraphService: failed to commit write batch: {}",
                          commitRes.error().message);
+            if (commitRes.error().message.find("database is locked") != std::string::npos) {
+                TuneAdvisor::reportDbLockError();
+            }
             return false;
         }
 
@@ -1014,6 +1018,9 @@ EntityGraphService::generateEntityEmbeddings(const Job& job,
     if (!insertResult) {
         spdlog::warn("EntityGraphService: failed to insert entity vectors: {}",
                      insertResult.error().message);
+        if (insertResult.error().message.find("database is locked") != std::string::npos) {
+            TuneAdvisor::reportDbLockError();
+        }
         return insertResult.error();
     }
 
@@ -1178,11 +1185,14 @@ bool EntityGraphService::populateKnowledgeGraphNL(
         }
         auto& contextNodes = contextNodesRes.value();
 
-        // Create entity nodes (still uses kg directly for now, TODO: batch this too)
-        auto entityNodesRes = createEntityNodes(kg, job, result);
+        // Create entity nodes using WriteBatch for reduced transaction overhead
+        auto entityNodesRes = createEntityNodes(kg, batch.get(), job, result);
         if (!entityNodesRes) {
             spdlog::warn("EntityGraphService: failed to create entity nodes: {}",
                          entityNodesRes.error().message);
+            if (entityNodesRes.error().message.find("database is locked") != std::string::npos) {
+                TuneAdvisor::reportDbLockError();
+            }
             return false;
         }
         auto& entityNodes = entityNodesRes.value();
@@ -1260,6 +1270,9 @@ bool EntityGraphService::populateKnowledgeGraphNL(
         if (!commitRes) {
             spdlog::warn("EntityGraphService: failed to commit NL write batch: {}",
                          commitRes.error().message);
+            if (commitRes.error().message.find("database is locked") != std::string::npos) {
+                TuneAdvisor::reportDbLockError();
+            }
             return false;
         }
 
@@ -1282,16 +1295,17 @@ bool EntityGraphService::populateKnowledgeGraphNL(
 }
 
 yams::Result<EntityGraphService::EntityNodeBatch> EntityGraphService::createEntityNodes(
-    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
+    yams::metadata::KnowledgeGraphStore::WriteBatch* writeBatch, const Job& job,
     const yams_entity_extraction_result_v2* result) {
-    EntityNodeBatch batch;
+    EntityNodeBatch nodeBatch;
     if (!result || result->entity_count == 0) {
-        return batch;
+        return nodeBatch;
     }
 
     std::vector<yams::metadata::KGNode> nodes;
     nodes.reserve(result->entity_count);
-    batch.entityKeys.reserve(result->entity_count);
+    nodeBatch.entityKeys.reserve(result->entity_count);
 
     auto now = std::chrono::system_clock::now().time_since_epoch().count();
 
@@ -1335,15 +1349,15 @@ yams::Result<EntityGraphService::EntityNodeBatch> EntityGraphService::createEnti
         node.properties = props.dump();
 
         nodes.push_back(std::move(node));
-        batch.entityKeys.push_back(nodeKey);
+        nodeBatch.entityKeys.push_back(nodeKey);
     }
 
-    auto nodeIdsRes = kg->upsertNodes(nodes);
+    auto nodeIdsRes = writeBatch ? writeBatch->upsertNodes(nodes) : kg->upsertNodes(nodes);
     if (!nodeIdsRes) {
         return nodeIdsRes.error();
     }
 
-    batch.nodeIds = nodeIdsRes.value();
+    nodeBatch.nodeIds = nodeIdsRes.value();
 
     // Add aliases for entity text (for search)
     std::vector<yams::metadata::KGAlias> aliases;
@@ -1353,7 +1367,7 @@ yams::Result<EntityGraphService::EntityNodeBatch> EntityGraphService::createEnti
             continue;
 
         yams::metadata::KGAlias alias;
-        alias.nodeId = batch.nodeIds[i];
+        alias.nodeId = nodeBatch.nodeIds[i];
         alias.alias = std::string(ent.text);
         alias.source = "nl_entity_text";
         alias.confidence = ent.confidence;
@@ -1361,10 +1375,14 @@ yams::Result<EntityGraphService::EntityNodeBatch> EntityGraphService::createEnti
     }
 
     if (!aliases.empty()) {
-        kg->addAliases(aliases);
+        if (writeBatch) {
+            writeBatch->addAliases(aliases);
+        } else {
+            kg->addAliases(aliases);
+        }
     }
 
-    return batch;
+    return nodeBatch;
 }
 
 yams::Result<void>

@@ -40,12 +40,12 @@ public:
 
     /// Configuration for backend
     struct Config {
-        size_t embedding_dim = 384;         ///< Embedding dimensions
-        size_t hnsw_m = 16;                 ///< HNSW connections per node
-        size_t hnsw_ef_construction = 200;  ///< HNSW build exploration factor
-        size_t hnsw_ef_search = 100;        ///< HNSW search exploration factor
-        size_t checkpoint_threshold = 1000; ///< Inserts before HNSW checkpoint
-        float compaction_threshold = 0.2f;  ///< Compact when >20% deleted
+        size_t embedding_dim = 384;        ///< Embedding dimensions
+        size_t hnsw_m = 16;                ///< HNSW connections per node
+        size_t hnsw_ef_construction = 200; ///< HNSW build exploration factor
+        size_t hnsw_ef_search = 100;       ///< HNSW search exploration factor
+        size_t checkpoint_threshold = 100; ///< Inserts before HNSW checkpoint
+        float compaction_threshold = 0.2f; ///< Compact when >20% deleted
     };
 
     SqliteVecBackend();

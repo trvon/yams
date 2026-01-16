@@ -338,7 +338,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createSessionIndexes(),
             createRepairTrackingSchema(),
             createSymbolExtractionStateSchema(),
-            createSymSpellSchema()};
+            createSymSpellSchema(),
+            createTermStatsSchema()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2225,6 +2226,50 @@ Migration YamsMetadataMigrations::createSymSpellSchema() {
         DROP INDEX IF EXISTS idx_symspell_deletes_hash;
         DROP TABLE IF EXISTS symspell_deletes;
         DROP TABLE IF EXISTS symspell_terms;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createTermStatsSchema() {
+    Migration m;
+    m.version = 24;
+    m.name = "Create term statistics table for IDF computation";
+    m.created = std::chrono::system_clock::now();
+
+    m.upSQL = R"(
+        -- Term statistics table for IDF computation and query term weighting
+        -- Populated incrementally during FTS5 indexing
+        -- Enables dense-first retrieval with learned sparse term importance
+        CREATE TABLE IF NOT EXISTS term_stats (
+            term TEXT PRIMARY KEY NOT NULL,
+            document_frequency INTEGER DEFAULT 0,  -- Number of documents containing this term
+            collection_frequency INTEGER DEFAULT 0, -- Total occurrences across all documents
+            last_updated INTEGER DEFAULT (unixepoch())
+        ) WITHOUT ROWID;
+
+        -- Index for efficient IDF lookups during query processing
+        CREATE INDEX IF NOT EXISTS idx_term_stats_df
+            ON term_stats(document_frequency DESC);
+
+        -- Materialized corpus-level statistics for fast IDF computation
+        -- Updated via trigger when term_stats changes
+        CREATE TABLE IF NOT EXISTS corpus_term_stats (
+            id INTEGER PRIMARY KEY CHECK (id = 1),  -- Singleton row
+            total_documents INTEGER DEFAULT 0,
+            total_terms INTEGER DEFAULT 0,
+            avg_document_length REAL DEFAULT 0.0,
+            last_updated INTEGER DEFAULT (unixepoch())
+        );
+
+        -- Initialize singleton row
+        INSERT OR IGNORE INTO corpus_term_stats (id) VALUES (1);
+    )";
+
+    m.downSQL = R"(
+        DROP TABLE IF EXISTS corpus_term_stats;
+        DROP INDEX IF EXISTS idx_term_stats_df;
+        DROP TABLE IF EXISTS term_stats;
     )";
 
     return m;

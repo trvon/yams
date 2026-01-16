@@ -593,19 +593,32 @@ public:
     }
 
     // Post-ingest batching size. Env override: YAMS_POST_INGEST_BATCH_SIZE
+    // Dynamically scales down when DB lock contention is detected.
     static uint32_t postIngestBatchSize() {
         uint32_t ov = postIngestBatchSizeOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
+
+        uint32_t baseBatchSize = 8;
         if (const char* s = std::getenv("YAMS_POST_INGEST_BATCH_SIZE")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 256)
-                    return v;
+                    baseBatchSize = v;
             } catch (...) {
             }
         }
-        return 8;
+
+        // Adaptive scaling: reduce batch size when lock contention is high
+        uint64_t recentErrors = dbLockErrorCount_.load(std::memory_order_relaxed);
+        if (recentErrors > 10) {
+            return 1; // Maximum contention: single-document transactions
+        } else if (recentErrors > 5) {
+            return std::min(baseBatchSize, 2u);
+        } else if (recentErrors > 2) {
+            return std::min(baseBatchSize, 4u);
+        }
+        return baseBatchSize;
     }
     static void setPostIngestBatchSize(uint32_t v) {
         postIngestBatchSizeOverride_.store(v, std::memory_order_relaxed);
@@ -1434,10 +1447,10 @@ public:
             } catch (...) {
             }
         }
-        // Default: scale with hardware up to 8 workers
-        // Embeddings are GPU/CPU intensive, so we cap lower than other stages
+        // Default: scale with hardware up to 16 workers
+        // Use hw/2 to maintain throughput while leaving headroom for other tasks
         uint32_t hw = hardwareConcurrency();
-        return std::min<uint32_t>(std::max<uint32_t>(hw / 4, 2), 8);
+        return std::min<uint32_t>(std::max<uint32_t>(hw / 2, 4), 16);
     }
     static void setPostEmbedConcurrent(uint32_t v) {
         postEmbedConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
@@ -1461,6 +1474,102 @@ public:
     static void setEmbedChannelCapacity(uint32_t v) {
         embedChannelCapacityOverride_.store(std::clamp(v, 256u, 65536u), std::memory_order_relaxed);
     }
+
+    // =========================================================================
+    // DB Contention Management (adaptive concurrency based on lock errors)
+    // =========================================================================
+
+    /// SQLite connection pool minimum size (default 4)
+    /// Environment: YAMS_DB_POOL_MIN
+    static uint32_t dbConnectionPoolMin() {
+        uint32_t ov = dbPoolMinOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_DB_POOL_MIN")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 64)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 4;
+    }
+    static void setDbConnectionPoolMin(uint32_t v) {
+        dbPoolMinOverride_.store(std::clamp(v, 1u, 64u), std::memory_order_relaxed);
+    }
+
+    /// SQLite connection pool maximum size (default 20)
+    /// Environment: YAMS_DB_POOL_MAX
+    static uint32_t dbConnectionPoolMax() {
+        uint32_t ov = dbPoolMaxOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_DB_POOL_MAX")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 128)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 20;
+    }
+    static void setDbConnectionPoolMax(uint32_t v) {
+        dbPoolMaxOverride_.store(std::clamp(v, 1u, 128u), std::memory_order_relaxed);
+    }
+
+    /// SQLite busy timeout in milliseconds (default 30000)
+    /// Environment: YAMS_DB_BUSY_TIMEOUT_MS
+    static uint32_t dbBusyTimeoutMs() {
+        uint32_t ov = dbBusyTimeoutMsOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_DB_BUSY_TIMEOUT_MS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1000 && v <= 120000)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 30000;
+    }
+    static void setDbBusyTimeoutMs(uint32_t v) {
+        dbBusyTimeoutMsOverride_.store(std::clamp(v, 1000u, 120000u), std::memory_order_relaxed);
+    }
+
+    /// Lock error threshold for scaling down concurrency (default 5)
+    /// When dbLockErrorsWindow exceeds this, TuningManager reduces KG/embed concurrency
+    /// Environment: YAMS_DB_LOCK_THRESHOLD
+    static uint32_t dbLockErrorThreshold() {
+        uint32_t ov = dbLockThresholdOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_DB_LOCK_THRESHOLD")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 100)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 5;
+    }
+    static void setDbLockErrorThreshold(uint32_t v) {
+        dbLockThresholdOverride_.store(std::clamp(v, 1u, 100u), std::memory_order_relaxed);
+    }
+
+    /// Increment DB lock error counter (call this when "database is locked" error occurs)
+    static void reportDbLockError() { dbLockErrorCount_.fetch_add(1, std::memory_order_relaxed); }
+
+    /// Get and reset DB lock error window count (called by TuningManager per tick)
+    static uint64_t getAndResetDbLockErrors() {
+        return dbLockErrorCount_.exchange(0, std::memory_order_relaxed);
+    }
+
+    /// Get current DB lock error count (for monitoring)
+    static uint64_t dbLockErrorCount() { return dbLockErrorCount_.load(std::memory_order_relaxed); }
 
 private:
     // Runtime policy storage (single process); defaults chosen to reduce CPU when busy
@@ -1534,6 +1643,15 @@ private:
     // PBI-05b: EmbeddingService concurrency overrides
     static inline std::atomic<uint32_t> postEmbedConcurrentOverride_{0};
     static inline std::atomic<uint32_t> embedChannelCapacityOverride_{0};
+
+    // DB contention management overrides
+    static inline std::atomic<uint32_t> dbPoolMinOverride_{0};
+    static inline std::atomic<uint32_t> dbPoolMaxOverride_{0};
+    static inline std::atomic<uint32_t> dbBusyTimeoutMsOverride_{0};
+    static inline std::atomic<uint32_t> dbLockThresholdOverride_{0};
+
+    // DB lock error tracking (rolling window counter)
+    static inline std::atomic<uint64_t> dbLockErrorCount_{0};
 };
 
 } // namespace yams::daemon

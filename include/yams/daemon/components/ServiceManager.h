@@ -420,6 +420,17 @@ public:
     // Returns true if a rebuild was triggered (async, not awaited).
     bool triggerSearchEngineRebuildIfNeeded();
 
+    /// Request a search engine rebuild via the FSM. If waitForDrain is true (default),
+    /// the rebuild will be deferred until PostIngestQueue drains.
+    /// Returns true if the request was accepted (not already building/awaiting).
+    bool requestSearchEngineRebuild(const std::string& reason, bool includeVector = true,
+                                    bool waitForDrain = true) {
+        return searchEngineManager_.requestRebuild(reason, includeVector, waitForDrain);
+    }
+
+    /// Check if search engine is awaiting indexing drain before rebuild.
+    bool isSearchEngineAwaitingDrain() const { return searchEngineManager_.isAwaitingDrain(); }
+
     // Ensure embedding generator is initialized for a specific model name (already loaded in
     // provider). Returns success if generator is ready or initialized; schedules no rebuild by
     // itself.

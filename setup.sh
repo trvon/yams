@@ -497,7 +497,7 @@ if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true"
 fi
 
 if [[ "${ENABLE_TSAN}" == "true" ]]; then
-  MESON_OPTIONS+=("-Denable-tsan=true")
+  MESON_OPTIONS+=("-Denable-tsan=true" "-Db_sanitize=thread")
   echo "ThreadSanitizer enabled (race detection)"
 fi
 

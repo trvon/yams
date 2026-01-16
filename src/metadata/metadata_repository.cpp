@@ -3,6 +3,8 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <thread>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -60,6 +62,44 @@ constexpr const char* kDocumentColumnListCompatQualified =
     "repair_status, NULL as repair_attempted_at, 0 as repair_attempts";
 
 constexpr int64_t kPathTreeNullParent = PathTreeNode::kNullParent;
+
+// Transaction begin helper with backend-appropriate semantics.
+// - libsql (MVCC): Uses regular BEGIN since concurrent writers are supported.
+// - SQLite: Uses BEGIN IMMEDIATE with retry/backoff for lock contention.
+Result<void> beginTransactionWithRetry(
+    Database& db, int maxRetries = 5,
+    std::chrono::milliseconds initialBackoff = std::chrono::milliseconds(10)) {
+#if YAMS_LIBSQL_BACKEND
+    // libsql supports MVCC - concurrent writers don't block each other.
+    // Use regular BEGIN (deferred) for better concurrency.
+    (void)maxRetries;     // unused in libsql mode
+    (void)initialBackoff; // unused in libsql mode
+    return db.execute("BEGIN");
+#else
+    // Standard SQLite: single-writer model. BEGIN IMMEDIATE acquires write lock
+    // immediately but fails fast when another writer holds a lock.
+    // Retry with exponential backoff to handle transient lock contention.
+    auto backoff = initialBackoff;
+    for (int attempt = 0; attempt < maxRetries; ++attempt) {
+        auto result = db.execute("BEGIN IMMEDIATE");
+        if (result) {
+            return result;
+        }
+        // Check if it's a lock error (worth retrying)
+        const auto& errMsg = result.error().message;
+        if (errMsg.find("locked") == std::string::npos &&
+            errMsg.find("busy") == std::string::npos) {
+            // Not a lock error, don't retry
+            return result;
+        }
+        if (attempt + 1 < maxRetries) {
+            std::this_thread::sleep_for(backoff);
+            backoff *= 2; // Exponential backoff
+        }
+    }
+    return Error{ErrorCode::DatabaseError, "BEGIN IMMEDIATE failed after retries: database locked"};
+#endif
+}
 
 std::vector<float> blobToFloatVector(const std::vector<std::byte>& blob) {
     if (blob.empty() || (blob.size() % sizeof(float)) != 0)
@@ -760,6 +800,158 @@ Result<void> MetadataRepository::deleteContent(int64_t documentId) {
     });
 }
 
+Result<void>
+MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEntry>& entries) {
+    if (entries.empty()) {
+        return Result<void>();
+    }
+
+    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+        // Begin transaction for batch operation
+        auto beginResult = beginTransactionWithRetry(db);
+        if (!beginResult) {
+            return beginResult.error();
+        }
+
+        // Check if FTS5 is available once
+        auto fts5Result = db.hasFTS5();
+        if (!fts5Result) {
+            db.execute("ROLLBACK");
+            return fts5Result.error();
+        }
+        const bool hasFts5 = fts5Result.value();
+
+        // Prepare cached statements for reuse
+        auto contentStmtResult = db.prepareCached(R"(
+            INSERT INTO document_content (
+                document_id, content_text, content_length,
+                extraction_method, language
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(document_id) DO UPDATE SET
+                content_text = excluded.content_text,
+                content_length = excluded.content_length,
+                extraction_method = excluded.extraction_method,
+                language = excluded.language
+        )");
+        if (!contentStmtResult) {
+            db.execute("ROLLBACK");
+            return contentStmtResult.error();
+        }
+        auto& contentStmt = *contentStmtResult.value();
+
+        std::optional<CachedStatement> ftsStmtOpt;
+        if (hasFts5) {
+            auto ftsStmtResult = db.prepareCached(R"(
+                INSERT OR REPLACE INTO documents_fts (rowid, content, title)
+                VALUES (?, ?, ?)
+            )");
+            if (!ftsStmtResult) {
+                db.execute("ROLLBACK");
+                return ftsStmtResult.error();
+            }
+            ftsStmtOpt = std::move(ftsStmtResult.value());
+        }
+
+        auto statusStmtResult = db.prepareCached(R"(
+            UPDATE documents
+            SET content_extracted = 1, extraction_status = 'Success', extraction_error = NULL
+            WHERE id = ?
+        )");
+        if (!statusStmtResult) {
+            db.execute("ROLLBACK");
+            return statusStmtResult.error();
+        }
+        auto& statusStmt = *statusStmtResult.value();
+
+        // Process each entry
+        for (const auto& entry : entries) {
+            const std::string sanitizedContent = common::sanitizeUtf8(entry.contentText);
+            const std::string sanitizedTitle = common::sanitizeUtf8(entry.title);
+
+            // 1. Insert content
+            if (auto r = contentStmt.reset(); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = contentStmt.clearBindings(); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            auto bindResult = contentStmt.bindAll(entry.documentId, sanitizedContent,
+                                                  static_cast<int64_t>(sanitizedContent.length()),
+                                                  entry.extractionMethod, entry.language);
+            if (!bindResult) {
+                db.execute("ROLLBACK");
+                return bindResult.error();
+            }
+            auto execResult = contentStmt.execute();
+            if (!execResult) {
+                db.execute("ROLLBACK");
+                return execResult.error();
+            }
+
+            // 2. Insert FTS index
+            if (hasFts5 && ftsStmtOpt) {
+                auto& ftsStmt = **ftsStmtOpt;
+                if (auto r = ftsStmt.reset(); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                if (auto r = ftsStmt.clearBindings(); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                auto ftsBind = ftsStmt.bindAll(entry.documentId, sanitizedContent, sanitizedTitle);
+                if (!ftsBind) {
+                    db.execute("ROLLBACK");
+                    return ftsBind.error();
+                }
+                auto ftsExec = ftsStmt.execute();
+                if (!ftsExec) {
+                    db.execute("ROLLBACK");
+                    return ftsExec.error();
+                }
+            }
+
+            // 3. Update extraction status
+            if (auto r = statusStmt.reset(); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = statusStmt.clearBindings(); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            auto statusBind = statusStmt.bind(1, entry.documentId);
+            if (!statusBind) {
+                db.execute("ROLLBACK");
+                return statusBind.error();
+            }
+            auto statusExec = statusStmt.execute();
+            if (!statusExec) {
+                db.execute("ROLLBACK");
+                return statusExec.error();
+            }
+        }
+
+        // Commit transaction
+        auto commitResult = db.execute("COMMIT");
+        if (!commitResult) {
+            db.execute("ROLLBACK");
+            return commitResult.error();
+        }
+
+        return Result<void>();
+    });
+
+    if (result) {
+        invalidateQueryCache();
+        // Signal corpus stats stale - batch content affects extractionCoverage stats
+        signalCorpusStatsStale();
+    }
+    return result;
+}
+
 // Metadata operations
 Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::string& key,
                                              const MetadataValue& value) {
@@ -790,9 +982,9 @@ Result<void> MetadataRepository::setMetadataBatch(
     if (entries.empty()) {
         return Result<void>();
     }
-    return executeQuery<void>([&](Database& db) -> Result<void> {
-        // Begin transaction for batch operation
-        auto beginResult = db.execute("BEGIN IMMEDIATE");
+    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+        // Begin transaction for batch operation with retry for lock contention
+        auto beginResult = beginTransactionWithRetry(db);
         if (!beginResult) {
             return beginResult.error();
         }
@@ -835,6 +1027,12 @@ Result<void> MetadataRepository::setMetadataBatch(
 
         return Result<void>();
     });
+
+    if (result) {
+        // Signal corpus stats stale - metadata batch may affect corpus statistics
+        signalCorpusStatsStale();
+    }
+    return result;
 }
 
 Result<std::optional<MetadataValue>> MetadataRepository::getMetadata(int64_t documentId,
@@ -1627,17 +1825,14 @@ static bool isStopword(const std::string& term) {
     return getStopwords().count(lower) > 0;
 }
 
-// Helper function to sanitize FTS5 query strings
-// Best practice: split into terms and wrap each in quotes to preserve AND behavior
-// while safely escaping all FTS5 special characters (~, -, +, *, ^, :, etc.)
-// See: https://sqlite.org/forum/forumpost/576d6cc2d2
+// FTS5 query sanitization implementing industry best practices:
+// 1. Tokenize and strip punctuation for better matching
+// 2. For long natural language queries (5+ terms): filter stopwords, use OR semantics
+// 3. For short queries (< 5 terms): use AND semantics (more precise)
+// 4. Pass through advanced FTS5 operators (AND, OR, NOT, NEAR) for power users
 //
-// For natural language (sentence-like) queries with many terms:
-// - Strip punctuation from tokens
-// - Filter out stopwords
-// - Use OR semantics if many terms remain (improves recall for NL queries)
+// Based on: SQLite FTS5 docs, LangChain BM25Retriever, Elastic/Vespa hybrid search patterns
 std::string sanitizeFTS5Query(const std::string& query) {
-    // Trim whitespace from both ends
     std::string trimmed = query;
     trimmed.erase(0, trimmed.find_first_not_of(" \t\n\r"));
     if (!trimmed.empty()) {
@@ -1651,15 +1846,13 @@ std::string sanitizeFTS5Query(const std::string& query) {
         return "\"\"";
     }
 
-    // Check if the query uses advanced FTS5 operators (AND, OR, NOT, NEAR, ~ for NOT)
-    // Power users can use these directly - do minimal sanitization
+    // Check if the query uses advanced FTS5 operators - pass through for power users
     bool hasAdvancedOperators =
         trimmed.find(" AND ") != std::string::npos || trimmed.find(" OR ") != std::string::npos ||
         trimmed.find(" NOT ") != std::string::npos || trimmed.find("NEAR(") != std::string::npos ||
         trimmed.find('~') != std::string::npos;
 
     if (hasAdvancedOperators) {
-        // For advanced queries, just escape quotes
         std::string escaped;
         for (char c : trimmed) {
             if (c == '"') {
@@ -1678,9 +1871,8 @@ std::string sanitizeFTS5Query(const std::string& query) {
 
     logFtsTokensIfEnabled(query, terms);
 
-    // Strip punctuation from terms before quoting to improve matching.
-    // FTS5 requires exact matches for quoted terms, so "India." won't match "India".
-    // By stripping punctuation, natural language queries match corpus text better.
+    // Strip punctuation from terms before quoting to improve matching
+    // FTS5 requires exact matches for quoted terms, so "India." won't match "India"
     std::vector<std::string> cleanedTerms;
     cleanedTerms.reserve(terms.size());
     for (const auto& t : terms) {
@@ -1694,14 +1886,12 @@ std::string sanitizeFTS5Query(const std::string& query) {
         return "\"\"";
     }
 
-    // For natural language queries (many terms), filter stopwords and use OR semantics.
-    // This dramatically improves recall for sentence-like queries in BEIR/SciFact benchmarks.
-    // Heuristic: if query has 5+ terms, treat as natural language and use OR on content terms.
+    // For natural language queries (5+ terms), filter stopwords and use OR semantics
+    // This improves recall for sentence-like queries in BEIR/SciFact benchmarks
     constexpr size_t kNaturalLanguageThreshold = 5;
     const bool isNaturalLanguageQuery = cleanedTerms.size() >= kNaturalLanguageThreshold;
 
     if (isNaturalLanguageQuery) {
-        // Filter out stopwords and keep only significant content terms
         std::vector<std::string> contentTerms;
         contentTerms.reserve(cleanedTerms.size());
         for (const auto& t : cleanedTerms) {
@@ -1710,7 +1900,6 @@ std::string sanitizeFTS5Query(const std::string& query) {
             }
         }
 
-        // If we have content terms, use OR semantics for better recall
         if (!contentTerms.empty()) {
             std::string result;
             for (size_t i = 0; i < contentTerms.size(); ++i) {
@@ -1720,7 +1909,6 @@ std::string sanitizeFTS5Query(const std::string& query) {
             }
             return result;
         }
-        // Fall through to AND if no content terms remain
     }
 
     // For short queries (< 5 terms), use AND semantics (more precise)
@@ -2735,12 +2923,14 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
             auto age = std::chrono::duration_cast<std::chrono::seconds>(now - corpusStatsCachedAt_);
 
             // Check if cache is still valid:
-            // 1. Within TTL
-            // 2. Document count hasn't changed significantly
+            // 1. Not explicitly marked stale via signalCorpusStatsStale()
+            // 2. Within TTL
+            // 3. Document count hasn't changed significantly
+            bool isStale = corpusStatsStale_.load(std::memory_order_acquire);
             auto currentDocCount = cachedDocumentCount_.load(std::memory_order_relaxed);
             bool docCountUnchanged = (currentDocCount == corpusStatsDocCount_);
 
-            if (age < kCorpusStatsTtl && docCountUnchanged) {
+            if (!isStale && age < kCorpusStatsTtl && docCountUnchanged) {
                 return *cachedCorpusStats_;
             }
         }
@@ -2919,9 +3109,17 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
         cachedCorpusStats_ = std::make_unique<storage::CorpusStats>(result.value());
         corpusStatsCachedAt_ = std::chrono::steady_clock::now();
         corpusStatsDocCount_ = cachedDocumentCount_.load(std::memory_order_relaxed);
+        // Clear stale flag after successful recomputation
+        corpusStatsStale_.store(false, std::memory_order_release);
     }
 
     return result;
+}
+
+void MetadataRepository::signalCorpusStatsStale() {
+    // Lightweight signal - just set the flag, don't recompute
+    // Actual recomputation is deferred to next getCorpusStats() call
+    corpusStatsStale_.store(true, std::memory_order_release);
 }
 
 // -----------------------------------------------------------------------------
@@ -2979,6 +3177,214 @@ void MetadataRepository::addSymSpellTerm(std::string_view term, int64_t frequenc
     if (symspellIndex_) {
         symspellIndex_->addTerm(term, frequency);
     }
+}
+
+// =============================================================================
+// Term Statistics for IDF (Dense-First Retrieval)
+// =============================================================================
+
+Result<float> MetadataRepository::getTermIDF(const std::string& term) {
+    return executeQuery<float>([&](Database& db) -> Result<float> {
+        // Get total document count from corpus stats
+        auto corpusStmt = db.prepare("SELECT total_documents FROM corpus_term_stats WHERE id = 1");
+        if (!corpusStmt)
+            return corpusStmt.error();
+
+        auto& cs = corpusStmt.value();
+        auto corpusStep = cs.step();
+        if (!corpusStep)
+            return corpusStep.error();
+
+        int64_t totalDocs = 0;
+        if (corpusStep.value()) {
+            totalDocs = cs.getInt64(0);
+        }
+
+        if (totalDocs <= 0) {
+            return 0.0f; // Empty corpus
+        }
+
+        // Get document frequency for term
+        auto termStmt = db.prepare("SELECT document_frequency FROM term_stats WHERE term = ?");
+        if (!termStmt)
+            return termStmt.error();
+
+        auto& ts = termStmt.value();
+        auto bindResult = ts.bind(1, term);
+        if (!bindResult)
+            return bindResult.error();
+
+        auto termStep = ts.step();
+        if (!termStep)
+            return termStep.error();
+
+        int64_t docFreq = 0;
+        if (termStep.value()) {
+            docFreq = ts.getInt64(0);
+        }
+
+        if (docFreq <= 0) {
+            return 0.0f; // Term not found
+        }
+
+        // IDF = log(N / df)
+        return static_cast<float>(std::log(static_cast<double>(totalDocs) / docFreq));
+    });
+}
+
+Result<std::unordered_map<std::string, float>>
+MetadataRepository::getTermIDFBatch(const std::vector<std::string>& terms) {
+    if (terms.empty()) {
+        return std::unordered_map<std::string, float>{};
+    }
+
+    return executeQuery<std::unordered_map<std::string, float>>(
+        [&](Database& db) -> Result<std::unordered_map<std::string, float>> {
+            std::unordered_map<std::string, float> result;
+
+            // Get total document count
+            auto corpusStmt =
+                db.prepare("SELECT total_documents FROM corpus_term_stats WHERE id = 1");
+            if (!corpusStmt)
+                return corpusStmt.error();
+
+            auto& cs = corpusStmt.value();
+            auto corpusStep = cs.step();
+            if (!corpusStep)
+                return corpusStep.error();
+
+            int64_t totalDocs = 0;
+            if (corpusStep.value()) {
+                totalDocs = cs.getInt64(0);
+            }
+
+            if (totalDocs <= 0) {
+                // Empty corpus - return zeros for all terms
+                for (const auto& term : terms) {
+                    result[term] = 0.0f;
+                }
+                return result;
+            }
+
+            // Build IN clause for batch lookup
+            std::string sql = "SELECT term, document_frequency FROM term_stats WHERE term IN (";
+            for (size_t i = 0; i < terms.size(); ++i) {
+                if (i > 0)
+                    sql += ',';
+                sql += '?';
+            }
+            sql += ')';
+
+            auto termStmt = db.prepare(sql);
+            if (!termStmt)
+                return termStmt.error();
+
+            auto& ts = termStmt.value();
+            for (size_t i = 0; i < terms.size(); ++i) {
+                auto bindResult = ts.bind(static_cast<int>(i + 1), terms[i]);
+                if (!bindResult)
+                    return bindResult.error();
+            }
+
+            // Initialize all terms with 0 (not found)
+            for (const auto& term : terms) {
+                result[term] = 0.0f;
+            }
+
+            // Process results
+            double logTotalDocs = std::log(static_cast<double>(totalDocs));
+            while (true) {
+                auto stepResult = ts.step();
+                if (!stepResult)
+                    return stepResult.error();
+                if (!stepResult.value())
+                    break;
+
+                std::string term = ts.getString(0);
+                int64_t docFreq = ts.getInt64(1);
+
+                if (docFreq > 0) {
+                    // IDF = log(N / df) = log(N) - log(df)
+                    result[term] =
+                        static_cast<float>(logTotalDocs - std::log(static_cast<double>(docFreq)));
+                }
+            }
+
+            return result;
+        });
+}
+
+Result<void>
+MetadataRepository::updateTermStats(const std::unordered_map<std::string, int64_t>& terms) {
+    if (terms.empty()) {
+        return {};
+    }
+
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        // Use UPSERT pattern to update term statistics
+        auto stmt = db.prepare(R"(
+            INSERT INTO term_stats (term, document_frequency, collection_frequency, last_updated)
+            VALUES (?, 1, ?, unixepoch())
+            ON CONFLICT(term) DO UPDATE SET
+                document_frequency = document_frequency + 1,
+                collection_frequency = collection_frequency + excluded.collection_frequency,
+                last_updated = unixepoch()
+        )");
+        if (!stmt)
+            return stmt.error();
+
+        auto& s = stmt.value();
+        for (const auto& [term, count] : terms) {
+            auto b1 = s.bind(1, term);
+            if (!b1)
+                return b1.error();
+            auto b2 = s.bind(2, count);
+            if (!b2)
+                return b2.error();
+            auto execResult = s.execute();
+            if (!execResult)
+                return execResult.error();
+            s.reset();
+        }
+
+        return {};
+    });
+}
+
+Result<void> MetadataRepository::updateCorpusTermStats() {
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        // Update corpus-level statistics from documents table
+        auto result = db.execute(R"(
+            UPDATE corpus_term_stats SET
+                total_documents = (SELECT COUNT(*) FROM documents WHERE content_extracted = 1),
+                total_terms = (SELECT COUNT(*) FROM term_stats),
+                avg_document_length = COALESCE(
+                    (SELECT AVG(content_length) FROM document_content WHERE content_length > 0),
+                    0.0
+                ),
+                last_updated = unixepoch()
+            WHERE id = 1
+        )");
+        return result;
+    });
+}
+
+Result<int64_t> MetadataRepository::getCorpusDocumentCount() {
+    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+        auto stmt = db.prepare("SELECT total_documents FROM corpus_term_stats WHERE id = 1");
+        if (!stmt)
+            return stmt.error();
+
+        auto& s = stmt.value();
+        auto stepResult = s.step();
+        if (!stepResult)
+            return stepResult.error();
+
+        if (stepResult.value()) {
+            return s.getInt64(0);
+        }
+        return int64_t{0};
+    });
 }
 
 Result<void> MetadataRepository::updateDocumentEmbeddingStatus(int64_t documentId,
@@ -3046,6 +3452,11 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatus(int64_t documentI
             core::saturating_sub(cachedIndexedCount_, uint64_t{1});
         }
 
+        // Signal corpus stats stale if embedding status changed (affects embeddingCoverage)
+        if (hadEmbedding != hasEmbedding) {
+            signalCorpusStatsStale();
+        }
+
         return Result<void>();
     });
 }
@@ -3095,6 +3506,9 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatusByHash(const std::
         auto execResult = ustmt.execute();
         if (!execResult)
             return execResult.error();
+
+        // Signal corpus stats stale (affects embeddingCoverage)
+        signalCorpusStatsStale();
 
         return Result<void>();
     });

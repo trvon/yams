@@ -105,6 +105,33 @@ std::size_t PostIngestQueue::resolveChannelCapacity() const {
     return cap;
 }
 
+void PostIngestQueue::checkDrainAndSignal() {
+    // Check if queue is now drained (all stages idle)
+    if (totalInFlight() == 0) {
+        // Only signal if we were previously active (had work)
+        bool expected = true;
+        if (wasActive_.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
+            // Queue just became drained - signal corpus stats stale
+            if (meta_) {
+                meta_->signalCorpusStatsStale();
+            }
+
+            // Invoke drain callback (for search engine rebuild trigger)
+            DrainCallback cb;
+            {
+                std::lock_guard<std::mutex> lock(drainCallbackMutex_);
+                cb = drainCallback_;
+            }
+            if (cb) {
+                cb();
+            }
+
+            spdlog::debug(
+                "[PostIngestQueue] Queue drained, signaled corpus stats and drain callback");
+        }
+    }
+}
+
 boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     spdlog::info("[PostIngestQueue] channelPoller coroutine STARTED");
     const std::size_t channelCapacity = resolveChannelCapacity();
@@ -137,11 +164,13 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         }
 
         if (didWork && !batch.empty()) {
+            wasActive_.store(true, std::memory_order_release);
             const std::size_t batchCount = batch.size();
             boost::asio::post(coordinator_->getExecutor(),
                               [this, batch = std::move(batch), batchCount]() mutable {
                                   processBatch(std::move(batch));
                                   inFlight_.fetch_sub(batchCount);
+                                  checkDrainAndSignal();
                               });
         }
 
@@ -221,29 +250,129 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         }
     }
 
-    // Batch embedding dispatch: collect hashes and dispatch incrementally for parallelism
-    const std::size_t embedBatchThreshold = TuneAdvisor::postIngestBatchSize();
-    std::vector<std::string> embeddingHashes;
-    embeddingHashes.reserve(embedBatchThreshold);
+    // =========================================================================
+    // 4-PHASE BATCHED METADATA PROCESSING
+    // Phase 1: Prepare - extract text for all tasks
+    // Phase 2: Batch DB write - single transaction for all successes
+    // Phase 3: Handle failures - update extraction status
+    // Phase 4: Dispatch - send to channels
+    // =========================================================================
 
+    std::vector<PreparedMetadataEntry> successes;
+    std::vector<ExtractionFailure> failures;
+    std::vector<const InternalEventBus::PostIngestTask*> fallbackTasks; // Tasks without info
+
+    successes.reserve(tasks.size());
+    failures.reserve(tasks.size() / 10); // Expect ~10% failure rate
+
+    // Phase 1: PREPARATION - extract text for all documents
     for (const auto& task : tasks) {
         try {
             auto it = infoMap.find(task.hash);
             if (it != infoMap.end()) {
                 const auto tagsIt = tagsByDocId.find(it->second.id);
-                const std::vector<std::string>* tags =
-                    (tagsIt != tagsByDocId.end()) ? &tagsIt->second : nullptr;
-                processMetadataStage(task.hash, task.mime, it->second, tags ? tags : &kEmptyTags,
-                                     symbolExtensionMap, entityProviders);
+                const std::vector<std::string>& tags =
+                    (tagsIt != tagsByDocId.end()) ? tagsIt->second : kEmptyTags;
 
+                auto result = prepareMetadataEntry(task.hash, task.mime, it->second, tags,
+                                                   symbolExtensionMap, entityProviders);
+
+                if (auto* prepared = std::get_if<PreparedMetadataEntry>(&result)) {
+                    successes.push_back(std::move(*prepared));
+                } else {
+                    failures.push_back(std::get<ExtractionFailure>(result));
+                }
             } else {
-                // Avoid extra metadata lookup for tags on the fallback path.
-                // An empty override signals "no tags" but still skips per-doc tag query.
-                processMetadataStage(task.hash, task.mime, std::nullopt, &kEmptyTags,
-                                     symbolExtensionMap, entityProviders);
+                // No DocumentInfo in batch lookup - use fallback path
+                fallbackTasks.push_back(&task);
             }
-            // Collect hash and dispatch batch when threshold reached for parallelism
-            embeddingHashes.push_back(task.hash);
+        } catch (const std::exception& e) {
+            spdlog::error("[PostIngestQueue] Preparation failed for {}: {}", task.hash, e.what());
+            failed_++;
+        }
+    }
+
+    // Phase 2: BATCH DB WRITE - single transaction for all successful extractions
+    if (!successes.empty() && meta_) {
+        std::vector<metadata::BatchContentEntry> entries;
+        entries.reserve(successes.size());
+
+        for (const auto& prepared : successes) {
+            metadata::BatchContentEntry entry;
+            entry.documentId = prepared.documentId;
+            entry.title = prepared.fileName;
+            entry.contentText = prepared.extractedText;
+            entry.mimeType = prepared.mimeType;
+            entry.extractionMethod = "post_ingest";
+            entry.language = prepared.language;
+            entries.push_back(std::move(entry));
+        }
+
+        auto batchResult = meta_->batchInsertContentAndIndex(entries);
+        if (!batchResult) {
+            spdlog::error("[PostIngestQueue] Batch DB write failed: {}",
+                          batchResult.error().message);
+            if (batchResult.error().message.find("database is locked") != std::string::npos) {
+                TuneAdvisor::reportDbLockError();
+            }
+            // All successes become failures
+            for (const auto& prepared : successes) {
+                failures.push_back(ExtractionFailure{prepared.documentId, prepared.hash,
+                                                     batchResult.error().message});
+            }
+            successes.clear();
+        } else {
+            spdlog::info("[PostIngestQueue] Batch DB write succeeded for {} documents",
+                         entries.size());
+        }
+    }
+
+    // Phase 3: HANDLE FAILURES - update extraction status for failed documents
+    for (const auto& failure : failures) {
+        if (failure.documentId >= 0 && meta_) {
+            auto updateRes = meta_->updateDocumentExtractionStatus(
+                failure.documentId, false, metadata::ExtractionStatus::Failed,
+                failure.errorMessage);
+            if (!updateRes) {
+                spdlog::warn("[PostIngestQueue] Failed to mark extraction failed for {}: {}",
+                             failure.hash, updateRes.error().message);
+            }
+        }
+    }
+
+    // Phase 4: DISPATCH - send successful documents to channels
+    const std::size_t embedBatchThreshold = TuneAdvisor::postIngestBatchSize();
+    std::vector<std::string> embeddingHashes;
+    embeddingHashes.reserve(successes.size() + fallbackTasks.size());
+
+    for (const auto& prepared : successes) {
+        if (prepared.shouldDispatchKg) {
+            dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.fileName,
+                                std::vector<std::string>(prepared.tags));
+        }
+        if (prepared.shouldDispatchSymbol) {
+            dispatchToSymbolChannel(prepared.hash, prepared.documentId, prepared.fileName,
+                                    prepared.symbolLanguage);
+        }
+        if (prepared.shouldDispatchEntity) {
+            dispatchToEntityChannel(prepared.hash, prepared.documentId, prepared.fileName,
+                                    prepared.extension);
+        }
+        embeddingHashes.push_back(prepared.hash);
+        if (embeddingHashes.size() >= embedBatchThreshold) {
+            processEmbeddingBatch(embeddingHashes);
+            embeddingHashes.clear();
+        }
+        processed_++;
+        InternalEventBus::instance().incPostConsumed();
+    }
+
+    // Handle fallback tasks (those without DocumentInfo) using legacy path
+    for (const auto* taskPtr : fallbackTasks) {
+        try {
+            processMetadataStage(taskPtr->hash, taskPtr->mime, std::nullopt, &kEmptyTags,
+                                 symbolExtensionMap, entityProviders);
+            embeddingHashes.push_back(taskPtr->hash);
             if (embeddingHashes.size() >= embedBatchThreshold) {
                 processEmbeddingBatch(embeddingHashes);
                 embeddingHashes.clear();
@@ -251,12 +380,13 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
             processed_++;
             InternalEventBus::instance().incPostConsumed();
         } catch (const std::exception& e) {
-            spdlog::error("[PostIngestQueue] Failed to process {}: {}", task.hash, e.what());
+            spdlog::error("[PostIngestQueue] Fallback processing failed for {}: {}", taskPtr->hash,
+                          e.what());
             failed_++;
         }
     }
 
-    // Dispatch any remaining hashes
+    // Dispatch any remaining embedding hashes
     if (!embeddingHashes.empty()) {
         processEmbeddingBatch(embeddingHashes);
     }
@@ -445,6 +575,10 @@ void PostIngestQueue::processMetadataStage(
             if (!pr) {
                 spdlog::warn("[PostIngestQueue] persist/index failed for {}: {}", hash,
                              pr.error().message);
+                // Track lock errors for adaptive concurrency scaling
+                if (pr.error().message.find("database is locked") != std::string::npos) {
+                    TuneAdvisor::reportDbLockError();
+                }
             } else {
                 auto duration = std::chrono::steady_clock::now() - startTime;
                 double ms = std::chrono::duration<double, std::milli>(duration).count();
@@ -482,6 +616,57 @@ void PostIngestQueue::processMetadataStage(
     } catch (const std::exception& e) {
         spdlog::error("[PostIngestQueue] Metadata stage failed for {}: {}", hash, e.what());
     }
+}
+
+std::variant<PostIngestQueue::PreparedMetadataEntry, PostIngestQueue::ExtractionFailure>
+PostIngestQueue::prepareMetadataEntry(
+    const std::string& hash, const std::string& mime, const metadata::DocumentInfo& info,
+    const std::vector<std::string>& tags,
+    const std::unordered_map<std::string, std::string>& symbolExtensionMap,
+    const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders) {
+    PreparedMetadataEntry prepared;
+    prepared.documentId = info.id;
+    prepared.hash = hash;
+    prepared.fileName = info.fileName;
+    prepared.mimeType = mime.empty() ? info.mimeType : mime;
+    prepared.extension = info.fileExtension;
+    prepared.tags = tags;
+
+    // Extract document text
+    auto txt =
+        extractDocumentText(store_, hash, prepared.mimeType, prepared.extension, extractors_);
+    if (!txt || txt->empty()) {
+        spdlog::debug("[PostIngestQueue] no text extracted for {} (mime={}, ext={})", hash,
+                      prepared.mimeType, prepared.extension);
+        return ExtractionFailure{info.id, hash, "No text extracted"};
+    }
+
+    prepared.extractedText = std::move(*txt);
+
+    // Detect language
+    double langConfidence = 0.0;
+    prepared.language =
+        yams::extraction::LanguageDetector::detectLanguage(prepared.extractedText, &langConfidence);
+
+    // Determine dispatch flags
+    prepared.shouldDispatchKg = (info.id >= 0);
+
+    // Symbol extraction: check if extension is in the symbol map
+    std::string extKey = prepared.extension;
+    if (!extKey.empty() && extKey[0] == '.') {
+        extKey = extKey.substr(1);
+    }
+    auto symIt = symbolExtensionMap.find(extKey);
+    if (symIt != symbolExtensionMap.end()) {
+        prepared.shouldDispatchSymbol = true;
+        prepared.symbolLanguage = symIt->second;
+    }
+
+    // Entity extraction: check if any provider supports this extension
+    prepared.shouldDispatchEntity =
+        extensionSupportsEntityProviders(entityProviders, prepared.extension);
+
+    return prepared;
 }
 
 void PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, int64_t docId,
@@ -607,12 +792,14 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         const std::size_t maxConcurrent = maxKgConcurrent();
         while (kgInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
             didWork = true;
+            wasActive_.store(true, std::memory_order_release);
             kgInFlight_.fetch_add(1);
             boost::asio::post(coordinator_->getExecutor(),
                               [this, hash = std::move(job.hash), docId = job.documentId,
                                filePath = std::move(job.filePath), tags = std::move(job.tags)]() {
                                   processKnowledgeGraphStage(hash, docId, filePath, tags);
                                   kgInFlight_.fetch_sub(1);
+                                  checkDrainAndSignal();
                               });
         }
 
@@ -652,6 +839,7 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         const std::size_t maxConcurrent = maxSymbolConcurrent();
         while (symbolInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
             didWork = true;
+            wasActive_.store(true, std::memory_order_release);
             symbolInFlight_.fetch_add(1);
             boost::asio::post(coordinator_->getExecutor(),
                               [this, hash = std::move(job.hash), docId = job.documentId,
@@ -659,6 +847,7 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
                                language = std::move(job.language)]() {
                                   processSymbolExtractionStage(hash, docId, filePath, language);
                                   symbolInFlight_.fetch_sub(1);
+                                  checkDrainAndSignal();
                               });
         }
 
@@ -801,6 +990,7 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         const std::size_t maxConcurrent = maxEntityConcurrent();
         while (entityInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
             didWork = true;
+            wasActive_.store(true, std::memory_order_release);
             entityInFlight_.fetch_add(1);
             auto entityExec = entityCoordinator_ ? entityCoordinator_->getExecutor()
                                                  : coordinator_->getExecutor();
@@ -809,6 +999,7 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
                                            extension = std::move(job.extension)]() {
                 processEntityExtractionStage(hash, docId, filePath, extension);
                 entityInFlight_.fetch_sub(1);
+                checkDrainAndSignal();
             });
         }
 
@@ -900,6 +1091,15 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                     return true; // Continue to next batch
                 }
 
+                // Wrap all KG operations in a single WriteBatch transaction
+                auto batchRes = kg_->beginWriteBatch();
+                if (!batchRes) {
+                    spdlog::warn("[PostIngestQueue] Failed to begin WriteBatch: {}",
+                                 batchRes.error().message);
+                    return true; // Continue despite error
+                }
+                auto& kgBatch = batchRes.value();
+
                 const bool hasSnapshot = !snapshotId.empty();
                 std::vector<metadata::KGNode> canonicalNodes;
                 std::vector<metadata::KGNode> versionNodes;
@@ -934,7 +1134,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                 }
 
                 // Insert canonical nodes and get their IDs
-                auto canonicalIds = kg_->upsertNodes(canonicalNodes);
+                auto canonicalIds = kgBatch->upsertNodes(canonicalNodes);
                 if (!canonicalIds) {
                     spdlog::warn("[PostIngestQueue] Failed to insert batch {} nodes: {}",
                                  progress.batchNumber, canonicalIds.error().message);
@@ -948,7 +1148,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                 }
                 if (hasSnapshot) {
                     // Insert version nodes and get their IDs
-                    auto versionIds = kg_->upsertNodes(versionNodes);
+                    auto versionIds = kgBatch->upsertNodes(versionNodes);
                     if (!versionIds) {
                         spdlog::warn(
                             "[PostIngestQueue] Failed to insert batch {} version nodes: {}",
@@ -980,7 +1180,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                         observedEdges.push_back(std::move(edge));
                     }
                     if (!observedEdges.empty()) {
-                        kg_->addEdgesUnique(observedEdges);
+                        kgBatch->addEdgesUnique(observedEdges);
                     }
                 } else {
                     for (size_t i = 0; i < canonicalNodes.size() && i < canonicalIds.value().size();
@@ -1017,7 +1217,7 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                 }
 
                 if (!resolvedEdges.empty()) {
-                    kg_->addEdgesUnique(resolvedEdges);
+                    kgBatch->addEdgesUnique(resolvedEdges);
                     totalEdgesInserted += resolvedEdges.size();
                 }
 
@@ -1036,8 +1236,15 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
                 }
 
                 if (!resolvedAliases.empty()) {
-                    kg_->addAliases(resolvedAliases);
+                    kgBatch->addAliases(resolvedAliases);
                     totalAliasesInserted += resolvedAliases.size();
+                }
+
+                // Commit the WriteBatch transaction
+                auto commitRes = kgBatch->commit();
+                if (!commitRes) {
+                    spdlog::warn("[PostIngestQueue] Failed to commit WriteBatch: {}",
+                                 commitRes.error().message);
                 }
 
                 const size_t batchNodesInserted =

@@ -22,6 +22,17 @@ namespace yamsfmt = fmt;
 
 namespace yams::storage {
 
+// Retry parameters vary by backend:
+// - libsql MVCC: fewer retries needed since concurrent writers don't block
+// - SQLite: more retries with longer backoff for single-writer model
+#if YAMS_LIBSQL_BACKEND
+constexpr int kMaxRetries = 3;
+constexpr int kInitialBackoffMs = 5;
+#else
+constexpr int kMaxRetries = 5;
+constexpr int kInitialBackoffMs = 10;
+#endif
+
 // SQLite RAII wrapper for statements
 class Statement {
 public:
@@ -91,17 +102,31 @@ public:
         }
     }
 
-    // Execute and fetch results
+    // Execute and fetch results with retry for transient lock errors
     bool step() {
-        int rc = sqlite3_step(stmt_);
-        if (rc == SQLITE_ROW) {
-            return true;
-        } else if (rc == SQLITE_DONE) {
-            return false;
-        } else {
+        auto backoff = std::chrono::milliseconds(kInitialBackoffMs);
+
+        for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+            int rc = sqlite3_step(stmt_);
+            if (rc == SQLITE_ROW) {
+                return true;
+            } else if (rc == SQLITE_DONE) {
+                return false;
+            }
+
+            // Check for transient lock errors
+            if ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && attempt + 1 < kMaxRetries) {
+                sqlite3_reset(stmt_);
+                std::this_thread::sleep_for(backoff);
+                backoff *= 2;
+                continue;
+            }
+
             throw std::runtime_error(
                 yamsfmt::format("Statement execution failed: {}", sqlite3_errmsg(db_)));
         }
+
+        throw std::runtime_error("Statement execution failed: max retries exceeded");
     }
 
     void execute() {
@@ -181,15 +206,34 @@ public:
     Database(const Database&) = delete;
     Database& operator=(const Database&) = delete;
 
-    // Execute SQL without results
+    // Execute SQL without results, with retry for transient lock errors
     void execute(const std::string& sql) {
-        char* errMsg = nullptr;
-        int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &errMsg);
-        if (rc != SQLITE_OK) {
+        auto backoff = std::chrono::milliseconds(kInitialBackoffMs);
+
+        for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+            char* errMsg = nullptr;
+            int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &errMsg);
+
+            if (rc == SQLITE_OK) {
+                return;
+            }
+
             std::string error = errMsg ? errMsg : "Unknown error";
             sqlite3_free(errMsg);
+
+            // Check for transient lock errors
+            if ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && attempt + 1 < kMaxRetries) {
+                spdlog::debug("[ReferenceDB] transient lock, retry {}/{}", attempt + 1,
+                              kMaxRetries);
+                std::this_thread::sleep_for(backoff);
+                backoff *= 2;
+                continue;
+            }
+
             throw std::runtime_error(yamsfmt::format("SQL execution failed: {}", error));
         }
+
+        throw std::runtime_error("SQL execution failed: max retries exceeded");
     }
 
     // Execute SQL from file
@@ -212,10 +256,15 @@ public:
         return Statement(db_, sql);
     }
 
-    // Transaction control with proper timeout handling
+    // Transaction control with backend-appropriate semantics
     void beginTransaction() {
-        // IMMEDIATE transaction with high busy timeout should handle concurrency
+#if YAMS_LIBSQL_BACKEND
+        // libsql MVCC: use regular BEGIN (deferred) for better concurrency
+        execute("BEGIN TRANSACTION");
+#else
+        // SQLite: use BEGIN IMMEDIATE to acquire write lock immediately
         execute("BEGIN IMMEDIATE TRANSACTION");
+#endif
     }
 
     void commit() { execute("COMMIT"); }

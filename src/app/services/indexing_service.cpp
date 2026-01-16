@@ -255,8 +255,8 @@ public:
                         bool willInclude = shouldIncludeFile(
                             req.directoryPath, ent.path().string(), req.includePatterns,
                             req.excludePatterns, gitignorePatterns);
-                        spdlog::info("[IndexingService] candidate: '{}' -> {}", ent.path().string(),
-                                     willInclude ? "include" : "skip");
+                        spdlog::debug("[IndexingService] candidate: '{}' -> {}",
+                                      ent.path().string(), willInclude ? "include" : "skip");
                         processDirectoryEntry(ent, req, localResp, snapshotId, gitignorePatterns);
                         auto leftBefore = remaining.fetch_sub(1, std::memory_order_relaxed);
                         if (leftBefore > 0)

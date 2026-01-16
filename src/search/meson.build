@@ -27,6 +27,7 @@ yams_search = static_library('yams_search',
     'symbol_enrichment.cpp',
     'internal_benchmark.cpp',
     'symspell_search.cpp',
+    'query_concept_extractor.cpp',
   ],
   include_directories: [
     include_directories('../../include'),

@@ -4,6 +4,7 @@
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/search/hotzone_manager.h>
+#include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
 
 #include <boost/asio/awaitable.hpp>
@@ -110,10 +111,32 @@ void CheckpointManager::launchCheckpointLoop() {
 }
 
 bool CheckpointManager::checkpointVectorIndex() {
-    // VectorIndexManager removed - SearchEngine uses VectorDatabase directly
-    // VectorDatabase uses SQLite which handles persistence via transactions/WAL
-    spdlog::debug("[CheckpointManager] Vector index checkpoint skipped (using VectorDatabase)");
-    return true;
+    if (!deps_.vectorSystemManager) {
+        return true;
+    }
+
+    auto vectorDb = deps_.vectorSystemManager->getVectorDatabase();
+    if (!vectorDb || !vectorDb->isInitialized()) {
+        return true;
+    }
+
+    try {
+        if (vectorDb->optimizeIndex()) {
+            auto now = std::chrono::system_clock::now();
+            auto epoch =
+                std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+            stats_.last_vector_checkpoint_epoch.store(static_cast<uint64_t>(epoch),
+                                                      std::memory_order_relaxed);
+            stats_.vector_checkpoints.fetch_add(1, std::memory_order_relaxed);
+            spdlog::debug("[CheckpointManager] Vector index checkpoint completed");
+            return true;
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("[CheckpointManager] Vector index checkpoint failed: {}", e.what());
+        stats_.checkpoint_errors.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    return false;
 }
 
 bool CheckpointManager::checkpointHotzone() {

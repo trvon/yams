@@ -1,6 +1,7 @@
 // Daemon FSM test suite (Catch2)
 // Consolidates 14 FSM test files into a single, well-organized suite
-// Covers: ConnectionFSM, DaemonLifecycleFSM, ServiceManagerFSM, PluginHostFSM, EmbeddingProviderFSM
+// Covers: ConnectionFSM, DaemonLifecycleFSM, ServiceManagerFSM, PluginHostFSM,
+//         EmbeddingProviderFSM, SearchEngineFSM
 // Note: This is a basic structure. Full coverage requires understanding actual FSM implementation.
 
 #include <catch2/catch_test_macros.hpp>
@@ -9,6 +10,7 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/PluginHostFsm.h>
+#include <yams/daemon/components/SearchEngineFsm.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
 #include <yams/daemon/ipc/connection_fsm.h>
 
@@ -346,5 +348,209 @@ TEST_CASE("EmbeddingProviderFSM: Load failure", "[daemon][fsm][embedding-provide
                 }
             }
         }
+    }
+}
+
+// =============================================================================
+// SearchEngineFSM Tests
+// =============================================================================
+// Tests the SearchEngineFsm with AwaitingDrain state and rebuild request handling
+
+TEST_CASE("SearchEngineFSM: Basic state transitions", "[daemon][fsm][search-engine]") {
+    SearchEngineFsm fsm;
+
+    SECTION("Initial state is NotBuilt") {
+        auto snapshot = fsm.snapshot();
+        REQUIRE(snapshot.state == SearchEngineState::NotBuilt);
+        REQUIRE_FALSE(fsm.isReady());
+        REQUIRE_FALSE(fsm.isBuilding());
+        REQUIRE_FALSE(fsm.hasFailed());
+        REQUIRE_FALSE(fsm.isAwaitingDrain());
+    }
+
+    SECTION("Build started transitions to Building") {
+        fsm.dispatch(SearchEngineRebuildStartedEvent{"test_reason", true});
+
+        auto snapshot = fsm.snapshot();
+        REQUIRE(snapshot.state == SearchEngineState::Building);
+        REQUIRE(fsm.isBuilding());
+        REQUIRE(snapshot.buildReason == "test_reason");
+        REQUIRE(snapshot.vectorEnabled == true);
+    }
+
+    SECTION("Build completed transitions to Ready") {
+        fsm.dispatch(SearchEngineRebuildStartedEvent{"test", false});
+        fsm.dispatch(SearchEngineRebuildCompletedEvent{true, 100});
+
+        auto snapshot = fsm.snapshot();
+        REQUIRE(snapshot.state == SearchEngineState::Ready);
+        REQUIRE(fsm.isReady());
+        REQUIRE(snapshot.hasEngine == true);
+        REQUIRE(snapshot.vectorEnabled == true);
+        REQUIRE(snapshot.buildDurationMs == 100);
+    }
+
+    SECTION("Build failure transitions to Failed") {
+        fsm.dispatch(SearchEngineRebuildStartedEvent{"test", false});
+        fsm.dispatch(SearchEngineRebuildFailedEvent{"build_timeout"});
+
+        auto snapshot = fsm.snapshot();
+        REQUIRE(snapshot.state == SearchEngineState::Failed);
+        REQUIRE(fsm.hasFailed());
+        REQUIRE(snapshot.lastError == "build_timeout");
+        REQUIRE(snapshot.hasEngine == false);
+    }
+}
+
+TEST_CASE("SearchEngineFSM: AwaitingDrain state", "[daemon][fsm][search-engine][drain]") {
+    SearchEngineFsm fsm;
+
+    SECTION("Rebuild request with waitForDrain transitions to AwaitingDrain") {
+        bool accepted = fsm.dispatch(SearchEngineRebuildRequestedEvent{"drain_test", true, true});
+
+        REQUIRE(accepted);
+        auto snapshot = fsm.snapshot();
+        REQUIRE(snapshot.state == SearchEngineState::AwaitingDrain);
+        REQUIRE(fsm.isAwaitingDrain());
+        REQUIRE(snapshot.rebuildPending == true);
+        REQUIRE(snapshot.buildReason.find("drain_test") != std::string::npos);
+    }
+
+    SECTION("Rebuild request without waitForDrain triggers callback immediately") {
+        bool callbackCalled = false;
+        std::string callbackReason;
+        bool callbackIncludeVector = false;
+
+        fsm.setRebuildCallback([&](const std::string& reason, bool includeVector) {
+            callbackCalled = true;
+            callbackReason = reason;
+            callbackIncludeVector = includeVector;
+        });
+
+        bool accepted = fsm.dispatch(SearchEngineRebuildRequestedEvent{"immediate", true, false});
+
+        REQUIRE(accepted);
+        REQUIRE(callbackCalled);
+        REQUIRE(callbackReason == "immediate");
+        REQUIRE(callbackIncludeVector == true);
+    }
+
+    SECTION("Indexing drained event triggers rebuild when in AwaitingDrain") {
+        bool callbackCalled = false;
+        std::string callbackReason;
+
+        fsm.setRebuildCallback([&](const std::string& reason, bool /*includeVector*/) {
+            callbackCalled = true;
+            callbackReason = reason;
+        });
+
+        // Request rebuild with wait for drain
+        fsm.dispatch(SearchEngineRebuildRequestedEvent{"awaiting", true, true});
+        REQUIRE(fsm.isAwaitingDrain());
+        REQUIRE_FALSE(callbackCalled);
+
+        // Signal drain - should trigger callback
+        fsm.dispatch(SearchEngineIndexingDrainedEvent{});
+        REQUIRE(callbackCalled);
+        REQUIRE(callbackReason == "awaiting");
+    }
+
+    SECTION("Indexing drained event is ignored when not in AwaitingDrain") {
+        bool callbackCalled = false;
+
+        fsm.setRebuildCallback(
+            [&](const std::string& /*reason*/, bool /*includeVector*/) { callbackCalled = true; });
+
+        // FSM is in NotBuilt state, drain should be ignored
+        fsm.dispatch(SearchEngineIndexingDrainedEvent{});
+        REQUIRE_FALSE(callbackCalled);
+
+        // Transition to Ready state
+        fsm.dispatch(SearchEngineRebuildStartedEvent{"init", false});
+        fsm.dispatch(SearchEngineRebuildCompletedEvent{false, 0});
+        REQUIRE(fsm.isReady());
+
+        // Drain should still be ignored
+        fsm.dispatch(SearchEngineIndexingDrainedEvent{});
+        REQUIRE_FALSE(callbackCalled);
+    }
+}
+
+TEST_CASE("SearchEngineFSM: Rebuild guards", "[daemon][fsm][search-engine][guards]") {
+    SearchEngineFsm fsm;
+
+    SECTION("Cannot request rebuild while building") {
+        fsm.dispatch(SearchEngineRebuildStartedEvent{"first", false});
+        REQUIRE(fsm.isBuilding());
+
+        bool accepted = fsm.dispatch(SearchEngineRebuildRequestedEvent{"second", true, true});
+        REQUIRE_FALSE(accepted);
+        // State should still be Building
+        REQUIRE(fsm.isBuilding());
+    }
+
+    SECTION("Cannot request rebuild while awaiting drain") {
+        fsm.dispatch(SearchEngineRebuildRequestedEvent{"first", true, true});
+        REQUIRE(fsm.isAwaitingDrain());
+
+        bool accepted = fsm.dispatch(SearchEngineRebuildRequestedEvent{"second", true, true});
+        REQUIRE_FALSE(accepted);
+        // State should still be AwaitingDrain
+        REQUIRE(fsm.isAwaitingDrain());
+    }
+
+    SECTION("Can request rebuild after previous build completes") {
+        // First build cycle
+        fsm.dispatch(SearchEngineRebuildStartedEvent{"first", false});
+        fsm.dispatch(SearchEngineRebuildCompletedEvent{false, 0});
+        REQUIRE(fsm.isReady());
+
+        // Second rebuild request should be accepted
+        bool accepted = fsm.dispatch(SearchEngineRebuildRequestedEvent{"second", true, true});
+        REQUIRE(accepted);
+        REQUIRE(fsm.isAwaitingDrain());
+    }
+
+    SECTION("Can request rebuild after previous build fails") {
+        // Failed build
+        fsm.dispatch(SearchEngineRebuildStartedEvent{"first", false});
+        fsm.dispatch(SearchEngineRebuildFailedEvent{"error"});
+        REQUIRE(fsm.hasFailed());
+
+        // Rebuild request should be accepted
+        bool accepted = fsm.dispatch(SearchEngineRebuildRequestedEvent{"retry", true, false});
+        REQUIRE(accepted);
+    }
+}
+
+TEST_CASE("SearchEngineFSM: Snapshot fields", "[daemon][fsm][search-engine][snapshot]") {
+    SearchEngineFsm fsm;
+
+    SECTION("rebuildPending is cleared after build starts") {
+        fsm.dispatch(SearchEngineRebuildRequestedEvent{"test", true, true});
+        REQUIRE(fsm.snapshot().rebuildPending == true);
+
+        fsm.dispatch(SearchEngineRebuildStartedEvent{"test", true});
+        REQUIRE(fsm.snapshot().rebuildPending == false);
+    }
+
+    SECTION("rebuildPending is cleared after build completes") {
+        fsm.dispatch(SearchEngineRebuildRequestedEvent{"test", true, true});
+        fsm.dispatch(SearchEngineRebuildStartedEvent{"test", true});
+        fsm.dispatch(SearchEngineRebuildCompletedEvent{true, 50});
+
+        auto snapshot = fsm.snapshot();
+        REQUIRE(snapshot.rebuildPending == false);
+        REQUIRE(snapshot.hasEngine == true);
+    }
+
+    SECTION("rebuildPending is cleared after build fails") {
+        fsm.dispatch(SearchEngineRebuildRequestedEvent{"test", true, true});
+        fsm.dispatch(SearchEngineRebuildStartedEvent{"test", true});
+        fsm.dispatch(SearchEngineRebuildFailedEvent{"timeout"});
+
+        auto snapshot = fsm.snapshot();
+        REQUIRE(snapshot.rebuildPending == false);
+        REQUIRE(snapshot.hasEngine == false);
     }
 }

@@ -77,6 +77,10 @@ struct DaemonStats {
     std::atomic<uint64_t> repairEmbeddingsSkipped{0};
     std::atomic<uint64_t> repairFailedOperations{0};
     std::atomic<uint64_t> repairQueueDepth{0};
+
+    // Database contention metrics (for adaptive concurrency scaling)
+    std::atomic<uint64_t> dbLockErrors{0};       // Total "database is locked" errors
+    std::atomic<uint64_t> dbLockErrorsWindow{0}; // Errors in current tuning window
 };
 
 /**

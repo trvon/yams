@@ -1101,6 +1101,47 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::debug("ServiceManager(co): co_await executor done");
     spdlog::default_logger()->flush();
 
+    // Set up SearchEngineManager rebuild callback for FSM-driven rebuilds
+    // This callback is invoked when the FSM determines it's time to rebuild
+    // (e.g., after indexing drains when in AwaitingDrain state)
+    searchEngineManager_.setRebuildCallback([this, ex](const std::string& reason,
+                                                       bool includeVector) {
+        spdlog::info("[ServiceManager] FSM triggered rebuild: reason={} includeVector={}", reason,
+                     includeVector);
+
+        // Post the async rebuild to the executor
+        boost::asio::co_spawn(
+            ex,
+            [this, reason, includeVector]() -> boost::asio::awaitable<void> {
+                try {
+                    std::shared_ptr<vector::EmbeddingGenerator> embGen;
+                    if (includeVector && modelProvider_) {
+                        try {
+                            embGen = modelProvider_->getEmbeddingGenerator();
+                        } catch (...) {
+                        }
+                    }
+
+                    int build_timeout = 30000; // 30s timeout
+                    auto result = co_await searchEngineManager_.buildEngine(
+                        metadataRepo_, vectorDatabase_, embGen, reason, build_timeout,
+                        getWorkerExecutor());
+
+                    if (result.has_value()) {
+                        state_.readiness.searchEngineReady.store(true);
+                        spdlog::info("[ServiceManager] FSM-triggered rebuild succeeded");
+                    } else {
+                        spdlog::error("[ServiceManager] FSM-triggered rebuild failed: {}",
+                                      result.error().message);
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::error("[ServiceManager] FSM-triggered rebuild exception: {}", e.what());
+                }
+                co_return;
+            },
+            boost::asio::detached);
+    });
+
     // Plugins step: mark ready (host scaffolding) and record duration uniformly
     spdlog::info("[ServiceManager] Phase: Plugins Ready.");
     try {
@@ -1419,6 +1460,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         } catch (...) {
         }
         spdlog::info("Post-ingest queue initialized (capacity={})", qcap);
+
+        // Wire PostIngestQueue drain to SearchEngineManager FSM
+        postIngest_->setDrainCallback([this]() {
+            spdlog::debug(
+                "[ServiceManager] PostIngestQueue drained, signaling SearchEngineManager");
+            searchEngineManager_.signalIndexingDrained();
+        });
     } catch (const std::exception& e) {
         spdlog::warn("Post-ingest queue init failed: {}", e.what());
     } catch (...) {

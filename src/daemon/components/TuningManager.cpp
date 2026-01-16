@@ -181,9 +181,23 @@ void TuningManager::tick_once() {
             extractionTarget = std::max<uint32_t>(4, extractionTarget); // floor at default
             TuneAdvisor::setPostExtractionConcurrent(extractionTarget);
 
-            // KG concurrency scales similarly but with higher limits (DB-bound)
+            // KG concurrency: scale based on queue depth BUT scale DOWN on DB contention
+            // This prevents "database is locked" errors from overwhelming the system
             uint32_t kgTarget = 8;
-            if (queuedItems > 500) {
+            const uint64_t dbLockErrors = TuneAdvisor::getAndResetDbLockErrors();
+            const uint32_t lockThreshold = TuneAdvisor::dbLockErrorThreshold();
+
+            if (dbLockErrors > lockThreshold * 2) {
+                // Severe contention: drop to minimum
+                kgTarget = 2;
+                spdlog::debug("TuningManager: DB lock errors ({}) severe, KG concurrency -> 2",
+                              dbLockErrors);
+            } else if (dbLockErrors > lockThreshold) {
+                // Moderate contention: reduce significantly
+                kgTarget = 4;
+                spdlog::debug("TuningManager: DB lock errors ({}) > threshold, KG concurrency -> 4",
+                              dbLockErrors);
+            } else if (queuedItems > 500) {
                 kgTarget = std::min<uint32_t>(hwThreads / 2, 32);
             } else if (queuedItems > 100) {
                 kgTarget = 16;
@@ -206,8 +220,16 @@ void TuningManager::tick_once() {
             const std::size_t embedQueued = bus.embedQueued();
             const std::size_t embedDropped = bus.embedDropped();
 
+            // Embed concurrency: also scale DOWN on DB contention
+            // Embeddings write to vector_db which shares the SQLite connection pool
             uint32_t embedTarget = 2; // minimum baseline
-            if (embedQueued > 1000 || embedDropped > 100) {
+            if (dbLockErrors > lockThreshold * 2) {
+                // Severe DB contention: drop to minimum
+                embedTarget = 2;
+            } else if (dbLockErrors > lockThreshold) {
+                // Moderate contention: cap at 4
+                embedTarget = std::min<uint32_t>(4, embedTarget);
+            } else if (embedQueued > 1000 || embedDropped > 100) {
                 // Heavy backlog or significant drops - scale to max
                 embedTarget = std::min<uint32_t>(hwThreads / 2, 16);
             } else if (embedQueued > 500 || embedDropped > 10) {
@@ -230,6 +252,7 @@ void TuningManager::tick_once() {
             TracyPlot("post.embed.limit", static_cast<double>(embedTarget));
             TracyPlot("post.embed.queued", static_cast<double>(embedQueued));
             TracyPlot("post.embed.dropped", static_cast<double>(embedDropped));
+            TracyPlot("db.lock_errors_window", static_cast<double>(dbLockErrors));
 #endif
         }
     } catch (...) {

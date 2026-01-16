@@ -169,20 +169,32 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     spdlog::debug("EmbeddingService: processing batch of {} documents with model '{}'",
                   job.hashes.size(), modelName);
 
-    std::size_t succeeded = 0;
+    // ============================================================
+    // Phase 1: Gather all document content and metadata
+    // ============================================================
+    struct DocData {
+        std::string hash;
+        std::string text;
+        std::string fileName;
+        std::string filePath;
+        std::string mimeType;
+    };
+    std::vector<DocData> docsToEmbed;
+    docsToEmbed.reserve(job.hashes.size());
+
     std::size_t skipped = 0;
+    std::size_t failedGather = 0;
 
     for (const auto& hash : job.hashes) {
         try {
             auto docInfoRes = meta_->getDocumentByHash(hash);
             if (!docInfoRes || !docInfoRes.value().has_value()) {
                 spdlog::warn("EmbeddingService: document not found: {}", hash);
-                failed_.fetch_add(1);
+                failedGather++;
                 continue;
             }
 
             const auto& docInfo = *docInfoRes.value();
-            int64_t docId = docInfo.id;
 
             if (job.skipExisting && vdb->hasEmbedding(hash)) {
                 spdlog::debug("EmbeddingService: skipExisting=true, already embedded: {}", hash);
@@ -190,10 +202,10 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                 continue;
             }
 
-            auto contentOpt = meta_->getContent(docId);
+            auto contentOpt = meta_->getContent(docInfo.id);
             if (!contentOpt || !contentOpt.value().has_value()) {
                 spdlog::debug("EmbeddingService: no content for document {}", hash);
-                failed_.fetch_add(1);
+                failedGather++;
                 continue;
             }
 
@@ -204,65 +216,184 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                 continue;
             }
 
-            yams::vector::ChunkingConfig ccfg{};
-            spdlog::debug("EmbeddingService: generating embeddings for {} using model '{}'", hash,
-                          modelName);
-
-            const int maxAttempts = 5;
-            std::chrono::milliseconds backoff(100);
-            bool done = false;
-
-            for (int attempt = 1; attempt <= maxAttempts && !done; ++attempt) {
-                auto r = yams::ingest::embed_and_insert_document(
-                    *provider, modelName, *vdb, *meta_, hash, text, docInfo.fileName,
-                    docInfo.filePath, docInfo.mimeType, ccfg);
-
-                if (r) {
-                    spdlog::debug("EmbeddingService: successfully generated {} embeddings for {}",
-                                  r.value(), hash);
-                    succeeded++;
-                    done = true;
-                    // Mark repair as completed
-                    (void)meta_->updateDocumentRepairStatus(hash,
-                                                            metadata::RepairStatus::Completed);
-                    break;
-                }
-
-                const auto& msg = r.error().message;
-                const bool isDeadlock = msg.find("deadlock") != std::string::npos ||
-                                        msg.find("resource deadlock") != std::string::npos;
-                const bool isBusy = msg.find("busy") != std::string::npos ||
-                                    msg.find("locked") != std::string::npos;
-
-                const bool retryable = (isDeadlock || isBusy);
-
-                if (!retryable || attempt == maxAttempts) {
-                    spdlog::warn("EmbeddingService: embed/insert failed for {} (attempt {}/{}): {}",
-                                 hash, attempt, maxAttempts, msg);
-                    failed_.fetch_add(1);
-                    // Mark repair as failed after exhausting retries
-                    (void)meta_->updateDocumentRepairStatus(hash, metadata::RepairStatus::Failed);
-                    done = true;
-                    break;
-                }
-
-                spdlog::warn("EmbeddingService: retrying {} after {} ms (attempt {}/{}): {}", hash,
-                             backoff.count(), attempt, maxAttempts, msg);
-                std::this_thread::sleep_for(backoff);
-                backoff = std::min<std::chrono::milliseconds>(backoff * 2, std::chrono::seconds(2));
-            }
+            docsToEmbed.push_back(
+                {hash, text, docInfo.fileName, docInfo.filePath, docInfo.mimeType});
         } catch (const std::exception& e) {
-            spdlog::error("EmbeddingService: exception processing {}: {}", hash, e.what());
-            failed_.fetch_add(1);
-            // Mark repair as failed on exception
-            (void)meta_->updateDocumentRepairStatus(hash, metadata::RepairStatus::Failed);
+            spdlog::error("EmbeddingService: exception gathering {}: {}", hash, e.what());
+            failedGather++;
         }
     }
 
-    processed_.fetch_add(succeeded);
+    failed_.fetch_add(failedGather);
+
+    if (docsToEmbed.empty()) {
+        spdlog::debug("EmbeddingService: no documents to embed after gathering");
+        return;
+    }
+
+    spdlog::debug("EmbeddingService: gathered {} documents for embedding", docsToEmbed.size());
+
+    // ============================================================
+    // Phase 2: Chunk all documents
+    // ============================================================
+    struct ChunkInfo {
+        size_t docIdx;       // Index into docsToEmbed
+        std::string chunkId; // Unique chunk ID
+        std::string content; // Chunk text
+        size_t startOffset;
+        size_t endOffset;
+    };
+    std::vector<ChunkInfo> allChunks;
+    std::vector<std::string> allTexts; // For batch embedding call
+
+    yams::vector::ChunkingConfig ccfg{};
+    auto chunker =
+        yams::vector::createChunker(yams::vector::ChunkingStrategy::SENTENCE_BASED, ccfg, nullptr);
+
+    for (size_t docIdx = 0; docIdx < docsToEmbed.size(); ++docIdx) {
+        const auto& doc = docsToEmbed[docIdx];
+        auto chunks = chunker->chunkDocument(doc.text, doc.hash);
+
+        if (chunks.empty()) {
+            // No chunks produced - use whole document as single chunk
+            std::string chunkId = yams::vector::utils::generateChunkId(doc.hash, 0);
+            allChunks.push_back({docIdx, chunkId, doc.text, 0, doc.text.size()});
+            allTexts.push_back(doc.text);
+        } else {
+            for (size_t i = 0; i < chunks.size(); ++i) {
+                auto& c = chunks[i];
+                std::string chunkId = c.chunk_id.empty()
+                                          ? yams::vector::utils::generateChunkId(doc.hash, i)
+                                          : c.chunk_id;
+                allChunks.push_back(
+                    {docIdx, chunkId, std::move(c.content), c.start_offset, c.end_offset});
+                allTexts.push_back(allChunks.back().content);
+            }
+        }
+    }
+
+    spdlog::debug("EmbeddingService: chunked {} documents into {} chunks", docsToEmbed.size(),
+                  allChunks.size());
+
+    // ============================================================
+    // Phase 3: Single batch embedding call for ALL chunks
+    // ============================================================
+    auto embedResult = provider->generateBatchEmbeddingsFor(modelName, allTexts);
+    if (!embedResult) {
+        spdlog::error("EmbeddingService: batch embedding failed: {}", embedResult.error().message);
+        failed_.fetch_add(docsToEmbed.size());
+        for (const auto& doc : docsToEmbed) {
+            (void)meta_->updateDocumentRepairStatus(doc.hash, metadata::RepairStatus::Failed);
+        }
+        return;
+    }
+
+    auto& embeddings = embedResult.value();
+    if (embeddings.size() != allChunks.size()) {
+        spdlog::error("EmbeddingService: embedding count mismatch ({} vs {})", embeddings.size(),
+                      allChunks.size());
+        failed_.fetch_add(docsToEmbed.size());
+        for (const auto& doc : docsToEmbed) {
+            (void)meta_->updateDocumentRepairStatus(doc.hash, metadata::RepairStatus::Failed);
+        }
+        return;
+    }
+
+    spdlog::debug("EmbeddingService: generated {} embeddings in single batch", embeddings.size());
+
+    // ============================================================
+    // Phase 4: Build VectorRecords and batch insert
+    // ============================================================
+    // Group chunks by document for document-level embedding computation
+    std::unordered_map<size_t, std::vector<size_t>> docToChunkIndices;
+    for (size_t i = 0; i < allChunks.size(); ++i) {
+        docToChunkIndices[allChunks[i].docIdx].push_back(i);
+    }
+
+    std::vector<yams::vector::VectorRecord> allRecords;
+    allRecords.reserve(allChunks.size() + docsToEmbed.size()); // chunks + doc-level embeddings
+
+    for (size_t docIdx = 0; docIdx < docsToEmbed.size(); ++docIdx) {
+        const auto& doc = docsToEmbed[docIdx];
+        const auto& chunkIndices = docToChunkIndices[docIdx];
+
+        // Add chunk-level records
+        for (size_t chunkIdx : chunkIndices) {
+            const auto& chunk = allChunks[chunkIdx];
+            yams::vector::VectorRecord rec;
+            rec.document_hash = doc.hash;
+            rec.chunk_id = chunk.chunkId;
+            rec.embedding = std::move(embeddings[chunkIdx]);
+            rec.content = chunk.content;
+            rec.start_offset = chunk.startOffset;
+            rec.end_offset = chunk.endOffset;
+            rec.level = yams::vector::EmbeddingLevel::CHUNK;
+            rec.metadata["name"] = doc.fileName;
+            rec.metadata["mime_type"] = doc.mimeType;
+            rec.metadata["path"] = doc.filePath;
+            allRecords.push_back(std::move(rec));
+        }
+
+        // Compute document-level embedding (average of chunks, normalized)
+        if (!chunkIndices.empty() && !embeddings[chunkIndices[0]].empty()) {
+            size_t dim = embeddings[chunkIndices[0]].size();
+            std::vector<float> docEmbedding(dim, 0.0f);
+
+            for (size_t chunkIdx : chunkIndices) {
+                const auto& emb = embeddings[chunkIdx];
+                for (size_t j = 0; j < dim && j < emb.size(); ++j) {
+                    docEmbedding[j] += emb[j];
+                }
+            }
+
+            // Normalize
+            float norm = 0.0f;
+            for (float v : docEmbedding) {
+                norm += v * v;
+            }
+            if (norm > 0.0f) {
+                norm = std::sqrt(norm);
+                for (float& v : docEmbedding) {
+                    v /= norm;
+                }
+            }
+
+            yams::vector::VectorRecord docRec;
+            docRec.document_hash = doc.hash;
+            docRec.chunk_id = yams::vector::utils::generateChunkId(doc.hash, 999999);
+            docRec.embedding = std::move(docEmbedding);
+            docRec.content = doc.text.substr(0, 1000);
+            docRec.level = yams::vector::EmbeddingLevel::DOCUMENT;
+            for (size_t chunkIdx : chunkIndices) {
+                docRec.source_chunk_ids.push_back(allChunks[chunkIdx].chunkId);
+            }
+            docRec.metadata["name"] = doc.fileName;
+            docRec.metadata["mime_type"] = doc.mimeType;
+            docRec.metadata["path"] = doc.filePath;
+            allRecords.push_back(std::move(docRec));
+        }
+    }
+
+    // Single batch insert for all records
+    if (!vdb->insertVectorsBatch(allRecords)) {
+        spdlog::error("EmbeddingService: batch vector insert failed: {}", vdb->getLastError());
+        failed_.fetch_add(docsToEmbed.size());
+        for (const auto& doc : docsToEmbed) {
+            (void)meta_->updateDocumentRepairStatus(doc.hash, metadata::RepairStatus::Failed);
+        }
+        return;
+    }
+
+    // Update metadata and repair status for all succeeded documents
+    for (const auto& doc : docsToEmbed) {
+        (void)meta_->updateDocumentEmbeddingStatusByHash(doc.hash, true, modelName);
+        (void)meta_->updateDocumentRepairStatus(doc.hash, metadata::RepairStatus::Completed);
+    }
+
+    processed_.fetch_add(docsToEmbed.size());
 
     spdlog::debug("EmbeddingService: batch complete (succeeded={}, skipped={}, failed={})",
-                  succeeded, skipped, job.hashes.size() - succeeded - skipped);
+                  docsToEmbed.size(), skipped, failedGather);
 }
 
 } // namespace daemon

@@ -70,6 +70,10 @@ public:
         return Error{ErrorCode::NotImplemented, "NI"};
     }
     Result<void> deleteContent(int64_t) override { return Error{ErrorCode::NotImplemented, "NI"}; }
+    Result<void>
+    batchInsertContentAndIndex(const std::vector<yams::metadata::BatchContentEntry>&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
 
     // Metadata ops (unused)
     Result<void> setMetadata(int64_t, const std::string&,
@@ -295,6 +299,7 @@ public:
     Result<storage::CorpusStats> getCorpusStats() override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+    void signalCorpusStatsStale() override { /* no-op for mock */ }
 
     Result<
         std::unordered_map<int64_t, std::unordered_map<std::string, yams::metadata::MetadataValue>>>

@@ -1,0 +1,9 @@
+[wrap-git]
+url = https://github.com/tursodatabase/libsql-c.git
+revision = v0.3.4
+depth = 1
+clone-recursive = false
+patch_directory = libsql
+
+[provide]
+libsql = libsql_dep

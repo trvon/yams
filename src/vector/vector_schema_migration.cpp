@@ -1,7 +1,9 @@
 #include <yams/vector/vector_schema_migration.h>
 
+#include <chrono>
 #include <cstdint>
 #include <string>
+#include <thread>
 
 #include <sqlite3.h>
 #include <spdlog/spdlog.h>
@@ -13,6 +15,17 @@
 namespace yams::vector {
 
 namespace {
+
+// Retry parameters vary by backend:
+// - libsql MVCC: fewer retries needed since concurrent writers don't block
+// - SQLite: more retries with longer backoff for single-writer model
+#if YAMS_LIBSQL_BACKEND
+constexpr int kMaxRetries = 3;
+constexpr int kInitialBackoffMs = 5;
+#else
+constexpr int kMaxRetries = 5;
+constexpr int kInitialBackoffMs = 10;
+#endif
 
 // Check if a table exists
 bool tableExists(sqlite3* db, const char* table_name) {
@@ -30,18 +43,45 @@ bool tableExists(sqlite3* db, const char* table_name) {
     return exists;
 }
 
-// Execute SQL statement
+// Execute SQL statement with retry for transient lock errors
 Result<void> executeSQL(sqlite3* db, const char* sql) {
-    char* err_msg = nullptr;
-    int rc = sqlite3_exec(db, sql, nullptr, nullptr, &err_msg);
+    auto backoff = std::chrono::milliseconds(kInitialBackoffMs);
 
-    if (rc != SQLITE_OK) {
+    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+        char* err_msg = nullptr;
+        int rc = sqlite3_exec(db, sql, nullptr, nullptr, &err_msg);
+
+        if (rc == SQLITE_OK) {
+            return Result<void>{};
+        }
+
         std::string err = err_msg ? err_msg : "Unknown error";
         sqlite3_free(err_msg);
+
+        // Check for transient lock errors
+        if ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && attempt + 1 < kMaxRetries) {
+            spdlog::debug("[Migration] transient lock on '{}', retry {}/{}", sql, attempt + 1,
+                          kMaxRetries);
+            std::this_thread::sleep_for(backoff);
+            backoff *= 2;
+            continue;
+        }
+
         return Error{ErrorCode::DatabaseError, err};
     }
 
-    return Result<void>{};
+    return Error{ErrorCode::DatabaseError, "Max retries exceeded"};
+}
+
+// Begin transaction with backend-appropriate semantics
+Result<void> beginTransaction(sqlite3* db) {
+#if YAMS_LIBSQL_BACKEND
+    // libsql MVCC: use regular BEGIN (deferred) for better concurrency
+    return executeSQL(db, "BEGIN");
+#else
+    // SQLite: use BEGIN IMMEDIATE to acquire write lock immediately
+    return executeSQL(db, "BEGIN IMMEDIATE");
+#endif
 }
 
 // Check if vec0 module is available (needed to read V1 embeddings)
@@ -158,7 +198,7 @@ Result<void> VectorSchemaMigration::migrateV2ToV2_1(sqlite3* db) {
     spdlog::info("Starting V2 to V2.1 schema migration (adding embedding_dim column)...");
 
     // Begin transaction
-    auto result = executeSQL(db, "BEGIN TRANSACTION");
+    auto result = beginTransaction(db);
     if (!result) {
         return result;
     }
@@ -236,7 +276,7 @@ Result<void> VectorSchemaMigration::migrateV1ToV2(sqlite3* db, size_t embedding_
     }
 
     // Begin transaction
-    auto result = executeSQL(db, "BEGIN TRANSACTION");
+    auto result = beginTransaction(db);
     if (!result) {
         return result;
     }
@@ -485,7 +525,7 @@ Result<void> VectorSchemaMigration::rollbackV2ToV1(sqlite3* db) {
 
     spdlog::info("Rolling back V2 to V1 schema...");
 
-    auto result = executeSQL(db, "BEGIN TRANSACTION");
+    auto result = beginTransaction(db);
     if (!result) {
         return result;
     }
@@ -590,7 +630,7 @@ Result<void> VectorSchemaMigration::removeV1Tables(sqlite3* db) {
 
     spdlog::info("Removing V1 vector tables...");
 
-    auto result = executeSQL(db, "BEGIN TRANSACTION");
+    auto result = beginTransaction(db);
     if (!result) {
         return result;
     }
