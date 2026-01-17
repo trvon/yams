@@ -276,30 +276,56 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                   allChunks.size());
 
     // ============================================================
-    // Phase 3: Single batch embedding call for ALL chunks
+    // Phase 3: Batch embedding call with sub-batching to avoid timeouts
     // ============================================================
-    auto embedResult = provider->generateBatchEmbeddingsFor(modelName, allTexts);
-    if (!embedResult) {
-        spdlog::error("EmbeddingService: batch embedding failed: {}", embedResult.error().message);
-        failed_.fetch_add(docsToEmbed.size());
-        for (const auto& doc : docsToEmbed) {
-            (void)meta_->updateDocumentRepairStatus(doc.hash, metadata::RepairStatus::Failed);
+    // Model inference can be slow for large batches. Sub-batch to keep response times reasonable.
+    constexpr size_t kMaxBatchSize = 64; // Max chunks per model call
+    std::vector<std::vector<float>> embeddings;
+    embeddings.reserve(allTexts.size());
+
+    for (size_t start = 0; start < allTexts.size(); start += kMaxBatchSize) {
+        size_t end = std::min(start + kMaxBatchSize, allTexts.size());
+        std::vector<std::string> subBatch(allTexts.begin() + start, allTexts.begin() + end);
+
+        spdlog::debug("EmbeddingService: generating embeddings for batch {}-{} of {}", start, end,
+                      allTexts.size());
+
+        auto embedResult = provider->generateBatchEmbeddingsFor(modelName, subBatch);
+        if (!embedResult) {
+            spdlog::error("EmbeddingService: batch embedding failed at {}-{}: {}", start, end,
+                          embedResult.error().message);
+            failed_.fetch_add(docsToEmbed.size());
+            std::vector<std::string> failedHashes;
+            failedHashes.reserve(docsToEmbed.size());
+            for (const auto& doc : docsToEmbed) {
+                failedHashes.push_back(doc.hash);
+            }
+            (void)meta_->batchUpdateDocumentRepairStatuses(failedHashes,
+                                                           metadata::RepairStatus::Failed);
+            return;
         }
-        return;
+
+        auto& batchEmbeddings = embedResult.value();
+        for (auto& emb : batchEmbeddings) {
+            embeddings.push_back(std::move(emb));
+        }
     }
 
-    auto& embeddings = embedResult.value();
     if (embeddings.size() != allChunks.size()) {
         spdlog::error("EmbeddingService: embedding count mismatch ({} vs {})", embeddings.size(),
                       allChunks.size());
         failed_.fetch_add(docsToEmbed.size());
+        std::vector<std::string> failedHashes;
+        failedHashes.reserve(docsToEmbed.size());
         for (const auto& doc : docsToEmbed) {
-            (void)meta_->updateDocumentRepairStatus(doc.hash, metadata::RepairStatus::Failed);
+            failedHashes.push_back(doc.hash);
         }
+        (void)meta_->batchUpdateDocumentRepairStatuses(failedHashes,
+                                                       metadata::RepairStatus::Failed);
         return;
     }
 
-    spdlog::debug("EmbeddingService: generated {} embeddings in single batch", embeddings.size());
+    spdlog::debug("EmbeddingService: generated {} embeddings total", embeddings.size());
 
     // ============================================================
     // Phase 4: Build VectorRecords and batch insert
@@ -378,17 +404,25 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     if (!vdb->insertVectorsBatch(allRecords)) {
         spdlog::error("EmbeddingService: batch vector insert failed: {}", vdb->getLastError());
         failed_.fetch_add(docsToEmbed.size());
+        std::vector<std::string> failedHashes;
+        failedHashes.reserve(docsToEmbed.size());
         for (const auto& doc : docsToEmbed) {
-            (void)meta_->updateDocumentRepairStatus(doc.hash, metadata::RepairStatus::Failed);
+            failedHashes.push_back(doc.hash);
         }
+        (void)meta_->batchUpdateDocumentRepairStatuses(failedHashes,
+                                                       metadata::RepairStatus::Failed);
         return;
     }
 
-    // Update metadata and repair status for all succeeded documents
+    // Update metadata and repair status for all succeeded documents (single transaction each)
+    std::vector<std::string> successHashes;
+    successHashes.reserve(docsToEmbed.size());
     for (const auto& doc : docsToEmbed) {
-        (void)meta_->updateDocumentEmbeddingStatusByHash(doc.hash, true, modelName);
-        (void)meta_->updateDocumentRepairStatus(doc.hash, metadata::RepairStatus::Completed);
+        successHashes.push_back(doc.hash);
     }
+    (void)meta_->batchUpdateDocumentEmbeddingStatusByHashes(successHashes, true, modelName);
+    (void)meta_->batchUpdateDocumentRepairStatuses(successHashes,
+                                                   metadata::RepairStatus::Completed);
 
     processed_.fetch_add(docsToEmbed.size());
 

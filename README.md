@@ -162,6 +162,8 @@ yams plugin health                  # Check plugin status
 yams doctor plugin onnx             # Diagnose specific plugin
 ```
 
+**Recommended model:** `all-MiniLM-L6-v2` (384-dim) — best speed/quality tradeoff. On Windows, avoid 768-dim+ models due to single-threaded ONNX execution.
+
 ## Troubleshooting
 
 ```bash

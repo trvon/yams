@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 
 #include <yams/core/types.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 
 #include <sqlite-vec-cpp/index/hnsw_persistence.hpp>
 
@@ -70,6 +71,7 @@ Result<void> executeSQL(sqlite3* db, const char* sql) {
         return Error{ErrorCode::DatabaseError, err};
     }
 
+    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
     return Error{ErrorCode::DatabaseError, "Max retries exceeded"};
 }
 

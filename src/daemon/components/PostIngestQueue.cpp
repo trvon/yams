@@ -727,16 +727,15 @@ void PostIngestQueue::processEmbeddingBatch(const std::vector<std::string>& hash
         job.skipExisting = true;
         job.modelName = "";
 
-        // PBI-05b: Use blocking push with backpressure to prevent embed job drops.
-        // Wait up to 5 seconds for space - this creates backpressure on ingest when
-        // embedding can't keep up, which is better than silently dropping jobs.
-        constexpr auto kEmbedPushTimeout = std::chrono::seconds(5);
+        // PBI-05b: Use blocking push with short timeout to avoid stalling pipeline.
+        // If embedding can't keep up, better to queue retry than block for seconds.
+        constexpr auto kEmbedPushTimeout = std::chrono::milliseconds(100);
         if (!embedChannel->push_wait(std::move(job), kEmbedPushTimeout)) {
             for (std::size_t i = 0; i < hashes.size(); ++i) {
                 InternalEventBus::instance().incEmbedDropped();
             }
-            spdlog::warn("[PostIngestQueue] Embed channel full after {}s backpressure, dropping "
-                         "batch of {} hashes",
+            spdlog::warn("[PostIngestQueue] Embed channel full after {}ms, dropping batch of {} "
+                         "hashes",
                          kEmbedPushTimeout.count(), hashes.size());
         } else {
             for (std::size_t i = 0; i < hashes.size(); ++i) {

@@ -1385,7 +1385,7 @@ public:
             } catch (...) {
             }
         }
-        return 8; // Default matches original kMaxKgConcurrent_
+        return 4; // Increased back from 2 after batch status update improvements
     }
     static void setPostKgConcurrent(uint32_t v) {
         postKgConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
@@ -1405,7 +1405,7 @@ public:
             } catch (...) {
             }
         }
-        return 4; // Default matches original kMaxSymbolConcurrent_
+        return 4; // Increased back from 2 after batch status update improvements
     }
     static void setPostSymbolConcurrent(uint32_t v) {
         postSymbolConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
@@ -1447,10 +1447,10 @@ public:
             } catch (...) {
             }
         }
-        // Default: scale with hardware up to 16 workers
-        // Use hw/2 to maintain throughput while leaving headroom for other tasks
+        // Default: scale with hardware. Embeddings are compute-bound (ONNX inference).
+        // DB batch updates now use single-transaction batching to reduce contention.
         uint32_t hw = hardwareConcurrency();
-        return std::min<uint32_t>(std::max<uint32_t>(hw / 2, 4), 16);
+        return std::min<uint32_t>(std::max<uint32_t>(hw / 2, 2), 8);
     }
     static void setPostEmbedConcurrent(uint32_t v) {
         postEmbedConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);

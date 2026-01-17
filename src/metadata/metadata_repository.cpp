@@ -3514,6 +3514,103 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatusByHash(const std::
     });
 }
 
+Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
+    const std::vector<std::string>& hashes, bool hasEmbedding, const std::string& modelId) {
+    if (hashes.empty())
+        return Result<void>();
+
+    constexpr int kMaxRetries = 5;
+    constexpr int kBaseDelayMs = 50;
+
+    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+        auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+            auto beginResult = db.execute("BEGIN IMMEDIATE");
+            if (!beginResult)
+                return beginResult.error();
+
+            auto lookupStmt = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
+            if (!lookupStmt) {
+                db.execute("ROLLBACK");
+                return lookupStmt.error();
+            }
+
+            auto updateStmt = db.prepare(R"(
+                INSERT INTO document_embeddings_status (document_id, has_embedding, model_id, updated_at)
+                VALUES (?, ?, ?, unixepoch())
+                ON CONFLICT(document_id) DO UPDATE SET
+                    has_embedding = excluded.has_embedding,
+                    model_id = excluded.model_id,
+                    updated_at = excluded.updated_at
+            )");
+            if (!updateStmt) {
+                db.execute("ROLLBACK");
+                return updateStmt.error();
+            }
+
+            auto& lstmt = lookupStmt.value();
+            auto& ustmt = updateStmt.value();
+
+            for (const auto& hash : hashes) {
+                lstmt.reset();
+                if (auto r = lstmt.bind(1, hash); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+
+                auto stepResult = lstmt.step();
+                if (!stepResult) {
+                    db.execute("ROLLBACK");
+                    return stepResult.error();
+                }
+                if (!stepResult.value())
+                    continue;
+
+                int64_t documentId = lstmt.getInt64(0);
+
+                ustmt.reset();
+                if (auto r = ustmt.bind(1, documentId); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                if (auto r = ustmt.bind(2, hasEmbedding ? 1 : 0); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                if (auto r = ustmt.bind(3, modelId.empty() ? nullptr : modelId.c_str()); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+
+                auto execResult = ustmt.execute();
+                if (!execResult) {
+                    db.execute("ROLLBACK");
+                    return execResult.error();
+                }
+            }
+
+            auto commitResult = db.execute("COMMIT");
+            if (!commitResult)
+                return commitResult.error();
+
+            signalCorpusStatsStale();
+            return Result<void>();
+        });
+
+        if (result)
+            return result;
+
+        if (result.error().message.find("database is locked") == std::string::npos)
+            return result;
+
+        int delayMs = kBaseDelayMs * (1 << attempt);
+        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+    }
+
+    daemon::TuneAdvisor::reportDbLockError();
+    return Error{ErrorCode::DatabaseError,
+                 "batchUpdateDocumentEmbeddingStatusByHashes: max retries exceeded"};
+}
+
 Result<void> MetadataRepository::updateDocumentExtractionStatus(int64_t documentId,
                                                                 bool contentExtracted,
                                                                 ExtractionStatus status,
@@ -3568,6 +3665,74 @@ Result<void> MetadataRepository::updateDocumentRepairStatus(const std::string& h
 
         return Result<void>();
     });
+}
+
+Result<void>
+MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::string>& hashes,
+                                                      RepairStatus status) {
+    if (hashes.empty())
+        return Result<void>();
+
+    constexpr int kMaxRetries = 5;
+    constexpr int kBaseDelayMs = 50;
+
+    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+        auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+            auto beginResult = db.execute("BEGIN IMMEDIATE");
+            if (!beginResult)
+                return beginResult.error();
+
+            auto updateStmt = db.prepare(R"(
+                UPDATE documents
+                SET repair_status = ?, repair_attempted_at = unixepoch(), repair_attempts = repair_attempts + 1
+                WHERE sha256_hash = ?
+            )");
+            if (!updateStmt) {
+                db.execute("ROLLBACK");
+                return updateStmt.error();
+            }
+
+            auto& stmt = updateStmt.value();
+            std::string statusStr = RepairStatusUtils::toString(status);
+
+            for (const auto& hash : hashes) {
+                stmt.reset();
+                if (auto r = stmt.bind(1, statusStr.c_str()); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                if (auto r = stmt.bind(2, hash); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+
+                auto execResult = stmt.execute();
+                if (!execResult) {
+                    db.execute("ROLLBACK");
+                    return execResult.error();
+                }
+            }
+
+            auto commitResult = db.execute("COMMIT");
+            if (!commitResult)
+                return commitResult.error();
+
+            return Result<void>();
+        });
+
+        if (result)
+            return result;
+
+        if (result.error().message.find("database is locked") == std::string::npos)
+            return result;
+
+        int delayMs = kBaseDelayMs * (1 << attempt);
+        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+    }
+
+    daemon::TuneAdvisor::reportDbLockError();
+    return Error{ErrorCode::DatabaseError,
+                 "batchUpdateDocumentRepairStatuses: max retries exceeded"};
 }
 
 Result<void> MetadataRepository::checkpointWal() {

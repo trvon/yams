@@ -8,6 +8,7 @@ namespace yamsfmt = std;
 namespace yamsfmt = fmt;
 #endif
 #include <yams/core/types.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 
 #include <chrono>
 #include <filesystem>
@@ -126,6 +127,7 @@ public:
                 yamsfmt::format("Statement execution failed: {}", sqlite3_errmsg(db_)));
         }
 
+        daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
         throw std::runtime_error("Statement execution failed: max retries exceeded");
     }
 
@@ -233,6 +235,7 @@ public:
             throw std::runtime_error(yamsfmt::format("SQL execution failed: {}", error));
         }
 
+        daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
         throw std::runtime_error("SQL execution failed: max retries exceeded");
     }
 

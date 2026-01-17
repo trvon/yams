@@ -1,6 +1,8 @@
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_schema_migration.h>
 
+#include <yams/daemon/components/TuneAdvisor.h>
+
 #include <sqlite3.h>
 #include <chrono>
 #include <cstring>
@@ -71,6 +73,7 @@ inline bool beginTransactionWithRetry(sqlite3* db) {
                      attempt + 1, kMaxRetries);
         break;
     }
+    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
     return false;
 }
 
@@ -92,6 +95,7 @@ inline bool execWithRetry(sqlite3* db, const char* sql) {
                      attempt + 1, kMaxRetries);
         break;
     }
+    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
     return false;
 }
 
@@ -112,7 +116,8 @@ inline int stepWithRetry(sqlite3_stmt* stmt) {
         }
         return rc; // Non-retryable error
     }
-    return SQLITE_BUSY; // Max retries exceeded
+    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
+    return SQLITE_BUSY;                       // Max retries exceeded
 }
 
 // SQL statements

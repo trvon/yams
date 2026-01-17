@@ -299,13 +299,17 @@ public:
                     // NOTE: Removed g_onnx_init_mutex lock here - it may have been conflicting
                     // with ONNX Runtime's internal locking. We rely on:
                     // 1. Single-flight pattern in loadModel() to prevent concurrent model loads
-                    // 2. ONNX Runtime configured for single-threaded operation
+                    // 2. ONNX Runtime configured for single-threaded operation on Windows
                     spdlog::info("[ONNX] Configuring session options for '{}'", modelName_);
 
-                    // Create local session options with single thread
+                    // Clone session options; on Windows force single-thread to avoid deadlocks
                     auto options = sessionOptions_->Clone();
+#ifdef _WIN32
+                    // Windows: force single-threaded to avoid "resource deadlock would occur"
                     options.SetIntraOpNumThreads(1);
                     options.SetInterOpNumThreads(1);
+#endif
+                    // Non-Windows: use configured threads from sessionOptions_ (default intra=4)
 
                     // Create session directly - no async wrapper needed for local file operations
                     spdlog::info("[ONNX] Creating Ort::Session for '{}' at '{}'", modelName_,

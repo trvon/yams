@@ -20,6 +20,7 @@
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_concepts.h>
 #include <yams/profiling.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 
 namespace yams::search {
 class SymSpellSearch; // Forward declaration for SQLite-backed fuzzy search
@@ -296,6 +297,10 @@ public:
     virtual Result<void> updateDocumentEmbeddingStatusByHash(const std::string& hash,
                                                              bool hasEmbedding,
                                                              const std::string& modelId = "") = 0;
+    virtual Result<void>
+    batchUpdateDocumentEmbeddingStatusByHashes(const std::vector<std::string>& hashes,
+                                               bool hasEmbedding,
+                                               const std::string& modelId = "") = 0;
 
     // Extraction status operations (avoid read-modify-write)
     virtual Result<void> updateDocumentExtractionStatus(int64_t documentId, bool contentExtracted,
@@ -305,10 +310,9 @@ public:
     // Repair status operations
     virtual Result<void> updateDocumentRepairStatus(const std::string& hash,
                                                     RepairStatus status) = 0;
+    virtual Result<void> batchUpdateDocumentRepairStatuses(const std::vector<std::string>& hashes,
+                                                           RepairStatus status) = 0;
 
-    /**
-     * @brief Force a WAL checkpoint.
-     */
     virtual Result<void> checkpointWal() = 0;
 
     // Path tree operations (PBI-051 scaffold)
@@ -543,6 +547,10 @@ public:
                                                const std::string& modelId = "") override;
     Result<void> updateDocumentEmbeddingStatusByHash(const std::string& hash, bool hasEmbedding,
                                                      const std::string& modelId = "") override;
+    Result<void>
+    batchUpdateDocumentEmbeddingStatusByHashes(const std::vector<std::string>& hashes,
+                                               bool hasEmbedding,
+                                               const std::string& modelId = "") override;
 
     // Extraction status operations (avoid read-modify-write)
     Result<void> updateDocumentExtractionStatus(int64_t documentId, bool contentExtracted,
@@ -551,6 +559,8 @@ public:
 
     // Repair status operations
     Result<void> updateDocumentRepairStatus(const std::string& hash, RepairStatus status) override;
+    Result<void> batchUpdateDocumentRepairStatuses(const std::vector<std::string>& hashes,
+                                                   RepairStatus status) override;
 
     Result<void> checkpointWal() override;
 
@@ -707,6 +717,10 @@ private:
     template <typename T> Result<T> executeQuery(std::function<Result<T>(Database&)> func) {
         auto result = pool_.withConnection(func);
         if (!result.has_value()) {
+            // Report lock errors to TuneAdvisor for adaptive concurrency scaling
+            if (result.error().message.find("database is locked") != std::string::npos) {
+                daemon::TuneAdvisor::reportDbLockError();
+            }
             if (metadata_trace_enabled()) {
                 spdlog::warn("MetadataRepository::executeQuery op='{}' error: {}",
                              current_metadata_op(), result.error().message);

@@ -222,13 +222,18 @@ void TuningManager::tick_once() {
 
             // Embed concurrency: also scale DOWN on DB contention
             // Embeddings write to vector_db which shares the SQLite connection pool
-            uint32_t embedTarget = 2; // minimum baseline
+            uint32_t embedTarget = 4; // conservative baseline (was 2, caused stalls)
             if (dbLockErrors > lockThreshold * 2) {
                 // Severe DB contention: drop to minimum
-                embedTarget = 2;
+                embedTarget = 1;
+                spdlog::debug("TuningManager: DB lock errors ({}) severe, embed concurrency -> 1",
+                              dbLockErrors);
             } else if (dbLockErrors > lockThreshold) {
-                // Moderate contention: cap at 4
-                embedTarget = std::min<uint32_t>(4, embedTarget);
+                // Moderate contention: reduce to 2
+                embedTarget = 2;
+                spdlog::debug(
+                    "TuningManager: DB lock errors ({}) > threshold, embed concurrency -> 2",
+                    dbLockErrors);
             } else if (embedQueued > 1000 || embedDropped > 100) {
                 // Heavy backlog or significant drops - scale to max
                 embedTarget = std::min<uint32_t>(hwThreads / 2, 16);

@@ -325,6 +325,10 @@ public:
                                                      const std::string&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+    Result<void> batchUpdateDocumentEmbeddingStatusByHashes(const std::vector<std::string>&, bool,
+                                                            const std::string&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
 
     Result<void> updateDocumentExtractionStatus(int64_t, bool, yams::metadata::ExtractionStatus,
                                                 const std::string&) override {
@@ -334,6 +338,10 @@ public:
     // Repair status operations
     Result<void> updateDocumentRepairStatus(const std::string&,
                                             yams::metadata::RepairStatus) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<void> batchUpdateDocumentRepairStatuses(const std::vector<std::string>&,
+                                                   yams::metadata::RepairStatus) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
 

@@ -3,6 +3,7 @@
 #include <cstring>
 #include <sstream>
 #include <thread>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/metadata/database.h>
 
 namespace yams::metadata {
@@ -138,6 +139,7 @@ Result<void> Statement::execute() {
         return Error{ErrorCode::DatabaseError,
                      "Failed to execute statement: " + std::string(sqlite3_errstr(rc))};
     }
+    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
     return Error{ErrorCode::DatabaseError, "Failed to execute statement: max retries exceeded"};
 }
 
@@ -170,6 +172,7 @@ Result<bool> Statement::step() {
         return Error{ErrorCode::DatabaseError,
                      "Failed to step statement: " + std::string(sqlite3_errstr(rc))};
     }
+    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
     return Error{ErrorCode::DatabaseError, "Failed to step statement: max retries exceeded"};
 }
 

@@ -1331,13 +1331,7 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                 socket.close();
             }
         } else {
-            // Check connection_closing_ before is_open() to avoid TSAN race with handle_connection
-            const uint64_t sock_fd =
-                (!connection_closing_.load(std::memory_order_acquire) && socket.is_open())
-                    ? static_cast<uint64_t>(socket.native_handle())
-                    : static_cast<uint64_t>(-1);
-            spdlog::debug("keeping socket open after response (request_id={} fd={})", request_id,
-                          sock_fd);
+            spdlog::debug("keeping socket open after response (request_id={})", request_id);
         }
 
         auto duration = std::chrono::steady_clock::now() - start_time;
