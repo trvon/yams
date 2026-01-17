@@ -1515,7 +1515,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: EmbeddingService Initialized.");
 
-    // Initialize KGWriteQueue for serialized KG writes (eliminates lock contention)
+    // Initialize KGWriteQueue for serialized KG writes (internal infrastructure, not a phase)
     try {
         auto kgStore = getKgStore();
         if (kgStore && workCoordinator_) {
@@ -1527,16 +1527,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             kgWriteQueue_ = std::make_unique<KGWriteQueue>(*workCoordinator_->getIOContext(),
                                                            kgStore, queueConfig);
             kgWriteQueue_->start();
-            spdlog::info("[ServiceManager] KGWriteQueue initialized and started");
-        } else {
-            spdlog::debug("[ServiceManager] KGWriteQueue skipped (no KG store or coordinator)");
+            spdlog::debug("[ServiceManager] KGWriteQueue started");
         }
     } catch (const std::exception& e) {
         spdlog::warn("[ServiceManager] KGWriteQueue init failed: {}", e.what());
     } catch (...) {
-        spdlog::warn("[ServiceManager] KGWriteQueue init failed (unknown)");
     }
-    spdlog::info("[ServiceManager] Phase: KGWriteQueue Initialized.");
 
     // Defer Vector DB initialization until after plugin adoption (provider dim)
     spdlog::info("[ServiceManager] Phase: Vector DB Init (deferred until after plugins).");

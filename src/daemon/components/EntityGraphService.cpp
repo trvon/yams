@@ -193,98 +193,14 @@ bool EntityGraphService::populateKnowledgeGraph(
     spdlog::info("EntityGraphService: received {} symbols, {} relations from {}",
                  result->symbol_count, result->relation_count, job.filePath);
 
-    // Check if KGWriteQueue is available - use deferred batching to eliminate lock contention
+    // Require KGWriteQueue - batched writes only (no fallback to per-document commits)
     KGWriteQueue* kgQueue = services_ ? services_->getKgWriteQueue() : nullptr;
-    if (kgQueue) {
-        return populateKnowledgeGraphDeferred(kg, job, result, kgQueue);
-    }
-
-    // Avoid removing historical edges when we have snapshot-scoped nodes.
-    if (job.documentHash.empty() && !job.filePath.empty()) {
-        auto cleanupResult = kg->deleteEdgesForSourceFile(job.filePath);
-        if (cleanupResult) {
-            if (cleanupResult.value() > 0) {
-                spdlog::debug("EntityGraphService: cleaned up {} stale edges for {}",
-                              cleanupResult.value(), job.filePath);
-            }
-        }
-    }
-
-    // Fallback: direct write batch (original implementation)
-    try {
-        // Create a write batch for reduced transaction overhead
-        auto batchRes = kg->beginWriteBatch();
-        if (!batchRes) {
-            spdlog::warn("EntityGraphService: failed to begin write batch: {}",
-                         batchRes.error().message);
-            return false;
-        }
-        auto batch = std::move(batchRes.value());
-
-        // Per-job cache to avoid redundant node key lookups
-        ExtractionCache cache;
-
-        std::optional<std::int64_t> documentDbId;
-        auto contextNodesRes = resolveContextNodes(kg, batch.get(), cache, job, documentDbId);
-        if (!contextNodesRes) {
-            spdlog::warn("EntityGraphService: failed to resolve context nodes: {}",
-                         contextNodesRes.error().message);
-            return false;
-        }
-        auto& contextNodes = contextNodesRes.value();
-
-        auto symbolNodesRes = createSymbolNodes(kg, batch.get(), cache, job, result);
-        if (!symbolNodesRes) {
-            spdlog::warn("EntityGraphService: failed to create symbol nodes: {}",
-                         symbolNodesRes.error().message);
-            return false;
-        }
-        auto& symbolNodes = symbolNodesRes.value();
-
-        auto edgesRes =
-            createSymbolEdges(kg, batch.get(), cache, job, result, contextNodes, symbolNodes);
-        if (!edgesRes) {
-            spdlog::warn("EntityGraphService: failed to create symbol edges: {}",
-                         edgesRes.error().message);
-            // Non-fatal, continue to doc entities
-        }
-
-        auto docEntitiesRes =
-            createDocEntities(batch.get(), documentDbId, result, symbolNodes.versionNodeIds);
-        if (!docEntitiesRes) {
-            spdlog::warn("EntityGraphService: failed to create doc entities: {}",
-                         docEntitiesRes.error().message);
-            // Non-fatal
-        }
-
-        // Commit the batch
-        auto commitRes = batch->commit();
-        if (!commitRes) {
-            spdlog::warn("EntityGraphService: failed to commit write batch: {}",
-                         commitRes.error().message);
-            if (commitRes.error().message.find("database is locked") != std::string::npos) {
-                TuneAdvisor::reportDbLockError();
-            }
-            return false;
-        }
-
-        // Generate entity embeddings for semantic symbol search (non-blocking)
-        // Note: this runs outside the batch since it may involve model inference
-        auto embeddingsRes = generateEntityEmbeddings(job, result, symbolNodes);
-        if (!embeddingsRes) {
-            spdlog::debug("EntityGraphService: entity embeddings skipped or failed: {}",
-                          embeddingsRes.error().message);
-            // Non-fatal - KG is still populated
-        }
-
-        spdlog::info("EntityGraphService: populated KG with {} symbols from {}",
-                     result->symbol_count, job.filePath);
-        return true;
-
-    } catch (const std::exception& e) {
-        spdlog::warn("EntityGraphService: exception populating KG: {}", e.what());
+    if (!kgQueue) {
+        spdlog::error("EntityGraphService: KGWriteQueue not available, cannot process symbols");
         return false;
     }
+
+    return populateKnowledgeGraphDeferred(kg, job, result, kgQueue);
 }
 
 bool EntityGraphService::populateKnowledgeGraphDeferred(
@@ -1616,143 +1532,14 @@ bool EntityGraphService::populateKnowledgeGraphNL(
     spdlog::info("EntityGraphService: populating KG with {} NL entities from {}",
                  result->entity_count, job.filePath);
 
-    // Check if KGWriteQueue is available - use deferred batching to eliminate lock contention
+    // Require KGWriteQueue - batched writes only (no fallback to per-document commits)
     KGWriteQueue* kgQueue = services_ ? services_->getKgWriteQueue() : nullptr;
-    if (kgQueue) {
-        return populateKnowledgeGraphNLDeferred(kg, job, result, adapter, kgQueue);
-    }
-
-    // Fallback: direct write batch (original implementation)
-    try {
-        // Create a write batch for reduced transaction overhead
-        auto batchRes = kg->beginWriteBatch();
-        if (!batchRes) {
-            spdlog::warn("EntityGraphService: failed to begin write batch for NL: {}",
-                         batchRes.error().message);
-            return false;
-        }
-        auto batch = std::move(batchRes.value());
-
-        // Per-job cache to avoid redundant node key lookups
-        ExtractionCache cache;
-
-        // Resolve context nodes (document, file, directory)
-        std::optional<std::int64_t> documentDbId;
-        auto contextNodesRes = resolveContextNodes(kg, batch.get(), cache, job, documentDbId);
-        if (!contextNodesRes) {
-            spdlog::warn("EntityGraphService: failed to resolve context nodes for NL: {}",
-                         contextNodesRes.error().message);
-            return false;
-        }
-        auto& contextNodes = contextNodesRes.value();
-
-        // Create entity nodes using WriteBatch for reduced transaction overhead
-        auto entityNodesRes = createEntityNodes(kg, batch.get(), job, result);
-        if (!entityNodesRes) {
-            spdlog::warn("EntityGraphService: failed to create entity nodes: {}",
-                         entityNodesRes.error().message);
-            if (entityNodesRes.error().message.find("database is locked") != std::string::npos) {
-                TuneAdvisor::reportDbLockError();
-            }
-            return false;
-        }
-        auto& entityNodes = entityNodesRes.value();
-
-        // Link entities to document context
-        if (contextNodes.documentNodeId.has_value() || contextNodes.fileNodeId.has_value()) {
-            std::vector<yams::metadata::KGEdge> contextEdges;
-            contextEdges.reserve(entityNodes.nodeIds.size());
-
-            for (size_t i = 0; i < entityNodes.nodeIds.size(); ++i) {
-                const auto& ent = result->entities[i];
-
-                // Link to document
-                if (contextNodes.documentNodeId.has_value()) {
-                    nlohmann::json edgeProps;
-                    edgeProps["start_offset"] = ent.start_offset;
-                    edgeProps["end_offset"] = ent.end_offset;
-                    edgeProps["confidence"] = ent.confidence;
-                    if (!job.documentHash.empty())
-                        edgeProps["snapshot_id"] = job.documentHash;
-
-                    yams::metadata::KGEdge edge;
-                    edge.srcNodeId = entityNodes.nodeIds[i];
-                    edge.dstNodeId = contextNodes.documentNodeId.value();
-                    edge.relation = "mentioned_in";
-                    edge.weight = ent.confidence;
-                    edge.properties = edgeProps.dump();
-                    contextEdges.push_back(edge);
-                }
-
-                // Link to file if no document
-                if (!contextNodes.documentNodeId.has_value() &&
-                    contextNodes.fileNodeId.has_value()) {
-                    yams::metadata::KGEdge edge;
-                    edge.srcNodeId = entityNodes.nodeIds[i];
-                    edge.dstNodeId = contextNodes.fileNodeId.value();
-                    edge.relation = "mentioned_in";
-                    edge.weight = ent.confidence;
-                    contextEdges.push_back(edge);
-                }
-            }
-
-            if (!contextEdges.empty()) {
-                batch->addEdgesUnique(contextEdges);
-            }
-        }
-
-        // Create DocEntity records for entity spans
-        if (documentDbId.has_value()) {
-            std::vector<yams::metadata::DocEntity> docEntities;
-            docEntities.reserve(result->entity_count);
-
-            for (size_t i = 0; i < result->entity_count; ++i) {
-                const auto& ent = result->entities[i];
-
-                yams::metadata::DocEntity docEnt;
-                docEnt.documentId = documentDbId.value();
-                docEnt.entityText = ent.text ? std::string(ent.text) : "";
-                docEnt.nodeId = entityNodes.nodeIds[i];
-                docEnt.startOffset = ent.start_offset;
-                docEnt.endOffset = ent.end_offset;
-                docEnt.confidence = ent.confidence;
-                docEnt.extractor = adapter->getExtractorId();
-                docEntities.push_back(docEnt);
-            }
-
-            if (!docEntities.empty()) {
-                batch->deleteDocEntitiesForDocument(documentDbId.value());
-                batch->addDocEntities(docEntities);
-            }
-        }
-
-        // Commit the batch
-        auto commitRes = batch->commit();
-        if (!commitRes) {
-            spdlog::warn("EntityGraphService: failed to commit NL write batch: {}",
-                         commitRes.error().message);
-            if (commitRes.error().message.find("database is locked") != std::string::npos) {
-                TuneAdvisor::reportDbLockError();
-            }
-            return false;
-        }
-
-        // Generate embeddings for NL entities (outside batch, may involve model inference)
-        auto embeddingsRes = generateNLEntityEmbeddings(job, result, entityNodes);
-        if (!embeddingsRes) {
-            spdlog::debug("EntityGraphService: NL entity embeddings skipped: {}",
-                          embeddingsRes.error().message);
-            // Non-fatal
-        }
-
-        spdlog::info("EntityGraphService: populated KG with {} NL entities from {}",
-                     result->entity_count, job.filePath);
-        return true;
-
-    } catch (const std::exception& e) {
-        spdlog::warn("EntityGraphService: exception populating NL KG: {}", e.what());
+    if (!kgQueue) {
+        spdlog::error("EntityGraphService: KGWriteQueue not available, cannot process NL entities");
         return false;
     }
+
+    return populateKnowledgeGraphNLDeferred(kg, job, result, adapter, kgQueue);
 }
 
 bool EntityGraphService::populateKnowledgeGraphNLDeferred(

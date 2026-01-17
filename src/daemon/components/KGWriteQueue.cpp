@@ -3,6 +3,7 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
@@ -46,7 +47,7 @@ std::future<Result<void>> KGWriteQueue::enqueue(std::unique_ptr<DeferredKGBatch>
         }
     }
 
-    queueCv_.notify_one();
+    // Note: writerLoop uses async polling, no need for condition_variable notify
     return future;
 }
 
@@ -62,7 +63,7 @@ void KGWriteQueue::shutdown() {
     }
 
     spdlog::info("[KGWriteQueue] Shutting down...");
-    queueCv_.notify_all();
+    // Note: writerLoop will exit on next poll when it sees stop_ = true
 
     // Wait for pending batches to drain (with timeout)
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -90,17 +91,16 @@ KGWriteQueue::Stats KGWriteQueue::getStats() const {
 boost::asio::awaitable<void> KGWriteQueue::writerLoop() {
     spdlog::info("[KGWriteQueue] Writer loop started");
 
+    // Use async timer instead of blocking condition_variable
+    // to avoid blocking io_context threads
+    boost::asio::steady_timer pollTimer(co_await boost::asio::this_coro::executor);
+
     while (!stop_.load()) {
         std::vector<std::unique_ptr<DeferredKGBatch>> batchesToProcess;
 
-        // Wait for batches with timeout
+        // Check for batches (non-blocking)
         {
-            std::unique_lock<std::mutex> lock(queueMutex_);
-
-            // Wait until we have batches or timeout
-            // Wait for batches with timeout - return value indicates if predicate is true
-            (void)queueCv_.wait_for(lock, config_.maxBatchDelayMs,
-                                    [this] { return !pendingBatches_.empty() || stop_.load(); });
+            std::lock_guard<std::mutex> lock(queueMutex_);
 
             if (stop_.load() && pendingBatches_.empty()) {
                 break;
@@ -120,6 +120,13 @@ boost::asio::awaitable<void> KGWriteQueue::writerLoop() {
         }
 
         if (batchesToProcess.empty()) {
+            // No batches available - async wait before checking again
+            // This yields the thread to other coroutines (non-blocking)
+            pollTimer.expires_after(config_.maxBatchDelayMs);
+            boost::system::error_code ec;
+            co_await pollTimer.async_wait(
+                boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+            // Ignore timer errors (e.g., cancelled on shutdown)
             continue;
         }
 
@@ -142,10 +149,10 @@ boost::asio::awaitable<void> KGWriteQueue::writerLoop() {
 
         inFlight_.store(0);
 
-        // Yield to allow other coroutines to run
-        boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-        timer.expires_after(std::chrono::microseconds(100));
-        co_await timer.async_wait(boost::asio::use_awaitable);
+        // Brief yield to allow other coroutines to run
+        pollTimer.expires_after(std::chrono::microseconds(100));
+        boost::system::error_code ec;
+        co_await pollTimer.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
     }
 
     spdlog::info("[KGWriteQueue] Writer loop exited");

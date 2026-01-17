@@ -1045,6 +1045,7 @@ struct BenchFixture {
         yams::daemon::ClientConfig clientCfg;
         clientCfg.socketPath = harness->socketPath();
         clientCfg.connectTimeout = 5s;
+        clientCfg.requestTimeout = 300s; // 5 minutes for bulk ingestion
         clientCfg.autoStart = false;
         client = std::make_unique<yams::daemon::DaemonClient>(clientCfg);
 
