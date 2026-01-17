@@ -194,8 +194,8 @@ ResultFusion::fuseTextAnchor(const std::vector<ComponentResult>& results) {
     // Accumulate scores per document
     std::unordered_map<std::string, SearchResult> resultMap;
     const float k = config_.rrfK;
-    constexpr float vectorOnlyThreshold = 0.85f; // High confidence for vector-only results
-    constexpr float vectorBoostFactor = 0.15f;   // Small boost from vector when text anchored
+    constexpr float vectorOnlyThreshold = 0.80f; // High confidence for vector-only results
+    constexpr float vectorBoostFactor = 0.30f;   // Meaningful boost from vector when text anchored
 
     // Process text-anchored documents first (these always get included)
     for (const auto& [docHash, compResults] : textResults) {
@@ -875,9 +875,14 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFullText(const std
             return results;
         }
 
+        // Normalize query for matching (lowercase, trim)
+        std::string queryLower = query;
+        std::transform(queryLower.begin(), queryLower.end(), queryLower.begin(), ::tolower);
+
         for (size_t rank = 0; rank < fts5Results.value().results.size(); ++rank) {
             const auto& searchResult = fts5Results.value().results[rank];
             const auto& filePath = searchResult.document.filePath;
+            const auto& fileName = searchResult.document.fileName;
 
             auto pruneCategory = magic::getPruneCategory(filePath);
             bool isCodeFile = pruneCategory == magic::PruneCategory::BuildObject ||
@@ -885,8 +890,25 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFullText(const std
 
             float scoreMultiplier = isCodeFile ? 1.0f : 0.5f;
 
-            // Note: Symbol-based ranking boost removed (yams-c1ot.2)
-            // SymbolEnricher in search_service.cpp provides better KG-based boost
+            // Exact match boosting: filename/path matches rank higher than content
+            std::string fileNameLower = fileName;
+            std::transform(fileNameLower.begin(), fileNameLower.end(), fileNameLower.begin(),
+                           ::tolower);
+            std::string filePathLower = filePath;
+            std::transform(filePathLower.begin(), filePathLower.end(), filePathLower.begin(),
+                           ::tolower);
+
+            std::string matchType = "content";
+            if (fileNameLower == queryLower) {
+                scoreMultiplier *= 3.0f; // Exact filename match: 3x boost
+                matchType = "exact_filename";
+            } else if (fileNameLower.find(queryLower) != std::string::npos) {
+                scoreMultiplier *= 2.0f; // Filename contains query: 2x boost
+                matchType = "filename_contains";
+            } else if (filePathLower.find(queryLower) != std::string::npos) {
+                scoreMultiplier *= 1.5f; // Path contains query: 1.5x boost
+                matchType = "path_contains";
+            }
 
             ComponentResult result;
             result.documentHash = searchResult.document.sha256Hash;
@@ -903,6 +925,7 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFullText(const std
             result.snippet = searchResult.snippet.empty()
                                  ? std::nullopt
                                  : std::optional<std::string>(searchResult.snippet);
+            result.debugInfo["match_type"] = matchType;
 
             results.push_back(std::move(result));
         }

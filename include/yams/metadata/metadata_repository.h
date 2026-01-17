@@ -713,27 +713,45 @@ private:
     void updateQueryCache(const std::string& key, const SearchResults& results) const;
     void invalidateQueryCache() const;
 
-    // Helper method to handle nested Result from withConnection
+    // Helper method to handle nested Result from withConnection with retry for lock errors
     template <typename T> Result<T> executeQuery(std::function<Result<T>(Database&)> func) {
-        auto result = pool_.withConnection(func);
-        if (!result.has_value()) {
-            // Report lock errors to TuneAdvisor for adaptive concurrency scaling
-            if (result.error().message.find("database is locked") != std::string::npos) {
-                daemon::TuneAdvisor::reportDbLockError();
+        constexpr int kMaxRetries = 5;
+        constexpr int kBaseDelayMs = 25;
+
+        for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+            auto result = pool_.withConnection(func);
+            if (result.has_value()) {
+                if constexpr (std::is_void_v<T>) {
+                    return Result<void>();
+                } else {
+                    return result.value();
+                }
             }
-            if (metadata_trace_enabled()) {
-                spdlog::warn("MetadataRepository::executeQuery op='{}' error: {}",
-                             current_metadata_op(), result.error().message);
+
+            // Check if it's a lock error that we should retry
+            bool isLockError =
+                result.error().message.find("database is locked") != std::string::npos;
+            if (!isLockError || attempt == kMaxRetries - 1) {
+                // Non-lock error or final attempt - report and return error
+                if (isLockError) {
+                    daemon::TuneAdvisor::reportDbLockError();
+                }
+                if (metadata_trace_enabled()) {
+                    spdlog::warn("MetadataRepository::executeQuery op='{}' error: {}",
+                                 current_metadata_op(), result.error().message);
+                }
+                spdlog::error("MetadataRepository::executeQuery connection error: {}",
+                              result.error().message);
+                return Error{result.error()};
             }
-            spdlog::error("MetadataRepository::executeQuery connection error: {}",
-                          result.error().message);
-            return Error{result.error()};
+
+            // Exponential backoff before retry
+            int delayMs = kBaseDelayMs * (1 << attempt);
+            std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
         }
-        if constexpr (std::is_void_v<T>) {
-            return Result<void>();
-        } else {
-            return result.value();
-        }
+
+        // Should never reach here, but satisfy compiler
+        return Error{ErrorCode::DatabaseError, "executeQuery: unexpected retry loop exit"};
     }
 };
 

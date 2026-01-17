@@ -157,14 +157,17 @@ struct TunedParams {
             break;
 
         case TuningState::SCIENTIFIC:
-            params.rrfK = 30;
-            params.textWeight = 0.55f;
-            params.vectorWeight = 0.40f;
+            // Lower rrfK gives more weight to top-ranked results (rank 0: 1/10=0.10 vs 1/30=0.03)
+            params.rrfK = 10;
+            // Text-heavy weighting for scientific corpora (papers, abstracts)
+            params.textWeight = 0.60f;
+            params.vectorWeight = 0.35f;
             params.entityVectorWeight = 0.00f;
             params.pathTreeWeight = 0.00f;
             params.kgWeight = 0.00f;
             params.tagWeight = 0.00f;
             params.metadataWeight = 0.05f;
+            // TEXT_ANCHOR: text results as primary, vector for re-ranking boost
             params.fusionStrategy = SearchEngineConfig::FusionStrategy::TEXT_ANCHOR;
             break;
 
