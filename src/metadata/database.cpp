@@ -315,7 +315,11 @@ Result<void> Database::open(const std::string& path, ConnectionMode mode) {
 
 void Database::close() {
     // Clear statement cache before closing (statements must be finalized before db close)
-    statementCache_.clear();
+    // Lock to prevent concurrent returnToCache() calls from accessing invalidated cache
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex_);
+        statementCache_.clear();
+    }
     if (db_) {
         sqlite3_close(db_);
         db_ = nullptr;
@@ -340,6 +344,10 @@ Result<CachedStatement> Database::prepareCached(const std::string& sql) {
     if (!db_) {
         return Error{ErrorCode::InvalidState, "Database not open"};
     }
+
+    // Lock mutex for thread-safe cache access
+    // (CachedStatement::returnFunc_ may be called from different threads)
+    std::lock_guard<std::mutex> lock(cacheMutex_);
 
     // Check if statement is in cache
     auto it = statementCache_.find(sql);
@@ -389,7 +397,7 @@ Result<CachedStatement> Database::prepareCached(const std::string& sql) {
 }
 
 void Database::returnToCache(const std::string& sql, Statement&& stmt) {
-    // Don't cache if DB is closed or cache is full
+    // Don't cache if DB is closed
     if (!db_) {
         return;
     }
@@ -405,6 +413,10 @@ void Database::returnToCache(const std::string& sql, Statement&& stmt) {
         return; // Statement is invalid, don't cache
     }
 
+    // Lock mutex for thread-safe cache access
+    // (This may be called from different threads via CachedStatement destructor)
+    std::lock_guard<std::mutex> lock(cacheMutex_);
+
     // Evict oldest entry if cache is full (simple LRU approximation: just clear if full)
     if (statementCache_.size() >= kMaxCacheSize) {
         // Remove one entry (first one found - could be improved with proper LRU)
@@ -417,12 +429,14 @@ void Database::returnToCache(const std::string& sql, Statement&& stmt) {
 }
 
 void Database::clearStatementCache() {
+    std::lock_guard<std::mutex> lock(cacheMutex_);
     statementCache_.clear();
     cacheHits_ = 0;
     cacheMisses_ = 0;
 }
 
 Database::CacheStats Database::getStatementCacheStats() const {
+    std::lock_guard<std::mutex> lock(cacheMutex_);
     return CacheStats{cacheHits_, cacheMisses_, statementCache_.size(), kMaxCacheSize};
 }
 

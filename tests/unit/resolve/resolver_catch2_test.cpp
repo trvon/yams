@@ -329,6 +329,9 @@ public:
                                                             const std::string&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+    Result<bool> hasDocumentEmbeddingByHash(const std::string&) override {
+        return false; // Default to no embedding for mock
+    }
 
     Result<void> updateDocumentExtractionStatus(int64_t, bool, yams::metadata::ExtractionStatus,
                                                 const std::string&) override {

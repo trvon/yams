@@ -4,6 +4,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -361,6 +362,9 @@ private:
 
     // Statement cache for prepared statement reuse
     // Key: SQL string, Value: prepared Statement ready for reuse
+    // Protected by cacheMutex_ for thread-safety (CachedStatement::returnFunc_ may be
+    // called from different threads when statements outlive their connection's scope)
+    mutable std::mutex cacheMutex_;
     std::unordered_map<std::string, Statement> statementCache_;
     mutable size_t cacheHits_{0};
     mutable size_t cacheMisses_{0};

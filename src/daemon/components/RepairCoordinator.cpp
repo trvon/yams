@@ -640,10 +640,6 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
 
                             // Check vector availability (skip if disabled)
                             const bool vectorsDisabled = vectorsDisabledByEnv();
-                            auto vectorDb =
-                                vectorsDisabled
-                                    ? nullptr
-                                    : (services_ ? services_->getVectorDatabase() : nullptr);
 
                             // Use smaller batch size during startup to reduce load
                             const size_t batchSize = TuneAdvisor::repairStartupBatchSize();
@@ -677,10 +673,14 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                                         }
 
                                         // Check if document needs repair
-                                        // (skip embedding check if vectors disabled)
-                                        const bool missingEmb =
-                                            vectorDb ? !vectorDb->hasEmbedding(d.sha256Hash)
-                                                     : false;
+                                        // Use metadata repo instead of VectorDB to avoid mutex
+                                        // contention
+                                        bool missingEmb = false;
+                                        if (!vectorsDisabled) {
+                                            auto hasEmbedRes =
+                                                meta->hasDocumentEmbeddingByHash(d.sha256Hash);
+                                            missingEmb = !hasEmbedRes || !hasEmbedRes.value();
+                                        }
                                         const bool missingFts =
                                             (!d.contentExtracted) ||
                                             (d.extractionStatus !=
@@ -772,23 +772,22 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
 
         // Detect documents missing embeddings (vector repair)
         // Skip if vectors are disabled via environment
+        // Use metadata repository instead of VectorDatabase to avoid mutex contention
         std::vector<std::string> missingEmbeddings;
-        if (!vectorsDisabledByEnv()) {
-            auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
-            if (vectorDb) {
-                for (const auto& hash : batch) {
-                    if (!vectorDb->hasEmbedding(hash))
-                        missingEmbeddings.push_back(hash);
-                }
+        if (!vectorsDisabledByEnv() && meta_repo) {
+            for (const auto& hash : batch) {
+                auto hasEmbedRes = meta_repo->hasDocumentEmbeddingByHash(hash);
+                if (!hasEmbedRes || !hasEmbedRes.value())
+                    missingEmbeddings.push_back(hash);
+            }
 
-                // Check if model provider is available for embedding generation
-                if (!missingEmbeddings.empty()) {
-                    auto provider = services_ ? services_->getModelProvider() : nullptr;
-                    if (provider && provider->isAvailable()) {
-                        spdlog::debug(
-                            "RepairCoordinator: {} docs need embeddings, model provider ready",
-                            missingEmbeddings.size());
-                    }
+            // Check if model provider is available for embedding generation
+            if (!missingEmbeddings.empty()) {
+                auto provider = services_ ? services_->getModelProvider() : nullptr;
+                if (provider && provider->isAvailable()) {
+                    spdlog::debug(
+                        "RepairCoordinator: {} docs need embeddings, model provider ready",
+                        missingEmbeddings.size());
                 }
             }
         }

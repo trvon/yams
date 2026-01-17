@@ -9,8 +9,10 @@
 #include <chrono>
 #include <memory>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -2524,11 +2526,47 @@ public:
         if (committed_) {
             return Error{ErrorCode::InvalidState, "Already committed"};
         }
-        auto result = (*conn_)->commit();
-        if (result) {
-            committed_ = true;
+
+        // Retry logic for write contention (database is locked)
+        // Use exponential backoff with jitter to prevent thundering herd
+        constexpr int kMaxRetries = 10;
+        constexpr int kBaseDelayMs = 50;
+        constexpr int kMaxDelayMs = 3000;
+
+        thread_local std::mt19937 rng(std::random_device{}());
+
+        for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+            auto result = (*conn_)->commit();
+            if (result) {
+                committed_ = true;
+                if (attempt > 0) {
+                    spdlog::debug("WriteBatch::commit succeeded after {} retries", attempt);
+                }
+                return result;
+            }
+
+            // Check if it's a lock error that we should retry
+            bool isLockError =
+                result.error().message.find("database is locked") != std::string::npos ||
+                result.error().message.find("SQLITE_BUSY") != std::string::npos;
+
+            if (!isLockError || attempt == kMaxRetries - 1) {
+                if (isLockError) {
+                    spdlog::warn("WriteBatch::commit: lock error after {} retries: {}", attempt + 1,
+                                 result.error().message);
+                }
+                return result;
+            }
+
+            // Exponential backoff with jitter (±25%), capped at kMaxDelayMs
+            int baseDelayMs = std::min(kBaseDelayMs * (1 << attempt), kMaxDelayMs);
+            int jitter = static_cast<int>(baseDelayMs * 0.25);
+            std::uniform_int_distribution<int> dist(-jitter, jitter);
+            int delayMs = baseDelayMs + dist(rng);
+            std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
         }
-        return result;
+
+        return Error{ErrorCode::DatabaseError, "WriteBatch::commit: max retries exceeded"};
     }
 
 private:

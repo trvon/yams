@@ -116,8 +116,21 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
 
             // Dispatch to work executor for parallel processing
             boost::asio::post(coordinator_->getExecutor(), [this, job = std::move(job)]() mutable {
-                processEmbedJob(std::move(job));
-                inFlight_.fetch_sub(1);
+                // Use scope guard to ensure inFlight_ is always decremented, even on exception
+                // This prevents permanent stalls if processEmbedJob throws
+                struct ScopeGuard {
+                    std::atomic<std::size_t>& counter;
+                    ~ScopeGuard() { counter.fetch_sub(1); }
+                } guard{inFlight_};
+
+                try {
+                    processEmbedJob(std::move(job));
+                } catch (const std::exception& e) {
+                    spdlog::error("[EmbeddingService] Uncaught exception in embed job: {}",
+                                  e.what());
+                } catch (...) {
+                    spdlog::error("[EmbeddingService] Unknown exception in embed job");
+                }
             });
         }
 
@@ -196,10 +209,16 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
             const auto& docInfo = *docInfoRes.value();
 
-            if (job.skipExisting && vdb->hasEmbedding(hash)) {
-                spdlog::debug("EmbeddingService: skipExisting=true, already embedded: {}", hash);
-                skipped++;
-                continue;
+            // Check embedding status via metadata repository (separate DB, no VectorDatabase lock)
+            // This avoids mutex contention with EntityGraphService's insertEntityVectorsBatch
+            if (job.skipExisting) {
+                auto hasEmbedRes = meta_->hasDocumentEmbeddingByHash(hash);
+                if (hasEmbedRes && hasEmbedRes.value()) {
+                    spdlog::debug("EmbeddingService: skipExisting=true, already embedded: {}",
+                                  hash);
+                    skipped++;
+                    continue;
+                }
             }
 
             auto contentOpt = meta_->getContent(docInfo.id);

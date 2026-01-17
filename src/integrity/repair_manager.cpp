@@ -448,7 +448,11 @@ RepairManager::repairBlockReferences(const std::filesystem::path& objectsPath,
         }
 
         // Start a transaction for batch updates
+#if YAMS_LIBSQL_BACKEND
+        sqlite3_exec(db, "BEGIN;", nullptr, nullptr, nullptr);
+#else
         sqlite3_exec(db, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr);
+#endif
     }
 
     // Prepare select statement to check current values
@@ -571,7 +575,11 @@ RepairManager::repairBlockReferences(const std::filesystem::path& objectsPath,
 
                     // Commit every 10000 updates to avoid holding lock too long
                     if (!dryRun && result.blocksUpdated % 10000 == 0) {
+#if YAMS_LIBSQL_BACKEND
+                        sqlite3_exec(db, "COMMIT; BEGIN;", nullptr, nullptr, nullptr);
+#else
                         sqlite3_exec(db, "COMMIT; BEGIN IMMEDIATE;", nullptr, nullptr, nullptr);
+#endif
                     }
                 } else {
                     result.blocksSkipped++;

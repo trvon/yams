@@ -10,6 +10,7 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <random>
 #include <span>
 #include <sstream>
 #include <string_view>
@@ -852,24 +853,17 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
 Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::string& key,
                                              const MetadataValue& value) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        // Use INSERT OR REPLACE to handle both insert and update
-        // Use prepareCached for better performance on repeated calls
-        auto stmtResult = db.prepareCached(R"(
-            INSERT OR REPLACE INTO metadata (document_id, key, value, value_type)
-            VALUES (?, ?, ?, ?)
-        )");
+        repository::MetadataEntry entry;
+        entry.documentId = documentId;
+        entry.key = key;
+        entry.value = value.value;
+        entry.valueType = MetadataValueTypeUtils::toString(value.type);
 
-        if (!stmtResult)
-            return stmtResult.error();
-
-        auto& stmt = *stmtResult.value();
-        auto bindResult = stmt.bindAll(documentId, key, value.value,
-                                       MetadataValueTypeUtils::toString(value.type));
-
-        if (!bindResult)
-            return bindResult.error();
-
-        return stmt.execute();
+        // Use INSERT OR REPLACE which handles composite PK (document_id, key) correctly
+        repository::CrudOps<repository::MetadataEntry> ops;
+        std::vector<repository::MetadataEntry> batch{entry};
+        YAMS_TRY(ops.upsertBatch(db, batch));
+        return {};
     });
 }
 
@@ -878,50 +872,24 @@ Result<void> MetadataRepository::setMetadataBatch(
     if (entries.empty()) {
         return Result<void>();
     }
+
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        // Begin transaction for batch operation with retry for lock contention
-        auto beginResult = beginTransactionWithRetry(db);
-        if (!beginResult) {
-            return beginResult.error();
-        }
-
-        // Use prepareCached for better performance - statement is reused across calls
-        auto stmtResult = db.prepareCached(R"(
-            INSERT OR REPLACE INTO metadata (document_id, key, value, value_type)
-            VALUES (?, ?, ?, ?)
-        )");
-
-        if (!stmtResult) {
-            db.execute("ROLLBACK");
-            return stmtResult.error();
-        }
-
-        auto& stmt = *stmtResult.value();
-
+        // Convert to MetadataEntry vector
+        std::vector<repository::MetadataEntry> batch;
+        batch.reserve(entries.size());
         for (const auto& [documentId, key, value] : entries) {
-            stmt.reset();
-            stmt.clearBindings();
-            auto bindResult = stmt.bindAll(documentId, key, value.value,
-                                           MetadataValueTypeUtils::toString(value.type));
-            if (!bindResult) {
-                db.execute("ROLLBACK");
-                return bindResult.error();
-            }
-
-            auto execResult = stmt.execute();
-            if (!execResult) {
-                db.execute("ROLLBACK");
-                return execResult.error();
-            }
+            repository::MetadataEntry entry;
+            entry.documentId = documentId;
+            entry.key = key;
+            entry.value = value.value;
+            entry.valueType = MetadataValueTypeUtils::toString(value.type);
+            batch.push_back(std::move(entry));
         }
 
-        auto commitResult = db.execute("COMMIT");
-        if (!commitResult) {
-            db.execute("ROLLBACK");
-            return commitResult.error();
-        }
-
-        return Result<void>();
+        // CrudOps::upsertBatch handles transaction internally
+        repository::CrudOps<repository::MetadataEntry> ops;
+        YAMS_TRY(ops.upsertBatch(db, batch));
+        return {};
     });
 
     if (result) {
@@ -1491,6 +1459,11 @@ static bool isStopword(const std::string& term) {
 // Sanitize FTS5 query to prevent syntax errors.
 // Uses FTS5's default AND semantics for multiple terms (all terms must match).
 // Pass through advanced FTS5 operators (AND, OR, NOT, NEAR) for power users.
+//
+// For RAG/BEIR-style retrieval, consider:
+// 1. Document expansion at index time (docT5query technique)
+// 2. Reranking with cross-encoder after BM25 retrieval
+// 3. Hybrid fusion with vector search for semantic matching
 std::string sanitizeFTS5Query(const std::string& query) {
     // Trim whitespace from both ends
     std::string trimmed = query;
@@ -1647,10 +1620,13 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         spec.table = "documents_fts";
         spec.from =
             std::optional<std::string>{"documents_fts fts JOIN documents d ON d.id = fts.rowid"};
+        // BM25 column weights: content=1.0, title=10.0
+        // Boosting title matches significantly improves precision for document retrieval
+        // (Source: SQLite FTS5 docs, BEIR benchmark best practices)
         spec.columns = {"fts.rowid",
                         "fts.title",
                         "snippet(documents_fts, 0, '<b>', '</b>', '...', 16) as snippet",
-                        "bm25(documents_fts) as score",
+                        "bm25(documents_fts, 1.0, 10.0) as score",
                         "d.file_path",
                         "d.file_name",
                         "d.file_extension",
@@ -3102,12 +3078,19 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
     if (hashes.empty())
         return Result<void>();
 
-    constexpr int kMaxRetries = 5;
+    constexpr int kMaxRetries = 7; // Increased for heavy concurrent load
     constexpr int kBaseDelayMs = 50;
+
+    // Thread-local RNG for jitter to avoid thundering herd
+    thread_local std::mt19937 rng(std::random_device{}());
 
     for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
         auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+#if YAMS_LIBSQL_BACKEND
+            auto beginResult = db.execute("BEGIN");
+#else
             auto beginResult = db.execute("BEGIN IMMEDIATE");
+#endif
             if (!beginResult)
                 return beginResult.error();
 
@@ -3185,13 +3168,45 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
         if (result.error().message.find("database is locked") == std::string::npos)
             return result;
 
-        int delayMs = kBaseDelayMs * (1 << attempt);
+        // Exponential backoff with jitter (±25%) to prevent thundering herd
+        int baseDelayMs = kBaseDelayMs * (1 << attempt);
+        int jitter = static_cast<int>(baseDelayMs * 0.25);
+        std::uniform_int_distribution<int> dist(-jitter, jitter);
+        int delayMs = baseDelayMs + dist(rng);
         std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
     }
 
     daemon::TuneAdvisor::reportDbLockError();
     return Error{ErrorCode::DatabaseError,
                  "batchUpdateDocumentEmbeddingStatusByHashes: max retries exceeded"};
+}
+
+Result<bool> MetadataRepository::hasDocumentEmbeddingByHash(const std::string& hash) {
+    return executeQuery<bool>([&](Database& db) -> Result<bool> {
+        auto stmtResult = db.prepare(R"(
+            SELECT COALESCE(des.has_embedding, 0)
+            FROM documents d
+            LEFT JOIN document_embeddings_status des ON d.id = des.document_id
+            WHERE d.sha256_hash = ?
+        )");
+        if (!stmtResult)
+            return stmtResult.error();
+
+        auto& stmt = stmtResult.value();
+        if (auto r = stmt.bind(1, hash); !r)
+            return r.error();
+
+        auto stepResult = stmt.step();
+        if (!stepResult)
+            return stepResult.error();
+
+        if (!stepResult.value()) {
+            // Document not found - treat as no embedding
+            return false;
+        }
+
+        return stmt.getInt(0) != 0;
+    });
 }
 
 Result<void> MetadataRepository::updateDocumentExtractionStatus(int64_t documentId,
@@ -3256,12 +3271,19 @@ MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::str
     if (hashes.empty())
         return Result<void>();
 
-    constexpr int kMaxRetries = 5;
+    constexpr int kMaxRetries = 7; // Increased for heavy concurrent load
     constexpr int kBaseDelayMs = 50;
+
+    // Thread-local RNG for jitter to avoid thundering herd
+    thread_local std::mt19937 rng(std::random_device{}());
 
     for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
         auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+#if YAMS_LIBSQL_BACKEND
+            auto beginResult = db.execute("BEGIN");
+#else
             auto beginResult = db.execute("BEGIN IMMEDIATE");
+#endif
             if (!beginResult)
                 return beginResult.error();
 
@@ -3309,7 +3331,11 @@ MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::str
         if (result.error().message.find("database is locked") == std::string::npos)
             return result;
 
-        int delayMs = kBaseDelayMs * (1 << attempt);
+        // Exponential backoff with jitter (±25%) to prevent thundering herd
+        int baseDelayMs = kBaseDelayMs * (1 << attempt);
+        int jitter = static_cast<int>(baseDelayMs * 0.25);
+        std::uniform_int_distribution<int> dist(-jitter, jitter);
+        int delayMs = baseDelayMs + dist(rng);
         std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
     }
 
@@ -4610,10 +4636,11 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
         constexpr int kMaxSearchLimit = 10000;
         const int effectiveLimit = std::min(limit > 0 ? limit : 100, kMaxSearchLimit);
 
+        // BM25 column weights: content=1.0, title=10.0 (match main search function)
         std::string sql = R"(
             SELECT fts.rowid, fts.title,
                    snippet(documents_fts, 0, '<b>', '</b>', '...', 16) as snippet,
-                   bm25(documents_fts) as score,
+                   bm25(documents_fts, 1.0, 10.0) as score,
                    d.file_path, d.file_name, d.file_extension, d.file_size,
                    d.sha256_hash, d.mime_type, d.created_time, d.modified_time,
                    d.indexed_time, d.content_extracted, d.extraction_status, d.extraction_error

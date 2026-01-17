@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <shared_mutex>
 #include <span>
 #include <string_view>
@@ -301,6 +302,7 @@ public:
     batchUpdateDocumentEmbeddingStatusByHashes(const std::vector<std::string>& hashes,
                                                bool hasEmbedding,
                                                const std::string& modelId = "") = 0;
+    virtual Result<bool> hasDocumentEmbeddingByHash(const std::string& hash) = 0;
 
     // Extraction status operations (avoid read-modify-write)
     virtual Result<void> updateDocumentExtractionStatus(int64_t documentId, bool contentExtracted,
@@ -551,6 +553,7 @@ public:
     batchUpdateDocumentEmbeddingStatusByHashes(const std::vector<std::string>& hashes,
                                                bool hasEmbedding,
                                                const std::string& modelId = "") override;
+    Result<bool> hasDocumentEmbeddingByHash(const std::string& hash) override;
 
     // Extraction status operations (avoid read-modify-write)
     Result<void> updateDocumentExtractionStatus(int64_t documentId, bool contentExtracted,
@@ -711,12 +714,21 @@ private:
 
     // Helper method to handle nested Result from withConnection with retry for lock errors
     template <typename T> Result<T> executeQuery(std::function<Result<T>(Database&)> func) {
-        constexpr int kMaxRetries = 5;
-        constexpr int kBaseDelayMs = 25;
+        constexpr int kMaxRetries = 10;   // Increased for heavy concurrent load
+        constexpr int kBaseDelayMs = 50;  // Higher base delay for better backoff
+        constexpr int kMaxDelayMs = 3000; // Cap delay to prevent very long waits
+
+        // Thread-local RNG for jitter to avoid thundering herd
+        thread_local std::mt19937 rng(std::random_device{}());
 
         for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
             auto result = pool_.withConnection(func);
             if (result.has_value()) {
+                if (attempt > 0) {
+                    // Log successful retry at debug level
+                    spdlog::debug("MetadataRepository::executeQuery succeeded after {} retries",
+                                  attempt);
+                }
                 if constexpr (std::is_void_v<T>) {
                     return Result<void>();
                 } else {
@@ -741,8 +753,11 @@ private:
                 return Error{result.error()};
             }
 
-            // Exponential backoff before retry
-            int delayMs = kBaseDelayMs * (1 << attempt);
+            // Exponential backoff with jitter (±25%), capped at kMaxDelayMs
+            int baseDelayMs = std::min(kBaseDelayMs * (1 << attempt), kMaxDelayMs);
+            int jitter = static_cast<int>(baseDelayMs * 0.25);
+            std::uniform_int_distribution<int> dist(-jitter, jitter);
+            int delayMs = baseDelayMs + dist(rng);
             std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
         }
 

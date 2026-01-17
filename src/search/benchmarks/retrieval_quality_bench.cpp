@@ -1061,9 +1061,11 @@ struct BenchFixture {
         spdlog::info("Directory ingestion request accepted: {}", addResult.value().message);
 
         // Wait for directory ingestion to complete by monitoring document count
-        spdlog::info("Waiting for ingestion to complete (expecting {} documents)...", corpusSize);
-        auto deadline =
-            std::chrono::steady_clock::now() + 120s; // 2 minute timeout for bulk ingestion
+        // Scale timeout based on corpus size: 2 minutes base + 5 seconds per 100 docs
+        auto ingestTimeoutSec = std::chrono::seconds(120 + (corpusSize / 100) * 5);
+        spdlog::info("Waiting for ingestion to complete (expecting {} documents, timeout {}s)...",
+                     corpusSize, ingestTimeoutSec.count());
+        auto deadline = std::chrono::steady_clock::now() + ingestTimeoutSec;
         uint64_t lastDocCount = 0;
         uint32_t lastDepth = 0;
         bool completed = false;
@@ -1098,8 +1100,10 @@ struct BenchFixture {
             std::this_thread::sleep_for(500ms);
         }
         if (!completed) {
-            spdlog::warn("Ingestion did not complete within timeout (docs: {}, queue: {})",
-                         lastDocCount, lastDepth);
+            spdlog::error("Ingestion did not complete within timeout (docs: {}/{}, queue: {})",
+                          lastDocCount, corpusSize, lastDepth);
+            throw std::runtime_error("Ingestion incomplete - benchmark results would be invalid. "
+                                     "Increase timeout or reduce corpus size.");
         }
 
         // Wait for embedding provider to become available
