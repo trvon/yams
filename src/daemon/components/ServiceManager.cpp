@@ -811,6 +811,15 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 6.3.5: No embedding service to shutdown");
     }
 
+    spdlog::info("[ServiceManager] Phase 6.3.6: Shutting down KG write queue");
+    if (kgWriteQueue_) {
+        kgWriteQueue_->shutdown();
+        kgWriteQueue_.reset();
+        spdlog::info("[ServiceManager] Phase 6.3.6: KG write queue shutdown complete");
+    } else {
+        spdlog::info("[ServiceManager] Phase 6.3.6: No KG write queue to shutdown");
+    }
+
     // No vector index to save - using VectorDatabase directly
     spdlog::info("[ServiceManager] Phase 6.4: Vector search uses VectorDatabase directly");
 
@@ -1505,6 +1514,29 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         embeddingService_.reset();
     }
     spdlog::info("[ServiceManager] Phase: EmbeddingService Initialized.");
+
+    // Initialize KGWriteQueue for serialized KG writes (eliminates lock contention)
+    try {
+        auto kgStore = getKgStore();
+        if (kgStore && workCoordinator_) {
+            KGWriteQueue::Config queueConfig;
+            queueConfig.maxBatchSize = 50;
+            queueConfig.maxBatchDelayMs = std::chrono::milliseconds(100);
+            queueConfig.channelCapacity = 1000;
+
+            kgWriteQueue_ = std::make_unique<KGWriteQueue>(*workCoordinator_->getIOContext(),
+                                                           kgStore, queueConfig);
+            kgWriteQueue_->start();
+            spdlog::info("[ServiceManager] KGWriteQueue initialized and started");
+        } else {
+            spdlog::debug("[ServiceManager] KGWriteQueue skipped (no KG store or coordinator)");
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] KGWriteQueue init failed: {}", e.what());
+    } catch (...) {
+        spdlog::warn("[ServiceManager] KGWriteQueue init failed (unknown)");
+    }
+    spdlog::info("[ServiceManager] Phase: KGWriteQueue Initialized.");
 
     // Defer Vector DB initialization until after plugin adoption (provider dim)
     spdlog::info("[ServiceManager] Phase: Vector DB Init (deferred until after plugins).");

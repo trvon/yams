@@ -33,6 +33,7 @@ namespace daemon {
 class ServiceManager;
 class AbiSymbolExtractorAdapter;
 class AbiEntityExtractorAdapter;
+class KGWriteQueue;
 
 /// Per-job cache to avoid redundant KG lookups during extraction.
 /// Scoped to a single populateKnowledgeGraph() call.
@@ -118,6 +119,15 @@ private:
     bool populateKnowledgeGraph(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
                                 const Job& job, const yams_symbol_extraction_result_v1* result);
 
+    /**
+     * Deferred symbol KG population using batched write queue.
+     * Eliminates lock contention by queuing writes instead of immediate commits.
+     */
+    bool
+    populateKnowledgeGraphDeferred(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
+                                   const Job& job, const yams_symbol_extraction_result_v1* result,
+                                   KGWriteQueue* kgQueue);
+
     struct ContextNodes {
         std::optional<std::int64_t> documentNodeId;
         std::optional<std::int64_t> fileNodeId;
@@ -189,6 +199,16 @@ private:
     bool populateKnowledgeGraphNL(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
                                   const Job& job, const yams_entity_extraction_result_v2* result,
                                   const AbiEntityExtractorAdapter* adapter);
+
+    /**
+     * Deferred KG population using batched write queue.
+     * Eliminates lock contention by queuing writes instead of immediate commits.
+     */
+    bool
+    populateKnowledgeGraphNLDeferred(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
+                                     const Job& job, const yams_entity_extraction_result_v2* result,
+                                     const AbiEntityExtractorAdapter* adapter,
+                                     KGWriteQueue* kgQueue);
 
     /**
      * Create KG nodes for NL entities.

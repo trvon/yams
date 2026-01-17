@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <chrono>
 #include <filesystem>
@@ -192,6 +193,12 @@ bool EntityGraphService::populateKnowledgeGraph(
     spdlog::info("EntityGraphService: received {} symbols, {} relations from {}",
                  result->symbol_count, result->relation_count, job.filePath);
 
+    // Check if KGWriteQueue is available - use deferred batching to eliminate lock contention
+    KGWriteQueue* kgQueue = services_ ? services_->getKgWriteQueue() : nullptr;
+    if (kgQueue) {
+        return populateKnowledgeGraphDeferred(kg, job, result, kgQueue);
+    }
+
     // Avoid removing historical edges when we have snapshot-scoped nodes.
     if (job.documentHash.empty() && !job.filePath.empty()) {
         auto cleanupResult = kg->deleteEdgesForSourceFile(job.filePath);
@@ -203,6 +210,7 @@ bool EntityGraphService::populateKnowledgeGraph(
         }
     }
 
+    // Fallback: direct write batch (original implementation)
     try {
         // Create a write batch for reduced transaction overhead
         auto batchRes = kg->beginWriteBatch();
@@ -275,6 +283,452 @@ bool EntityGraphService::populateKnowledgeGraph(
 
     } catch (const std::exception& e) {
         spdlog::warn("EntityGraphService: exception populating KG: {}", e.what());
+        return false;
+    }
+}
+
+bool EntityGraphService::populateKnowledgeGraphDeferred(
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
+    const yams_symbol_extraction_result_v1* result, KGWriteQueue* kgQueue) {
+    // Build a DeferredKGBatch with all operations using nodeKey references
+    // This eliminates lock contention by batching writes from multiple documents
+    auto batch = std::make_unique<DeferredKGBatch>();
+    batch->sourceFile = job.filePath;
+
+    auto now = std::chrono::system_clock::now().time_since_epoch().count();
+    const bool hasSnapshot = !job.documentHash.empty();
+
+    // Get document database ID for doc entities (read operation, safe)
+    std::optional<std::int64_t> documentDbId;
+    if (hasSnapshot) {
+        auto docDbIdResult = kg->getDocumentIdByHash(job.documentHash);
+        if (docDbIdResult.has_value()) {
+            documentDbId = docDbIdResult.value();
+            batch->documentIdToDelete = documentDbId; // Delete old doc entities
+        }
+    }
+
+    // Optionally cleanup stale edges for this file
+    if (job.documentHash.empty() && !job.filePath.empty()) {
+        batch->sourceFileToDelete = job.filePath;
+    }
+
+    // === Build context nodes ===
+
+    // Document node
+    std::string docNodeKey;
+    if (hasSnapshot) {
+        docNodeKey = "doc:" + job.documentHash;
+
+        yams::metadata::KGNode docNode;
+        docNode.nodeKey = docNodeKey;
+        docNode.label = job.filePath;
+        docNode.type = "document";
+        nlohmann::json docProps;
+        docProps["hash"] = job.documentHash;
+        docProps["path"] = job.filePath;
+        docProps["language"] = job.language;
+        docNode.properties = docProps.dump();
+        batch->nodes.push_back(std::move(docNode));
+    }
+
+    // File node
+    std::string fileNodeKey;
+    if (!job.filePath.empty()) {
+        fileNodeKey = "file:" + job.filePath;
+
+        yams::metadata::KGNode fileNode;
+        fileNode.nodeKey = fileNodeKey;
+        fileNode.label = job.filePath;
+        fileNode.type = "file";
+        nlohmann::json fileProps;
+        fileProps["path"] = job.filePath;
+        fileProps["language"] = job.language;
+        fileProps["basename"] = std::filesystem::path(job.filePath).filename().string();
+        if (hasSnapshot) {
+            fileProps["current_hash"] = job.documentHash;
+        }
+        fileNode.properties = fileProps.dump();
+        batch->nodes.push_back(std::move(fileNode));
+    }
+
+    // Directory node
+    std::string dirNodeKey;
+    if (!job.filePath.empty()) {
+        size_t lastSlash = job.filePath.rfind('/');
+        if (lastSlash != std::string::npos) {
+            std::string dirPath = job.filePath.substr(0, lastSlash);
+            dirNodeKey = "dir:" + dirPath;
+
+            yams::metadata::KGNode dirNode;
+            dirNode.nodeKey = dirNodeKey;
+            dirNode.label = dirPath;
+            dirNode.type = "directory";
+            nlohmann::json dirProps;
+            dirProps["path"] = dirPath;
+            dirNode.properties = dirProps.dump();
+            batch->nodes.push_back(std::move(dirNode));
+        }
+    }
+
+    // File -> Document edge
+    if (!fileNodeKey.empty() && !docNodeKey.empty()) {
+        DeferredEdge edge;
+        edge.srcNodeKey = fileNodeKey;
+        edge.dstNodeKey = docNodeKey;
+        edge.relation = "has_version";
+        edge.weight = 1.0f;
+        nlohmann::json edgeProps;
+        edgeProps["timestamp"] = now;
+        edge.properties = edgeProps.dump();
+        batch->deferredEdges.push_back(std::move(edge));
+    }
+
+    // Directory -> File edge
+    if (!dirNodeKey.empty() && !fileNodeKey.empty()) {
+        DeferredEdge edge;
+        edge.srcNodeKey = dirNodeKey;
+        edge.dstNodeKey = fileNodeKey;
+        edge.relation = "contains";
+        edge.weight = 1.0f;
+        batch->deferredEdges.push_back(std::move(edge));
+    }
+
+    // === Build symbol nodes ===
+    std::vector<std::string> canonicalNodeKeys;
+    std::vector<std::string> versionNodeKeys;
+    std::vector<std::string> qualifiedNames;
+    canonicalNodeKeys.reserve(result->symbol_count);
+    versionNodeKeys.reserve(result->symbol_count);
+    qualifiedNames.reserve(result->symbol_count);
+
+    for (size_t i = 0; i < result->symbol_count; ++i) {
+        const auto& sym = result->symbols[i];
+
+        std::string qualName = sym.qualified_name ? std::string(sym.qualified_name)
+                                                  : (sym.name ? std::string(sym.name) : "");
+        std::string kind = sym.kind ? std::string(sym.kind) : "symbol";
+        std::string canonicalKey = kind + ":" + qualName + "@" + job.filePath;
+        canonicalNodeKeys.push_back(canonicalKey);
+        qualifiedNames.push_back(qualName);
+
+        // Canonical node
+        yams::metadata::KGNode canonicalNode;
+        canonicalNode.nodeKey = canonicalKey;
+        canonicalNode.label = sym.name ? std::string(sym.name) : qualName;
+        canonicalNode.type = kind;
+
+        nlohmann::json canonicalProps;
+        canonicalProps["qualified_name"] = qualName;
+        canonicalProps["simple_name"] = sym.name ? std::string(sym.name) : "";
+        canonicalProps["file_path"] = sym.file_path ? std::string(sym.file_path) : job.filePath;
+        canonicalProps["language"] = job.language;
+        canonicalNode.properties = canonicalProps.dump();
+        batch->nodes.push_back(std::move(canonicalNode));
+
+        // Version node (if snapshot)
+        if (hasSnapshot) {
+            std::string versionKey = canonicalKey + "@snap:" + job.documentHash;
+            versionNodeKeys.push_back(versionKey);
+
+            yams::metadata::KGNode versionNode;
+            versionNode.nodeKey = versionKey;
+            versionNode.label = sym.name ? std::string(sym.name) : qualName;
+            versionNode.type = kind + "_version";
+
+            nlohmann::json props;
+            props["qualified_name"] = qualName;
+            props["simple_name"] = sym.name ? std::string(sym.name) : "";
+            props["file_path"] = sym.file_path ? std::string(sym.file_path) : job.filePath;
+            props["language"] = job.language;
+            props["start_line"] = sym.start_line;
+            props["end_line"] = sym.end_line;
+            props["start_offset"] = sym.start_offset;
+            props["end_offset"] = sym.end_offset;
+            props["last_seen"] = now;
+            props["snapshot_id"] = job.documentHash;
+            props["document_hash"] = job.documentHash;
+            props["canonical_key"] = canonicalKey;
+            props["kind"] = kind;
+            if (sym.return_type)
+                props["return_type"] = std::string(sym.return_type);
+            if (sym.documentation)
+                props["documentation"] = std::string(sym.documentation);
+            if (sym.parameters && sym.parameter_count > 0) {
+                nlohmann::json params = nlohmann::json::array();
+                for (size_t p = 0; p < sym.parameter_count; ++p) {
+                    if (sym.parameters[p])
+                        params.push_back(std::string(sym.parameters[p]));
+                }
+                props["parameters"] = params;
+            }
+            versionNode.properties = props.dump();
+            batch->nodes.push_back(std::move(versionNode));
+        } else {
+            versionNodeKeys.push_back(canonicalKey); // No snapshot: version = canonical
+        }
+    }
+
+    // === Build symbol metadata ===
+    if (hasSnapshot) {
+        batch->symbolMetadata.reserve(result->symbol_count);
+        for (size_t i = 0; i < result->symbol_count; ++i) {
+            const auto& sym = result->symbols[i];
+
+            yams::metadata::SymbolMetadata meta;
+            meta.documentHash = job.documentHash;
+            meta.filePath = sym.file_path ? std::string(sym.file_path) : job.filePath;
+            meta.symbolName = sym.name ? std::string(sym.name) : "";
+            meta.qualifiedName = sym.qualified_name ? std::string(sym.qualified_name)
+                                                    : (sym.name ? std::string(sym.name) : "");
+            meta.kind = sym.kind ? std::string(sym.kind) : "symbol";
+            meta.startLine = sym.start_line;
+            meta.endLine = sym.end_line;
+            meta.startOffset = sym.start_offset;
+            meta.endOffset = sym.end_offset;
+            if (sym.return_type)
+                meta.returnType = std::string(sym.return_type);
+            if (sym.documentation)
+                meta.documentation = std::string(sym.documentation);
+            if (sym.parameters && sym.parameter_count > 0) {
+                std::string params;
+                for (size_t p = 0; p < sym.parameter_count; ++p) {
+                    if (sym.parameters[p]) {
+                        if (!params.empty())
+                            params += ", ";
+                        params += sym.parameters[p];
+                    }
+                }
+                meta.parameters = params;
+            }
+            batch->symbolMetadata.push_back(std::move(meta));
+        }
+    }
+
+    // === Build aliases ===
+    // Note: Aliases are added to batch->aliases with nodeId=0; resolved at apply time
+    for (size_t i = 0; i < result->symbol_count; ++i) {
+        const auto& sym = result->symbols[i];
+        const std::string& nodeKey = canonicalNodeKeys[i];
+
+        // Store nodeKey in alias.source field for resolution (hacky but works)
+        // The KGWriteQueue will resolve these based on the nodeKey->nodeId map
+        if (sym.name) {
+            yams::metadata::KGAlias alias;
+            alias.nodeId = 0; // Will be resolved
+            alias.alias = std::string(sym.name);
+            alias.source = "symbol_name|" + nodeKey;
+            alias.confidence = 1.0f;
+            batch->aliases.push_back(alias);
+        }
+        if (sym.qualified_name && sym.qualified_name != sym.name) {
+            yams::metadata::KGAlias alias;
+            alias.nodeId = 0;
+            alias.alias = std::string(sym.qualified_name);
+            alias.source = "qualified_name|" + nodeKey;
+            alias.confidence = 1.0f;
+            batch->aliases.push_back(alias);
+        }
+        // Partial qualified name aliases
+        if (sym.qualified_name) {
+            std::string qn(sym.qualified_name);
+            size_t pos = 0;
+            while ((pos = qn.find("::", pos)) != std::string::npos) {
+                std::string partial = qn.substr(pos + 2);
+                if (!partial.empty() && partial != sym.name) {
+                    yams::metadata::KGAlias alias;
+                    alias.nodeId = 0;
+                    alias.alias = partial;
+                    alias.source = "partial_qualified|" + nodeKey;
+                    alias.confidence = 0.8f;
+                    batch->aliases.push_back(alias);
+                }
+                pos += 2;
+            }
+        }
+    }
+
+    // === Build context edges ===
+    // Symbol -> document, symbol -> file, symbol -> directory
+    std::string targetNodeKey = !docNodeKey.empty() ? docNodeKey : fileNodeKey;
+    for (size_t i = 0; i < result->symbol_count; ++i) {
+        const std::string& symNodeKey = versionNodeKeys[i];
+
+        // Symbol -> document (defined_in)
+        if (!docNodeKey.empty()) {
+            DeferredEdge edge;
+            edge.srcNodeKey = symNodeKey;
+            edge.dstNodeKey = docNodeKey;
+            edge.relation = "defined_in";
+            edge.weight = 1.0f;
+            nlohmann::json edgeProps;
+            edgeProps["line_start"] = result->symbols[i].start_line;
+            edgeProps["line_end"] = result->symbols[i].end_line;
+            if (hasSnapshot)
+                edgeProps["snapshot_id"] = job.documentHash;
+            edge.properties = edgeProps.dump();
+            batch->deferredEdges.push_back(std::move(edge));
+        }
+
+        // Symbol -> file (located_in)
+        if (!fileNodeKey.empty()) {
+            DeferredEdge edge;
+            edge.srcNodeKey = symNodeKey;
+            edge.dstNodeKey = fileNodeKey;
+            edge.relation = "located_in";
+            edge.weight = 1.0f;
+            batch->deferredEdges.push_back(std::move(edge));
+        }
+
+        // Symbol -> directory (scoped_by)
+        if (!dirNodeKey.empty()) {
+            DeferredEdge edge;
+            edge.srcNodeKey = symNodeKey;
+            edge.dstNodeKey = dirNodeKey;
+            edge.relation = "scoped_by";
+            edge.weight = 0.5f;
+            batch->deferredEdges.push_back(std::move(edge));
+        }
+    }
+
+    // === Build containment edges ===
+    // File -> symbol (contains)
+    if (!fileNodeKey.empty()) {
+        for (size_t i = 0; i < result->symbol_count; ++i) {
+            DeferredEdge edge;
+            edge.srcNodeKey = fileNodeKey;
+            edge.dstNodeKey = versionNodeKeys[i];
+            edge.relation = "contains";
+            edge.weight = 1.0f;
+            nlohmann::json edgeProps;
+            edgeProps["line_start"] = result->symbols[i].start_line;
+            edgeProps["line_end"] = result->symbols[i].end_line;
+            if (hasSnapshot)
+                edgeProps["snapshot_id"] = job.documentHash;
+            edge.properties = edgeProps.dump();
+            batch->deferredEdges.push_back(std::move(edge));
+        }
+    }
+
+    // === Build canonical -> version edges ===
+    if (hasSnapshot) {
+        for (size_t i = 0; i < result->symbol_count; ++i) {
+            DeferredEdge edge;
+            edge.srcNodeKey = canonicalNodeKeys[i];
+            edge.dstNodeKey = versionNodeKeys[i];
+            edge.relation = "observed_as";
+            edge.weight = 1.0f;
+            nlohmann::json props;
+            props["snapshot_id"] = job.documentHash;
+            props["document_hash"] = job.documentHash;
+            edge.properties = props.dump();
+            batch->deferredEdges.push_back(std::move(edge));
+        }
+    }
+
+    // === Build symbol relation edges ===
+    // Note: For deferred path, we can only handle intra-file relations reliably
+    // Cross-file references would need the target symbol to be in the nodeKeyToId map
+    if (result->relation_count > 0) {
+        std::unordered_map<std::string, std::string> qualNameToNodeKey;
+        for (size_t i = 0; i < qualifiedNames.size(); ++i) {
+            qualNameToNodeKey[qualifiedNames[i]] = versionNodeKeys[i];
+        }
+
+        for (size_t i = 0; i < result->relation_count; ++i) {
+            const auto& rel = result->relations[i];
+            if (!rel.src_symbol || !rel.dst_symbol || !rel.kind)
+                continue;
+
+            std::string src(rel.src_symbol);
+            std::string dst(rel.dst_symbol);
+            std::string kind(rel.kind);
+
+            std::string srcNodeKey;
+            std::string dstNodeKey;
+
+            if (kind == "includes") {
+                // For includes: src is current file, dst is included file
+                srcNodeKey = fileNodeKey;
+                dstNodeKey = "file:" + dst; // External file reference
+            } else {
+                // For calls, inherits, etc.: resolve as symbols
+                auto srcIt = qualNameToNodeKey.find(src);
+                auto dstIt = qualNameToNodeKey.find(dst);
+                if (srcIt != qualNameToNodeKey.end())
+                    srcNodeKey = srcIt->second;
+                if (dstIt != qualNameToNodeKey.end())
+                    dstNodeKey = dstIt->second;
+            }
+
+            // Only add edge if both endpoints can be resolved within this batch
+            // or are context nodes (file, doc) that will be in the batch
+            if (!srcNodeKey.empty() && !dstNodeKey.empty()) {
+                DeferredEdge edge;
+                edge.srcNodeKey = srcNodeKey;
+                edge.dstNodeKey = dstNodeKey;
+                edge.relation = kind;
+                edge.weight = static_cast<float>(rel.weight);
+                nlohmann::json relProps;
+                relProps["source_file"] = job.filePath;
+                if (hasSnapshot)
+                    relProps["snapshot_id"] = job.documentHash;
+                relProps["timestamp"] = now;
+                edge.properties = relProps.dump();
+                batch->deferredEdges.push_back(std::move(edge));
+            }
+        }
+    }
+
+    // === Build deferred doc entities ===
+    if (documentDbId.has_value()) {
+        for (size_t i = 0; i < result->symbol_count; ++i) {
+            const auto& sym = result->symbols[i];
+
+            DeferredDocEntity docEnt;
+            docEnt.documentId = documentDbId.value();
+            docEnt.entityText = sym.qualified_name ? std::string(sym.qualified_name)
+                                                   : (sym.name ? std::string(sym.name) : "");
+            docEnt.nodeKey = versionNodeKeys[i];
+            docEnt.startOffset = sym.start_offset;
+            docEnt.endOffset = sym.end_offset;
+            docEnt.confidence = 1.0f;
+            docEnt.extractor = "symbol_extractor_v1";
+            batch->deferredDocEntities.push_back(std::move(docEnt));
+        }
+    }
+
+    // === Enqueue and wait ===
+    try {
+        auto future = kgQueue->enqueue(std::move(batch));
+
+        // Wait for the batch to be committed (with timeout)
+        auto status = future.wait_for(std::chrono::seconds(60));
+        if (status == std::future_status::timeout) {
+            spdlog::warn("EntityGraphService: KG write queue timeout for {}", job.filePath);
+            return false;
+        }
+
+        auto commitResult = future.get();
+        if (!commitResult) {
+            spdlog::warn("EntityGraphService: KG write queue failed for {}: {}", job.filePath,
+                         commitResult.error().message);
+            if (commitResult.error().message.find("database is locked") != std::string::npos) {
+                TuneAdvisor::reportDbLockError();
+            }
+            return false;
+        }
+
+        spdlog::info("EntityGraphService: queued KG batch with {} symbols from {}",
+                     result->symbol_count, job.filePath);
+
+        // Generate entity embeddings (runs after batch committed, non-blocking)
+        // Note: symbolNodes needed for embeddings but we don't have IDs in deferred path
+        // Skip embeddings in deferred path for now - can be added via separate embedding queue
+        return true;
+
+    } catch (const std::exception& e) {
+        spdlog::warn("EntityGraphService: exception queueing symbol KG batch: {}", e.what());
         return false;
     }
 }
@@ -1162,6 +1616,13 @@ bool EntityGraphService::populateKnowledgeGraphNL(
     spdlog::info("EntityGraphService: populating KG with {} NL entities from {}",
                  result->entity_count, job.filePath);
 
+    // Check if KGWriteQueue is available - use deferred batching to eliminate lock contention
+    KGWriteQueue* kgQueue = services_ ? services_->getKgWriteQueue() : nullptr;
+    if (kgQueue) {
+        return populateKnowledgeGraphNLDeferred(kg, job, result, adapter, kgQueue);
+    }
+
+    // Fallback: direct write batch (original implementation)
     try {
         // Create a write batch for reduced transaction overhead
         auto batchRes = kg->beginWriteBatch();
@@ -1290,6 +1751,195 @@ bool EntityGraphService::populateKnowledgeGraphNL(
 
     } catch (const std::exception& e) {
         spdlog::warn("EntityGraphService: exception populating NL KG: {}", e.what());
+        return false;
+    }
+}
+
+bool EntityGraphService::populateKnowledgeGraphNLDeferred(
+    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
+    const yams_entity_extraction_result_v2* result, const AbiEntityExtractorAdapter* adapter,
+    KGWriteQueue* kgQueue) {
+    // Build a DeferredKGBatch with all operations using nodeKey references
+    // This eliminates lock contention by batching writes from multiple documents
+    auto batch = std::make_unique<DeferredKGBatch>();
+    batch->sourceFile = job.filePath;
+
+    auto now = std::chrono::system_clock::now().time_since_epoch().count();
+
+    // Get document database ID for doc entities (read operation, safe)
+    std::optional<std::int64_t> documentDbId;
+    if (!job.documentHash.empty()) {
+        auto docDbIdResult = kg->getDocumentIdByHash(job.documentHash);
+        if (docDbIdResult.has_value()) {
+            documentDbId = docDbIdResult.value();
+            batch->documentIdToDelete = documentDbId; // Delete old doc entities
+        }
+    }
+
+    // Build document context node
+    std::string docNodeKey;
+    if (!job.documentHash.empty()) {
+        docNodeKey = "doc:" + job.documentHash;
+
+        yams::metadata::KGNode docNode;
+        docNode.nodeKey = docNodeKey;
+        docNode.label = job.filePath;
+        docNode.type = "document";
+        nlohmann::json docProps;
+        docProps["hash"] = job.documentHash;
+        docProps["path"] = job.filePath;
+        docProps["language"] = job.language;
+        docNode.properties = docProps.dump();
+        batch->nodes.push_back(std::move(docNode));
+    }
+
+    // Build file context node
+    std::string fileNodeKey;
+    if (!job.filePath.empty()) {
+        fileNodeKey = "file:" + job.filePath;
+
+        yams::metadata::KGNode fileNode;
+        fileNode.nodeKey = fileNodeKey;
+        fileNode.label = job.filePath;
+        fileNode.type = "file";
+        nlohmann::json fileProps;
+        fileProps["path"] = job.filePath;
+        fileProps["language"] = job.language;
+        if (!job.filePath.empty()) {
+            fileProps["basename"] = std::filesystem::path(job.filePath).filename().string();
+        }
+        if (!job.documentHash.empty()) {
+            fileProps["current_hash"] = job.documentHash;
+        }
+        fileNode.properties = fileProps.dump();
+        batch->nodes.push_back(std::move(fileNode));
+    }
+
+    // Build entity nodes and collect their keys
+    std::vector<std::string> entityNodeKeys;
+    entityNodeKeys.reserve(result->entity_count);
+
+    for (size_t i = 0; i < result->entity_count; ++i) {
+        const auto& ent = result->entities[i];
+
+        std::string text = ent.text ? std::string(ent.text) : "";
+        std::string type = ent.type ? std::string(ent.type) : "entity";
+
+        // Normalize text for canonical matching
+        std::string normalizedText = text;
+        std::transform(normalizedText.begin(), normalizedText.end(), normalizedText.begin(),
+                       ::tolower);
+
+        std::string nodeKey = "nl_entity:" + type + ":" + normalizedText;
+        entityNodeKeys.push_back(nodeKey);
+
+        yams::metadata::KGNode node;
+        node.nodeKey = nodeKey;
+        node.label = text;
+        node.type = type;
+
+        nlohmann::json props;
+        props["entity_text"] = text;
+        props["entity_type"] = type;
+        props["confidence"] = ent.confidence;
+        props["first_seen_file"] = job.filePath;
+        props["last_seen"] = now;
+        if (!job.documentHash.empty()) {
+            props["first_seen_hash"] = job.documentHash;
+        }
+        if (ent.properties_json) {
+            try {
+                auto extraProps = nlohmann::json::parse(ent.properties_json);
+                for (auto& [key, val] : extraProps.items()) {
+                    props[key] = val;
+                }
+            } catch (...) {
+            }
+        }
+        node.properties = props.dump();
+        batch->nodes.push_back(std::move(node));
+
+        // Add alias for entity text
+        if (ent.text) {
+            yams::metadata::KGAlias alias;
+            alias.nodeId = 0; // Will be resolved by queue
+            alias.alias = text;
+            alias.source = "nl_entity_text";
+            alias.confidence = ent.confidence;
+            // Note: aliases need nodeId, but we can't set it here.
+            // For now, skip aliases in deferred path (they'll be added by upsertNodes)
+        }
+    }
+
+    // Build deferred edges (entity -> document/file)
+    std::string targetNodeKey = !docNodeKey.empty() ? docNodeKey : fileNodeKey;
+    if (!targetNodeKey.empty()) {
+        for (size_t i = 0; i < result->entity_count; ++i) {
+            const auto& ent = result->entities[i];
+
+            DeferredEdge edge;
+            edge.srcNodeKey = entityNodeKeys[i];
+            edge.dstNodeKey = targetNodeKey;
+            edge.relation = "mentioned_in";
+            edge.weight = ent.confidence;
+
+            nlohmann::json edgeProps;
+            edgeProps["start_offset"] = ent.start_offset;
+            edgeProps["end_offset"] = ent.end_offset;
+            edgeProps["confidence"] = ent.confidence;
+            if (!job.documentHash.empty()) {
+                edgeProps["snapshot_id"] = job.documentHash;
+            }
+            edge.properties = edgeProps.dump();
+
+            batch->deferredEdges.push_back(std::move(edge));
+        }
+    }
+
+    // Build deferred doc entities
+    if (documentDbId.has_value()) {
+        for (size_t i = 0; i < result->entity_count; ++i) {
+            const auto& ent = result->entities[i];
+
+            DeferredDocEntity docEnt;
+            docEnt.documentId = documentDbId.value();
+            docEnt.entityText = ent.text ? std::string(ent.text) : "";
+            docEnt.nodeKey = entityNodeKeys[i];
+            docEnt.startOffset = ent.start_offset;
+            docEnt.endOffset = ent.end_offset;
+            docEnt.confidence = ent.confidence;
+            docEnt.extractor = adapter->getExtractorId();
+            batch->deferredDocEntities.push_back(std::move(docEnt));
+        }
+    }
+
+    // Enqueue the batch and wait for completion
+    try {
+        auto future = kgQueue->enqueue(std::move(batch));
+
+        // Wait for the batch to be committed (with timeout)
+        auto status = future.wait_for(std::chrono::seconds(60));
+        if (status == std::future_status::timeout) {
+            spdlog::warn("EntityGraphService: KG write queue timeout for {}", job.filePath);
+            return false;
+        }
+
+        auto commitResult = future.get();
+        if (!commitResult) {
+            spdlog::warn("EntityGraphService: KG write queue failed for {}: {}", job.filePath,
+                         commitResult.error().message);
+            if (commitResult.error().message.find("database is locked") != std::string::npos) {
+                TuneAdvisor::reportDbLockError();
+            }
+            return false;
+        }
+
+        spdlog::info("EntityGraphService: queued KG batch with {} NL entities from {}",
+                     result->entity_count, job.filePath);
+        return true;
+
+    } catch (const std::exception& e) {
+        spdlog::warn("EntityGraphService: exception queueing NL KG batch: {}", e.what());
         return false;
     }
 }
