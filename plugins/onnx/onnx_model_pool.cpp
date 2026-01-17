@@ -8,6 +8,19 @@
 #include <filesystem>
 #include <mutex>
 
+// GPU execution provider headers - conditionally included based on Conan build options
+#ifdef YAMS_ONNX_CUDA_ENABLED
+#include <onnxruntime/core/providers/cuda/cuda_provider_factory.h>
+#endif
+
+#ifdef YAMS_ONNX_DIRECTML_ENABLED
+#include <onnxruntime/core/providers/dml/dml_provider_factory.h>
+#endif
+
+#ifdef YAMS_ONNX_COREML_ENABLED
+#include <onnxruntime/core/providers/coreml/coreml_provider_factory.h>
+#endif
+
 #ifdef YAMS_ENABLE_ONNX_GENAI
 #include <yams/daemon/resource/onnx_genai_adapter.h>
 #endif
@@ -198,8 +211,7 @@ public:
         sessionOptions_->EnableCpuMemArena();
 
         if (config.enable_gpu) {
-            // TODO: Add GPU provider when available
-            spdlog::warn("GPU support requested but not yet implemented");
+            appendGpuExecutionProvider();
         }
     }
 
@@ -570,6 +582,53 @@ public:
     size_t getMaxSequenceLength() const { return maxSequenceLength_; }
 
 private:
+    // Append GPU execution provider to session options based on build configuration
+    void appendGpuExecutionProvider() {
+#if defined(YAMS_ONNX_CUDA_ENABLED)
+        // CUDA execution provider (NVIDIA GPUs)
+        try {
+            OrtCUDAProviderOptions cuda_options{};
+            cuda_options.device_id = 0;
+            cuda_options.arena_extend_strategy = 0; // kNextPowerOfTwo
+            cuda_options.gpu_mem_limit = SIZE_MAX;  // Use all available GPU memory
+            cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
+            cuda_options.do_copy_in_default_stream = 1;
+
+            sessionOptions_->AppendExecutionProvider_CUDA(cuda_options);
+            spdlog::info("[ONNX] CUDA execution provider enabled (device_id=0)");
+        } catch (const Ort::Exception& e) {
+            spdlog::warn("[ONNX] Failed to enable CUDA provider: {}. Falling back to CPU.",
+                         e.what());
+        }
+#elif defined(YAMS_ONNX_DIRECTML_ENABLED)
+        // DirectML execution provider (Windows, any DX12 GPU)
+        try {
+            sessionOptions_->AppendExecutionProvider("DML");
+            spdlog::info("[ONNX] DirectML execution provider enabled");
+        } catch (const Ort::Exception& e) {
+            spdlog::warn("[ONNX] Failed to enable DirectML provider: {}. Falling back to CPU.",
+                         e.what());
+        }
+#elif defined(YAMS_ONNX_COREML_ENABLED)
+        // CoreML execution provider (macOS, Apple Silicon + Neural Engine)
+        try {
+            // CoreML flags: use Neural Engine when available
+            uint32_t coreml_flags = 0;
+            coreml_flags |= COREML_FLAG_ENABLE_ON_SUBGRAPH;
+
+            sessionOptions_->AppendExecutionProvider("CoreML", coreml_flags);
+            spdlog::info("[ONNX] CoreML execution provider enabled (Neural Engine + GPU)");
+        } catch (const Ort::Exception& e) {
+            spdlog::warn("[ONNX] Failed to enable CoreML provider: {}. Falling back to CPU.",
+                         e.what());
+        }
+#else
+        // No GPU provider compiled in
+        spdlog::warn("[ONNX] GPU requested but no GPU provider compiled. "
+                     "Rebuild with -Dwith_gpu=cuda|directml|coreml");
+#endif
+    }
+
     // GenAI adapter (optional)
 #ifdef YAMS_ENABLE_ONNX_GENAI
     std::unique_ptr<OnnxGenAIAdapter> genai_;

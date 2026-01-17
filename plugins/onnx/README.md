@@ -152,6 +152,57 @@ When adopted by the daemon:
 
 Only plugins from trusted directories are allowed. The trust list lives at `~/.config/yams/plugins_trust.txt`. For additional defense, production deployments should lock down plugin directories and pre‑stage models in a read‑only location.
 
+## GPU Acceleration
+
+The ONNX plugin supports GPU acceleration via platform-specific execution providers. To enable GPU support, build with the appropriate Conan option:
+
+### macOS (CoreML + Apple Neural Engine)
+```bash
+# CoreML is included in standard macOS ONNX Runtime builds
+conan install . -o onnxruntime/*:with_gpu=coreml
+meson setup builddir
+meson compile -C builddir
+```
+CoreML automatically uses Apple Silicon's Neural Engine and GPU for compatible operations.
+
+### Linux (CUDA / NVIDIA GPUs)
+```bash
+# Download CUDA-enabled ONNX Runtime binary
+conan install . -o onnxruntime/*:with_gpu=cuda
+meson setup builddir
+meson compile -C builddir
+```
+Requires CUDA toolkit and cuDNN installed on the system.
+
+### Windows (DirectML / Any DX12 GPU)
+```powershell
+# Download DirectML-enabled ONNX Runtime binary
+conan install . -o onnxruntime/*:with_gpu=directml
+meson setup builddir
+meson compile -C builddir
+```
+DirectML works with any DirectX 12 capable GPU (NVIDIA, AMD, Intel).
+
+### Enabling GPU at Runtime
+
+Set `enable_gpu: true` in the plugin options JSON or embedding config:
+
+```json
+{
+  "runtime": {
+    "execution_providers": ["CUDAExecutionProvider", "CPUExecutionProvider"]
+  }
+}
+```
+
+Or via YAMS config:
+```toml
+[embeddings]
+enable_gpu = true
+```
+
+The plugin automatically falls back to CPU if GPU initialization fails.
+
 ## Build
 
 From the repo root:

@@ -320,6 +320,59 @@ if ($BuildType -in @('Debug','Profiling','Fuzzing')) {
 if ($env:YAMS_DISABLE_ONNX -eq 'true') {
     Write-Host 'ONNX support disabled (YAMS_DISABLE_ONNX=true)'
     $conanArgs += @('-o', 'yams/*:enable_onnx=False')
+} else {
+    # Auto-detect GPU for ONNX acceleration
+    # Override with YAMS_ONNX_GPU=cuda|directml|none
+    $onnxGpu = $env:YAMS_ONNX_GPU
+    if (-not $onnxGpu -or $onnxGpu -eq 'auto') {
+        # Windows: Check for DirectX 12 capable GPU (DirectML)
+        # DirectML works with any DX12 GPU (NVIDIA, AMD, Intel)
+        $hasDx12Gpu = $false
+        try {
+            # Check for any display adapter that supports DX12
+            $adapters = Get-CimInstance -ClassName Win32_VideoController -ErrorAction SilentlyContinue
+            if ($adapters) {
+                foreach ($adapter in $adapters) {
+                    # Most modern GPUs (2015+) support DX12
+                    if ($adapter.AdapterRAM -gt 0 -and $adapter.Name -notmatch 'Microsoft Basic') {
+                        $hasDx12Gpu = $true
+                        Write-Host "GPU detected: $($adapter.Name)"
+                        break
+                    }
+                }
+            }
+        } catch {
+            Write-Host "Could not detect GPU: $_"
+        }
+
+        # Also check for NVIDIA GPU (prefer CUDA if available)
+        $hasCuda = $false
+        if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+            try {
+                $null = nvidia-smi 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    $hasCuda = $true
+                    Write-Host "NVIDIA GPU with CUDA detected"
+                }
+            } catch {}
+        }
+
+        if ($hasCuda) {
+            $onnxGpu = 'cuda'
+            Write-Host "Enabling CUDA GPU acceleration"
+        } elseif ($hasDx12Gpu) {
+            $onnxGpu = 'directml'
+            Write-Host "Enabling DirectML GPU acceleration (DX12)"
+        } else {
+            $onnxGpu = 'none'
+            Write-Host "No GPU detected: using CPU-only ONNX Runtime"
+        }
+    }
+
+    if ($onnxGpu -ne 'none') {
+        $conanArgs += @('-o', "onnxruntime/*:with_gpu=$onnxGpu")
+        Write-Host "ONNX GPU provider: $onnxGpu"
+    }
 }
 
 if ($env:YAMS_DISABLE_SYMBOL_EXTRACTION -eq 'true') {

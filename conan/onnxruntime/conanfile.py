@@ -11,15 +11,17 @@ class OnnxRuntimeConan(ConanFile):
     url = "https://github.com/microsoft/onnxruntime"
     description = "ONNX Runtime: cross-platform, high performance ML inferencing and training accelerator"
     topics = ("onnx", "machine-learning", "inference", "neural-network")
-    
+
     settings = "os", "compiler", "build_type", "arch"
     options = {
         "shared": [True, False],
         "fPIC": [True, False],
+        "with_gpu": [None, "cuda", "directml", "coreml"],
     }
     default_options = {
         "shared": False,
         "fPIC": True,
+        "with_gpu": None,
     }
     
     def requirements(self):
@@ -34,22 +36,46 @@ class OnnxRuntimeConan(ConanFile):
     def configure(self):
         if self.options.shared:
             self.options.rm_safe("fPIC")
+
+        # Validate GPU options per platform
+        gpu = self.options.with_gpu
+        os_name = str(self.settings.os)
+
+        if gpu == "cuda":
+            if os_name not in ["Linux", "Windows"]:
+                raise Exception(f"CUDA is only supported on Linux and Windows, not {os_name}")
+        elif gpu == "directml":
+            if os_name != "Windows":
+                raise Exception(f"DirectML is only supported on Windows, not {os_name}")
+        elif gpu == "coreml":
+            if os_name != "Macos":
+                raise Exception(f"CoreML is only supported on macOS, not {os_name}")
+            # Note: CoreML is included in standard macOS builds, no special download needed
+            self.output.info("CoreML is included in standard macOS ONNX Runtime builds")
     
     def _get_download_url(self):
         """Get platform-specific download URL"""
         base_url = f"https://github.com/microsoft/onnxruntime/releases/download/v{self.version}"  # noqa: E501
-        
+
         os_name = str(self.settings.os)
         arch = str(self.settings.arch)
-        
+        gpu = str(self.options.with_gpu) if self.options.with_gpu else None
+
         if os_name == "Linux":
             if arch == "x86_64":
-                filename = f"onnxruntime-linux-x64-{self.version}.tgz"
+                if gpu == "cuda":
+                    # CUDA build for Linux x64
+                    filename = f"onnxruntime-linux-x64-gpu-{self.version}.tgz"
+                else:
+                    filename = f"onnxruntime-linux-x64-{self.version}.tgz"
             elif arch == "aarch64" or arch == "armv8":
+                if gpu == "cuda":
+                    raise Exception("CUDA GPU build not available for Linux ARM64")
                 filename = f"onnxruntime-linux-aarch64-{self.version}.tgz"
             else:
                 raise Exception(f"Unsupported arch: {arch}")
         elif os_name == "Macos":
+            # macOS builds include CoreML by default, no separate GPU download needed
             if arch == "x86_64":
                 filename = f"onnxruntime-osx-x86_64-{self.version}.tgz"
             elif arch == "armv8":
@@ -58,13 +84,26 @@ class OnnxRuntimeConan(ConanFile):
                 raise Exception(f"Unsupported arch: {arch}")
         elif os_name == "Windows":
             if arch == "x86_64":
-                filename = f"onnxruntime-win-x64-{self.version}.zip"
+                if gpu == "cuda":
+                    # CUDA build for Windows x64
+                    filename = f"onnxruntime-win-x64-gpu-{self.version}.zip"
+                elif gpu == "directml":
+                    # DirectML build for Windows x64 (uses NuGet naming)
+                    # Download from NuGet: https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.DirectML
+                    return self._get_directml_url()
+                else:
+                    filename = f"onnxruntime-win-x64-{self.version}.zip"
             else:
                 raise Exception(f"Unsupported arch: {arch}")
         else:
             raise Exception(f"Unsupported OS: {os_name}")
-        
+
         return f"{base_url}/{filename}"
+
+    def _get_directml_url(self):
+        """Get DirectML package URL from NuGet"""
+        # NuGet package URL for DirectML variant
+        return f"https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/{self.version}"
     
     def source(self):
         # Download prebuilt binaries from GitHub releases
@@ -166,15 +205,35 @@ Cflags: -I${{includedir}}
         save(self, os.path.join(pc_dir, "onnxruntime.pc"), pc_content)
     
     def package_info(self):
+        gpu = str(self.options.with_gpu) if self.options.with_gpu else None
+
+        # Base library
         self.cpp_info.libs = ["onnxruntime"]
-        
+
+        # GPU-specific libraries
+        if gpu == "cuda":
+            # CUDA builds include provider libraries
+            self.cpp_info.libs.extend([
+                "onnxruntime_providers_shared",
+                "onnxruntime_providers_cuda",
+            ])
+            # Define to enable CUDA provider in code
+            self.cpp_info.defines = ["YAMS_ONNX_CUDA_ENABLED=1"]
+        elif gpu == "directml":
+            # DirectML provider library
+            self.cpp_info.libs.append("onnxruntime_providers_dml")
+            self.cpp_info.defines = ["YAMS_ONNX_DIRECTML_ENABLED=1"]
+        elif gpu == "coreml":
+            # CoreML is built into the main library on macOS
+            self.cpp_info.defines = ["YAMS_ONNX_COREML_ENABLED=1"]
+
         # Set include dirs
         self.cpp_info.includedirs = ["include"]
-        
+
         # System libs
         if self.settings.os == "Linux":
             self.cpp_info.system_libs = ["pthread", "dl", "m"]
-        
+
         # Runtime library path
         if self.settings.os in ["Linux", "Macos"]:
             self.cpp_info.libdirs = ["lib"]
@@ -184,10 +243,10 @@ Cflags: -I${{includedir}}
             # On Windows, DLLs go in bin, .lib files in lib
             self.cpp_info.libdirs = ["lib"]
             self.cpp_info.bindirs = ["bin"]
-        
+
         # CMake properties
         self.cpp_info.set_property("cmake_file_name", "onnxruntime")
         self.cpp_info.set_property("cmake_target_name", "onnxruntime::onnxruntime")
-        
+
         # Pkg-config properties (for PkgConfigDeps generator)
         self.cpp_info.set_property("pkg_config_name", "onnxruntime")

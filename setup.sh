@@ -17,6 +17,8 @@
 #   YAMS_ENABLE_MODULES      - Enable C++20 modules (true/false, auto-detected if not set)
 #   YAMS_LIBCXX_HARDENING    - libc++ hardening mode (none, fast, extensive, debug)
 #   YAMS_INSTALL_PREFIX      - Installation prefix (default: /usr/local or Homebrew)
+#   YAMS_ONNX_GPU            - GPU provider for ONNX (auto|cuda|coreml|none, default: auto)
+#                              auto: macOS=coreml, Linux+NVIDIA=cuda, otherwise=none
 #
 # The script prefers Clang when available, falling back to GCC otherwise. It
 # ensures Conan is given a concrete C++ standard so dependencies resolve cleanly
@@ -371,6 +373,29 @@ fi
 if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
   echo "ONNX support disabled (YAMS_DISABLE_ONNX=true)"
   CONAN_ARGS+=(-o "yams/*:enable_onnx=False")
+else
+  # Auto-detect GPU for ONNX acceleration
+  # Override with YAMS_ONNX_GPU=cuda|coreml|none
+  ONNX_GPU="${YAMS_ONNX_GPU:-auto}"
+  if [[ "${ONNX_GPU}" == "auto" ]]; then
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      # macOS: CoreML is included in standard ONNX Runtime builds
+      ONNX_GPU="coreml"
+      echo "macOS detected: enabling CoreML GPU acceleration (Neural Engine + GPU)"
+    elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+      # Linux with NVIDIA GPU
+      ONNX_GPU="cuda"
+      echo "NVIDIA GPU detected: enabling CUDA acceleration"
+    else
+      ONNX_GPU="none"
+      echo "No GPU detected: using CPU-only ONNX Runtime"
+    fi
+  fi
+
+  if [[ "${ONNX_GPU}" != "none" ]]; then
+    CONAN_ARGS+=(-o "onnxruntime/*:with_gpu=${ONNX_GPU}")
+    echo "ONNX GPU provider: ${ONNX_GPU}"
+  fi
 fi
 
 if [[ "${YAMS_DISABLE_SYMBOL_EXTRACTION:-}" == "true" ]]; then

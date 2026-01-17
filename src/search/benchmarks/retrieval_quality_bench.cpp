@@ -14,6 +14,14 @@
     YAMS_BENCH_DATASET=<name>         - Use BEIR dataset (default: synthetic)
     YAMS_BENCH_DATASET_PATH=...       - Path to dataset directory
 
+  Tuning for faster ingestion (recommended for large corpora):
+    YAMS_POST_EMBED_CONCURRENT=12     - Parallel embedding workers (default: 4-8)
+    YAMS_POST_EXTRACTION_CONCURRENT=12- Parallel content extraction (default: 4)
+    YAMS_POST_KG_CONCURRENT=12        - Parallel KG extraction (default: 4)
+    YAMS_POST_INGEST_BATCH_SIZE=24    - Documents per batch (default: 8, adaptive)
+    YAMS_EMBED_CHANNEL_CAPACITY=16384 - Embedding queue capacity (default: 8192)
+    YAMS_DB_POOL_MAX=48               - Database connection pool (default: 20)
+
   Supported BEIR datasets (download from
   https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/): scifact       - Scientific
   fact verification (300 queries, 5K docs) cqadupstack   - Community Q&A including programming (13K
@@ -1070,29 +1078,62 @@ struct BenchFixture {
         uint32_t lastDepth = 0;
         bool completed = false;
         int stableChecks = 0;
+        // Helper to get metric from requestCounts with default 0
+        auto getMetric = [](const auto& counts, const std::string& key) -> uint64_t {
+            auto it = counts.find(key);
+            return (it != counts.end()) ? it->second : 0;
+        };
+
+        uint64_t lastKgInFlight = 0, lastSymbolInFlight = 0, lastEntityInFlight = 0;
+        uint64_t lastExtractionInFlight = 0;
+
         while (std::chrono::steady_clock::now() < deadline) {
             auto statusResult = yams::cli::run_sync(client->status(), 5s);
             if (statusResult) {
+                const auto& counts = statusResult.value().requestCounts;
                 uint32_t depth = statusResult.value().postIngestQueueDepth;
-                uint64_t docCount = 0;
-                auto it = statusResult.value().requestCounts.find("documents_total");
-                if (it != statusResult.value().requestCounts.end()) {
-                    docCount = it->second;
-                }
+                uint64_t docCount = getMetric(counts, "documents_total");
 
-                if (depth != lastDepth || docCount != lastDocCount) {
-                    spdlog::info("Documents: {} / {}, queue depth: {}", docCount, corpusSize,
-                                 depth);
+                // Check all processing stage in-flight counters
+                uint64_t extractionInFlight = getMetric(counts, "extraction_inflight");
+                uint64_t kgInFlight = getMetric(counts, "kg_inflight");
+                uint64_t symbolInFlight = getMetric(counts, "symbol_inflight");
+                uint64_t entityInFlight = getMetric(counts, "entity_inflight");
+
+                // Total in-flight across all stages (matches PostIngestQueue::totalInFlight())
+                uint64_t totalInFlight =
+                    extractionInFlight + kgInFlight + symbolInFlight + entityInFlight;
+
+                bool statusChanged =
+                    (depth != lastDepth || docCount != lastDocCount ||
+                     kgInFlight != lastKgInFlight || symbolInFlight != lastSymbolInFlight ||
+                     entityInFlight != lastEntityInFlight ||
+                     extractionInFlight != lastExtractionInFlight);
+
+                if (statusChanged) {
+                    spdlog::info("Documents: {} / {}, queue={}, inflight: extract={} kg={} "
+                                 "symbol={} entity={} (total={})",
+                                 docCount, corpusSize, depth, extractionInFlight, kgInFlight,
+                                 symbolInFlight, entityInFlight, totalInFlight);
                     lastDepth = depth;
                     lastDocCount = docCount;
+                    lastKgInFlight = kgInFlight;
+                    lastSymbolInFlight = symbolInFlight;
+                    lastEntityInFlight = entityInFlight;
+                    lastExtractionInFlight = extractionInFlight;
                     stableChecks = 0;
                 } else {
                     stableChecks++;
                 }
 
-                // Complete when queue is empty AND we have expected doc count (or stable for 5s)
-                if (depth == 0 && (docCount >= (uint64_t)corpusSize || stableChecks >= 10)) {
-                    spdlog::info("Ingestion complete: {} documents indexed", docCount);
+                // Complete when ALL stages are idle:
+                // - postIngestQueueDepth == 0 (queue empty)
+                // - totalInFlight == 0 (all stages: extraction, KG, symbol, entity)
+                // - docCount >= corpusSize OR stable for 5+ seconds
+                bool allStagesDrained = (depth == 0 && totalInFlight == 0);
+                if (allStagesDrained && (docCount >= (uint64_t)corpusSize || stableChecks >= 10)) {
+                    spdlog::info("Ingestion complete: {} documents indexed, all stages drained",
+                                 docCount);
                     completed = true;
                     break;
                 }
@@ -1100,10 +1141,14 @@ struct BenchFixture {
             std::this_thread::sleep_for(500ms);
         }
         if (!completed) {
-            spdlog::error("Ingestion did not complete within timeout (docs: {}/{}, queue: {})",
-                          lastDocCount, corpusSize, lastDepth);
+            spdlog::error("Ingestion did not complete within timeout (docs: {}/{}, queue: {}, "
+                          "inflight: extract={} kg={} symbol={} entity={})",
+                          lastDocCount, corpusSize, lastDepth, lastExtractionInFlight,
+                          lastKgInFlight, lastSymbolInFlight, lastEntityInFlight);
             throw std::runtime_error("Ingestion incomplete - benchmark results would be invalid. "
-                                     "Increase timeout or reduce corpus size.");
+                                     "Increase timeout or reduce corpus size. "
+                                     "For faster ingestion, set: YAMS_POST_EMBED_CONCURRENT=12 "
+                                     "YAMS_POST_EXTRACTION_CONCURRENT=12 YAMS_DB_POOL_MAX=48");
         }
 
         // Wait for embedding provider to become available
