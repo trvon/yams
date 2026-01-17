@@ -9,17 +9,11 @@
 #include <mutex>
 
 // GPU execution provider headers - conditionally included based on Conan build options
-#ifdef YAMS_ONNX_CUDA_ENABLED
-#include <onnxruntime/core/providers/cuda/cuda_provider_factory.h>
-#endif
-
-#ifdef YAMS_ONNX_DIRECTML_ENABLED
-#include <onnxruntime/core/providers/dml/dml_provider_factory.h>
-#endif
-
-#ifdef YAMS_ONNX_COREML_ENABLED
-#include <onnxruntime/core/providers/coreml/coreml_provider_factory.h>
-#endif
+// Note: Prebuilt ONNX Runtime binaries from GitHub releases use the C API for providers.
+// The provider-specific headers (cuda_provider_factory.h, etc.) are only available when
+// building ONNX Runtime from source. For prebuilt binaries, we use
+// OrtSessionOptionsAppendExecutionProvider_* functions from the C API which are declared in
+// onnxruntime_c_api.h (included via onnxruntime_cxx_api.h).
 
 #ifdef YAMS_ENABLE_ONNX_GENAI
 #include <yams/daemon/resource/onnx_genai_adapter.h>
@@ -69,6 +63,7 @@ static Ort::Env& get_global_ort_env() {
 #include <fstream>
 #include <future>
 #include <thread>
+#include <unordered_map>
 
 namespace yams::daemon {
 
@@ -583,9 +578,11 @@ public:
 
 private:
     // Append GPU execution provider to session options based on build configuration
+    // Uses the ONNX Runtime C API which is available in prebuilt binaries
     void appendGpuExecutionProvider() {
 #if defined(YAMS_ONNX_CUDA_ENABLED)
         // CUDA execution provider (NVIDIA GPUs)
+        // Use the C API function available in prebuilt binaries
         try {
             OrtCUDAProviderOptions cuda_options{};
             cuda_options.device_id = 0;
@@ -603,6 +600,7 @@ private:
 #elif defined(YAMS_ONNX_DIRECTML_ENABLED)
         // DirectML execution provider (Windows, any DX12 GPU)
         try {
+            // Use generic AppendExecutionProvider for DML
             sessionOptions_->AppendExecutionProvider("DML");
             spdlog::info("[ONNX] DirectML execution provider enabled");
         } catch (const Ort::Exception& e) {
@@ -611,14 +609,20 @@ private:
         }
 #elif defined(YAMS_ONNX_COREML_ENABLED)
         // CoreML execution provider (macOS, Apple Silicon + Neural Engine)
+        // The prebuilt macOS ONNX Runtime binaries include CoreML support
         try {
-            // CoreML flags: use Neural Engine when available
-            uint32_t coreml_flags = 0;
-            coreml_flags |= COREML_FLAG_ENABLE_ON_SUBGRAPH;
+            // CoreML provider options (empty map uses defaults: GPU + Neural Engine)
+            // Available options: "MLComputeUnits" = "CPUAndGPU" | "CPUOnly" | "CPUAndNeuralEngine"
+            // | "All"
+            std::unordered_map<std::string, std::string> coreml_options;
+            coreml_options["MLComputeUnits"] = "All"; // Use CPU, GPU, and Neural Engine
 
-            sessionOptions_->AppendExecutionProvider("CoreML", coreml_flags);
+            sessionOptions_->AppendExecutionProvider("CoreML", coreml_options);
             spdlog::info("[ONNX] CoreML execution provider enabled (Neural Engine + GPU)");
         } catch (const Ort::Exception& e) {
+            spdlog::warn("[ONNX] Failed to enable CoreML provider: {}. Falling back to CPU.",
+                         e.what());
+        } catch (const std::exception& e) {
             spdlog::warn("[ONNX] Failed to enable CoreML provider: {}. Falling back to CPU.",
                          e.what());
         }

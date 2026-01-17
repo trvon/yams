@@ -705,6 +705,8 @@ jobs:
             export YAMS_INSTALL_PREFIX="/usr"
           else
             export YAMS_INSTALL_PREFIX="/usr/local"
+            # Enable CoreML GPU acceleration for macOS builds
+            export YAMS_ONNX_GPU="coreml"
           fi
           
           # For cross-compilation, ensure pkg-config is available

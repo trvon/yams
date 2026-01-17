@@ -162,7 +162,30 @@ yams plugin health                  # Check plugin status
 yams doctor plugin onnx             # Diagnose specific plugin
 ```
 
-**Recommended model:** `all-MiniLM-L6-v2` (384-dim) — best speed/quality tradeoff. On Windows, avoid 768-dim+ models due to single-threaded ONNX execution.
+**Recommended model:** `all-MiniLM-L6-v2` (384-dim) — best speed/quality tradeoff.
+
+### GPU Acceleration
+
+The ONNX plugin supports GPU acceleration for faster embedding generation:
+
+| Platform | Provider | Hardware |
+|----------|----------|----------|
+| macOS | CoreML | Apple Silicon Neural Engine + GPU |
+| Linux | CUDA | NVIDIA GPUs |
+| Windows | DirectML | Any DirectX 12 GPU (NVIDIA, AMD, Intel) |
+
+GPU support is **auto-detected** during build. To manually control:
+```bash
+# Disable GPU
+YAMS_ONNX_GPU=none ./setup.sh Release
+
+# Force specific provider
+YAMS_ONNX_GPU=cuda ./setup.sh Release    # Linux
+YAMS_ONNX_GPU=coreml ./setup.sh Release  # macOS
+YAMS_ONNX_GPU=directml ./setup.ps1       # Windows
+```
+
+See [plugins/onnx/README.md](plugins/onnx/README.md) for detailed configuration.
 
 ## Troubleshooting
 

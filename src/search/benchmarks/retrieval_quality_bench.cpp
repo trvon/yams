@@ -1069,15 +1069,23 @@ struct BenchFixture {
         spdlog::info("Directory ingestion request accepted: {}", addResult.value().message);
 
         // Wait for directory ingestion to complete by monitoring document count
-        // Scale timeout based on corpus size: 2 minutes base + 5 seconds per 100 docs
-        auto ingestTimeoutSec = std::chrono::seconds(120 + (corpusSize / 100) * 5);
-        spdlog::info("Waiting for ingestion to complete (expecting {} documents, timeout {}s)...",
-                     corpusSize, ingestTimeoutSec.count());
-        auto deadline = std::chrono::steady_clock::now() + ingestTimeoutSec;
+        // Use progress-based timeout: only timeout if no progress for N seconds
+        // This is more robust than a hard deadline because slow ingestion won't fail,
+        // but true hangs will still be detected.
+        auto progressTimeoutSec = std::chrono::seconds(120); // 2 minutes without progress = stalled
+        if (const char* env = std::getenv("YAMS_BENCH_PROGRESS_TIMEOUT")) {
+            progressTimeoutSec = std::chrono::seconds(std::stoi(env));
+        }
+        spdlog::info("Waiting for ingestion to complete (expecting {} documents, "
+                     "progress timeout {}s)...",
+                     corpusSize, progressTimeoutSec.count());
+
+        auto lastProgressTime = std::chrono::steady_clock::now();
         uint64_t lastDocCount = 0;
         uint32_t lastDepth = 0;
         bool completed = false;
         int stableChecks = 0;
+
         // Helper to get metric from requestCounts with default 0
         auto getMetric = [](const auto& counts, const std::string& key) -> uint64_t {
             auto it = counts.find(key);
@@ -1087,7 +1095,24 @@ struct BenchFixture {
         uint64_t lastKgInFlight = 0, lastSymbolInFlight = 0, lastEntityInFlight = 0;
         uint64_t lastExtractionInFlight = 0;
 
-        while (std::chrono::steady_clock::now() < deadline) {
+        while (true) {
+            auto now = std::chrono::steady_clock::now();
+            auto timeSinceProgress =
+                std::chrono::duration_cast<std::chrono::seconds>(now - lastProgressTime);
+
+            // Check for stall (no progress for progressTimeoutSec)
+            if (timeSinceProgress > progressTimeoutSec) {
+                spdlog::error("Ingestion stalled - no progress for {}s (docs: {}/{}, queue: {}, "
+                              "inflight: extract={} kg={} symbol={} entity={})",
+                              timeSinceProgress.count(), lastDocCount, corpusSize, lastDepth,
+                              lastExtractionInFlight, lastKgInFlight, lastSymbolInFlight,
+                              lastEntityInFlight);
+                throw std::runtime_error("Ingestion stalled - benchmark results would be invalid. "
+                                         "Set YAMS_BENCH_PROGRESS_TIMEOUT=300 for slower systems. "
+                                         "For faster ingestion: YAMS_POST_EMBED_CONCURRENT=12 "
+                                         "YAMS_POST_EXTRACTION_CONCURRENT=12 YAMS_DB_POOL_MAX=48");
+            }
+
             auto statusResult = yams::cli::run_sync(client->status(), 5s);
             if (statusResult) {
                 const auto& counts = statusResult.value().requestCounts;
@@ -1122,6 +1147,7 @@ struct BenchFixture {
                     lastEntityInFlight = entityInFlight;
                     lastExtractionInFlight = extractionInFlight;
                     stableChecks = 0;
+                    lastProgressTime = now; // Reset progress timer on any change
                 } else {
                     stableChecks++;
                 }
@@ -1140,20 +1166,10 @@ struct BenchFixture {
             }
             std::this_thread::sleep_for(500ms);
         }
-        if (!completed) {
-            spdlog::error("Ingestion did not complete within timeout (docs: {}/{}, queue: {}, "
-                          "inflight: extract={} kg={} symbol={} entity={})",
-                          lastDocCount, corpusSize, lastDepth, lastExtractionInFlight,
-                          lastKgInFlight, lastSymbolInFlight, lastEntityInFlight);
-            throw std::runtime_error("Ingestion incomplete - benchmark results would be invalid. "
-                                     "Increase timeout or reduce corpus size. "
-                                     "For faster ingestion, set: YAMS_POST_EMBED_CONCURRENT=12 "
-                                     "YAMS_POST_EXTRACTION_CONCURRENT=12 YAMS_DB_POOL_MAX=48");
-        }
 
         // Wait for embedding provider to become available
         spdlog::info("Waiting for embedding provider to become available...");
-        deadline = std::chrono::steady_clock::now() + 30s;
+        auto deadline = std::chrono::steady_clock::now() + 30s;
         bool embeddingReady = false;
         while (std::chrono::steady_clock::now() < deadline) {
             auto statusResult = yams::cli::run_sync(client->status(), 5s);

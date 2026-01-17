@@ -19,12 +19,14 @@ race:any_executor.hpp
 # conditionally_enabled_mutex is reinitialized out of line with the reactor run
 # loop (tracked upstream for Boost.Asio kqueue).
 race:boost::asio::detail::conditionally_enabled_mutex
+race:boost::asio::detail::conditionally_enabled_mutex::scoped_lock
 race:conditionally_enabled_mutex.hpp
 race:kqueue_reactor.ipp
 race:kqueue_reactor.hpp
 race:boost::asio::detail::kqueue_reactor::descriptor_state
 race:boost::asio::detail::kqueue_reactor::allocate_descriptor_state
 race:boost::asio::detail::kqueue_reactor::register_descriptor
+race:boost::asio::detail::kqueue_reactor::run
 race:object_pool.hpp
 
 # Boost.Asio reactive socket service - race in socket descriptor registration
@@ -32,7 +34,9 @@ race:object_pool.hpp
 # fd_set_ tracking has a data race in reactive_socket_service_base::construct().
 # This is a known boost::asio internal issue.
 race:boost::asio::detail::reactive_socket_service_base::construct
+race:boost::asio::detail::reactive_socket_service_base::do_assign
 race:reactive_socket_service_base.ipp
+race:reactive_socket_accept_op.hpp
 
 # Boost.Asio strand destructor - mutex use-after-free during complex shutdown
 # When ServiceManager is destroyed, pending async operations may still hold

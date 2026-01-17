@@ -141,6 +141,7 @@ meson compile -C build\release
 | `YAMS_DISABLE_ONNX` | false | Disable ONNX embeddings |
 | `YAMS_DISABLE_PDF` | false | Disable PDF extraction |
 | `YAMS_INSTALL_PREFIX` | /usr/local | Install location |
+| `YAMS_ONNX_GPU` | auto | GPU provider: `auto`, `cuda`, `coreml`, `directml`, `none` |
 | `FAST_MODE` | 0 | Disable ONNX and tests for quick iteration |
 
 ### Meson Options
@@ -231,6 +232,70 @@ docker run --rm -it ghcr.io/trvon/yams:latest --version
 # Persistent data
 mkdir -p $HOME/yams-data
 docker run --rm -it -v $HOME/yams-data:/var/lib/yams ghcr.io/trvon/yams:latest yams init --non-interactive
+```
+
+## GPU Acceleration
+
+The ONNX plugin supports GPU acceleration for embedding generation. GPU support is **auto-detected** during build based on platform and available hardware.
+
+### Supported Providers
+
+| Platform | Provider | Hardware | Detection |
+|----------|----------|----------|-----------|
+| macOS | CoreML | Apple Neural Engine + GPU | Always enabled (built into ONNX Runtime) |
+| Linux | CUDA | NVIDIA GPUs | Detected via `nvidia-smi` |
+| Windows | DirectML | Any DirectX 12 GPU | Detected via Win32 API |
+| Windows | CUDA | NVIDIA GPUs | Preferred over DirectML if detected |
+
+### Build Configuration
+
+```bash
+# Auto-detect (default) - recommended
+./setup.sh Release
+
+# Force specific provider
+YAMS_ONNX_GPU=cuda ./setup.sh Release      # NVIDIA CUDA
+YAMS_ONNX_GPU=coreml ./setup.sh Release    # macOS CoreML
+YAMS_ONNX_GPU=directml ./setup.ps1         # Windows DirectML
+
+# Disable GPU (CPU-only)
+YAMS_ONNX_GPU=none ./setup.sh Release
+```
+
+### Runtime Configuration
+
+GPU is used automatically when the plugin loads. To enable/disable at runtime:
+
+```toml
+# ~/.config/yams/config.toml
+[embeddings]
+enable_gpu = true   # Use GPU if available (default)
+# enable_gpu = false  # Force CPU-only
+```
+
+### Prerequisites
+
+**CUDA (Linux/Windows):**
+- NVIDIA GPU with CUDA Compute Capability 5.0+
+- CUDA Toolkit 11.8+ and cuDNN 8.6+
+- Driver version 525.60+
+
+**DirectML (Windows):**
+- Any DirectX 12 capable GPU (no additional drivers needed)
+
+**CoreML (macOS):**
+- macOS 11+ (Big Sur or later)
+- No additional setup required; Neural Engine used on Apple Silicon
+
+### Verification
+
+```bash
+# Check build configuration
+yams plugin health
+
+# Check ONNX provider in logs
+yams daemon log | grep -i "execution provider"
+# Should show: "[ONNX] CoreML execution provider enabled" or similar
 ```
 
 ## Troubleshooting
