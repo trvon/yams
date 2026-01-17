@@ -21,6 +21,11 @@ race:any_executor.hpp
 race:boost::asio::detail::conditionally_enabled_mutex
 race:conditionally_enabled_mutex.hpp
 race:kqueue_reactor.ipp
+race:kqueue_reactor.hpp
+race:boost::asio::detail::kqueue_reactor::descriptor_state
+race:boost::asio::detail::kqueue_reactor::allocate_descriptor_state
+race:boost::asio::detail::kqueue_reactor::register_descriptor
+race:object_pool.hpp
 
 # Boost.Asio reactive socket service - race in socket descriptor registration
 # when sockets are constructed/moved across threads. The reactor's internal

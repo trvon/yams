@@ -29,7 +29,17 @@
 #include <yams/search/symspell_search.h>
 #include <yams/storage/corpus_stats.h>
 
+// Phase 2: MetadataRepository refactor - ADR-0004
+// Using result helpers for reduced error handling boilerplate
+#include "repository/result_helpers.hpp"
+
+// Phase 5: CrudOps for generic CRUD operations (ADR-0004)
+#include "repository/crud_ops.hpp"
+
 namespace yams::metadata {
+
+// Import result helpers for cleaner error handling (ADR-0004 Phase 2)
+using repository::scope_exit;
 
 namespace {
 constexpr const char* kDocumentColumnListNew =
@@ -480,25 +490,17 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocument(int64_t id) 
             spec.table = "documents";
             spec.columns = {cols};
             spec.conditions = {"id = ?"};
+
             // Use prepareCached for better performance on repeated lookups
-            auto stmtResult = db.prepareCached(yams::metadata::sql::buildSelect(spec));
+            YAMS_TRY_UNWRAP(cachedStmt, db.prepareCached(yams::metadata::sql::buildSelect(spec)));
+            auto& stmt = *cachedStmt;
 
-            if (!stmtResult)
-                return stmtResult.error();
+            YAMS_TRY(stmt.bind(1, id));
+            YAMS_TRY_UNWRAP(hasRow, stmt.step());
 
-            auto& stmt = *stmtResult.value();
-            auto bindResult = stmt.bind(1, id);
-            if (!bindResult)
-                return bindResult.error();
-
-            auto stepResult = stmt.step();
-            if (!stepResult)
-                return stepResult.error();
-
-            if (!stepResult.value()) {
+            if (!hasRow) {
                 return std::optional<DocumentInfo>{};
             }
-
             return std::optional<DocumentInfo>{mapDocumentRow(stmt)};
         });
 }
@@ -512,25 +514,16 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentInternal(Data
     spec.table = "documents";
     spec.columns = {cols};
     spec.conditions = {"id = ?"};
-    // Use prepareCached for better performance on repeated lookups
-    auto stmtResult = db.prepareCached(yams::metadata::sql::buildSelect(spec));
 
-    if (!stmtResult)
-        return stmtResult.error();
+    YAMS_TRY_UNWRAP(cachedStmt, db.prepareCached(yams::metadata::sql::buildSelect(spec)));
+    auto& stmt = *cachedStmt;
 
-    auto& stmt = *stmtResult.value();
-    auto bindResult = stmt.bind(1, id);
-    if (!bindResult)
-        return bindResult.error();
+    YAMS_TRY(stmt.bind(1, id));
+    YAMS_TRY_UNWRAP(hasRow, stmt.step());
 
-    auto stepResult = stmt.step();
-    if (!stepResult)
-        return stepResult.error();
-
-    if (!stepResult.value()) {
+    if (!hasRow) {
         return std::optional<DocumentInfo>{};
     }
-
     return std::optional<DocumentInfo>{mapDocumentRow(stmt)};
 }
 
@@ -542,23 +535,14 @@ MetadataRepository::getAllMetadataInternal(Database& db, int64_t documentId) {
     spec.table = "metadata";
     spec.columns = {"key", "value", "value_type"};
     spec.conditions = {"document_id = ?"};
-    auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
 
-    if (!stmtResult)
-        return stmtResult.error();
-
-    Statement stmt = std::move(stmtResult).value();
-    auto bindResult = stmt.bind(1, documentId);
-    if (!bindResult)
-        return bindResult.error();
+    YAMS_TRY_UNWRAP(stmt, db.prepare(yams::metadata::sql::buildSelect(spec)));
+    YAMS_TRY(stmt.bind(1, documentId));
 
     std::unordered_map<std::string, MetadataValue> result;
-
     while (true) {
-        auto stepResult = stmt.step();
-        if (!stepResult)
-            return stepResult.error();
-        if (!stepResult.value())
+        YAMS_TRY_UNWRAP(hasRow, stmt.step());
+        if (!hasRow)
             break;
 
         std::string key = stmt.getString(0);
@@ -582,29 +566,15 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const 
             spec.table = "documents";
             spec.columns = {cols};
             spec.conditions = {"sha256_hash = ?"};
-            auto sql = yams::metadata::sql::buildSelect(spec);
-            // Use prepareCached for better performance on repeated lookups
-            auto stmtResult = db.prepareCached(sql);
 
-            if (!stmtResult) {
-                return stmtResult.error();
-            }
+            YAMS_TRY_UNWRAP(cachedStmt, db.prepareCached(yams::metadata::sql::buildSelect(spec)));
+            auto& stmt = *cachedStmt;
+            YAMS_TRY(stmt.bind(1, hash));
+            YAMS_TRY_UNWRAP(hasRow, stmt.step());
 
-            auto& stmt = *stmtResult.value();
-            auto bindResult = stmt.bind(1, hash);
-            if (!bindResult) {
-                return bindResult.error();
-            }
-
-            auto stepResult = stmt.step();
-            if (!stepResult) {
-                return stepResult.error();
-            }
-
-            if (!stepResult.value()) {
+            if (!hasRow) {
                 return std::optional<DocumentInfo>{};
             }
-
             return std::optional<DocumentInfo>{mapDocumentRow(stmt)};
         });
 }
@@ -612,7 +582,7 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const 
 Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
         // Use prepareCached for better performance on repeated updates
-        auto stmtResult = db.prepareCached(R"(
+        YAMS_TRY_UNWRAP(cachedStmt, db.prepareCached(R"(
             UPDATE documents SET
                 file_path = ?, file_name = ?, file_extension = ?,
                 file_size = ?, sha256_hash = ?, mime_type = ?,
@@ -621,21 +591,15 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
                 extraction_error = ?, path_prefix = ?, reverse_path = ?,
                 path_hash = ?, parent_hash = ?, path_depth = ?
             WHERE id = ?
-        )");
+        )"));
 
-        if (!stmtResult)
-            return stmtResult.error();
-
-        auto& stmt = *stmtResult.value();
-        auto bindResult = stmt.bindAll(
-            info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
-            info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
-            info.contentExtracted ? 1 : 0, ExtractionStatusUtils::toString(info.extractionStatus),
-            info.extractionError, info.pathPrefix, info.reversePath, info.pathHash, info.parentHash,
-            info.pathDepth, info.id);
-
-        if (!bindResult)
-            return bindResult.error();
+        auto& stmt = *cachedStmt;
+        YAMS_TRY(stmt.bindAll(info.filePath, info.fileName, info.fileExtension, info.fileSize,
+                              info.sha256Hash, info.mimeType, info.createdTime, info.modifiedTime,
+                              info.indexedTime, info.contentExtracted ? 1 : 0,
+                              ExtractionStatusUtils::toString(info.extractionStatus),
+                              info.extractionError, info.pathPrefix, info.reversePath,
+                              info.pathHash, info.parentHash, info.pathDepth, info.id));
 
         return stmt.execute();
     });
@@ -697,106 +661,38 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
 // Content operations
 Result<void> MetadataRepository::insertContent(const DocumentContent& content) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        // Use prepareCached for better performance on repeated content insertions
-        auto stmtResult = db.prepareCached(R"(
-            INSERT INTO document_content (
-                document_id, content_text, content_length,
-                extraction_method, language
-            ) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(document_id) DO UPDATE SET
-                content_text = excluded.content_text,
-                content_length = excluded.content_length,
-                extraction_method = excluded.extraction_method,
-                language = excluded.language
-        )");
+        DocumentContent sanitized = content;
+        sanitized.contentText = common::sanitizeUtf8(content.contentText);
+        sanitized.contentLength = static_cast<int64_t>(sanitized.contentText.length());
 
-        if (!stmtResult)
-            return stmtResult.error();
-
-        auto& stmt = *stmtResult.value();
-        const std::string sanitizedContent = common::sanitizeUtf8(content.contentText);
-        auto bindResult = stmt.bindAll(content.documentId, sanitizedContent,
-                                       static_cast<int64_t>(sanitizedContent.length()),
-                                       content.extractionMethod, content.language);
-
-        if (!bindResult)
-            return bindResult.error();
-
-        return stmt.execute();
+        repository::CrudOps<DocumentContent> ops;
+        return ops.upsertOnConflict(db, sanitized, "document_id");
     });
 }
 
 Result<std::optional<DocumentContent>> MetadataRepository::getContent(int64_t documentId) {
     return executeQuery<std::optional<DocumentContent>>(
         [&](Database& db) -> Result<std::optional<DocumentContent>> {
-            // Use prepareCached for hot-path queries
-            auto stmtResult = db.prepareCached(R"(
-            SELECT document_id, content_text, content_length,
-                   extraction_method, language
-            FROM document_content WHERE document_id = ?
-        )");
-
-            if (!stmtResult) {
-                return stmtResult.error();
-            }
-
-            auto& stmt = *stmtResult.value();
-            auto bindResult = stmt.bind(1, documentId);
-            if (!bindResult) {
-                return bindResult.error();
-            }
-
-            auto stepResult = stmt.step();
-            if (!stepResult) {
-                return stepResult.error();
-            }
-
-            if (!stepResult.value()) {
-                return std::optional<DocumentContent>{};
-            }
-
-            auto content = mapContentRow(stmt);
-            return std::optional<DocumentContent>{content};
+            repository::CrudOps<DocumentContent> ops;
+            return ops.getById(db, documentId);
         });
 }
 
 Result<void> MetadataRepository::updateContent(const DocumentContent& content) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        auto stmtResult = db.prepare(R"(
-            UPDATE document_content SET
-                content_text = ?, content_length = ?,
-                extraction_method = ?, language = ?
-            WHERE document_id = ?
-        )");
+        DocumentContent sanitized = content;
+        sanitized.contentText = common::sanitizeUtf8(content.contentText);
+        sanitized.contentLength = static_cast<int64_t>(sanitized.contentText.length());
 
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-        const std::string sanitizedContent = common::sanitizeUtf8(content.contentText);
-        auto bindResult =
-            stmt.bindAll(sanitizedContent, static_cast<int64_t>(sanitizedContent.length()),
-                         content.extractionMethod, content.language, content.documentId);
-
-        if (!bindResult)
-            return bindResult.error();
-
-        return stmt.execute();
+        repository::CrudOps<DocumentContent> ops;
+        return ops.update(db, sanitized);
     });
 }
 
 Result<void> MetadataRepository::deleteContent(int64_t documentId) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        auto stmtResult = db.prepare("DELETE FROM document_content WHERE document_id = ?");
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bind(1, documentId);
-        if (!bindResult)
-            return bindResult.error();
-
-        return stmt.execute();
+        repository::CrudOps<DocumentContent> ops;
+        return ops.deleteById(db, documentId);
     });
 }
 
@@ -1039,30 +935,15 @@ Result<std::optional<MetadataValue>> MetadataRepository::getMetadata(int64_t doc
                                                                      const std::string& key) {
     return executeQuery<std::optional<MetadataValue>>(
         [&](Database& db) -> Result<std::optional<MetadataValue>> {
-            // Use prepareCached for hot-path queries
-            auto stmtResult = db.prepareCached(
-                "SELECT value, value_type FROM metadata WHERE document_id = ? AND key = ?");
-
-            if (!stmtResult)
-                return stmtResult.error();
-
-            auto& stmt = *stmtResult.value();
-            auto bindResult = stmt.bindAll(documentId, key);
-            if (!bindResult)
-                return bindResult.error();
-
-            auto stepResult = stmt.step();
-            if (!stepResult)
-                return stepResult.error();
-
-            if (!stepResult.value()) {
+            repository::CrudOps<repository::MetadataEntry> ops;
+            YAMS_TRY_UNWRAP(entry,
+                            ops.queryOne(db, "document_id = ? AND key = ?", documentId, key));
+            if (!entry) {
                 return std::optional<MetadataValue>{};
             }
-
             MetadataValue value;
-            value.value = stmt.getString(0);
-            value.type = MetadataValueTypeUtils::fromString(stmt.getString(1));
-
+            value.value = entry->value;
+            value.type = MetadataValueTypeUtils::fromString(entry->valueType);
             return std::optional<MetadataValue>{value};
         });
 }
@@ -1071,34 +952,16 @@ Result<std::unordered_map<std::string, MetadataValue>>
 MetadataRepository::getAllMetadata(int64_t documentId) {
     return executeQuery<std::unordered_map<std::string, MetadataValue>>(
         [&](Database& db) -> Result<std::unordered_map<std::string, MetadataValue>> {
-            // Use prepareCached for hot-path queries
-            auto stmtResult = db.prepareCached(
-                "SELECT key, value, value_type FROM metadata WHERE document_id = ?");
-
-            if (!stmtResult)
-                return stmtResult.error();
-
-            auto& stmt = *stmtResult.value();
-            auto bindResult = stmt.bind(1, documentId);
-            if (!bindResult)
-                return bindResult.error();
+            repository::CrudOps<repository::MetadataEntry> ops;
+            YAMS_TRY_UNWRAP(entries, ops.query(db, "document_id = ?", documentId));
 
             std::unordered_map<std::string, MetadataValue> result;
-
-            while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
-                    break;
-
+            for (const auto& entry : entries) {
                 MetadataValue value;
-                value.value = stmt.getString(1);
-                value.type = MetadataValueTypeUtils::fromString(stmt.getString(2));
-
-                result[stmt.getString(0)] = value;
+                value.value = entry.value;
+                value.type = MetadataValueTypeUtils::fromString(entry.valueType);
+                result[entry.key] = value;
             }
-
             return result;
         });
 }
@@ -1126,24 +989,17 @@ MetadataRepository::getMetadataForDocuments(std::span<const int64_t> documentIds
             spec.table = "metadata";
             spec.columns = {"document_id", "key", "value", "value_type"};
             spec.conditions = {"document_id IN " + inList};
-            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
-            if (!stmtResult)
-                return stmtResult.error();
 
-            Statement stmt = std::move(stmtResult).value();
+            YAMS_TRY_UNWRAP(stmt, db.prepare(yams::metadata::sql::buildSelect(spec)));
             int index = 1;
             for (auto id : documentIds) {
-                if (auto bindRes = stmt.bind(index++, id); !bindRes)
-                    return bindRes.error();
+                YAMS_TRY(stmt.bind(index++, id));
             }
 
             std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>> result;
-
             while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
+                YAMS_TRY_UNWRAP(hasRow, stmt.step());
+                if (!hasRow)
                     break;
 
                 int64_t docId = stmt.getInt64(0);
@@ -1159,61 +1015,33 @@ MetadataRepository::getMetadataForDocuments(std::span<const int64_t> documentIds
 
 Result<void> MetadataRepository::removeMetadata(int64_t documentId, const std::string& key) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        auto stmtResult = db.prepare(R"(
-            DELETE FROM metadata WHERE document_id = ? AND key = ?
-        )");
-
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bindAll(documentId, key);
-        if (!bindResult)
-            return bindResult.error();
-
-        return stmt.execute();
+        repository::CrudOps<repository::MetadataEntry> ops;
+        ops.deleteWhere(db, "document_id = ? AND key = ?", documentId, key);
+        return {};
     });
 }
 
 // Relationship operations
 Result<int64_t> MetadataRepository::insertRelationship(const DocumentRelationship& relationship) {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        auto stmtResult = db.prepare(R"(
+        YAMS_TRY_UNWRAP(stmt, db.prepare(R"(
             INSERT INTO document_relationships (
                 parent_id, child_id, relationship_type, created_time
             ) VALUES (?, ?, ?, ?)
-        )");
+        )"));
 
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-
-        Result<void> bindResult;
         if (relationship.parentId > 0) {
-            bindResult =
-                stmt.bindAll(relationship.parentId, relationship.childId,
-                             relationship.getRelationshipTypeString(), relationship.createdTime);
+            YAMS_TRY(stmt.bindAll(relationship.parentId, relationship.childId,
+                                  relationship.getRelationshipTypeString(),
+                                  relationship.createdTime));
         } else {
-            bindResult = stmt.bind(1, nullptr);
-            if (bindResult.has_value()) {
-                bindResult = stmt.bind(2, relationship.childId);
-            }
-            if (bindResult.has_value()) {
-                bindResult = stmt.bind(3, relationship.getRelationshipTypeString());
-            }
-            if (bindResult.has_value()) {
-                bindResult = stmt.bind(4, relationship.createdTime);
-            }
+            YAMS_TRY(stmt.bind(1, nullptr));
+            YAMS_TRY(stmt.bind(2, relationship.childId));
+            YAMS_TRY(stmt.bind(3, relationship.getRelationshipTypeString()));
+            YAMS_TRY(stmt.bind(4, relationship.createdTime));
         }
 
-        if (!bindResult)
-            return bindResult.error();
-
-        auto execResult = stmt.execute();
-        if (!execResult)
-            return execResult.error();
-
+        YAMS_TRY(stmt.execute());
         return db.lastInsertRowId();
     });
 }
@@ -1221,234 +1049,69 @@ Result<int64_t> MetadataRepository::insertRelationship(const DocumentRelationshi
 Result<std::vector<DocumentRelationship>> MetadataRepository::getRelationships(int64_t documentId) {
     return executeQuery<std::vector<DocumentRelationship>>(
         [&](Database& db) -> Result<std::vector<DocumentRelationship>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT id, parent_id, child_id, relationship_type, created_time
-            FROM document_relationships
-            WHERE parent_id = ? OR child_id = ?
-        )");
-
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            auto bindResult = stmt.bindAll(documentId, documentId);
-            if (!bindResult)
-                return bindResult.error();
-
-            std::vector<DocumentRelationship> result;
-
-            while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
-                    break;
-
-                result.push_back(mapRelationshipRow(stmt));
-            }
-
-            return result;
+            repository::CrudOps<DocumentRelationship> ops;
+            return ops.query(db, "parent_id = ? OR child_id = ?", documentId, documentId);
         });
 }
 
 Result<void> MetadataRepository::deleteRelationship(int64_t relationshipId) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        auto stmtResult = db.prepare(R"(
-            DELETE FROM document_relationships WHERE id = ?
-        )");
-
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bind(1, relationshipId);
-        if (!bindResult)
-            return bindResult.error();
-
-        return stmt.execute();
+        repository::CrudOps<DocumentRelationship> ops;
+        return ops.deleteById(db, relationshipId);
     });
 }
 
-// Search history operations
+// Search history operations (refactored with YAMS_TRY - ADR-0004 Phase 2)
 Result<int64_t> MetadataRepository::insertSearchHistory(const SearchHistoryEntry& entry) {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        auto stmtResult = db.prepare(R"(
-            INSERT INTO search_history (
-                query, query_time, results_count, execution_time_ms, user_context
-            ) VALUES (?, ?, ?, ?, ?)
-        )");
-
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bindAll(entry.query, entry.queryTime, entry.resultsCount,
-                                       entry.executionTimeMs, entry.userContext);
-
-        if (!bindResult)
-            return bindResult.error();
-
-        auto execResult = stmt.execute();
-        if (!execResult)
-            return execResult.error();
-
-        return db.lastInsertRowId();
+        repository::CrudOps<SearchHistoryEntry> ops;
+        return ops.insert(db, entry);
     });
 }
 
 Result<std::vector<SearchHistoryEntry>> MetadataRepository::getRecentSearches(int limit) {
     return executeQuery<std::vector<SearchHistoryEntry>>(
         [&](Database& db) -> Result<std::vector<SearchHistoryEntry>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT id, query, query_time, results_count, execution_time_ms, user_context
-            FROM search_history
-            ORDER BY query_time DESC
-            LIMIT ?
-        )");
-
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            auto bindResult = stmt.bind(1, limit);
-            if (!bindResult)
-                return bindResult.error();
-
-            std::vector<SearchHistoryEntry> result;
-
-            while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
-                    break;
-
-                result.push_back(mapSearchHistoryRow(stmt));
-            }
-
-            return result;
+            repository::CrudOps<SearchHistoryEntry> ops;
+            return ops.getAllOrdered(db, "query_time DESC", limit);
         });
 }
 
-// Saved queries operations
+// Saved queries operations (refactored with YAMS_TRY - ADR-0004 Phase 2)
 Result<int64_t> MetadataRepository::insertSavedQuery(const SavedQuery& query) {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        auto stmtResult = db.prepare(R"(
-            INSERT INTO saved_queries (
-                name, query, description, created_time, last_used, use_count
-            ) VALUES (?, ?, ?, ?, ?, ?)
-        )");
-
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bindAll(query.name, query.query, query.description,
-                                       query.createdTime, query.lastUsed, query.useCount);
-
-        if (!bindResult)
-            return bindResult.error();
-
-        auto execResult = stmt.execute();
-        if (!execResult)
-            return execResult.error();
-
-        return db.lastInsertRowId();
+        repository::CrudOps<SavedQuery> ops;
+        return ops.insert(db, query);
     });
 }
 
 Result<std::optional<SavedQuery>> MetadataRepository::getSavedQuery(int64_t id) {
     return executeQuery<std::optional<SavedQuery>>(
         [&](Database& db) -> Result<std::optional<SavedQuery>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT id, name, query, description, created_time, last_used, use_count
-            FROM saved_queries WHERE id = ?
-        )");
-
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            auto bindResult = stmt.bind(1, id);
-            if (!bindResult)
-                return bindResult.error();
-
-            auto stepResult = stmt.step();
-            if (!stepResult)
-                return stepResult.error();
-
-            if (!stepResult.value()) {
-                return std::optional<SavedQuery>{};
-            }
-
-            return std::optional<SavedQuery>{mapSavedQueryRow(stmt)};
+            repository::CrudOps<SavedQuery> ops;
+            return ops.getById(db, id);
         });
 }
 
 Result<std::vector<SavedQuery>> MetadataRepository::getAllSavedQueries() {
     return executeQuery<std::vector<SavedQuery>>(
         [&](Database& db) -> Result<std::vector<SavedQuery>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT id, name, query, description, created_time, last_used, use_count
-            FROM saved_queries
-            ORDER BY use_count DESC, last_used DESC
-        )");
-
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            std::vector<SavedQuery> result;
-
-            while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
-                    break;
-
-                result.push_back(mapSavedQueryRow(stmt));
-            }
-
-            return result;
+            repository::CrudOps<SavedQuery> ops;
+            return ops.getAllOrdered(db, "use_count DESC, last_used DESC");
         });
 }
 
 Result<void> MetadataRepository::updateSavedQuery(const SavedQuery& query) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        auto stmtResult = db.prepare(R"(
-            UPDATE saved_queries SET
-                name = ?, query = ?, description = ?,
-                created_time = ?, last_used = ?, use_count = ?
-            WHERE id = ?
-        )");
-
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bindAll(query.name, query.query, query.description,
-                                       query.createdTime, query.lastUsed, query.useCount, query.id);
-
-        if (!bindResult)
-            return bindResult.error();
-
-        return stmt.execute();
+        repository::CrudOps<SavedQuery> ops;
+        return ops.update(db, query);
     });
 }
 
 Result<void> MetadataRepository::deleteSavedQuery(int64_t id) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        auto stmtResult = db.prepare("DELETE FROM saved_queries WHERE id = ?");
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bind(1, id);
-        if (!bindResult)
-            return bindResult.error();
-
-        return stmt.execute();
+        repository::CrudOps<SavedQuery> ops;
+        return ops.deleteById(db, id);
     });
 }
 
@@ -1825,14 +1488,11 @@ static bool isStopword(const std::string& term) {
     return getStopwords().count(lower) > 0;
 }
 
-// FTS5 query sanitization implementing industry best practices:
-// 1. Tokenize and strip punctuation for better matching
-// 2. For long natural language queries (5+ terms): filter stopwords, use OR semantics
-// 3. For short queries (< 5 terms): use AND semantics (more precise)
-// 4. Pass through advanced FTS5 operators (AND, OR, NOT, NEAR) for power users
-//
-// Based on: SQLite FTS5 docs, LangChain BM25Retriever, Elastic/Vespa hybrid search patterns
+// Sanitize FTS5 query to prevent syntax errors.
+// Uses FTS5's default AND semantics for multiple terms (all terms must match).
+// Pass through advanced FTS5 operators (AND, OR, NOT, NEAR) for power users.
 std::string sanitizeFTS5Query(const std::string& query) {
+    // Trim whitespace from both ends
     std::string trimmed = query;
     trimmed.erase(0, trimmed.find_first_not_of(" \t\n\r"));
     if (!trimmed.empty()) {
@@ -1849,76 +1509,39 @@ std::string sanitizeFTS5Query(const std::string& query) {
     // Check if the query uses advanced FTS5 operators - pass through for power users
     bool hasAdvancedOperators =
         trimmed.find(" AND ") != std::string::npos || trimmed.find(" OR ") != std::string::npos ||
-        trimmed.find(" NOT ") != std::string::npos || trimmed.find("NEAR(") != std::string::npos ||
-        trimmed.find('~') != std::string::npos;
+        trimmed.find(" NOT ") != std::string::npos || trimmed.find("NEAR(") != std::string::npos;
 
+    // If using advanced operators, do minimal sanitization
     if (hasAdvancedOperators) {
-        std::string escaped;
-        for (char c : trimmed) {
-            if (c == '"') {
-                escaped += "\"\"";
+        // Just remove trailing operators that would cause syntax errors
+        while (!trimmed.empty()) {
+            char lastChar = trimmed.back();
+            if (lastChar == '-' || lastChar == '+' || lastChar == '*' || lastChar == '(' ||
+                lastChar == ')') {
+                trimmed.pop_back();
             } else {
-                escaped += c;
+                break;
             }
         }
-        return escaped;
+        return trimmed.empty() ? "\"\"" : trimmed;
     }
 
-    std::vector<std::string> terms = splitFTS5Terms(trimmed);
-    if (terms.empty()) {
-        return "\"\"";
-    }
-
-    logFtsTokensIfEnabled(query, terms);
-
-    // Strip punctuation from terms before quoting to improve matching
-    // FTS5 requires exact matches for quoted terms, so "India." won't match "India"
-    std::vector<std::string> cleanedTerms;
-    cleanedTerms.reserve(terms.size());
-    for (const auto& t : terms) {
-        std::string cleaned = stripPunctuation(t);
-        if (!cleaned.empty()) {
-            cleanedTerms.push_back(std::move(cleaned));
+    // For regular queries, just escape internal quotes. This allows FTS5 to use
+    // its default AND behavior for multiple terms, which is more precise than
+    // OR semantics and matches main branch behavior.
+    std::string escaped;
+    escaped.reserve(trimmed.size());
+    for (char c : trimmed) {
+        if (c == '"') {
+            // Escape quotes by doubling them (FTS5 syntax)
+            escaped += "\"\"";
+        } else {
+            escaped += c;
         }
     }
 
-    if (cleanedTerms.empty()) {
-        return "\"\"";
-    }
-
-    // For natural language queries (5+ terms), filter stopwords and use OR semantics
-    // This improves recall for sentence-like queries in BEIR/SciFact benchmarks
-    constexpr size_t kNaturalLanguageThreshold = 5;
-    const bool isNaturalLanguageQuery = cleanedTerms.size() >= kNaturalLanguageThreshold;
-
-    if (isNaturalLanguageQuery) {
-        std::vector<std::string> contentTerms;
-        contentTerms.reserve(cleanedTerms.size());
-        for (const auto& t : cleanedTerms) {
-            if (!isStopword(t) && t.size() >= 2) {
-                contentTerms.push_back(t);
-            }
-        }
-
-        if (!contentTerms.empty()) {
-            std::string result;
-            for (size_t i = 0; i < contentTerms.size(); ++i) {
-                if (i > 0)
-                    result += " OR ";
-                result += quoteFTS5Term(contentTerms[i]);
-            }
-            return result;
-        }
-    }
-
-    // For short queries (< 5 terms), use AND semantics (more precise)
-    std::string result;
-    for (size_t i = 0; i < cleanedTerms.size(); ++i) {
-        if (i > 0)
-            result += ' ';
-        result += quoteFTS5Term(cleanedTerms[i]);
-    }
-    return result;
+    // DO NOT wrap in quotes or use OR. Let FTS5 handle as set of terms with AND semantics.
+    return escaped;
 }
 
 Result<SearchResults>
@@ -2652,20 +2275,8 @@ MetadataRepository::findDocumentsModifiedSince(std::chrono::system_clock::time_p
 // Statistics
 Result<int64_t> MetadataRepository::getDocumentCount() {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        using yams::metadata::sql::QuerySpec;
-        QuerySpec spec{};
-        spec.table = "documents";
-        spec.columns = {"COUNT(*)"};
-        auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-        auto stepResult = stmt.step();
-        if (!stepResult)
-            return stepResult.error();
-
-        return stmt.getInt64(0);
+        repository::CrudOps<DocumentInfo> ops;
+        return ops.count(db);
     });
 }
 
@@ -2689,43 +2300,15 @@ Result<int64_t> MetadataRepository::getIndexedDocumentCount() {
 
 Result<int64_t> MetadataRepository::getContentExtractedDocumentCount() {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        using yams::metadata::sql::QuerySpec;
-        QuerySpec spec{};
-        spec.table = "documents";
-        spec.columns = {"COUNT(*)"};
-        spec.conditions = {"content_extracted = 1"};
-        auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
-        if (!stmtResult)
-            return stmtResult.error();
-        Statement stmt = std::move(stmtResult).value();
-        auto stepResult = stmt.step();
-        if (!stepResult)
-            return stepResult.error();
-        return stmt.getInt64(0);
+        repository::CrudOps<DocumentInfo> ops;
+        return ops.count(db, "content_extracted = 1");
     });
 }
 
 Result<int64_t> MetadataRepository::getDocumentCountByExtractionStatus(ExtractionStatus status) {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
-        using yams::metadata::sql::QuerySpec;
-        QuerySpec spec{};
-        spec.table = "documents";
-        spec.columns = {"COUNT(*)"};
-        spec.conditions = {"extraction_status = ?"};
-        auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bind(1, ExtractionStatusUtils::toString(status));
-        if (!bindResult)
-            return bindResult.error();
-
-        auto stepResult = stmt.step();
-        if (!stepResult)
-            return stepResult.error();
-
-        return stmt.getInt64(0);
+        repository::CrudOps<DocumentInfo> ops;
+        return ops.count(db, "extraction_status = ?", ExtractionStatusUtils::toString(status));
     });
 }
 
@@ -4759,53 +4342,6 @@ DocumentInfo MetadataRepository::mapDocumentRow(Statement& stmt) {
     return info;
 }
 
-DocumentContent MetadataRepository::mapContentRow(Statement& stmt) {
-    DocumentContent content;
-    content.documentId = stmt.getInt64(0);
-    content.contentText = stmt.getString(1);
-    content.contentLength = stmt.getInt64(2);
-    content.extractionMethod = stmt.getString(3);
-    content.language = stmt.getString(4);
-    return content;
-}
-
-DocumentRelationship MetadataRepository::mapRelationshipRow(Statement& stmt) {
-    DocumentRelationship rel;
-    rel.id = stmt.getInt64(0);
-    if (!stmt.isNull(1)) {
-        rel.parentId = stmt.getInt64(1);
-    }
-    rel.childId = stmt.getInt64(2);
-    rel.setRelationshipTypeFromString(stmt.getString(3));
-    rel.createdTime = stmt.getTime(4);
-    return rel;
-}
-
-SearchHistoryEntry MetadataRepository::mapSearchHistoryRow(Statement& stmt) {
-    SearchHistoryEntry entry;
-    entry.id = stmt.getInt64(0);
-    entry.query = stmt.getString(1);
-    entry.queryTime = stmt.getTime(2);
-    entry.resultsCount = stmt.getInt64(3);
-    entry.executionTimeMs = stmt.getInt64(4);
-    entry.userContext = stmt.getString(5);
-    return entry;
-}
-
-SavedQuery MetadataRepository::mapSavedQueryRow(Statement& stmt) {
-    SavedQuery query;
-    query.id = stmt.getInt64(0);
-    query.name = stmt.getString(1);
-    query.query = stmt.getString(2);
-    query.description = stmt.getString(3);
-    query.createdTime = stmt.getTime(4);
-    if (!stmt.isNull(5)) {
-        query.lastUsed = stmt.getTime(5);
-    }
-    query.useCount = stmt.getInt64(6);
-    return query;
-}
-
 // MetadataQueryBuilder implementation
 MetadataQueryBuilder& MetadataQueryBuilder::withExtension(const std::string& extension) {
     conditions_.push_back("file_extension = ?");
@@ -5454,20 +4990,9 @@ Result<int64_t> MetadataRepository::countDocumentsBySessionId(const std::string&
 
 Result<void> MetadataRepository::removeSessionIdFromDocuments(const std::string& sessionId) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        auto stmtResult = db.prepare(R"(
-            DELETE FROM metadata
-            WHERE key = 'session_id' AND value = ?
-        )");
-
-        if (!stmtResult)
-            return stmtResult.error();
-
-        Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bind(1, sessionId);
-        if (!bindResult)
-            return bindResult.error();
-
-        return stmt.execute();
+        repository::CrudOps<repository::MetadataEntry> ops;
+        ops.deleteWhere(db, "key = 'session_id' AND value = ?", sessionId);
+        return {};
     });
 }
 

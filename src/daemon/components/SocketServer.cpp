@@ -135,11 +135,34 @@ Result<void> SocketServer::start() {
         }
 
         auto io_context = coordinator_->getIOContext();
-        acceptor_ = std::make_unique<local::acceptor>(*io_context);
-        local::endpoint endpoint(sockPath.string());
-        acceptor_->open(endpoint.protocol());
-        acceptor_->bind(endpoint);
-        acceptor_->listen(boost::asio::socket_base::max_listen_connections);
+
+        // Create acceptor on the io_context executor to avoid TSan race with
+        // worker threads already running io_context->run(). The kqueue_reactor
+        // descriptor allocation must be synchronized with event processing.
+        std::exception_ptr acceptorException;
+        std::string sockPathStr = sockPath.string();
+
+        std::promise<void> acceptorReady;
+        auto acceptorFuture = acceptorReady.get_future();
+
+        boost::asio::post(
+            *io_context, [this, io_context, &sockPathStr, &acceptorException, &acceptorReady]() {
+                try {
+                    acceptor_ = std::make_unique<local::acceptor>(*io_context);
+                    local::endpoint endpoint(sockPathStr);
+                    acceptor_->open(endpoint.protocol());
+                    acceptor_->bind(endpoint);
+                    acceptor_->listen(boost::asio::socket_base::max_listen_connections);
+                } catch (...) {
+                    acceptorException = std::current_exception();
+                }
+                acceptorReady.set_value();
+            });
+
+        acceptorFuture.get();
+        if (acceptorException) {
+            std::rethrow_exception(acceptorException);
+        }
 
 #ifndef _WIN32
         // Set socket permissions on Unix (Windows Unix sockets don't support filesystem

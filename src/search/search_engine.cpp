@@ -191,11 +191,11 @@ ResultFusion::fuseTextAnchor(const std::vector<ComponentResult>& results) {
         }
     }
 
-    // Accumulate scores per document
     std::unordered_map<std::string, SearchResult> resultMap;
     const float k = config_.rrfK;
-    constexpr float vectorOnlyThreshold = 0.80f; // High confidence for vector-only results
-    constexpr float vectorBoostFactor = 0.30f;   // Meaningful boost from vector when text anchored
+    const float vectorOnlyThreshold = config_.vectorOnlyThreshold;
+    const float vectorBoostFactor = config_.vectorBoostFactor;
+    const float vectorOnlyPenalty = config_.vectorOnlyPenalty;
 
     // Process text-anchored documents first (these always get included)
     for (const auto& [docHash, compResults] : textResults) {
@@ -219,11 +219,12 @@ ResultFusion::fuseTextAnchor(const std::vector<ComponentResult>& results) {
             }
         }
 
-        // Add small vector boost if also found by vector (re-ranking)
         if (auto it = vectorResults.find(docHash); it != vectorResults.end()) {
             for (const auto* vcomp : it->second) {
-                // Vector contributes a small boost proportional to its score
-                double vectorBoost = vectorBoostFactor * vcomp->score;
+                double rrfScale = 1.0 / (k + static_cast<double>(vcomp->rank));
+                double scoreMultiplier =
+                    1.0 + std::clamp(static_cast<double>(vcomp->score), 0.0, 1.0);
+                double vectorBoost = vectorBoostFactor * rrfScale * scoreMultiplier;
                 totalScore += vectorBoost;
                 debugInfo["vector_boost"] = std::to_string(vectorBoost);
             }
@@ -255,13 +256,11 @@ ResultFusion::fuseTextAnchor(const std::vector<ComponentResult>& results) {
             }
         }
 
-        // Only include if confidence exceeds threshold (semantic discovery)
         if (maxVectorScore >= vectorOnlyThreshold && bestVectorResult != nullptr) {
             double score = getComponentWeight(bestVectorResult->source) *
                            (1.0 / (k + static_cast<double>(bestVectorResult->rank))) *
                            (1.0 + maxVectorScore);
-            // Slight penalty for being vector-only (text is more reliable)
-            score *= 0.8;
+            score *= vectorOnlyPenalty;
 
             SearchResult sr;
             sr.document.sha256Hash = docHash;
@@ -913,12 +912,8 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFullText(const std
             ComponentResult result;
             result.documentHash = searchResult.document.sha256Hash;
             result.filePath = filePath;
-            // FTS5 BM25 scores are negative (more negative = better match)
-            // Convert to [0, 1] range: score of -25 → 1.0, score of 0 → 0.0
-            // Using sigmoid-like transformation: 1 / (1 + exp(score/5))
-            // This preserves ranking order and normalizes to [0, 1]
             float rawScore = static_cast<float>(searchResult.score);
-            float normalizedScore = 1.0f / (1.0f + std::exp(rawScore / 5.0f));
+            float normalizedScore = std::clamp(-rawScore / config_.bm25NormDivisor, 0.0f, 1.0f);
             result.score = scoreMultiplier * normalizedScore;
             result.source = "text";
             result.rank = rank;

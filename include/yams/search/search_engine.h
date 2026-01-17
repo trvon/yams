@@ -75,26 +75,32 @@ struct SearchEngineConfig {
     } corpusProfile = CorpusProfile::MIXED;
 
     // Component weights (0.0 = disabled, 1.0 = full weight)
-    // Restored higher vector weight from main branch for better embedding-based ranking
-    float textWeight = 0.30f;         // Full-text search weight (merged FTS5 + symbol)
-    float pathTreeWeight = 0.10f;     // Path tree hierarchical weight
-    float kgWeight = 0.05f;           // Knowledge graph weight
-    float vectorWeight = 0.55f;       // Vector similarity weight (HNSW indexed, fast) - increased
-    float entityVectorWeight = 0.05f; // Entity (symbol) vector similarity weight
-    float tagWeight = 0.05f;          // Tag-based search weight (modifier, not standalone)
+    // Text weight strongly dominant; vector minimal - text ranking is primary
+    float textWeight = 0.70f;          // Full-text search weight - dominant for MRR
+    float pathTreeWeight = 0.08f;      // Path tree hierarchical weight
+    float kgWeight = 0.04f;            // Knowledge graph weight
+    float vectorWeight = 0.08f;        // Vector similarity weight - minimal, for re-ranking only
+    float vectorOnlyPenalty = 0.8f;    // Penalty for vector-only results (no text match)
+    float vectorOnlyThreshold = 0.90f; // Minimum confidence for vector-only inclusion
+    float vectorBoostFactor = 0.10f;   // Boost factor for vector re-ranking
+    float entityVectorWeight = 0.05f;  // Entity (symbol) vector similarity weight
+    float tagWeight = 0.05f;           // Tag-based search weight (modifier, not standalone)
     float metadataWeight = 0.05f; // Metadata attribute matching weight (modifier, not standalone)
 
     // Search parameters
     size_t maxResults = 100;             // Maximum results to return
-    float similarityThreshold = 0.50f;   // Minimum similarity threshold (lowered for better recall)
+    float similarityThreshold = 0.55f;   // Minimum similarity threshold (balanced precision/recall)
     bool enableParallelExecution = true; // Parallel component queries
     std::chrono::milliseconds componentTimeout = // Timeout per component (0 = no timeout)
         std::chrono::milliseconds(0);
 
     // RRF (Reciprocal Rank Fusion) parameter
-    // Lower k = more weight on top-ranked items
+    // Lower k = more weight on top-ranked items (better precision/MRR)
     // Higher k = smoother ranking across positions (better recall)
-    float rrfK = 60.0f; // Restored from main branch for better recall
+    float rrfK = 12.0f; // Lower k for sharper top-rank discrimination
+
+    // BM25 score normalization divisor (typical range: 20-30)
+    float bm25NormDivisor = 25.0f;
 
     // Benchmarking support
     bool enableProfiling = false;
@@ -107,7 +113,7 @@ struct SearchEngineConfig {
         WEIGHTED_RECIPROCAL, // Weighted RRF (custom)
         COMB_MNZ,            // CombMNZ: score * num_components (recall-focused)
         TEXT_ANCHOR          // Text-anchored: FTS5 as primary, vector for re-ranking only
-    } fusionStrategy = FusionStrategy::RECIPROCAL_RANK; // Restored from main branch
+    } fusionStrategy = FusionStrategy::TEXT_ANCHOR; // Text as anchor for better MRR/precision
 
     /// Convert FusionStrategy to string for logging/debugging
     [[nodiscard]] static constexpr const char*

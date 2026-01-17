@@ -693,10 +693,6 @@ private:
 
     // Helper methods for row mapping
     DocumentInfo mapDocumentRow(Statement& stmt);
-    DocumentContent mapContentRow(Statement& stmt);
-    DocumentRelationship mapRelationshipRow(Statement& stmt);
-    SearchHistoryEntry mapSearchHistoryRow(Statement& stmt);
-    SavedQuery mapSavedQueryRow(Statement& stmt);
 
     Result<void> ensureFuzzyIndexInitialized();
 

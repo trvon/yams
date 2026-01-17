@@ -1594,6 +1594,18 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Repository Foundation Tests (Catch2) - entity_traits, result_helpers, crud_ops
+  # Phase 1 of ADR-0004: MetadataRepository Refactor with Templates and Metaprogramming
+  # --------------------------------------------------------------------------
+  catch2_repository_foundation_exe = executable('catch2_repository_foundation',
+    files('unit/metadata/repository_foundation_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Core tests (minimal dependencies - no daemon)
   core_test_deps = [
     dependency('spdlog'),
@@ -2012,6 +2024,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'metadata', 'corpus_stats'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
+  )
+
+  test('repository_foundation', catch2_repository_foundation_exe,
+    suite: ['catch2', 'unit', 'metadata', 'repository', 'foundation'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   # Core tests
