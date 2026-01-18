@@ -499,9 +499,9 @@ public:
         }
 
         try {
-            auto result =
-                backend_->searchSimilar(query_embedding, params.k, params.similarity_threshold,
-                                        params.document_hash, params.metadata_filters);
+            auto result = backend_->searchSimilar(query_embedding, params.k,
+                                                  params.similarity_threshold, params.document_hash,
+                                                  params.candidate_hashes, params.metadata_filters);
             if (!result) {
                 // Can't modify has_error_ from const method
                 return {};

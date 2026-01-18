@@ -11,6 +11,7 @@
 #include <yams/downloader/downloader.hpp>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
+#include <yams/search/query_concept_extractor.h>
 // Required for yams::extraction::IContentExtractor
 #include <yams/extraction/content_extractor.h>
 
@@ -105,6 +106,9 @@ struct AppContext {
     bool searchRepairInProgress{false};
     std::string searchRepairDetails{};
     int searchRepairProgress{0}; // 0-100%
+
+    // GLiNER query concept extraction for semantic query expansion
+    search::EntityExtractionFunc queryConceptExtractor;
 };
 
 // ===========================

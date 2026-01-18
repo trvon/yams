@@ -583,7 +583,7 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar with m
     std::map<std::string, std::string> filters;
     filters["category"] = "even";
 
-    auto filterResult = backend.searchSimilar(query, 10, 0.0f, std::nullopt, filters);
+    auto filterResult = backend.searchSimilar(query, 10, 0.0f, std::nullopt, {}, filters);
     REQUIRE(filterResult.has_value());
 
     // All results should have category=even

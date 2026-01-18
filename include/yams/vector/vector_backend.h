@@ -3,6 +3,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 #include <yams/core/types.h>
 #include <yams/vector/vector_database.h>
@@ -75,7 +76,8 @@ public:
      * @param query_embedding The query vector
      * @param k Number of nearest neighbors to return
      * @param similarity_threshold Minimum similarity score
-     * @param document_hash Optional filter by document
+     * @param document_hash Optional filter by single document
+     * @param candidate_hashes Narrow search to these document hashes (tiered search)
      * @param metadata_filters Optional metadata key-value filters
      * @return Vector of matching records sorted by similarity
      */
@@ -83,6 +85,7 @@ public:
     searchSimilar(const std::vector<float>& query_embedding, size_t k,
                   float similarity_threshold = 0.0f,
                   const std::optional<std::string>& document_hash = std::nullopt,
+                  const std::unordered_set<std::string>& candidate_hashes = {},
                   const std::map<std::string, std::string>& metadata_filters = {}) = 0;
 
     /**

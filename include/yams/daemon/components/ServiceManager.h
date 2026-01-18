@@ -70,6 +70,8 @@ class RepairManager;
 namespace yams::search {
 class SearchEngine;
 class SearchEngineBuilder;
+class IReranker;
+class OnnxRerankerAdapter;
 } // namespace yams::search
 namespace yams::vector {
 class EmbeddingGenerator;
@@ -84,6 +86,7 @@ class RetrievalSessionManager;
 class WorkerPool;
 class TuningManager;
 class CheckpointManager;
+class OnnxRerankerSession;
 } // namespace yams::daemon
 
 namespace yams::daemon {
@@ -561,6 +564,9 @@ private:
     std::shared_ptr<yams::search::SearchEngine> searchEngine_;
     mutable YAMS_SHARED_LOCKABLE(std::shared_mutex, searchEngineMutex_); // Allow concurrent reads
 
+    // Cross-encoder reranker for improved search ranking (PBI: yams-li9e)
+    std::shared_ptr<yams::search::OnnxRerankerAdapter> rerankerAdapter_;
+
     // Modern async architecture (Phase 0c): WorkCoordinator delegates threading complexity
     // Member declaration order is CRITICAL for correct destruction
     // 1. Cancellation signal (destructs last among these) - signals all async ops to cancel
@@ -634,6 +640,10 @@ private:
     std::unique_ptr<PluginManager> pluginManager_;
     std::unique_ptr<VectorSystemManager> vectorSystemManager_;
     std::unique_ptr<DatabaseManager> databaseManager_;
+
+    // Cached GLiNER query concept extraction function (initialized once when plugins ready)
+    mutable std::once_flag queryConceptExtractorOnce_;
+    mutable search::EntityExtractionFunc cachedQueryConceptExtractor_;
 
     mutable std::shared_mutex pluginStatusMutex_;
     PluginStatusSnapshot pluginStatusSnapshot_{};

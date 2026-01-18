@@ -14,6 +14,7 @@
 #include <yams/daemon/resource/plugin_host.h>
 #endif
 #include <yams/plugins/search_provider_v1.h>
+#include <yams/search/query_concept_extractor.h>
 #include <yams/search/query_qualifiers.hpp>
 #include <yams/search/symbol_enrichment.h>
 
@@ -1129,6 +1130,9 @@ private:
         constexpr int kMaxSearchResults = 10000;
         params.limit = std::min(params.limit, kMaxSearchResults);
 
+        // GLiNER concept extraction is now handled inside SearchEngine in parallel
+        // with embedding generation and text-based components. Concepts are used
+        // in fusion for boosting, not for query expansion.
         auto searchRes = ctx_.searchEngine->searchWithResponse(req.query, params);
         if (!searchRes) {
             spdlog::warn("Search failed ({}), falling back to keyword-only search",
@@ -1221,7 +1225,7 @@ private:
             // Store hash for post-processing symbol enrichment
             std::vector<std::string> hashes(n);
 
-            auto worker = [&, this]() {
+            auto worker = [&]() {
                 YAMS_ZONE_SCOPED_N("search_service::result_shape_worker");
                 while (true) {
                     const size_t i = next.fetch_add(1);

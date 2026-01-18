@@ -151,6 +151,24 @@ public:
     virtual std::shared_ptr<vector::EmbeddingGenerator>
     getEmbeddingGenerator(const std::string& modelName = "") = 0;
 
+    /**
+     * Score documents against a query using a cross-encoder reranker model
+     * Returns relevance scores for each document in the same order as input.
+     *
+     * This is an optional capability - implementations that don't support
+     * cross-encoder reranking should return an error.
+     *
+     * @param query The search query
+     * @param documents The document texts/snippets to score
+     * @return Vector of relevance scores [0,1] or error if not supported
+     */
+    virtual Result<std::vector<float>> scoreDocuments(const std::string& query,
+                                                      const std::vector<std::string>& documents) {
+        (void)query;
+        (void)documents;
+        return Error{ErrorCode::NotImplemented, "Cross-encoder reranking not supported"};
+    }
+
     // ========================================================================
     // Provider Information
     // ========================================================================

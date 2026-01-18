@@ -768,6 +768,7 @@ public:
     Result<std::vector<VectorRecord>>
     searchSimilar(const std::vector<float>& query_embedding, size_t k, float similarity_threshold,
                   const std::optional<std::string>& document_hash,
+                  const std::unordered_set<std::string>& candidate_hashes,
                   const std::map<std::string, std::string>& metadata_filters) {
         std::shared_lock lock(mutex_);
 
@@ -809,9 +810,9 @@ public:
                          hnsw->size(), k, sc);
         }
 
-        // Build filter function for document_hash and metadata
+        // Build filter function for document_hash, candidate_hashes, and metadata
         HNSWIndex::FilterFn filter = nullptr;
-        if (document_hash || !metadata_filters.empty()) {
+        if (document_hash || !candidate_hashes.empty() || !metadata_filters.empty()) {
             filter = [&](size_t node_id) {
                 // Look up the record
                 auto record_opt = getVectorByRowidUnlocked(static_cast<int64_t>(node_id));
@@ -820,7 +821,13 @@ public:
 
                 const auto& record = *record_opt;
 
-                // Check document_hash filter
+                // Check candidate_hashes filter (tiered search narrowing)
+                if (!candidate_hashes.empty() &&
+                    candidate_hashes.find(record.document_hash) == candidate_hashes.end()) {
+                    return false;
+                }
+
+                // Check document_hash filter (single doc)
                 if (document_hash && record.document_hash != *document_hash) {
                     return false;
                 }
@@ -2017,8 +2024,46 @@ private:
         hnsw_dirty_.clear();
         hnsw_loaded_ = false;
 
+        // Drop persisted HNSW tables so ensureHnswLoadedUnlocked will rebuild from vectors table
+        // (otherwise it would load stale indices that don't include recent inserts)
+        dropHnswTablesUnlocked();
+
         ensureHnswLoadedUnlocked();
         saveAllHnswUnlocked();
+    }
+
+    // Drop all HNSW tables (but not the vectors table)
+    void dropHnswTablesUnlocked() {
+        std::vector<std::string> tables_to_drop;
+        const char* find_tables =
+            "SELECT name FROM sqlite_master WHERE type='table' AND "
+            "(name LIKE 'vectors_%_hnsw_meta' OR name LIKE 'vectors_%_hnsw_nodes' OR "
+            " name = 'vectors_hnsw_meta' OR name = 'vectors_hnsw_nodes')";
+
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, find_tables, -1, &stmt, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* table_name =
+                    reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                if (table_name) {
+                    tables_to_drop.push_back(std::string("DROP TABLE IF EXISTS ") + table_name);
+                }
+            }
+            sqlite3_finalize(stmt);
+        }
+
+        for (const auto& sql : tables_to_drop) {
+            char* err_msg = nullptr;
+            sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err_msg);
+            if (err_msg) {
+                sqlite3_free(err_msg);
+            }
+        }
+
+        if (!tables_to_drop.empty()) {
+            spdlog::debug("[HNSW] Dropped {} persisted HNSW tables for rebuild",
+                          tables_to_drop.size());
+        }
     }
 
     // Compact all HNSW indices (remove soft-deleted nodes)
@@ -2179,9 +2224,10 @@ Result<std::vector<VectorRecord>>
 SqliteVecBackend::searchSimilar(const std::vector<float>& query_embedding, size_t k,
                                 float similarity_threshold,
                                 const std::optional<std::string>& document_hash,
+                                const std::unordered_set<std::string>& candidate_hashes,
                                 const std::map<std::string, std::string>& metadata_filters) {
     return impl_->searchSimilar(query_embedding, k, similarity_threshold, document_hash,
-                                metadata_filters);
+                                candidate_hashes, metadata_filters);
 }
 
 Result<std::optional<VectorRecord>> SqliteVecBackend::getVector(const std::string& chunk_id) {

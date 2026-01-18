@@ -3,6 +3,7 @@
 #include <yams/core/types.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/search/query_concept_extractor.h>
 #include <yams/search/search_results.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
@@ -93,6 +94,15 @@ struct SearchEngineConfig {
     bool enableParallelExecution = true; // Parallel component queries
     std::chrono::milliseconds componentTimeout = // Timeout per component (0 = no timeout)
         std::chrono::milliseconds(0);
+
+    // Tiered execution: Run fast components (FTS5 + path) first, use results to narrow vector
+    // search Tier 1 results inform which document vectors to search, improving both speed and
+    // relevance
+    bool enableTieredExecution = true; // Enable two-tier search (text narrows vector candidates)
+    bool tieredNarrowVectorSearch =
+        true; // Use Tier 1 doc hashes to filter vector search candidates
+    size_t tieredMinCandidates =
+        10; // Min candidates from Tier 1 before narrowing (fallback to full)
 
     // RRF (Reciprocal Rank Fusion) parameter
     // Lower k = more weight on top-ranked items (better precision/MRR)
@@ -564,6 +574,12 @@ public:
      * @param executor Optional executor. If empty/nullopt, falls back to std::async.
      */
     void setExecutor(std::optional<boost::asio::any_io_executor> executor);
+
+    /**
+     * @brief Set the concept extractor for GLiNER-based entity extraction
+     * @param extractor Function to extract concepts from query text
+     */
+    void setConceptExtractor(EntityExtractionFunc extractor);
 
 private:
     class Impl;

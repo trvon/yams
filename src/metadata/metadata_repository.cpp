@@ -1499,22 +1499,55 @@ std::string sanitizeFTS5Query(const std::string& query) {
         return trimmed.empty() ? "\"\"" : trimmed;
     }
 
-    // For regular queries, just escape internal quotes. This allows FTS5 to use
-    // its default AND behavior for multiple terms, which is more precise than
-    // OR semantics and matches main branch behavior.
-    std::string escaped;
-    escaped.reserve(trimmed.size());
-    for (char c : trimmed) {
-        if (c == '"') {
-            // Escape quotes by doubling them (FTS5 syntax)
-            escaped += "\"\"";
+    // For regular queries, process each token to handle special characters.
+    // FTS5 interprets `-` as NOT operator, so terms with embedded hyphens need quoting.
+    // Split by whitespace, quote terms with embedded hyphens, rejoin.
+    std::string result;
+    result.reserve(trimmed.size() + 10);
+
+    std::istringstream iss(trimmed);
+    std::string token;
+    bool first = true;
+
+    while (iss >> token) {
+        if (!first) {
+            result += ' ';
+        }
+        first = false;
+
+        // Escape internal quotes by doubling them
+        std::string escaped;
+        escaped.reserve(token.size());
+        for (char c : token) {
+            if (c == '"') {
+                escaped += "\"\"";
+            } else {
+                escaped += c;
+            }
+        }
+
+        // Check if token has embedded hyphen (not at start/end) - needs quoting
+        // to prevent FTS5 interpreting `-` as NOT operator
+        bool hasEmbeddedHyphen = false;
+        if (escaped.size() > 2) {
+            for (size_t i = 1; i < escaped.size() - 1; ++i) {
+                if (escaped[i] == '-') {
+                    hasEmbeddedHyphen = true;
+                    break;
+                }
+            }
+        }
+
+        if (hasEmbeddedHyphen) {
+            result += '"';
+            result += escaped;
+            result += '"';
         } else {
-            escaped += c;
+            result += escaped;
         }
     }
 
-    // DO NOT wrap in quotes or use OR. Let FTS5 handle as set of terms with AND semantics.
-    return escaped;
+    return result.empty() ? "\"\"" : result;
 }
 
 Result<SearchResults>

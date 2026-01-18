@@ -78,6 +78,7 @@ public:
     searchSimilar(const std::vector<float>& query_embedding, size_t k,
                   float similarity_threshold = 0.0f,
                   const std::optional<std::string>& document_hash = std::nullopt,
+                  const std::unordered_set<std::string>& candidate_hashes = {},
                   const std::map<std::string, std::string>& metadata_filters = {}) override;
 
     Result<std::optional<VectorRecord>> getVector(const std::string& chunk_id) override;

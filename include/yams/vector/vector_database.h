@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace yams::vector {
@@ -143,9 +144,10 @@ struct EntitySearchParams {
  * Search parameters for vector similarity queries
  */
 struct VectorSearchParams {
-    size_t k = 10;                                       // Number of results to return
-    float similarity_threshold = 0.7f;                   // Minimum similarity score
-    std::optional<std::string> document_hash;            // Filter by document
+    size_t k = 10;                                    // Number of results to return
+    float similarity_threshold = 0.7f;                // Minimum similarity score
+    std::optional<std::string> document_hash;         // Filter by single document
+    std::unordered_set<std::string> candidate_hashes; // Filter to these candidates (tiered search)
     std::map<std::string, std::string> metadata_filters; // Metadata filters
     bool include_embeddings = false;                     // Include embedding vectors in results
 };

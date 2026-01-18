@@ -202,6 +202,7 @@ public:
     std::string hashDocCamel1_; // api_handler.cpp
     std::string hashDocCamel2_; // file_system_utils.cpp
     std::string hashDocCamel3_; // snake_case_example.py
+    std::string hashDocHyphen_; // config-parser.md
 
 private:
     void setupTestEnvironment() {
@@ -471,6 +472,12 @@ def validate_input():
     pass
 )",
                                         {"code", "python", "snakecase"});
+
+    // Hyphenated token test document
+    hashDocHyphen_ = createDocument(
+        "config-parser.md",
+        "The config-parser module handles command-line arguments and configuration files.",
+        {"docs", "config"});
 }
 
 // TEMPORARY: Disable broken inheritance-based mocks
@@ -871,11 +878,7 @@ TEST_CASE("KeywordSearch - Hyphenated as single token", "[search][keyword][token
     SearchServiceFixture fixture;
 
     // FTS5 is configured with tokenchars='_-' so hyphenated terms are single tokens
-    auto hashHyphen = fixture.createDocument(
-        "config-parser.md",
-        "The config-parser module handles command-line arguments and configuration files.",
-        {"docs", "config"});
-
+    // Document created in populateTestCorpus(): config-parser.md
     // Query for the exact hyphenated term
     app::services::SearchRequest req;
     req.query = "config-parser";
