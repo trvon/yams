@@ -385,6 +385,54 @@ void AbiModelProviderAdapter::releaseUnusedResources() {}
 
 void AbiModelProviderAdapter::shutdown() {}
 
+Result<std::vector<float>>
+AbiModelProviderAdapter::scoreDocuments(const std::string& query,
+                                        const std::vector<std::string>& documents) {
+    // Check if the plugin supports v1.3 reranking
+    if (!table_ || !table_->score_documents) {
+        return Error{ErrorCode::NotImplemented, "Cross-encoder reranking not supported by plugin"};
+    }
+
+    if (documents.empty()) {
+        return std::vector<float>{};
+    }
+
+    // Build document pointer array for C ABI
+    std::vector<const char*> doc_ptrs;
+    doc_ptrs.reserve(documents.size());
+    for (const auto& doc : documents) {
+        doc_ptrs.push_back(doc.c_str());
+    }
+
+    float* scores = nullptr;
+    size_t count = 0;
+    auto st =
+        table_->score_documents(table_->self, nullptr, // Use default reranker
+                                query.c_str(), doc_ptrs.data(), documents.size(), &scores, &count);
+
+    if (st != YAMS_OK) {
+        return mapStatus(st, "score_documents");
+    }
+
+    std::vector<float> result;
+    try {
+        if (scores && count > 0) {
+            result.assign(scores, scores + count);
+        }
+    } catch (...) {
+        if (table_->free_scores) {
+            table_->free_scores(table_->self, scores, count);
+        }
+        return Error{ErrorCode::InternalError, "Failed to copy reranker scores"};
+    }
+
+    if (table_->free_scores) {
+        table_->free_scores(table_->self, scores, count);
+    }
+
+    return result;
+}
+
 Error AbiModelProviderAdapter::mapStatus(yams_status_t st, const std::string& context) {
     using EC = ErrorCode;
     EC code = EC::Unknown;

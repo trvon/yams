@@ -11,7 +11,7 @@ extern "C" {
 
 // Interface identity
 #define YAMS_IFACE_MODEL_PROVIDER_V1 "model_provider_v1"
-#define YAMS_IFACE_MODEL_PROVIDER_V1_VERSION 2u
+#define YAMS_IFACE_MODEL_PROVIDER_V1_VERSION 3u
 
 // Status codes (int ABI)
 enum yams_status_e {
@@ -105,6 +105,18 @@ typedef struct yams_model_provider_v1 {
     // Optional: set threading parameters for a model or provider (no-op if unsupported)
     yams_status_t (*set_threading)(void* self, const char* model_id, int intra_threads,
                                    int inter_threads);
+
+    // v1.3 extension: Cross-encoder reranking (optional)
+    // Scores documents against a query using a cross-encoder model.
+    // Returns relevance scores in the same order as input documents.
+    // reranker_model_id may be NULL to use default reranker.
+    // Returns YAMS_ERR_UNSUPPORTED if reranking not available.
+    yams_status_t (*score_documents)(void* self, const char* reranker_model_id, const char* query,
+                                     const char* const* documents, size_t doc_count,
+                                     float** out_scores, // length = doc_count
+                                     size_t* out_count);
+
+    void (*free_scores)(void* self, float* scores, size_t count);
 } yams_model_provider_v1;
 
 #ifdef __cplusplus

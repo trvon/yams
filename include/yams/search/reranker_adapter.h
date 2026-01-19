@@ -1,40 +1,47 @@
 #pragma once
 
 #include <yams/search/search_engine.h>
-#include <yams/daemon/resource/onnx_reranker_session.h>
+#include <yams/daemon/resource/model_provider.h>
 
 #include <memory>
+#include <functional>
 
 namespace yams::search {
 
 /**
- * @brief Adapter to bridge OnnxRerankerSession to IReranker interface
+ * @brief Adapter to bridge IModelProvider to IReranker interface
  *
- * Wraps the daemon's OnnxRerankerSession to implement the search engine's
- * IReranker interface for cross-encoder document reranking.
+ * Wraps the model provider's scoreDocuments capability to implement the
+ * search engine's IReranker interface for cross-encoder document reranking.
+ *
+ * This uses the existing plugin infrastructure - the ONNX plugin provides
+ * the model provider which implements scoreDocuments via OnnxRerankerSession.
  */
-class OnnxRerankerAdapter : public IReranker {
+class ModelProviderRerankerAdapter : public IReranker {
 public:
-    explicit OnnxRerankerAdapter(std::shared_ptr<daemon::OnnxRerankerSession> session)
-        : session_(std::move(session)) {}
+    using ProviderGetter = std::function<std::shared_ptr<daemon::IModelProvider>()>;
 
-    ~OnnxRerankerAdapter() override = default;
+    explicit ModelProviderRerankerAdapter(ProviderGetter providerGetter)
+        : providerGetter_(std::move(providerGetter)) {}
+
+    ~ModelProviderRerankerAdapter() override = default;
 
     Result<std::vector<float>> scoreDocuments(const std::string& query,
                                               const std::vector<std::string>& documents) override {
-        if (!session_ || !session_->isValid()) {
-            return Error{ErrorCode::InvalidState, "Reranker session not available"};
+        auto provider = providerGetter_();
+        if (!provider || !provider->isAvailable()) {
+            return Error{ErrorCode::InvalidState, "Model provider not available for reranking"};
         }
-        return session_->scoreBatch(query, documents);
+        return provider->scoreDocuments(query, documents);
     }
 
-    bool isReady() const override { return session_ && session_->isValid(); }
-
-    // Access underlying session for diagnostics
-    daemon::OnnxRerankerSession* getSession() const { return session_.get(); }
+    bool isReady() const override {
+        auto provider = providerGetter_();
+        return provider && provider->isAvailable();
+    }
 
 private:
-    std::shared_ptr<daemon::OnnxRerankerSession> session_;
+    ProviderGetter providerGetter_;
 };
 
 } // namespace yams::search

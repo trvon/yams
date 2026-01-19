@@ -823,3 +823,274 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend dropTables",
 
     REQUIRE_FALSE(backend.tablesExist());
 }
+
+// =============================================================================
+// HNSW Rebuild Tests (Bug fix verification)
+// =============================================================================
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend buildIndex after batch insert",
+                 "[vector][backend][hnsw][rebuild][catch2]") {
+    skipIfNeeded();
+
+    // This test verifies the bug fix where buildIndex() wasn't properly rebuilding
+    // the HNSW index after batch inserts (vectors were in DB but HNSW was stale)
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+    config.checkpoint_threshold = 1000; // High threshold to prevent auto-checkpointing
+
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    // Batch insert 100 vectors
+    std::vector<VectorRecord> records;
+    for (int i = 0; i < 100; ++i) {
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        records.push_back(createVectorRecord("batch_rebuild_" + std::to_string(i), emb));
+    }
+
+    auto batchResult = backend.insertVectorsBatch(records);
+    REQUIRE(batchResult.has_value());
+
+    // Verify count
+    auto countResult = backend.getVectorCount();
+    REQUIRE(countResult.has_value());
+    CHECK(countResult.value() == 100);
+
+    // Explicitly rebuild the index
+    auto buildResult = backend.buildIndex();
+    REQUIRE(buildResult.has_value());
+
+    // Search should return results from the rebuilt index
+    auto query = createEmbedding(64, 50.0f); // Query near middle of range
+    auto searchResult = backend.searchSimilar(query, 10, 0.0f, std::nullopt, {});
+    REQUIRE(searchResult.has_value());
+
+    // Should find 10 results from the 100 inserted
+    CHECK(searchResult.value().size() == 10);
+
+    // The top result should be close to index 50 (query seed)
+    // Due to random embedding generation, we just verify results exist
+    for (const auto& result : searchResult.value()) {
+        CHECK(result.chunk_id.find("batch_rebuild_") != std::string::npos);
+    }
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend HNSW persists and reloads correctly",
+                 "[vector][backend][hnsw][persistence][catch2]") {
+    skipIfNeeded();
+
+    std::string dbPath = createTempDbPath();
+
+    // First session: create, insert batch, and close
+    {
+        SqliteVecBackend::Config config;
+        config.embedding_dim = 64;
+
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+        REQUIRE(backend.createTables(64).has_value());
+
+        // Batch insert vectors
+        std::vector<VectorRecord> records;
+        for (int i = 0; i < 50; ++i) {
+            auto emb = createEmbedding(64, static_cast<float>(i + 1));
+            records.push_back(createVectorRecord("persist_" + std::to_string(i), emb));
+        }
+
+        REQUIRE(backend.insertVectorsBatch(records).has_value());
+
+        // Ensure HNSW is saved
+        REQUIRE(backend.buildIndex().has_value());
+
+        backend.close();
+    }
+
+    // Second session: reopen and search (HNSW should load from disk, not rebuild)
+    {
+        SqliteVecBackend::Config config;
+        config.embedding_dim = 64;
+
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(dbPath).has_value());
+        REQUIRE(backend.tablesExist());
+
+        // Verify count persisted
+        auto countResult = backend.getVectorCount();
+        REQUIRE(countResult.has_value());
+        CHECK(countResult.value() == 50);
+
+        // Search should work (HNSW loaded from persisted state)
+        auto query = createEmbedding(64, 25.0f);
+        auto searchResult = backend.searchSimilar(query, 5, 0.0f, std::nullopt, {});
+        REQUIRE(searchResult.has_value());
+        CHECK(searchResult.value().size() == 5);
+
+        backend.close();
+    }
+}
+
+// =============================================================================
+// Candidate Hashes Filtering Tests (Tiered search narrowing)
+// =============================================================================
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar with candidate_hashes",
+                 "[vector][backend][search][tiered][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    // Insert vectors from different documents (doc groups A, B, C)
+    for (int i = 0; i < 30; ++i) {
+        std::string docGroup;
+        if (i < 10)
+            docGroup = "doc_group_A";
+        else if (i < 20)
+            docGroup = "doc_group_B";
+        else
+            docGroup = "doc_group_C";
+
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        auto rec = createVectorRecord("candidate_" + std::to_string(i), emb, docGroup);
+        REQUIRE(backend.insertVector(rec).has_value());
+    }
+
+    // Query that would match all documents
+    auto query = createEmbedding(64, 15.0f); // Middle of range
+
+    // Search WITHOUT candidate filter - should return from all groups
+    auto unfilteredResult = backend.searchSimilar(query, 10, 0.0f, std::nullopt, {});
+    REQUIRE(unfilteredResult.has_value());
+    CHECK(unfilteredResult.value().size() == 10);
+
+    // Search WITH candidate filter - only doc_group_A allowed
+    std::unordered_set<std::string> candidatesA = {"doc_group_A"};
+    auto filteredResultA = backend.searchSimilar(query, 10, 0.0f, std::nullopt, candidatesA, {});
+    REQUIRE(filteredResultA.has_value());
+
+    // All results should be from doc_group_A
+    for (const auto& result : filteredResultA.value()) {
+        CHECK(result.document_hash == "doc_group_A");
+    }
+    // Should have at most 10 results from A's 10 vectors
+    CHECK(filteredResultA.value().size() <= 10);
+
+    // Search with multiple candidate groups (A and C, not B)
+    std::unordered_set<std::string> candidatesAC = {"doc_group_A", "doc_group_C"};
+    auto filteredResultAC = backend.searchSimilar(query, 20, 0.0f, std::nullopt, candidatesAC, {});
+    REQUIRE(filteredResultAC.has_value());
+
+    // All results should be from A or C, never B
+    for (const auto& result : filteredResultAC.value()) {
+        bool isAorC =
+            (result.document_hash == "doc_group_A" || result.document_hash == "doc_group_C");
+        CHECK(isAorC);
+        CHECK(result.document_hash != "doc_group_B");
+    }
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend searchSimilar candidate_hashes empty returns all",
+                 "[vector][backend][search][tiered][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    // Insert some vectors
+    for (int i = 0; i < 20; ++i) {
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        REQUIRE(
+            backend.insertVector(createVectorRecord("empty_candidate_" + std::to_string(i), emb))
+                .has_value());
+    }
+
+    auto query = createEmbedding(64, 10.0f);
+
+    // Empty candidate set should NOT filter (returns all matching results)
+    std::unordered_set<std::string> emptyCandidates;
+    auto result = backend.searchSimilar(query, 10, 0.0f, std::nullopt, emptyCandidates, {});
+    REQUIRE(result.has_value());
+    CHECK(result.value().size() == 10);
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend searchSimilar candidate_hashes no match returns empty",
+                 "[vector][backend][search][tiered][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    // Insert vectors from doc_A
+    for (int i = 0; i < 10; ++i) {
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        auto rec = createVectorRecord("nomatch_" + std::to_string(i), emb, "doc_A");
+        REQUIRE(backend.insertVector(rec).has_value());
+    }
+
+    auto query = createEmbedding(64, 5.0f);
+
+    // Search with candidates that don't exist in the corpus
+    std::unordered_set<std::string> nonExistentCandidates = {"doc_X", "doc_Y", "doc_Z"};
+    auto result = backend.searchSimilar(query, 10, 0.0f, std::nullopt, nonExistentCandidates, {});
+    REQUIRE(result.has_value());
+    CHECK(result.value().empty());
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend searchSimilar combines candidate_hashes with metadata_filters",
+                 "[vector][backend][search][tiered][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    // Insert vectors with different docs and metadata
+    for (int i = 0; i < 20; ++i) {
+        std::string docGroup = (i < 10) ? "doc_A" : "doc_B";
+        std::string category = (i % 2 == 0) ? "even" : "odd";
+
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        VectorRecord rec;
+        rec.chunk_id = "combined_" + std::to_string(i);
+        rec.document_hash = docGroup;
+        rec.embedding = emb;
+        rec.content = "Content " + std::to_string(i);
+        rec.metadata["category"] = category;
+
+        REQUIRE(backend.insertVector(rec).has_value());
+    }
+
+    auto query = createEmbedding(64, 10.0f);
+
+    // Filter to doc_A AND category=even
+    std::unordered_set<std::string> candidates = {"doc_A"};
+    std::map<std::string, std::string> metaFilters = {{"category", "even"}};
+
+    auto result = backend.searchSimilar(query, 20, 0.0f, std::nullopt, candidates, metaFilters);
+    REQUIRE(result.has_value());
+
+    // Should only return doc_A vectors with category=even
+    for (const auto& r : result.value()) {
+        CHECK(r.document_hash == "doc_A");
+        auto catIt = r.metadata.find("category");
+        REQUIRE(catIt != r.metadata.end());
+        CHECK(catIt->second == "even");
+    }
+
+    // doc_A has indices 0-9, even indices are 0,2,4,6,8 = 5 vectors max
+    // HNSW is approximate, so we may not find all 5, but should find at least 1
+    CHECK(result.value().size() >= 1);
+    CHECK(result.value().size() <= 5);
+}

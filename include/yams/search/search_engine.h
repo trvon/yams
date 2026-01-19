@@ -50,6 +50,33 @@ struct SearchParams {
 };
 
 /**
+ * @brief Interface for cross-encoder document reranking
+ *
+ * Rerankers use cross-encoder models to score query-document pairs,
+ * providing more accurate relevance scores than bi-encoder (embedding) similarity.
+ * This is typically used as a second-stage ranker after initial retrieval.
+ */
+class IReranker {
+public:
+    virtual ~IReranker() = default;
+
+    /**
+     * @brief Score documents against a query using cross-encoder
+     *
+     * @param query The search query
+     * @param documents The document texts/snippets to score
+     * @return Vector of relevance scores [0,1] for each document, or error
+     */
+    virtual Result<std::vector<float>>
+    scoreDocuments(const std::string& query, const std::vector<std::string>& documents) = 0;
+
+    /**
+     * @brief Check if the reranker is ready to accept requests
+     */
+    virtual bool isReady() const = 0;
+};
+
+/**
  * @brief Configuration for SearchEngine
  *
  * Search engine configuration with tunable weights for each component.
@@ -76,11 +103,10 @@ struct SearchEngineConfig {
     } corpusProfile = CorpusProfile::MIXED;
 
     // Component weights (0.0 = disabled, 1.0 = full weight)
-    // Text weight strongly dominant; vector minimal - text ranking is primary
-    float textWeight = 0.70f;          // Full-text search weight - dominant for MRR
+    float textWeight = 0.70f;          // Full-text search weight
     float pathTreeWeight = 0.08f;      // Path tree hierarchical weight
     float kgWeight = 0.04f;            // Knowledge graph weight
-    float vectorWeight = 0.08f;        // Vector similarity weight - minimal, for re-ranking only
+    float vectorWeight = 0.30f;        // Vector similarity weight (increased for hybrid value)
     float vectorOnlyPenalty = 0.8f;    // Penalty for vector-only results (no text match)
     float vectorOnlyThreshold = 0.90f; // Minimum confidence for vector-only inclusion
     float vectorBoostFactor = 0.10f;   // Boost factor for vector re-ranking
@@ -90,7 +116,7 @@ struct SearchEngineConfig {
 
     // Search parameters
     size_t maxResults = 100;             // Maximum results to return
-    float similarityThreshold = 0.55f;   // Minimum similarity threshold (balanced precision/recall)
+    float similarityThreshold = 0.75f;   // Higher threshold - only high-confidence vector matches
     bool enableParallelExecution = true; // Parallel component queries
     std::chrono::milliseconds componentTimeout = // Timeout per component (0 = no timeout)
         std::chrono::milliseconds(0);
@@ -100,7 +126,7 @@ struct SearchEngineConfig {
     // relevance
     bool enableTieredExecution = true; // Enable two-tier search (text narrows vector candidates)
     bool tieredNarrowVectorSearch =
-        true; // Use Tier 1 doc hashes to filter vector search candidates
+        false; // DISABLED: Narrowing prevents vector from finding docs FTS5 missed
     size_t tieredMinCandidates =
         10; // Min candidates from Tier 1 before narrowing (fallback to full)
 
@@ -123,7 +149,7 @@ struct SearchEngineConfig {
         WEIGHTED_RECIPROCAL, // Weighted RRF (custom)
         COMB_MNZ,            // CombMNZ: score * num_components (recall-focused)
         TEXT_ANCHOR          // Text-anchored: FTS5 as primary, vector for re-ranking only
-    } fusionStrategy = FusionStrategy::TEXT_ANCHOR; // Text as anchor for better MRR/precision
+    } fusionStrategy = FusionStrategy::WEIGHTED_RECIPROCAL; // Weighted RRF with score boost
 
     /// Convert FusionStrategy to string for logging/debugging
     [[nodiscard]] static constexpr const char*
@@ -164,6 +190,12 @@ struct SearchEngineConfig {
     // Debugging
     bool includeDebugInfo = false;       // Include per-component scores in results
     bool includeComponentTiming = false; // Include per-component execution time in response
+
+    // Cross-encoder reranking (second-stage ranking for improved relevance)
+    bool enableReranking = true;     // Enable cross-encoder reranking of top results
+    size_t rerankTopK = 50;          // Number of top results to rerank (latency vs quality)
+    float rerankWeight = 0.60f;      // Blend weight: final = rerank*w + original*(1-w)
+    bool rerankReplaceScores = true; // If true, replace scores entirely; if false, blend
 
     /**
      * @brief Get preset configuration for a corpus profile
@@ -297,12 +329,58 @@ struct SearchEngineConfig {
 struct ComponentResult {
     std::string documentHash;
     std::string filePath;
-    float score;                                  // Component-specific score [0.0, 1.0]
-    std::string source;                           // Component name (e.g., "fts5", "vector")
+    float score; // Component-specific score [0.0, 1.0]
+    enum class Source {
+        Text,
+        PathTree,
+        KnowledgeGraph,
+        Vector,
+        EntityVector,
+        Tag,
+        Metadata,
+        Symbol,
+        Unknown
+    } source = Source::Unknown;
     size_t rank;                                  // Rank within component results (0-based)
     std::optional<std::string> snippet;           // Optional text snippet
     std::map<std::string, std::string> debugInfo; // Component-specific debug data
 };
+
+inline constexpr const char* componentSourceToString(ComponentResult::Source source) noexcept {
+    switch (source) {
+        case ComponentResult::Source::Text:
+            return "text";
+        case ComponentResult::Source::PathTree:
+            return "path_tree";
+        case ComponentResult::Source::KnowledgeGraph:
+            return "kg";
+        case ComponentResult::Source::Vector:
+            return "vector";
+        case ComponentResult::Source::EntityVector:
+            return "entity_vector";
+        case ComponentResult::Source::Tag:
+            return "tag";
+        case ComponentResult::Source::Metadata:
+            return "metadata";
+        case ComponentResult::Source::Symbol:
+            return "symbol";
+        case ComponentResult::Source::Unknown:
+            return "unknown";
+    }
+    return "unknown";
+}
+
+inline constexpr bool isVectorComponent(ComponentResult::Source source) noexcept {
+    return source == ComponentResult::Source::Vector ||
+           source == ComponentResult::Source::EntityVector;
+}
+
+inline constexpr bool isTextAnchoringComponent(ComponentResult::Source source) noexcept {
+    return source == ComponentResult::Source::Text || source == ComponentResult::Source::PathTree ||
+           source == ComponentResult::Source::KnowledgeGraph ||
+           source == ComponentResult::Source::Tag || source == ComponentResult::Source::Metadata ||
+           source == ComponentResult::Source::Symbol;
+}
 
 struct SearchResponse {
     std::vector<SearchResult> results;
@@ -348,26 +426,27 @@ private:
     std::vector<SearchResult> fuseSinglePass(const std::vector<ComponentResult>& results,
                                              ScoreFunc&& scoreFunc);
 
-    float getComponentWeight(const std::string& source) const;
+    float getComponentWeight(ComponentResult::Source source) const;
 
     const SearchEngineConfig& config_;
 };
 
 // Helper to accumulate a component score into the appropriate breakdown field
-inline void accumulateComponentScore(SearchResult& r, const std::string& source,
+inline void accumulateComponentScore(SearchResult& r, ComponentResult::Source source,
                                      double contribution) {
     // Map source names to breakdown fields
-    if (source == "vector" || source == "entity_vector") {
+    if (isVectorComponent(source)) {
         r.vectorScore = r.vectorScore.value_or(0.0) + contribution;
-    } else if (source == "text" || source == "fts5") {
+    } else if (source == ComponentResult::Source::Text) {
         r.keywordScore = r.keywordScore.value_or(0.0) + contribution;
-    } else if (source == "kg") {
+    } else if (source == ComponentResult::Source::KnowledgeGraph) {
         r.kgScore = r.kgScore.value_or(0.0) + contribution;
-    } else if (source == "path_tree") {
+    } else if (source == ComponentResult::Source::PathTree) {
         r.pathScore = r.pathScore.value_or(0.0) + contribution;
-    } else if (source == "tag" || source == "metadata") {
+    } else if (source == ComponentResult::Source::Tag ||
+               source == ComponentResult::Source::Metadata) {
         r.tagScore = r.tagScore.value_or(0.0) + contribution;
-    } else if (source == "symbol") {
+    } else if (source == ComponentResult::Source::Symbol) {
         r.symbolScore = r.symbolScore.value_or(0.0) + contribution;
     }
     // Unknown sources still contribute to total score but don't get a breakdown field
@@ -580,6 +659,16 @@ public:
      * @param extractor Function to extract concepts from query text
      */
     void setConceptExtractor(EntityExtractionFunc extractor);
+
+    /**
+     * @brief Set the reranker for cross-encoder second-stage ranking
+     *
+     * When a reranker is set and config.enableReranking is true, search results
+     * are passed through the cross-encoder for improved relevance scoring.
+     *
+     * @param reranker The reranker implementation (or nullptr to disable)
+     */
+    void setReranker(std::shared_ptr<IReranker> reranker);
 
 private:
     class Impl;

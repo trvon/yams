@@ -71,6 +71,11 @@ struct TunedParams {
     // Similarity threshold for vector search
     float similarityThreshold = 0.65f;
 
+    // Vector boost factor for TEXT_ANCHOR fusion (multiplied with vectorWeight)
+    // Higher values = stronger vector influence in text-anchored results
+    // Default 1.0 means full vectorWeight is used; lower values reduce vector impact
+    float vectorBoostFactor = 1.0f;
+
     // Fusion strategy (default: COMB_MNZ, but TEXT_ANCHOR for scientific corpora)
     SearchEngineConfig::FusionStrategy fusionStrategy =
         SearchEngineConfig::FusionStrategy::COMB_MNZ;
@@ -87,6 +92,7 @@ struct TunedParams {
         config.tagWeight = tagWeight;
         config.metadataWeight = metadataWeight;
         config.similarityThreshold = similarityThreshold;
+        config.vectorBoostFactor = vectorBoostFactor;
         config.rrfK = static_cast<float>(rrfK);
         config.fusionStrategy = fusionStrategy;
     }
@@ -103,7 +109,8 @@ struct TunedParams {
                               {"kg_weight", kgWeight},
                               {"tag_weight", tagWeight},
                               {"metadata_weight", metadataWeight},
-                              {"similarity_threshold", similarityThreshold}};
+                              {"similarity_threshold", similarityThreshold},
+                              {"vector_boost_factor", vectorBoostFactor}};
     }
 };
 
@@ -159,16 +166,20 @@ struct TunedParams {
         case TuningState::SCIENTIFIC:
             // Lower rrfK gives more weight to top-ranked results (rank 0: 1/10=0.10 vs 1/30=0.03)
             params.rrfK = 10;
-            // Text-heavy weighting for scientific corpora (papers, abstracts)
-            params.textWeight = 0.60f;
-            params.vectorWeight = 0.35f;
+            // Vector-heavy weighting for scientific corpora where queries are sentences
+            // and FTS5 AND semantics is too strict (papers, abstracts, claims)
+            params.textWeight = 0.20f;   // FTS5 AND often returns 0 for sentence queries
+            params.vectorWeight = 0.70f; // Primary signal for semantic matching
             params.entityVectorWeight = 0.00f;
             params.pathTreeWeight = 0.00f;
             params.kgWeight = 0.00f;
             params.tagWeight = 0.00f;
-            params.metadataWeight = 0.05f;
-            // TEXT_ANCHOR: text results as primary, vector for re-ranking boost
-            params.fusionStrategy = SearchEngineConfig::FusionStrategy::TEXT_ANCHOR;
+            params.metadataWeight = 0.10f;
+            // Lower similarity threshold for scientific text embeddings
+            params.similarityThreshold = 0.50f;
+            // COMB_MNZ: treats all components equally, doesn't require text anchor
+            // TEXT_ANCHOR fails when FTS5 returns 0 (vectorOnlyThreshold filters all)
+            params.fusionStrategy = SearchEngineConfig::FusionStrategy::COMB_MNZ;
             break;
 
         case TuningState::MIXED:

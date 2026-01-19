@@ -1,8 +1,8 @@
 #include <yams/extraction/extraction_util.h>
 
+#include <algorithm>
 #include <spdlog/spdlog.h>
 #include <yams/detection/file_type_detector.h>
-#include <yams/extraction/html_text_extractor.h>
 #include <yams/extraction/text_extractor.h>
 
 namespace yams::extraction::util {
@@ -19,10 +19,41 @@ std::optional<std::string> extractDocumentText(std::shared_ptr<yams::api::IConte
         return std::nullopt;
     const auto& bytes = bytesRes.value();
 
-    // Get FileTypeDetector for MIME type checks (uses magic_numbers.hpp)
-    auto& detector = yams::detection::FileTypeDetector::instance();
+    // Normalize extension for factory lookup
+    std::string normalizedExt = extension;
+    if (!normalizedExt.empty() && normalizedExt[0] != '.') {
+        normalizedExt = "." + normalizedExt;
+    }
+    std::transform(normalizedExt.begin(), normalizedExt.end(), normalizedExt.begin(), ::tolower);
 
-    // 1) Try plugin extractors first (best-match)
+    // 1) Try built-in extractors via TextExtractorFactory first
+    //    This handles PlainTextExtractor (.txt, .md, source code, etc.) and HtmlTextExtractor
+    if (!normalizedExt.empty()) {
+        auto& factory = TextExtractorFactory::instance();
+        if (factory.isSupported(normalizedExt)) {
+            try {
+                auto extractor = factory.create(normalizedExt);
+                if (extractor) {
+                    ExtractionConfig cfg{};
+                    cfg.preserveFormatting = true;
+                    auto result = extractor->extractFromBuffer(
+                        std::span<const std::byte>(bytes.data(), bytes.size()), cfg);
+                    if (result && result.value().isSuccess() && !result.value().text.empty()) {
+                        spdlog::debug("Extracted {} bytes via {} for extension {}",
+                                      result.value().text.size(), extractor->name(), normalizedExt);
+                        return result.value().text;
+                    }
+                }
+            } catch (const std::exception& e) {
+                spdlog::debug("TextExtractorFactory error for {}: {}", normalizedExt, e.what());
+            } catch (...) {
+                spdlog::debug("TextExtractorFactory unknown error for {}", normalizedExt);
+            }
+        }
+    }
+
+    // 2) Try plugin extractors (IContentExtractor) for formats not handled by built-ins
+    //    e.g., PDF, Office docs, etc. provided by external plugins
     for (const auto& ext : extractors) {
         try {
             if (ext && ext->supports(mime, extension)) {
@@ -31,46 +62,26 @@ std::optional<std::string> extractDocumentText(std::shared_ptr<yams::api::IConte
                     return text;
             }
         } catch (const std::exception& e) {
-            spdlog::debug("Extractor threw exception for extension {}: {}", extension, e.what());
+            spdlog::debug("Plugin extractor threw exception for {}: {}", extension, e.what());
         } catch (...) {
-            spdlog::debug("Extractor threw unknown exception for extension {}", extension);
+            spdlog::debug("Plugin extractor threw unknown exception for {}", extension);
         }
     }
 
-    // 2) Built-in HTML-aware fallback: if content is HTML and still unhandled, extract readable
-    // text
-    auto is_html_ext = [&]() {
-        return extension == ".html" || extension == ".htm" || extension == ".xhtml";
-    };
-    if (mime == "text/html" || mime == "application/xhtml+xml" || is_html_ext()) {
-        try {
-            HtmlTextExtractor html;
-            ExtractionConfig cfg{};
-            if (auto res = html.extractFromBuffer(bytes, cfg);
-                res && res.value().isSuccess() && !res.value().text.empty()) {
-                return std::optional<std::string>(res.value().text);
-            }
-        } catch (...) {
-            // fall through to generic fallback
-        }
-    }
-
-    // 3) Built-in fallbacks for text-like MIME types (uses magic_numbers.hpp via FileTypeDetector)
+    // 3) Fallback: raw bytes for text MIME types not handled above
+    auto& detector = yams::detection::FileTypeDetector::instance();
     if (!mime.empty() && detector.isTextMimeType(mime)) {
+        spdlog::debug("Fallback to raw bytes for MIME type {}", mime);
         return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     }
 
-    // 4) As a last resort, if extension implies text (uses magic_numbers.hpp)
+    // 4) Last resort: extension implies text but wasn't in factory
     try {
-        // Normalize extension: ensure it has a leading dot
-        std::string normalizedExt = extension;
-        if (!normalizedExt.empty() && normalizedExt[0] != '.') {
-            normalizedExt = "." + normalizedExt;
-        }
-
         auto detectedMime =
             yams::detection::FileTypeDetector::getMimeTypeFromExtension(normalizedExt);
         if (!detectedMime.empty() && detector.isTextMimeType(detectedMime)) {
+            spdlog::debug("Fallback to raw bytes for extension {} (detected MIME: {})",
+                          normalizedExt, detectedMime);
             return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
         }
     } catch (const std::exception& e) {

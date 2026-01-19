@@ -71,7 +71,6 @@ namespace yams::search {
 class SearchEngine;
 class SearchEngineBuilder;
 class IReranker;
-class OnnxRerankerAdapter;
 } // namespace yams::search
 namespace yams::vector {
 class EmbeddingGenerator;
@@ -564,8 +563,8 @@ private:
     std::shared_ptr<yams::search::SearchEngine> searchEngine_;
     mutable YAMS_SHARED_LOCKABLE(std::shared_mutex, searchEngineMutex_); // Allow concurrent reads
 
-    // Cross-encoder reranker for improved search ranking (PBI: yams-li9e)
-    std::shared_ptr<yams::search::OnnxRerankerAdapter> rerankerAdapter_;
+    // Cross-encoder reranker for improved search ranking
+    std::shared_ptr<yams::search::IReranker> rerankerAdapter_;
 
     // Modern async architecture (Phase 0c): WorkCoordinator delegates threading complexity
     // Member declaration order is CRITICAL for correct destruction

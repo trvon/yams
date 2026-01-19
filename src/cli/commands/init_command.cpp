@@ -597,10 +597,10 @@ public:
 
                 // 7a) GLiNER Model Setup (for NER in Glint plugin)
                 maybeSetupGlinerModel(dataPath, configPath);
-
-                // 7b) Reranker Model Setup (for two-stage hybrid search)
-                maybeSetupRerankerModel(dataPath, configPath);
             }
+
+            // 7b) Reranker Model Setup (for two-stage hybrid search)
+            maybeSetupRerankerModel(dataPath, configPath);
 
             // 7) Tree-sitter Grammar Setup (for symbol extraction)
             maybeSetupGrammars(dataPath);

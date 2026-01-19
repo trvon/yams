@@ -54,7 +54,7 @@ struct HNSWIndexFixture {
     std::vector<float> createEmbedding(size_t dim, float seed = 42.0f) {
         std::vector<float> emb(dim);
         std::mt19937 rng(static_cast<uint32_t>(seed));
-        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
         for (size_t i = 0; i < dim; ++i) {
             emb[i] = dist(rng);
         }
@@ -138,6 +138,7 @@ TEST_CASE_METHOD(HNSWIndexFixture, "HNSWIndex insert multiple vectors",
     auto emb = createEmbedding(64, 1005.0f);
     VectorSearchParams params;
     params.k = 10;
+    params.similarity_threshold = 0.0f; // Disable threshold for HNSW unit tests
     auto results = db.search(emb, params);
     REQUIRE(results.size() == 10);
 }
@@ -190,6 +191,7 @@ TEST_CASE_METHOD(HNSWIndexFixture, "HNSWIndex batch search",
     auto query = createEmbedding(64, 3125.0f); // Near middle of range
     VectorSearchParams params;
     params.k = 10;
+    params.similarity_threshold = 0.0f; // Disable threshold for HNSW unit tests
     auto results = db.search(query, params);
     REQUIRE(results.size() == 10);
 }
@@ -250,6 +252,7 @@ TEST_CASE_METHOD(HNSWIndexFixture, "HNSWIndex search quality recall",
     auto query = createEmbedding(64, 6500.0f);
     VectorSearchParams params;
     params.k = 10;
+    params.similarity_threshold = 0.0f; // Disable threshold for HNSW unit tests
     auto results = db.search(query, params);
     REQUIRE(results.size() == 10);
 
@@ -283,6 +286,7 @@ TEST_CASE_METHOD(HNSWIndexFixture, "HNSWIndex large corpus 10K vectors",
     auto query = createEmbedding(64, 7500.0f);
     VectorSearchParams params;
     params.k = 10;
+    params.similarity_threshold = 0.0f; // Disable threshold for HNSW unit tests
     auto results = db.search(query, params);
     REQUIRE(results.size() == 10);
 

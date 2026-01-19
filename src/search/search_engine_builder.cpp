@@ -12,6 +12,46 @@
 
 namespace yams::search {
 
+namespace {
+
+bool envEnabled(const char* name) {
+    if (const char* env = std::getenv(name)) {
+        return std::string(env) == "1";
+    }
+    return false;
+}
+
+std::optional<std::string> getEnvString(const char* name) {
+    if (const char* env = std::getenv(name)) {
+        return std::string(env);
+    }
+    return std::nullopt;
+}
+
+std::optional<float> getEnvFloat(const char* name) {
+    if (auto val = getEnvString(name)) {
+        try {
+            return std::stof(*val);
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<int> getEnvInt(const char* name) {
+    if (auto val = getEnvString(name)) {
+        try {
+            return std::stoi(*val);
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
 // ------------------------------
 // SearchEngineBuilder
 // ------------------------------
@@ -34,27 +74,30 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
     // Determine config: auto-tune or use provided config
     SearchEngineConfig cfg = options.config;
 
+    const bool allowEnvOverrides = envEnabled("YAMS_ENABLE_ENV_OVERRIDES");
+
     // Check for environment variable override first (useful for benchmarks)
     // This allows setting YAMS_TUNING_OVERRIDE=SCIENTIFIC without code changes
     std::optional<TuningState> envOverride;
-    if (const char* envVal = std::getenv("YAMS_TUNING_OVERRIDE")) {
-        std::string val(envVal);
-        if (val == "SCIENTIFIC") {
-            envOverride = TuningState::SCIENTIFIC;
-        } else if (val == "SMALL_CODE") {
-            envOverride = TuningState::SMALL_CODE;
-        } else if (val == "LARGE_CODE") {
-            envOverride = TuningState::LARGE_CODE;
-        } else if (val == "SMALL_PROSE") {
-            envOverride = TuningState::SMALL_PROSE;
-        } else if (val == "LARGE_PROSE") {
-            envOverride = TuningState::LARGE_PROSE;
-        } else if (val == "MIXED") {
-            envOverride = TuningState::MIXED;
-        } else if (val == "MINIMAL") {
-            envOverride = TuningState::MINIMAL;
-        } else {
-            spdlog::warn("Unknown YAMS_TUNING_OVERRIDE value '{}', ignoring", val);
+    if (allowEnvOverrides) {
+        if (auto val = getEnvString("YAMS_TUNING_OVERRIDE")) {
+            if (*val == "SCIENTIFIC") {
+                envOverride = TuningState::SCIENTIFIC;
+            } else if (*val == "SMALL_CODE") {
+                envOverride = TuningState::SMALL_CODE;
+            } else if (*val == "LARGE_CODE") {
+                envOverride = TuningState::LARGE_CODE;
+            } else if (*val == "SMALL_PROSE") {
+                envOverride = TuningState::SMALL_PROSE;
+            } else if (*val == "LARGE_PROSE") {
+                envOverride = TuningState::LARGE_PROSE;
+            } else if (*val == "MIXED") {
+                envOverride = TuningState::MIXED;
+            } else if (*val == "MINIMAL") {
+                envOverride = TuningState::MINIMAL;
+            } else {
+                spdlog::warn("Unknown YAMS_TUNING_OVERRIDE value '{}', ignoring", *val);
+            }
         }
     }
 
@@ -102,84 +145,70 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
 
     // Allow environment variable overrides for individual weights (for benchmarking)
     // These take precedence over tuning state weights
-    if (const char* textWeightEnv = std::getenv("YAMS_SEARCH_TEXT_WEIGHT")) {
-        try {
-            cfg.textWeight = std::stof(textWeightEnv);
+    if (allowEnvOverrides) {
+        if (auto textWeight = getEnvFloat("YAMS_SEARCH_TEXT_WEIGHT")) {
+            cfg.textWeight = *textWeight;
             spdlog::info("SearchEngine textWeight overridden to {:.2f} via env", cfg.textWeight);
-        } catch (...) {
-            spdlog::warn("Invalid YAMS_SEARCH_TEXT_WEIGHT value '{}', ignoring", textWeightEnv);
         }
-    }
-    if (const char* vectorWeightEnv = std::getenv("YAMS_SEARCH_VECTOR_WEIGHT")) {
-        try {
-            cfg.vectorWeight = std::stof(vectorWeightEnv);
+        if (auto vectorWeight = getEnvFloat("YAMS_SEARCH_VECTOR_WEIGHT")) {
+            cfg.vectorWeight = *vectorWeight;
             spdlog::info("SearchEngine vectorWeight overridden to {:.2f} via env",
                          cfg.vectorWeight);
-        } catch (...) {
-            spdlog::warn("Invalid YAMS_SEARCH_VECTOR_WEIGHT value '{}', ignoring", vectorWeightEnv);
         }
     }
 
     // Allow fusion strategy override for benchmarking
-    if (const char* fusionEnv = std::getenv("YAMS_FUSION_STRATEGY")) {
-        std::string val(fusionEnv);
-        if (val == "WEIGHTED_SUM") {
-            cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
-        } else if (val == "RECIPROCAL_RANK") {
-            cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK;
-        } else if (val == "BORDA_COUNT") {
-            cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::BORDA_COUNT;
-        } else if (val == "WEIGHTED_RECIPROCAL") {
-            cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
-        } else if (val == "COMB_MNZ") {
-            cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::COMB_MNZ;
-        } else if (val == "TEXT_ANCHOR") {
-            cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::TEXT_ANCHOR;
-        } else {
-            spdlog::warn("Unknown YAMS_FUSION_STRATEGY value '{}', ignoring", val);
+    if (allowEnvOverrides) {
+        if (auto fusionEnv = getEnvString("YAMS_FUSION_STRATEGY")) {
+            if (*fusionEnv == "WEIGHTED_SUM") {
+                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
+            } else if (*fusionEnv == "RECIPROCAL_RANK") {
+                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK;
+            } else if (*fusionEnv == "BORDA_COUNT") {
+                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::BORDA_COUNT;
+            } else if (*fusionEnv == "WEIGHTED_RECIPROCAL") {
+                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
+            } else if (*fusionEnv == "COMB_MNZ") {
+                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::COMB_MNZ;
+            } else if (*fusionEnv == "TEXT_ANCHOR") {
+                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::TEXT_ANCHOR;
+            } else {
+                spdlog::warn("Unknown YAMS_FUSION_STRATEGY value '{}', ignoring", *fusionEnv);
+            }
+            spdlog::info("SearchEngine fusionStrategy overridden to {} via env",
+                         SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy));
         }
-        spdlog::info("SearchEngine fusionStrategy overridden to {} via env",
-                     SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy));
     }
 
     // Allow candidate limit overrides for recall benchmarking
     // YAMS_CANDIDATE_MULTIPLIER scales all maxResults values (e.g., 2.0 = 2x candidates)
-    if (const char* multiplierEnv = std::getenv("YAMS_CANDIDATE_MULTIPLIER")) {
-        try {
-            float multiplier = std::stof(multiplierEnv);
-            cfg.textMaxResults = static_cast<size_t>(cfg.textMaxResults * multiplier);
-            cfg.vectorMaxResults = static_cast<size_t>(cfg.vectorMaxResults * multiplier);
+    if (allowEnvOverrides) {
+        if (auto multiplier = getEnvFloat("YAMS_CANDIDATE_MULTIPLIER")) {
+            cfg.textMaxResults = static_cast<size_t>(cfg.textMaxResults * *multiplier);
+            cfg.vectorMaxResults = static_cast<size_t>(cfg.vectorMaxResults * *multiplier);
             cfg.entityVectorMaxResults =
-                static_cast<size_t>(cfg.entityVectorMaxResults * multiplier);
-            cfg.pathTreeMaxResults = static_cast<size_t>(cfg.pathTreeMaxResults * multiplier);
-            cfg.kgMaxResults = static_cast<size_t>(cfg.kgMaxResults * multiplier);
-            cfg.tagMaxResults = static_cast<size_t>(cfg.tagMaxResults * multiplier);
-            cfg.metadataMaxResults = static_cast<size_t>(cfg.metadataMaxResults * multiplier);
+                static_cast<size_t>(cfg.entityVectorMaxResults * *multiplier);
+            cfg.pathTreeMaxResults = static_cast<size_t>(cfg.pathTreeMaxResults * *multiplier);
+            cfg.kgMaxResults = static_cast<size_t>(cfg.kgMaxResults * *multiplier);
+            cfg.tagMaxResults = static_cast<size_t>(cfg.tagMaxResults * *multiplier);
+            cfg.metadataMaxResults = static_cast<size_t>(cfg.metadataMaxResults * *multiplier);
             spdlog::info(
                 "SearchEngine candidate limits scaled by {:.2f}x via env (text={}, vec={})",
-                multiplier, cfg.textMaxResults, cfg.vectorMaxResults);
-        } catch (...) {
-            spdlog::warn("Invalid YAMS_CANDIDATE_MULTIPLIER value '{}', ignoring", multiplierEnv);
+                *multiplier, cfg.textMaxResults, cfg.vectorMaxResults);
         }
     }
 
     // Individual maxResults overrides
-    if (const char* textMaxEnv = std::getenv("YAMS_TEXT_MAX_RESULTS")) {
-        try {
-            cfg.textMaxResults = static_cast<size_t>(std::stoi(textMaxEnv));
+    if (allowEnvOverrides) {
+        if (auto textMax = getEnvInt("YAMS_TEXT_MAX_RESULTS")) {
+            cfg.textMaxResults = static_cast<size_t>(*textMax);
             spdlog::info("SearchEngine textMaxResults overridden to {} via env",
                          cfg.textMaxResults);
-        } catch (...) {
-            spdlog::warn("Invalid YAMS_TEXT_MAX_RESULTS value '{}', ignoring", textMaxEnv);
         }
-    }
-    if (const char* vectorMaxEnv = std::getenv("YAMS_VECTOR_MAX_RESULTS")) {
-        try {
-            cfg.vectorMaxResults = static_cast<size_t>(std::stoi(vectorMaxEnv));
+        if (auto vectorMax = getEnvInt("YAMS_VECTOR_MAX_RESULTS")) {
+            cfg.vectorMaxResults = static_cast<size_t>(*vectorMax);
             spdlog::info("SearchEngine vectorMaxResults overridden to {} via env",
                          cfg.vectorMaxResults);
-        } catch (...) {
-            spdlog::warn("Invalid YAMS_VECTOR_MAX_RESULTS value '{}', ignoring", vectorMaxEnv);
         }
     }
 

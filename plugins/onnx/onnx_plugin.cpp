@@ -13,12 +13,12 @@ extern "C" {
 
 static const char* kManifestJson = R"JSON({
   "name": "onnx",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "interfaces": [
-    {"id": "model_provider_v1", "version": 2},
+    {"id": "model_provider_v1", "version": 3},
     {"id": "onnx_request_v1", "version": 1}
   ]
-})JSON"; // ABI v1.2 (model_provider_v1 version=2) + onnx_request_v1
+})JSON"; // ABI v1.3 (model_provider_v1 version=3 with reranking) + onnx_request_v1
 
 // Lightweight runtime flags
 static bool g_plugin_disabled = false; // set by env at init
@@ -172,8 +172,8 @@ YAMS_PLUGIN_API int yams_plugin_get_interface(const char* id, uint32_t version, 
     *out_iface = nullptr;
     if (g_plugin_disabled)
         return YAMS_PLUGIN_ERR_NOT_FOUND;
-    // Accept any version >= 1 up to our max (2), to avoid CLI hangs on minor mismatches
-    if ((version >= 1 && version <= 2) && std::strcmp(id, YAMS_IFACE_MODEL_PROVIDER_V1) == 0) {
+    // Accept any version >= 1 up to our max (3), to avoid CLI hangs on minor mismatches
+    if ((version >= 1 && version <= 3) && std::strcmp(id, YAMS_IFACE_MODEL_PROVIDER_V1) == 0) {
         *out_iface = static_cast<void*>(yams_onnx_get_model_provider());
         return (*out_iface) ? YAMS_PLUGIN_OK : YAMS_PLUGIN_ERR_NOT_FOUND;
     }

@@ -46,6 +46,10 @@ public:
     void releaseUnusedResources() override;
     void shutdown() override;
 
+    // v1.3: Cross-encoder reranking
+    Result<std::vector<float>> scoreDocuments(const std::string& query,
+                                              const std::vector<std::string>& documents) override;
+
 private:
     yams_model_provider_v1* table_{};
     std::function<void(const ModelLoadEvent&)> progress_{};

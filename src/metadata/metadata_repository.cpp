@@ -142,6 +142,64 @@ Result<void> bindParentId(Statement& stmt, int index, int64_t parentId) {
 }
 } // namespace
 
+const char* MetadataRepository::documentColumnList(bool qualified) const {
+    if (qualified) {
+        return hasPathIndexing_ ? kDocumentColumnListNewQualified
+                                : kDocumentColumnListCompatQualified;
+    }
+    return hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
+}
+
+Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByCondition(
+    Database& db, std::string_view condition,
+    const std::function<Result<void>(Statement&)>& binder) const {
+    using yams::metadata::sql::QuerySpec;
+    QuerySpec spec{};
+    spec.table = "documents";
+    spec.columns = {documentColumnList(false)};
+    spec.conditions = {std::string(condition)};
+
+    YAMS_TRY_UNWRAP(cachedStmt, db.prepareCached(yams::metadata::sql::buildSelect(spec)));
+    auto& stmt = *cachedStmt;
+    if (binder) {
+        YAMS_TRY(binder(stmt));
+    }
+    YAMS_TRY_UNWRAP(hasRow, stmt.step());
+
+    if (!hasRow) {
+        return std::optional<DocumentInfo>{};
+    }
+    return std::optional<DocumentInfo>{mapDocumentRow(stmt)};
+}
+
+Result<std::vector<DocumentInfo>> MetadataRepository::queryDocumentsBySpec(
+    Database& db, const sql::QuerySpec& spec,
+    const std::function<Result<void>(Statement&)>& binder) const {
+    auto stmtResult = db.prepare(sql::buildSelect(spec));
+    if (!stmtResult)
+        return stmtResult.error();
+
+    Statement stmt = std::move(stmtResult).value();
+    if (binder) {
+        auto bindResult = binder(stmt);
+        if (!bindResult)
+            return bindResult.error();
+    }
+
+    std::vector<DocumentInfo> result;
+    while (true) {
+        auto stepResult = stmt.step();
+        if (!stepResult)
+            return stepResult.error();
+        if (!stepResult.value())
+            break;
+
+        result.push_back(mapDocumentRow(stmt));
+    }
+
+    return result;
+}
+
 std::optional<DocumentInfo>
 MetadataRepository::lookupPathCache(const std::string& normalizedPath) const {
     YAMS_ZONE_SCOPED_N("MetadataRepo::lookupPathCache");
@@ -484,48 +542,15 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocument(int64_t id) 
     YAMS_ZONE_SCOPED_N("MetadataRepo::getDocument");
     return executeQuery<std::optional<DocumentInfo>>(
         [&](Database& db) -> Result<std::optional<DocumentInfo>> {
-            using yams::metadata::sql::QuerySpec;
-            const char* cols =
-                hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
-            QuerySpec spec{};
-            spec.table = "documents";
-            spec.columns = {cols};
-            spec.conditions = {"id = ?"};
-
-            // Use prepareCached for better performance on repeated lookups
-            YAMS_TRY_UNWRAP(cachedStmt, db.prepareCached(yams::metadata::sql::buildSelect(spec)));
-            auto& stmt = *cachedStmt;
-
-            YAMS_TRY(stmt.bind(1, id));
-            YAMS_TRY_UNWRAP(hasRow, stmt.step());
-
-            if (!hasRow) {
-                return std::optional<DocumentInfo>{};
-            }
-            return std::optional<DocumentInfo>{mapDocumentRow(stmt)};
+            return getDocumentByCondition(db, "id = ?",
+                                          [&](Statement& stmt) { return stmt.bind(1, id); });
         });
 }
 
 // Internal helper that uses an existing connection to avoid nested connection acquisition deadlock
 Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentInternal(Database& db,
                                                                             int64_t id) {
-    using yams::metadata::sql::QuerySpec;
-    const char* cols = hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
-    QuerySpec spec{};
-    spec.table = "documents";
-    spec.columns = {cols};
-    spec.conditions = {"id = ?"};
-
-    YAMS_TRY_UNWRAP(cachedStmt, db.prepareCached(yams::metadata::sql::buildSelect(spec)));
-    auto& stmt = *cachedStmt;
-
-    YAMS_TRY(stmt.bind(1, id));
-    YAMS_TRY_UNWRAP(hasRow, stmt.step());
-
-    if (!hasRow) {
-        return std::optional<DocumentInfo>{};
-    }
-    return std::optional<DocumentInfo>{mapDocumentRow(stmt)};
+    return getDocumentByCondition(db, "id = ?", [&](Statement& stmt) { return stmt.bind(1, id); });
 }
 
 // Internal helper that uses an existing connection to avoid nested connection acquisition deadlock
@@ -560,23 +585,8 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const 
     YAMS_ZONE_SCOPED_N("MetadataRepo::getDocumentByHash");
     return executeQuery<std::optional<DocumentInfo>>(
         [&](Database& db) -> Result<std::optional<DocumentInfo>> {
-            using yams::metadata::sql::QuerySpec;
-            const char* cols =
-                hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
-            QuerySpec spec{};
-            spec.table = "documents";
-            spec.columns = {cols};
-            spec.conditions = {"sha256_hash = ?"};
-
-            YAMS_TRY_UNWRAP(cachedStmt, db.prepareCached(yams::metadata::sql::buildSelect(spec)));
-            auto& stmt = *cachedStmt;
-            YAMS_TRY(stmt.bind(1, hash));
-            YAMS_TRY_UNWRAP(hasRow, stmt.step());
-
-            if (!hasRow) {
-                return std::optional<DocumentInfo>{};
-            }
-            return std::optional<DocumentInfo>{mapDocumentRow(stmt)};
+            return getDocumentByCondition(db, "sha256_hash = ?",
+                                          [&](Statement& stmt) { return stmt.bind(1, hash); });
         });
 }
 
@@ -1346,6 +1356,296 @@ static std::string stripTrailingPunctuation(std::string term) {
     return stripPunctuation(std::move(term));
 }
 
+static bool isFts5BarewordChar(unsigned char c) {
+    return std::isalnum(c) || c == '_' || c == 0x1A || c >= 0x80;
+}
+
+static bool isFts5Bareword(const std::string& token) {
+    if (token.empty()) {
+        return false;
+    }
+    std::string upper;
+    upper.reserve(token.size());
+    for (char c : token) {
+        upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    }
+    if (upper == "AND" || upper == "OR" || upper == "NOT") {
+        return false;
+    }
+    for (unsigned char c : token) {
+        if (!isFts5BarewordChar(c)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static std::string renderFts5Token(const std::string& token, bool prefix) {
+    std::string rendered = isFts5Bareword(token) ? token : quoteFTS5Term(token);
+    if (prefix) {
+        rendered.push_back('*');
+    }
+    return rendered;
+}
+
+static std::string buildSimpleFts5Query(const std::string& query, bool allowPrefixWildcard = true) {
+    std::istringstream iss(query);
+    std::string token;
+    std::string result;
+    bool first = true;
+
+    while (iss >> token) {
+        bool prefix = false;
+        if (allowPrefixWildcard && token.size() > 1 && token.back() == '*') {
+            prefix = true;
+            token.pop_back();
+        }
+
+        token = stripPunctuation(std::move(token));
+        if (token.empty()) {
+            continue;
+        }
+
+        if (!first) {
+            result.push_back(' ');
+        }
+        first = false;
+
+        result += renderFts5Token(token, prefix);
+    }
+
+    return result.empty() ? "\"\"" : result;
+}
+
+static bool hasAdvancedFts5Operators(const std::string& query) {
+    bool inQuotes = false;
+    bool sawQuote = false;
+    std::string token;
+    token.reserve(32);
+    bool sawOperatorToken = false;
+    bool sawNonOperatorToken = false;
+    int nonOperatorTokenCount = 0;
+
+    auto flushToken = [&](void) -> bool {
+        if (token.empty()) {
+            return false;
+        }
+        // FTS5 operators are CASE-SENSITIVE: only uppercase AND/OR/NOT/NEAR are operators
+        // Lowercase "and", "or", "not" are regular search terms
+        if (token == "AND" || token == "OR" || token == "NOT") {
+            sawOperatorToken = true;
+            token.clear();
+            return false;
+        }
+        if (token == "NEAR" || token.rfind("NEAR/", 0) == 0) {
+            sawOperatorToken = true;
+            token.clear();
+            return false;
+        }
+        // Build uppercase version for other checks
+        std::string upper;
+        upper.reserve(token.size());
+        for (char c : token) {
+            upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+        }
+        auto colonPos = token.find(':');
+        if (colonPos != std::string::npos && colonPos > 0) {
+            bool validField = true;
+            for (size_t i = 0; i < colonPos; ++i) {
+                char c = token[i];
+                if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) {
+                    validField = false;
+                    break;
+                }
+            }
+            if (validField) {
+                if (token.find('/') == std::string::npos && token.find('\\') == std::string::npos) {
+                    return true;
+                }
+            }
+        }
+        sawNonOperatorToken = true;
+        ++nonOperatorTokenCount;
+        token.clear();
+        return false;
+    };
+
+    for (size_t i = 0; i < query.size(); ++i) {
+        char c = query[i];
+        if (c == '"') {
+            sawQuote = true;
+            if (inQuotes && i + 1 < query.size() && query[i + 1] == '"') {
+                ++i;
+                continue;
+            }
+            inQuotes = !inQuotes;
+            continue;
+        }
+        if (!inQuotes) {
+            if (std::isspace(static_cast<unsigned char>(c))) {
+                if (flushToken()) {
+                    return true;
+                }
+                continue;
+            }
+            if (c == '(' || c == ')') {
+                if (flushToken()) {
+                    return true;
+                }
+                // Only treat parens as grouping operators if we've seen actual FTS5 operators
+                // "(DCs)" after "dendritic cells" is punctuation, not grouping
+                // "(foo OR bar)" with uppercase OR is actual grouping
+                if (sawOperatorToken) {
+                    return true;
+                }
+                continue;
+            }
+            token.push_back(c);
+        }
+    }
+
+    if (flushToken()) {
+        return true;
+    }
+
+    if (sawQuote) {
+        return true;
+    }
+    return sawOperatorToken && sawNonOperatorToken;
+}
+
+static std::string sanitizeFts5UserQuery(std::string query, bool allowPrefixWildcard = true) {
+    query.erase(0, query.find_first_not_of(" \t\n\r"));
+    if (!query.empty()) {
+        auto lastNonWs = query.find_last_not_of(" \t\n\r");
+        if (lastNonWs != std::string::npos) {
+            query.erase(lastNonWs + 1);
+        }
+    }
+
+    if (query.empty()) {
+        return "\"\"";
+    }
+
+    if (hasAdvancedFts5Operators(query)) {
+        while (!query.empty()) {
+            char lastChar = query.back();
+            if (lastChar == '-' || lastChar == '+' || lastChar == '*' || lastChar == '(') {
+                query.pop_back();
+            } else {
+                break;
+            }
+        }
+        return query.empty() ? "\"\"" : query;
+    }
+
+    return buildSimpleFts5Query(query, allowPrefixWildcard);
+}
+
+enum class Fts5QueryMode { Smart, Simple, Natural };
+
+static Fts5QueryMode parseFts5ModeEnv() {
+    if (const char* env = std::getenv("YAMS_FTS_MODE"); env && *env) {
+        std::string mode(env);
+        std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+        if (mode == "simple") {
+            return Fts5QueryMode::Simple;
+        }
+        if (mode == "nl" || mode == "natural") {
+            return Fts5QueryMode::Natural;
+        }
+    }
+    return Fts5QueryMode::Smart;
+}
+
+static bool isLikelyNaturalLanguageQuery(std::string_view query) {
+    if (hasAdvancedFts5Operators(std::string(query))) {
+        return false;
+    }
+
+    if (query.find(':') != std::string_view::npos || query.find('*') != std::string_view::npos ||
+        query.find('=') != std::string_view::npos || query.find('\\') != std::string_view::npos ||
+        query.find('/') != std::string_view::npos) {
+        return false;
+    }
+
+    std::istringstream iss{std::string(query)};
+    std::string token;
+    int tokenCount = 0;
+    int alphaTokenCount = 0;
+    double totalLen = 0.0;
+    double totalAlpha = 0.0;
+
+    while (iss >> token) {
+        if (token.find('_') != std::string::npos || token.find("::") != std::string::npos) {
+            return false;
+        }
+        tokenCount++;
+        totalLen += token.size();
+        int alphaCount = 0;
+        for (unsigned char c : token) {
+            if (std::isalpha(c)) {
+                alphaCount++;
+            }
+        }
+        totalAlpha += alphaCount;
+        if (alphaCount >= 2) {
+            alphaTokenCount++;
+        }
+    }
+
+    if (tokenCount < 2) {
+        return false;
+    }
+
+    const double avgLen = totalLen / tokenCount;
+    const double alphaRatio = totalAlpha / std::max(1.0, totalLen);
+
+    return alphaTokenCount >= 2 && avgLen >= 3.0 && alphaRatio >= 0.6;
+}
+
+static std::vector<std::string> tokenizeNaturalLanguageQuery(std::string_view query);
+
+static std::string buildNaturalLanguageFts5Query(std::string_view query, bool useOrFallback,
+                                                 bool autoPrefix, bool autoPhrase) {
+    auto tokens = tokenizeNaturalLanguageQuery(query);
+    if (tokens.empty()) {
+        return "\"\"";
+    }
+
+    if (autoPhrase && tokens.size() >= 2 && tokens.size() <= 4) {
+        std::string phrase;
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            if (i > 0)
+                phrase.push_back(' ');
+            phrase += tokens[i];
+        }
+        return quoteFTS5Term(phrase);
+    }
+
+    std::string result;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (i > 0) {
+            result += useOrFallback ? " OR " : " ";
+        }
+        const bool prefix = autoPrefix && tokens[i].size() >= 4;
+        result += renderFts5Token(tokens[i], prefix);
+    }
+
+    return result.empty() ? "\"\"" : result;
+}
+
+namespace test {
+std::string buildNaturalLanguageFts5QueryForTest(std::string_view query, bool useOr,
+                                                 bool autoPrefix, bool autoPhrase) {
+    return buildNaturalLanguageFts5Query(query, useOr, autoPrefix, autoPhrase);
+}
+
+bool isLikelyNaturalLanguageQueryForTest(std::string_view query) {
+    return isLikelyNaturalLanguageQuery(query);
+}
+} // namespace test
+
 static std::vector<std::string> splitFTS5Terms(const std::string& trimmed) {
     std::vector<std::string> terms;
     std::string current;
@@ -1419,6 +1719,9 @@ static std::string buildDiagnosticAltOrQuery(const std::vector<std::string>& tok
 static void logFtsTokensIfEnabled(const std::string& rawQuery,
                                   const std::vector<std::string>& tokens) {
     if (const char* env = std::getenv("YAMS_FTS_DEBUG_QUERY"); env && std::string(env) == "1") {
+        if (hasAdvancedFts5Operators(rawQuery)) {
+            return;
+        }
         std::vector<std::string> stripped = stripPunctuationTokens(tokens);
         std::string previewRaw = joinPreview(tokens);
         std::string previewStripped = joinPreview(stripped);
@@ -1456,6 +1759,24 @@ static bool isStopword(const std::string& term) {
     return getStopwords().count(lower) > 0;
 }
 
+static std::vector<std::string> tokenizeNaturalLanguageQuery(std::string_view query) {
+    std::vector<std::string> tokens;
+    std::istringstream iss{std::string(query)};
+    std::string term;
+    while (iss >> term) {
+        std::transform(term.begin(), term.end(), term.begin(), ::tolower);
+        term = stripPunctuation(std::move(term));
+        if (term.empty())
+            continue;
+        if (term.size() < 2)
+            continue;
+        if (isStopword(term))
+            continue;
+        tokens.push_back(std::move(term));
+    }
+    return tokens;
+}
+
 // Sanitize FTS5 query to prevent syntax errors.
 // Uses FTS5's default AND semantics for multiple terms (all terms must match).
 // Pass through advanced FTS5 operators (AND, OR, NOT, NEAR) for power users.
@@ -1465,89 +1786,7 @@ static bool isStopword(const std::string& term) {
 // 2. Reranking with cross-encoder after BM25 retrieval
 // 3. Hybrid fusion with vector search for semantic matching
 std::string sanitizeFTS5Query(const std::string& query) {
-    // Trim whitespace from both ends
-    std::string trimmed = query;
-    trimmed.erase(0, trimmed.find_first_not_of(" \t\n\r"));
-    if (!trimmed.empty()) {
-        auto lastNonWs = trimmed.find_last_not_of(" \t\n\r");
-        if (lastNonWs != std::string::npos) {
-            trimmed.erase(lastNonWs + 1);
-        }
-    }
-
-    if (trimmed.empty()) {
-        return "\"\"";
-    }
-
-    // Check if the query uses advanced FTS5 operators - pass through for power users
-    bool hasAdvancedOperators =
-        trimmed.find(" AND ") != std::string::npos || trimmed.find(" OR ") != std::string::npos ||
-        trimmed.find(" NOT ") != std::string::npos || trimmed.find("NEAR(") != std::string::npos;
-
-    // If using advanced operators, do minimal sanitization
-    if (hasAdvancedOperators) {
-        // Just remove trailing operators that would cause syntax errors
-        while (!trimmed.empty()) {
-            char lastChar = trimmed.back();
-            if (lastChar == '-' || lastChar == '+' || lastChar == '*' || lastChar == '(' ||
-                lastChar == ')') {
-                trimmed.pop_back();
-            } else {
-                break;
-            }
-        }
-        return trimmed.empty() ? "\"\"" : trimmed;
-    }
-
-    // For regular queries, process each token to handle special characters.
-    // FTS5 interprets `-` as NOT operator, so terms with embedded hyphens need quoting.
-    // Split by whitespace, quote terms with embedded hyphens, rejoin.
-    std::string result;
-    result.reserve(trimmed.size() + 10);
-
-    std::istringstream iss(trimmed);
-    std::string token;
-    bool first = true;
-
-    while (iss >> token) {
-        if (!first) {
-            result += ' ';
-        }
-        first = false;
-
-        // Escape internal quotes by doubling them
-        std::string escaped;
-        escaped.reserve(token.size());
-        for (char c : token) {
-            if (c == '"') {
-                escaped += "\"\"";
-            } else {
-                escaped += c;
-            }
-        }
-
-        // Check if token has embedded hyphen (not at start/end) - needs quoting
-        // to prevent FTS5 interpreting `-` as NOT operator
-        bool hasEmbeddedHyphen = false;
-        if (escaped.size() > 2) {
-            for (size_t i = 1; i < escaped.size() - 1; ++i) {
-                if (escaped[i] == '-') {
-                    hasEmbeddedHyphen = true;
-                    break;
-                }
-            }
-        }
-
-        if (hasEmbeddedHyphen) {
-            result += '"';
-            result += escaped;
-            result += '"';
-        } else {
-            result += escaped;
-        }
-    }
-
-    return result.empty() ? "\"\"" : result;
+    return sanitizeFts5UserQuery(query);
 }
 
 Result<SearchResults>
@@ -1595,6 +1834,27 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         // FTS5 availability is verified at startup, skip check for performance
         // Sanitize the query to prevent FTS5 syntax errors
         std::string sanitizedQuery = sanitizeFTS5Query(query);
+        const auto ftsMode = parseFts5ModeEnv();
+        const bool nlAutoPhrase = (std::getenv("YAMS_FTS_NL_AUTO_PHRASE") &&
+                                   std::string(std::getenv("YAMS_FTS_NL_AUTO_PHRASE")) == "1");
+        const bool nlAutoPrefix = !(std::getenv("YAMS_FTS_NL_PREFIX") &&
+                                    std::string(std::getenv("YAMS_FTS_NL_PREFIX")) == "0");
+        int nlMinResults = 3;
+        if (const char* s = std::getenv("YAMS_FTS_NL_MIN_RESULTS"); s && *s) {
+            nlMinResults = std::max(0, std::atoi(s));
+        }
+        const bool useNlFallback = !(std::getenv("YAMS_FTS_NL_OR_FALLBACK") &&
+                                     std::string(std::getenv("YAMS_FTS_NL_OR_FALLBACK")) == "0");
+        const bool isAdvancedQuery = hasAdvancedFts5Operators(query);
+        bool usedNaturalLanguageQuery = false;
+        if (!isAdvancedQuery) {
+            if (ftsMode == Fts5QueryMode::Natural ||
+                (ftsMode == Fts5QueryMode::Smart && isLikelyNaturalLanguageQuery(query))) {
+                sanitizedQuery =
+                    buildNaturalLanguageFts5Query(query, false, nlAutoPrefix, nlAutoPhrase);
+                usedNaturalLanguageQuery = true;
+            }
+        }
 
         // Optional debug: log raw vs sanitized query.
         // This is intentionally opt-in because it can be noisy and may contain user text.
@@ -1609,7 +1869,7 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         // gauge strictness of AND behavior. This must not affect normal results.
         std::optional<size_t> diagAltHitCount;
         std::string diagAltQuery;
-        if (ftsDebug) {
+        if (ftsDebug && !hasAdvancedFts5Operators(query)) {
             std::vector<std::string> diagTokens = splitFTS5Terms(query);
             diagAltQuery = buildDiagnosticAltOrQuery(diagTokens);
             if (!diagAltQuery.empty()) {
@@ -1648,56 +1908,59 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                          diagAltQuery, *diagAltHitCount);
         }
 
-        using yams::metadata::sql::QuerySpec;
-        QuerySpec spec{};
-        spec.table = "documents_fts";
-        spec.from =
-            std::optional<std::string>{"documents_fts fts JOIN documents d ON d.id = fts.rowid"};
-        // BM25 column weights: content=1.0, title=10.0
-        // Boosting title matches significantly improves precision for document retrieval
-        // (Source: SQLite FTS5 docs, BEIR benchmark best practices)
-        spec.columns = {"fts.rowid",
-                        "fts.title",
-                        "snippet(documents_fts, 0, '<b>', '</b>', '...', 16) as snippet",
-                        "bm25(documents_fts, 1.0, 10.0) as score",
-                        "d.file_path",
-                        "d.file_name",
-                        "d.file_extension",
-                        "d.file_size",
-                        "d.sha256_hash",
-                        "d.mime_type",
-                        "d.created_time",
-                        "d.modified_time",
-                        "d.indexed_time",
-                        "d.content_extracted",
-                        "d.extraction_status",
-                        "d.extraction_error"};
-        spec.conditions.emplace_back("documents_fts MATCH ?");
-        // Optional ID filter (dynamic IN placeholder list)
-        std::string idIn;
-        if (docIds && !docIds->empty()) {
-            idIn = "d.id IN (";
-            for (size_t i = 0; i < docIds->size(); ++i) {
-                if (i > 0)
-                    idIn += ',';
-                idIn += '?';
+        auto runFtsQuery = [&](const std::string& queryText, SearchResults& out) -> Result<bool> {
+            using yams::metadata::sql::QuerySpec;
+            QuerySpec spec{};
+            spec.table = "documents_fts";
+            spec.from = std::optional<std::string>{"documents_fts fts JOIN documents d ON d.id = "
+                                                   "fts.rowid"};
+            // BM25 column weights: content=1.0, title=10.0
+            // Boosting title matches significantly improves precision for document retrieval
+            // (Source: SQLite FTS5 docs, BEIR benchmark best practices)
+            spec.columns = {"fts.rowid",
+                            "fts.title",
+                            "snippet(documents_fts, 0, '<b>', '</b>', '...', 16) as snippet",
+                            "bm25(documents_fts, 1.0, 10.0) as score",
+                            "d.file_path",
+                            "d.file_name",
+                            "d.file_extension",
+                            "d.file_size",
+                            "d.sha256_hash",
+                            "d.mime_type",
+                            "d.created_time",
+                            "d.modified_time",
+                            "d.indexed_time",
+                            "d.content_extracted",
+                            "d.extraction_status",
+                            "d.extraction_error"};
+            spec.conditions.emplace_back("documents_fts MATCH ?");
+            // Optional ID filter (dynamic IN placeholder list)
+            std::string idIn;
+            if (docIds && !docIds->empty()) {
+                idIn = "d.id IN (";
+                for (size_t i = 0; i < docIds->size(); ++i) {
+                    if (i > 0)
+                        idIn += ',';
+                    idIn += '?';
+                }
+                idIn += ')';
+                spec.conditions.push_back(idIn);
             }
-            idIn += ')';
-            spec.conditions.push_back(idIn);
-        }
-        spec.orderBy = std::optional<std::string>{"score"};
-        spec.limit = effectiveLimit;
-        spec.offset = offset;
-        auto sql = yams::metadata::sql::buildSelect(spec);
+            spec.orderBy = std::optional<std::string>{"score"};
+            spec.limit = effectiveLimit;
+            spec.offset = offset;
+            auto sql = yams::metadata::sql::buildSelect(spec);
 
-        bool ftsSearchSucceeded = false;
-        auto stmtResult = db.prepare(sql);
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult) {
+                spdlog::debug("FTS5 search prepare failed: {}", stmtResult.error().message);
+                return false;
+            }
 
-        if (stmtResult) {
             Statement stmt = std::move(stmtResult).value();
             // Bind: MATCH term, optional id list, limit, offset
             int bindIndex = 1;
-            auto b1 = stmt.bind(bindIndex++, sanitizedQuery);
+            auto b1 = stmt.bind(bindIndex++, queryText);
             if (!b1)
                 return b1.error();
             if (docIds && !docIds->empty()) {
@@ -1707,62 +1970,59 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                         return b.error();
                 }
             }
-            {
-                // Execute the FTS5 search
-                size_t rowCount = 0;
-                while (true) {
-                    auto stepResult = stmt.step();
-                    if (!stepResult) {
-                        break;
-                    }
-                    if (!stepResult.value()) {
-                        ftsSearchSucceeded = true;
-                        break;
-                    }
 
-                    rowCount++;
-
-                    SearchResult result;
-
-                    // Map document info
-                    result.document.id = stmt.getInt64(0);
-                    result.document.filePath = stmt.getString(4);
-                    result.document.fileName = stmt.getString(5);
-                    result.document.fileExtension = stmt.getString(6);
-                    result.document.fileSize = stmt.getInt64(7);
-                    result.document.sha256Hash = stmt.getString(8);
-                    result.document.mimeType = stmt.getString(9);
-                    result.document.createdTime = stmt.getTime(10);
-                    result.document.modifiedTime = stmt.getTime(11);
-                    result.document.indexedTime = stmt.getTime(12);
-                    result.document.contentExtracted = stmt.getInt(13) != 0;
-                    result.document.extractionStatus =
-                        ExtractionStatusUtils::fromString(stmt.getString(14));
-                    result.document.extractionError = stmt.getString(15);
-
-                    // Search-specific fields
-                    result.snippet = common::sanitizeUtf8(stmt.getString(2));
-                    result.score = stmt.getDouble(3);
-
-                    results.results.push_back(result);
-                    ftsSearchSucceeded = true;
+            // Execute the FTS5 search
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult) {
+                    // Log the error instead of silently breaking
+                    spdlog::error("FTS5 search step() failed: {}", stepResult.error().message);
+                    break;
+                }
+                if (!stepResult.value()) {
+                    break;
                 }
 
+                SearchResult result;
+
+                // Map document info
+                result.document.id = stmt.getInt64(0);
+                result.document.filePath = stmt.getString(4);
+                result.document.fileName = stmt.getString(5);
+                result.document.fileExtension = stmt.getString(6);
+                result.document.fileSize = stmt.getInt64(7);
+                result.document.sha256Hash = stmt.getString(8);
+                result.document.mimeType = stmt.getString(9);
+                result.document.createdTime = stmt.getTime(10);
+                result.document.modifiedTime = stmt.getTime(11);
+                result.document.indexedTime = stmt.getTime(12);
+                result.document.contentExtracted = stmt.getInt(13) != 0;
+                result.document.extractionStatus =
+                    ExtractionStatusUtils::fromString(stmt.getString(14));
+                result.document.extractionError = stmt.getString(15);
+
+                // Search-specific fields
+                result.snippet = common::sanitizeUtf8(stmt.getString(2));
+                result.score = stmt.getDouble(3);
+
+                out.results.push_back(result);
+            }
+
+            if (!out.results.empty()) {
                 // Get total count for FTS5 results
                 // PERFORMANCE FIX: Skip expensive COUNT(*) for large result sets
                 // If we got back fewer results than the limit, that's the total count
-                if (ftsSearchSucceeded) {
-                    const size_t resultSize = results.results.size();
-                    const size_t requestedLimit = static_cast<size_t>(limit);
+                const size_t resultSize = out.results.size();
+                const size_t requestedLimit = static_cast<size_t>(limit);
 
-                    // Fast path: if we got fewer than limit, that's the exact count
-                    if (resultSize < requestedLimit) {
-                        results.totalCount = resultSize;
-                    } else {
-                        // We hit the limit - need to count, but with timeout protection
-                        // Use a fast heuristic: try counting with a LIMIT to avoid full scans
-                        constexpr int64_t kMaxCountLimit = 10000;
-                        auto countStmtResult = db.prepare(R"(
+                // Fast path: if we got fewer than limit, that's the exact count
+                if (resultSize < requestedLimit) {
+                    out.totalCount = resultSize;
+                } else {
+                    // We hit the limit - need to count, but with timeout protection
+                    // Use a fast heuristic: try counting with a LIMIT to avoid full scans
+                    constexpr int64_t kMaxCountLimit = 10000;
+                    auto countStmtResult = db.prepare(R"(
                             SELECT COUNT(*) FROM (
                                 SELECT 1 FROM documents_fts 
                                 WHERE documents_fts MATCH ? 
@@ -1770,34 +2030,60 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                             )
                         )");
 
-                        if (countStmtResult) {
-                            Statement countStmt = std::move(countStmtResult).value();
-                            auto bindRes1 = countStmt.bind(1, sanitizedQuery);
-                            auto bindRes2 = countStmt.bind(2, kMaxCountLimit);
-                            if (bindRes1.has_value() && bindRes2.has_value()) {
-                                auto stepRes = countStmt.step();
-                                if (stepRes.has_value() && stepRes.value()) {
-                                    int64_t boundedCount = countStmt.getInt64(0);
-                                    results.totalCount = boundedCount;
-                                    // If we hit the limit, indicate there are "many more"
-                                    if (boundedCount >= kMaxCountLimit) {
-                                        spdlog::debug(
-                                            "Search matched >{} results, using approximate count",
-                                            kMaxCountLimit);
-                                    }
+                    if (countStmtResult) {
+                        Statement countStmt = std::move(countStmtResult).value();
+                        auto bindRes1 = countStmt.bind(1, queryText);
+                        auto bindRes2 = countStmt.bind(2, kMaxCountLimit);
+                        if (bindRes1.has_value() && bindRes2.has_value()) {
+                            auto stepRes = countStmt.step();
+                            if (stepRes.has_value() && stepRes.value()) {
+                                int64_t boundedCount = countStmt.getInt64(0);
+                                out.totalCount = boundedCount;
+                                // If we hit the limit, indicate there are "many more"
+                                if (boundedCount >= kMaxCountLimit) {
+                                    spdlog::debug(
+                                        "Search matched >{} results, using approximate count",
+                                        kMaxCountLimit);
                                 }
                             }
-                        } else {
-                            // Fallback: just use result size as lower bound
-                            results.totalCount = resultSize;
-                            spdlog::debug("Count query failed, using result size as count");
                         }
+                    } else {
+                        // Fallback: just use result size as lower bound
+                        out.totalCount = resultSize;
+                        spdlog::debug("Count query failed, using result size as count");
                     }
                 }
             }
-        } else {
-            spdlog::debug("FTS5 search prepare failed: {}", stmtResult.error().message);
+
+            return !out.results.empty();
+        };
+
+        bool ftsSearchSucceeded = false;
+        auto ftsRun = runFtsQuery(sanitizedQuery, results);
+        if (!ftsRun) {
+            return ftsRun.error();
         }
+        ftsSearchSucceeded = ftsRun.value();
+
+        if (usedNaturalLanguageQuery && useNlFallback && ftsSearchSucceeded &&
+            static_cast<int>(results.results.size()) < nlMinResults) {
+            SearchResults orResults;
+            orResults.query = query;
+            std::string orQuery =
+                buildNaturalLanguageFts5Query(query, true, nlAutoPrefix, nlAutoPhrase);
+            auto orRun = runFtsQuery(orQuery, orResults);
+            if (!orRun) {
+                return orRun.error();
+            }
+            if (orRun.value()) {
+                results = std::move(orResults);
+                sanitizedQuery = std::move(orQuery);
+            }
+        }
+
+        // Log FTS5 result count for diagnostics
+        spdlog::info("FTS5 search for '{}': succeeded={} results={}", query.substr(0, 50),
+                     ftsSearchSucceeded, results.results.size());
 
         // If FTS5 search failed, fall back to fuzzy search (noise-reduced to debug)
         if (!ftsSearchSucceeded) {
@@ -1839,11 +2125,9 @@ MetadataRepository::findDocumentByExactPath(const std::string& path) {
     return executeQuery<std::optional<DocumentInfo>>(
         [&](Database& db) -> Result<std::optional<DocumentInfo>> {
             using yams::metadata::sql::QuerySpec;
-            const char* cols =
-                hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
             QuerySpec spec{};
             spec.table = "documents";
-            spec.columns = {cols};
+            spec.columns = {documentColumnList(false)};
             spec.conditions = {"path_hash = ?"};
             spec.orderBy = std::nullopt;
             spec.groupBy = std::nullopt;
@@ -1880,10 +2164,9 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
 
             std::string sql = "SELECT ";
             if (joinFtsForContains) {
-                sql += hasPathIndexing_ ? kDocumentColumnListNewQualified
-                                        : kDocumentColumnListCompatQualified;
+                sql += documentColumnList(true);
             } else {
-                sql += hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
+                sql += documentColumnList(false);
             }
             sql += " FROM documents";
             if (joinFtsForContains)
@@ -1995,15 +2278,27 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
                 std::replace(fragment.begin(), fragment.end(), '\\', '/');
 
                 if (joinFtsForContains) {
-                    std::string ftsToken = fragment;
-                    auto slashPos = ftsToken.find_last_of('/');
-                    if (slashPos != std::string::npos)
-                        ftsToken = ftsToken.substr(slashPos + 1);
-                    std::replace(ftsToken.begin(), ftsToken.end(), '"', ' ');
-                    if (!ftsToken.empty() && ftsToken.back() != '*')
-                        ftsToken.push_back('*');
-                    conditions.emplace_back("documents_path_fts MATCH ?");
-                    addText(ftsToken);
+                    if (hasAdvancedFts5Operators(fragment)) {
+                        std::string sanitized = sanitizeFts5UserQuery(fragment);
+                        if (!sanitized.empty()) {
+                            conditions.emplace_back("documents_path_fts MATCH ?");
+                            addText(sanitized);
+                        }
+                    } else {
+                        std::string ftsToken = fragment;
+                        auto slashPos = ftsToken.find_last_of('/');
+                        if (slashPos != std::string::npos)
+                            ftsToken = ftsToken.substr(slashPos + 1);
+                        bool prefix = true;
+                        if (!ftsToken.empty() && ftsToken.back() == '*') {
+                            ftsToken.pop_back();
+                        }
+                        ftsToken = stripPunctuation(std::move(ftsToken));
+                        if (!ftsToken.empty()) {
+                            conditions.emplace_back("documents_path_fts MATCH ?");
+                            addText(renderFts5Token(ftsToken, prefix));
+                        }
+                    }
                 }
 
                 if (hasPathIndexing_) {
@@ -2168,38 +2463,15 @@ MetadataRepository::findDocumentsByHashPrefix(const std::string& hashPrefix, std
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
             // Build query via helper
-            const char* cols =
-                hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
             sql::QuerySpec spec{};
             spec.table = "documents";
-            spec.columns = {cols};
+            spec.columns = {documentColumnList(false)};
             spec.conditions = {"lower(sha256_hash) LIKE ?"};
             spec.orderBy = std::optional<std::string>("indexed_time DESC");
             spec.limit = static_cast<int>(limit);
             spec.offset = std::nullopt;
-            auto stmtResult = db.prepare(sql::buildSelect(spec));
-
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            auto bindPrefix = stmt.bind(1, lowered + "%");
-            if (!bindPrefix)
-                return bindPrefix.error();
-            // Limit is embedded in SQL
-
-            std::vector<DocumentInfo> result;
-            while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
-                    break;
-
-                result.push_back(mapDocumentRow(stmt));
-            }
-
-            return result;
+            return queryDocumentsBySpec(
+                db, spec, [&](Statement& stmt) { return stmt.bind(1, lowered + "%"); });
         });
 }
 
@@ -2207,35 +2479,15 @@ Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsByExtension(const std::string& extension) {
     return executeQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            const char* cols =
-                hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
             sql::QuerySpec spec{};
             spec.table = "documents";
-            spec.columns = {cols};
+            spec.columns = {documentColumnList(false)};
             spec.conditions = {"file_extension = ?"};
             spec.orderBy = std::optional<std::string>("file_name");
             spec.limit = std::nullopt;
             spec.offset = std::nullopt;
-
-            auto stmtResult = db.prepare(sql::buildSelect(spec));
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            auto bindResult = stmt.bind(1, extension);
-            if (!bindResult)
-                return bindResult.error();
-
-            std::vector<DocumentInfo> result;
-            while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
-                    break;
-                result.push_back(mapDocumentRow(stmt));
-            }
-            return result;
+            return queryDocumentsBySpec(db, spec,
+                                        [&](Statement& stmt) { return stmt.bind(1, extension); });
         });
 }
 
@@ -2247,37 +2499,14 @@ MetadataRepository::findDocumentsModifiedSince(std::chrono::system_clock::time_p
             auto sinceUnix =
                 std::chrono::duration_cast<std::chrono::seconds>(since.time_since_epoch()).count();
 
-            const char* cols =
-                hasPathIndexing_ ? kDocumentColumnListNew : kDocumentColumnListCompat;
             QuerySpec spec{};
             spec.table = "documents";
-            spec.columns = {cols};
+            spec.columns = {documentColumnList(false)};
             spec.conditions = {"modified_time >= ?"};
             spec.orderBy = std::optional<std::string>("modified_time DESC");
-
-            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
-
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            auto bindResult = stmt.bind(1, static_cast<int64_t>(sinceUnix));
-            if (!bindResult)
-                return bindResult.error();
-
-            std::vector<DocumentInfo> result;
-
-            while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
-                    break;
-
-                result.push_back(mapDocumentRow(stmt));
-            }
-
-            return result;
+            return queryDocumentsBySpec(db, spec, [&](Statement& stmt) {
+                return stmt.bind(1, static_cast<int64_t>(sinceUnix));
+            });
         });
 }
 
@@ -4373,7 +4602,7 @@ Result<void> MetadataRepository::finalizeTreeDiff(int64_t diffId, std::size_t ch
 }
 
 // Helper methods for row mapping
-DocumentInfo MetadataRepository::mapDocumentRow(Statement& stmt) {
+DocumentInfo MetadataRepository::mapDocumentRow(Statement& stmt) const {
     DocumentInfo info;
     info.id = stmt.getInt64(0);
     info.filePath = stmt.getString(1);
@@ -4610,56 +4839,83 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
             return results;
         }
 
-        // Split query into terms and expand each via SymSpell
-        std::vector<std::string> expandedTerms;
-        std::istringstream iss(query);
-        std::string term;
-        while (iss >> term) {
-            // Lowercase for matching
-            std::transform(term.begin(), term.end(), term.begin(), ::tolower);
-            if (term.length() < 2)
-                continue;
-
-            search::SymSpellSearch::SearchOptions opts;
-            opts.maxEditDistance = 2;
-            opts.returnAll = true;
-            opts.maxResults = 5; // Get top 5 corrections per term
-
-            auto suggestions = symspellIndex_->search(term, opts);
-            if (!suggestions.empty()) {
-                for (const auto& s : suggestions) {
-                    expandedTerms.push_back(s.term);
-                }
-            } else {
-                // No fuzzy match found, use original term
-                expandedTerms.push_back(term);
-            }
-        }
-
-        auto symspellEnd = std::chrono::high_resolution_clock::now();
-        auto symspellMs =
-            std::chrono::duration_cast<std::chrono::milliseconds>(symspellEnd - totalStart).count();
-        spdlog::debug("[FUZZY] SymSpell term expansion took {}ms, expanded to {} terms", symspellMs,
-                      expandedTerms.size());
-
-        if (expandedTerms.empty()) {
-            results.totalCount = 0;
-            results.executionTimeMs = symspellMs;
-            return results;
-        }
-
-        // Build FTS5 query with OR'd expanded terms
         std::string ftsQuery;
-        for (size_t i = 0; i < expandedTerms.size(); ++i) {
-            if (i > 0)
-                ftsQuery += " OR ";
-            // Escape special FTS5 characters
-            std::string escaped = expandedTerms[i];
-            for (auto& c : escaped) {
-                if (c == '"' || c == '*' || c == '-')
-                    c = ' ';
+        const bool advancedQuery = hasAdvancedFts5Operators(query);
+        if (!advancedQuery) {
+            // Split query into terms and expand each via SymSpell
+            // Keep expansions grouped by original term for AND semantics
+            std::vector<std::vector<std::string>> termExpansions;
+            std::istringstream iss(query);
+            std::string term;
+            while (iss >> term) {
+                // Lowercase for matching
+                std::transform(term.begin(), term.end(), term.begin(), ::tolower);
+                term = stripPunctuation(std::move(term));
+                if (term.empty())
+                    continue;
+                if (term.length() < 2)
+                    continue;
+
+                search::SymSpellSearch::SearchOptions opts;
+                opts.maxEditDistance = 2;
+                opts.returnAll = true;
+                opts.maxResults = 5; // Get top 5 corrections per term
+
+                std::vector<std::string> expansions;
+                auto suggestions = symspellIndex_->search(term, opts);
+                if (!suggestions.empty()) {
+                    for (const auto& s : suggestions) {
+                        std::string cleaned = stripPunctuation(std::string(s.term));
+                        if (!cleaned.empty()) {
+                            expansions.push_back(std::move(cleaned));
+                        }
+                    }
+                } else {
+                    // No fuzzy match found, use original term
+                    expansions.push_back(term);
+                }
+                if (!expansions.empty()) {
+                    termExpansions.push_back(std::move(expansions));
+                }
             }
-            ftsQuery += "\"" + escaped + "\"";
+
+            auto symspellEnd = std::chrono::high_resolution_clock::now();
+            auto symspellMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(symspellEnd - totalStart)
+                    .count();
+            spdlog::debug("[FUZZY] SymSpell term expansion took {}ms, {} term groups", symspellMs,
+                          termExpansions.size());
+
+            if (termExpansions.empty()) {
+                results.totalCount = 0;
+                results.executionTimeMs = symspellMs;
+                return results;
+            }
+
+            // Build FTS5 query with AND between term groups, OR within each group
+            // Example: ("term1a" OR "term1b") AND ("term2a" OR "term2b")
+            // This maintains AND semantics at the term level while allowing fuzzy matches
+            for (size_t g = 0; g < termExpansions.size(); ++g) {
+                if (g > 0)
+                    ftsQuery += " AND ";
+
+                const auto& expansions = termExpansions[g];
+                if (expansions.size() == 1) {
+                    // Single expansion, no need for parentheses
+                    ftsQuery += renderFts5Token(expansions[0], false);
+                } else {
+                    // Multiple expansions, use OR within parentheses
+                    ftsQuery += "(";
+                    for (size_t i = 0; i < expansions.size(); ++i) {
+                        if (i > 0)
+                            ftsQuery += " OR ";
+                        ftsQuery += renderFts5Token(expansions[i], false);
+                    }
+                    ftsQuery += ")";
+                }
+            }
+        } else {
+            ftsQuery = sanitizeFts5UserQuery(query);
         }
 
         spdlog::debug("[FUZZY] FTS5 query: {}", ftsQuery);

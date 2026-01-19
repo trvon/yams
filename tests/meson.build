@@ -1418,7 +1418,10 @@ if catch2_dep.found()
   # Migrated from GTest as part of yams-3s4 / yams-aqc
   # --------------------------------------------------------------------------
   catch2_fts5_exe = executable('catch2_fts5',
-    files('unit/metadata/fts5_catch2_test.cpp'),
+    files(
+      'unit/metadata/fts5_catch2_test.cpp',
+      'unit/metadata/fts5_query_sanitizer_catch2_test.cpp',
+    ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -1713,6 +1716,16 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Text extraction to FTS5 pipeline test (detection -> extraction -> indexing -> search)
+  text_extraction_fts5_pipeline_exe = executable('text_extraction_fts5_pipeline',
+    files('unit/extraction/text_extraction_fts5_pipeline_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps + [dependency('yams_metadata')],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Plugin process tests (external plugin infrastructure)
   plugin_process_test_deps = [
     dependency('spdlog'),
@@ -1869,6 +1882,19 @@ if catch2_dep.found()
     dependencies: [catch2_dep, catch2_main_dep] + search_test_deps + [
       dependency('yams_daemon'),
       dependency('yams_daemon_client'),
+    ],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Reranker Integration Tests (Catch2)
+  # Tests IReranker interface, ModelProviderRerankerAdapter, and reranker config
+  reranker_integration_exe = executable('reranker_integration',
+    files('unit/search/reranker_integration_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + search_test_deps + [
+      dependency('yams_daemon'),
     ],
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     build_rpath: ':'.join(_test_rpaths),
@@ -2076,6 +2102,12 @@ if catch2_dep.found()
     timeout: 120  # Allow longer timeout for large file tests
   )
 
+  test('text_extraction_fts5_pipeline', text_extraction_fts5_pipeline_exe,
+    suite: ['catch2', 'unit', 'extraction', 'pipeline', 'fts5'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
   test('plugin_process', plugin_process_exe,
     suite: ['catch2', 'unit', 'extraction', 'plugin'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -2166,6 +2198,12 @@ if catch2_dep.found()
       'YAMS_DISABLE_VECTORS': '1',
     },
     timeout: 180
+  )
+
+  test('reranker_integration', reranker_integration_exe,
+    suite: ['catch2', 'unit', 'search', 'reranker'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   # Plugin integration tests

@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <future>
+#include <sstream>
 #include <set>
 #include <string>
 #include <thread>
@@ -63,6 +64,217 @@ auto postWork(Work work, const std::optional<boost::asio::any_io_executor>& exec
         (void)std::async(std::launch::async, [task = std::move(task)]() mutable { task(); });
     }
     return future;
+}
+
+std::vector<std::string> tokenizeLower(const std::string& input) {
+    std::string normalized = input;
+    for (char& c : normalized) {
+        if (c == '\\') {
+            c = '/';
+        }
+    }
+    std::vector<std::string> tokens;
+    std::string current;
+    for (unsigned char c : normalized) {
+        if (std::isalnum(c)) {
+            current.push_back(static_cast<char>(std::tolower(c)));
+        } else {
+            if (!current.empty()) {
+                tokens.push_back(std::move(current));
+                current.clear();
+            }
+        }
+    }
+    if (!current.empty()) {
+        tokens.push_back(std::move(current));
+    }
+    return tokens;
+}
+
+float normalizedBm25Score(double rawScore, float divisor, double minScore, double maxScore) {
+    if (maxScore > minScore) {
+        const double norm = (rawScore - minScore) / (maxScore - minScore);
+        return std::clamp(static_cast<float>(1.0 - norm), 0.0f, 1.0f);
+    }
+    return std::clamp(static_cast<float>(-rawScore) / divisor, 0.0f, 1.0f);
+}
+
+float filenamePathBoost(const std::string& query, const std::string& filePath,
+                        const std::string& fileName) {
+    const auto queryTokens = tokenizeLower(query);
+    if (queryTokens.empty()) {
+        return 1.0f;
+    }
+
+    const auto nameTokens = tokenizeLower(fileName);
+    const auto pathTokens = tokenizeLower(filePath);
+    if (nameTokens.empty() && pathTokens.empty()) {
+        return 1.0f;
+    }
+
+    std::unordered_set<std::string> nameSet(nameTokens.begin(), nameTokens.end());
+    std::unordered_set<std::string> pathSet(pathTokens.begin(), pathTokens.end());
+
+    std::size_t nameMatches = 0;
+    std::size_t pathMatches = 0;
+    for (const auto& tok : queryTokens) {
+        if (nameSet.count(tok)) {
+            nameMatches++;
+        } else if (pathSet.count(tok)) {
+            pathMatches++;
+        } else {
+            for (const auto& nameTok : nameTokens) {
+                if (nameTok.rfind(tok, 0) == 0) {
+                    nameMatches++;
+                    break;
+                }
+            }
+            if (nameMatches == 0) {
+                for (const auto& pathTok : pathTokens) {
+                    if (pathTok.rfind(tok, 0) == 0) {
+                        pathMatches++;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (nameMatches > 0) {
+        return 1.0f + std::min(2.0f, 0.5f + static_cast<float>(nameMatches) * 0.5f);
+    }
+    if (pathMatches > 0) {
+        return 1.0f + std::min(1.0f, 0.25f + static_cast<float>(pathMatches) * 0.25f);
+    }
+    return 1.0f;
+}
+
+enum class QueryIntent { Code, Path, Prose, Mixed };
+
+constexpr const char* queryIntentToString(QueryIntent intent) {
+    switch (intent) {
+        case QueryIntent::Code:
+            return "code";
+        case QueryIntent::Path:
+            return "path";
+        case QueryIntent::Prose:
+            return "prose";
+        case QueryIntent::Mixed:
+            return "mixed";
+    }
+    return "mixed";
+}
+
+bool hasCamelCase(const std::string& input) {
+    bool hasLower = false;
+    bool hasUpper = false;
+    for (unsigned char c : input) {
+        if (std::islower(c)) {
+            hasLower = true;
+        } else if (std::isupper(c)) {
+            hasUpper = true;
+        }
+        if (hasLower && hasUpper) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool hasFileExtension(std::string_view input) {
+    const auto dot = input.rfind('.');
+    if (dot == std::string_view::npos || dot == 0 || dot + 1 >= input.size()) {
+        return false;
+    }
+    const auto ext = input.substr(dot + 1);
+    if (ext.size() > 5) {
+        return false;
+    }
+    for (unsigned char c : ext) {
+        if (!std::isalnum(c)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+QueryIntent detectQueryIntent(const std::string& query) {
+    if (query.empty()) {
+        return QueryIntent::Mixed;
+    }
+
+    const bool hasPathSeparator =
+        query.find('/') != std::string::npos || query.find('\\') != std::string::npos;
+    const bool hasPathPrefix = query.rfind("./", 0) == 0 || query.rfind("../", 0) == 0;
+    const bool hasCodeSig =
+        query.find("::") != std::string::npos || query.find("->") != std::string::npos ||
+        query.find("#") != std::string::npos || query.find("_") != std::string::npos;
+    const bool hasExt = hasFileExtension(query);
+    const bool hasCamel = hasCamelCase(query);
+
+    if (hasPathSeparator || hasPathPrefix) {
+        return QueryIntent::Path;
+    }
+
+    if (hasCodeSig || hasCamel || hasExt) {
+        return QueryIntent::Code;
+    }
+
+    const auto tokens = tokenizeLower(query);
+    if (tokens.size() >= 3) {
+        return QueryIntent::Prose;
+    }
+
+    return QueryIntent::Mixed;
+}
+
+void applyIntentWeights(SearchEngineConfig& config, QueryIntent intent) {
+    auto scale = [](float& weight, float factor) {
+        weight = std::clamp(weight * factor, 0.0f, 1.0f);
+    };
+
+    switch (intent) {
+        case QueryIntent::Path:
+            scale(config.pathTreeWeight, 1.8f);
+            scale(config.textWeight, 0.8f);
+            scale(config.vectorWeight, 0.7f);
+            scale(config.entityVectorWeight, 0.8f);
+            scale(config.kgWeight, 0.8f);
+            scale(config.tagWeight, 0.9f);
+            break;
+        case QueryIntent::Code:
+            scale(config.pathTreeWeight, 1.5f);
+            scale(config.entityVectorWeight, 1.5f);
+            scale(config.textWeight, 0.8f);
+            scale(config.vectorWeight, 0.7f);
+            scale(config.kgWeight, 0.9f);
+            break;
+        case QueryIntent::Prose:
+            scale(config.textWeight, 1.2f);
+            scale(config.vectorWeight, 1.2f);
+            scale(config.pathTreeWeight, 0.6f);
+            scale(config.entityVectorWeight, 0.6f);
+            scale(config.kgWeight, 0.8f);
+            break;
+        case QueryIntent::Mixed:
+            break;
+    }
+}
+
+std::vector<std::string> tokenizeKgQuery(std::string_view query) {
+    static const std::unordered_set<std::string> kStopwords = {
+        "the", "a",   "an",   "and", "or",   "not",  "to",    "of",   "in",
+        "on",  "for", "with", "by",  "from", "is",   "are",   "was",  "were",
+        "be",  "as",  "at",   "it",  "this", "that", "these", "those"};
+
+    std::vector<std::string> tokens = tokenizeLower(std::string(query));
+    tokens.erase(std::remove_if(tokens.begin(), tokens.end(),
+                                [](const std::string& token) {
+                                    return token.size() < 3 ||
+                                           kStopwords.find(token) != kStopwords.end();
+                                }),
+                 tokens.end());
+    return tokens;
 }
 
 } // namespace
@@ -183,9 +395,10 @@ ResultFusion::fuseTextAnchor(const std::vector<ComponentResult>& results) {
     std::unordered_set<std::string> textFoundDocs;
 
     for (const auto& comp : results) {
-        if (comp.source == "vector" || comp.source == "entity_vector") {
+        if (isVectorComponent(comp.source)) {
             vectorResults[comp.documentHash].push_back(&comp);
         } else {
+            // Treat unknown sources as text-anchoring to avoid dropping results.
             textResults[comp.documentHash].push_back(&comp);
             textFoundDocs.insert(comp.documentHash);
         }
@@ -194,7 +407,9 @@ ResultFusion::fuseTextAnchor(const std::vector<ComponentResult>& results) {
     std::unordered_map<std::string, SearchResult> resultMap;
     const float k = config_.rrfK;
     const float vectorOnlyThreshold = config_.vectorOnlyThreshold;
-    const float vectorBoostFactor = config_.vectorBoostFactor;
+    // Use vectorWeight for boost (scaled by vectorBoostFactor for fine-tuning)
+    // This allows SearchTuner's vectorWeight setting to actually take effect
+    const float vectorBoostWeight = config_.vectorWeight * config_.vectorBoostFactor;
     const float vectorOnlyPenalty = config_.vectorOnlyPenalty;
 
     // Process text-anchored documents first (these always get included)
@@ -224,7 +439,7 @@ ResultFusion::fuseTextAnchor(const std::vector<ComponentResult>& results) {
                 double rrfScale = 1.0 / (k + static_cast<double>(vcomp->rank));
                 double scoreMultiplier =
                     1.0 + std::clamp(static_cast<double>(vcomp->score), 0.0, 1.0);
-                double vectorBoost = vectorBoostFactor * rrfScale * scoreMultiplier;
+                double vectorBoost = vectorBoostWeight * rrfScale * scoreMultiplier;
                 totalScore += vectorBoost;
                 debugInfo["vector_boost"] = std::to_string(vectorBoost);
             }
@@ -287,21 +502,26 @@ ResultFusion::fuseTextAnchor(const std::vector<ComponentResult>& results) {
     return finalResults;
 }
 
-float ResultFusion::getComponentWeight(const std::string& source) const {
-    if (source == "text")
-        return config_.textWeight;
-    if (source == "path_tree")
-        return config_.pathTreeWeight;
-    if (source == "kg")
-        return config_.kgWeight;
-    if (source == "vector")
-        return config_.vectorWeight;
-    if (source == "entity_vector")
-        return config_.entityVectorWeight;
-    if (source == "tag")
-        return config_.tagWeight;
-    if (source == "metadata")
-        return config_.metadataWeight;
+float ResultFusion::getComponentWeight(ComponentResult::Source source) const {
+    switch (source) {
+        case ComponentResult::Source::Text:
+            return config_.textWeight;
+        case ComponentResult::Source::PathTree:
+            return config_.pathTreeWeight;
+        case ComponentResult::Source::KnowledgeGraph:
+            return config_.kgWeight;
+        case ComponentResult::Source::Vector:
+            return config_.vectorWeight;
+        case ComponentResult::Source::EntityVector:
+            return config_.entityVectorWeight;
+        case ComponentResult::Source::Tag:
+            return config_.tagWeight;
+        case ComponentResult::Source::Metadata:
+            return config_.metadataWeight;
+        case ComponentResult::Source::Symbol:
+        case ComponentResult::Source::Unknown:
+            return 0.0f;
+    }
     return 0.0f;
 }
 
@@ -368,6 +588,8 @@ public:
         conceptExtractor_ = std::move(extractor);
     }
 
+    void setReranker(std::shared_ptr<IReranker> reranker) { reranker_ = std::move(reranker); }
+
 private:
     Result<SearchResponse> searchInternal(const std::string& query, const SearchParams& params);
 
@@ -394,6 +616,7 @@ private:
     SearchEngineConfig config_;
     mutable SearchEngine::Statistics stats_;
     EntityExtractionFunc conceptExtractor_; // GLiNER concept extractor (optional)
+    std::shared_ptr<IReranker> reranker_;   // Cross-encoder reranker (optional)
 };
 
 Result<std::vector<SearchResult>> SearchEngine::Impl::search(const std::string& query,
@@ -459,6 +682,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     spdlog::debug("Search limit optimization: userLimit={}, componentCap={}", userLimit,
                   componentCap);
+
+    const QueryIntent intent = detectQueryIntent(query);
+    applyIntentWeights(workingConfig, intent);
+    spdlog::debug("Query intent: {}", queryIntentToString(intent));
 
     std::vector<ComponentResult> allComponentResults;
     size_t estimatedResults = 0;
@@ -551,6 +778,21 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::future<Result<std::vector<ComponentResult>>> tagFuture;
         std::future<Result<std::vector<ComponentResult>>> metaFuture;
 
+        auto schedule = [&](const char* name, float weight, std::atomic<uint64_t>& queryCount,
+                            std::atomic<uint64_t>& avgTime,
+                            auto&& fn) -> std::future<Result<std::vector<ComponentResult>>> {
+            if (weight <= 0.0f) {
+                return {};
+            }
+            return postWork(std::forward<decltype(fn)>(fn), executor_);
+        };
+
+        auto collectIf = [&](std::future<Result<std::vector<ComponentResult>>>& future,
+                             const char* name, std::atomic<uint64_t>& queryCount,
+                             std::atomic<uint64_t>& avgTime) {
+            handleStatus(collectResults(future, name, queryCount, avgTime), name);
+        };
+
         if (config_.enableTieredExecution) {
             // === TIERED EXECUTION ===
             // Tier 1: Fast text-based components (FTS5 + path_tree)
@@ -558,57 +800,40 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             YAMS_ZONE_SCOPED_N("search_engine::tiered_execution");
 
             // --- TIER 1: Text + Path (fast, high precision) ---
-            if (config_.textWeight > 0.0f) {
-                textFuture = postWork(
-                    [this, &query, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::text");
-                        return queryFullText(query, workingConfig.textMaxResults);
-                    },
-                    executor_);
-            }
+            textFuture = schedule("text", config_.textWeight, stats_.textQueries,
+                                  stats_.avgTextTimeMicros, [this, &query, &workingConfig]() {
+                                      YAMS_ZONE_SCOPED_N("component::text");
+                                      return queryFullText(query, workingConfig.textMaxResults);
+                                  });
 
-            if (config_.pathTreeWeight > 0.0f) {
-                pathFuture = postWork(
-                    [this, &query, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::path");
-                        return queryPathTree(query, workingConfig.pathTreeMaxResults);
-                    },
-                    executor_);
-            }
+            pathFuture = schedule("path", config_.pathTreeWeight, stats_.pathTreeQueries,
+                                  stats_.avgPathTreeTimeMicros, [this, &query, &workingConfig]() {
+                                      YAMS_ZONE_SCOPED_N("component::path");
+                                      return queryPathTree(query, workingConfig.pathTreeMaxResults);
+                                  });
 
             // Tags and metadata are also fast, run in Tier 1
-            if (config_.tagWeight > 0.0f && !params.tags.empty()) {
-                tagFuture = postWork(
-                    [this, &params, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::tag");
-                        return queryTags(params.tags, params.matchAllTags,
-                                         workingConfig.tagMaxResults);
-                    },
-                    executor_);
+            if (!params.tags.empty()) {
+                tagFuture = schedule("tag", config_.tagWeight, stats_.tagQueries,
+                                     stats_.avgTagTimeMicros, [this, &params, &workingConfig]() {
+                                         YAMS_ZONE_SCOPED_N("component::tag");
+                                         return queryTags(params.tags, params.matchAllTags,
+                                                          workingConfig.tagMaxResults);
+                                     });
             }
 
-            if (config_.metadataWeight > 0.0f) {
-                metaFuture = postWork(
-                    [this, &params, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::metadata");
-                        return queryMetadata(params, workingConfig.metadataMaxResults);
-                    },
-                    executor_);
-            }
+            metaFuture =
+                schedule("metadata", config_.metadataWeight, stats_.metadataQueries,
+                         stats_.avgMetadataTimeMicros, [this, &params, &workingConfig]() {
+                             YAMS_ZONE_SCOPED_N("component::metadata");
+                             return queryMetadata(params, workingConfig.metadataMaxResults);
+                         });
 
             // Collect Tier 1 results
-            handleStatus(
-                collectResults(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros),
-                "text");
-            handleStatus(collectResults(pathFuture, "path", stats_.pathTreeQueries,
-                                        stats_.avgPathTreeTimeMicros),
-                         "path");
-            handleStatus(
-                collectResults(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros),
-                "tag");
-            handleStatus(collectResults(metaFuture, "metadata", stats_.metadataQueries,
-                                        stats_.avgMetadataTimeMicros),
-                         "metadata");
+            collectIf(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros);
+            collectIf(pathFuture, "path", stats_.pathTreeQueries, stats_.avgPathTreeTimeMicros);
+            collectIf(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
+            collectIf(metaFuture, "metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros);
 
             // Extract Tier 1 candidate document hashes for narrowing vector search
             std::unordered_set<std::string> tier1Candidates;
@@ -646,8 +871,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             const bool shouldNarrow = config_.tieredNarrowVectorSearch &&
                                       tier1Candidates.size() >= config_.tieredMinCandidates;
 
-            if (config_.vectorWeight > 0.0f && queryEmbedding.has_value() && vectorDb_) {
-                vectorFuture = postWork(
+            if (queryEmbedding.has_value() && vectorDb_) {
+                vectorFuture = schedule(
+                    "vector", config_.vectorWeight, stats_.vectorQueries,
+                    stats_.avgVectorTimeMicros,
                     [this, &queryEmbedding, &workingConfig, &tier1Candidates, shouldNarrow]() {
                         YAMS_ZONE_SCOPED_N("component::vector");
                         if (shouldNarrow) {
@@ -658,129 +885,97 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                             return queryVectorIndex(queryEmbedding.value(),
                                                     workingConfig.vectorMaxResults); // Full search
                         }
-                    },
-                    executor_);
-            }
+                    });
 
-            if (config_.entityVectorWeight > 0.0f && queryEmbedding.has_value() && vectorDb_) {
-                entityVectorFuture = postWork(
-                    [this, &queryEmbedding, &workingConfig]() {
+                entityVectorFuture = schedule(
+                    "entity_vector", config_.entityVectorWeight, stats_.entityVectorQueries,
+                    stats_.avgEntityVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
                         YAMS_ZONE_SCOPED_N("component::entity_vector");
                         return queryEntityVectors(queryEmbedding.value(),
                                                   workingConfig.entityVectorMaxResults);
-                    },
-                    executor_);
+                    });
             }
 
-            if (config_.kgWeight > 0.0f && kgStore_) {
-                kgFuture = postWork(
-                    [this, &query, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::kg");
-                        return queryKnowledgeGraph(query, workingConfig.kgMaxResults);
-                    },
-                    executor_);
+            if (kgStore_) {
+                kgFuture =
+                    schedule("kg", config_.kgWeight, stats_.kgQueries, stats_.avgKgTimeMicros,
+                             [this, &query, &workingConfig]() {
+                                 YAMS_ZONE_SCOPED_N("component::kg");
+                                 return queryKnowledgeGraph(query, workingConfig.kgMaxResults);
+                             });
             }
 
             // Collect Tier 2 results (always collect, never skip)
-            handleStatus(collectResults(vectorFuture, "vector", stats_.vectorQueries,
-                                        stats_.avgVectorTimeMicros),
-                         "vector");
-            handleStatus(collectResults(entityVectorFuture, "entity_vector",
-                                        stats_.entityVectorQueries,
-                                        stats_.avgEntityVectorTimeMicros),
-                         "entity_vector");
-            handleStatus(collectResults(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros),
-                         "kg");
+            collectIf(vectorFuture, "vector", stats_.vectorQueries, stats_.avgVectorTimeMicros);
+            collectIf(entityVectorFuture, "entity_vector", stats_.entityVectorQueries,
+                      stats_.avgEntityVectorTimeMicros);
+            collectIf(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros);
         } else {
             // === FLAT PARALLEL EXECUTION (original behavior) ===
             // All components run in parallel
-            if (config_.textWeight > 0.0f) {
-                textFuture = postWork(
-                    [this, &query, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::text");
-                        return queryFullText(query, workingConfig.textMaxResults);
-                    },
-                    executor_);
+            textFuture = schedule("text", config_.textWeight, stats_.textQueries,
+                                  stats_.avgTextTimeMicros, [this, &query, &workingConfig]() {
+                                      YAMS_ZONE_SCOPED_N("component::text");
+                                      return queryFullText(query, workingConfig.textMaxResults);
+                                  });
+
+            if (kgStore_) {
+                kgFuture =
+                    schedule("kg", config_.kgWeight, stats_.kgQueries, stats_.avgKgTimeMicros,
+                             [this, &query, &workingConfig]() {
+                                 YAMS_ZONE_SCOPED_N("component::kg");
+                                 return queryKnowledgeGraph(query, workingConfig.kgMaxResults);
+                             });
             }
 
-            if (config_.kgWeight > 0.0f && kgStore_) {
-                kgFuture = postWork(
-                    [this, &query, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::kg");
-                        return queryKnowledgeGraph(query, workingConfig.kgMaxResults);
-                    },
-                    executor_);
-            }
+            pathFuture = schedule("path", config_.pathTreeWeight, stats_.pathTreeQueries,
+                                  stats_.avgPathTreeTimeMicros, [this, &query, &workingConfig]() {
+                                      YAMS_ZONE_SCOPED_N("component::path");
+                                      return queryPathTree(query, workingConfig.pathTreeMaxResults);
+                                  });
 
-            if (config_.pathTreeWeight > 0.0f) {
-                pathFuture = postWork(
-                    [this, &query, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::path");
-                        return queryPathTree(query, workingConfig.pathTreeMaxResults);
-                    },
-                    executor_);
-            }
+            if (queryEmbedding.has_value() && vectorDb_) {
+                vectorFuture =
+                    schedule("vector", config_.vectorWeight, stats_.vectorQueries,
+                             stats_.avgVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
+                                 YAMS_ZONE_SCOPED_N("component::vector");
+                                 return queryVectorIndex(queryEmbedding.value(),
+                                                         workingConfig.vectorMaxResults);
+                             });
 
-            if (config_.vectorWeight > 0.0f && queryEmbedding.has_value() && vectorDb_) {
-                vectorFuture = postWork(
-                    [this, &queryEmbedding, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::vector");
-                        return queryVectorIndex(queryEmbedding.value(),
-                                                workingConfig.vectorMaxResults);
-                    },
-                    executor_);
-            }
-
-            if (config_.entityVectorWeight > 0.0f && queryEmbedding.has_value() && vectorDb_) {
-                entityVectorFuture = postWork(
-                    [this, &queryEmbedding, &workingConfig]() {
+                entityVectorFuture = schedule(
+                    "entity_vector", config_.entityVectorWeight, stats_.entityVectorQueries,
+                    stats_.avgEntityVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
                         YAMS_ZONE_SCOPED_N("component::entity_vector");
                         return queryEntityVectors(queryEmbedding.value(),
                                                   workingConfig.entityVectorMaxResults);
-                    },
-                    executor_);
+                    });
             }
 
-            if (config_.tagWeight > 0.0f && !params.tags.empty()) {
-                tagFuture = postWork(
-                    [this, &params, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::tag");
-                        return queryTags(params.tags, params.matchAllTags,
-                                         workingConfig.tagMaxResults);
-                    },
-                    executor_);
+            if (!params.tags.empty()) {
+                tagFuture = schedule("tag", config_.tagWeight, stats_.tagQueries,
+                                     stats_.avgTagTimeMicros, [this, &params, &workingConfig]() {
+                                         YAMS_ZONE_SCOPED_N("component::tag");
+                                         return queryTags(params.tags, params.matchAllTags,
+                                                          workingConfig.tagMaxResults);
+                                     });
             }
 
-            if (config_.metadataWeight > 0.0f) {
-                metaFuture = postWork(
-                    [this, &params, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::metadata");
-                        return queryMetadata(params, workingConfig.metadataMaxResults);
-                    },
-                    executor_);
-            }
+            metaFuture =
+                schedule("metadata", config_.metadataWeight, stats_.metadataQueries,
+                         stats_.avgMetadataTimeMicros, [this, &params, &workingConfig]() {
+                             YAMS_ZONE_SCOPED_N("component::metadata");
+                             return queryMetadata(params, workingConfig.metadataMaxResults);
+                         });
 
-            handleStatus(
-                collectResults(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros),
-                "text");
-            handleStatus(collectResults(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros),
-                         "kg");
-            handleStatus(collectResults(pathFuture, "path", stats_.pathTreeQueries,
-                                        stats_.avgPathTreeTimeMicros),
-                         "path");
-            handleStatus(collectResults(vectorFuture, "vector", stats_.vectorQueries,
-                                        stats_.avgVectorTimeMicros),
-                         "vector");
-            handleStatus(collectResults(entityVectorFuture, "entity_vector",
-                                        stats_.entityVectorQueries,
-                                        stats_.avgEntityVectorTimeMicros),
-                         "entity_vector");
-            handleStatus(
-                collectResults(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros),
-                "tag");
-            handleStatus(collectResults(metaFuture, "metadata", stats_.metadataQueries,
-                                        stats_.avgMetadataTimeMicros),
-                         "metadata");
+            collectIf(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros);
+            collectIf(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros);
+            collectIf(pathFuture, "path", stats_.pathTreeQueries, stats_.avgPathTreeTimeMicros);
+            collectIf(vectorFuture, "vector", stats_.vectorQueries, stats_.avgVectorTimeMicros);
+            collectIf(entityVectorFuture, "entity_vector", stats_.entityVectorQueries,
+                      stats_.avgEntityVectorTimeMicros);
+            collectIf(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
+            collectIf(metaFuture, "metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros);
         }
     } else {
         auto runSequential = [&](auto queryFn, const char* name, float weight,
@@ -883,6 +1078,70 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     {
         YAMS_ZONE_SCOPED_N("fusion::results");
         response.results = fusion.fuse(allComponentResults);
+    }
+
+    // Cross-encoder reranking: second-stage ranking for improved relevance
+    const bool rerankAvailable = reranker_ && reranker_->isReady();
+    if (!config_.enableReranking && rerankAvailable) {
+        spdlog::debug("[reranker] Auto-enabled (model detected)");
+    }
+    if (rerankAvailable && !response.results.empty()) {
+        YAMS_ZONE_SCOPED_N("reranking");
+        const size_t rerankWindow = std::min(config_.rerankTopK, response.results.size());
+
+        // Extract document snippets for reranking
+        std::vector<std::string> snippets;
+        std::vector<size_t> rerankIndices;
+        snippets.reserve(rerankWindow);
+        rerankIndices.reserve(rerankWindow);
+        for (size_t i = 0; i < rerankWindow; ++i) {
+            // Only rerank when we have real text; skip file-path-only samples.
+            if (!response.results[i].snippet.empty()) {
+                snippets.push_back(response.results[i].snippet);
+                rerankIndices.push_back(i);
+            } else {
+                spdlog::debug("[reranker] Skipping doc {} (no snippet available)", i);
+            }
+        }
+
+        if (!snippets.empty()) {
+            auto rerankResult = reranker_->scoreDocuments(query, snippets);
+            if (rerankResult) {
+                const auto& scores = rerankResult.value();
+                spdlog::debug("[reranker] Reranked {} documents", scores.size());
+
+                // Apply reranker scores to eligible results.
+                for (size_t i = 0; i < scores.size() && i < rerankIndices.size(); ++i) {
+                    const size_t idx = rerankIndices[i];
+                    double originalScore = response.results[idx].score;
+                    double rerankScore = static_cast<double>(scores[i]);
+
+                    if (config_.rerankReplaceScores) {
+                        // Replace entirely with reranker score
+                        response.results[idx].score = rerankScore;
+                    } else {
+                        // Blend: final = rerank * weight + original * (1 - weight)
+                        response.results[idx].score = rerankScore * config_.rerankWeight +
+                                                      originalScore * (1.0 - config_.rerankWeight);
+                    }
+                    response.results[idx].rerankerScore = rerankScore;
+                }
+
+                // Re-sort by new scores (only the top window needs sorting)
+                std::sort(
+                    response.results.begin(),
+                    response.results.begin() + static_cast<ptrdiff_t>(rerankWindow),
+                    [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+
+                contributing.push_back("reranker");
+            } else {
+                spdlog::warn("[reranker] Reranking failed: {}", rerankResult.error().message);
+            }
+        } else {
+            spdlog::debug("[reranker] Skipping rerank: no snippets available");
+        }
+    } else if (config_.enableReranking && !rerankAvailable) {
+        spdlog::debug("[reranker] Unavailable; falling back to fused scores");
     }
 
     if (!response.results.empty()) {
@@ -994,7 +1253,7 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryPathTree(const std
                 result.score = 0.5f; // Partial match
             }
 
-            result.source = "path_tree";
+            result.source = ComponentResult::Source::PathTree;
             result.rank = rank;
             result.snippet = std::optional<std::string>(doc.filePath);
             result.debugInfo["path"] = doc.filePath;
@@ -1029,9 +1288,20 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFullText(const std
             return results;
         }
 
-        // Normalize query for matching (lowercase, trim)
-        std::string queryLower = query;
-        std::transform(queryLower.begin(), queryLower.end(), queryLower.begin(), ::tolower);
+        double minBm25 = 0.0;
+        double maxBm25 = 0.0;
+        bool bm25RangeInitialized = false;
+        for (const auto& sr : fts5Results.value().results) {
+            double score = sr.score;
+            if (!bm25RangeInitialized) {
+                minBm25 = score;
+                maxBm25 = score;
+                bm25RangeInitialized = true;
+            } else {
+                minBm25 = std::min(minBm25, score);
+                maxBm25 = std::max(maxBm25, score);
+            }
+        }
 
         for (size_t rank = 0; rank < fts5Results.value().results.size(); ++rank) {
             const auto& searchResult = fts5Results.value().results[rank];
@@ -1043,44 +1313,27 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFullText(const std
                               pruneCategory == magic::PruneCategory::None;
 
             float scoreMultiplier = isCodeFile ? 1.0f : 0.5f;
-
-            // Exact match boosting: filename/path matches rank higher than content
-            std::string fileNameLower = fileName;
-            std::transform(fileNameLower.begin(), fileNameLower.end(), fileNameLower.begin(),
-                           ::tolower);
-            std::string filePathLower = filePath;
-            std::transform(filePathLower.begin(), filePathLower.end(), filePathLower.begin(),
-                           ::tolower);
-
-            std::string matchType = "content";
-            if (fileNameLower == queryLower) {
-                scoreMultiplier *= 3.0f; // Exact filename match: 3x boost
-                matchType = "exact_filename";
-            } else if (fileNameLower.find(queryLower) != std::string::npos) {
-                scoreMultiplier *= 2.0f; // Filename contains query: 2x boost
-                matchType = "filename_contains";
-            } else if (filePathLower.find(queryLower) != std::string::npos) {
-                scoreMultiplier *= 1.5f; // Path contains query: 1.5x boost
-                matchType = "path_contains";
-            }
+            scoreMultiplier *= filenamePathBoost(query, filePath, fileName);
 
             ComponentResult result;
             result.documentHash = searchResult.document.sha256Hash;
             result.filePath = filePath;
             float rawScore = static_cast<float>(searchResult.score);
-            float normalizedScore = std::clamp(-rawScore / config_.bm25NormDivisor, 0.0f, 1.0f);
+            float normalizedScore =
+                normalizedBm25Score(rawScore, config_.bm25NormDivisor, minBm25, maxBm25);
             result.score = scoreMultiplier * normalizedScore;
-            result.source = "text";
+            result.source = ComponentResult::Source::Text;
             result.rank = rank;
             result.snippet = searchResult.snippet.empty()
                                  ? std::nullopt
                                  : std::optional<std::string>(searchResult.snippet);
-            result.debugInfo["match_type"] = matchType;
+            result.debugInfo["score_multiplier"] = fmt::format("{:.3f}", scoreMultiplier);
 
             results.push_back(std::move(result));
         }
 
-        spdlog::debug("Full-text query returned {} results for query: {}", results.size(), query);
+        spdlog::info("queryFullText: {} results for query '{}' (limit={})", results.size(),
+                     query.substr(0, 50), limit);
 
         if (const char* env = std::getenv("YAMS_SEARCH_DIAG"); env && std::string(env) == "1") {
             spdlog::warn("[search_diag] text_hits={} limit={} query='{}'", results.size(), limit,
@@ -1105,16 +1358,47 @@ SearchEngine::Impl::queryKnowledgeGraph(const std::string& query, size_t limit) 
     }
 
     try {
-        auto aliasResults = kgStore_->resolveAliasFuzzy(query, limit);
-        if (!aliasResults || aliasResults.value().empty()) {
-            aliasResults = kgStore_->resolveAliasExact(query, limit);
-            if (!aliasResults) {
-                spdlog::debug("KG alias resolution failed: {}", aliasResults.error().message);
-                return results;
+        // Tokenize query into individual terms for alias lookup.
+        // Lowercase + stopword filtering improves KG precision.
+        std::vector<std::string> queryTokens = tokenizeKgQuery(query);
+
+        if (queryTokens.empty()) {
+            return results;
+        }
+
+        // Collect aliases from all tokens with score tracking
+        std::vector<metadata::AliasResolution> aliases;
+        std::unordered_map<int64_t, float> nodeIdToScore; // Track best score per node
+
+        // Limit aliases per token to avoid explosion
+        const size_t aliasesPerToken = std::max(size_t(3), limit / queryTokens.size());
+
+        for (const auto& tok : queryTokens) {
+            auto aliasResults = kgStore_->resolveAliasExact(tok, aliasesPerToken);
+            bool usedFuzzy = false;
+            if (!aliasResults || aliasResults.value().empty()) {
+                aliasResults = kgStore_->resolveAliasFuzzy(tok, aliasesPerToken);
+                usedFuzzy = true;
+            }
+
+            if (aliasResults && !aliasResults.value().empty()) {
+                for (const auto& alias : aliasResults.value()) {
+                    const float score = usedFuzzy ? alias.score * 0.8f : alias.score;
+                    // Track best score for each node (multiple tokens may match same node)
+                    auto it = nodeIdToScore.find(alias.nodeId);
+                    if (it == nodeIdToScore.end()) {
+                        nodeIdToScore[alias.nodeId] = score;
+                        aliases.push_back(alias);
+                    } else {
+                        // Boost score if multiple tokens match same node
+                        it->second = std::min(1.0f, it->second + score * 0.5f);
+                    }
+                }
             }
         }
 
-        const auto& aliases = aliasResults.value();
+        spdlog::debug("KG: {} tokens -> {} unique aliases from {} query terms", queryTokens.size(),
+                      aliases.size(), queryTokens.size());
         if (aliases.empty()) {
             return results;
         }
@@ -1265,7 +1549,7 @@ SearchEngine::Impl::queryKnowledgeGraph(const std::string& query, size_t limit) 
             result.documentHash = docHash;
             result.filePath = searchResult.document.filePath;
             result.score = bestScore * 0.8f;
-            result.source = "kg";
+            result.source = ComponentResult::Source::KnowledgeGraph;
             result.rank = results.size();
             result.snippet = searchResult.snippet.empty()
                                  ? std::optional<std::string>(bestTerm)
@@ -1280,8 +1564,8 @@ SearchEngine::Impl::queryKnowledgeGraph(const std::string& query, size_t limit) 
             results.push_back(std::move(result));
         }
 
-        spdlog::debug("KG query returned {} document results for query: {} (batch: {} terms)",
-                      results.size(), query, searchTerms.size());
+        spdlog::info("queryKnowledgeGraph: {} results for query '{}' (batch: {} terms)",
+                     results.size(), query.substr(0, 50), searchTerms.size());
 
     } catch (const std::exception& e) {
         spdlog::warn("KG query exception: {}", e.what());
@@ -1339,7 +1623,7 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding, size_t
             ComponentResult result;
             result.documentHash = vr.document_hash;
             result.score = vr.relevance_score;
-            result.source = "vector";
+            result.source = ComponentResult::Source::Vector;
             result.rank = rank;
 
             if (auto it = hashToPath.find(vr.document_hash); it != hashToPath.end()) {
@@ -1349,7 +1633,8 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding, size_t
             results.push_back(std::move(result));
         }
 
-        spdlog::debug("Vector search returned {} results", results.size());
+        spdlog::info("queryVectorIndex: {} results (limit={}, threshold={})", results.size(), limit,
+                     config_.similarityThreshold);
 
     } catch (const std::exception& e) {
         spdlog::warn("Vector search exception: {}", e.what());
@@ -1405,7 +1690,7 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding, size_t
             ComponentResult result;
             result.documentHash = vr.document_hash;
             result.score = vr.relevance_score;
-            result.source = "vector";
+            result.source = ComponentResult::Source::Vector;
             result.rank = rank;
 
             if (auto it = hashToPath.find(vr.document_hash); it != hashToPath.end()) {
@@ -1478,7 +1763,7 @@ SearchEngine::Impl::queryEntityVectors(const std::vector<float>& embedding, size
             ComponentResult result;
             result.documentHash = er.document_hash;
             result.score = er.relevance_score;
-            result.source = "entity_vector";
+            result.source = ComponentResult::Source::EntityVector;
             result.rank = rank;
 
             // Use file_path from entity record, or look up from metadata
@@ -1544,7 +1829,7 @@ SearchEngine::Impl::queryTags(const std::vector<std::string>& tags, bool matchAl
             // (avoids N database calls to fetch tags per document)
             result.score = matchAll ? 1.0f : 1.0f / (1.0f + 0.1f * static_cast<float>(rank));
 
-            result.source = "tag";
+            result.source = ComponentResult::Source::Tag;
             result.rank = rank;
             result.debugInfo["matched_tags"] = std::to_string(tags.size());
 
@@ -1611,7 +1896,7 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryMetadata(const Sea
                 filterCount++;
 
             result.score = 1.0f; // All returned docs fully match the filters
-            result.source = "metadata";
+            result.source = ComponentResult::Source::Metadata;
             result.rank = rank;
             result.debugInfo["filter_count"] = std::to_string(filterCount);
             if (params.mimeType.has_value()) {
@@ -1706,6 +1991,10 @@ void SearchEngine::setExecutor(std::optional<boost::asio::any_io_executor> execu
 
 void SearchEngine::setConceptExtractor(EntityExtractionFunc extractor) {
     pImpl_->setConceptExtractor(std::move(extractor));
+}
+
+void SearchEngine::setReranker(std::shared_ptr<IReranker> reranker) {
+    pImpl_->setReranker(std::move(reranker));
 }
 
 // Factory function

@@ -875,6 +875,7 @@ struct BenchFixture {
                 // Set SCIENTIFIC tuning override for BEIR datasets
                 // This is needed because the auto-detection uses absolute path depth
                 // which fails for temp directories (pathDepthAvg >> 1.5)
+                setenv("YAMS_ENABLE_ENV_OVERRIDES", "1", 1);
                 setenv("YAMS_TUNING_OVERRIDE", "SCIENTIFIC", 1);
                 spdlog::info("Set YAMS_TUNING_OVERRIDE=SCIENTIFIC for BEIR benchmark ({})",
                              datasetName);
@@ -979,6 +980,8 @@ struct BenchFixture {
             BEIRDataset fullDataset = dsResult.value();
 
             // Apply corpus size limit if specified via env var
+            // IMPORTANT: We must include documents that are referenced by qrels,
+            // otherwise we'll have queries with no relevant documents to find!
             BEIRDataset dataset;
             dataset.name = fullDataset.name;
             dataset.basePath = fullDataset.basePath;
@@ -986,21 +989,36 @@ struct BenchFixture {
             int maxDocs = env_size ? corpusSize : (int)fullDataset.documents.size();
             int maxQueries = env_queries ? numQueries : (int)fullDataset.queries.size();
 
-            // Copy limited documents
-            int docCount = 0;
-            for (const auto& [id, doc] : fullDataset.documents) {
-                if (docCount >= maxDocs)
-                    break;
-                dataset.documents[id] = doc;
-                docCount++;
+            // Step 1: Collect all document IDs referenced by qrels (these are "relevant" docs)
+            std::set<std::string> qrelDocIds;
+            for (const auto& [queryId, docScore] : fullDataset.qrels) {
+                qrelDocIds.insert(docScore.first);
             }
+            spdlog::info("BEIR dataset has {} documents referenced by qrels", qrelDocIds.size());
 
-            // Copy queries that have qrels for documents we included
+            // Step 2: First include documents that are referenced by qrels (up to maxDocs)
             std::set<std::string> includedDocIds;
-            for (const auto& [id, doc] : dataset.documents) {
-                includedDocIds.insert(id);
+            for (const auto& docId : qrelDocIds) {
+                if ((int)includedDocIds.size() >= maxDocs)
+                    break;
+                if (fullDataset.documents.count(docId) > 0) {
+                    dataset.documents[docId] = fullDataset.documents.at(docId);
+                    includedDocIds.insert(docId);
+                }
+            }
+            spdlog::info("Included {} qrel-referenced documents", includedDocIds.size());
+
+            // Step 3: Fill remaining slots with other documents (for realistic corpus size)
+            for (const auto& [id, doc] : fullDataset.documents) {
+                if ((int)includedDocIds.size() >= maxDocs)
+                    break;
+                if (includedDocIds.count(id) == 0) {
+                    dataset.documents[id] = doc;
+                    includedDocIds.insert(id);
+                }
             }
 
+            // Step 4: Select queries that have qrels for documents we included
             int queryCount = 0;
             for (const auto& [qid, query] : fullDataset.queries) {
                 if (queryCount >= maxQueries)
@@ -1026,9 +1044,10 @@ struct BenchFixture {
                 }
             }
 
-            spdlog::info("Limited BEIR dataset to {} docs, {} queries (from {} docs, {} queries)",
-                         dataset.documents.size(), dataset.queries.size(),
-                         fullDataset.documents.size(), fullDataset.queries.size());
+            spdlog::info(
+                "Limited BEIR dataset to {} docs, {} queries, {} qrels (from {} docs, {} queries)",
+                dataset.documents.size(), dataset.queries.size(), dataset.qrels.size(),
+                fullDataset.documents.size(), fullDataset.queries.size());
 
             fs::path corpusDir = harness->rootDir() / "corpus";
             beirCorpus = std::make_unique<BEIRCorpusLoader>(dataset, corpusDir);

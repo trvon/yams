@@ -196,6 +196,9 @@ public:
     };
     void setResolutionHints(const std::string& modelName, const ResolutionHints& hints);
 
+    // Get the configured models root directory
+    const std::string& getModelsRoot() const { return config_.modelsRoot; }
+
 private:
     // Model registry entry
     struct ModelEntry {

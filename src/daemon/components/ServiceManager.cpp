@@ -77,6 +77,7 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
+#include <yams/search/reranker_adapter.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/integrity/repair_manager.h>
 #include <yams/metadata/migration.h>
@@ -1534,6 +1535,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     } catch (...) {
     }
 
+    // Cross-encoder reranker is initialized later after plugins are loaded
+    // See the reranker wiring after search engine build in searchEngine setup
+
     // Defer Vector DB initialization until after plugin adoption (provider dim)
     spdlog::info("[ServiceManager] Phase: Vector DB Init (deferred until after plugins).");
 
@@ -1736,6 +1740,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             {
                 std::unique_lock lk(searchEngineMutex_); // Exclusive write
                 searchEngine_ = built;
+            }
+
+            // Wire cross-encoder reranker if available
+            if (rerankerAdapter_ && rerankerAdapter_->isReady()) {
+                built->setReranker(rerankerAdapter_);
+                spdlog::info("[SearchBuild] Cross-encoder reranker wired to search engine");
             }
 
             // Update readiness indicators after successful rebuild
@@ -2037,7 +2047,7 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int timeout_ms,
     }
 }
 
-// NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
+/// NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
 Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& preferredName) {
     if (pluginManager_) {
         auto result = pluginManager_->adoptModelProvider(preferredName);
@@ -2048,6 +2058,14 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
             state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
             spdlog::info("[ServiceManager] Synced model provider: model='{}', provider={}",
                          embeddingModelName_, modelProvider_ ? "valid" : "null");
+
+            // Initialize reranker adapter using model provider's scoreDocuments capability
+            // This is a lazy-init adapter - it fetches the provider on each call
+            if (!rerankerAdapter_) {
+                rerankerAdapter_ = std::make_shared<yams::search::ModelProviderRerankerAdapter>(
+                    [this]() { return this->modelProvider_; });
+                spdlog::info("[Reranker] Initialized model provider reranker adapter");
+            }
         }
         return result;
     }
@@ -2284,6 +2302,12 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 {
                     std::unique_lock lk(searchEngineMutex_); // Exclusive write
                     searchEngine_ = rebuilt;
+                }
+
+                // Wire cross-encoder reranker if available
+                if (rerankerAdapter_ && rerankerAdapter_->isReady()) {
+                    rebuilt->setReranker(rerankerAdapter_);
+                    spdlog::debug("[Rebuild] Cross-encoder reranker wired to search engine");
                 }
 
                 // Update readiness indicators after successful rebuild

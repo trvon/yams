@@ -15,6 +15,7 @@
 #include <spdlog/spdlog.h>
 
 #include <sqlite-vec-cpp/distances/cosine.hpp>
+#include <sqlite-vec-cpp/distances/inner_product.hpp>
 #include <sqlite-vec-cpp/index/hnsw.hpp>
 #include <sqlite-vec-cpp/index/hnsw_persistence.hpp>
 #include <sqlite-vec-cpp/sqlite/vec0_module.hpp>
@@ -22,8 +23,8 @@
 namespace yams::vector {
 
 // Type aliases for sqlite-vec-cpp
-using CosineMetric = sqlite_vec_cpp::distances::CosineMetric<float>;
-using HNSWIndex = sqlite_vec_cpp::index::HNSWIndex<float, CosineMetric>;
+using DistanceMetric = sqlite_vec_cpp::distances::CosineMetric<float>;
+using HNSWIndex = sqlite_vec_cpp::index::HNSWIndex<float, DistanceMetric>;
 
 namespace {
 
@@ -846,10 +847,51 @@ public:
 
         // Search HNSW
         std::span<const float> query_span(query_embedding.data(), query_embedding.size());
-        size_t ef_search = std::max(config_.hnsw_ef_search, k * 2);
 
-        // Over-fetch if filtering to ensure enough results
-        size_t fetch_k = (filter != nullptr) ? k * 5 : k;
+        // Calculate ef_search: when filtering is active, we need to explore more nodes
+        // to find enough valid results. Estimate selectivity and increase ef accordingly.
+        size_t ef_search = config_.hnsw_ef_search;
+        size_t fetch_k = k;
+
+        if (filter != nullptr) {
+            // Estimate filter selectivity based on candidate_hashes
+            // If we're filtering to N candidate docs out of M total, selectivity ≈ N/M
+            // We need to explore ~k/selectivity nodes on average to find k valid results
+            float selectivity = 1.0f;
+
+            if (!candidate_hashes.empty() && hnsw->size() > 0) {
+                // Rough estimate: each doc has ~10 chunks on average
+                size_t estimated_valid_chunks = candidate_hashes.size() * 10;
+                selectivity = std::min(1.0f, static_cast<float>(estimated_valid_chunks) /
+                                                 static_cast<float>(hnsw->size()));
+            }
+
+            // With metadata filters, assume another 50% reduction
+            if (!metadata_filters.empty()) {
+                selectivity *= 0.5f;
+            }
+
+            // Clamp selectivity to avoid division by zero or excessive exploration
+            selectivity = std::max(0.01f, selectivity);
+
+            // Increase ef_search inversely proportional to selectivity
+            // With 10% selectivity, we need ~10x more exploration
+            size_t selectivity_boost = static_cast<size_t>(1.0f / selectivity);
+            ef_search = std::max(ef_search, k * selectivity_boost);
+
+            // Also increase fetch_k to ensure we get enough results post-filter
+            fetch_k = std::max(k * 5, static_cast<size_t>(k / selectivity));
+
+            // Cap at reasonable limits to avoid excessive computation
+            ef_search = std::min(ef_search, std::max(size_t{500}, hnsw->size()));
+            fetch_k = std::min(fetch_k, hnsw->size());
+
+            spdlog::debug(
+                "[HNSW] Filtered search: k={}, selectivity={:.2f}, ef_search={}, fetch_k={}", k,
+                selectivity, ef_search, fetch_k);
+        } else {
+            ef_search = std::max(ef_search, k * 2);
+        }
 
         auto results = hnsw->search_with_filter(query_span, fetch_k, ef_search, filter);
 
@@ -1906,7 +1948,7 @@ private:
             try {
                 std::string table_prefix = hnswTablePrefix(dim);
                 char* err = nullptr;
-                auto loaded_hnsw = sqlite_vec_cpp::index::load_hnsw_index<float, CosineMetric>(
+                auto loaded_hnsw = sqlite_vec_cpp::index::load_hnsw_index<float, DistanceMetric>(
                     db_, "main", table_prefix.c_str(), &err);
                 if (err) {
                     spdlog::warn("[HNSW] Failed to load index for dim={}: {}", dim, err);
@@ -1982,7 +2024,7 @@ private:
 
             std::string table_prefix = hnswTablePrefix(dim);
             char* err = nullptr;
-            int rc = sqlite_vec_cpp::index::save_hnsw_index<float, CosineMetric>(
+            int rc = sqlite_vec_cpp::index::save_hnsw_index<float, DistanceMetric>(
                 db_, "main", table_prefix.c_str(), *hnsw, &err);
             if (rc != SQLITE_OK) {
                 if (err) {
@@ -2008,7 +2050,7 @@ private:
 
             std::string table_prefix = hnswTablePrefix(dim);
             char* err = nullptr;
-            int rc = sqlite_vec_cpp::index::save_hnsw_checkpoint<float, CosineMetric>(
+            int rc = sqlite_vec_cpp::index::save_hnsw_checkpoint<float, DistanceMetric>(
                 db_, "main", table_prefix.c_str(), *hnsw, &err);
             if (rc != SQLITE_OK && err) {
                 spdlog::warn("[HNSW] Failed to save checkpoint for dim={}: {}", dim, err);

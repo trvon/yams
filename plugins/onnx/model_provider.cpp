@@ -10,6 +10,7 @@
 #include <thread>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
+#include <yams/daemon/resource/onnx_reranker_session.h>
 
 namespace {
 
@@ -38,11 +39,13 @@ struct ProviderCtx {
     yams_model_load_progress_cb progress_cb = nullptr;
     void* progress_user = nullptr;
     std::unique_ptr<yams::daemon::OnnxModelPool> pool;
+    std::unique_ptr<yams::daemon::OnnxRerankerSession> reranker; // Cross-encoder reranker
     std::unordered_map<std::string, State> model_states;         // per-model FSM
     std::unordered_map<std::string, FailureInfo> model_failures; // failure tracking
     bool ready = false;
     bool disabled = false;
     std::string last_error;
+    std::string rerankerModelPath; // Path to reranker model
 
     // Check if model is in cooldown period after failures
     bool isInCooldown(const std::string& modelId) const {
@@ -392,7 +395,7 @@ struct ProviderSingleton {
     }
 
     ProviderSingleton() {
-        vtable.abi_version = 2; // v1.2
+        vtable.abi_version = 3; // v1.3 (added score_documents for reranking)
         vtable.self = &ctx;
 
         // Use daemon's default logger - no separate file needed
@@ -1061,6 +1064,118 @@ struct ProviderSingleton {
 
         // Assign function pointer for set_threading
         vtable.set_threading = &onnx_set_threading;
+
+        // v1.3: Cross-encoder reranking
+        vtable.score_documents = [](void* self, const char* /*reranker_model_id*/,
+                                    const char* query, const char* const* documents,
+                                    size_t doc_count, float** out_scores,
+                                    size_t* out_count) -> yams_status_t {
+            if (!self || !query || !documents || !out_scores || !out_count)
+                return YAMS_ERR_INVALID_ARG;
+            if (doc_count == 0) {
+                *out_scores = nullptr;
+                *out_count = 0;
+                return YAMS_OK;
+            }
+
+            try {
+                auto* c = static_cast<ProviderCtx*>(self);
+                if (c->disabled)
+                    return YAMS_ERR_UNSUPPORTED;
+
+                // Lazy-init reranker session on first use
+                if (!c->reranker) {
+                    std::lock_guard<std::mutex> lk(c->mu);
+                    if (!c->reranker) {
+                        // Use the same models root as embedding models (from pool config)
+                        namespace fs = std::filesystem;
+                        std::string modelsRoot = c->pool ? c->pool->getModelsRoot() : "";
+
+                        if (modelsRoot.empty()) {
+                            spdlog::debug(
+                                "[ONNX Plugin] No modelsRoot configured, reranker unavailable");
+                            return YAMS_ERR_UNSUPPORTED;
+                        }
+
+                        // Look for common reranker models in the configured models directory
+                        const std::vector<std::string> rerankerModels = {
+                            "bge-reranker-v2-m3", "bge-reranker-base", "bge-reranker-large",
+                            "ms-marco-MiniLM-L-12-v2"};
+
+                        for (const auto& modelName : rerankerModels) {
+                            fs::path modelPath = fs::path(modelsRoot) / modelName;
+                            fs::path onnxPath = modelPath / "model.onnx";
+                            if (fs::exists(onnxPath)) {
+                                spdlog::info("[ONNX Plugin] Found reranker model: {}",
+                                             modelPath.string());
+                                yams::daemon::RerankerConfig cfg;
+                                cfg.model_path = modelPath.string();
+                                cfg.model_name = modelName;
+                                cfg.num_threads = std::max(1u, std::thread::hardware_concurrency());
+                                try {
+                                    c->reranker =
+                                        std::make_unique<yams::daemon::OnnxRerankerSession>(
+                                            modelPath.string(), modelName, cfg);
+                                    c->rerankerModelPath = modelPath.string();
+                                    spdlog::info("[ONNX Plugin] Reranker session initialized: {}",
+                                                 modelName);
+                                } catch (const std::exception& e) {
+                                    spdlog::warn("[ONNX Plugin] Failed to init reranker: {}",
+                                                 e.what());
+                                }
+                                break;
+                            }
+                        }
+
+                        if (!c->reranker) {
+                            spdlog::debug("[ONNX Plugin] No reranker model found in: {}",
+                                          modelsRoot);
+                            return YAMS_ERR_UNSUPPORTED;
+                        }
+                    }
+                }
+
+                if (!c->reranker || !c->reranker->isValid()) {
+                    return YAMS_ERR_UNSUPPORTED;
+                }
+
+                // Build document vector
+                std::vector<std::string> docs;
+                docs.reserve(doc_count);
+                for (size_t i = 0; i < doc_count; ++i) {
+                    docs.emplace_back(documents[i] ? documents[i] : "");
+                }
+
+                // Score documents
+                auto result = c->reranker->scoreBatch(query, docs);
+                if (!result) {
+                    spdlog::warn("[ONNX Plugin] Reranker scoreBatch failed: {}",
+                                 result.error().message);
+                    return YAMS_ERR_INTERNAL;
+                }
+
+                const auto& scores = result.value();
+                float* buf = static_cast<float*>(std::malloc(sizeof(float) * scores.size()));
+                if (!buf)
+                    return YAMS_ERR_INTERNAL;
+                std::memcpy(buf, scores.data(), sizeof(float) * scores.size());
+                *out_scores = buf;
+                *out_count = scores.size();
+                return YAMS_OK;
+
+            } catch (const std::exception& e) {
+                spdlog::error("[ONNX Plugin] score_documents exception: {}", e.what());
+                return YAMS_ERR_INTERNAL;
+            } catch (...) {
+                spdlog::error("[ONNX Plugin] score_documents unknown exception");
+                return YAMS_ERR_INTERNAL;
+            }
+        };
+
+        vtable.free_scores = [](void* /*self*/, float* scores, size_t /*count*/) {
+            if (scores)
+                std::free(scores);
+        };
     }
 };
 

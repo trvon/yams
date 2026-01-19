@@ -37,6 +37,10 @@ struct CorpusStats;
 
 namespace yams::metadata {
 
+namespace sql {
+struct QuerySpec;
+}
+
 namespace detail {
 inline thread_local std::string_view metadata_op_tag;
 }
@@ -695,7 +699,16 @@ private:
     mutable std::atomic<uint64_t> globalSeq_{0};
 
     // Helper methods for row mapping
-    DocumentInfo mapDocumentRow(Statement& stmt);
+    DocumentInfo mapDocumentRow(Statement& stmt) const;
+    const char* documentColumnList(bool qualified) const;
+
+    Result<std::optional<DocumentInfo>>
+    getDocumentByCondition(Database& db, std::string_view condition,
+                           const std::function<Result<void>(Statement&)>& binder) const;
+
+    Result<std::vector<DocumentInfo>>
+    queryDocumentsBySpec(Database& db, const sql::QuerySpec& spec,
+                         const std::function<Result<void>(Statement&)>& binder) const;
 
     Result<void> ensureFuzzyIndexInitialized();
 
@@ -765,6 +778,12 @@ private:
         return Error{ErrorCode::DatabaseError, "executeQuery: unexpected retry loop exit"};
     }
 };
+
+namespace test {
+std::string buildNaturalLanguageFts5QueryForTest(std::string_view query, bool useOr,
+                                                 bool autoPrefix, bool autoPhrase);
+bool isLikelyNaturalLanguageQueryForTest(std::string_view query);
+} // namespace test
 
 /**
  * @brief Builder for metadata queries with fluent interface
