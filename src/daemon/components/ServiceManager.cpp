@@ -2219,6 +2219,12 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
                 searchEngine_ = rebuilt;
             }
 
+            // Wire cross-encoder reranker if available
+            if (rerankerAdapter_ && rerankerAdapter_->isReady()) {
+                rebuilt->setReranker(rerankerAdapter_);
+                spdlog::debug("[Rebuild] Cross-encoder reranker wired to search engine");
+            }
+
             // Update readiness indicators
             state_.readiness.searchEngineReady = true;
             state_.readiness.vectorIndexReady = (vectorDatabase_ != nullptr);

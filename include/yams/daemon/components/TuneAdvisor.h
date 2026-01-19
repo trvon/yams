@@ -129,7 +129,20 @@ public:
             v = 0.95;
         embedSafety_.store(v, std::memory_order_relaxed);
     }
-    static std::size_t embedDocCap() { return embedDocCap_.load(std::memory_order_relaxed); }
+    static std::size_t embedDocCap() {
+        std::size_t ov = embedDocCap_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_EMBED_DOC_CAP")) {
+            try {
+                std::size_t v = static_cast<std::size_t>(std::stoull(s));
+                if (v >= 1 && v <= 4096)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 0;
+    }
     static void setEmbedDocCap(std::size_t v) { embedDocCap_.store(v, std::memory_order_relaxed); }
     static unsigned embedPauseMs() { return embedPauseMs_.load(std::memory_order_relaxed); }
     static void setEmbedPauseMs(unsigned v) { embedPauseMs_.store(v, std::memory_order_relaxed); }

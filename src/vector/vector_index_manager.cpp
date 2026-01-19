@@ -1318,6 +1318,7 @@ private:
                 cfg.M_max = config_.hnsw_m * 2;
                 cfg.M_max_0 = config_.hnsw_m * 2;
                 cfg.ef_construction = config_.hnsw_ef_construction;
+                cfg.clamp_negative_distances = config_.normalize_vectors;
                 hnsw_index_ = IPIndex(cfg);
                 break;
             }

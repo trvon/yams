@@ -46,6 +46,8 @@ public:
         size_t hnsw_ef_search = 100;       ///< HNSW search exploration factor
         size_t checkpoint_threshold = 100; ///< Inserts before HNSW checkpoint
         float compaction_threshold = 0.2f; ///< Compact when >20% deleted
+        size_t filter_candidate_chunks_per_doc =
+            10; ///< Estimated chunks per document for filtering
     };
 
     SqliteVecBackend();

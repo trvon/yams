@@ -298,7 +298,13 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     // Phase 3: Batch embedding call with sub-batching to avoid timeouts
     // ============================================================
     // Model inference can be slow for large batches. Sub-batch to keep response times reasonable.
-    constexpr size_t kMaxBatchSize = 64; // Max chunks per model call
+    std::size_t kMaxBatchSize = TuneAdvisor::getEmbedDocCap();
+    if (kMaxBatchSize == 0) {
+        kMaxBatchSize = 64; // Default cap when not configured
+    }
+    if (kMaxBatchSize < 1) {
+        kMaxBatchSize = 1;
+    }
     std::vector<std::vector<float>> embeddings;
     embeddings.reserve(allTexts.size());
 

@@ -148,7 +148,8 @@ struct SearchEngineConfig {
         BORDA_COUNT,         // Borda count voting
         WEIGHTED_RECIPROCAL, // Weighted RRF (custom)
         COMB_MNZ,            // CombMNZ: score * num_components (recall-focused)
-        TEXT_ANCHOR          // Text-anchored: FTS5 as primary, vector for re-ranking only
+        TEXT_ANCHOR,         // Text-anchored: FTS5 as primary, vector for re-ranking only
+        WEIGHTED_MAX         // Max of weighted scores (no multi-component boost)
     } fusionStrategy = FusionStrategy::WEIGHTED_RECIPROCAL; // Weighted RRF with score boost
 
     /// Convert FusionStrategy to string for logging/debugging
@@ -167,6 +168,8 @@ struct SearchEngineConfig {
                 return "COMB_MNZ";
             case FusionStrategy::TEXT_ANCHOR:
                 return "TEXT_ANCHOR";
+            case FusionStrategy::WEIGHTED_MAX:
+                return "WEIGHTED_MAX";
         }
         return "UNKNOWN";
     }
@@ -191,11 +194,18 @@ struct SearchEngineConfig {
     bool includeDebugInfo = false;       // Include per-component scores in results
     bool includeComponentTiming = false; // Include per-component execution time in response
 
-    // Cross-encoder reranking (second-stage ranking for improved relevance)
-    bool enableReranking = true;     // Enable cross-encoder reranking of top results
-    size_t rerankTopK = 50;          // Number of top results to rerank (latency vs quality)
-    float rerankWeight = 0.60f;      // Blend weight: final = rerank*w + original*(1-w)
+    // Reranking configuration
+    bool enableReranking = true;     // Enable reranking (score-based by default)
+    size_t rerankTopK = 10;          // Number of top results to rerank
+    float rerankWeight = 0.60f;      // Blend weight for model reranking
     bool rerankReplaceScores = true; // If true, replace scores entirely; if false, blend
+
+    // Model-based reranking (cross-encoder) - opt-in, requires ONNX model
+    bool enableModelReranking = false; // Use cross-encoder model (slow, opt-in)
+
+    // Score-based reranking (default) - uses component scores, no model needed
+    // Boosts documents that score well in BOTH text AND vector components
+    bool useScoreBasedReranking = true; // Use score-based reranking (fast, default)
 
     /**
      * @brief Get preset configuration for a corpus profile
@@ -421,6 +431,7 @@ private:
     std::vector<SearchResult> fuseWeightedReciprocal(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseCombMNZ(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseTextAnchor(const std::vector<ComponentResult>& results);
+    std::vector<SearchResult> fuseWeightedMax(const std::vector<ComponentResult>& results);
 
     template <typename ScoreFunc>
     std::vector<SearchResult> fuseSinglePass(const std::vector<ComponentResult>& results,

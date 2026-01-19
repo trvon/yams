@@ -129,6 +129,26 @@ struct ProviderCtx {
                     if (pos != std::string::npos)
                         s.erase(pos + 1);
                 };
+                auto apply_num_threads = [&](const std::string& value) {
+                    try {
+                        int v = std::stoi(value);
+                        if (v > 0) {
+                            cfg.numThreads = v;
+                        }
+                    } catch (...) {
+                    }
+                };
+                auto apply_enable_gpu = [&](const std::string& value) {
+                    std::string v = value;
+                    for (auto& c : v)
+                        c = static_cast<char>(std::tolower(c));
+                    if (v == "true" || v == "1" || v == "yes" || v == "on") {
+                        cfg.enableGPU = true;
+                    } else if (v == "false" || v == "0" || v == "no" || v == "off") {
+                        cfg.enableGPU = false;
+                    }
+                };
+
                 while (std::getline(file, line)) {
                     if (line.empty() || line[0] == '#')
                         continue;
@@ -164,12 +184,22 @@ struct ProviderCtx {
                     if (section == "embeddings") {
                         if (key == "preferred_model" && preferredModel.empty())
                             preferredModel = value;
+                        else if (key == "enable_gpu")
+                            apply_enable_gpu(value);
+                        else if (key == "num_threads")
+                            apply_num_threads(value);
                         else if (key == "keep_model_hot") {
                             std::string v = value;
                             for (auto& c : v)
                                 c = static_cast<char>(std::tolower(c));
                             keepModelHot = !(v == "false" || v == "0" || v == "no" || v == "off");
                         }
+                    }
+                    if (section == "daemon.models") {
+                        if (key == "enable_gpu")
+                            apply_enable_gpu(value);
+                        else if (key == "num_threads")
+                            apply_num_threads(value);
                     }
                     // New: preload list under [plugins.onnx]
                     if (section == "plugins.onnx" && key == "preload") {
@@ -288,6 +318,20 @@ struct ProviderCtx {
                     if (j.contains("keep_model_hot") && j["keep_model_hot"].is_boolean()) {
                         keepModelHot = j["keep_model_hot"].get<bool>();
                         spdlog::info("[ONNX-Plugin] JSON config: keep_model_hot={}", keepModelHot);
+                    }
+                    // enable_gpu
+                    if (j.contains("enable_gpu") && j["enable_gpu"].is_boolean()) {
+                        cfg.enableGPU = j["enable_gpu"].get<bool>();
+                        spdlog::info("[ONNX-Plugin] JSON config: enable_gpu={}", cfg.enableGPU);
+                    }
+                    // num_threads
+                    if (j.contains("num_threads") && j["num_threads"].is_number_integer()) {
+                        int v = j["num_threads"].get<int>();
+                        if (v > 0) {
+                            cfg.numThreads = v;
+                            spdlog::info("[ONNX-Plugin] JSON config: num_threads={}",
+                                         cfg.numThreads);
+                        }
                     }
                     // models_root - override the models directory
                     if (j.contains("models_root") && j["models_root"].is_string()) {
@@ -1107,16 +1151,16 @@ struct ProviderSingleton {
                             fs::path onnxPath = modelPath / "model.onnx";
                             if (fs::exists(onnxPath)) {
                                 spdlog::info("[ONNX Plugin] Found reranker model: {}",
-                                             modelPath.string());
+                                             onnxPath.string());
                                 yams::daemon::RerankerConfig cfg;
-                                cfg.model_path = modelPath.string();
+                                cfg.model_path = onnxPath.string();
                                 cfg.model_name = modelName;
                                 cfg.num_threads = std::max(1u, std::thread::hardware_concurrency());
                                 try {
                                     c->reranker =
                                         std::make_unique<yams::daemon::OnnxRerankerSession>(
-                                            modelPath.string(), modelName, cfg);
-                                    c->rerankerModelPath = modelPath.string();
+                                            onnxPath.string(), modelName, cfg);
+                                    c->rerankerModelPath = onnxPath.string();
                                     spdlog::info("[ONNX Plugin] Reranker session initialized: {}",
                                                  modelName);
                                 } catch (const std::exception& e) {

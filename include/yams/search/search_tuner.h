@@ -164,22 +164,23 @@ struct TunedParams {
             break;
 
         case TuningState::SCIENTIFIC:
-            // Lower rrfK gives more weight to top-ranked results (rank 0: 1/10=0.10 vs 1/30=0.03)
-            params.rrfK = 10;
+            // For scientific corpora: use actual similarity scores, not rank-based fusion
+            // WEIGHTED_MAX takes the best score per document (no multi-component boost)
+            params.rrfK = 10; // Used in RRF score calculation
             // Vector-heavy weighting for scientific corpora where queries are sentences
             // and FTS5 AND semantics is too strict (papers, abstracts, claims)
             params.textWeight = 0.20f;   // FTS5 AND often returns 0 for sentence queries
-            params.vectorWeight = 0.70f; // Primary signal for semantic matching
+            params.vectorWeight = 0.80f; // Primary signal - use actual cosine similarity
             params.entityVectorWeight = 0.00f;
             params.pathTreeWeight = 0.00f;
             params.kgWeight = 0.00f;
             params.tagWeight = 0.00f;
-            params.metadataWeight = 0.10f;
+            params.metadataWeight = 0.00f; // Disable metadata to avoid noise
             // Lower similarity threshold for scientific text embeddings
             params.similarityThreshold = 0.50f;
-            // COMB_MNZ: treats all components equally, doesn't require text anchor
-            // TEXT_ANCHOR fails when FTS5 returns 0 (vectorOnlyThreshold filters all)
-            params.fusionStrategy = SearchEngineConfig::FusionStrategy::COMB_MNZ;
+            // WEIGHTED_MAX: takes max score per doc, prevents "hub" docs from dominating
+            // via multi-component consensus boost. Reranker will re-order top-K.
+            params.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_MAX;
             break;
 
         case TuningState::MIXED:

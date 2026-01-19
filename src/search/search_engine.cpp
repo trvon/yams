@@ -313,6 +313,8 @@ std::vector<SearchResult> ResultFusion::fuse(const std::vector<ComponentResult>&
             return fuseCombMNZ(componentResults);
         case SearchEngineConfig::FusionStrategy::TEXT_ANCHOR:
             return fuseTextAnchor(componentResults);
+        case SearchEngineConfig::FusionStrategy::WEIGHTED_MAX:
+            return fuseWeightedMax(componentResults);
         default:
             return fuseCombMNZ(componentResults);
     }
@@ -333,7 +335,8 @@ std::vector<SearchResult>
 ResultFusion::fuseReciprocalRank(const std::vector<ComponentResult>& results) {
     const float k = config_.rrfK;
     return fuseSinglePass(results, [k](const ComponentResult& comp) {
-        return 1.0 / (k + static_cast<double>(comp.rank));
+        const double rank = static_cast<double>(comp.rank) + 1.0; // RRF uses 1-based ranks
+        return 1.0 / (k + rank);
     });
 }
 
@@ -354,7 +357,8 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
         // - Formula: weight * rrfScore * (1 + score) where score is in [0,1]
         //   This gives rank-1 with score=0.9 a 1.9x boost vs rank-1 with score=0
         float weight = getComponentWeight(comp.source);
-        double rrfScore = 1.0 / (k + static_cast<double>(comp.rank));
+        const double rank = static_cast<double>(comp.rank) + 1.0;
+        double rrfScore = 1.0 / (k + rank);
         double scoreBoost = 1.0 + std::clamp(static_cast<double>(comp.score), 0.0, 1.0);
         return weight * rrfScore * scoreBoost;
     });
@@ -371,10 +375,52 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
     const float k = config_.rrfK;
     return fuseSinglePass(results, [this, k, &componentCounts](const ComponentResult& comp) {
         float weight = getComponentWeight(comp.source);
-        double rrfScore = 1.0 / (k + static_cast<double>(comp.rank));
+        const double rank = static_cast<double>(comp.rank) + 1.0;
+        double rrfScore = 1.0 / (k + rank);
         double mnzBoost = static_cast<double>(componentCounts[comp.documentHash]);
         return weight * rrfScore * mnzBoost;
     });
+}
+
+std::vector<SearchResult>
+ResultFusion::fuseWeightedMax(const std::vector<ComponentResult>& results) {
+    // WEIGHTED_MAX: Take the maximum weighted score per document (no multi-component boost).
+    // Unlike COMB_MNZ which sums scores (boosting "hub" docs found by many components),
+    // this takes the max, preventing over-emphasis on multi-component consensus.
+    // Useful for scientific/benchmark corpora where text OR vector should dominate.
+    std::unordered_map<std::string, SearchResult> resultMap;
+    resultMap.reserve(results.size());
+    const float k = config_.rrfK;
+
+    for (const auto& comp : results) {
+        float weight = getComponentWeight(comp.source);
+        const double rank = static_cast<double>(comp.rank) + 1.0;
+        double rrfScore = 1.0 / (k + rank);
+        double scoreBoost = 1.0 + std::clamp(static_cast<double>(comp.score), 0.0, 1.0);
+        double contribution = weight * rrfScore * scoreBoost;
+
+        auto& r = resultMap[comp.documentHash];
+        if (r.document.sha256Hash.empty()) {
+            r.document.sha256Hash = comp.documentHash;
+            r.document.filePath = comp.filePath;
+            r.score = contribution; // Initialize with first contribution
+        } else {
+            r.score = std::max(r.score, contribution); // Take MAX instead of SUM
+        }
+        accumulateComponentScore(r, comp.source, contribution);
+        if (r.snippet.empty() && comp.snippet.has_value()) {
+            r.snippet = comp.snippet.value();
+        }
+    }
+
+    std::vector<SearchResult> sorted;
+    sorted.reserve(resultMap.size());
+    for (auto& [_, res] : resultMap) {
+        sorted.push_back(std::move(res));
+    }
+    std::sort(sorted.begin(), sorted.end(),
+              [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+    return sorted;
 }
 
 std::vector<SearchResult>
@@ -421,7 +467,8 @@ ResultFusion::fuseTextAnchor(const std::vector<ComponentResult>& results) {
 
         for (const auto* comp : compResults) {
             float weight = getComponentWeight(comp->source);
-            double rrfScore = 1.0 / (k + static_cast<double>(comp->rank));
+            const double rank = static_cast<double>(comp->rank) + 1.0;
+            double rrfScore = 1.0 / (k + rank);
             double scoreBoost = 1.0 + std::clamp(static_cast<double>(comp->score), 0.0, 1.0);
             double contribution = weight * rrfScore * scoreBoost;
             totalScore += contribution;
@@ -436,7 +483,8 @@ ResultFusion::fuseTextAnchor(const std::vector<ComponentResult>& results) {
 
         if (auto it = vectorResults.find(docHash); it != vectorResults.end()) {
             for (const auto* vcomp : it->second) {
-                double rrfScale = 1.0 / (k + static_cast<double>(vcomp->rank));
+                const double rank = static_cast<double>(vcomp->rank) + 1.0;
+                double rrfScale = 1.0 / (k + rank);
                 double scoreMultiplier =
                     1.0 + std::clamp(static_cast<double>(vcomp->score), 0.0, 1.0);
                 double vectorBoost = vectorBoostWeight * rrfScale * scoreMultiplier;
@@ -472,8 +520,8 @@ ResultFusion::fuseTextAnchor(const std::vector<ComponentResult>& results) {
         }
 
         if (maxVectorScore >= vectorOnlyThreshold && bestVectorResult != nullptr) {
-            double score = getComponentWeight(bestVectorResult->source) *
-                           (1.0 / (k + static_cast<double>(bestVectorResult->rank))) *
+            const double rank = static_cast<double>(bestVectorResult->rank) + 1.0;
+            double score = getComponentWeight(bestVectorResult->source) * (1.0 / (k + rank)) *
                            (1.0 + maxVectorScore);
             score *= vectorOnlyPenalty;
 
@@ -1321,7 +1369,7 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFullText(const std
             float rawScore = static_cast<float>(searchResult.score);
             float normalizedScore =
                 normalizedBm25Score(rawScore, config_.bm25NormDivisor, minBm25, maxBm25);
-            result.score = scoreMultiplier * normalizedScore;
+            result.score = std::clamp(scoreMultiplier * normalizedScore, 0.0f, 1.0f);
             result.source = ComponentResult::Source::Text;
             result.rank = rank;
             result.snippet = searchResult.snippet.empty()

@@ -860,8 +860,10 @@ public:
             float selectivity = 1.0f;
 
             if (!candidate_hashes.empty() && hnsw->size() > 0) {
-                // Rough estimate: each doc has ~10 chunks on average
-                size_t estimated_valid_chunks = candidate_hashes.size() * 10;
+                // Rough estimate: each doc has ~N chunks on average (configurable)
+                size_t chunks_per_doc =
+                    std::max<size_t>(1, config_.filter_candidate_chunks_per_doc);
+                size_t estimated_valid_chunks = candidate_hashes.size() * chunks_per_doc;
                 selectivity = std::min(1.0f, static_cast<float>(estimated_valid_chunks) /
                                                  static_cast<float>(hnsw->size()));
             }

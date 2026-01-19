@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Download CLI: progress streaming (human/json) via DownloadService callbacks.
 - Symbol-aware search ranking: definitions rank higher than usages (`YAMS_SYMBOL_WEIGHT`).
 - Zig language support: functions, structs, enums, unions, fields, imports, calls.
+- **WEIGHTED_MAX fusion strategy**: Takes maximum weighted score per document instead of sum.
+  Prevents "hub" documents from dominating via multi-component consensus boost. Used by
+  SCIENTIFIC tuning profile for benchmark corpora.
 
 ### Performance
 
@@ -46,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-memory chunking for `storeBytes()` - avoids temp file I/O for large documents.
 
 #### Database & Metadata
+- **KGWriteQueue**: Batched, serialized writes to KnowledgeGraphStore via async writer coroutine.
+  Eliminates "database is locked" errors during high-throughput ingestion by queueing KG operations
+  (nodes, edges, aliases, doc entities) and committing in batches. Both symbol extraction and NL
+  entity extraction now use deferred batching with nodeKey→nodeId resolution at commit time.
 - Prepared statement caching for SQLite queries - reduces SQL compilation overhead on repeated operations. Cached methods: `setMetadata`, `setMetadataBatch`, `getMetadata`, `getAllMetadata`, `getContent`, `getDocument`, `getDocumentByHash`, `updateDocument`, `deleteDocument`, `insertContent`.
 - `setMetadataBatch()` API for bulk metadata updates - 4x faster than individual calls.
 
@@ -58,21 +65,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 |-----------|----------|----------|--------|
 | Ingestion_SmallDocument | 2,771 ops/s | 2,821 ops/s | ~same |
 | Ingestion_MediumDocument | 56 ops/s | 57 ops/s | ~same |
+| Ingestion_E2E (100 docs) | - | 9.2 docs/s | new (KGWriteQueue) |
 | Metadata_SingleUpdate | 10,537 ops/s | 17,794 ops/s | **+69%** |
 | Metadata_BulkUpdate(500) | 7,823 ops/s | 50,473 ops/s | **+6.5x** |
 | IPC_StreamingFramer | - | 3,732 ops/s | new |
 | IPC_UnaryFramer | - | 10,088 ops/s | new |
 
-#### Retrieval Quality Benchmarks (SciFact: 5,183 docs, 300 queries)
+### Experimental
+- **libSQL backend**: Default database backend with concurrent write support via MVCC.
+  Enables up to 4x write throughput during heavy indexing. Configure with meson option
+  `database-backend` (choices: `libsql` [default], `sqlite`).
 
-| Metric | Score | Description |
-|--------|-------|-------------|
-| MRR | 0.630 | Mean Reciprocal Rank |
-| Recall@10 | 0.799 | Recall at K=10 |
-| MAP | 0.628 | Mean Average Precision |
-| nDCG@10 | 0.669 | Normalized Discounted Cumulative Gain |
+  **Installation**: If Rust toolchain is available, libsql builds automatically from source
+  via the meson subproject. Otherwise falls back to SQLite.
+  ```bash
+  # Ensure Rust is installed (for automatic build)
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  # Or disable libsql to use standard SQLite
+  meson configure -Ddatabase-backend=sqlite
+  ```
+  See [libSQL](https://github.com/tursodatabase/libsql) for details.
+
+### Documentation
+- **Embedding model recommendations**: Added model comparison table to README. 384-dim models
+  (e.g., `all-MiniLM-L6-v2`) recommended for best speed/quality tradeoff.
+
+### Changed
+- **Reranking**: Score-based reranking is now the default. Uses geometric mean of text and
+  vector scores to boost documents with multi-component consensus. No external model needed.
+  Cross-encoder model reranking is opt-in via `enableModelReranking` config option.
 
 ### Fixed
+- **FTS5 natural language queries**: OR fallback now correctly triggers when AND query returns
+  zero results. Previously, long queries like scientific abstracts would fail because the AND
+  query returned nothing and the OR fallback condition was never met.
+- **ONNX multi-threading on Linux/macOS**: Removed forced single-threaded execution that was
+  only needed for Windows. Non-Windows platforms now use `intra_op_threads=4` by default,
+  improving inference speed for 768-dim and larger models by 2-4x.
+- Hybrid search fusion: fallback to non-empty `filePath` when vector results have empty paths
+  (hash→path lookup failures no longer cause result mismatches).
+- TSAN race in `daemon_search()`: pass `DaemonSearchOptions` by value to avoid stack reference
+  escaping to coroutine thread.
+- TSAN race in `handle_streaming_request()`: check `connection_closing_` before `socket.is_open()`
+  to avoid race with `handle_connection` closing the socket.
 - Compression stats now persist across daemon restarts (`Storage Logical Bytes` vs
   `CAS Unique Raw Bytes` now show correct values).
 - CLI rejects ambiguous subcommands (e.g., `yams search graph` → use `--query`).

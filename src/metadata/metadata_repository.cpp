@@ -2065,7 +2065,9 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         }
         ftsSearchSucceeded = ftsRun.value();
 
-        if (usedNaturalLanguageQuery && useNlFallback && ftsSearchSucceeded &&
+        // Fix: Try OR fallback when AND query returned fewer than nlMinResults (including 0)
+        // Previously required ftsSearchSucceeded which was false when AND returned 0 results
+        if (usedNaturalLanguageQuery && useNlFallback &&
             static_cast<int>(results.results.size()) < nlMinResults) {
             SearchResults orResults;
             orResults.query = query;
@@ -2078,6 +2080,7 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
             if (orRun.value()) {
                 results = std::move(orResults);
                 sanitizedQuery = std::move(orQuery);
+                ftsSearchSucceeded = true; // OR fallback found results
             }
         }
 
@@ -4843,8 +4846,7 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
         const bool advancedQuery = hasAdvancedFts5Operators(query);
         if (!advancedQuery) {
             // Split query into terms and expand each via SymSpell
-            // Keep expansions grouped by original term for AND semantics
-            std::vector<std::vector<std::string>> termExpansions;
+            std::vector<std::string> expandedTerms;
             std::istringstream iss(query);
             std::string term;
             while (iss >> term) {
@@ -4861,21 +4863,17 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
                 opts.returnAll = true;
                 opts.maxResults = 5; // Get top 5 corrections per term
 
-                std::vector<std::string> expansions;
                 auto suggestions = symspellIndex_->search(term, opts);
                 if (!suggestions.empty()) {
                     for (const auto& s : suggestions) {
                         std::string cleaned = stripPunctuation(std::string(s.term));
                         if (!cleaned.empty()) {
-                            expansions.push_back(std::move(cleaned));
+                            expandedTerms.push_back(std::move(cleaned));
                         }
                     }
                 } else {
                     // No fuzzy match found, use original term
-                    expansions.push_back(term);
-                }
-                if (!expansions.empty()) {
-                    termExpansions.push_back(std::move(expansions));
+                    expandedTerms.push_back(term);
                 }
             }
 
@@ -4883,36 +4881,20 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
             auto symspellMs =
                 std::chrono::duration_cast<std::chrono::milliseconds>(symspellEnd - totalStart)
                     .count();
-            spdlog::debug("[FUZZY] SymSpell term expansion took {}ms, {} term groups", symspellMs,
-                          termExpansions.size());
+            spdlog::debug("[FUZZY] SymSpell term expansion took {}ms, expanded to {} terms",
+                          symspellMs, expandedTerms.size());
 
-            if (termExpansions.empty()) {
+            if (expandedTerms.empty()) {
                 results.totalCount = 0;
                 results.executionTimeMs = symspellMs;
                 return results;
             }
 
-            // Build FTS5 query with AND between term groups, OR within each group
-            // Example: ("term1a" OR "term1b") AND ("term2a" OR "term2b")
-            // This maintains AND semantics at the term level while allowing fuzzy matches
-            for (size_t g = 0; g < termExpansions.size(); ++g) {
-                if (g > 0)
-                    ftsQuery += " AND ";
-
-                const auto& expansions = termExpansions[g];
-                if (expansions.size() == 1) {
-                    // Single expansion, no need for parentheses
-                    ftsQuery += renderFts5Token(expansions[0], false);
-                } else {
-                    // Multiple expansions, use OR within parentheses
-                    ftsQuery += "(";
-                    for (size_t i = 0; i < expansions.size(); ++i) {
-                        if (i > 0)
-                            ftsQuery += " OR ";
-                        ftsQuery += renderFts5Token(expansions[i], false);
-                    }
-                    ftsQuery += ")";
-                }
+            // Build FTS5 query with OR across all expanded terms (global OR)
+            for (size_t i = 0; i < expandedTerms.size(); ++i) {
+                if (i > 0)
+                    ftsQuery += " OR ";
+                ftsQuery += renderFts5Token(expandedTerms[i], false);
             }
         } else {
             ftsQuery = sanitizeFts5UserQuery(query);

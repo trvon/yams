@@ -126,6 +126,86 @@ static std::string trimCopy(std::string s) {
     return s;
 }
 
+// Stricter heuristic for query routing: avoid misclassifying code-like tokens as hashes.
+// Require explicit prefix or a long hex length with at least one alpha hex digit.
+bool looksLikeHashQuery(const std::string& raw) {
+    auto trimmed = trimCopy(raw);
+    if (trimmed.empty())
+        return false;
+
+    const std::string lower = [&]() {
+        std::string s = trimmed;
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return s;
+    }();
+
+    auto stripPrefix = [&](std::string_view prefix) -> std::string {
+        if (lower.rfind(prefix, 0) == 0) {
+            return trimmed.substr(prefix.size());
+        }
+        return {};
+    };
+
+    if (auto v = stripPrefix("hash:"); !v.empty()) {
+        return looksLikeHash(trimCopy(v));
+    }
+    if (auto v = stripPrefix("sha1:"); !v.empty()) {
+        return looksLikeHash(trimCopy(v));
+    }
+    if (auto v = stripPrefix("sha256:"); !v.empty()) {
+        return looksLikeHash(trimCopy(v));
+    }
+    if (auto v = stripPrefix("md5:"); !v.empty()) {
+        return looksLikeHash(trimCopy(v));
+    }
+
+    if (!looksLikeHash(trimmed))
+        return false;
+
+    // Require long hex and at least one alpha digit to avoid common code tokens like "deadbeef".
+    if (trimmed.size() < 32)
+        return false;
+    return std::any_of(trimmed.begin(), trimmed.end(),
+                       [](unsigned char c) { return std::isalpha(c) != 0; });
+}
+
+std::optional<std::string> extractHashPrefix(const std::string& raw) {
+    auto trimmed = trimCopy(raw);
+    if (trimmed.empty())
+        return std::nullopt;
+
+    std::string lower = trimmed;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    auto stripPrefix = [&](std::string_view prefix) -> std::string {
+        if (lower.rfind(prefix, 0) == 0) {
+            return trimCopy(trimmed.substr(prefix.size()));
+        }
+        return {};
+    };
+
+    if (auto v = stripPrefix("hash:"); !v.empty()) {
+        return looksLikeHash(v) ? std::optional<std::string>(v) : std::nullopt;
+    }
+    if (auto v = stripPrefix("sha1:"); !v.empty()) {
+        return looksLikeHash(v) ? std::optional<std::string>(v) : std::nullopt;
+    }
+    if (auto v = stripPrefix("sha256:"); !v.empty()) {
+        return looksLikeHash(v) ? std::optional<std::string>(v) : std::nullopt;
+    }
+    if (auto v = stripPrefix("md5:"); !v.empty()) {
+        return looksLikeHash(v) ? std::optional<std::string>(v) : std::nullopt;
+    }
+
+    if (looksLikeHashQuery(trimmed)) {
+        return trimmed;
+    }
+
+    return std::nullopt;
+}
+
 static bool hasWhitespace(const std::string& s) {
     return std::any_of(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); });
 }
@@ -444,7 +524,8 @@ public:
             co_return result;
         }
 
-        if (looksLikeHash(normalizedReq.query)) {
+        if (auto hashPrefix = extractHashPrefix(normalizedReq.query)) {
+            normalizedReq.hash = std::move(*hashPrefix);
             auto result = co_await searchByHashPrefix(normalizedReq, &metadataTelemetry);
             setExecTime(result, t0);
             if (result) {

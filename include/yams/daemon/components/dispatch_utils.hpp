@@ -20,6 +20,7 @@
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/resource/external_plugin_host.h>
@@ -231,9 +232,41 @@ generate_batch(IModelProvider* provider, const std::string& model,
     if (!provider)
         return yams::Error{yams::ErrorCode::InvalidState, "Provider null"};
     try {
-        if (model.empty())
-            return provider->generateBatchEmbeddings(texts);
-        return provider->generateBatchEmbeddingsFor(model, texts);
+        if (texts.empty())
+            return std::vector<std::vector<float>>{};
+
+        std::size_t cap = TuneAdvisor::getEmbedDocCap();
+        if (cap == 0 || cap > texts.size())
+            cap = texts.size();
+        if (cap < 1)
+            cap = 1;
+
+        if (texts.size() <= cap) {
+            if (model.empty())
+                return provider->generateBatchEmbeddings(texts);
+            return provider->generateBatchEmbeddingsFor(model, texts);
+        }
+
+        std::vector<std::vector<float>> out;
+        out.reserve(texts.size());
+        for (std::size_t start = 0; start < texts.size(); start += cap) {
+            std::size_t end = std::min(start + cap, texts.size());
+            std::vector<std::string> sub(texts.begin() + start, texts.begin() + end);
+            yams::Result<std::vector<std::vector<float>>> r;
+            if (model.empty())
+                r = provider->generateBatchEmbeddings(sub);
+            else
+                r = provider->generateBatchEmbeddingsFor(model, sub);
+            if (!r)
+                return r.error();
+            auto& batch = r.value();
+            if (batch.size() != sub.size()) {
+                return yams::Error{yams::ErrorCode::InvalidData, "Batch embedding size mismatch"};
+            }
+            for (auto& v : batch)
+                out.push_back(std::move(v));
+        }
+        return out;
     } catch (const std::exception& e) {
         return yams::Error{yams::ErrorCode::InternalError, e.what()};
     }
