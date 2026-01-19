@@ -932,21 +932,9 @@ struct BenchFixture {
             } else {
                 harnessOptions.pluginDir = fs::current_path() / "builddir" / "plugins";
             }
-            harnessOptions.preloadModels = {"all-MiniLM-L6-v2"};
-
-            // Force the benchmark to use all-MiniLM-L6-v2 regardless of user's config
-            // This env var takes precedence over config file settings
-            setenv("YAMS_PREFERRED_MODEL", "all-MiniLM-L6-v2", 1);
-            spdlog::info("Set YAMS_PREFERRED_MODEL=all-MiniLM-L6-v2 for benchmark isolation");
-
-            // Configure ONNX plugin with preferred model for embeddings
-            // Key must match plugin name variants: onnx_plugin (from libyams_onnx_plugin)
-            json onnxConfig;
-            onnxConfig["preferred_model"] = "all-MiniLM-L6-v2";
-            onnxConfig["preload"] = "all-MiniLM-L6-v2";
-            onnxConfig["keep_model_hot"] = true;
-            harnessOptions.pluginConfigs["onnx_plugin"] = onnxConfig.dump();
-            spdlog::info("Configured ONNX plugin with model: all-MiniLM-L6-v2");
+            // Use system config for model settings - no hardcoded overrides
+            // The benchmark will use whatever preferred_model is set in ~/.config/yams/config.toml
+            spdlog::info("Using system config for embedding model (no benchmark override)");
 
             // Configure Glint plugin with GLiNER model path for NL entity extraction
             std::string glinerModelPath = discoverGlinerModelPath();

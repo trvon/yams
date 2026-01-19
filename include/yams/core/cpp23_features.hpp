@@ -331,10 +331,18 @@
 // ============================================================================
 
 // Required for compatibility helpers
+#include <chrono>
 #include <string_view>
 
 namespace yams {
 namespace features {
+
+/**
+ * @brief Convert Unix timestamp to sys_seconds
+ */
+inline std::chrono::sys_seconds fromUnixTime(int64_t ts) {
+    return std::chrono::sys_seconds{std::chrono::seconds{ts}};
+}
 
 /**
  * @brief Feature detection summary for diagnostics
@@ -375,9 +383,6 @@ inline const char* get_feature_summary() {
 
 /**
  * @brief String contains helper (C++23 compatibility)
- *
- * When std::string::contains() is available, this is a passthrough.
- * Otherwise, provides fallback using find().
  */
 #if YAMS_HAS_STRING_CONTAINS
 template <typename StringT, typename SubstrT>

@@ -65,16 +65,6 @@ void readStringArray(const json& j, std::string_view key, Container& out) {
     }
 }
 
-template <typename Handler, typename Request, typename Response>
-concept SyncToolHandler =
-    std::invocable<Handler&, const Request&> &&
-    std::same_as<std::invoke_result_t<Handler&, const Request&>, Result<Response>>;
-
-template <typename Handler, typename Request, typename Response>
-concept AsyncToolHandler = std::invocable<Handler&, const Request&> &&
-                           std::same_as<std::invoke_result_t<Handler&, const Request&>,
-                                        boost::asio::awaitable<Result<Response>>>;
-
 } // namespace detail
 
 // MCP 1.x requires textual responses wrapped in a content array. Retain this format until the
@@ -104,6 +94,82 @@ concept ToolSerializable = requires(const T& t, const json& j) {
     { T::fromJson(j) } -> std::same_as<T>;
     { t.toJson() } -> std::same_as<json>;
 };
+
+namespace detail {
+
+template <typename Handler, typename Request, typename Response>
+concept SyncToolHandler =
+    std::invocable<Handler&, const Request&> &&
+    std::same_as<std::invoke_result_t<Handler&, const Request&>, Result<Response>>;
+
+template <typename Handler, typename Request, typename Response>
+concept AsyncToolHandler = std::invocable<Handler&, const Request&> &&
+                           std::same_as<std::invoke_result_t<Handler&, const Request&>,
+                                        boost::asio::awaitable<Result<Response>>>;
+
+} // namespace detail
+
+#define YAMS_MCP_FROM_JSON_FIELDS(Type, ...)                                                       \
+    static Type fromJson(const json& j) {                                                          \
+        Type r;                                                                                    \
+        auto _add = [&](auto& value, std::string_view key) {                                       \
+            using T = std::decay_t<decltype(value)>;                                               \
+            if constexpr (std::is_same_v<T, bool>)                                                 \
+                value = yams::mcp::detail::jsonValueOr(j, key, value);                             \
+            else if constexpr (std::is_same_v<T, int> || std::is_same_v<T, int64_t>)               \
+                value = yams::mcp::detail::jsonValueOr(j, key, value);                             \
+            else if constexpr (std::is_same_v<T, unsigned int> || std::is_same_v<T, uint64_t>)     \
+                value = yams::mcp::detail::jsonValueOr(j, key, value);                             \
+            else if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>)              \
+                value = yams::mcp::detail::jsonValueOr(j, key, value);                             \
+            else if constexpr (std::is_same_v<T, std::string>)                                     \
+                value = yams::mcp::detail::jsonValueOr(j, key, value);                             \
+            else if constexpr (std::is_same_v<T, std::vector<std::string>>)                        \
+                yams::mcp::detail::readStringArray(j, key, value);                                 \
+            else if constexpr (std::is_same_v<T, json>)                                            \
+                value = yams::mcp::detail::jsonValueOr(j, key, value);                             \
+        };                                                                                         \
+        _add(r.running, "running");                                                                \
+        _add(r.ready, "ready");                                                                    \
+        _add(r.overallStatus, "overallStatus");                                                    \
+        _add(r.lifecycleState, "lifecycleState");                                                  \
+        _add(r.lastError, "lastError");                                                            \
+        _add(r.version, "version");                                                                \
+        _add(r.uptimeSeconds, "uptimeSeconds");                                                    \
+        _add(r.requestsProcessed, "requestsProcessed");                                            \
+        _add(r.activeConnections, "activeConnections");                                            \
+        _add(r.memoryUsageMb, "memoryUsageMb");                                                    \
+        _add(r.cpuUsagePercent, "cpuUsagePercent");                                                \
+        _add(r.counters, "counters");                                                              \
+        _add(r.readinessStates, "readinessStates");                                                \
+        _add(r.initProgress, "initProgress");                                                      \
+        return r;                                                                                  \
+    }
+
+#define YAMS_MCP_TO_JSON_FIELDS(...)                                                               \
+    json toJson() const {                                                                          \
+        json j;                                                                                    \
+        j["running"] = running;                                                                    \
+        j["ready"] = ready;                                                                        \
+        j["overallStatus"] = overallStatus;                                                        \
+        j["lifecycleState"] = lifecycleState;                                                      \
+        j["lastError"] = lastError;                                                                \
+        j["version"] = version;                                                                    \
+        j["uptimeSeconds"] = uptimeSeconds;                                                        \
+        j["requestsProcessed"] = requestsProcessed;                                                \
+        j["activeConnections"] = activeConnections;                                                \
+        j["memoryUsageMb"] = memoryUsageMb;                                                        \
+        j["cpuUsagePercent"] = cpuUsagePercent;                                                    \
+        j["counters"] = counters;                                                                  \
+        j["readinessStates"] = readinessStates;                                                    \
+        j["initProgress"] = initProgress;                                                          \
+        return j;                                                                                  \
+    }
+
+#define YAMS_MCP_FIELD(field) _add(r.field, #field)
+#define YAMS_MCP_FIELD_ALIAS(field, alias) _add(r.field, alias)
+#define YAMS_MCP_SET(field) _set(field, #field)
+#define YAMS_MCP_SET_ALIAS(field, alias) _set(field, alias)
 
 // Tool request/response DTOs
 struct MCPSearchRequest {

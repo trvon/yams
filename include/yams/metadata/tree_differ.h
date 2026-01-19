@@ -1,6 +1,3 @@
-// Copyright 2025 YAMS Project
-// SPDX-License-Identifier: GPL-3.0-or-later
-
 #pragma once
 
 #include <memory>

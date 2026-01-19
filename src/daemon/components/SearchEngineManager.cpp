@@ -144,12 +144,15 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
 
             // Post build work to worker executor (blocking operations)
             boost::asio::post(workerExecutor, [this, builder, opts, timer, completed, handlerPtr,
-                                               completion_exec, vectorEnabled]() mutable {
+                                               completion_exec, vectorEnabled,
+                                               workerExecutor]() mutable {
                 RetT result(Error{ErrorCode::InternalError, "unknown_error"});
                 try {
                     auto r = builder->buildEmbedded(opts);
                     if (r) {
                         auto newEngine = r.value();
+                        // Set executor for async component execution (embedding, etc.)
+                        newEngine->setExecutor(workerExecutor);
                         {
                             std::unique_lock lock(engineMutex_);
                             engine_ = newEngine;

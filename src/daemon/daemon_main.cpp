@@ -98,6 +98,52 @@ void setup_fatal_handlers() {
         std::_Exit(1);
     });
 }
+
+void clear_session_index_on_start() {
+    const char* xdg = std::getenv("XDG_STATE_HOME");
+    const char* home = std::getenv("HOME");
+    std::filesystem::path root;
+    if (xdg && *xdg) {
+        root = std::filesystem::path(xdg) / "yams";
+    } else if (home && *home) {
+        root = std::filesystem::path(home) / ".local" / "state" / "yams";
+    } else {
+        root = std::filesystem::current_path() / ".yams_state";
+    }
+
+    auto index = root / "sessions" / "index.json";
+    if (!std::filesystem::exists(index)) {
+        return;
+    }
+
+    try {
+        std::ifstream in(index);
+        if (!in.good()) {
+            return;
+        }
+        nlohmann::json j;
+        in >> j;
+        if (!j.contains("current")) {
+            return;
+        }
+        j.erase("current");
+        if (j.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(index, ec);
+            if (!ec) {
+                spdlog::info("Cleared session index (removed {})", index.string());
+            }
+            return;
+        }
+        std::ofstream out(index);
+        if (out.good()) {
+            out << j.dump(2) << std::endl;
+            spdlog::info("Cleared current session in {}", index.string());
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("Failed to clear session index {}: {}", index.string(), e.what());
+    }
+}
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -828,6 +874,8 @@ int main(int argc, char* argv[]) {
             spdlog::debug("FSM metrics collection enabled");
         }
     }
+
+    clear_session_index_on_start();
 
     // Best-effort: notify about config v2 migration before daemonizing (visible to user)
     try {

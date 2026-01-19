@@ -382,6 +382,7 @@ public:
     Result<bool> adoptModelProviderFromHosts(const std::string& preferredName = "");
     Result<size_t> adoptContentExtractorsFromHosts();
     Result<size_t> adoptSymbolExtractorsFromHosts();
+    Result<size_t> adoptEntityExtractorsFromHosts();
     bool isEmbeddingsAutoOnAdd() const { return embeddingsAutoOnAdd_; }
 
     // Explicit, on-demand plugin autoload: scans trusted roots and default directories,

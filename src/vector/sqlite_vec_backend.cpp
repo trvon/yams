@@ -18,7 +18,7 @@
 #include <sqlite-vec-cpp/distances/inner_product.hpp>
 #include <sqlite-vec-cpp/index/hnsw.hpp>
 #include <sqlite-vec-cpp/index/hnsw_persistence.hpp>
-#include <sqlite-vec-cpp/sqlite/vec0_module.hpp>
+#include <sqlite-vec-cpp/sqlite/registration.hpp>
 
 namespace yams::vector {
 
@@ -32,6 +32,17 @@ namespace {
 inline std::string safeColumnText(sqlite3_stmt* stmt, int col) {
     const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, col));
     return text ? text : "";
+}
+
+// Check if an embedding is zero-norm (all zeros or negligible magnitude)
+// Zero-norm vectors cannot participate in cosine similarity and become dead-ends in HNSW
+inline bool isZeroNormEmbedding(const std::vector<float>& embedding) {
+    constexpr double kZeroNormThreshold = 1e-10;
+    double norm_sq = 0.0;
+    for (float val : embedding) {
+        norm_sq += static_cast<double>(val) * static_cast<double>(val);
+    }
+    return norm_sq < kZeroNormThreshold;
 }
 
 // ============================================================================
@@ -344,15 +355,17 @@ public:
         sqlite3_exec(db_, "PRAGMA synchronous=NORMAL", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "PRAGMA cache_size=-64000", nullptr, nullptr, nullptr); // 64MB cache
 
-        // Register vec0 module to enable reading V1 schema data during migration
-        // This allows us to read embeddings from the old vec0 virtual table
-        auto vec0_result = sqlite_vec_cpp::sqlite::register_vec0_module(db_);
-        if (!vec0_result) {
-            spdlog::warn("[VectorInit] Failed to register vec0 module: {}",
-                         vec0_result.error().message);
+        // Register all sqlite-vec functions: vec0 module (for V1 migration), distance functions
+        // (l2, l1, cosine, hamming), utility functions (vec_length, vec_type, vec_f32, etc.),
+        // and enhanced functions (vec_dot, vec_magnitude, vec_scale, vec_mean)
+        auto func_result = sqlite_vec_cpp::sqlite::register_all_functions(db_);
+        if (!func_result) {
+            spdlog::warn("[VectorInit] Failed to register sqlite-vec functions: {}",
+                         func_result.error().message);
             // Continue anyway - migration will handle this gracefully
         } else {
-            spdlog::info("[VectorInit] vec0 module registered for V1 migration");
+            spdlog::info(
+                "[VectorInit] sqlite-vec functions registered (vec0, distances, enhanced)");
         }
 
         // Check for V1 schema and migrate if needed
@@ -502,6 +515,13 @@ public:
 
         int64_t rowid = rowid_result.value();
 
+        // Skip HNSW insertion for zero-norm vectors (they become dead-ends in the graph)
+        if (isZeroNormEmbedding(record.embedding)) {
+            spdlog::warn("[HNSW] Skipping zero-norm vector for chunk_id={} (stored in SQLite only)",
+                         record.chunk_id);
+            return Result<void>{};
+        }
+
         // Insert into HNSW (dimension-specific index)
         ensureHnswLoadedUnlocked();
         size_t dim = record.embedding.size();
@@ -556,35 +576,72 @@ public:
         ensureHnswLoadedUnlocked();
 
         // Group records by dimension for batch insertion into appropriate indices
+        // Skip zero-norm vectors (they become dead-ends in the HNSW graph)
         std::unordered_map<size_t, std::vector<std::pair<size_t, size_t>>>
             dim_records; // dim -> [(idx, rowid)]
+        size_t skipped_zero_norm = 0;
         for (size_t i = 0; i < records.size(); ++i) {
+            if (isZeroNormEmbedding(records[i].embedding)) {
+                ++skipped_zero_norm;
+                continue;
+            }
             size_t dim = records[i].embedding.size();
             dim_records[dim].emplace_back(i, rowids[i]);
+        }
+
+        if (skipped_zero_norm > 0) {
+            spdlog::warn("[HNSW] Skipped {} zero-norm vectors in batch (stored in SQLite only)",
+                         skipped_zero_norm);
         }
 
         static std::atomic<uint64_t> batch_counter{0};
         uint64_t bc = batch_counter.fetch_add(1);
 
+        // Threshold for using parallel build (sequential is faster for small batches)
+        constexpr size_t kParallelBuildThreshold = 100;
+
         for (auto& [dim, indices] : dim_records) {
             if (auto* hnsw = getOrCreateHnswForDim(dim)) {
                 size_t before_size = hnsw->size();
-                for (const auto& [idx, rowid] : indices) {
-                    std::span<const float> embedding_span(records[idx].embedding.data(),
-                                                          records[idx].embedding.size());
-                    hnsw->insert(static_cast<size_t>(rowid), embedding_span);
+
+                if (indices.size() >= kParallelBuildThreshold) {
+                    // Use parallel build for large batches
+                    std::vector<size_t> ids;
+                    std::vector<std::span<const float>> vectors;
+                    ids.reserve(indices.size());
+                    vectors.reserve(indices.size());
+
+                    for (const auto& [idx, rowid] : indices) {
+                        ids.push_back(static_cast<size_t>(rowid));
+                        vectors.emplace_back(records[idx].embedding.data(),
+                                             records[idx].embedding.size());
+                    }
+
+                    hnsw->build_parallel(std::span{ids}, std::span{vectors}, 0); // 0 = auto threads
+
+                    spdlog::debug("[HNSW] insertVectorsBatch (parallel): dim={}, added {} records, "
+                                  "hnsw_size: {} -> {} (batch #{})",
+                                  dim, indices.size(), before_size, hnsw->size(), bc);
+                } else {
+                    // Sequential insert for small batches (avoids thread overhead)
+                    for (const auto& [idx, rowid] : indices) {
+                        std::span<const float> embedding_span(records[idx].embedding.data(),
+                                                              records[idx].embedding.size());
+                        hnsw->insert(static_cast<size_t>(rowid), embedding_span);
+                    }
+
+                    if (bc % 100 == 0 || indices.size() >= 10) {
+                        spdlog::debug(
+                            "[HNSW] insertVectorsBatch: dim={}, added {} records, hnsw_size: "
+                            "{} -> {} (batch #{})",
+                            dim, indices.size(), before_size, hnsw->size(), bc);
+                    }
                 }
                 hnsw_dirty_[dim] = true;
-
-                if (bc % 100 == 0 || indices.size() >= 10) {
-                    spdlog::debug("[HNSW] insertVectorsBatch: dim={}, added {} records, hnsw_size: "
-                                  "{} -> {} (batch #{})",
-                                  dim, indices.size(), before_size, hnsw->size(), bc);
-                }
             }
         }
 
-        pending_inserts_ += records.size();
+        pending_inserts_ += records.size() - skipped_zero_norm;
         if (pending_inserts_ >= config_.checkpoint_threshold) {
             saveHnswCheckpointUnlocked();
         }
@@ -637,6 +694,12 @@ public:
 
         int64_t new_rowid = rowid_result.value();
         size_t new_dim = record.embedding.size();
+
+        // Skip HNSW insertion for zero-norm vectors
+        if (isZeroNormEmbedding(record.embedding)) {
+            spdlog::warn("[HNSW] Skipping zero-norm vector update for chunk_id={}", chunk_id);
+            return Result<void>{};
+        }
 
         // Insert into HNSW (new dimension's index)
         if (auto* hnsw = getOrCreateHnswForDim(new_dim)) {
@@ -848,41 +911,43 @@ public:
         // Search HNSW
         std::span<const float> query_span(query_embedding.data(), query_embedding.size());
 
-        // Calculate ef_search: when filtering is active, we need to explore more nodes
-        // to find enough valid results. Estimate selectivity and increase ef accordingly.
-        size_t ef_search = config_.hnsw_ef_search;
+        // Calculate ef_search adaptively based on corpus size for target 95% recall
+        // recommended_ef_search() uses hnsw->size() internally for corpus-aware tuning
+        size_t ef_search = hnsw->recommended_ef_search(k, 0.95F);
+        // Apply user-configured minimum as floor
+        ef_search = std::max(ef_search, config_.hnsw_ef_search);
         size_t fetch_k = k;
 
         if (filter != nullptr) {
             // Estimate filter selectivity based on candidate_hashes
             // If we're filtering to N candidate docs out of M total, selectivity ≈ N/M
             // We need to explore ~k/selectivity nodes on average to find k valid results
-            float selectivity = 1.0f;
+            float selectivity = 1.0F;
 
             if (!candidate_hashes.empty() && hnsw->size() > 0) {
                 // Rough estimate: each doc has ~N chunks on average (configurable)
                 size_t chunks_per_doc =
                     std::max<size_t>(1, config_.filter_candidate_chunks_per_doc);
                 size_t estimated_valid_chunks = candidate_hashes.size() * chunks_per_doc;
-                selectivity = std::min(1.0f, static_cast<float>(estimated_valid_chunks) /
+                selectivity = std::min(1.0F, static_cast<float>(estimated_valid_chunks) /
                                                  static_cast<float>(hnsw->size()));
             }
 
             // With metadata filters, assume another 50% reduction
             if (!metadata_filters.empty()) {
-                selectivity *= 0.5f;
+                selectivity *= 0.5F;
             }
 
             // Clamp selectivity to avoid division by zero or excessive exploration
-            selectivity = std::max(0.01f, selectivity);
+            selectivity = std::max(0.01F, selectivity);
 
             // Increase ef_search inversely proportional to selectivity
             // With 10% selectivity, we need ~10x more exploration
-            size_t selectivity_boost = static_cast<size_t>(1.0f / selectivity);
+            size_t selectivity_boost = static_cast<size_t>(1.0F / selectivity);
             ef_search = std::max(ef_search, k * selectivity_boost);
 
             // Also increase fetch_k to ensure we get enough results post-filter
-            fetch_k = std::max(k * 5, static_cast<size_t>(k / selectivity));
+            fetch_k = std::max(k * 5, static_cast<size_t>(static_cast<float>(k) / selectivity));
 
             // Cap at reasonable limits to avoid excessive computation
             ef_search = std::min(ef_search, std::max(size_t{500}, hnsw->size()));
@@ -891,8 +956,6 @@ public:
             spdlog::debug(
                 "[HNSW] Filtered search: k={}, selectivity={:.2f}, ef_search={}, fetch_k={}", k,
                 selectivity, ef_search, fetch_k);
-        } else {
-            ef_search = std::max(ef_search, k * 2);
         }
 
         auto results = hnsw->search_with_filter(query_span, fetch_k, ef_search, filter);
@@ -945,6 +1008,96 @@ public:
         }
 
         return records;
+    }
+
+    Result<std::vector<std::vector<VectorRecord>>>
+    searchSimilarBatch(const std::vector<std::vector<float>>& query_embeddings, size_t k,
+                       float similarity_threshold, size_t num_threads) {
+        if (query_embeddings.empty()) {
+            return std::vector<std::vector<VectorRecord>>{};
+        }
+
+        // Ensure all queries have the same dimension
+        size_t query_dim = query_embeddings[0].size();
+        for (const auto& q : query_embeddings) {
+            if (q.size() != query_dim) {
+                return Error{ErrorCode::InvalidArgument,
+                             "All query embeddings must have the same dimension"};
+            }
+        }
+
+        std::shared_lock lock(mutex_);
+
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        // Ensure HNSW is loaded (may upgrade to unique_lock)
+        {
+            lock.unlock();
+            std::unique_lock write_lock(mutex_);
+            ensureHnswLoadedUnlocked();
+            write_lock.unlock();
+            lock.lock();
+        }
+
+        // Find index for this dimension
+        auto it = hnsw_indices_.find(query_dim);
+        if (it == hnsw_indices_.end() || it->second->empty()) {
+            spdlog::warn("[HNSW] searchSimilarBatch: no index for dim={}", query_dim);
+            return std::vector<std::vector<VectorRecord>>(query_embeddings.size());
+        }
+
+        HNSWIndex* hnsw = it->second.get();
+
+        // Convert to spans for HNSW batch search
+        std::vector<std::span<const float>> query_spans;
+        query_spans.reserve(query_embeddings.size());
+        for (const auto& q : query_embeddings) {
+            query_spans.emplace_back(q.data(), q.size());
+        }
+
+        // Calculate ef_search adaptively based on corpus size
+        size_t ef_search = hnsw->recommended_ef_search(k, 0.95F);
+        ef_search = std::max(ef_search, config_.hnsw_ef_search);
+
+        spdlog::info(
+            "[HNSW] searchSimilarBatch: {} queries, dim={}, k={}, ef_search={}, threads={}",
+            query_embeddings.size(), query_dim, k, ef_search,
+            num_threads ? num_threads : std::thread::hardware_concurrency());
+
+        // Execute parallel batch search
+        auto batch_results = hnsw->search_batch(
+            std::span<const std::span<const float>>(query_spans.data(), query_spans.size()), k,
+            ef_search, num_threads);
+
+        // Convert HNSW results to VectorRecords
+        std::vector<std::vector<VectorRecord>> results;
+        results.reserve(batch_results.size());
+
+        for (const auto& hnsw_results : batch_results) {
+            std::vector<VectorRecord> records;
+            records.reserve(std::min(hnsw_results.size(), k));
+
+            for (const auto& [node_id, distance] : hnsw_results) {
+                if (records.size() >= k)
+                    break;
+
+                float similarity = 1.0f - distance;
+                if (similarity < similarity_threshold) {
+                    continue;
+                }
+
+                auto record_opt = getVectorByRowidUnlocked(static_cast<int64_t>(node_id));
+                if (record_opt) {
+                    record_opt->relevance_score = similarity;
+                    records.push_back(std::move(*record_opt));
+                }
+            }
+            results.push_back(std::move(records));
+        }
+
+        return results;
     }
 
     Result<std::optional<VectorRecord>> getVector(const std::string& chunk_id) {
@@ -1992,6 +2145,11 @@ private:
                     std::vector<float> embedding(num_floats);
                     std::memcpy(embedding.data(), blob, blob_size);
 
+                    // Skip zero-norm vectors during rebuild (they become dead-ends in HNSW)
+                    if (isZeroNormEmbedding(embedding)) {
+                        continue;
+                    }
+
                     std::span<const float> embedding_span(embedding.data(), embedding.size());
 
                     // Get or create index for this dimension
@@ -2151,12 +2309,27 @@ private:
             return it->second.get();
         }
 
-        // Create new HNSW index for this dimension
-        HNSWIndex::Config config;
-        config.M = config_.hnsw_m;
-        config.M_max = config_.hnsw_m * 2;
-        config.M_max_0 = config_.hnsw_m * 2;
-        config.ef_construction = config_.hnsw_ef_construction;
+        // Get corpus size for optimal HNSW configuration
+        // Query directly since we may not hold the lock in the same way as getVectorCount
+        size_t corpus_size = 0;
+        if (stmt_count_) {
+            sqlite3_reset(stmt_count_);
+            if (sqlite3_step(stmt_count_) == SQLITE_ROW) {
+                corpus_size = static_cast<size_t>(sqlite3_column_int64(stmt_count_, 0));
+            }
+        }
+
+        // Use corpus-aware config from sqlite-vec-cpp for optimal M values
+        // Higher dims (384+) get M=24, M_max=48, M_max_0=96 for better recall
+        HNSWIndex::Config config = HNSWIndex::Config::for_corpus(corpus_size, dim);
+
+        // Preserve user-configured ef_construction if higher than library default
+        config.ef_construction = std::max(config.ef_construction, config_.hnsw_ef_construction);
+
+        spdlog::info("[HNSW] Creating index for dim={} corpus_size={}: M={} M_max={} M_max_0={} "
+                     "ef_construction={}",
+                     dim, corpus_size, config.M, config.M_max, config.M_max_0,
+                     config.ef_construction);
 
         auto idx = std::make_unique<HNSWIndex>(config);
         auto* ptr = idx.get();
@@ -2272,6 +2445,12 @@ SqliteVecBackend::searchSimilar(const std::vector<float>& query_embedding, size_
                                 const std::map<std::string, std::string>& metadata_filters) {
     return impl_->searchSimilar(query_embedding, k, similarity_threshold, document_hash,
                                 candidate_hashes, metadata_filters);
+}
+
+Result<std::vector<std::vector<VectorRecord>>>
+SqliteVecBackend::searchSimilarBatch(const std::vector<std::vector<float>>& query_embeddings,
+                                     size_t k, float similarity_threshold, size_t num_threads) {
+    return impl_->searchSimilarBatch(query_embeddings, k, similarity_threshold, num_threads);
 }
 
 Result<std::optional<VectorRecord>> SqliteVecBackend::getVector(const std::string& chunk_id) {

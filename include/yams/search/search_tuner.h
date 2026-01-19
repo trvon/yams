@@ -164,23 +164,21 @@ struct TunedParams {
             break;
 
         case TuningState::SCIENTIFIC:
-            // For scientific corpora: use actual similarity scores, not rank-based fusion
-            // WEIGHTED_MAX takes the best score per document (no multi-component boost)
-            params.rrfK = 10; // Used in RRF score calculation
-            // Vector-heavy weighting for scientific corpora where queries are sentences
-            // and FTS5 AND semantics is too strict (papers, abstracts, claims)
-            params.textWeight = 0.20f;   // FTS5 AND often returns 0 for sentence queries
-            params.vectorWeight = 0.80f; // Primary signal - use actual cosine similarity
+            // For scientific/benchmark corpora: balanced text + vector fusion
+            // Text-dominant because FTS5 keyword matching is reliable when it works
+            // WEIGHTED_RECIPROCAL avoids COMB_MNZ's mnzBoost penalty which demotes
+            // documents found by only one component (common when vector search doesn't
+            // understand scientific terminology)
+            params.rrfK = 12;            // Low k for better top-rank discrimination
+            params.textWeight = 0.60f;   // Text as primary signal
+            params.vectorWeight = 0.35f; // Vector for semantic understanding
             params.entityVectorWeight = 0.00f;
             params.pathTreeWeight = 0.00f;
             params.kgWeight = 0.00f;
             params.tagWeight = 0.00f;
-            params.metadataWeight = 0.00f; // Disable metadata to avoid noise
-            // Lower similarity threshold for scientific text embeddings
-            params.similarityThreshold = 0.50f;
-            // WEIGHTED_MAX: takes max score per doc, prevents "hub" docs from dominating
-            // via multi-component consensus boost. Reranker will re-order top-K.
-            params.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_MAX;
+            params.metadataWeight = 0.05f;
+            params.similarityThreshold = 0.55f;
+            params.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
             break;
 
         case TuningState::MIXED:

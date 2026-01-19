@@ -136,8 +136,17 @@ Result<void> Statement::execute() {
             continue;
         }
         // Non-retryable error or max retries exceeded
-        return Error{ErrorCode::DatabaseError,
-                     "Failed to execute statement: " + std::string(sqlite3_errstr(rc))};
+        // Include SQL snippet for constraint failures to aid debugging
+        std::string errMsg = "Failed to execute statement: " + std::string(sqlite3_errstr(rc));
+        if (rc == SQLITE_CONSTRAINT && stmt_) {
+            const char* sql = sqlite3_sql(stmt_);
+            if (sql) {
+                // Include first 100 chars of SQL for context
+                std::string sqlSnippet(sql, std::min(strlen(sql), size_t{100}));
+                errMsg += " [SQL: " + sqlSnippet + (strlen(sql) > 100 ? "..." : "") + "]";
+            }
+        }
+        return Error{ErrorCode::DatabaseError, errMsg};
     }
     daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
     return Error{ErrorCode::DatabaseError, "Failed to execute statement: max retries exceeded"};

@@ -48,7 +48,7 @@ struct IndexConfig {
     // HNSW parameters
     size_t hnsw_m = 16;                // Number of connections per node
     size_t hnsw_ef_construction = 200; // Construction time accuracy
-    size_t hnsw_ef_search = 50;        // Search time accuracy
+    size_t hnsw_ef_search = 100;       // Search time accuracy (90% recall baseline)
     size_t hnsw_seed = 100;            // Random seed for level assignment
 
     // IVF parameters

@@ -4,7 +4,7 @@
  *
  * Integration test coverage focusing on:
  * - Multi-component search (FTS5, vector, symbol, KG, path tree)
- * - Fusion strategies (WEIGHTED_SUM, RRF, BORDA_COUNT, WEIGHTED_RECIPROCAL)
+ * - Fusion strategies (WEIGHTED_SUM, RECIPROCAL_RANK, WEIGHTED_RECIPROCAL, COMB_MNZ)
  * - Fallback scenarios (degraded mode, timeouts)
  * - Real component integration (actual indexes, engines)
  * - Performance characteristics

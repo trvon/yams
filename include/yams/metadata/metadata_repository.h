@@ -752,14 +752,20 @@ private:
             // Check if it's a lock error that we should retry
             bool isLockError =
                 result.error().message.find("database is locked") != std::string::npos;
-            if (!isLockError || attempt == kMaxRetries - 1) {
-                // Non-lock error or final attempt - report and return error
+            // Constraint failures are not retryable - don't waste time
+            bool isConstraintError =
+                result.error().message.find("constraint failed") != std::string::npos;
+
+            if (!isLockError || isConstraintError || attempt == kMaxRetries - 1) {
+                // Non-lock error, constraint error, or final attempt - report and return error
                 if (isLockError) {
                     daemon::TuneAdvisor::reportDbLockError();
                 }
-                if (metadata_trace_enabled()) {
+                // Always log operation context for constraint errors (helps debugging)
+                auto op = current_metadata_op();
+                if (isConstraintError || metadata_trace_enabled()) {
                     spdlog::warn("MetadataRepository::executeQuery op='{}' error: {}",
-                                 current_metadata_op(), result.error().message);
+                                 op.empty() ? "(unknown)" : op, result.error().message);
                 }
                 spdlog::error("MetadataRepository::executeQuery connection error: {}",
                               result.error().message);

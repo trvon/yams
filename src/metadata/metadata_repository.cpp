@@ -1128,25 +1128,13 @@ Result<void> indexDocumentContentImpl(Database& db, int64_t documentId, const st
         }
     }
 
-    // Delete existing entry first (FTS5 doesn't support ON CONFLICT well)
-    auto deleteStmt = db.prepare("DELETE FROM documents_fts WHERE rowid = ?");
-    if (!deleteStmt)
-        return deleteStmt.error();
-
-    Statement deleteS = std::move(deleteStmt).value();
-    auto deleteBind = deleteS.bind(1, documentId);
-    if (!deleteBind)
-        return deleteBind.error();
-    auto deleteResult = deleteS.execute();
-    if (!deleteResult)
-        return deleteResult.error();
-
     const std::string sanitizedContent = common::sanitizeUtf8(content);
     const std::string sanitizedTitle = common::sanitizeUtf8(title);
 
+    // Use INSERT OR REPLACE for atomic upsert (avoids race condition in delete-then-insert)
     // Note: content_type removed from FTS5 in migration v18 - never used in MATCH queries
     auto stmtResult = db.prepare(R"(
-             INSERT INTO documents_fts (rowid, content, title)
+             INSERT OR REPLACE INTO documents_fts (rowid, content, title)
              VALUES (?, ?, ?)
          )");
 
@@ -1843,8 +1831,10 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
         if (const char* s = std::getenv("YAMS_FTS_NL_MIN_RESULTS"); s && *s) {
             nlMinResults = std::max(0, std::atoi(s));
         }
-        const bool useNlFallback = !(std::getenv("YAMS_FTS_NL_OR_FALLBACK") &&
-                                     std::string(std::getenv("YAMS_FTS_NL_OR_FALLBACK")) == "0");
+        // OR fallback disabled by default - hurts precision for scientific/benchmark queries
+        // Set YAMS_FTS_NL_OR_FALLBACK=1 to enable if recall is more important than precision
+        const bool useNlFallback = std::getenv("YAMS_FTS_NL_OR_FALLBACK") &&
+                                   std::string(std::getenv("YAMS_FTS_NL_OR_FALLBACK")) == "1";
         const bool isAdvancedQuery = hasAdvancedFts5Operators(query);
         bool usedNaturalLanguageQuery = false;
         if (!isAdvancedQuery) {
@@ -2093,7 +2083,8 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
             spdlog::debug("FTS5 search failed for query '{}', falling back to fuzzy search", query);
 
             // Use fuzzy search as fallback (note: fuzzy search doesn't support offset)
-            auto fuzzyResults = fuzzySearch(query, 0.3, limit);
+            // Pass docIds to preserve tag/path filters
+            auto fuzzyResults = fuzzySearch(query, 0.3, limit, docIds);
             if (fuzzyResults) {
                 results = fuzzyResults.value();
                 // Add a note in the error message that we fell back to fuzzy search
@@ -3245,11 +3236,25 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatus(int64_t documentI
             return Error{ErrorCode::NotFound, "Document not found"};
         }
 
+        // Ensure model_id exists in vector_models (FK constraint)
+        if (!modelId.empty()) {
+            auto ensureModelStmt = db.prepare(R"(
+                INSERT OR IGNORE INTO vector_models (model_id, model_name, embedding_dim)
+                VALUES (?, ?, 0)
+            )");
+            if (ensureModelStmt) {
+                auto& mstmt = ensureModelStmt.value();
+                mstmt.bind(1, modelId);
+                mstmt.bind(2, modelId); // Use model_id as name if not registered
+                (void)mstmt.execute();
+            }
+        }
+
         // Insert or update the embedding status
         auto updateStmt = db.prepare(R"(
                 INSERT INTO document_embeddings_status (document_id, has_embedding, model_id, updated_at)
                 VALUES (?, ?, ?, unixepoch())
-                ON CONFLICT(document_id) DO UPDATE SET 
+                ON CONFLICT(document_id) DO UPDATE SET
                     has_embedding = excluded.has_embedding,
                     model_id = excluded.model_id,
                     updated_at = excluded.updated_at
@@ -3307,11 +3312,25 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatusByHash(const std::
 
         int64_t documentId = stmt.getInt64(0);
 
+        // Ensure model_id exists in vector_models (FK constraint)
+        if (!modelId.empty()) {
+            auto ensureModelStmt = db.prepare(R"(
+                INSERT OR IGNORE INTO vector_models (model_id, model_name, embedding_dim)
+                VALUES (?, ?, 0)
+            )");
+            if (ensureModelStmt) {
+                auto& mstmt = ensureModelStmt.value();
+                mstmt.bind(1, modelId);
+                mstmt.bind(2, modelId); // Use model_id as name if not registered
+                (void)mstmt.execute();
+            }
+        }
+
         // Insert or update the embedding status
         auto updateStmt = db.prepare(R"(
                 INSERT INTO document_embeddings_status (document_id, has_embedding, model_id, updated_at)
                 VALUES (?, ?, ?, unixepoch())
-                ON CONFLICT(document_id) DO UPDATE SET 
+                ON CONFLICT(document_id) DO UPDATE SET
                     has_embedding = excluded.has_embedding,
                     model_id = excluded.model_id,
                     updated_at = excluded.updated_at
@@ -3358,6 +3377,20 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
 #endif
             if (!beginResult)
                 return beginResult.error();
+
+            // Ensure model_id exists in vector_models (FK constraint) - once per batch
+            if (!modelId.empty()) {
+                auto ensureModelStmt = db.prepare(R"(
+                    INSERT OR IGNORE INTO vector_models (model_id, model_name, embedding_dim)
+                    VALUES (?, ?, 0)
+                )");
+                if (ensureModelStmt) {
+                    auto& mstmt = ensureModelStmt.value();
+                    mstmt.bind(1, modelId);
+                    mstmt.bind(2, modelId); // Use model_id as name if not registered
+                    (void)mstmt.execute();
+                }
+            }
 
             auto lookupStmt = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
             if (!lookupStmt) {
@@ -3703,28 +3736,10 @@ Result<PathTreeNode> MetadataRepository::insertPathTreeNode(int64_t parentId,
 
 Result<void> MetadataRepository::incrementPathTreeDocCount(int64_t nodeId, int64_t documentId) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        // Check whether the (node, document) pair already exists.
-        auto checkStmtResult = db.prepare(
-            "SELECT 1 FROM path_tree_node_documents WHERE node_id = ? AND document_id = ?");
-        if (!checkStmtResult)
-            return checkStmtResult.error();
-        auto checkStmt = std::move(checkStmtResult).value();
-        if (auto bindNode = checkStmt.bind(1, nodeId); !bindNode)
-            return bindNode.error();
-        if (auto bindDoc = checkStmt.bind(2, documentId); !bindDoc)
-            return bindDoc.error();
-
-        auto stepResult = checkStmt.step();
-        if (!stepResult)
-            return stepResult.error();
-        if (stepResult.value()) {
-            // Already associated; nothing to update.
-            return Result<void>();
-        }
-
-        // Insert relationship and increment doc count.
-        auto insertStmtResult =
-            db.prepare("INSERT INTO path_tree_node_documents (node_id, document_id) VALUES (?, ?)");
+        // Use INSERT OR IGNORE to handle concurrent inserts atomically.
+        // This avoids the race condition in check-then-insert pattern.
+        auto insertStmtResult = db.prepare(
+            "INSERT OR IGNORE INTO path_tree_node_documents (node_id, document_id) VALUES (?, ?)");
         if (!insertStmtResult)
             return insertStmtResult.error();
         auto insertStmt = std::move(insertStmtResult).value();
@@ -3734,6 +3749,12 @@ Result<void> MetadataRepository::incrementPathTreeDocCount(int64_t nodeId, int64
             return bindDoc.error();
         if (auto execResult = insertStmt.execute(); !execResult)
             return execResult.error();
+
+        // Only increment doc_count if a new row was actually inserted
+        // (changes() returns 0 if INSERT was ignored due to conflict)
+        if (db.changes() == 0) {
+            return Result<void>(); // Already associated, nothing to update
+        }
 
         auto updateStmtResult =
             db.prepare("UPDATE path_tree_nodes "

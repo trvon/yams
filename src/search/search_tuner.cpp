@@ -27,7 +27,7 @@ SearchEngineConfig SearchTuner::getConfig() const {
     config.enableProfiling = false;
 
     // fusionStrategy is set by params_.applyTo() based on corpus type
-    // (e.g., TEXT_ANCHOR for SCIENTIFIC corpora, COMB_MNZ for others)
+    // (COMB_MNZ is used for most corpus types)
 
     return config;
 }

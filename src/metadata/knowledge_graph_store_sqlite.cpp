@@ -386,7 +386,10 @@ public:
     Result<std::int64_t> addAlias(const KGAlias& alias) override {
         return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
             auto stmtR = db.prepare(
-                "INSERT INTO kg_aliases (node_id, alias, source, confidence) VALUES (?, ?, ?, ?)");
+                "INSERT INTO kg_aliases (node_id, alias, source, confidence) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(node_id, alias) DO UPDATE SET "
+                "  source = COALESCE(excluded.source, kg_aliases.source), "
+                "  confidence = MAX(excluded.confidence, kg_aliases.confidence)");
             if (!stmtR)
                 return stmtR.error();
             auto stmt = std::move(stmtR).value();
@@ -422,8 +425,12 @@ public:
             return Result<void>();
         return pool_->withConnection([&](Database& db) -> Result<void> {
             return db.transaction([&]() -> Result<void> {
-                auto stmtR = db.prepare("INSERT INTO kg_aliases (node_id, alias, source, "
-                                        "confidence) VALUES (?, ?, ?, ?)");
+                auto stmtR =
+                    db.prepare("INSERT INTO kg_aliases (node_id, alias, source, "
+                               "confidence) VALUES (?, ?, ?, ?) "
+                               "ON CONFLICT(node_id, alias) DO UPDATE SET "
+                               "  source = COALESCE(excluded.source, kg_aliases.source), "
+                               "  confidence = MAX(excluded.confidence, kg_aliases.confidence)");
                 if (!stmtR)
                     return stmtR.error();
                 auto stmt = std::move(stmtR).value();
@@ -2341,7 +2348,10 @@ public:
         Database& db = **conn_;
 
         auto stmtR = db.prepareCached(
-            "INSERT INTO kg_aliases (node_id, alias, source, confidence) VALUES (?, ?, ?, ?)");
+            "INSERT INTO kg_aliases (node_id, alias, source, confidence) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(node_id, alias) DO UPDATE SET "
+            "  source = COALESCE(excluded.source, kg_aliases.source), "
+            "  confidence = MAX(excluded.confidence, kg_aliases.confidence)");
         if (!stmtR)
             return stmtR.error();
         auto& stmt = *stmtR.value();

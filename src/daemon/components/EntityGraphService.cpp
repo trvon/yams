@@ -2,14 +2,15 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
-#include <yams/daemon/components/KGWriteQueue.h>
-#include <yams/daemon/components/TuneAdvisor.h>
 #include <chrono>
 #include <filesystem>
 #include <sstream>
 #include <unordered_map>
 #include <boost/asio.hpp>
+#include <yams/common/utf8_utils.h>
+#include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/resource/abi_entity_extractor_adapter.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
@@ -238,12 +239,12 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
 
         yams::metadata::KGNode docNode;
         docNode.nodeKey = docNodeKey;
-        docNode.label = job.filePath;
+        docNode.label = common::sanitizeUtf8(job.filePath);
         docNode.type = "document";
         nlohmann::json docProps;
         docProps["hash"] = job.documentHash;
-        docProps["path"] = job.filePath;
-        docProps["language"] = job.language;
+        docProps["path"] = common::sanitizeUtf8(job.filePath);
+        docProps["language"] = common::sanitizeUtf8(job.language);
         docNode.properties = docProps.dump();
         batch->nodes.push_back(std::move(docNode));
     }
@@ -255,12 +256,13 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
 
         yams::metadata::KGNode fileNode;
         fileNode.nodeKey = fileNodeKey;
-        fileNode.label = job.filePath;
+        fileNode.label = common::sanitizeUtf8(job.filePath);
         fileNode.type = "file";
         nlohmann::json fileProps;
-        fileProps["path"] = job.filePath;
-        fileProps["language"] = job.language;
-        fileProps["basename"] = std::filesystem::path(job.filePath).filename().string();
+        fileProps["path"] = common::sanitizeUtf8(job.filePath);
+        fileProps["language"] = common::sanitizeUtf8(job.language);
+        fileProps["basename"] =
+            common::sanitizeUtf8(std::filesystem::path(job.filePath).filename().string());
         if (hasSnapshot) {
             fileProps["current_hash"] = job.documentHash;
         }
@@ -278,10 +280,10 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
 
             yams::metadata::KGNode dirNode;
             dirNode.nodeKey = dirNodeKey;
-            dirNode.label = dirPath;
+            dirNode.label = common::sanitizeUtf8(dirPath);
             dirNode.type = "directory";
             nlohmann::json dirProps;
-            dirProps["path"] = dirPath;
+            dirProps["path"] = common::sanitizeUtf8(dirPath);
             dirNode.properties = dirProps.dump();
             batch->nodes.push_back(std::move(dirNode));
         }
@@ -1570,12 +1572,12 @@ bool EntityGraphService::populateKnowledgeGraphNLDeferred(
 
         yams::metadata::KGNode docNode;
         docNode.nodeKey = docNodeKey;
-        docNode.label = job.filePath;
+        docNode.label = common::sanitizeUtf8(job.filePath);
         docNode.type = "document";
         nlohmann::json docProps;
         docProps["hash"] = job.documentHash;
-        docProps["path"] = job.filePath;
-        docProps["language"] = job.language;
+        docProps["path"] = common::sanitizeUtf8(job.filePath);
+        docProps["language"] = common::sanitizeUtf8(job.language);
         docNode.properties = docProps.dump();
         batch->nodes.push_back(std::move(docNode));
     }
@@ -1587,13 +1589,14 @@ bool EntityGraphService::populateKnowledgeGraphNLDeferred(
 
         yams::metadata::KGNode fileNode;
         fileNode.nodeKey = fileNodeKey;
-        fileNode.label = job.filePath;
+        fileNode.label = common::sanitizeUtf8(job.filePath);
         fileNode.type = "file";
         nlohmann::json fileProps;
-        fileProps["path"] = job.filePath;
-        fileProps["language"] = job.language;
+        fileProps["path"] = common::sanitizeUtf8(job.filePath);
+        fileProps["language"] = common::sanitizeUtf8(job.language);
         if (!job.filePath.empty()) {
-            fileProps["basename"] = std::filesystem::path(job.filePath).filename().string();
+            fileProps["basename"] =
+                common::sanitizeUtf8(std::filesystem::path(job.filePath).filename().string());
         }
         if (!job.documentHash.empty()) {
             fileProps["current_hash"] = job.documentHash;
@@ -1609,8 +1612,9 @@ bool EntityGraphService::populateKnowledgeGraphNLDeferred(
     for (size_t i = 0; i < result->entity_count; ++i) {
         const auto& ent = result->entities[i];
 
-        std::string text = ent.text ? std::string(ent.text) : "";
-        std::string type = ent.type ? std::string(ent.type) : "entity";
+        // Sanitize entity text to ensure valid UTF-8 (prevents json.exception.type_error.316)
+        std::string text = ent.text ? common::sanitizeUtf8(ent.text) : "";
+        std::string type = ent.type ? common::sanitizeUtf8(ent.type) : "entity";
 
         // Normalize text for canonical matching
         std::string normalizedText = text;
@@ -1629,7 +1633,7 @@ bool EntityGraphService::populateKnowledgeGraphNLDeferred(
         props["entity_text"] = text;
         props["entity_type"] = type;
         props["confidence"] = ent.confidence;
-        props["first_seen_file"] = job.filePath;
+        props["first_seen_file"] = common::sanitizeUtf8(job.filePath);
         props["last_seen"] = now;
         if (!job.documentHash.empty()) {
             props["first_seen_hash"] = job.documentHash;
@@ -1749,8 +1753,9 @@ yams::Result<EntityGraphService::EntityNodeBatch> EntityGraphService::createEnti
     for (size_t i = 0; i < result->entity_count; ++i) {
         const auto& ent = result->entities[i];
 
-        std::string text = ent.text ? std::string(ent.text) : "";
-        std::string type = ent.type ? std::string(ent.type) : "entity";
+        // Sanitize entity text to ensure valid UTF-8 (prevents json.exception.type_error.316)
+        std::string text = ent.text ? common::sanitizeUtf8(ent.text) : "";
+        std::string type = ent.type ? common::sanitizeUtf8(ent.type) : "entity";
 
         // Create canonical node key: type:normalized_text
         // Normalize text for canonical matching (lowercase, trim)
@@ -1769,7 +1774,7 @@ yams::Result<EntityGraphService::EntityNodeBatch> EntityGraphService::createEnti
         props["entity_text"] = text;
         props["entity_type"] = type;
         props["confidence"] = ent.confidence;
-        props["first_seen_file"] = job.filePath;
+        props["first_seen_file"] = common::sanitizeUtf8(job.filePath);
         props["last_seen"] = now;
         if (!job.documentHash.empty()) {
             props["first_seen_hash"] = job.documentHash;
@@ -1805,7 +1810,7 @@ yams::Result<EntityGraphService::EntityNodeBatch> EntityGraphService::createEnti
 
         yams::metadata::KGAlias alias;
         alias.nodeId = nodeBatch.nodeIds[i];
-        alias.alias = std::string(ent.text);
+        alias.alias = common::sanitizeUtf8(ent.text);
         alias.source = "nl_entity_text";
         alias.confidence = ent.confidence;
         aliases.push_back(alias);

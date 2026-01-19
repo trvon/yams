@@ -230,6 +230,13 @@ public:
         std::string filePath;
         std::string extension;
     };
+    // Async GLiNER title extraction job - decoupled from main extraction pipeline
+    struct TitleExtractionJob {
+        std::string hash;
+        int64_t documentId{-1};
+        std::string textSnippet;   // First N chars for GLiNER inference
+        std::string fallbackTitle; // Filename to use if GLiNER fails
+    };
     struct StoreDocumentTask {
         AddDocumentRequest request;
     };
@@ -283,6 +290,9 @@ private:
     std::atomic<std::uint64_t> entityQueued_{0};
     std::atomic<std::uint64_t> entityDropped_{0};
     std::atomic<std::uint64_t> entityConsumed_{0};
+    std::atomic<std::uint64_t> titleQueued_{0};
+    std::atomic<std::uint64_t> titleDropped_{0};
+    std::atomic<std::uint64_t> titleConsumed_{0};
 
 public:
     // Counter helpers
@@ -325,6 +335,9 @@ public:
     void incEntityQueued() { entityQueued_.fetch_add(1, std::memory_order_relaxed); }
     void incEntityDropped() { entityDropped_.fetch_add(1, std::memory_order_relaxed); }
     void incEntityConsumed() { entityConsumed_.fetch_add(1, std::memory_order_relaxed); }
+    void incTitleQueued() { titleQueued_.fetch_add(1, std::memory_order_relaxed); }
+    void incTitleDropped() { titleDropped_.fetch_add(1, std::memory_order_relaxed); }
+    void incTitleConsumed() { titleConsumed_.fetch_add(1, std::memory_order_relaxed); }
 
     std::uint64_t embedQueued() const { return embedQueued_.load(std::memory_order_relaxed); }
     std::uint64_t embedDropped() const { return embedDropped_.load(std::memory_order_relaxed); }
@@ -359,6 +372,9 @@ public:
     std::uint64_t entityQueued() const { return entityQueued_.load(std::memory_order_relaxed); }
     std::uint64_t entityDropped() const { return entityDropped_.load(std::memory_order_relaxed); }
     std::uint64_t entityConsumed() const { return entityConsumed_.load(std::memory_order_relaxed); }
+    std::uint64_t titleQueued() const { return titleQueued_.load(std::memory_order_relaxed); }
+    std::uint64_t titleDropped() const { return titleDropped_.load(std::memory_order_relaxed); }
+    std::uint64_t titleConsumed() const { return titleConsumed_.load(std::memory_order_relaxed); }
 };
 
 } // namespace yams::daemon

@@ -141,16 +141,13 @@ struct SearchEngineConfig {
     // Benchmarking support
     bool enableProfiling = false;
 
-    // Result fusion strategy
+    // Result fusion strategy (4 strategies for simplicity)
     enum class FusionStrategy {
-        WEIGHTED_SUM,        // Sum of weighted scores
-        RECIPROCAL_RANK,     // Reciprocal Rank Fusion
-        BORDA_COUNT,         // Borda count voting
-        WEIGHTED_RECIPROCAL, // Weighted RRF (custom)
-        COMB_MNZ,            // CombMNZ: score * num_components (recall-focused)
-        TEXT_ANCHOR,         // Text-anchored: FTS5 as primary, vector for re-ranking only
-        WEIGHTED_MAX         // Max of weighted scores (no multi-component boost)
-    } fusionStrategy = FusionStrategy::WEIGHTED_RECIPROCAL; // Weighted RRF with score boost
+        WEIGHTED_SUM,                            // Sum of weighted scores (simple baseline)
+        RECIPROCAL_RANK,                         // Standard Reciprocal Rank Fusion
+        WEIGHTED_RECIPROCAL,                     // RRF with score boost (good default)
+        COMB_MNZ                                 // CombMNZ: score * num_components (recall-focused)
+    } fusionStrategy = FusionStrategy::COMB_MNZ; // Default: recall-focused
 
     /// Convert FusionStrategy to string for logging/debugging
     [[nodiscard]] static constexpr const char*
@@ -160,16 +157,10 @@ struct SearchEngineConfig {
                 return "WEIGHTED_SUM";
             case FusionStrategy::RECIPROCAL_RANK:
                 return "RECIPROCAL_RANK";
-            case FusionStrategy::BORDA_COUNT:
-                return "BORDA_COUNT";
             case FusionStrategy::WEIGHTED_RECIPROCAL:
                 return "WEIGHTED_RECIPROCAL";
             case FusionStrategy::COMB_MNZ:
                 return "COMB_MNZ";
-            case FusionStrategy::TEXT_ANCHOR:
-                return "TEXT_ANCHOR";
-            case FusionStrategy::WEIGHTED_MAX:
-                return "WEIGHTED_MAX";
         }
         return "UNKNOWN";
     }
@@ -427,11 +418,8 @@ public:
 private:
     std::vector<SearchResult> fuseWeightedSum(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseReciprocalRank(const std::vector<ComponentResult>& results);
-    std::vector<SearchResult> fuseBordaCount(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseWeightedReciprocal(const std::vector<ComponentResult>& results);
     std::vector<SearchResult> fuseCombMNZ(const std::vector<ComponentResult>& results);
-    std::vector<SearchResult> fuseTextAnchor(const std::vector<ComponentResult>& results);
-    std::vector<SearchResult> fuseWeightedMax(const std::vector<ComponentResult>& results);
 
     template <typename ScoreFunc>
     std::vector<SearchResult> fuseSinglePass(const std::vector<ComponentResult>& results,
@@ -443,24 +431,33 @@ private:
 };
 
 // Helper to accumulate a component score into the appropriate breakdown field
+// Uses a single switch for clarity and maintainability
 inline void accumulateComponentScore(SearchResult& r, ComponentResult::Source source,
                                      double contribution) {
-    // Map source names to breakdown fields
-    if (isVectorComponent(source)) {
-        r.vectorScore = r.vectorScore.value_or(0.0) + contribution;
-    } else if (source == ComponentResult::Source::Text) {
-        r.keywordScore = r.keywordScore.value_or(0.0) + contribution;
-    } else if (source == ComponentResult::Source::KnowledgeGraph) {
-        r.kgScore = r.kgScore.value_or(0.0) + contribution;
-    } else if (source == ComponentResult::Source::PathTree) {
-        r.pathScore = r.pathScore.value_or(0.0) + contribution;
-    } else if (source == ComponentResult::Source::Tag ||
-               source == ComponentResult::Source::Metadata) {
-        r.tagScore = r.tagScore.value_or(0.0) + contribution;
-    } else if (source == ComponentResult::Source::Symbol) {
-        r.symbolScore = r.symbolScore.value_or(0.0) + contribution;
+    switch (source) {
+        case ComponentResult::Source::Vector:
+        case ComponentResult::Source::EntityVector:
+            r.vectorScore = r.vectorScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::Text:
+            r.keywordScore = r.keywordScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::KnowledgeGraph:
+            r.kgScore = r.kgScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::PathTree:
+            r.pathScore = r.pathScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::Tag:
+        case ComponentResult::Source::Metadata:
+            r.tagScore = r.tagScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::Symbol:
+            r.symbolScore = r.symbolScore.value_or(0.0) + contribution;
+            break;
+        default:
+            break;
     }
-    // Unknown sources still contribute to total score but don't get a breakdown field
 }
 
 // Template implementation - must be in header

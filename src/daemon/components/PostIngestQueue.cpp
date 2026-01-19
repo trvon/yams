@@ -1,6 +1,8 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cctype>
+#include <string_view>
 #include <thread>
 #include <unordered_set>
 #include <boost/asio.hpp>
@@ -26,6 +28,184 @@
 using yams::extraction::util::extractDocumentText;
 
 namespace yams::daemon {
+namespace {
+constexpr size_t kMaxTitleLen = 120;
+constexpr size_t kMaxGlinerChars = 2000;
+constexpr float kMinTitleConfidence = 0.55f;
+
+// Check if GLiNER title extraction is disabled via environment variable
+// Set YAMS_DISABLE_GLINER_TITLES=1 for faster ingestion at the cost of title quality
+inline bool isGlinerTitleExtractionDisabled() {
+    static const bool disabled = []() {
+        const char* env = std::getenv("YAMS_DISABLE_GLINER_TITLES");
+        return env && std::string(env) == "1";
+    }();
+    return disabled;
+}
+
+std::string trimCopy(std::string_view input) {
+    size_t start = 0;
+    size_t end = input.size();
+    while (start < end && std::isspace(static_cast<unsigned char>(input[start]))) {
+        ++start;
+    }
+    while (end > start && std::isspace(static_cast<unsigned char>(input[end - 1]))) {
+        --end;
+    }
+    return std::string(input.substr(start, end - start));
+}
+
+std::string collapseWhitespace(std::string s) {
+    std::string out;
+    out.reserve(s.size());
+    bool inSpace = false;
+    for (unsigned char c : s) {
+        if (std::isspace(c)) {
+            if (!inSpace) {
+                out.push_back(' ');
+                inSpace = true;
+            }
+        } else {
+            out.push_back(static_cast<char>(c));
+            inSpace = false;
+        }
+    }
+    return out;
+}
+
+std::string normalizeTitleCandidate(std::string s) {
+    s = trimCopy(s);
+    if (s.empty()) {
+        return s;
+    }
+    s = collapseWhitespace(std::move(s));
+    if (s.size() > kMaxTitleLen) {
+        s.resize(kMaxTitleLen);
+    }
+    return s;
+}
+
+std::string stripCommentPrefix(std::string_view line) {
+    std::string s = trimCopy(line);
+    if (s.rfind("//", 0) == 0) {
+        return trimCopy(std::string_view(s).substr(2));
+    }
+    if (s.rfind("#", 0) == 0) {
+        return trimCopy(std::string_view(s).substr(1));
+    }
+    if (s.rfind("--", 0) == 0) {
+        return trimCopy(std::string_view(s).substr(2));
+    }
+    if (s.rfind("/*", 0) == 0) {
+        s = trimCopy(std::string_view(s).substr(2));
+    }
+    if (s.rfind("*", 0) == 0) {
+        return trimCopy(std::string_view(s).substr(1));
+    }
+    if (s.rfind("*/", 0) == 0) {
+        return trimCopy(std::string_view(s).substr(2));
+    }
+    return s;
+}
+
+std::string extractHtmlTitle(std::string_view text) {
+    const size_t maxScan = std::min(text.size(), static_cast<size_t>(4096));
+    std::string lower;
+    lower.reserve(maxScan);
+    for (size_t i = 0; i < maxScan; ++i) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(text[i]))));
+    }
+    const std::string_view lowerView(lower);
+    const auto openPos = lowerView.find("<title");
+    if (openPos == std::string_view::npos) {
+        return {};
+    }
+    const auto gtPos = lowerView.find('>', openPos);
+    if (gtPos == std::string_view::npos) {
+        return {};
+    }
+    const auto closePos = lowerView.find("</title>", gtPos);
+    if (closePos == std::string_view::npos) {
+        return {};
+    }
+    const auto start = gtPos + 1;
+    const auto len = closePos - start;
+    return normalizeTitleCandidate(std::string(text.substr(start, len)));
+}
+
+std::string extractMarkdownHeading(std::string_view text) {
+    size_t pos = 0;
+    size_t lines = 0;
+    const size_t maxLines = 200;
+    while (pos < text.size() && lines < maxLines) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string_view::npos) {
+            end = text.size();
+        }
+        auto line = trimCopy(text.substr(pos, end - pos));
+        if (!line.empty()) {
+            if (line.rfind("#", 0) == 0) {
+                size_t i = 0;
+                while (i < line.size() && line[i] == '#') {
+                    ++i;
+                }
+                auto heading = trimCopy(std::string_view(line).substr(i));
+                return normalizeTitleCandidate(std::move(heading));
+            }
+        }
+        pos = end + 1;
+        ++lines;
+    }
+    return {};
+}
+
+std::string extractCodeSignature(std::string_view text) {
+    size_t pos = 0;
+    size_t lines = 0;
+    const size_t maxLines = 200;
+    while (pos < text.size() && lines < maxLines) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string_view::npos) {
+            end = text.size();
+        }
+        auto rawLine = text.substr(pos, end - pos);
+        auto line = stripCommentPrefix(rawLine);
+        if (!line.empty()) {
+            static constexpr std::string_view kPrefixes[] = {
+                "class ",    "struct ", "interface ", "enum ",    "def ",
+                "function ", "fn ",     "module ",    "package ", "namespace "};
+            for (const auto& prefix : kPrefixes) {
+                if (line.rfind(prefix, 0) == 0) {
+                    return normalizeTitleCandidate(std::move(line));
+                }
+            }
+        }
+        pos = end + 1;
+        ++lines;
+    }
+    return {};
+}
+
+std::string extractFirstMeaningfulLine(std::string_view text) {
+    size_t pos = 0;
+    size_t lines = 0;
+    const size_t maxLines = 200;
+    while (pos < text.size() && lines < maxLines) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string_view::npos) {
+            end = text.size();
+        }
+        auto rawLine = text.substr(pos, end - pos);
+        auto line = stripCommentPrefix(rawLine);
+        if (!line.empty()) {
+            return normalizeTitleCandidate(std::move(line));
+        }
+        pos = end + 1;
+        ++lines;
+    }
+    return {};
+}
+} // namespace
 
 // Dynamic concurrency limits from TuneAdvisor
 std::size_t PostIngestQueue::maxExtractionConcurrent() {
@@ -42,6 +222,12 @@ std::size_t PostIngestQueue::maxSymbolConcurrent() {
 
 std::size_t PostIngestQueue::maxEntityConcurrent() {
     return static_cast<std::size_t>(TuneAdvisor::postEntityConcurrent());
+}
+
+std::size_t PostIngestQueue::maxTitleConcurrent() {
+    // Title extraction shares ONNX resources with embeddings, so limit concurrency
+    // to allow both to run in parallel without starving each other
+    return static_cast<std::size_t>(std::max(1u, TuneAdvisor::postEntityConcurrent() / 2));
 }
 
 PostIngestQueue::PostIngestQueue(
@@ -73,17 +259,21 @@ void PostIngestQueue::start() {
         auto entityExec =
             entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor();
         boost::asio::co_spawn(entityExec, entityPoller(), boost::asio::detached);
+        spdlog::info("[PostIngestQueue] Spawning titlePoller coroutine...");
+        boost::asio::co_spawn(coordinator_->getExecutor(), titlePoller(), boost::asio::detached);
 
         constexpr int maxWaitMs = 100;
-        for (int i = 0; i < maxWaitMs && (!started_.load() || !kgStarted_.load() ||
-                                          !symbolStarted_.load() || !entityStarted_.load());
+        for (int i = 0;
+             i < maxWaitMs && (!started_.load() || !kgStarted_.load() || !symbolStarted_.load() ||
+                               !entityStarted_.load() || !titleStarted_.load());
              ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        spdlog::info(
-            "[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={}, entity={})",
-            started_.load(), kgStarted_.load(), symbolStarted_.load(), entityStarted_.load());
+        spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={}, "
+                     "entity={}, title={})",
+                     started_.load(), kgStarted_.load(), symbolStarted_.load(),
+                     entityStarted_.load(), titleStarted_.load());
     } else {
         spdlog::warn("[PostIngestQueue] start() skipped because stop_=true");
     }
@@ -300,7 +490,7 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         for (const auto& prepared : successes) {
             metadata::BatchContentEntry entry;
             entry.documentId = prepared.documentId;
-            entry.title = prepared.fileName;
+            entry.title = prepared.title.empty() ? prepared.fileName : prepared.title;
             entry.contentText = prepared.extractedText;
             entry.mimeType = prepared.mimeType;
             entry.extractionMethod = "post_ingest";
@@ -324,6 +514,12 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         } else {
             spdlog::info("[PostIngestQueue] Batch DB write succeeded for {} documents",
                          entries.size());
+            for (const auto& prepared : successes) {
+                if (!prepared.title.empty()) {
+                    (void)meta_->setMetadata(prepared.documentId, "title",
+                                             metadata::MetadataValue(prepared.title));
+                }
+            }
         }
     }
 
@@ -357,6 +553,10 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         if (prepared.shouldDispatchEntity) {
             dispatchToEntityChannel(prepared.hash, prepared.documentId, prepared.fileName,
                                     prepared.extension);
+        }
+        if (prepared.shouldDispatchTitle) {
+            dispatchToTitleChannel(prepared.hash, prepared.documentId, prepared.titleTextSnippet,
+                                   prepared.fileName);
         }
         embeddingHashes.push_back(prepared.hash);
         if (embeddingHashes.size() >= embedBatchThreshold) {
@@ -648,6 +848,22 @@ PostIngestQueue::prepareMetadataEntry(
     prepared.language =
         yams::extraction::LanguageDetector::detectLanguage(prepared.extractedText, &langConfidence);
 
+    prepared.title = deriveTitle(prepared.extractedText, prepared.fileName, prepared.mimeType,
+                                 prepared.extension);
+
+    // Title extraction: if heuristics produced a weak title (filename fallback),
+    // dispatch async GLiNER job to derive a better title
+    if (titleExtractor_ && !isGlinerTitleExtractionDisabled()) {
+        // Dispatch if title equals filename (weakest fallback)
+        if (prepared.title == prepared.fileName || prepared.title.empty()) {
+            prepared.shouldDispatchTitle = true;
+            // Store snippet for GLiNER inference
+            prepared.titleTextSnippet = prepared.extractedText.size() > kMaxGlinerChars
+                                            ? prepared.extractedText.substr(0, kMaxGlinerChars)
+                                            : prepared.extractedText;
+        }
+    }
+
     // Determine dispatch flags
     prepared.shouldDispatchKg = (info.id >= 0);
 
@@ -667,6 +883,54 @@ PostIngestQueue::prepareMetadataEntry(
         extensionSupportsEntityProviders(entityProviders, prepared.extension);
 
     return prepared;
+}
+
+std::string PostIngestQueue::deriveTitle(const std::string& text, const std::string& fileName,
+                                         const std::string& mimeType,
+                                         const std::string& extension) const {
+    if (text.empty()) {
+        return fileName;
+    }
+
+    // === FAST PATH: Try cheap heuristics first (no ML inference) ===
+
+    // HTML: extract <title> tag
+    const bool isHtml = extension == ".html" || extension == ".htm" || mimeType == "text/html";
+    if (isHtml) {
+        auto title = extractHtmlTitle(text);
+        if (!title.empty()) {
+            return title;
+        }
+    }
+
+    // Markdown: extract first heading
+    const bool isMarkdown =
+        extension == ".md" || extension == ".markdown" || mimeType == "text/markdown";
+    if (isMarkdown) {
+        auto title = extractMarkdownHeading(text);
+        if (!title.empty()) {
+            return title;
+        }
+    }
+
+    // Code: extract class/function/module signature
+    auto codeTitle = extractCodeSignature(text);
+    if (!codeTitle.empty()) {
+        return codeTitle;
+    }
+
+    // NOTE: GLiNER inference moved to async title extraction pipeline (titlePoller)
+    // to avoid blocking the main extraction pipeline and competing with embeddings
+    // for ONNX resources. Title jobs are dispatched after successful extraction
+    // and processed asynchronously.
+
+    // === FALLBACK: First meaningful line ===
+    auto lineTitle = extractFirstMeaningfulLine(text);
+    if (!lineTitle.empty()) {
+        return lineTitle;
+    }
+
+    return fileName;
 }
 
 void PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, int64_t docId,
@@ -1281,6 +1545,153 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
         InternalEventBus::instance().incEntityConsumed();
     } catch (const std::exception& e) {
         spdlog::error("[PostIngestQueue] Entity extraction failed for {}: {}", hash, e.what());
+    }
+}
+
+void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t docId,
+                                             const std::string& textSnippet,
+                                             const std::string& fallbackTitle) {
+    constexpr std::size_t titleChannelCapacity = 4096;
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::TitleExtractionJob>(
+            "title_extraction", titleChannelCapacity);
+
+    InternalEventBus::TitleExtractionJob job;
+    job.hash = hash;
+    job.documentId = docId;
+    job.textSnippet = textSnippet;
+    job.fallbackTitle = fallbackTitle;
+
+    if (!channel->try_push(std::move(job))) {
+        spdlog::debug("[PostIngestQueue] Title channel full, skipping async title for {}",
+                      hash.substr(0, 12));
+        InternalEventBus::instance().incTitleDropped();
+    } else {
+        spdlog::debug("[PostIngestQueue] Dispatched title extraction job for {}",
+                      hash.substr(0, 12));
+        InternalEventBus::instance().incTitleQueued();
+    }
+}
+
+boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
+    constexpr std::size_t titleChannelCapacity = 4096;
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::TitleExtractionJob>(
+            "title_extraction", titleChannelCapacity);
+
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+
+    titleStarted_.store(true);
+    spdlog::info("[PostIngestQueue] Title extraction poller started");
+
+    auto idleDelay = std::chrono::milliseconds(1);
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10);
+
+    while (!stop_.load()) {
+        bool didWork = false;
+        InternalEventBus::TitleExtractionJob job;
+        // Dynamic concurrency limit
+        const std::size_t maxConcurrent = maxTitleConcurrent();
+        while (titleInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
+            didWork = true;
+            wasActive_.store(true, std::memory_order_release);
+            titleInFlight_.fetch_add(1);
+            boost::asio::post(coordinator_->getExecutor(),
+                              [this, hash = std::move(job.hash), docId = job.documentId,
+                               textSnippet = std::move(job.textSnippet),
+                               fallbackTitle = std::move(job.fallbackTitle)]() {
+                                  processTitleExtractionStage(hash, docId, textSnippet,
+                                                              fallbackTitle);
+                                  titleInFlight_.fetch_sub(1);
+                                  checkDrainAndSignal();
+                              });
+        }
+
+        if (didWork) {
+            idleDelay = std::chrono::milliseconds(1);
+            continue;
+        }
+
+        timer.expires_after(idleDelay);
+        co_await timer.async_wait(boost::asio::use_awaitable);
+        if (idleDelay < kMaxIdleDelay) {
+            idleDelay *= 2;
+        }
+    }
+
+    spdlog::info("[PostIngestQueue] Title extraction poller exited");
+}
+
+void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64_t docId,
+                                                  const std::string& textSnippet,
+                                                  const std::string& fallbackTitle) {
+    if (!titleExtractor_) {
+        spdlog::debug("[PostIngestQueue] Title extraction skipped for {} - no titleExtractor",
+                      hash);
+        return;
+    }
+
+    spdlog::debug("[PostIngestQueue] Title extraction starting for {} (docId={})",
+                  hash.substr(0, 12), docId);
+
+    try {
+        auto startTime = std::chrono::steady_clock::now();
+
+        // Run GLiNER inference to extract title entities
+        static const std::vector<std::string> kTitleEntityTypes = {
+            "title", "heading", "function", "class", "method", "module", "file", "symbol"};
+
+        auto result = titleExtractor_(textSnippet, kTitleEntityTypes);
+        if (!result || !result.value().usedGliner || result.value().concepts.empty()) {
+            spdlog::debug("[PostIngestQueue] GLiNER returned no title concepts for {}",
+                          hash.substr(0, 12));
+            InternalEventBus::instance().incTitleConsumed();
+            return;
+        }
+
+        // Find the best title candidate
+        const search::QueryConcept* best = nullptr;
+        for (const auto& qc : result.value().concepts) {
+            if (qc.confidence < kMinTitleConfidence || qc.text.empty()) {
+                continue;
+            }
+            if (!best || qc.confidence > best->confidence) {
+                best = &qc;
+            }
+        }
+
+        if (!best) {
+            spdlog::debug("[PostIngestQueue] No high-confidence title found for {}",
+                          hash.substr(0, 12));
+            InternalEventBus::instance().incTitleConsumed();
+            return;
+        }
+
+        auto newTitle = normalizeTitleCandidate(best->text);
+        if (newTitle.empty() || newTitle == fallbackTitle) {
+            spdlog::debug("[PostIngestQueue] GLiNER title same as fallback for {}",
+                          hash.substr(0, 12));
+            InternalEventBus::instance().incTitleConsumed();
+            return;
+        }
+
+        // Update the title in the database
+        if (meta_ && docId >= 0) {
+            auto updateRes = meta_->setMetadata(docId, "title", metadata::MetadataValue(newTitle));
+            if (!updateRes) {
+                spdlog::warn("[PostIngestQueue] Failed to update title for {}: {}",
+                             hash.substr(0, 12), updateRes.error().message);
+            } else {
+                auto duration = std::chrono::steady_clock::now() - startTime;
+                double ms = std::chrono::duration<double, std::milli>(duration).count();
+                spdlog::info("[PostIngestQueue] Title updated for {} in {:.2f}ms: \"{}\"",
+                             hash.substr(0, 12), ms, newTitle.substr(0, 50));
+            }
+        }
+
+        InternalEventBus::instance().incTitleConsumed();
+    } catch (const std::exception& e) {
+        spdlog::error("[PostIngestQueue] Title extraction failed for {}: {}", hash, e.what());
     }
 }
 

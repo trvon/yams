@@ -60,8 +60,10 @@ auto postWork(Work work, const std::optional<boost::asio::any_io_executor>& exec
     if (executor) {
         boost::asio::post(*executor, [task = std::move(task)]() mutable { task(); });
     } else {
-        // Fire-and-forget async task - intentionally discard the future
-        (void)std::async(std::launch::async, [task = std::move(task)]() mutable { task(); });
+        // No executor available - run synchronously on current thread.
+        // NOTE: std::async futures block in destructor, so discarding one
+        // would actually block anyway. Better to be explicit about sync execution.
+        task();
     }
     return future;
 }
@@ -305,19 +307,12 @@ std::vector<SearchResult> ResultFusion::fuse(const std::vector<ComponentResult>&
             return fuseWeightedSum(componentResults);
         case SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK:
             return fuseReciprocalRank(componentResults);
-        case SearchEngineConfig::FusionStrategy::BORDA_COUNT:
-            return fuseBordaCount(componentResults);
         case SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL:
             return fuseWeightedReciprocal(componentResults);
         case SearchEngineConfig::FusionStrategy::COMB_MNZ:
             return fuseCombMNZ(componentResults);
-        case SearchEngineConfig::FusionStrategy::TEXT_ANCHOR:
-            return fuseTextAnchor(componentResults);
-        case SearchEngineConfig::FusionStrategy::WEIGHTED_MAX:
-            return fuseWeightedMax(componentResults);
-        default:
-            return fuseCombMNZ(componentResults);
     }
+    return fuseCombMNZ(componentResults); // Default fallback
 }
 
 // All fusion strategies now use fuseSinglePass (defined in header as template).
@@ -337,13 +332,6 @@ ResultFusion::fuseReciprocalRank(const std::vector<ComponentResult>& results) {
     return fuseSinglePass(results, [k](const ComponentResult& comp) {
         const double rank = static_cast<double>(comp.rank) + 1.0; // RRF uses 1-based ranks
         return 1.0 / (k + rank);
-    });
-}
-
-std::vector<SearchResult>
-ResultFusion::fuseBordaCount(const std::vector<ComponentResult>& results) {
-    return fuseSinglePass(results, [this](const ComponentResult& comp) {
-        return getComponentWeight(comp.source) * (100.0 - static_cast<double>(comp.rank));
     });
 }
 
@@ -380,174 +368,6 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
         double mnzBoost = static_cast<double>(componentCounts[comp.documentHash]);
         return weight * rrfScore * mnzBoost;
     });
-}
-
-std::vector<SearchResult>
-ResultFusion::fuseWeightedMax(const std::vector<ComponentResult>& results) {
-    // WEIGHTED_MAX: Take the maximum weighted score per document (no multi-component boost).
-    // Unlike COMB_MNZ which sums scores (boosting "hub" docs found by many components),
-    // this takes the max, preventing over-emphasis on multi-component consensus.
-    // Useful for scientific/benchmark corpora where text OR vector should dominate.
-    std::unordered_map<std::string, SearchResult> resultMap;
-    resultMap.reserve(results.size());
-    const float k = config_.rrfK;
-
-    for (const auto& comp : results) {
-        float weight = getComponentWeight(comp.source);
-        const double rank = static_cast<double>(comp.rank) + 1.0;
-        double rrfScore = 1.0 / (k + rank);
-        double scoreBoost = 1.0 + std::clamp(static_cast<double>(comp.score), 0.0, 1.0);
-        double contribution = weight * rrfScore * scoreBoost;
-
-        auto& r = resultMap[comp.documentHash];
-        if (r.document.sha256Hash.empty()) {
-            r.document.sha256Hash = comp.documentHash;
-            r.document.filePath = comp.filePath;
-            r.score = contribution; // Initialize with first contribution
-        } else {
-            r.score = std::max(r.score, contribution); // Take MAX instead of SUM
-        }
-        accumulateComponentScore(r, comp.source, contribution);
-        if (r.snippet.empty() && comp.snippet.has_value()) {
-            r.snippet = comp.snippet.value();
-        }
-    }
-
-    std::vector<SearchResult> sorted;
-    sorted.reserve(resultMap.size());
-    for (auto& [_, res] : resultMap) {
-        sorted.push_back(std::move(res));
-    }
-    std::sort(sorted.begin(), sorted.end(),
-              [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
-    return sorted;
-}
-
-std::vector<SearchResult>
-ResultFusion::fuseTextAnchor(const std::vector<ComponentResult>& results) {
-    // TEXT_ANCHOR fusion: FTS5/text results as primary anchor, vector for re-ranking only.
-    // This strategy addresses the MRR degradation observed when vector results disagree
-    // with text ranking (e.g., 4x MRR drop on SciFact benchmark).
-    //
-    // Strategy:
-    // 1. Text-based components (text, path_tree, kg, tag, metadata) form the anchor set
-    // 2. Documents found by text get full scoring with optional vector boost
-    // 3. Vector-only documents need very high confidence (>0.85) to be included
-    // 4. This preserves text ranking while allowing semantic discovery
-
-    // Separate results by component type
-    std::unordered_map<std::string, std::vector<const ComponentResult*>> textResults;
-    std::unordered_map<std::string, std::vector<const ComponentResult*>> vectorResults;
-    std::unordered_set<std::string> textFoundDocs;
-
-    for (const auto& comp : results) {
-        if (isVectorComponent(comp.source)) {
-            vectorResults[comp.documentHash].push_back(&comp);
-        } else {
-            // Treat unknown sources as text-anchoring to avoid dropping results.
-            textResults[comp.documentHash].push_back(&comp);
-            textFoundDocs.insert(comp.documentHash);
-        }
-    }
-
-    std::unordered_map<std::string, SearchResult> resultMap;
-    const float k = config_.rrfK;
-    const float vectorOnlyThreshold = config_.vectorOnlyThreshold;
-    // Use vectorWeight for boost (scaled by vectorBoostFactor for fine-tuning)
-    // This allows SearchTuner's vectorWeight setting to actually take effect
-    const float vectorBoostWeight = config_.vectorWeight * config_.vectorBoostFactor;
-    const float vectorOnlyPenalty = config_.vectorOnlyPenalty;
-
-    // Process text-anchored documents first (these always get included)
-    for (const auto& [docHash, compResults] : textResults) {
-        double totalScore = 0.0;
-        std::string bestPath;
-        std::optional<std::string> bestSnippet;
-        std::map<std::string, std::string> debugInfo;
-
-        for (const auto* comp : compResults) {
-            float weight = getComponentWeight(comp->source);
-            const double rank = static_cast<double>(comp->rank) + 1.0;
-            double rrfScore = 1.0 / (k + rank);
-            double scoreBoost = 1.0 + std::clamp(static_cast<double>(comp->score), 0.0, 1.0);
-            double contribution = weight * rrfScore * scoreBoost;
-            totalScore += contribution;
-
-            if (bestPath.empty()) {
-                bestPath = comp->filePath;
-            }
-            if (!bestSnippet && comp->snippet) {
-                bestSnippet = comp->snippet;
-            }
-        }
-
-        if (auto it = vectorResults.find(docHash); it != vectorResults.end()) {
-            for (const auto* vcomp : it->second) {
-                const double rank = static_cast<double>(vcomp->rank) + 1.0;
-                double rrfScale = 1.0 / (k + rank);
-                double scoreMultiplier =
-                    1.0 + std::clamp(static_cast<double>(vcomp->score), 0.0, 1.0);
-                double vectorBoost = vectorBoostWeight * rrfScale * scoreMultiplier;
-                totalScore += vectorBoost;
-                debugInfo["vector_boost"] = std::to_string(vectorBoost);
-            }
-        }
-
-        SearchResult sr;
-        sr.document.sha256Hash = docHash;
-        sr.document.filePath = bestPath;
-        sr.score = totalScore;
-        if (bestSnippet) {
-            sr.snippet = *bestSnippet;
-        }
-        resultMap[docHash] = std::move(sr);
-    }
-
-    // Process vector-only documents (high confidence threshold)
-    for (const auto& [docHash, compResults] : vectorResults) {
-        if (textFoundDocs.count(docHash) > 0) {
-            continue; // Already processed with text anchor
-        }
-
-        // Check if any vector result has high enough confidence
-        float maxVectorScore = 0.0f;
-        const ComponentResult* bestVectorResult = nullptr;
-        for (const auto* comp : compResults) {
-            if (comp->score > maxVectorScore) {
-                maxVectorScore = comp->score;
-                bestVectorResult = comp;
-            }
-        }
-
-        if (maxVectorScore >= vectorOnlyThreshold && bestVectorResult != nullptr) {
-            const double rank = static_cast<double>(bestVectorResult->rank) + 1.0;
-            double score = getComponentWeight(bestVectorResult->source) * (1.0 / (k + rank)) *
-                           (1.0 + maxVectorScore);
-            score *= vectorOnlyPenalty;
-
-            SearchResult sr;
-            sr.document.sha256Hash = docHash;
-            sr.document.filePath = bestVectorResult->filePath;
-            sr.score = score;
-            if (bestVectorResult->snippet) {
-                sr.snippet = *bestVectorResult->snippet;
-            }
-            sr.vectorScore = maxVectorScore;
-            resultMap[docHash] = std::move(sr);
-        }
-    }
-
-    // Convert to vector and sort by score
-    std::vector<SearchResult> finalResults;
-    finalResults.reserve(resultMap.size());
-    for (auto& [_, result] : resultMap) {
-        finalResults.push_back(std::move(result));
-    }
-
-    std::sort(finalResults.begin(), finalResults.end(),
-              [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
-
-    return finalResults;
 }
 
 float ResultFusion::getComponentWeight(ComponentResult::Source source) const {
@@ -696,23 +516,38 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::vector<std::string> skipped;
     std::map<std::string, int64_t> componentTiming;
 
-    // Generate embedding upfront if needed (required for vector searches)
+    // Start embedding generation as async task (runs in parallel with Tier 1 components)
     std::optional<std::vector<float>> queryEmbedding;
     const bool needsEmbedding = (config_.vectorWeight > 0.0f || config_.entityVectorWeight > 0.0f);
+    std::future<std::vector<float>> embeddingFuture;
+    std::chrono::steady_clock::time_point embStart;
     if (needsEmbedding && embeddingGen_) {
-        auto embStart = std::chrono::steady_clock::now();
-        try {
-            auto embResult = embeddingGen_->generateEmbedding(query);
-            if (!embResult.empty()) {
-                queryEmbedding = std::move(embResult);
-            }
-        } catch (const std::exception& e) {
-            spdlog::warn("Failed to generate query embedding: {}", e.what());
-        }
-        auto embEnd = std::chrono::steady_clock::now();
-        componentTiming["embedding"] =
-            std::chrono::duration_cast<std::chrono::microseconds>(embEnd - embStart).count();
+        embStart = std::chrono::steady_clock::now();
+        // Launch embedding generation in parallel - will be awaited when Tier 2/vector needs it
+        embeddingFuture = postWork(
+            [this, &query]() {
+                YAMS_ZONE_SCOPED_N("embedding::generate_async");
+                return embeddingGen_->generateEmbedding(query);
+            },
+            executor_);
     }
+
+    // Helper to await embedding result when needed (called before vector search)
+    auto awaitEmbedding = [&]() {
+        if (embeddingFuture.valid() && !queryEmbedding.has_value()) {
+            try {
+                auto embResult = embeddingFuture.get();
+                if (!embResult.empty()) {
+                    queryEmbedding = std::move(embResult);
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("Failed to generate query embedding: {}", e.what());
+            }
+            auto embEnd = std::chrono::steady_clock::now();
+            componentTiming["embedding"] =
+                std::chrono::duration_cast<std::chrono::microseconds>(embEnd - embStart).count();
+        }
+    };
 
     const size_t userLimit =
         params.limit > 0 ? static_cast<size_t>(params.limit) : config_.maxResults;
@@ -897,22 +732,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // appropriate
             YAMS_ZONE_SCOPED_N("search_engine::tier2_semantic");
 
-            // Generate embedding now if we haven't already (lazy evaluation)
-            if (!queryEmbedding.has_value() && needsEmbedding && embeddingGen_) {
-                auto embStart = std::chrono::steady_clock::now();
-                try {
-                    auto embResult = embeddingGen_->generateEmbedding(query);
-                    if (!embResult.empty()) {
-                        queryEmbedding = std::move(embResult);
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("Failed to generate query embedding: {}", e.what());
-                }
-                auto embEnd = std::chrono::steady_clock::now();
-                componentTiming["embedding"] =
-                    std::chrono::duration_cast<std::chrono::microseconds>(embEnd - embStart)
-                        .count();
-            }
+            // Await embedding result (was started in parallel with Tier 1)
+            awaitEmbedding();
 
             // Decide whether to narrow vector search to Tier 1 candidates
             // Narrow if: config enabled AND Tier 1 has enough candidates
@@ -982,6 +803,27 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                       return queryPathTree(query, workingConfig.pathTreeMaxResults);
                                   });
 
+            // NOTE: Vector components scheduled below after embedding is ready
+            // This allows text/kg/path to run in parallel with embedding generation
+
+            if (!params.tags.empty()) {
+                tagFuture = schedule("tag", config_.tagWeight, stats_.tagQueries,
+                                     stats_.avgTagTimeMicros, [this, &params, &workingConfig]() {
+                                         YAMS_ZONE_SCOPED_N("component::tag");
+                                         return queryTags(params.tags, params.matchAllTags,
+                                                          workingConfig.tagMaxResults);
+                                     });
+            }
+
+            metaFuture =
+                schedule("metadata", config_.metadataWeight, stats_.metadataQueries,
+                         stats_.avgMetadataTimeMicros, [this, &params, &workingConfig]() {
+                             YAMS_ZONE_SCOPED_N("component::metadata");
+                             return queryMetadata(params, workingConfig.metadataMaxResults);
+                         });
+
+            // Await embedding (ran in parallel with text/kg/path above) then schedule vector
+            awaitEmbedding();
             if (queryEmbedding.has_value() && vectorDb_) {
                 vectorFuture =
                     schedule("vector", config_.vectorWeight, stats_.vectorQueries,
@@ -999,22 +841,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                                   workingConfig.entityVectorMaxResults);
                     });
             }
-
-            if (!params.tags.empty()) {
-                tagFuture = schedule("tag", config_.tagWeight, stats_.tagQueries,
-                                     stats_.avgTagTimeMicros, [this, &params, &workingConfig]() {
-                                         YAMS_ZONE_SCOPED_N("component::tag");
-                                         return queryTags(params.tags, params.matchAllTags,
-                                                          workingConfig.tagMaxResults);
-                                     });
-            }
-
-            metaFuture =
-                schedule("metadata", config_.metadataWeight, stats_.metadataQueries,
-                         stats_.avgMetadataTimeMicros, [this, &params, &workingConfig]() {
-                             YAMS_ZONE_SCOPED_N("component::metadata");
-                             return queryMetadata(params, workingConfig.metadataMaxResults);
-                         });
 
             collectIf(textFuture, "text", stats_.textQueries, stats_.avgTextTimeMicros);
             collectIf(kgFuture, "kg", stats_.kgQueries, stats_.avgKgTimeMicros);
@@ -1066,6 +892,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                       "path", config_.pathTreeWeight, stats_.pathTreeQueries,
                       stats_.avgPathTreeTimeMicros);
 
+        // Await embedding (ran in parallel with sequential components above)
+        awaitEmbedding();
         if (queryEmbedding.has_value() && vectorDb_) {
             runSequential(
                 [&]() {

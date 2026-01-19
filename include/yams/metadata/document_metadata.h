@@ -4,11 +4,35 @@
 #include <chrono>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <variant>
 #include <vector>
+#include <yams/core/cpp23_features.hpp>
 #include <yams/core/types.h>
 
 namespace yams::metadata {
+
+namespace detail {
+
+template <typename E, std::size_t N>
+constexpr std::string_view enumToStringImpl(E value,
+                                            const std::pair<E, std::string_view> (&map)[N]) {
+    for (const auto& [k, v] : map)
+        if (k == value)
+            return v;
+    return "Unknown";
+}
+
+template <typename E, std::size_t N>
+constexpr E enumFromStringImpl(std::string_view name,
+                               const std::pair<E, std::string_view> (&map)[N]) {
+    for (const auto& [k, v] : map)
+        if (v == name)
+            return k;
+    return static_cast<E>(-1);
+}
+} // namespace detail
 
 /**
  * @brief Document extraction status
@@ -121,23 +145,27 @@ struct MetadataValue {
 
     void setVariant(const Variant& v) {
         typedCache = v;
-        if (std::holds_alternative<std::string>(v)) {
-            type = MetadataValueType::String;
-            value = std::get<std::string>(v);
-        } else if (std::holds_alternative<int64_t>(v)) {
-            type = MetadataValueType::Integer;
-            value = std::to_string(std::get<int64_t>(v));
-        } else if (std::holds_alternative<double>(v)) {
-            type = MetadataValueType::Real;
-            value = std::to_string(std::get<double>(v));
-        } else if (std::holds_alternative<bool>(v)) {
-            type = MetadataValueType::Boolean;
-            value = std::get<bool>(v) ? "1" : "0";
-        } else if (std::holds_alternative<std::vector<uint8_t>>(v)) {
-            type = MetadataValueType::Blob;
-            const auto& bytes = std::get<std::vector<uint8_t>>(v);
-            value.assign(bytes.begin(), bytes.end());
-        }
+        std::visit(
+            [this](auto&& val) {
+                using T = std::decay_t<decltype(val)>;
+                if constexpr (std::is_same_v<T, std::string>) {
+                    type = MetadataValueType::String;
+                    value = val;
+                } else if constexpr (std::is_same_v<T, int64_t>) {
+                    type = MetadataValueType::Integer;
+                    value = std::to_string(val);
+                } else if constexpr (std::is_same_v<T, double>) {
+                    type = MetadataValueType::Real;
+                    value = std::to_string(val);
+                } else if constexpr (std::is_same_v<T, bool>) {
+                    type = MetadataValueType::Boolean;
+                    value = val ? "1" : "0";
+                } else if constexpr (std::is_same_v<T, std::vector<uint8_t>>) {
+                    type = MetadataValueType::Blob;
+                    value.assign(val.begin(), val.end());
+                }
+            },
+            v);
     }
 };
 
@@ -174,17 +202,13 @@ struct DocumentInfo {
     /**
      * @brief Set time from Unix timestamp
      */
-    void setCreatedTime(int64_t unixTime) {
-        createdTime = std::chrono::sys_seconds{std::chrono::seconds{unixTime}};
-    }
+    void setCreatedTime(int64_t unixTime) { createdTime = yams::features::fromUnixTime(unixTime); }
 
     void setModifiedTime(int64_t unixTime) {
-        modifiedTime = std::chrono::sys_seconds{std::chrono::seconds{unixTime}};
+        modifiedTime = yams::features::fromUnixTime(unixTime);
     }
 
-    void setIndexedTime(int64_t unixTime) {
-        indexedTime = std::chrono::sys_seconds{std::chrono::seconds{unixTime}};
-    }
+    void setIndexedTime(int64_t unixTime) { indexedTime = yams::features::fromUnixTime(unixTime); }
 };
 
 /**
@@ -226,9 +250,7 @@ struct DocumentRelationship {
 
     // Legacy Unix accessor removed
 
-    void setCreatedTime(int64_t unixTime) {
-        createdTime = std::chrono::sys_seconds{std::chrono::seconds{unixTime}};
-    }
+    void setCreatedTime(int64_t unixTime) { createdTime = yams::features::fromUnixTime(unixTime); }
 
     /**
      * @brief Get relationship type as string for database storage
@@ -285,9 +307,7 @@ struct SearchHistoryEntry {
 
     // Legacy Unix accessor removed
 
-    void setQueryTime(int64_t unixTime) {
-        queryTime = std::chrono::sys_seconds{std::chrono::seconds{unixTime}};
-    }
+    void setQueryTime(int64_t unixTime) { queryTime = yams::features::fromUnixTime(unixTime); }
 };
 
 /**
@@ -304,13 +324,9 @@ struct SavedQuery {
 
     // Legacy Unix accessors removed
 
-    void setCreatedTime(int64_t unixTime) {
-        createdTime = std::chrono::sys_seconds{std::chrono::seconds{unixTime}};
-    }
+    void setCreatedTime(int64_t unixTime) { createdTime = yams::features::fromUnixTime(unixTime); }
 
-    void setLastUsed(int64_t unixTime) {
-        lastUsed = std::chrono::sys_seconds{std::chrono::seconds{unixTime}};
-    }
+    void setLastUsed(int64_t unixTime) { lastUsed = yams::features::fromUnixTime(unixTime); }
 };
 
 /**

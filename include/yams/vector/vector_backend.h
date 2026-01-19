@@ -89,6 +89,22 @@ public:
                   const std::map<std::string, std::string>& metadata_filters = {}) = 0;
 
     /**
+     * @brief Batch search for similar vectors (parallel execution)
+     *
+     * Executes multiple KNN queries in parallel using thread pool.
+     * More efficient than multiple sequential searchSimilar calls.
+     *
+     * @param query_embeddings Vector of query embeddings
+     * @param k Number of nearest neighbors per query
+     * @param similarity_threshold Minimum similarity score
+     * @param num_threads Thread count (0 = auto-detect from hardware)
+     * @return Vector of result vectors, one per query
+     */
+    virtual Result<std::vector<std::vector<VectorRecord>>>
+    searchSimilarBatch(const std::vector<std::vector<float>>& query_embeddings, size_t k,
+                       float similarity_threshold = 0.0f, size_t num_threads = 0) = 0;
+
+    /**
      * @brief Get a specific vector by chunk ID
      */
     virtual Result<std::optional<VectorRecord>> getVector(const std::string& chunk_id) = 0;

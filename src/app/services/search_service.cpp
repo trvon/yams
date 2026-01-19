@@ -841,15 +841,22 @@ private:
             co_return;
         }
 
+        // Defensive cap: avoid hydrating snippets for very large result sets.
+        constexpr size_t kMaxSnippetHydration = 200;
+        const size_t hydrateCount = std::min(resp.results.size(), kMaxSnippetHydration);
+        if (hydrateCount == 0) {
+            co_return;
+        }
+
         // Collect all hashes and paths that need hydration
         std::vector<std::string> hashes;
-        hashes.reserve(resp.results.size());
+        hashes.reserve(hydrateCount);
         std::unordered_map<std::string, std::vector<size_t>> hashToIndices;
-        hashToIndices.reserve(resp.results.size());
+        hashToIndices.reserve(hydrateCount);
         std::unordered_map<std::string, std::vector<size_t>> pathToIndices;
-        pathToIndices.reserve(resp.results.size());
+        pathToIndices.reserve(hydrateCount);
 
-        for (size_t i = 0; i < resp.results.size(); ++i) {
+        for (size_t i = 0; i < hydrateCount; ++i) {
             const auto& it = resp.results[i];
             if (it.snippet.empty()) {
                 if (!it.hash.empty()) {
@@ -923,6 +930,7 @@ private:
             return false;
         };
         YAMS_PLOT("search_service::snippet_budget_ms", static_cast<double>(snippetBudget.count()));
+        YAMS_PLOT("search_service::snippet_hydrate_cap", static_cast<double>(hydrateCount));
 
         YAMS_PLOT("search_service::snippet_docs", static_cast<double>(docsMap.size()));
         for (const auto& [hash, doc] : docsMap) {
@@ -1358,9 +1366,10 @@ private:
             // This avoids the N+1 query problem by only enriching a small subset
             if (symbolEnricher_ && symbolWeight_ > 0.0f && !resp.results.empty()) {
                 YAMS_ZONE_SCOPED_N("search_service::symbol_enrichment_topk");
-                constexpr size_t kSymbolEnrichLimit = 100;
+                constexpr size_t kSymbolEnrichLimit = 25;
                 const size_t enrichCount = std::min(resp.results.size(), kSymbolEnrichLimit);
                 const std::string& queryText = req.query;
+                bool boosted = false;
 
                 for (size_t i = 0; i < enrichCount; ++i) {
                     auto& it = resp.results[i];
@@ -1376,14 +1385,17 @@ private:
                                 1.0f + (symbolWeight_ * enrichItem.symbolContext->symbolScore);
                             boost *= enrichItem.symbolContext->definitionScore;
                             it.score *= boost;
+                            boosted = boosted || (boost != 1.0f);
                         }
                     }
                 }
 
                 // Re-sort after symbol boost applied
-                std::sort(
-                    resp.results.begin(), resp.results.end(),
-                    [](const SearchItem& a, const SearchItem& b) { return a.score > b.score; });
+                if (boosted) {
+                    std::sort(
+                        resp.results.begin(), resp.results.end(),
+                        [](const SearchItem& a, const SearchItem& b) { return a.score > b.score; });
+                }
             }
         }
 

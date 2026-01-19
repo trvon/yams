@@ -1094,3 +1094,233 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
     CHECK(result.value().size() >= 1);
     CHECK(result.value().size() <= 5);
 }
+
+// =============================================================================
+// HNSW Optimization Tests (beads-001, beads-003, beads-005)
+// Tests for Config::for_corpus(), adaptive ef_search, and zero-norm validation
+// =============================================================================
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend Config::for_corpus auto-tuning produces working index",
+                 "[vector][backend][hnsw][autotuning][catch2]") {
+    skipIfNeeded();
+
+    // Test that the auto-tuned HNSW parameters (via Config::for_corpus()) produce
+    // a working index with good recall across different dimension sizes.
+    // For 384d embeddings, Config::for_corpus() should use M=24 instead of M=16.
+
+    SECTION("64-dimensional embeddings") {
+        SqliteVecBackend::Config config;
+        config.embedding_dim = 64;
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(":memory:").has_value());
+        REQUIRE(backend.createTables(64).has_value());
+
+        // Insert corpus to trigger auto-tuning
+        std::vector<VectorRecord> records;
+        for (int i = 0; i < 100; ++i) {
+            auto emb = createEmbedding(64, static_cast<float>(i + 1));
+            records.push_back(createVectorRecord("tune64_" + std::to_string(i), emb));
+        }
+        REQUIRE(backend.insertVectorsBatch(records).has_value());
+
+        // Search should work with auto-tuned parameters
+        auto query = createEmbedding(64, 50.0f);
+        auto result = backend.searchSimilar(query, 10, 0.0f, std::nullopt, {});
+        REQUIRE(result.has_value());
+        CHECK(result.value().size() == 10);
+    }
+
+    SECTION("384-dimensional embeddings (higher M value)") {
+        SqliteVecBackend::Config config;
+        config.embedding_dim = 384;
+        SqliteVecBackend backend(config);
+        REQUIRE(backend.initialize(":memory:").has_value());
+        REQUIRE(backend.createTables(384).has_value());
+
+        // Insert corpus - 384d should trigger M=24 via Config::for_corpus()
+        std::vector<VectorRecord> records;
+        for (int i = 0; i < 100; ++i) {
+            auto emb = createEmbedding(384, static_cast<float>(i + 1));
+            records.push_back(createVectorRecord("tune384_" + std::to_string(i), emb));
+        }
+        REQUIRE(backend.insertVectorsBatch(records).has_value());
+
+        // Search should work with higher M value
+        auto query = createEmbedding(384, 50.0f);
+        auto result = backend.searchSimilar(query, 10, 0.0f, std::nullopt, {});
+        REQUIRE(result.has_value());
+        CHECK(result.value().size() == 10);
+
+        // Verify results are reasonable (top result should have high similarity)
+        CHECK(result.value()[0].relevance_score > 0.5f);
+    }
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend adaptive ef_search scales with k",
+                 "[vector][backend][hnsw][adaptive][catch2]") {
+    skipIfNeeded();
+
+    // Test that adaptive ef_search (via recommended_ef_search()) provides
+    // good recall for different k values without requiring explicit configuration.
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+    // Set a low default ef_search to verify adaptive increases it when needed
+    config.hnsw_ef_search = 20;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    // Insert larger corpus to exercise adaptive ef_search
+    std::vector<VectorRecord> records;
+    for (int i = 0; i < 500; ++i) {
+        auto emb = createEmbedding(64, static_cast<float>(i + 1));
+        records.push_back(createVectorRecord("adaptive_" + std::to_string(i), emb));
+    }
+    REQUIRE(backend.insertVectorsBatch(records).has_value());
+
+    auto query = createEmbedding(64, 250.0f); // Middle of corpus
+
+    SECTION("k=5 should return 5 results") {
+        auto result = backend.searchSimilar(query, 5, 0.0f, std::nullopt, {});
+        REQUIRE(result.has_value());
+        CHECK(result.value().size() == 5);
+    }
+
+    SECTION("k=50 should return 50 results with adaptive ef_search") {
+        // With k=50, recommended_ef_search() should automatically increase
+        // ef_search above the default 20 to achieve target 95% recall
+        auto result = backend.searchSimilar(query, 50, 0.0f, std::nullopt, {});
+        REQUIRE(result.has_value());
+        CHECK(result.value().size() == 50);
+    }
+
+    SECTION("k=100 should return 100 results") {
+        auto result = backend.searchSimilar(query, 100, 0.0f, std::nullopt, {});
+        REQUIRE(result.has_value());
+        CHECK(result.value().size() == 100);
+    }
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend zero-norm vector validation",
+                 "[vector][backend][hnsw][zeronorm][catch2]") {
+    skipIfNeeded();
+
+    // Test that zero-norm vectors (all zeros) are handled gracefully.
+    // Zero vectors cannot participate in cosine similarity and should be
+    // either rejected or skipped during HNSW indexing.
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    SECTION("Zero vector is skipped in HNSW but stored in DB") {
+        // Create a zero vector (all zeros)
+        std::vector<float> zeroVec(64, 0.0f);
+        VectorRecord zeroRec;
+        zeroRec.chunk_id = "zero_vec_chunk";
+        zeroRec.document_hash = "zero_doc";
+        zeroRec.embedding = zeroVec;
+        zeroRec.content = "Zero vector content";
+
+        // Insert should succeed (stored in SQLite)
+        auto insertResult = backend.insertVector(zeroRec);
+        REQUIRE(insertResult.has_value());
+
+        // Vector should be retrievable from DB
+        auto getResult = backend.getVector("zero_vec_chunk");
+        REQUIRE(getResult.has_value());
+        REQUIRE(getResult.value().has_value());
+        CHECK(getResult.value().value().chunk_id == "zero_vec_chunk");
+
+        // Add some normal vectors
+        for (int i = 0; i < 10; ++i) {
+            auto emb = createEmbedding(64, static_cast<float>(i + 1));
+            REQUIRE(backend.insertVector(createVectorRecord("normal_" + std::to_string(i), emb))
+                        .has_value());
+        }
+
+        // Search should work and not return the zero vector
+        // (zero vectors become dead-ends in HNSW and shouldn't be found)
+        auto query = createEmbedding(64, 5.0f);
+        auto searchResult = backend.searchSimilar(query, 20, 0.0f, std::nullopt, {});
+        REQUIRE(searchResult.has_value());
+
+        // Verify zero vector is not in search results
+        for (const auto& result : searchResult.value()) {
+            CHECK(result.chunk_id != "zero_vec_chunk");
+        }
+    }
+
+    SECTION("Near-zero vector (negligible magnitude) is handled") {
+        // Create a near-zero vector (very small values that would normalize to essentially zero)
+        std::vector<float> nearZeroVec(64, 1e-20f);
+        VectorRecord nearZeroRec;
+        nearZeroRec.chunk_id = "near_zero_chunk";
+        nearZeroRec.document_hash = "near_zero_doc";
+        nearZeroRec.embedding = nearZeroVec;
+        nearZeroRec.content = "Near-zero vector content";
+
+        // Insert should succeed
+        auto insertResult = backend.insertVector(nearZeroRec);
+        REQUIRE(insertResult.has_value());
+
+        // Add normal vectors
+        for (int i = 0; i < 5; ++i) {
+            auto emb = createEmbedding(64, static_cast<float>(i + 1));
+            REQUIRE(backend.insertVector(createVectorRecord("norm_" + std::to_string(i), emb))
+                        .has_value());
+        }
+
+        // Search should work without issues
+        auto query = createEmbedding(64, 2.0f);
+        auto searchResult = backend.searchSimilar(query, 10, 0.0f, std::nullopt, {});
+        REQUIRE(searchResult.has_value());
+        CHECK(searchResult.value().size() >= 1);
+    }
+
+    SECTION("Batch insert with zero vectors skips them in HNSW") {
+        std::vector<VectorRecord> records;
+
+        // Mix of normal and zero vectors
+        for (int i = 0; i < 10; ++i) {
+            if (i == 3 || i == 7) {
+                // Insert zero vectors at indices 3 and 7
+                std::vector<float> zeroVec(64, 0.0f);
+                VectorRecord rec;
+                rec.chunk_id = "batch_zero_" + std::to_string(i);
+                rec.document_hash = "batch_doc";
+                rec.embedding = zeroVec;
+                rec.content = "Zero content " + std::to_string(i);
+                records.push_back(rec);
+            } else {
+                auto emb = createEmbedding(64, static_cast<float>(i + 1));
+                records.push_back(
+                    createVectorRecord("batch_normal_" + std::to_string(i), emb, "batch_doc"));
+            }
+        }
+
+        // Batch insert should succeed
+        auto batchResult = backend.insertVectorsBatch(records);
+        REQUIRE(batchResult.has_value());
+
+        // All 10 vectors should be in DB
+        auto countResult = backend.getVectorCount();
+        REQUIRE(countResult.has_value());
+        CHECK(countResult.value() == 10);
+
+        // Search should find normal vectors but not zero vectors
+        auto query = createEmbedding(64, 5.0f);
+        auto searchResult = backend.searchSimilar(query, 20, 0.0f, std::nullopt, {});
+        REQUIRE(searchResult.has_value());
+
+        for (const auto& result : searchResult.value()) {
+            // Zero vectors at indices 3 and 7 should not appear
+            CHECK(result.chunk_id != "batch_zero_3");
+            CHECK(result.chunk_id != "batch_zero_7");
+        }
+    }
+}

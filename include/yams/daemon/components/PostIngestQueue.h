@@ -14,6 +14,7 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/search/query_concept_extractor.h>
 
 namespace yams {
 namespace api {
@@ -51,6 +52,7 @@ public:
         int64_t documentId = 0;
         std::string hash;
         std::string fileName;
+        std::string title;
         std::string extractedText;
         std::string mimeType;
         std::string extension;
@@ -62,6 +64,8 @@ public:
         bool shouldDispatchSymbol = false;
         std::string symbolLanguage;
         bool shouldDispatchEntity = false;
+        bool shouldDispatchTitle = false;
+        std::string titleTextSnippet; // First N chars for async GLiNER title extraction
     };
 
     /// Result of failed text extraction, requires status update.
@@ -98,9 +102,10 @@ public:
     std::size_t kgInFlight() const { return kgInFlight_.load(); }
     std::size_t symbolInFlight() const { return symbolInFlight_.load(); }
     std::size_t entityInFlight() const { return entityInFlight_.load(); }
+    std::size_t titleInFlight() const { return titleInFlight_.load(); }
     std::size_t totalInFlight() const {
         return inFlight_.load() + kgInFlight_.load() + symbolInFlight_.load() +
-               entityInFlight_.load();
+               entityInFlight_.load() + titleInFlight_.load();
     }
 
     // Stage concurrency limits (dynamic via TuneAdvisor)
@@ -108,6 +113,7 @@ public:
     static std::size_t maxKgConcurrent();
     static std::size_t maxSymbolConcurrent();
     static std::size_t maxEntityConcurrent();
+    static std::size_t maxTitleConcurrent();
 
     void setCapacity(std::size_t cap) { capacity_ = cap > 0 ? cap : capacity_; }
 
@@ -128,6 +134,11 @@ public:
         entityProviders_ = std::move(providers);
     }
 
+    // Set title extractor (GLiNER-backed) for deriving better FTS titles.
+    void setTitleExtractor(search::EntityExtractionFunc extractor) {
+        titleExtractor_ = std::move(extractor);
+    }
+
     /// Set callback to be invoked when the queue drains (all stages become idle).
     /// Used by ServiceManager to trigger search engine rebuild.
     using DrainCallback = std::function<void()>;
@@ -141,6 +152,7 @@ private:
     boost::asio::awaitable<void> kgPoller();
     boost::asio::awaitable<void> symbolPoller();
     boost::asio::awaitable<void> entityPoller();
+    boost::asio::awaitable<void> titlePoller();
     void processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks);
     void processTask(const std::string& hash, const std::string& mime);
     void processMetadataStage(
@@ -172,8 +184,15 @@ private:
                                  const std::string& filePath, const std::string& extension);
     void processEntityExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& extension);
+    void dispatchToTitleChannel(const std::string& hash, int64_t docId,
+                                const std::string& textSnippet, const std::string& fallbackTitle);
+    void processTitleExtractionStage(const std::string& hash, int64_t docId,
+                                     const std::string& textSnippet,
+                                     const std::string& fallbackTitle);
     std::size_t resolveChannelCapacity() const;
     void checkDrainAndSignal(); // Check if drained and signal corpus stats stale
+    std::string deriveTitle(const std::string& text, const std::string& fileName,
+                            const std::string& mimeType, const std::string& extension) const;
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
@@ -188,12 +207,14 @@ private:
     std::atomic<bool> kgStarted_{false};
     std::atomic<bool> symbolStarted_{false};
     std::atomic<bool> entityStarted_{false};
+    std::atomic<bool> titleStarted_{false};
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};
     std::atomic<std::size_t> inFlight_{0};
     std::atomic<std::size_t> kgInFlight_{0};
     std::atomic<std::size_t> symbolInFlight_{0};
     std::atomic<std::size_t> entityInFlight_{0};
+    std::atomic<std::size_t> titleInFlight_{0};
     std::atomic<double> latencyMsEma_{0.0};
     std::atomic<double> ratePerSecEma_{0.0};
     std::size_t capacity_{1000};
@@ -213,6 +234,8 @@ private:
 
     mutable std::mutex drainCallbackMutex_;
     DrainCallback drainCallback_;
+
+    search::EntityExtractionFunc titleExtractor_;
 };
 
 } // namespace yams::daemon

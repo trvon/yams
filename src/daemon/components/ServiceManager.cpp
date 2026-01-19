@@ -68,6 +68,7 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/VectorSystemManager.h>
+#include <yams/daemon/components/gliner_query_extractor.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
@@ -1620,6 +1621,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             } else {
                 spdlog::info("ServiceManager: symbol extractor plugins disabled by config");
             }
+
+            auto entityRes = init::step<size_t>("adopt_entity_extractors",
+                                                [&]() { return adoptEntityExtractorsFromHosts(); });
+            if (entityRes) {
+                spdlog::info("ServiceManager: Adopted {} entity extractors.", entityRes.value());
+            }
         }
         // If autoload is disabled but model provider is enabled, defer initialization
         // until after daemon reaches Ready state (see daemon.cpp main loop)
@@ -2126,6 +2133,25 @@ Result<size_t> ServiceManager::adoptSymbolExtractorsFromHosts() {
     return Result<size_t>(0);
 }
 
+// NOTE: Implementation delegated to PluginManager (PBI-088 decomposition)
+Result<size_t> ServiceManager::adoptEntityExtractorsFromHosts() {
+    if (pluginManager_) {
+        auto result = pluginManager_->adoptEntityExtractors();
+        if (result) {
+            if (postIngest_) {
+                auto extractor = createGlinerExtractionFunc(pluginManager_->getEntityExtractors());
+                postIngest_->setTitleExtractor(std::move(extractor));
+                spdlog::info("[ServiceManager] Updated PostIngestQueue title extractor using {} "
+                             "entity extractors",
+                             pluginManager_->getEntityExtractors().size());
+            }
+        }
+        return result;
+    }
+    spdlog::warn("[Plugin] PluginManager not initialized");
+    return Result<size_t>(0);
+}
+
 boost::asio::any_io_executor ServiceManager::getWorkerExecutor() const {
     if (workCoordinator_)
         return workCoordinator_->getExecutor();
@@ -2169,6 +2195,7 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
         // Adopt extractors
         (void)adoptContentExtractorsFromHosts();
         (void)adoptSymbolExtractorsFromHosts();
+        (void)adoptEntityExtractorsFromHosts();
 
         refreshPluginStatusSnapshot();
         writeBootstrapStatusFile(config_, state_);

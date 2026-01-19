@@ -164,14 +164,10 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                 cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
             } else if (*fusionEnv == "RECIPROCAL_RANK") {
                 cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK;
-            } else if (*fusionEnv == "BORDA_COUNT") {
-                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::BORDA_COUNT;
             } else if (*fusionEnv == "WEIGHTED_RECIPROCAL") {
                 cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL;
             } else if (*fusionEnv == "COMB_MNZ") {
                 cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::COMB_MNZ;
-            } else if (*fusionEnv == "TEXT_ANCHOR") {
-                cfg.fusionStrategy = SearchEngineConfig::FusionStrategy::TEXT_ANCHOR;
             } else {
                 spdlog::warn("Unknown YAMS_FUSION_STRATEGY value '{}', ignoring", *fusionEnv);
             }

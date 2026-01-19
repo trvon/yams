@@ -83,6 +83,10 @@ public:
                   const std::unordered_set<std::string>& candidate_hashes = {},
                   const std::map<std::string, std::string>& metadata_filters = {}) override;
 
+    Result<std::vector<std::vector<VectorRecord>>>
+    searchSimilarBatch(const std::vector<std::vector<float>>& query_embeddings, size_t k,
+                       float similarity_threshold = 0.0f, size_t num_threads = 0) override;
+
     Result<std::optional<VectorRecord>> getVector(const std::string& chunk_id) override;
     Result<std::map<std::string, VectorRecord>>
     getVectorsBatch(const std::vector<std::string>& chunk_ids) override;

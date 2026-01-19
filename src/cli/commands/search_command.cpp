@@ -907,8 +907,27 @@ public:
                 auto sessionName = (sessionOverride_ ? std::optional<std::string>(*sessionOverride_)
                                                      : std::optional<std::string>{});
                 auto sessPatterns = yams::cli::session_store::active_include_patterns(sessionName);
-                includeGlobsExpanded.insert(includeGlobsExpanded.end(), sessPatterns.begin(),
-                                            sessPatterns.end());
+                bool includeSessionPatterns = false;
+                if (sessionOverride_) {
+                    includeSessionPatterns = true;
+                } else if (!sessPatterns.empty()) {
+                    std::error_code ec;
+                    auto cwd = std::filesystem::current_path(ec);
+                    if (!ec) {
+                        std::string cwdStr = cwd.string();
+                        std::replace(cwdStr.begin(), cwdStr.end(), '\\', '/');
+                        if (!cwdStr.empty() && cwdStr.back() != '/') {
+                            cwdStr += '/';
+                        }
+                        includeSessionPatterns = matchAnyGlob(cwdStr, sessPatterns);
+                    }
+                }
+                if (includeSessionPatterns) {
+                    includeGlobsExpanded.insert(includeGlobsExpanded.end(), sessPatterns.begin(),
+                                                sessPatterns.end());
+                } else if (!sessPatterns.empty()) {
+                    spdlog::debug("[CLI] Skipping session include patterns outside CWD");
+                }
             }
             if (includeGlobsExpanded.empty() && !pathFilter_.empty()) {
                 includeGlobsExpanded.push_back(pathFilter_);
