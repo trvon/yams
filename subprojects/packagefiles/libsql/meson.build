@@ -40,7 +40,7 @@ libsql_lib = custom_target(
   build_by_default: true
 )
 
-libsql_include = include_directories(meson.current_source_dir())
+libsql_include = include_directories('.')
 libsql_dep = declare_dependency(
   include_directories: libsql_include,
   link_args: [join_paths(meson.current_build_dir(), libname)],
