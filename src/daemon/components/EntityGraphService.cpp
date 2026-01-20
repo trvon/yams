@@ -95,9 +95,9 @@ bool EntityGraphService::process(Job& job) {
         return true; // not an error if KG is not configured
     }
 
-    // Route to NL extraction for natural language content
+    // NL extraction handled in PostIngestQueue title+NL stage
     if (isNaturalLanguageContent(job)) {
-        return processNaturalLanguage(job);
+        return true;
     }
 
     // Code path: Locate a symbol extractor plugin that supports the language
@@ -112,16 +112,7 @@ bool EntityGraphService::process(Job& job) {
         }
     }
     if (!table || !table->extract_symbols) {
-        // No code extractor - try NL extraction as fallback for unknown content
-        const auto& nlExtractors = services_->getEntityExtractors();
-        if (!nlExtractors.empty()) {
-            spdlog::debug(
-                "EntityGraphService: no code extractor for lang='{}', trying NL extraction",
-                job.language);
-            return processNaturalLanguage(job);
-        }
-        spdlog::debug("EntityGraphService: no extractor for lang='{}' (skip)", job.language);
-        return true; // not an error: just no-op
+        return true; // no code extractor, NL handled in title+NL stage
     }
 
     // Get extractor ID for versioned state tracking
