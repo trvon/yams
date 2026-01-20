@@ -11,8 +11,10 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/api/content_store.h>
+#include <yams/common/utf8_utils.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
@@ -777,7 +779,8 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         }
         if (prepared.shouldDispatchTitle) {
             dispatchToTitleChannel(prepared.hash, prepared.documentId, prepared.titleTextSnippet,
-                                   prepared.fileName);
+                                   prepared.fileName, prepared.filePath, prepared.language,
+                                   prepared.mimeType);
         }
         embeddingHashes.push_back(prepared.hash);
         if (embeddingHashes.size() >= embedBatchThreshold) {
@@ -1049,6 +1052,7 @@ PostIngestQueue::prepareMetadataEntry(
     prepared.documentId = info.id;
     prepared.hash = hash;
     prepared.fileName = info.fileName;
+    prepared.filePath = info.filePath;
     prepared.mimeType = mime.empty() ? info.mimeType : mime;
     prepared.extension = info.fileExtension;
     prepared.tags = tags;
@@ -1072,17 +1076,13 @@ PostIngestQueue::prepareMetadataEntry(
     prepared.title = deriveTitle(prepared.extractedText, prepared.fileName, prepared.mimeType,
                                  prepared.extension);
 
-    // Title extraction: if heuristics produced a weak title (filename fallback),
-    // dispatch async GLiNER job to derive a better title
+    // Title+NL extraction: single GLiNER call for both title and NL entities
     if (titleExtractor_ && !isGlinerTitleExtractionDisabled()) {
-        // Dispatch if title equals filename (weakest fallback)
-        if (prepared.title == prepared.fileName || prepared.title.empty()) {
-            prepared.shouldDispatchTitle = true;
-            // Store snippet for GLiNER inference
-            prepared.titleTextSnippet = prepared.extractedText.size() > kMaxGlinerChars
-                                            ? prepared.extractedText.substr(0, kMaxGlinerChars)
-                                            : prepared.extractedText;
-        }
+        prepared.shouldDispatchTitle = true;
+        // Store snippet for GLiNER inference
+        prepared.titleTextSnippet = prepared.extractedText.size() > kMaxGlinerChars
+                                        ? prepared.extractedText.substr(0, kMaxGlinerChars)
+                                        : prepared.extractedText;
     }
 
     // Determine dispatch flags
@@ -1730,7 +1730,10 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
 
 void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t docId,
                                              const std::string& textSnippet,
-                                             const std::string& fallbackTitle) {
+                                             const std::string& fallbackTitle,
+                                             const std::string& filePath,
+                                             const std::string& language,
+                                             const std::string& mimeType) {
     constexpr std::size_t titleChannelCapacity = 4096;
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::TitleExtractionJob>(
@@ -1741,13 +1744,16 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
     job.documentId = docId;
     job.textSnippet = textSnippet;
     job.fallbackTitle = fallbackTitle;
+    job.filePath = filePath;
+    job.language = language;
+    job.mimeType = mimeType;
 
     if (!channel->try_push(std::move(job))) {
         spdlog::debug("[PostIngestQueue] Title channel full, skipping async title for {}",
                       hash.substr(0, 12));
         InternalEventBus::instance().incTitleDropped();
     } else {
-        spdlog::debug("[PostIngestQueue] Dispatched title extraction job for {}",
+        spdlog::debug("[PostIngestQueue] Dispatched title+NL extraction job for {}",
                       hash.substr(0, 12));
         InternalEventBus::instance().incTitleQueued();
     }
@@ -1776,15 +1782,17 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
             didWork = true;
             wasActive_.store(true, std::memory_order_release);
             titleInFlight_.fetch_add(1);
-            boost::asio::post(coordinator_->getExecutor(),
-                              [this, hash = std::move(job.hash), docId = job.documentId,
-                               textSnippet = std::move(job.textSnippet),
-                               fallbackTitle = std::move(job.fallbackTitle)]() {
-                                  processTitleExtractionStage(hash, docId, textSnippet,
-                                                              fallbackTitle);
-                                  titleInFlight_.fetch_sub(1);
-                                  checkDrainAndSignal();
-                              });
+            boost::asio::post(
+                coordinator_->getExecutor(),
+                [this, hash = std::move(job.hash), docId = job.documentId,
+                 textSnippet = std::move(job.textSnippet),
+                 fallbackTitle = std::move(job.fallbackTitle), filePath = std::move(job.filePath),
+                 language = std::move(job.language), mimeType = std::move(job.mimeType)]() {
+                    processTitleExtractionStage(hash, docId, textSnippet, fallbackTitle, filePath,
+                                                language, mimeType);
+                    titleInFlight_.fetch_sub(1);
+                    checkDrainAndSignal();
+                });
         }
 
         if (didWork) {
@@ -1804,74 +1812,217 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
 
 void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64_t docId,
                                                   const std::string& textSnippet,
-                                                  const std::string& fallbackTitle) {
+                                                  const std::string& fallbackTitle,
+                                                  const std::string& filePath,
+                                                  const std::string& language,
+                                                  const std::string& mimeType) {
     if (!titleExtractor_) {
-        spdlog::debug("[PostIngestQueue] Title extraction skipped for {} - no titleExtractor",
+        spdlog::debug("[PostIngestQueue] Title+NL extraction skipped for {} - no titleExtractor",
                       hash);
         return;
     }
 
-    spdlog::debug("[PostIngestQueue] Title extraction starting for {} (docId={})",
+    spdlog::debug("[PostIngestQueue] Title+NL extraction starting for {} (docId={})",
                   hash.substr(0, 12), docId);
 
     try {
         auto startTime = std::chrono::steady_clock::now();
 
-        // Run GLiNER inference to extract title entities
-        static const std::vector<std::string> kTitleEntityTypes = {
+        // Combined entity types: title-related + NL entities (merged GLiNER call)
+        // Title types for document title extraction
+        // NL types for knowledge graph population
+        static const std::vector<std::string> kCombinedEntityTypes = {
+            // Title-related types
+            "title", "heading", "function", "class", "method", "module", "file", "symbol",
+            // NL entity types (from Glint plugin defaults)
+            "person", "organization", "location", "date", "event", "product", "technology",
+            "concept"};
+
+        // Title type set for filtering
+        static const std::unordered_set<std::string> kTitleTypes = {
             "title", "heading", "function", "class", "method", "module", "file", "symbol"};
 
-        auto result = titleExtractor_(textSnippet, kTitleEntityTypes);
+        auto result = titleExtractor_(textSnippet, kCombinedEntityTypes);
         if (!result || !result.value().usedGliner || result.value().concepts.empty()) {
-            spdlog::debug("[PostIngestQueue] GLiNER returned no title concepts for {}",
+            spdlog::debug("[PostIngestQueue] GLiNER returned no concepts for {}",
                           hash.substr(0, 12));
             InternalEventBus::instance().incTitleConsumed();
             return;
         }
 
-        // Find the best title candidate
-        const search::QueryConcept* best = nullptr;
+        // Separate title entities from NL entities
+        const search::QueryConcept* bestTitle = nullptr;
+        std::vector<const search::QueryConcept*> nlEntities;
+
         for (const auto& qc : result.value().concepts) {
             if (qc.confidence < kMinTitleConfidence || qc.text.empty()) {
                 continue;
             }
-            if (!best || qc.confidence > best->confidence) {
-                best = &qc;
-            }
-        }
 
-        if (!best) {
-            spdlog::debug("[PostIngestQueue] No high-confidence title found for {}",
-                          hash.substr(0, 12));
-            InternalEventBus::instance().incTitleConsumed();
-            return;
-        }
-
-        auto newTitle = normalizeTitleCandidate(best->text);
-        if (newTitle.empty() || newTitle == fallbackTitle) {
-            spdlog::debug("[PostIngestQueue] GLiNER title same as fallback for {}",
-                          hash.substr(0, 12));
-            InternalEventBus::instance().incTitleConsumed();
-            return;
-        }
-
-        // Update the title in the database
-        if (meta_ && docId >= 0) {
-            auto updateRes = meta_->setMetadata(docId, "title", metadata::MetadataValue(newTitle));
-            if (!updateRes) {
-                spdlog::warn("[PostIngestQueue] Failed to update title for {}: {}",
-                             hash.substr(0, 12), updateRes.error().message);
+            if (kTitleTypes.count(qc.type) > 0) {
+                // Title candidate
+                if (!bestTitle || qc.confidence > bestTitle->confidence) {
+                    bestTitle = &qc;
+                }
             } else {
-                auto duration = std::chrono::steady_clock::now() - startTime;
-                double ms = std::chrono::duration<double, std::milli>(duration).count();
-                spdlog::info("[PostIngestQueue] Title updated for {} in {:.2f}ms: \"{}\"",
-                             hash.substr(0, 12), ms, newTitle.substr(0, 50));
+                // NL entity for KG
+                nlEntities.push_back(&qc);
             }
         }
+
+        // Update title if we found a good candidate
+        if (bestTitle) {
+            auto newTitle = normalizeTitleCandidate(bestTitle->text);
+            if (!newTitle.empty() && newTitle != fallbackTitle) {
+                if (meta_ && docId >= 0) {
+                    auto updateRes =
+                        meta_->setMetadata(docId, "title", metadata::MetadataValue(newTitle));
+                    if (!updateRes) {
+                        spdlog::warn("[PostIngestQueue] Failed to update title for {}: {}",
+                                     hash.substr(0, 12), updateRes.error().message);
+                    } else {
+                        spdlog::debug("[PostIngestQueue] Title updated for {}: \"{}\"",
+                                      hash.substr(0, 12), newTitle.substr(0, 50));
+                    }
+                }
+            }
+        }
+
+        // Populate KG with NL entities if we have any and KGWriteQueue is available
+        if (!nlEntities.empty() && kgWriteQueue_ && kg_) {
+            auto batch = std::make_unique<DeferredKGBatch>();
+            batch->sourceFile = filePath;
+
+            auto now = std::chrono::system_clock::now().time_since_epoch().count();
+
+            // Get document database ID for doc entities
+            std::optional<std::int64_t> documentDbId;
+            if (!hash.empty() && docId >= 0) {
+                documentDbId = docId;
+                batch->documentIdToDelete = documentDbId; // Delete old doc entities
+            }
+
+            // Build document context node
+            std::string docNodeKey;
+            if (!hash.empty()) {
+                docNodeKey = "doc:" + hash;
+
+                metadata::KGNode docNode;
+                docNode.nodeKey = docNodeKey;
+                docNode.label = common::sanitizeUtf8(filePath);
+                docNode.type = "document";
+                nlohmann::json docProps;
+                docProps["hash"] = hash;
+                docProps["path"] = common::sanitizeUtf8(filePath);
+                docProps["language"] = common::sanitizeUtf8(language);
+                docNode.properties = docProps.dump();
+                batch->nodes.push_back(std::move(docNode));
+            }
+
+            // Build file context node
+            std::string fileNodeKey;
+            if (!filePath.empty()) {
+                fileNodeKey = "file:" + filePath;
+
+                metadata::KGNode fileNode;
+                fileNode.nodeKey = fileNodeKey;
+                fileNode.label = common::sanitizeUtf8(filePath);
+                fileNode.type = "file";
+                nlohmann::json fileProps;
+                fileProps["path"] = common::sanitizeUtf8(filePath);
+                fileProps["language"] = common::sanitizeUtf8(language);
+                if (!filePath.empty()) {
+                    fileProps["basename"] =
+                        common::sanitizeUtf8(std::filesystem::path(filePath).filename().string());
+                }
+                if (!hash.empty()) {
+                    fileProps["current_hash"] = hash;
+                }
+                fileNode.properties = fileProps.dump();
+                batch->nodes.push_back(std::move(fileNode));
+            }
+
+            // Build entity nodes and edges
+            std::string targetNodeKey = !docNodeKey.empty() ? docNodeKey : fileNodeKey;
+            for (const auto* qc : nlEntities) {
+                std::string text = common::sanitizeUtf8(qc->text);
+                std::string type = common::sanitizeUtf8(qc->type);
+
+                // Normalize text for canonical matching
+                std::string normalizedText = text;
+                std::transform(normalizedText.begin(), normalizedText.end(), normalizedText.begin(),
+                               ::tolower);
+
+                std::string nodeKey = "nl_entity:" + type + ":" + normalizedText;
+
+                metadata::KGNode node;
+                node.nodeKey = nodeKey;
+                node.label = text;
+                node.type = type;
+
+                nlohmann::json props;
+                props["entity_text"] = text;
+                props["entity_type"] = type;
+                props["confidence"] = qc->confidence;
+                props["first_seen_file"] = common::sanitizeUtf8(filePath);
+                props["last_seen"] = now;
+                if (!hash.empty()) {
+                    props["first_seen_hash"] = hash;
+                }
+                node.properties = props.dump();
+                batch->nodes.push_back(std::move(node));
+
+                // Add edge from entity to document/file
+                if (!targetNodeKey.empty()) {
+                    DeferredEdge edge;
+                    edge.srcNodeKey = nodeKey;
+                    edge.dstNodeKey = targetNodeKey;
+                    edge.relation = "mentioned_in";
+                    edge.weight = qc->confidence;
+
+                    nlohmann::json edgeProps;
+                    edgeProps["confidence"] = qc->confidence;
+                    if (!hash.empty()) {
+                        edgeProps["snapshot_id"] = hash;
+                    }
+                    edge.properties = edgeProps.dump();
+                    batch->deferredEdges.push_back(std::move(edge));
+                }
+
+                // Add doc entity reference
+                if (documentDbId.has_value()) {
+                    DeferredDocEntity docEnt;
+                    docEnt.documentId = documentDbId.value();
+                    docEnt.entityText = text;
+                    docEnt.nodeKey = nodeKey;
+                    docEnt.startOffset = 0; // Not available from QueryConcept
+                    docEnt.endOffset = 0;
+                    docEnt.confidence = qc->confidence;
+                    docEnt.extractor = "gliner_title_nl";
+                    batch->deferredDocEntities.push_back(std::move(docEnt));
+                }
+            }
+
+            // Enqueue the batch (non-blocking)
+            try {
+                auto future = kgWriteQueue_->enqueue(std::move(batch));
+                // Don't wait for completion - fire and forget for async KG population
+                // The KGWriteQueue will batch and commit efficiently
+                spdlog::debug("[PostIngestQueue] Queued {} NL entities for KG from {}",
+                              nlEntities.size(), hash.substr(0, 12));
+            } catch (const std::exception& e) {
+                spdlog::warn("[PostIngestQueue] Failed to queue NL entities for KG: {}", e.what());
+            }
+        }
+
+        auto duration = std::chrono::steady_clock::now() - startTime;
+        double ms = std::chrono::duration<double, std::milli>(duration).count();
+        spdlog::info("[PostIngestQueue] Title+NL extraction for {} in {:.2f}ms (title={}, nl={})",
+                     hash.substr(0, 12), ms, bestTitle ? "yes" : "no", nlEntities.size());
 
         InternalEventBus::instance().incTitleConsumed();
     } catch (const std::exception& e) {
-        spdlog::error("[PostIngestQueue] Title extraction failed for {}: {}", hash, e.what());
+        spdlog::error("[PostIngestQueue] Title+NL extraction failed for {}: {}", hash, e.what());
     }
 }
 

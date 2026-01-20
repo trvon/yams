@@ -833,6 +833,7 @@ if catch2_dep.found()
       'unit/daemon/components/config_resolver_test.cpp',
       'unit/daemon/components/database_manager_test.cpp',
       'unit/daemon/components/plugin_manager_test.cpp',
+      'unit/daemon/plugin_manager_config_test.cpp',
       'unit/daemon/components/request_queue_test.cpp',
       'unit/daemon/components/vector_system_manager_test.cpp',
     ),
@@ -878,6 +879,23 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
+
+  if onnx_dep.found()
+    onnx_provider_test_deps = [catch2_dep, catch2_main_dep] + test_deps + onnx_dep
+    catch2_daemon_onnx_provider_exe = executable('catch2_daemon_onnx_provider',
+      files(
+        'unit/daemon/onnx_model_provider_config_test.cpp',
+        '../plugins/onnx/model_provider.cpp',
+        '../plugins/onnx/onnx_model_pool.cpp',
+        '../plugins/onnx/onnx_reranker_session.cpp',
+      ),
+      include_directories: incs,
+      dependencies: onnx_provider_test_deps,
+      cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+      build_rpath: ':'.join(_test_rpaths),
+      install: false,
+    )
+  endif
 
   catch2_plugin_infrastructure_exe = executable('catch2_plugin_infrastructure',
     files('unit/daemon/plugin_infrastructure_test.cpp'),
@@ -2281,6 +2299,18 @@ if catch2_dep.found()
     timeout: 60,
     is_parallel: true
   )
+
+  if onnx_dep.found()
+    test('daemon_onnx_provider_config', catch2_daemon_onnx_provider_exe,
+      suite: ['catch2', 'unit', 'daemon', 'onnx'],
+      env: {
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+        'YAMS_TEST_MODE': '1',
+      },
+      timeout: 60,
+      is_parallel: true
+    )
+  endif
 
   test('plugin_infrastructure', catch2_plugin_infrastructure_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugin', 'infrastructure'],

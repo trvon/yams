@@ -1529,6 +1529,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             kgWriteQueue_ = std::make_unique<KGWriteQueue>(*workCoordinator_->getIOContext(),
                                                            kgStore, queueConfig);
             kgWriteQueue_->start();
+            if (postIngest_) {
+                postIngest_->setKgWriteQueue(kgWriteQueue_.get());
+            }
             spdlog::debug("[ServiceManager] KGWriteQueue started");
         }
     } catch (const std::exception& e) {

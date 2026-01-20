@@ -37,7 +37,7 @@ struct GlinerConfig {
     size_t max_width = 12;                  // Maximum span width (in words)
     size_t max_sequence_length = 512;       // Maximum input sequence length
     bool flat_ner = true;                   // If true, no overlapping entities
-    int num_threads = 4;                    // ONNX Runtime threads
+    int num_threads = 1;                    // ONNX Runtime threads (1 is faster for small models)
 };
 
 // ============================================================================

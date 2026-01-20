@@ -21,6 +21,14 @@ RUN set -eux; \
   { echo "Attempt $i failed, retrying after 5s..."; sleep 5; apt-get clean; rm -rf /var/lib/apt/lists/*; }; \
   done
 
+# Install Rust toolchain for libsql build
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN set -eux; \
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal && \
+  rustc --version && cargo --version
+
 # Install Zig 0.15.2 stable for zyp PDF plugin
 RUN set -eux; \
   ARCH=$(uname -m); \
@@ -67,6 +75,8 @@ RUN git init 2>/dev/null || true && \
 # Configure Conan to retry downloads more aggressively for transient network failures
 RUN --mount=type=cache,target=/root/.conan2 \
   set -eux; \
+  mkdir -p /root/.conan2 && \
+  printf 'core.net.http:timeout=120\ncore.net.http:max_retries=10\ncore.download:retry=10\ncore.download:retry_wait=5\n' > /root/.conan2/global.conf && \
   conan --version && \
   conan profile detect --force && \
   echo '=== Conan remotes ==='; conan remote list || true && \
@@ -74,9 +84,6 @@ RUN --mount=type=cache,target=/root/.conan2 \
   conan remote add conancenter https://center2.conan.io; \
   fi && \
   conan remote update conancenter --url https://center2.conan.io || true && \
-  conan config set core.net.http:timeout=120 || true && \
-  conan config set core.net.http:max_retries=10 || true && \
-  conan config set core.net.http:retry_wait=5 || true && \
   export YAMS_COMPILER=gcc; \
   export YAMS_CPPSTD=${YAMS_CPPSTD}; \
   export YAMS_EXTRA_MESON_FLAGS="-Drequire-sqlite-vec=false"; \

@@ -163,6 +163,10 @@ public:
     // Preload models specified in config
     Result<void> preloadModels();
 
+    // Warm up the pool for a specific model by acquiring a session and doing a dummy inference
+    // This triggers lazy loading so subsequent real requests are faster
+    Result<void> warmupModel(const std::string& modelName);
+
     // Evict least recently used models
     void evictLRU(size_t numToEvict = 1);
 

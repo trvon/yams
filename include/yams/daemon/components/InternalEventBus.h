@@ -230,12 +230,16 @@ public:
         std::string filePath;
         std::string extension;
     };
-    // Async GLiNER title extraction job - decoupled from main extraction pipeline
+    // Async GLiNER job for title + NL entity extraction (single call)
     struct TitleExtractionJob {
         std::string hash;
         int64_t documentId{-1};
         std::string textSnippet;   // First N chars for GLiNER inference
         std::string fallbackTitle; // Filename to use if GLiNER fails
+        // Additional context for NL entity KG population
+        std::string filePath; // For KG node creation
+        std::string language; // Language hint for extraction
+        std::string mimeType; // MIME type for content routing
     };
     struct StoreDocumentTask {
         AddDocumentRequest request;

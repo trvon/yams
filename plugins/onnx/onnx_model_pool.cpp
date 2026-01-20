@@ -35,8 +35,23 @@ static Ort::Env& get_global_ort_env() {
         OrtThreadingOptions* threading_options = nullptr;
         Ort::GetApi().CreateThreadingOptions(&threading_options);
         if (threading_options) {
-            Ort::GetApi().SetGlobalIntraOpNumThreads(threading_options, 1);
-            Ort::GetApi().SetGlobalInterOpNumThreads(threading_options, 1);
+            unsigned hw_threads = std::thread::hardware_concurrency();
+            if (hw_threads == 0)
+                hw_threads = 4;
+
+#ifdef _WIN32
+            int intra_threads = 1;
+            int inter_threads = 1;
+            spdlog::info(
+                "[ONNX] Windows: using single-threaded globalOrt::Env (EDEADLK workaround)");
+#else
+            int intra_threads = static_cast<int>(std::max(1u, hw_threads / 2));
+            int inter_threads = 1;
+            spdlog::info("[ONNX] Using multi-threaded global Ort::Env (intra={}, inter={})",
+                         intra_threads, inter_threads);
+#endif
+            Ort::GetApi().SetGlobalIntraOpNumThreads(threading_options, intra_threads);
+            Ort::GetApi().SetGlobalInterOpNumThreads(threading_options, inter_threads);
             Ort::GetApi().SetGlobalSpinControl(threading_options, 0);
 
             g_onnx_env = new Ort::Env(threading_options, ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
@@ -110,9 +125,9 @@ public:
         // Initialize ONNX Runtime environment
         // Use a single global Ort::Env per process (best practice)
         // The global env is protected by g_onnx_init_mutex during initialization.
-        spdlog::info("[ONNX] Impl constructor: getting global Ort::Env for '{}'", modelName);
+        spdlog::debug("[ONNX] Impl constructor: getting global Ort::Env for '{}'", modelName);
         env_ = &get_global_ort_env();
-        spdlog::info("[ONNX] Impl constructor: global Ort::Env obtained for '{}'", modelName);
+        spdlog::debug("[ONNX] Impl constructor: global Ort::Env obtained for '{}'", modelName);
 
         // Configure session options
         sessionOptions_ = std::make_unique<Ort::SessionOptions>();
@@ -174,8 +189,8 @@ public:
         sessionOptions_->AddConfigEntry("session.inter_op.allow_spinning",
                                         allow_spinning ? "1" : "0");
 
-        spdlog::info("[ONNX] SessionOptions threads: intra-op={} inter-op={} spinning={}", intra,
-                     inter, allow_spinning);
+        spdlog::debug("[ONNX] SessionOptions threads: intra-op={} inter-op={} spinning={}", intra,
+                      inter, allow_spinning);
 
 #ifdef _WIN32
         // On Windows, use sequential execution mode to avoid thread pool issues
@@ -297,8 +312,8 @@ public:
                 }
             }
 #endif
-            spdlog::info("[ONNX] Creating Ort::Session for model '{}' at {}", modelName_.c_str(),
-                         modelPath_.c_str());
+            spdlog::debug("[ONNX] Creating Ort::Session for model '{}' at {}", modelName_.c_str(),
+                          modelPath_.c_str());
 
             int retries = 3;
             while (retries-- > 0) {
@@ -307,7 +322,7 @@ public:
                     // with ONNX Runtime's internal locking. We rely on:
                     // 1. Single-flight pattern in loadModel() to prevent concurrent model loads
                     // 2. ONNX Runtime configured for single-threaded operation on Windows
-                    spdlog::info("[ONNX] Configuring session options for '{}'", modelName_);
+                    spdlog::debug("[ONNX] Configuring session options for '{}'", modelName_);
 
                     // Clone session options; on Windows force single-thread to avoid deadlocks
                     auto options = sessionOptions_->Clone();
@@ -319,8 +334,8 @@ public:
                     // Non-Windows: use configured threads from sessionOptions_ (default intra=4)
 
                     // Create session directly - no async wrapper needed for local file operations
-                    spdlog::info("[ONNX] Creating Ort::Session for '{}' at '{}'", modelName_,
-                                 modelPath_);
+                    spdlog::debug("[ONNX] Creating Ort::Session for '{}' at '{}'", modelName_,
+                                  modelPath_);
                     session_ = std::make_unique<Ort::Session>(
                         *env_, std::filesystem::path(modelPath_).c_str(), options);
                     spdlog::info("[ONNX] Ort::Session created successfully for '{}'", modelName_);
@@ -1106,18 +1121,14 @@ OnnxModelSession::OnnxModelSession(const std::string& modelPath, const std::stri
         info_.memoryUsageBytes = fs::file_size(modelPath);
     }
 
-    // Eagerly load the model to surface errors immediately during startup/acquisition
-    spdlog::debug("[ONNX] Created session for '{}' - eager loading...", modelName);
-    if (auto res = pImpl->loadModel(); !res) {
-        spdlog::error("[ONNX] Eager load failed for '{}': {}", modelName, res.error().message);
-        // We can't return an error from constructor, but pImpl state remains unloaded/invalid
-    } else {
-        // Copy dimension info from impl to info_ struct
-        info_.embeddingDim = pImpl->getEmbeddingDim();
-        info_.maxSequenceLength = pImpl->getMaxSequenceLength();
-        spdlog::debug("[ONNX] Session for '{}' initialized: dim={}, max_seq_len={}", modelName,
-                      info_.embeddingDim, info_.maxSequenceLength);
-    }
+    // Lazy loading: model will be loaded on first inference request
+    // This prevents slow session creation during pool initialization
+    spdlog::debug("[ONNX] Created session for '{}' - lazy loading (load on first inference)",
+                  modelName);
+
+    // Dimension info will be populated on first inference or explicit warm-up
+    info_.embeddingDim = 0;
+    info_.maxSequenceLength = 0;
 }
 
 OnnxModelSession::~OnnxModelSession() = default;
@@ -1128,6 +1139,15 @@ Result<std::vector<float>> OnnxModelSession::generateEmbedding(const std::string
     auto result = pImpl->generateEmbedding(text);
     if (!result) {
         info_.errorCount++;
+        return result;
+    }
+
+    // Lazy load dimension info on first successful inference
+    if (info_.embeddingDim == 0 && pImpl->isValid()) {
+        info_.embeddingDim = pImpl->getEmbeddingDim();
+        info_.maxSequenceLength = pImpl->getMaxSequenceLength();
+        spdlog::debug("[ONNX] Lazy loaded dimensions for '{}': dim={}, max_seq_len={}", info_.name,
+                      info_.embeddingDim, info_.maxSequenceLength);
     }
 
     return result;
@@ -1135,7 +1155,24 @@ Result<std::vector<float>> OnnxModelSession::generateEmbedding(const std::string
 
 Result<std::vector<std::vector<float>>>
 OnnxModelSession::generateBatchEmbeddings(const std::vector<std::string>& texts) {
-    return pImpl->generateBatchEmbeddings(texts);
+    info_.requestCount++;
+
+    auto result = pImpl->generateBatchEmbeddings(texts);
+
+    if (!result) {
+        info_.errorCount++;
+        return result;
+    }
+
+    // Lazy load dimension info on first successful inference
+    if (info_.embeddingDim == 0 && pImpl->isValid()) {
+        info_.embeddingDim = pImpl->getEmbeddingDim();
+        info_.maxSequenceLength = pImpl->getMaxSequenceLength();
+        spdlog::debug("[ONNX] Lazy loaded dimensions for '{}' (batch): dim={}, max_seq_len={}",
+                      info_.name, info_.embeddingDim, info_.maxSequenceLength);
+    }
+
+    return result;
 }
 
 bool OnnxModelSession::isValid() const {
@@ -1234,6 +1271,15 @@ Result<void> OnnxModelPool::initialize() {
                 if (!result) {
                     spdlog::warn("Failed to preload model {}: {}", modelName,
                                  result.error().message);
+                } else {
+                    // Warm up the model to trigger lazy loading
+                    // This ensures the first real inference request is fast
+                    spdlog::info("Warming up preloaded model: {}", modelName);
+                    auto warmupResult = warmupModel(modelName);
+                    if (!warmupResult) {
+                        spdlog::warn("Failed to warm up model {}: {}", modelName,
+                                     warmupResult.error().message);
+                    }
                 }
             }
             spdlog::info("Background model preloading completed");
@@ -1486,10 +1532,10 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     // Configure pool for this model (no lock needed - local variables)
     // Dynamically calculate pool size based on hardware
     const unsigned hw_threads = std::thread::hardware_concurrency();
-    // Base pool size on available CPU cores: ~25% of cores for embedding work
+    // Base pool size on available CPU cores: 50% of cores for embedding work
     // Minimum 2, maximum 8 to avoid excessive memory usage
     const size_t dynamic_max =
-        std::clamp(static_cast<size_t>(hw_threads / 4), size_t{2}, size_t{8});
+        std::clamp(static_cast<size_t>(hw_threads / 2), size_t{2}, size_t{8});
     const size_t dynamic_min = std::min(size_t{2}, dynamic_max);
 
     spdlog::info("[ONNX Plugin] Configuring resource pool (hw_threads={}, pool_max={})", hw_threads,
@@ -1515,18 +1561,18 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
 
     // Create ResourcePool WITHOUT holding mutex_ - the factory lambda will be called
     // later during acquire(), also without holding mutex_.
-    spdlog::info("[ONNX Plugin] Creating ResourcePool for '{}'", modelName);
+    spdlog::debug("[ONNX Plugin] Creating ResourcePool for '{}'", modelName);
     auto t0 = std::chrono::steady_clock::now();
 
     std::shared_ptr<ResourcePool<OnnxModelSession>> pool;
     try {
-        spdlog::info("[ONNX Plugin] About to construct ResourcePool...");
+        spdlog::debug("[ONNX Plugin] About to construct ResourcePool...");
         pool = std::make_shared<ResourcePool<OnnxModelSession>>(
             poolConfig,
             [modelPath, modelName, embConfig](const std::string&) -> Result<ModelSessionPtr> {
                 try {
-                    spdlog::info("[ONNX Plugin] Factory: creating OnnxModelSession for '{}'",
-                                 modelName);
+                    spdlog::debug("[ONNX Plugin] Factory: creating OnnxModelSession for '{}'",
+                                  modelName);
                     return std::make_shared<OnnxModelSession>(modelPath, modelName, embConfig);
                 } catch (const std::exception& e) {
                     spdlog::error("[ONNX Plugin] Factory: failed to create session: {}", e.what());
@@ -1538,7 +1584,7 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
                 }
             },
             [](const OnnxModelSession& session) { return session.isValid(); });
-        spdlog::info("[ONNX Plugin] ResourcePool constructed successfully");
+        spdlog::debug("[ONNX Plugin] ResourcePool constructed successfully");
     } catch (const std::system_error& e) {
         spdlog::error("[ONNX Plugin] ResourcePool construction threw system_error: {} (code={})",
                       e.what(), e.code().value());
@@ -1551,7 +1597,7 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     }
 
     // Now acquire lock briefly to update shared state
-    spdlog::info("[ONNX Plugin] Acquiring mutex for model registration...");
+    spdlog::debug("[ONNX Plugin] Acquiring mutex for model registration...");
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -1627,6 +1673,14 @@ Result<void> OnnxModelPool::preloadModels() {
         if (!result) {
             spdlog::warn("Failed to preload model {}: {}", modelName, result.error().message);
         } else {
+            // Warm up the model to trigger lazy loading
+            spdlog::info("Warming up preloaded model: {}", modelName);
+            auto warmupResult = warmupModel(modelName);
+            if (!warmupResult) {
+                spdlog::warn("Failed to warm up model {}: {}", modelName,
+                             warmupResult.error().message);
+            }
+
             // Mark as hot model
             std::lock_guard<std::recursive_mutex> lock(mutex_);
             auto it = models_.find(modelName);
@@ -1635,6 +1689,44 @@ Result<void> OnnxModelPool::preloadModels() {
             }
         }
     }
+
+    return Result<void>();
+}
+
+Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
+    spdlog::info("[ONNX Plugin] Warming up model: {}", modelName);
+    auto t0 = std::chrono::steady_clock::now();
+
+    // Acquire a session from the pool
+    auto handleResult = acquireModel(modelName, std::chrono::seconds(30));
+    if (!handleResult) {
+        spdlog::error("[ONNX Plugin] Failed to acquire session for warmup: {}",
+                      handleResult.error().message);
+        return handleResult.error();
+    }
+
+    auto handle = std::move(handleResult.value());
+
+    // Check if session is valid
+    if (!handle->isValid()) {
+        spdlog::error("[ONNX Plugin] Session invalid during warmup for model: {}", modelName);
+        return Error{ErrorCode::InvalidState, "Session invalid during warmup"};
+    }
+
+    // Do a dummy inference to trigger lazy loading
+    // Use a short text that will produce embeddings quickly
+    const std::string warmupText = "warmup";
+    auto embedResult = handle->generateEmbedding(warmupText);
+    if (!embedResult) {
+        spdlog::error("[ONNX Plugin] Warmup inference failed for {}: {}", modelName,
+                      embedResult.error().message);
+        return embedResult.error();
+    }
+
+    auto t1 = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    spdlog::info("[ONNX Plugin] Model '{}' warmed up in {}ms (embedding dim={})", modelName, ms,
+                 embedResult.value().size());
 
     return Result<void>();
 }

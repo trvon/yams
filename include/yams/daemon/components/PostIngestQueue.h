@@ -37,6 +37,7 @@ class ExternalEntityProviderAdapter;
 class IModelProvider;
 class WorkCoordinator;
 class GraphComponent;
+class KGWriteQueue;
 
 class PostIngestQueue {
 public:
@@ -53,6 +54,7 @@ public:
         int64_t documentId = 0;
         std::string hash;
         std::string fileName;
+        std::string filePath; // Full path for KG node creation
         std::string title;
         std::string extractedText;
         std::string mimeType;
@@ -172,6 +174,9 @@ public:
         titleExtractor_ = std::move(extractor);
     }
 
+    // Set KGWriteQueue for async NL entity KG population (merged with title extraction)
+    void setKgWriteQueue(KGWriteQueue* queue) { kgWriteQueue_ = queue; }
+
     /// Set callback to be invoked when the queue drains (all stages become idle).
     /// Used by ServiceManager to trigger search engine rebuild.
     using DrainCallback = std::function<void()>;
@@ -225,10 +230,13 @@ private:
     void processEntityExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& extension);
     void dispatchToTitleChannel(const std::string& hash, int64_t docId,
-                                const std::string& textSnippet, const std::string& fallbackTitle);
+                                const std::string& textSnippet, const std::string& fallbackTitle,
+                                const std::string& filePath, const std::string& language,
+                                const std::string& mimeType);
     void processTitleExtractionStage(const std::string& hash, int64_t docId,
                                      const std::string& textSnippet,
-                                     const std::string& fallbackTitle);
+                                     const std::string& fallbackTitle, const std::string& filePath,
+                                     const std::string& language, const std::string& mimeType);
     std::size_t resolveChannelCapacity() const;
     void checkDrainAndSignal(); // Check if drained and signal corpus stats stale
     std::string deriveTitle(const std::string& text, const std::string& fileName,
@@ -293,6 +301,7 @@ private:
     std::deque<std::string> embedRetryHashes_;
 
     search::EntityExtractionFunc titleExtractor_;
+    KGWriteQueue* kgWriteQueue_{nullptr};
 };
 
 } // namespace yams::daemon
