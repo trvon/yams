@@ -502,12 +502,39 @@ private:
             if (startRestart_) {
                 std::cout << "[INFO] YAMS daemon is already running - restarting...\n";
                 restartDaemon();
-            } else {
+                return;
+            }
+
+            auto confirm = [](const std::string& q) -> bool {
+#ifndef _WIN32
+                bool interactive = ::isatty(STDIN_FILENO);
+#else
+                bool interactive = true;
+#endif
+                if (!interactive)
+                    return false;
+                std::cout << q << " [y/N]: " << std::flush;
+                std::string ans;
+                if (!std::getline(std::cin, ans))
+                    return false;
+                if (ans.empty())
+                    return false;
+                char c = static_cast<char>(std::tolower(ans[0]));
+                return c == 'y';
+            };
+
+            if (!confirm("YAMS daemon is already running. Stop it and start a new one?")) {
                 std::cout << "YAMS daemon is already running.\n";
                 std::cout << "Use '--restart' to restart it, or run 'yams daemon status -d' to "
                              "view daemon status.\n";
+                return;
             }
-            return;
+
+            stopDaemon();
+            if (daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+                std::cerr << "Failed to stop running daemon; not starting a new one.\n";
+                return;
+            }
         }
 
         // Determine foreground mode preference: start-level flag overrides global

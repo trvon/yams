@@ -93,6 +93,23 @@ public:
         }
     }
 
+    /// Profile scale for PostIngestQueue operations.
+    /// More conservative scaling: Aggressive is baseline (1.0), others reduce.
+    /// Efficient  -> 0.50 (minimal resource use)
+    /// Balanced   -> 0.75 (moderate resource use)
+    /// Aggressive -> 1.0  (current defaults, maximum throughput)
+    static double postIngestProfileScale() {
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 0.50;
+            case Profile::Balanced:
+                return 0.75;
+            case Profile::Aggressive:
+            default:
+                return 1.0;
+        }
+    }
+
     // Public accessors for embedding-related knobs (used outside daemon module)
     // These forward to internal tunables while keeping implementation details private.
     static double getEmbedSafety() { return embedSafety(); }
@@ -627,18 +644,21 @@ public:
     }
 
     // Post-ingest batching size. Env override: YAMS_POST_INGEST_BATCH_SIZE
+    // Profile-scaled: Efficient=4, Balanced=6, Aggressive=8
     // Dynamically scales down when DB lock contention is detected.
     static uint32_t postIngestBatchSize() {
         uint32_t ov = postIngestBatchSizeOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
 
-        uint32_t baseBatchSize = 8;
+        // Profile-scaled base: Efficient=4, Balanced=6, Aggressive=8
+        uint32_t baseBatchSize =
+            std::max(1u, static_cast<uint32_t>(8.0 * postIngestProfileScale()));
         auto embedCap = static_cast<uint32_t>(getEmbedDocCap());
         if (embedCap == 0) {
             embedCap = 64;
         }
-        baseBatchSize = std::min(embedCap, 256u);
+        baseBatchSize = std::min({baseBatchSize, embedCap, 256u});
         if (const char* s = std::getenv("YAMS_POST_INGEST_BATCH_SIZE")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
@@ -1390,7 +1410,8 @@ public:
     // PBI-05a: PostIngestQueue Dynamic Concurrency Scaling
     // =========================================================================
 
-    /// Maximum concurrent extraction tasks (default 4, max 64)
+    /// Maximum concurrent extraction tasks (profile-scaled, max 64)
+    /// Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
     /// Environment: YAMS_POST_EXTRACTION_CONCURRENT
     static uint32_t postExtractionConcurrent() {
         uint32_t ov = postExtractionConcurrentOverride_.load(std::memory_order_relaxed);
@@ -1404,13 +1425,15 @@ public:
             } catch (...) {
             }
         }
-        return 4; // Default matches original kMaxConcurrent_
+        // Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
+        return std::max(1u, static_cast<uint32_t>(4.0 * postIngestProfileScale()));
     }
     static void setPostExtractionConcurrent(uint32_t v) {
         postExtractionConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
     }
 
-    /// Maximum concurrent KG ingestion tasks (default 8, max 64)
+    /// Maximum concurrent KG ingestion tasks (profile-scaled, max 64)
+    /// Profile-scaled: Efficient=4, Balanced=6, Aggressive=8
     /// Environment: YAMS_POST_KG_CONCURRENT
     static uint32_t postKgConcurrent() {
         uint32_t ov = postKgConcurrentOverride_.load(std::memory_order_relaxed);
@@ -1424,13 +1447,15 @@ public:
             } catch (...) {
             }
         }
-        return 4; // Increased back from 2 after batch status update improvements
+        // Profile-scaled: Efficient=4, Balanced=6, Aggressive=8
+        return std::max(1u, static_cast<uint32_t>(8.0 * postIngestProfileScale()));
     }
     static void setPostKgConcurrent(uint32_t v) {
         postKgConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
     }
 
-    /// Maximum concurrent symbol extraction tasks (default 4, max 32)
+    /// Maximum concurrent symbol extraction tasks (profile-scaled, max 32)
+    /// Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
     /// Environment: YAMS_POST_SYMBOL_CONCURRENT
     static uint32_t postSymbolConcurrent() {
         uint32_t ov = postSymbolConcurrentOverride_.load(std::memory_order_relaxed);
@@ -1444,14 +1469,16 @@ public:
             } catch (...) {
             }
         }
-        return 4; // Increased back from 2 after batch status update improvements
+        // Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
+        return std::max(1u, static_cast<uint32_t>(4.0 * postIngestProfileScale()));
     }
     static void setPostSymbolConcurrent(uint32_t v) {
         postSymbolConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
     }
 
-    /// Maximum concurrent entity extraction tasks (default 2, max 16)
-    /// Entity extraction is heavy (binary analysis) so lower default
+    /// Maximum concurrent entity extraction tasks (profile-scaled, max 16)
+    /// Entity extraction is CPU-heavy, so lower defaults
+    /// Profile-scaled: Efficient=1, Balanced=2, Aggressive=2
     /// Environment: YAMS_POST_ENTITY_CONCURRENT
     static uint32_t postEntityConcurrent() {
         uint32_t ov = postEntityConcurrentOverride_.load(std::memory_order_relaxed);
@@ -1465,7 +1492,9 @@ public:
             } catch (...) {
             }
         }
-        return 2; // Default matches original kMaxEntityConcurrent_
+        // Profile-scaled: Efficient=1, Balanced=2, Aggressive=2
+        // Entity extraction is CPU-heavy, keep minimum at 1
+        return std::max(1u, static_cast<uint32_t>(2.0 * postIngestProfileScale()));
     }
     static void setPostEntityConcurrent(uint32_t v) {
         postEntityConcurrentOverride_.store(std::min(v, 16u), std::memory_order_relaxed);
@@ -1473,6 +1502,7 @@ public:
 
     // PBI-05b: EmbeddingService concurrency (parallel embedding workers)
     // Embeddings are compute-heavy (ONNX inference) so we need parallelism to keep up with ingest
+    // Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
     static uint32_t postEmbedConcurrent() {
         uint32_t ov = postEmbedConcurrentOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
@@ -1486,10 +1516,8 @@ public:
             } catch (...) {
             }
         }
-        // Default: scale with hardware. Embeddings are compute-bound (ONNX inference).
-        // DB batch updates now use single-transaction batching to reduce contention.
-        uint32_t hw = hardwareConcurrency();
-        return std::min<uint32_t>(std::max<uint32_t>(hw / 2, 2), 8);
+        // Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
+        return std::max(1u, static_cast<uint32_t>(4.0 * postIngestProfileScale()));
     }
     static void setPostEmbedConcurrent(uint32_t v) {
         postEmbedConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);

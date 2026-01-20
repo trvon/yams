@@ -1090,6 +1090,9 @@ struct BenchFixture {
 
         auto lastProgressTime = std::chrono::steady_clock::now();
         uint64_t lastDocCount = 0;
+        uint64_t lastIndexedDocCount = 0;
+        uint64_t lastContentExtracted = 0;
+        uint64_t lastPostProcessed = 0;
         uint32_t lastDepth = 0;
         bool completed = false;
         int stableChecks = 0;
@@ -1110,11 +1113,13 @@ struct BenchFixture {
 
             // Check for stall (no progress for progressTimeoutSec)
             if (timeSinceProgress > progressTimeoutSec) {
-                spdlog::error("Ingestion stalled - no progress for {}s (docs: {}/{}, queue: {}, "
-                              "inflight: extract={} kg={} symbol={} entity={})",
-                              timeSinceProgress.count(), lastDocCount, corpusSize, lastDepth,
-                              lastExtractionInFlight, lastKgInFlight, lastSymbolInFlight,
-                              lastEntityInFlight);
+                spdlog::error(
+                    "Ingestion stalled - no progress for {}s (docs: total={} indexed={} target={} "
+                    "queue={}, inflight: extract={} kg={} symbol={} entity={} extracted={} "
+                    "processed={})",
+                    timeSinceProgress.count(), lastDocCount, lastIndexedDocCount, corpusSize,
+                    lastDepth, lastExtractionInFlight, lastKgInFlight, lastSymbolInFlight,
+                    lastEntityInFlight, lastContentExtracted, lastPostProcessed);
                 throw std::runtime_error("Ingestion stalled - benchmark results would be invalid. "
                                          "Set YAMS_BENCH_PROGRESS_TIMEOUT=300 for slower systems. "
                                          "For faster ingestion: YAMS_POST_EMBED_CONCURRENT=12 "
@@ -1126,6 +1131,12 @@ struct BenchFixture {
                 const auto& counts = statusResult.value().requestCounts;
                 uint32_t depth = statusResult.value().postIngestQueueDepth;
                 uint64_t docCount = getMetric(counts, "documents_total");
+                uint64_t indexedCount = getMetric(counts, "documents_indexed");
+                uint64_t contentExtracted = getMetric(counts, "documents_content_extracted");
+                uint64_t postQueued = getMetric(counts, "post_ingest_queued");
+                uint64_t postInflight = getMetric(counts, "post_ingest_inflight");
+                uint64_t postProcessed = getMetric(counts, "post_ingest_processed");
+                uint64_t queuedTotal = std::max<uint64_t>(depth, postQueued);
 
                 // Check all processing stage in-flight counters
                 uint64_t extractionInFlight = getMetric(counts, "extraction_inflight");
@@ -1138,18 +1149,25 @@ struct BenchFixture {
                     extractionInFlight + kgInFlight + symbolInFlight + entityInFlight;
 
                 bool statusChanged =
-                    (depth != lastDepth || docCount != lastDocCount ||
-                     kgInFlight != lastKgInFlight || symbolInFlight != lastSymbolInFlight ||
-                     entityInFlight != lastEntityInFlight ||
+                    (queuedTotal != lastDepth || docCount != lastDocCount ||
+                     indexedCount != lastIndexedDocCount ||
+                     contentExtracted != lastContentExtracted ||
+                     postProcessed != lastPostProcessed || kgInFlight != lastKgInFlight ||
+                     symbolInFlight != lastSymbolInFlight || entityInFlight != lastEntityInFlight ||
                      extractionInFlight != lastExtractionInFlight);
 
                 if (statusChanged) {
-                    spdlog::info("Documents: {} / {}, queue={}, inflight: extract={} kg={} "
-                                 "symbol={} entity={} (total={})",
-                                 docCount, corpusSize, depth, extractionInFlight, kgInFlight,
+                    spdlog::info("Documents: total={} indexed={} / {} | queue={} inflight={} | "
+                                 "extracted={} processed={} | extract={} kg={} symbol={} "
+                                 "entity={} (total={})",
+                                 docCount, indexedCount, corpusSize, queuedTotal, postInflight,
+                                 contentExtracted, postProcessed, extractionInFlight, kgInFlight,
                                  symbolInFlight, entityInFlight, totalInFlight);
-                    lastDepth = depth;
+                    lastDepth = queuedTotal;
                     lastDocCount = docCount;
+                    lastIndexedDocCount = indexedCount;
+                    lastContentExtracted = contentExtracted;
+                    lastPostProcessed = postProcessed;
                     lastKgInFlight = kgInFlight;
                     lastSymbolInFlight = symbolInFlight;
                     lastEntityInFlight = entityInFlight;
@@ -1161,13 +1179,19 @@ struct BenchFixture {
                 }
 
                 // Complete when ALL stages are idle:
-                // - postIngestQueueDepth == 0 (queue empty)
+                // - post_ingest_queued == 0 AND post_ingest_inflight == 0 (queue empty)
                 // - totalInFlight == 0 (all stages: extraction, KG, symbol, entity)
-                // - docCount >= corpusSize OR stable for 5+ seconds
-                bool allStagesDrained = (depth == 0 && totalInFlight == 0);
-                if (allStagesDrained && (docCount >= (uint64_t)corpusSize || stableChecks >= 10)) {
-                    spdlog::info("Ingestion complete: {} documents indexed, all stages drained",
-                                 docCount);
+                // - indexedCount >= corpusSize (or stable for 5+ seconds after reaching target)
+                bool allStagesDrained =
+                    (queuedTotal == 0 && postInflight == 0 && totalInFlight == 0);
+                bool indexedReady = indexedCount >= static_cast<uint64_t>(corpusSize);
+                bool extractedReady = (contentExtracted >= static_cast<uint64_t>(corpusSize)) ||
+                                      (contentExtracted == 0);
+                if (allStagesDrained && indexedReady && extractedReady) {
+                    spdlog::info("Ingestion complete: total={} indexed={} (target={}), all stages "
+                                 "drained (extracted={}, processed={})",
+                                 docCount, indexedCount, corpusSize, contentExtracted,
+                                 postProcessed);
                     completed = true;
                     break;
                 }

@@ -369,3 +369,41 @@ TEST_CASE("Repair batch size env var overrides", "[daemon][tune][advisor][catch2
         CHECK(TuneAdvisor::repairMaxBatch() == 32u);
     }
 }
+
+// =============================================================================
+// PostIngestQueue Profile-Aware Concurrency Tests
+// =============================================================================
+
+TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][catch2]") {
+    resetEvictionOverrides();
+
+    SECTION("Efficient profile uses 0.5x scaling") {
+        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 2u); // 4 * 0.5 = 2
+        CHECK(TuneAdvisor::postKgConcurrent() == 4u);         // 8 * 0.5 = 4
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 2u);     // 4 * 0.5 = 2
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);     // 2 * 0.5 = 1
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);      // 4 * 0.5 = 2
+    }
+
+    SECTION("Balanced profile uses 0.75x scaling") {
+        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 3u); // 4 * 0.75 = 3
+        CHECK(TuneAdvisor::postKgConcurrent() == 6u);         // 8 * 0.75 = 6
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 3u);     // 4 * 0.75 = 3
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);     // 2 * 0.75 = 1.5, truncates to 1
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 3u);      // 4 * 0.75 = 3
+    }
+
+    SECTION("Aggressive profile uses 1.0x (defaults)") {
+        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 4u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 8u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 4u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 2u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 4u);
+    }
+}
