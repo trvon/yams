@@ -360,6 +360,31 @@ private:
         return kill(pid, 0) != 0; // Check if process is gone
     }
 
+    bool waitForDaemonStop(const std::string& socketPath, const std::string& pidFilePath,
+                           std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
+        const auto start = std::chrono::steady_clock::now();
+        const auto interval = std::chrono::milliseconds(100);
+
+        while (std::chrono::steady_clock::now() - start < timeout) {
+            pid_t pid = readPidFromFile(pidFilePath);
+
+            bool processGone = (pid <= 0) || (kill(pid, 0) != 0);
+            bool socketGone = !daemon::DaemonClient::isDaemonRunning(socketPath);
+
+            if (processGone && socketGone) {
+                spdlog::debug("Daemon fully stopped (PID {}), socket cleared", pid);
+                return true;
+            }
+
+            spdlog::debug("Waiting for daemon to stop... PID={}, process_gone={}, socket_gone={}",
+                          pid, processGone, socketGone);
+            std::this_thread::sleep_for(interval);
+        }
+
+        spdlog::warn("Timeout waiting for daemon to stop");
+        return false;
+    }
+
     void cleanupDaemonFiles(const std::string& socketPath, const std::string& pidFilePath) {
         auto removeWithRetry = [](const std::filesystem::path& path, const std::string& label) {
             if (path.empty()) {
@@ -524,14 +549,14 @@ private:
             };
 
             if (!confirm("YAMS daemon is already running. Stop it and start a new one?")) {
-                std::cout << "YAMS daemon is already running.\n";
                 std::cout << "Use '--restart' to restart it, or run 'yams daemon status -d' to "
                              "view daemon status.\n";
                 return;
             }
 
             stopDaemon();
-            if (daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+
+            if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5))) {
                 std::cerr << "Failed to stop running daemon; not starting a new one.\n";
                 return;
             }
@@ -2167,7 +2192,18 @@ private:
         const std::string effectiveSocket =
             socketPath_.empty() ? daemon::DaemonClient::resolveSocketPathConfigFirst().string()
                                 : socketPath_;
+
+        if (pidFile_.empty()) {
+            pidFile_ = daemon::YamsDaemon::resolveSystemPath(daemon::YamsDaemon::PathType::PidFile)
+                           .string();
+        }
+
         stopDaemon();
+
+        if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5))) {
+            spdlog::error("Failed to stop daemon for restart");
+            std::exit(1);
+        }
 
         // Start daemon
         std::cout << "[INFO] Starting YAMS daemon...\n";

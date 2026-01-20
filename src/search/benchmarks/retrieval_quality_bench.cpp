@@ -585,7 +585,12 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         opts.query = tq.query;
         opts.searchType = searchType;
         opts.limit = static_cast<std::size_t>(k);
-        opts.timeout = 5s;
+        std::chrono::milliseconds queryTimeout{20000};
+        if (const char* env = std::getenv("YAMS_BENCH_QUERY_TIMEOUT_MS")) {
+            queryTimeout = std::chrono::milliseconds{
+                static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
+        }
+        opts.timeout = queryTimeout;
         opts.symbolRank = true;
         const bool benchDiagEnabled = []() -> bool {
             if (const char* env = std::getenv("YAMS_BENCH_DIAG"); env && std::string(env) == "1") {
@@ -1197,7 +1202,12 @@ struct BenchFixture {
                 bool extractedReady = extractedPresent
                                           ? (contentExtracted >= static_cast<uint64_t>(corpusSize))
                                           : true;
-                if (allStagesDrained && indexedReady && extractedReady) {
+                bool processedReady = postProcessedPresent
+                                          ? (postProcessed >= static_cast<uint64_t>(corpusSize))
+                                          : true;
+                bool stableAfterDrain = (stableChecks >= 6);
+                if (allStagesDrained && indexedReady &&
+                    (extractedReady || processedReady || stableAfterDrain)) {
                     spdlog::info("Ingestion complete: total={} indexed={} (target={}), all stages "
                                  "drained (extracted={}, processed={})",
                                  docCount, indexedCount, corpusSize, contentExtracted,
@@ -1445,7 +1455,12 @@ struct BenchFixture {
             testReq.query = "test";
             testReq.searchType = "hybrid";
             testReq.limit = 1000;
-            testReq.timeout = 5s;
+            std::chrono::milliseconds queryTimeout{20000};
+            if (const char* env = std::getenv("YAMS_BENCH_QUERY_TIMEOUT_MS")) {
+                queryTimeout = std::chrono::milliseconds{
+                    static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
+            }
+            testReq.timeout = queryTimeout;
             auto testResult = yams::cli::run_sync(client->search(testReq), 10s);
             indexedDocCount = testResult ? testResult.value().results.size() : 0;
         }
@@ -1566,7 +1581,12 @@ struct BenchFixture {
                 opts.query = std::move(query);
                 opts.searchType = std::move(searchType);
                 opts.limit = 25;
-                opts.timeout = 5s;
+                std::chrono::milliseconds queryTimeout{20000};
+                if (const char* env = std::getenv("YAMS_BENCH_QUERY_TIMEOUT_MS")) {
+                    queryTimeout = std::chrono::milliseconds{
+                        static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
+                }
+                opts.timeout = queryTimeout;
                 opts.symbolRank = symbolRank;
 
                 DebugLogEntry sanityEntry;

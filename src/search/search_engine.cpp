@@ -9,8 +9,8 @@
 #include <chrono>
 #include <cmath>
 #include <future>
-#include <sstream>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -103,6 +103,31 @@ std::string truncateSnippet(const std::string& content, size_t maxLen) {
     std::string out = content.substr(0, maxLen);
     out.append("...");
     return out;
+}
+
+std::string_view::size_type ci_find(std::string_view haystack, std::string_view needle) {
+    if (needle.empty()) {
+        return 0;
+    }
+    if (needle.size() > haystack.size()) {
+        return std::string_view::npos;
+    }
+
+    for (std::string_view::size_type i = 0; i <= haystack.size() - needle.size(); ++i) {
+        bool match = true;
+        for (std::string_view::size_type j = 0; j < needle.size(); ++j) {
+            unsigned char c1 = static_cast<unsigned char>(haystack[i + j]);
+            unsigned char c2 = static_cast<unsigned char>(needle[j]);
+            if (std::tolower(c1) != std::tolower(c2)) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            return i;
+        }
+    }
+    return std::string_view::npos;
 }
 
 float normalizedBm25Score(double rawScore, float divisor, double minScore, double maxScore) {
@@ -365,21 +390,60 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
 }
 
 std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentResult>& results) {
-    // CombMNZ: documents found by multiple components get boosted
-    // First pass: count how many components found each document
-    std::unordered_map<std::string, size_t> componentCounts;
-    for (const auto& comp : results) {
-        componentCounts[comp.documentHash]++;
-    }
+    struct Accumulator {
+        double score = 0.0;
+        size_t componentCount = 0;
+        std::string filePath;
+        std::string snippet;
+    };
+    std::unordered_map<std::string, Accumulator> accumMap;
+    accumMap.reserve(results.size());
 
     const float k = config_.rrfK;
-    return fuseSinglePass(results, [this, k, &componentCounts](const ComponentResult& comp) {
+
+    for (const auto& comp : results) {
+        auto& acc = accumMap[comp.documentHash];
+
+        if (acc.componentCount == 0) {
+            acc.filePath = comp.filePath;
+            if (comp.snippet.has_value()) {
+                acc.snippet = comp.snippet.value();
+            }
+        }
+
         float weight = getComponentWeight(comp.source);
         const double rank = static_cast<double>(comp.rank) + 1.0;
         double rrfScore = 1.0 / (k + rank);
-        double mnzBoost = static_cast<double>(componentCounts[comp.documentHash]);
-        return weight * rrfScore * mnzBoost;
-    });
+        double contribution = weight * rrfScore;
+
+        acc.score += contribution;
+        acc.componentCount++;
+    }
+
+    std::vector<SearchResult> fusedResults;
+    fusedResults.reserve(accumMap.size());
+
+    for (auto& entry : accumMap) {
+        SearchResult r;
+        r.document.sha256Hash = entry.first;
+        r.document.filePath = std::move(entry.second.filePath);
+        r.score = static_cast<float>(entry.second.score * entry.second.componentCount);
+        r.snippet = std::move(entry.second.snippet);
+        fusedResults.push_back(std::move(r));
+    }
+
+    if (fusedResults.size() > config_.maxResults) {
+        std::partial_sort(
+            fusedResults.begin(), fusedResults.begin() + static_cast<ptrdiff_t>(config_.maxResults),
+            fusedResults.end(),
+            [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+        fusedResults.resize(config_.maxResults);
+    } else {
+        std::sort(fusedResults.begin(), fusedResults.end(),
+                  [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+    }
+
+    return fusedResults;
 }
 
 float ResultFusion::getComponentWeight(ComponentResult::Source source) const {
@@ -1048,15 +1112,19 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
 
     if (!response.results.empty()) {
-        std::unordered_map<std::string, size_t> extCounts;
+        std::unordered_map<std::string_view, size_t> extCounts;
         for (const auto& r : response.results) {
-            const std::string& path = r.document.filePath;
+            std::string_view path = r.document.filePath;
             auto pos = path.rfind('.');
-            std::string ext = (pos != std::string::npos) ? path.substr(pos) : "(no ext)";
+            std::string_view ext = (pos != std::string_view::npos) ? path.substr(pos) : "no ext";
             extCounts[ext]++;
         }
 
-        std::vector<std::pair<std::string, size_t>> sortedExts(extCounts.begin(), extCounts.end());
+        std::vector<std::pair<std::string, size_t>> sortedExts;
+        sortedExts.reserve(extCounts.size());
+        for (auto& kv : extCounts) {
+            sortedExts.emplace_back(std::string(kv.first), kv.second);
+        }
         std::sort(sortedExts.begin(), sortedExts.end(),
                   [](const auto& a, const auto& b) { return a.second > b.second; });
 
@@ -1139,21 +1207,17 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryPathTree(const std
             result.documentHash = doc.sha256Hash;
             result.filePath = doc.filePath;
 
-            // Score based on path match quality
-            // Exact match = 1.0, partial match = lower score
-            std::string lowerPath = doc.filePath;
-            std::string lowerQuery = query;
-            std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::tolower);
-            std::transform(lowerQuery.begin(), lowerQuery.end(), lowerQuery.begin(), ::tolower);
+            std::string_view pathView = doc.filePath;
+            std::string_view queryView = query;
 
-            if (lowerPath.find(lowerQuery) != std::string::npos) {
-                // Calculate score based on match position and length
-                size_t pos = lowerPath.find(lowerQuery);
-                float positionScore = 1.0f - (static_cast<float>(pos) / lowerPath.length());
-                float lengthScore = static_cast<float>(lowerQuery.length()) / lowerPath.length();
+            size_t pos = ci_find(pathView, queryView);
+
+            if (pos != std::string_view::npos) {
+                float positionScore = 1.0f - (static_cast<float>(pos) / pathView.length());
+                float lengthScore = static_cast<float>(queryView.length()) / pathView.length();
                 result.score = (positionScore * 0.3f + lengthScore * 0.7f);
             } else {
-                result.score = 0.5f; // Partial match
+                result.score = 0.5f;
             }
 
             result.source = ComponentResult::Source::PathTree;
