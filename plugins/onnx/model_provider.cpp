@@ -45,6 +45,7 @@ struct ProviderCtx {
     std::unordered_map<std::string, FailureInfo> model_failures; // failure tracking
     bool ready = false;
     bool disabled = false;
+    bool gpuEnabled = false; // Tracks whether GPU acceleration is configured
     std::string last_error;
     std::string rerankerModelPath; // Path to reranker model
     std::size_t configuredMaxLoadedModels = 0;
@@ -398,7 +399,9 @@ struct ProviderCtx {
 
         configuredMaxLoadedModels = cfg.maxLoadedModels;
         configuredHotPoolSize = cfg.hotPoolSize;
-        spdlog::info("[ONNX-Plugin] Creating OnnxModelPool with modelsRoot={}", cfg.modelsRoot);
+        gpuEnabled = cfg.enableGPU;
+        spdlog::info("[ONNX-Plugin] Creating OnnxModelPool with modelsRoot={}, gpuEnabled={}",
+                     cfg.modelsRoot, gpuEnabled);
         pool = std::make_unique<yams::daemon::OnnxModelPool>(cfg);
         spdlog::info("[ONNX-Plugin] OnnxModelPool created, calling initialize()...");
         try {
@@ -1102,7 +1105,23 @@ struct ProviderSingleton {
             j["model"] = model_id;
             // Best-effort dimension and runtime hints
             j["graph_optimization"] = "enabled";
-            j["execution_provider"] = "cpu";
+            // Report actual execution provider based on configuration
+            // GPU providers: CUDA (Linux), CoreML (macOS), DirectML (Windows)
+            if (c->gpuEnabled) {
+#if defined(__APPLE__)
+                j["execution_provider"] = "coreml";
+#elif defined(_WIN32)
+#if defined(YAMS_ONNX_CUDA_ENABLED)
+                j["execution_provider"] = "cuda";
+#else
+                j["execution_provider"] = "directml";
+#endif
+#else
+                j["execution_provider"] = "cuda";
+#endif
+            } else {
+                j["execution_provider"] = "cpu";
+            }
             size_t dim = 0;
             if (c->ready) {
                 auto h = c->pool->acquireModel(model_id, std::chrono::seconds(2));

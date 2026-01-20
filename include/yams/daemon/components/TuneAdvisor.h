@@ -1482,6 +1482,47 @@ public:
         postEmbedConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
     }
 
+    // =========================================================================
+    // ONNX Model Pool Sizing (GPU-aware)
+    // =========================================================================
+
+    /// Maximum concurrent ONNX sessions per model.
+    /// Adjusted based on whether GPU is available:
+    ///   GPU mode: max(2, min(hw_threads/2, 8)) - high throughput, GPU handles inference
+    ///   CPU mode: max(1, min(hw_threads/4, 4)) - conservative to avoid CPU saturation
+    /// Environment: YAMS_ONNX_SESSIONS_PER_MODEL
+    static uint32_t onnxSessionsPerModel(bool gpuEnabled) {
+        uint32_t ov = onnxSessionsPerModelOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_ONNX_SESSIONS_PER_MODEL")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 32)
+                    return v;
+            } catch (...) {
+            }
+        }
+        // GPU-aware default sizing
+        uint32_t hw = hardwareConcurrency();
+        if (gpuEnabled) {
+            // GPU mode: GPU handles heavy lifting, more sessions useful for throughput
+            return std::max<uint32_t>(2, std::min<uint32_t>(hw / 2, 8));
+        } else {
+            // CPU-only mode: conservative to prevent CPU saturation during inference
+            // Each ONNX session uses multiple threads internally (intra-op parallelism)
+            return std::max<uint32_t>(1, std::min<uint32_t>(hw / 4, 4));
+        }
+    }
+    static void setOnnxSessionsPerModel(uint32_t v) {
+        onnxSessionsPerModelOverride_.store(std::clamp(v, 1u, 32u), std::memory_order_relaxed);
+    }
+
+    /// Whether ONNX pool is currently in startup mode (reduced resources during warmup).
+    /// Set to true during initialization, cleared after preload completes.
+    static bool onnxStartupMode() { return onnxStartupMode_.load(std::memory_order_relaxed); }
+    static void setOnnxStartupMode(bool v) { onnxStartupMode_.store(v, std::memory_order_relaxed); }
+
     // Get the current embed channel capacity (for sizing the queue)
     static uint32_t embedChannelCapacity() {
         uint32_t ov = embedChannelCapacityOverride_.load(std::memory_order_relaxed);
@@ -1669,6 +1710,10 @@ private:
     // PBI-05b: EmbeddingService concurrency overrides
     static inline std::atomic<uint32_t> postEmbedConcurrentOverride_{0};
     static inline std::atomic<uint32_t> embedChannelCapacityOverride_{0};
+
+    // ONNX Model Pool overrides
+    static inline std::atomic<uint32_t> onnxSessionsPerModelOverride_{0};
+    static inline std::atomic<bool> onnxStartupMode_{false};
 
     // DB contention management overrides
     static inline std::atomic<uint32_t> dbPoolMinOverride_{0};

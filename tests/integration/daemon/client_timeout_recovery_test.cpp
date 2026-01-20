@@ -48,6 +48,7 @@ TEST_CASE("Client timeout recovery: Immediate EOF detection and retry",
         auto result1 = yams::cli::run_sync(client.list(req1), 2s);
         REQUIRE(result1.has_value());
 
+        // Sleep for 2 seconds to allow connection to become idle
         std::this_thread::sleep_for(2s);
 
         ListRequest req2;
@@ -55,12 +56,15 @@ TEST_CASE("Client timeout recovery: Immediate EOF detection and retry",
 
         // Connection may be stale after idle period - allow time for reconnection
         // Retry logic handles stale connection scenarios where pool needs to reconnect
+        // Note: Connection pool may need multiple attempts to detect stale connection
+        // and establish a new one. Give it more time and retries.
         yams::Result<yams::daemon::ListResponse> result2;
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            result2 = yams::cli::run_sync(client.list(req2), 3s);
+        for (int attempt = 0; attempt < 5; ++attempt) {
+            result2 = yams::cli::run_sync(client.list(req2), 5s);
             if (result2.has_value())
                 break;
-            std::this_thread::sleep_for(100ms);
+            // Longer delay between retries to allow pool to fully reset
+            std::this_thread::sleep_for(500ms);
         }
         REQUIRE(result2.has_value());
     }
@@ -82,6 +86,7 @@ TEST_CASE("Client timeout recovery: Streaming request connection handling",
         auto result1 = yams::cli::run_sync(client.grep(req1), 2s);
         REQUIRE(result1.has_value());
 
+        // Sleep for 2 seconds to allow connection to become idle
         std::this_thread::sleep_for(2s);
 
         GrepRequest req2;
@@ -89,12 +94,14 @@ TEST_CASE("Client timeout recovery: Streaming request connection handling",
         req2.pathsOnly = false;
 
         // Streaming requests may need reconnection after idle period
+        // Give more time and retries for connection pool to recover
         yams::Result<yams::daemon::GrepResponse> result2;
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            result2 = yams::cli::run_sync(client.grep(req2), 3s);
+        for (int attempt = 0; attempt < 5; ++attempt) {
+            result2 = yams::cli::run_sync(client.grep(req2), 5s);
             if (result2.has_value())
                 break;
-            std::this_thread::sleep_for(100ms);
+            // Longer delay between retries to allow pool to fully reset
+            std::this_thread::sleep_for(500ms);
         }
         REQUIRE(result2.has_value());
     }

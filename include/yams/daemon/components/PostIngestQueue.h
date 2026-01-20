@@ -100,6 +100,10 @@ public:
     double ratePerSecEma() const { return ratePerSecEma_.load(); }
     std::size_t capacity() const { return capacity_; }
 
+    /// Returns true once the channel poller coroutine has started.
+    /// Tests should wait for this before enqueueing to avoid race conditions.
+    bool started() const { return started_.load(); }
+
     // Per-stage inflight counts
     std::size_t extractionInFlight() const { return inFlight_.load(); }
     std::size_t kgInFlight() const { return kgInFlight_.load(); }

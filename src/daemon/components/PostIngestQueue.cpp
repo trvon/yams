@@ -246,6 +246,15 @@ PostIngestQueue::PostIngestQueue(
 
 PostIngestQueue::~PostIngestQueue() {
     stop();
+    // Wait for all in-flight operations to complete before destroying members.
+    // This prevents data races where workers access members during destruction.
+    constexpr int maxWaitMs = 1000;
+    for (int i = 0; i < maxWaitMs && totalInFlight() > 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    // Workers may still be executing post-processing (e.g., flushEmbedRetriesOnDrain)
+    // after decrementing in-flight counters. Acquire mutex to synchronize with them.
+    std::lock_guard<std::mutex> lock(embedRetryMutex_);
 }
 
 void PostIngestQueue::start() {

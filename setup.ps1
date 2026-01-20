@@ -347,17 +347,36 @@ if ($env:YAMS_DISABLE_ONNX -eq 'true') {
 
         # Also check for NVIDIA GPU (prefer CUDA if available)
         $hasCuda = $false
+        $hasCudaToolkit = $false
         if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
             try {
                 $null = nvidia-smi 2>$null
                 if ($LASTEXITCODE -eq 0) {
                     $hasCuda = $true
-                    Write-Host "NVIDIA GPU with CUDA detected"
+                    Write-Host "NVIDIA GPU detected via nvidia-smi"
+
+                    # Validate CUDA toolkit is actually available (not just the GPU driver)
+                    # nvidia-smi alone doesn't guarantee CUDA runtime is usable
+                    if (Get-Command nvcc -ErrorAction SilentlyContinue) {
+                        $hasCudaToolkit = $true
+                        Write-Host "CUDA toolkit (nvcc) detected"
+                    } elseif ($env:CUDA_PATH -and (Test-Path "$env:CUDA_PATH\bin\nvcc.exe")) {
+                        $hasCudaToolkit = $true
+                        Write-Host "CUDA toolkit detected at $env:CUDA_PATH"
+                    } elseif (Get-ChildItem -Path "$env:ProgramFiles\NVIDIA GPU Computing Toolkit\CUDA\*\bin\cudart64_*.dll" -ErrorAction SilentlyContinue) {
+                        $hasCudaToolkit = $true
+                        Write-Host "CUDA runtime (cudart64) detected"
+                    }
+
+                    if (-not $hasCudaToolkit) {
+                        Write-Host "NVIDIA GPU detected but CUDA toolkit missing - will use DirectML or CPU"
+                        Write-Host "  Install CUDA toolkit for GPU acceleration: https://developer.nvidia.com/cuda-downloads"
+                    }
                 }
             } catch {}
         }
 
-        if ($hasCuda) {
+        if ($hasCuda -and $hasCudaToolkit) {
             $onnxGpu = 'cuda'
             Write-Host "Enabling CUDA GPU acceleration"
         } elseif ($hasDx12Gpu) {

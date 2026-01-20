@@ -263,6 +263,29 @@ public:
         return std::vector<std::string>{};
     }
 
+    Result<void>
+    batchInsertContentAndIndex(const std::vector<metadata::BatchContentEntry>& entries) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (const auto& entry : entries) {
+            contentInserted_ = true;
+            // Store last content for verification
+            lastContent_.documentId = entry.documentId;
+            lastContent_.contentText = entry.contentText;
+            lastContent_.contentLength = static_cast<int64_t>(entry.contentText.size());
+            lastContent_.extractionMethod = entry.extractionMethod;
+            lastContent_.language = entry.language;
+            // Update document status
+            auto it = docsById_.find(entry.documentId);
+            if (it != docsById_.end()) {
+                it->second.contentExtracted = true;
+                it->second.extractionStatus = metadata::ExtractionStatus::Success;
+                docsByHash_[it->second.sha256Hash] = it->second;
+                lastUpdated_ = it->second;
+            }
+        }
+        return Result<void>();
+    }
+
     Result<std::unordered_map<std::string, metadata::DocumentInfo>>
     batchGetDocumentsByHash(const std::vector<std::string>& hashes) override {
         std::lock_guard<std::mutex> lk(mu_);
@@ -352,6 +375,13 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
                                                        nullptr, &coordinator, nullptr, 32);
         queue->start(); // Start the channel poller
 
+        // Wait for channel poller coroutine to start before enqueueing
+        auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!queue->started() && std::chrono::steady_clock::now() < startDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        REQUIRE(queue->started());
+
         PostIngestQueue::Task task{
             doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
         REQUIRE(queue->tryEnqueue(std::move(task)));
@@ -383,6 +413,13 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
         auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
                                                        nullptr, &coordinator, nullptr, 32);
         queue->start(); // Start the channel poller
+
+        // Wait for channel poller coroutine to start before enqueueing
+        auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!queue->started() && std::chrono::steady_clock::now() < startDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        REQUIRE(queue->started());
 
         PostIngestQueue::Task task{
             doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
@@ -445,6 +482,13 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and embed jobs",
     auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
                                                    nullptr, &coordinator, nullptr, 32);
     queue->start();
+
+    // Wait for channel poller coroutine to start before enqueueing
+    auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!queue->started() && std::chrono::steady_clock::now() < startDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(queue->started());
 
     for (const auto& doc : docs) {
         PostIngestQueue::Task task{

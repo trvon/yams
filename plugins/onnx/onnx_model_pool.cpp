@@ -1,4 +1,5 @@
 #include <yams/common/test_utils.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
 #include <yams/vector/embedding_generator.h>
 
@@ -1241,6 +1242,9 @@ Result<void> OnnxModelPool::initialize() {
         return Result<void>();
     }
 
+    // Mark as startup mode - reduces pool sizes during initial loading
+    TuneAdvisor::setOnnxStartupMode(true);
+
     spdlog::info("Initializing ONNX model pool with max {} models", config_.maxLoadedModels);
 
     // Eagerly initialize the global Ort::Env NOW, before any concurrent access.
@@ -1282,8 +1286,13 @@ Result<void> OnnxModelPool::initialize() {
                     }
                 }
             }
+            // Clear startup mode - normal pool sizing now applies to new models
+            TuneAdvisor::setOnnxStartupMode(false);
             spdlog::info("Background model preloading completed");
         });
+    } else {
+        // No preload configured - clear startup mode immediately
+        TuneAdvisor::setOnnxStartupMode(false);
     }
 
     initialized_ = true;
@@ -1530,16 +1539,15 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     }
 
     // Configure pool for this model (no lock needed - local variables)
-    // Dynamically calculate pool size based on hardware
-    const unsigned hw_threads = std::thread::hardware_concurrency();
-    // Base pool size on available CPU cores: 50% of cores for embedding work
-    // Minimum 2, maximum 8 to avoid excessive memory usage
-    const size_t dynamic_max =
-        std::clamp(static_cast<size_t>(hw_threads / 2), size_t{2}, size_t{8});
+    // Use TuneAdvisor for GPU-aware pool sizing:
+    //   GPU mode: larger pool (GPU handles inference, more sessions for throughput)
+    //   CPU mode: smaller pool (avoid CPU saturation from parallel inference)
+    const bool gpuEnabled = config_.enableGPU;
+    const size_t dynamic_max = TuneAdvisor::onnxSessionsPerModel(gpuEnabled);
     const size_t dynamic_min = std::min(size_t{2}, dynamic_max);
 
-    spdlog::info("[ONNX Plugin] Configuring resource pool (hw_threads={}, pool_max={})", hw_threads,
-                 dynamic_max);
+    spdlog::info("[ONNX Plugin] Configuring resource pool (gpu={}, pool_max={})",
+                 gpuEnabled ? "enabled" : "disabled", dynamic_max);
     PoolConfig<OnnxModelSession> poolConfig;
     poolConfig.minSize = dynamic_min;
     poolConfig.maxSize = dynamic_max;

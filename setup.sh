@@ -383,9 +383,24 @@ else
       ONNX_GPU="coreml"
       echo "macOS detected: enabling CoreML GPU acceleration (Neural Engine + GPU)"
     elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
-      # Linux with NVIDIA GPU
-      ONNX_GPU="cuda"
-      echo "NVIDIA GPU detected: enabling CUDA acceleration"
+      # NVIDIA GPU detected - now validate CUDA toolkit is actually available
+      # nvidia-smi presence alone doesn't guarantee CUDA runtime is usable
+      if command -v nvcc >/dev/null 2>&1; then
+        # nvcc is available (CUDA toolkit installed via package manager or CUDA SDK)
+        ONNX_GPU="cuda"
+        echo "NVIDIA GPU + CUDA toolkit (nvcc) detected: enabling CUDA acceleration"
+      elif [[ -f /usr/local/cuda/lib64/libcudart.so ]] || \
+           [[ -f /usr/local/cuda/lib/libcudart.so ]] || \
+           ldconfig -p 2>/dev/null | grep -q libcudart; then
+        # CUDA runtime library found (sufficient for inference, even without nvcc)
+        ONNX_GPU="cuda"
+        echo "NVIDIA GPU + CUDA runtime (libcudart) detected: enabling CUDA acceleration"
+      else
+        # GPU present but CUDA toolkit/runtime missing - use CPU to avoid runtime failures
+        ONNX_GPU="none"
+        echo "NVIDIA GPU detected but CUDA toolkit missing: using CPU-only ONNX Runtime"
+        echo "  Install CUDA toolkit for GPU acceleration: https://developer.nvidia.com/cuda-downloads"
+      fi
     else
       ONNX_GPU="none"
       echo "No GPU detected: using CPU-only ONNX Runtime"
