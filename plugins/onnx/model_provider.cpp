@@ -1298,6 +1298,8 @@ struct ProviderSingleton {
                 }
 
                 if (numToEvict == 0) {
+                    // pressure < 0.75: do idle maintenance instead of pressure eviction
+                    c->pool->performMaintenance();
                     return YAMS_OK;
                 }
 

@@ -977,56 +977,71 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         YAMS_ZONE_SCOPED_N("reranking");
         const size_t rerankWindow = std::min(config_.rerankTopK, response.results.size());
 
-        // Extract document snippets for reranking
-        std::vector<std::string> snippets;
-        std::vector<size_t> rerankIndices;
-        snippets.reserve(rerankWindow);
-        rerankIndices.reserve(rerankWindow);
-        for (size_t i = 0; i < rerankWindow; ++i) {
-            // Only rerank when we have real text; skip file-path-only samples.
-            if (!response.results[i].snippet.empty()) {
-                snippets.push_back(response.results[i].snippet);
-                rerankIndices.push_back(i);
-            } else {
-                spdlog::debug("[reranker] Skipping doc {} (no snippet available)", i);
+        bool skipRerank = false;
+        if (rerankWindow >= 2 && config_.rerankScoreGapThreshold > 0.0f) {
+            const double scoreGap = response.results[0].score - response.results[1].score;
+            if (scoreGap >= static_cast<double>(config_.rerankScoreGapThreshold)) {
+                spdlog::debug("[reranker] Skipping rerank (score gap {:.4f} >= {:.4f})", scoreGap,
+                              config_.rerankScoreGapThreshold);
+                skipRerank = true;
             }
         }
 
-        if (!snippets.empty()) {
-            auto rerankResult = reranker_->scoreDocuments(query, snippets);
-            if (rerankResult) {
-                const auto& scores = rerankResult.value();
-                spdlog::debug("[reranker] Reranked {} documents", scores.size());
-
-                // Apply reranker scores to eligible results.
-                for (size_t i = 0; i < scores.size() && i < rerankIndices.size(); ++i) {
-                    const size_t idx = rerankIndices[i];
-                    double originalScore = response.results[idx].score;
-                    double rerankScore = static_cast<double>(scores[i]);
-
-                    if (config_.rerankReplaceScores) {
-                        // Replace entirely with reranker score
-                        response.results[idx].score = rerankScore;
-                    } else {
-                        // Blend: final = rerank * weight + original * (1 - weight)
-                        response.results[idx].score = rerankScore * config_.rerankWeight +
-                                                      originalScore * (1.0 - config_.rerankWeight);
-                    }
-                    response.results[idx].rerankerScore = rerankScore;
+        if (!skipRerank) {
+            // Extract document snippets for reranking
+            std::vector<std::string> snippets;
+            std::vector<size_t> rerankIndices;
+            snippets.reserve(rerankWindow);
+            rerankIndices.reserve(rerankWindow);
+            for (size_t i = 0; i < rerankWindow; ++i) {
+                // Only rerank when we have real text; skip file-path-only samples.
+                if (!response.results[i].snippet.empty()) {
+                    snippets.push_back(truncateSnippet(response.results[i].snippet,
+                                                       config_.rerankSnippetMaxChars));
+                    rerankIndices.push_back(i);
+                } else {
+                    spdlog::debug("[reranker] Skipping doc {} (no snippet available)", i);
                 }
-
-                // Re-sort by new scores (only the top window needs sorting)
-                std::sort(
-                    response.results.begin(),
-                    response.results.begin() + static_cast<ptrdiff_t>(rerankWindow),
-                    [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
-
-                contributing.push_back("reranker");
-            } else {
-                spdlog::warn("[reranker] Reranking failed: {}", rerankResult.error().message);
             }
-        } else {
-            spdlog::debug("[reranker] Skipping rerank: no snippets available");
+
+            if (!snippets.empty()) {
+                auto rerankResult = reranker_->scoreDocuments(query, snippets);
+                if (rerankResult) {
+                    const auto& scores = rerankResult.value();
+                    spdlog::debug("[reranker] Reranked {} documents", scores.size());
+
+                    // Apply reranker scores to eligible results.
+                    for (size_t i = 0; i < scores.size() && i < rerankIndices.size(); ++i) {
+                        const size_t idx = rerankIndices[i];
+                        double originalScore = response.results[idx].score;
+                        double rerankScore = static_cast<double>(scores[i]);
+
+                        if (config_.rerankReplaceScores) {
+                            // Replace entirely with reranker score
+                            response.results[idx].score = rerankScore;
+                        } else {
+                            // Blend: final = rerank * weight + original * (1 - weight)
+                            response.results[idx].score =
+                                rerankScore * config_.rerankWeight +
+                                originalScore * (1.0 - config_.rerankWeight);
+                        }
+                        response.results[idx].rerankerScore = rerankScore;
+                    }
+
+                    // Re-sort by new scores (only the top window needs sorting)
+                    std::sort(response.results.begin(),
+                              response.results.begin() + static_cast<ptrdiff_t>(rerankWindow),
+                              [](const SearchResult& a, const SearchResult& b) {
+                                  return a.score > b.score;
+                              });
+
+                    contributing.push_back("reranker");
+                } else {
+                    spdlog::warn("[reranker] Reranking failed: {}", rerankResult.error().message);
+                }
+            } else {
+                spdlog::debug("[reranker] Skipping rerank: no snippets available");
+            }
         }
     } else if (config_.enableReranking && !rerankAvailable) {
         spdlog::debug("[reranker] Unavailable; falling back to fused scores");

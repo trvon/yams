@@ -431,6 +431,30 @@ void TuningManager::tick_once() {
         }
     } catch (...) {
     }
+
+    // Idle model maintenance: unload models that have been idle past their timeout
+    // This runs via evict_under_pressure(0.0) which triggers performMaintenance()
+    try {
+        if (sm_) {
+            auto searchMetrics = sm_->getSearchLoadMetrics();
+            std::size_t postIngestQueued = 0;
+            std::size_t currentInFlight = 0;
+            if (auto* pq = sm_->getPostIngestQueue()) {
+                postIngestQueued = pq->size();
+                currentInFlight = pq->totalInFlight();
+            }
+
+            bool daemonIdle = (activeConns == 0) && (searchMetrics.active == 0) &&
+                              (postIngestQueued == 0) && (currentInFlight == 0);
+
+            if (daemonIdle) {
+                if (auto provider = sm_->getModelProvider()) {
+                    provider->releaseUnusedResources();
+                }
+            }
+        }
+    } catch (...) {
+    }
 }
 
 } // namespace yams::daemon

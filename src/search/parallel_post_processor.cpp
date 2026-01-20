@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <future>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <string>
 #include <unordered_map>
 #include <yams/search/result_ranker.h>
@@ -17,51 +18,194 @@ ParallelPostProcessor::process(std::vector<SearchResultItem> results, const Sear
     ProcessingResult result;
     const bool useParallel = results.size() >= PARALLEL_THRESHOLD;
 
-    if (useParallel) {
-        // Parallel path: launch independent operations concurrently
+    const std::vector<std::string> queryTerms =
+        queryAst ? extractQueryTerms(queryAst) : std::vector<std::string>{};
 
-        // 1. Apply filtering first (facets need filtered results)
+    if (useParallel) {
+        // Parallel path: partition data into chunks and process each chunk independently
+        // This avoids race conditions between highlights (read) and snippets (write)
+        // and improves cache locality.
+
+        // 1. Apply filtering first (must be done sequentially or in a separate pass to determine
+        // result set)
         if (filters && filters->hasFilters()) {
             result.filteredResults = filters->apply(results);
         } else {
             result.filteredResults = std::move(results);
         }
 
-        // 2. Facet generation, highlights, and snippets can run in parallel
-        std::future<std::vector<SearchFacet>> facetFuture;
-        if (!facetFields.empty()) {
-            facetFuture = std::async(std::launch::async, [&result, &facetFields]() {
-                return generateFacetsParallel(result.filteredResults, facetFields);
-            });
+        const size_t totalResults = result.filteredResults.size();
+        if (totalResults == 0) {
+            return result;
         }
 
-        // 3. Highlights and snippets - must work on filtered results
-        // These modify results in-place but can run together
-        std::future<void> highlightFuture;
-        if (queryAst) {
-            auto queryTerms = extractQueryTerms(queryAst);
-            highlightFuture = std::async(
-                std::launch::async, [&result, queryTerms = std::move(queryTerms), maxHighlights]() {
-                    generateHighlightsParallel(result.filteredResults, queryTerms, maxHighlights);
-                });
+        // Determine concurrency
+        const unsigned int maxThreads = yams::daemon::TuneAdvisor::recommendedThreads(0.5, 0);
+        unsigned int numThreads =
+            std::min(maxThreads, static_cast<unsigned int>((totalResults + PARALLEL_THRESHOLD - 1) /
+                                                           PARALLEL_THRESHOLD));
+        if (numThreads == 0) {
+            numThreads = 1;
+        }
+        const size_t chunkSize = (totalResults + numThreads - 1) / numThreads;
+
+        std::vector<std::future<std::vector<SearchFacet>>> futures;
+
+        // Launch tasks for each chunk
+        for (unsigned int i = 0; i < numThreads; ++i) {
+            size_t start = i * chunkSize;
+            size_t end = std::min(start + chunkSize, totalResults);
+
+            if (start >= end)
+                break;
+
+            futures.push_back(
+                std::async(std::launch::async, [&result, start, end, &facetFields, &queryTerms,
+                                                maxHighlights, snippetLength]() {
+                    // 1. Local facet accumulation
+                    std::vector<SearchFacet> localFacets;
+                    if (!facetFields.empty()) {
+                        // Create temporary vector view for facet generation to avoid copying items
+                        // Note: generateFacetsParallel interface expects a vector, so we might need
+                        // to adapt or just count manually here for efficiency.
+                        // For now, we'll do manual counting to avoid vector copies.
+
+                        std::unordered_map<std::string, std::unordered_map<std::string, size_t>>
+                            fieldCounts;
+                        for (size_t idx = start; idx < end; ++idx) {
+                            const auto& item = result.filteredResults[idx];
+                            for (const auto& field : facetFields) {
+                                std::string value;
+                                if (field == "contentType")
+                                    value = item.contentType;
+                                else if (field == "language")
+                                    value = item.detectedLanguage;
+                                else if (field == "extension") {
+                                    auto pos = item.path.rfind('.');
+                                    if (pos != std::string::npos) {
+                                        value = item.path.substr(pos);
+                                    }
+                                } else {
+                                    auto it = item.metadata.find(field);
+                                    if (it != item.metadata.end())
+                                        value = it->second;
+                                }
+                                if (!value.empty())
+                                    fieldCounts[field][value]++;
+                            }
+                        }
+
+                        // Convert local counts to Facets
+                        for (const auto& field : facetFields) {
+                            SearchFacet facet;
+                            facet.name = field;
+                            facet.displayName = field;
+                            auto& counts = fieldCounts[field];
+                            facet.values.reserve(counts.size());
+                            for (auto&& [val, count] : counts) {
+                                facet.values.push_back(
+                                    {std::move(val), "", count, false}); // display set later
+                            }
+                            localFacets.push_back(std::move(facet));
+                        }
+                    }
+
+                    // 2. Highlights & Snippets (In-place modification)
+                    // Must run highlights BEFORE snippets (truncation)
+                    for (size_t idx = start; idx < end; ++idx) {
+                        auto& item = result.filteredResults[idx];
+
+                        // Generate highlights (reads contentPreview)
+                        if (!queryTerms.empty()) {
+                            // Logic from generateHighlightsParallel inlined/adapted for single item
+                            if (!item.contentPreview.empty()) {
+                                SearchHighlight h;
+                                h.field = "content";
+                                h.snippet = item.contentPreview; // Copy before truncate? No,
+                                                                 // highlight uses offsets
+                                h.startOffset = 0;
+                                h.endOffset = item.contentPreview.length();
+
+                                for (const auto& term : queryTerms) {
+                                    size_t pos = item.contentPreview.find(term);
+                                    if (pos != std::string::npos) {
+                                        h.highlights.emplace_back(pos, pos + term.length());
+                                    }
+                                }
+                                if (!h.highlights.empty())
+                                    item.highlights.push_back(std::move(h));
+                            }
+
+                            // Title highlights
+                            for (const auto& term : queryTerms) {
+                                size_t pos = item.title.find(term);
+                                if (pos != std::string::npos) {
+                                    SearchHighlight h;
+                                    h.field = "title";
+                                    h.snippet = item.title;
+                                    h.startOffset = 0;
+                                    h.endOffset = item.title.length();
+                                    h.highlights.emplace_back(pos, pos + term.length());
+                                    item.highlights.push_back(std::move(h));
+                                    break;
+                                }
+                            }
+
+                            if (item.highlights.size() > maxHighlights) {
+                                item.highlights.resize(maxHighlights);
+                            }
+                        }
+
+                        // Generate snippets (modifies contentPreview)
+                        if (snippetLength > 0) {
+                            if (item.contentPreview.length() > snippetLength) {
+                                item.contentPreview =
+                                    item.contentPreview.substr(0, snippetLength) + "...";
+                            }
+                            item.previewLength = item.contentPreview.length();
+                        }
+                    }
+
+                    return localFacets;
+                }));
         }
 
-        if (snippetLength > 0) {
-            generateSnippetsParallel(result.filteredResults, snippetLength);
+        // Aggregate results
+        std::unordered_map<std::string, std::unordered_map<std::string, size_t>> mergedCounts;
+
+        for (auto& f : futures) {
+            auto chunkFacets = f.get();
+            for (const auto& facet : chunkFacets) {
+                for (const auto& val : facet.values) {
+                    mergedCounts[facet.name][val.value] += val.count;
+                }
+            }
         }
 
-        // Wait for highlights to complete
-        if (queryAst) {
-            highlightFuture.get();
-            result.highlightsGenerated = true;
+        // Finalize facets
+        for (const auto& field : facetFields) {
+            if (mergedCounts.find(field) == mergedCounts.end())
+                continue;
+
+            SearchFacet facet;
+            facet.name = field;
+            facet.displayName = field;
+            auto& counts = mergedCounts[field];
+
+            for (const auto& [val, count] : counts) {
+                facet.values.push_back({val, val, count, false});
+            }
+
+            // Sort
+            std::sort(facet.values.begin(), facet.values.end(),
+                      [](const auto& a, const auto& b) { return a.count > b.count; });
+
+            facet.totalValues = facet.values.size();
+            result.facets.push_back(std::move(facet));
         }
 
+        result.highlightsGenerated = (queryAst != nullptr);
         result.snippetsGenerated = (snippetLength > 0);
-
-        // Get facets (already running in parallel)
-        if (!facetFields.empty()) {
-            result.facets = facetFuture.get();
-        }
 
     } else {
         // Sequential path: below threshold, avoid parallel overhead
@@ -116,6 +260,11 @@ ParallelPostProcessor::generateFacetsParallel(const std::vector<SearchResultItem
                 value = result.contentType;
             } else if (fieldName == "language") {
                 value = result.detectedLanguage;
+            } else if (fieldName == "extension") {
+                auto pos = result.path.rfind('.');
+                if (pos != std::string::npos) {
+                    value = result.path.substr(pos);
+                }
             } else {
                 // Check metadata
                 auto it = result.metadata.find(fieldName);

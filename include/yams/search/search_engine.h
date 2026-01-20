@@ -186,10 +186,12 @@ struct SearchEngineConfig {
     bool includeComponentTiming = false; // Include per-component execution time in response
 
     // Reranking configuration
-    bool enableReranking = true;     // Enable reranking (score-based by default)
-    size_t rerankTopK = 10;          // Number of top results to rerank
-    float rerankWeight = 0.60f;      // Blend weight for model reranking
-    bool rerankReplaceScores = true; // If true, replace scores entirely; if false, blend
+    bool enableReranking = true;           // Enable reranking (score-based by default)
+    size_t rerankTopK = 5;                 // Number of top results to rerank
+    size_t rerankSnippetMaxChars = 256;    // Max snippet chars sent to reranker
+    float rerankScoreGapThreshold = 0.05f; // Skip rerank if top1-top2 gap exceeds this
+    float rerankWeight = 0.60f;            // Blend weight for model reranking
+    bool rerankReplaceScores = true;       // If true, replace scores entirely; if false, blend
 
     // Model-based reranking (cross-encoder) - opt-in, requires ONNX model
     bool enableModelReranking = false; // Use cross-encoder model (slow, opt-in)

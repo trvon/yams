@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -457,6 +458,63 @@ private:
     // Parse all config values into a map (section.key format)
     std::map<std::string, std::string> parseSimpleToml(const fs::path& path) const {
         return yams::config::parse_simple_toml(path);
+    }
+
+    static std::vector<std::string> parseStringList(const std::string& raw) {
+        std::vector<std::string> items;
+        std::string s = raw;
+        auto trim_inplace = [](std::string& str) {
+            while (!str.empty() && std::isspace(static_cast<unsigned char>(str.front())))
+                str.erase(str.begin());
+            while (!str.empty() && std::isspace(static_cast<unsigned char>(str.back())))
+                str.pop_back();
+        };
+
+        trim_inplace(s);
+        if (s.size() >= 2 && s.front() == '[' && s.back() == ']') {
+            s = s.substr(1, s.size() - 2);
+        }
+
+        std::string current;
+        bool inQuote = false;
+        char quoteChar = '\0';
+        for (char ch : s) {
+            if ((ch == '"' || ch == '\'') && (!inQuote || ch == quoteChar)) {
+                inQuote = !inQuote;
+                quoteChar = inQuote ? ch : '\0';
+                continue;
+            }
+            if (ch == ',' && !inQuote) {
+                trim_inplace(current);
+                if (!current.empty()) {
+                    items.push_back(current);
+                }
+                current.clear();
+                continue;
+            }
+            current.push_back(ch);
+        }
+        trim_inplace(current);
+        if (!current.empty()) {
+            items.push_back(current);
+        }
+
+        items.erase(std::remove_if(items.begin(), items.end(),
+                                   [](const std::string& v) { return v.empty(); }),
+                    items.end());
+        return items;
+    }
+
+    static std::string formatStringList(const std::vector<std::string>& items) {
+        std::ostringstream out;
+        out << "[";
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (i > 0)
+                out << ", ";
+            out << "\"" << items[i] << "\"";
+        }
+        out << "]";
+        return out.str();
     }
 
     Result<void> executeGet() {
@@ -945,6 +1003,19 @@ private:
             // Build config updates: preferred_model + dimension
             std::vector<std::pair<std::string, std::string>> configs;
             configs.emplace_back("embeddings.preferred_model", embeddingModel_);
+
+            // Keep preferred model in the daemon preload list as the first entry.
+            auto config = parseSimpleToml(getConfigPath());
+            auto preloadRaw = config["daemon.models.preload_models"];
+            auto preloadModels = parseStringList(preloadRaw);
+            if (!preloadModels.empty()) {
+                preloadModels.erase(preloadModels.begin());
+            }
+            preloadModels.erase(
+                std::remove(preloadModels.begin(), preloadModels.end(), embeddingModel_),
+                preloadModels.end());
+            preloadModels.insert(preloadModels.begin(), embeddingModel_);
+            configs.emplace_back("daemon.models.preload_models", formatStringList(preloadModels));
 
             // Get dimension from model metadata (preferred) or fall back to heuristic
             std::optional<size_t> dim;

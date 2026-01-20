@@ -16,6 +16,7 @@
 #include <yams/plugins/search_provider_v1.h>
 #include <yams/search/query_concept_extractor.h>
 #include <yams/search/query_qualifiers.hpp>
+#include <yams/search/parallel_post_processor.hpp>
 #include <yams/search/symbol_enrichment.h>
 
 #include <algorithm>
@@ -75,6 +76,48 @@ static std::string escapeRegex(const std::string& text) {
         escaped += c;
     }
     return escaped;
+}
+
+std::vector<search::SearchResultItem> toPostProcessItems(const std::vector<SearchItem>& items) {
+    std::vector<search::SearchResultItem> out;
+    out.reserve(items.size());
+    for (const auto& item : items) {
+        search::SearchResultItem result;
+        result.documentId = item.id;
+        result.title = item.title;
+        result.path = item.path;
+        result.contentType = item.mimeType.empty() ? item.fileType : item.mimeType;
+        result.fileSize = static_cast<size_t>(item.size);
+        result.contentPreview = item.snippet;
+        result.metadata = item.metadata;
+        result.relevanceScore = static_cast<float>(item.score);
+        out.push_back(std::move(result));
+    }
+    return out;
+}
+
+void applyExtensionFacets(SearchResponse& resp) {
+    if (resp.results.empty()) {
+        return;
+    }
+    if (!resp.facets.empty()) {
+        return;
+    }
+    constexpr size_t kMaxFacetValues = 10;
+    auto items = toPostProcessItems(resp.results);
+    auto processed = search::ParallelPostProcessor::process(std::move(items), nullptr,
+                                                            {"extension"}, nullptr, 0, 0);
+    for (auto& facet : processed.facets) {
+        if (facet.name == "extension") {
+            facet.displayName = "File Type";
+        }
+        const size_t total = facet.values.size();
+        if (facet.values.size() > kMaxFacetValues) {
+            facet.values.resize(kMaxFacetValues);
+        }
+        facet.totalValues = total;
+        resp.facets.push_back(std::move(facet));
+    }
 }
 
 // Converts a glob pattern to a regex string.
@@ -1399,6 +1442,8 @@ private:
             }
         }
 
+        applyExtensionFacets(resp);
+
         resp.total = resp.results.size();
         return resp;
     }
@@ -1563,6 +1608,9 @@ private:
 
             resp.results = convertResults(res);
             normalizeScores(resp.results, resp.type);
+            if (!searchReq.pathsOnly) {
+                applyExtensionFacets(resp);
+            }
             return resp;
         };
 
@@ -1602,33 +1650,6 @@ private:
             resp.executionTimeMs = res.executionTimeMs;
             resp.usedHybrid = false;
 
-            if (!res.results.empty()) {
-                std::unordered_map<std::string, size_t> extCounts;
-                for (const auto& item : res.results) {
-                    const std::string& path = item.document.filePath;
-                    auto pos = path.rfind('.');
-                    std::string ext = (pos != std::string::npos) ? path.substr(pos) : "(no ext)";
-                    extCounts[ext]++;
-                }
-                std::vector<std::pair<std::string, size_t>> sortedExts(extCounts.begin(),
-                                                                       extCounts.end());
-                std::sort(sortedExts.begin(), sortedExts.end(),
-                          [](const auto& a, const auto& b) { return a.second > b.second; });
-                constexpr size_t kMaxFacetValues = 10;
-                search::SearchFacet facet;
-                facet.name = "extension";
-                facet.displayName = "File Type";
-                for (size_t i = 0; i < std::min(sortedExts.size(), kMaxFacetValues); ++i) {
-                    search::SearchFacet::FacetValue fv;
-                    fv.value = sortedExts[i].first;
-                    fv.display = sortedExts[i].first;
-                    fv.count = sortedExts[i].second;
-                    facet.values.push_back(std::move(fv));
-                }
-                facet.totalValues = sortedExts.size();
-                resp.facets.push_back(std::move(facet));
-            }
-
             if (searchReq.pathsOnly) {
                 const size_t effectiveLimit =
                     searchReq.limit > 0 ? searchReq.limit : res.results.size();
@@ -1644,6 +1665,9 @@ private:
 
             resp.results = convertResults(res);
             normalizeScores(resp.results, resp.type);
+            if (!searchReq.pathsOnly) {
+                applyExtensionFacets(resp);
+            }
             return resp;
         };
 
@@ -1705,6 +1729,9 @@ private:
             combined.results.resize(req.limit);
         }
         combined.total = combined.results.size();
+        if (!req.pathsOnly) {
+            applyExtensionFacets(combined);
+        }
         return combined;
     }
 };

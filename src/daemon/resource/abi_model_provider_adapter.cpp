@@ -382,7 +382,14 @@ size_t AbiModelProviderAdapter::getMemoryUsage() const {
     return 0;
 }
 
-void AbiModelProviderAdapter::releaseUnusedResources() {}
+void AbiModelProviderAdapter::releaseUnusedResources() {
+    // Call evict_under_pressure with pressure=0 for maintenance mode
+    // This triggers performMaintenance() in the ONNX plugin to unload idle models
+    if (table_ && abiVersion_ >= 4 && table_->evict_under_pressure) {
+        size_t evicted = 0;
+        table_->evict_under_pressure(table_->self, 0.0, false, &evicted);
+    }
+}
 
 size_t AbiModelProviderAdapter::evictUnderPressure(double pressureLevel, bool allowHotEviction) {
     // evict_under_pressure was added in v1.4 - must check version BEFORE accessing the field
