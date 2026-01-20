@@ -93,6 +93,18 @@ std::vector<std::string> tokenizeLower(const std::string& input) {
     return tokens;
 }
 
+std::string truncateSnippet(const std::string& content, size_t maxLen) {
+    if (content.empty()) {
+        return {};
+    }
+    if (content.size() <= maxLen) {
+        return content;
+    }
+    std::string out = content.substr(0, maxLen);
+    out.append("...");
+    return out;
+}
+
 float normalizedBm25Score(double rawScore, float divisor, double minScore, double maxScore) {
     if (maxScore > minScore) {
         const double norm = (rawScore - minScore) / (maxScore - minScore);
@@ -1505,6 +1517,9 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding, size_t
             if (auto it = hashToPath.find(vr.document_hash); it != hashToPath.end()) {
                 result.filePath = it->second;
             }
+            if (!vr.content.empty()) {
+                result.snippet = truncateSnippet(vr.content, 200);
+            }
 
             results.push_back(std::move(result));
         }
@@ -1571,6 +1586,9 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding, size_t
 
             if (auto it = hashToPath.find(vr.document_hash); it != hashToPath.end()) {
                 result.filePath = it->second;
+            }
+            if (!vr.content.empty()) {
+                result.snippet = truncateSnippet(vr.content, 200);
             }
 
             results.push_back(std::move(result));

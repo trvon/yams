@@ -4,6 +4,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 
 #include <sqlite3.h>
+#include <cmath>
 #include <chrono>
 #include <cstring>
 #include <shared_mutex>
@@ -43,6 +44,15 @@ inline bool isZeroNormEmbedding(const std::vector<float>& embedding) {
         norm_sq += static_cast<double>(val) * static_cast<double>(val);
     }
     return norm_sq < kZeroNormThreshold;
+}
+
+inline bool isFiniteEmbedding(const std::vector<float>& embedding) {
+    for (float val : embedding) {
+        if (!std::isfinite(val)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // ============================================================================
@@ -521,6 +531,12 @@ public:
                          record.chunk_id);
             return Result<void>{};
         }
+        if (!isFiniteEmbedding(record.embedding)) {
+            spdlog::warn(
+                "[HNSW] Skipping non-finite vector for chunk_id={} (stored in SQLite only)",
+                record.chunk_id);
+            return Result<void>{};
+        }
 
         // Insert into HNSW (dimension-specific index)
         ensureHnswLoadedUnlocked();
@@ -580,9 +596,14 @@ public:
         std::unordered_map<size_t, std::vector<std::pair<size_t, size_t>>>
             dim_records; // dim -> [(idx, rowid)]
         size_t skipped_zero_norm = 0;
+        size_t skipped_invalid = 0;
         for (size_t i = 0; i < records.size(); ++i) {
             if (isZeroNormEmbedding(records[i].embedding)) {
                 ++skipped_zero_norm;
+                continue;
+            }
+            if (!isFiniteEmbedding(records[i].embedding)) {
+                ++skipped_invalid;
                 continue;
             }
             size_t dim = records[i].embedding.size();
@@ -592,6 +613,10 @@ public:
         if (skipped_zero_norm > 0) {
             spdlog::warn("[HNSW] Skipped {} zero-norm vectors in batch (stored in SQLite only)",
                          skipped_zero_norm);
+        }
+        if (skipped_invalid > 0) {
+            spdlog::warn("[HNSW] Skipped {} non-finite vectors in batch (stored in SQLite only)",
+                         skipped_invalid);
         }
 
         static std::atomic<uint64_t> batch_counter{0};
@@ -698,6 +723,10 @@ public:
         // Skip HNSW insertion for zero-norm vectors
         if (isZeroNormEmbedding(record.embedding)) {
             spdlog::warn("[HNSW] Skipping zero-norm vector update for chunk_id={}", chunk_id);
+            return Result<void>{};
+        }
+        if (!isFiniteEmbedding(record.embedding)) {
+            spdlog::warn("[HNSW] Skipping non-finite vector update for chunk_id={}", chunk_id);
             return Result<void>{};
         }
 
@@ -2137,6 +2166,12 @@ private:
                     size_t dim = sqlite3_column_int64(stmt, 2);
                     if (dim == 0) {
                         dim = num_floats; // Fallback to blob size
+                    } else if (dim != num_floats) {
+                        spdlog::warn(
+                            "[HNSW] embedding_dim mismatch for rowid={} (col_dim={} blob_dim={}) "
+                            "- using blob_dim",
+                            rowid, dim, num_floats);
+                        dim = num_floats;
                     }
 
                     if (dim == 0 || num_floats == 0)
@@ -2147,6 +2182,9 @@ private:
 
                     // Skip zero-norm vectors during rebuild (they become dead-ends in HNSW)
                     if (isZeroNormEmbedding(embedding)) {
+                        continue;
+                    }
+                    if (!isFiniteEmbedding(embedding)) {
                         continue;
                     }
 
