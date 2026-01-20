@@ -298,3 +298,74 @@ TEST_CASE("Threshold ordering invariant: warning < critical < emergency",
               TuneAdvisor::modelEvictEmergencyThreshold());
     }
 }
+
+// =============================================================================
+// Repair Batch Size Profile Tests
+// =============================================================================
+
+TEST_CASE("Repair batch sizes are profile-aware", "[daemon][tune][advisor][catch2]") {
+    SECTION("Efficient profile uses smaller batch sizes") {
+        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+
+        // Efficient profile scale is 0.75
+        // repairMaxBatch: 32 * 0.75 = 24
+        // repairStartupBatchSize: 100 * 0.75 = 75
+        CHECK(TuneAdvisor::repairMaxBatch() == 24u);
+        CHECK(TuneAdvisor::repairStartupBatchSize() == 75u);
+    }
+
+    SECTION("Balanced profile uses default batch sizes") {
+        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+
+        // Balanced profile scale is 1.0
+        CHECK(TuneAdvisor::repairMaxBatch() == 32u);
+        CHECK(TuneAdvisor::repairStartupBatchSize() == 100u);
+    }
+
+    SECTION("Aggressive profile uses larger batch sizes") {
+        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+
+        // Aggressive profile scale is 1.5
+        // repairMaxBatch: 32 * 1.5 = 48
+        // repairStartupBatchSize: 100 * 1.5 = 150
+        CHECK(TuneAdvisor::repairMaxBatch() == 48u);
+        CHECK(TuneAdvisor::repairStartupBatchSize() == 150u);
+    }
+}
+
+TEST_CASE("Repair batch size env var overrides", "[daemon][tune][advisor][catch2]") {
+    ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
+
+    SECTION("YAMS_REPAIR_MAX_BATCH env var overrides profile") {
+        EnvGuard envGuard("YAMS_REPAIR_MAX_BATCH", "64");
+
+        CHECK(TuneAdvisor::repairMaxBatch() == 64u);
+    }
+
+    SECTION("YAMS_REPAIR_STARTUP_BATCH env var overrides profile") {
+        EnvGuard envGuard("YAMS_REPAIR_STARTUP_BATCH", "200");
+
+        CHECK(TuneAdvisor::repairStartupBatchSize() == 200u);
+    }
+
+    SECTION("Invalid env var falls back to profile default") {
+        EnvGuard envGuard("YAMS_REPAIR_MAX_BATCH", "invalid");
+
+        // Should fall back to profile default (32 for Balanced)
+        CHECK(TuneAdvisor::repairMaxBatch() == 32u);
+    }
+
+    SECTION("Zero env var falls back to profile default") {
+        EnvGuard envGuard("YAMS_REPAIR_MAX_BATCH", "0");
+
+        // 0 is rejected, should fall back to profile default
+        CHECK(TuneAdvisor::repairMaxBatch() == 32u);
+    }
+
+    SECTION("Env var > 1000 falls back to profile default") {
+        EnvGuard envGuard("YAMS_REPAIR_MAX_BATCH", "1001");
+
+        // > 1000 is rejected, should fall back to profile default
+        CHECK(TuneAdvisor::repairMaxBatch() == 32u);
+    }
+}

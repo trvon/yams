@@ -9,6 +9,7 @@
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/thread_pool.hpp>
@@ -154,7 +155,9 @@ private:
     std::atomic<std::uint32_t> tokens_{0};
 
     // Event queue for document operations
+    // Uses both queue (for ordering) and set (for O(1) deduplication)
     std::queue<std::string> pendingDocuments_;
+    std::unordered_set<std::string> pendingSet_; // For O(1) duplicate check
     mutable std::mutex queueMutex_;
     std::condition_variable queueCv_;
     std::atomic<bool> running_{false};

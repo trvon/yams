@@ -302,20 +302,24 @@ void RepairCoordinator::onDocumentAdded(const DocumentAddedEvent& event) {
 
     // If the main post-ingest pipeline is active, it will schedule embeddings
     // immediately after text extraction. Avoid duplicate scheduling here.
-    try {
-        if (services_ && services_->getPostIngestQueue()) {
+    // Use explicit started() check instead of exception-based control flow.
+    if (services_) {
+        auto piq = services_->getPostIngestQueue();
+        if (piq && piq->started()) {
             spdlog::debug(
                 "RepairCoordinator: skipping DocumentAdded {} — handled by PostIngestQueue",
                 event.hash);
             return;
         }
-    } catch (...) {
-        // fall through to best-effort queue if introspection fails
     }
 
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        pendingDocuments_.push(event.hash);
+        // Deduplicate: only enqueue if not already in queue
+        if (pendingSet_.find(event.hash) == pendingSet_.end()) {
+            pendingSet_.insert(event.hash);
+            pendingDocuments_.push(event.hash);
+        }
         if (state_)
             state_->stats.repairQueueDepth.store(static_cast<uint64_t>(pendingDocuments_.size()));
     }
@@ -410,17 +414,24 @@ void RepairCoordinator::enqueueEmbeddingRepair(const std::vector<std::string>& h
     if (hashes.empty()) {
         return;
     }
+    size_t enqueuedCount = 0;
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         for (const auto& hash : hashes) {
-            pendingDocuments_.push(hash);
+            // Deduplicate: only enqueue if not already in queue
+            if (pendingSet_.find(hash) == pendingSet_.end()) {
+                pendingSet_.insert(hash);
+                pendingDocuments_.push(hash);
+                ++enqueuedCount;
+            }
         }
         if (state_) {
             state_->stats.repairQueueDepth.store(static_cast<uint64_t>(pendingDocuments_.size()));
         }
     }
     queueCv_.notify_one();
-    spdlog::debug("RepairCoordinator: queued {} documents for embedding repair", hashes.size());
+    spdlog::debug("RepairCoordinator: queued {} documents for embedding repair ({} deduplicated)",
+                  enqueuedCount, hashes.size() - enqueuedCount);
 }
 
 void RepairCoordinator::onDocumentRemoved(const DocumentRemovedEvent& event) {
@@ -707,8 +718,13 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                                              yams::metadata::ExtractionStatus::Success);
 
                                         if (missingEmb || missingFts) {
-                                            pendingDocuments_.push(d.sha256Hash);
-                                            ++batchEnqueued;
+                                            // Deduplicate: only enqueue if not already in queue
+                                            if (pendingSet_.find(d.sha256Hash) ==
+                                                pendingSet_.end()) {
+                                                pendingSet_.insert(d.sha256Hash);
+                                                pendingDocuments_.push(d.sha256Hash);
+                                                ++batchEnqueued;
+                                            }
                                         }
                                     }
                                 }
@@ -752,8 +768,10 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
         {
             std::lock_guard<std::mutex> lk(queueMutex_);
             while (!pendingDocuments_.empty() && batch.size() < shutdownState->config.maxBatch) {
-                batch.push_back(std::move(pendingDocuments_.front()));
+                auto hash = std::move(pendingDocuments_.front());
                 pendingDocuments_.pop();
+                pendingSet_.erase(hash); // Remove from dedup set when dequeuing
+                batch.push_back(std::move(hash));
             }
             if (state_)
                 state_->stats.repairQueueDepth.store(
@@ -802,12 +820,35 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
             }
 
             // Check if model provider is available for embedding generation
+            // and that model dimensions match the vector DB dimensions
             if (!missingEmbeddings.empty()) {
                 auto provider = services_ ? services_->getModelProvider() : nullptr;
+                auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
+
                 if (provider && provider->isAvailable()) {
-                    spdlog::debug(
-                        "RepairCoordinator: {} docs need embeddings, model provider ready",
-                        missingEmbeddings.size());
+                    // Get model dimension (using empty string for default model)
+                    size_t modelDim = provider->getEmbeddingDim("");
+
+                    // Get vector DB stored dimension
+                    size_t storedDim = 0;
+                    if (vectorDb) {
+                        storedDim = vectorDb->getConfig().embedding_dim;
+                    }
+
+                    // Skip embedding repair if dimensions mismatch
+                    if (modelDim > 0 && storedDim > 0 && modelDim != storedDim) {
+                        spdlog::warn(
+                            "RepairCoordinator: skipping embedding repair - model dimension ({}) "
+                            "differs from DB dimension ({}). Use 'yams repair --rebuild-vectors' "
+                            "to migrate.",
+                            modelDim, storedDim);
+                        missingEmbeddings.clear();
+                    } else {
+                        spdlog::debug(
+                            "RepairCoordinator: {} docs need embeddings, model provider ready "
+                            "(dim={})",
+                            missingEmbeddings.size(), modelDim);
+                    }
                 }
             }
         }
@@ -848,6 +889,17 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
         if (!missingEmbeddings.empty()) {
             if (state_)
                 state_->stats.repairBatchesAttempted++;
+
+            // Mark documents as Processing BEFORE queueing to prevent re-queuing by concurrent
+            // scans
+            if (meta_repo) {
+                auto statusRes = meta_repo->batchUpdateDocumentRepairStatuses(
+                    missingEmbeddings, yams::metadata::RepairStatus::Processing);
+                if (!statusRes) {
+                    spdlog::warn("RepairCoordinator: failed to set Processing status: {}",
+                                 statusRes.error().message);
+                }
+            }
 
             InternalEventBus::EmbedJob job{missingEmbeddings,
                                            static_cast<uint32_t>(shutdownState->config.maxBatch),

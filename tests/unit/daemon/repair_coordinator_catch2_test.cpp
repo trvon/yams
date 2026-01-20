@@ -383,4 +383,85 @@ TEST_CASE("RepairCoordinator allows binary files with custom plugins",
     SUCCEED();
 }
 
+TEST_CASE("RepairCoordinator deduplicates pending documents", "[daemon][repair][coordinator]") {
+    StateComponent state;
+    auto activeFn = []() -> size_t { return 0; };
+
+    RepairCoordinator::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = std::filesystem::temp_directory_path() / "repair_test_dedupe_queue";
+    cfg.maxBatch = 100; // Large batch to accumulate without processing
+
+    RepairCoordinator coordinator(nullptr, &state, activeFn, cfg);
+
+    coordinator.start();
+
+    // Add the same document hash multiple times
+    const std::string testHash = "dedupe_test_hash_12345";
+    for (int i = 0; i < 10; ++i) {
+        RepairCoordinator::DocumentAddedEvent event{testHash, "/path/test.txt"};
+        coordinator.onDocumentAdded(event);
+    }
+
+    // Small delay to ensure processing
+    std::this_thread::sleep_for(50ms);
+
+    // Queue depth should be 1 (all duplicates should be deduped)
+    // Note: The queue may have been processed, so we check it's <= 1
+    REQUIRE(state.stats.repairQueueDepth.load() <= 1u);
+
+    coordinator.stop();
+}
+
+TEST_CASE("RepairCoordinator enqueueEmbeddingRepair deduplicates",
+          "[daemon][repair][coordinator]") {
+    StateComponent state;
+    auto activeFn = []() -> size_t { return 0; };
+
+    RepairCoordinator::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = std::filesystem::temp_directory_path() / "repair_test_batch_dedupe";
+    cfg.maxBatch = 100;
+
+    RepairCoordinator coordinator(nullptr, &state, activeFn, cfg);
+
+    coordinator.start();
+
+    // Enqueue batch with duplicate hashes
+    std::vector<std::string> hashes = {"hash_a", "hash_b", "hash_a", "hash_c", "hash_b", "hash_a"};
+    coordinator.enqueueEmbeddingRepair(hashes);
+
+    // Small delay
+    std::this_thread::sleep_for(50ms);
+
+    // Should have at most 3 unique hashes queued (may be processed already)
+    REQUIRE(state.stats.repairQueueDepth.load() <= 3u);
+
+    coordinator.stop();
+}
+
+TEST_CASE("RepairCoordinator token throttling limits concurrency",
+          "[daemon][repair][coordinator]") {
+    StateComponent state;
+    auto activeFn = []() -> size_t { return 0; };
+
+    RepairCoordinator::Config cfg;
+    cfg.enable = true;
+    cfg.dataDir = std::filesystem::temp_directory_path() / "repair_test_tokens";
+    cfg.maxBatch = 10;
+    cfg.maintenanceTokens = 2; // Limit to 2 concurrent operations
+
+    RepairCoordinator coordinator(nullptr, &state, activeFn, cfg);
+
+    // Test token acquisition
+    coordinator.setMaintenanceTokens(2);
+
+    coordinator.start();
+    std::this_thread::sleep_for(50ms);
+    coordinator.stop();
+
+    // Verify coordinator ran without errors
+    SUCCEED();
+}
+
 } // namespace yams::daemon

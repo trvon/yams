@@ -318,9 +318,9 @@ public:
     }
 
     // -------- Repair coordinator tuning (env-driven) --------
-    // Max repair batch size per cycle. Default 32.
+    // Max repair batch size per cycle.
+    // Profile-scaled: Efficient=24, Balanced=32, Aggressive=48
     static uint32_t repairMaxBatch() {
-        uint32_t def = 32;
         if (const char* s = std::getenv("YAMS_REPAIR_MAX_BATCH")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
@@ -329,12 +329,25 @@ public:
             } catch (...) {
             }
         }
-        return def;
+        // Profile-scaled: Efficient=24, Balanced=32, Aggressive=48
+        return static_cast<uint32_t>(32.0 * profileScale());
     }
 
-    // Batch size for repair operations during startup phase. Default 100.
-    // Smaller batches reduce startup load. Normal operation uses repairMaxBatch (32).
-    static uint32_t repairStartupBatchSize() { return 100; }
+    // Batch size for repair operations during startup phase.
+    // Profile-scaled: Efficient=75, Balanced=100, Aggressive=150
+    // Smaller batches reduce startup load. Normal operation uses repairMaxBatch().
+    static uint32_t repairStartupBatchSize() {
+        if (const char* s = std::getenv("YAMS_REPAIR_STARTUP_BATCH")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v > 0 && v <= 1000)
+                    return v;
+            } catch (...) {
+            }
+        }
+        // Profile-scaled: Efficient=75, Balanced=100, Aggressive=150
+        return static_cast<uint32_t>(100.0 * profileScale());
+    }
 
     // Duration of startup phase in ticks (each tick is statusTickMs, default 250ms).
     // During startup, smaller batch sizes are used to reduce load.
