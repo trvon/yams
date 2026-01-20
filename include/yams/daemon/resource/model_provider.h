@@ -207,6 +207,23 @@ public:
     virtual void releaseUnusedResources() = 0;
 
     /**
+     * Evict models under memory pressure (called by ResourceGovernor)
+     *
+     * This method is called when memory pressure exceeds configured thresholds.
+     * Implementations should evict LRU models to free memory, respecting the
+     * pressure level to determine how aggressive eviction should be.
+     *
+     * @param pressureLevel Current memory pressure (0.0-1.0, where 1.0 = at/over budget)
+     * @param allowHotEviction If true, evict even recently-used models (emergency mode)
+     * @return Number of models evicted
+     */
+    virtual size_t evictUnderPressure(double pressureLevel, bool allowHotEviction = false) {
+        (void)pressureLevel;
+        (void)allowHotEviction;
+        return 0; // Default no-op for providers that don't support pressure eviction
+    }
+
+    /**
      * Shutdown the provider and release all resources
      */
     virtual void shutdown() = 0;

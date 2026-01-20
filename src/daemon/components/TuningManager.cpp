@@ -10,6 +10,8 @@
 #include <boost/asio/use_future.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PoolManager.h>
+#include <yams/daemon/components/ResourceGovernor.h>
+#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -84,6 +86,21 @@ void TuningManager::tick_once() {
         return;
     }
 
+    // =========================================================================
+    // Resource Governor: collect metrics and respond to memory pressure
+    // =========================================================================
+    auto& governor = ResourceGovernor::instance();
+    ResourceSnapshot govSnap = governor.tick(sm_);
+
+#if defined(TRACY_ENABLE)
+    TracyPlot("governor.rss_mb", static_cast<double>(govSnap.rssBytes) / (1024.0 * 1024.0));
+    TracyPlot("governor.budget_mb",
+              static_cast<double>(govSnap.memoryBudgetBytes) / (1024.0 * 1024.0));
+    TracyPlot("governor.pressure_pct", govSnap.memoryPressure * 100.0);
+    TracyPlot("governor.level", static_cast<double>(govSnap.level));
+    TracyPlot("governor.headroom_pct", govSnap.scalingHeadroom * 100.0);
+#endif
+
     // Gather minimal metrics
     const std::uint64_t activeConns = state_->stats.activeConnections.load();
     const std::uint64_t workerThreads = sm_->getWorkerThreads();
@@ -114,6 +131,10 @@ void TuningManager::tick_once() {
             const std::size_t storageCap = TuneAdvisor::storagePoolSize();
             if (storageCap > 0)
                 cap = std::min(cap, storageCap);
+            // Gate through ResourceGovernor
+            if (TuneAdvisor::enableResourceGovernor()) {
+                cap = std::min(cap, static_cast<std::size_t>(governor.maxIngestWorkers()));
+            }
             if (cap == 0)
                 cap = 1;
             if (desired < 1)
@@ -150,6 +171,10 @@ void TuningManager::tick_once() {
         auto advisorLimit = TuneAdvisor::searchConcurrencyLimit();
         if (advisorLimit > 0)
             target = std::min(target, advisorLimit);
+        // Gate through ResourceGovernor
+        if (TuneAdvisor::enableResourceGovernor()) {
+            target = std::min(target, governor.maxSearchConcurrency());
+        }
         (void)sm_->applySearchConcurrencyTarget(target);
     } catch (...) {
     }
@@ -179,6 +204,10 @@ void TuningManager::tick_once() {
                 extractionTarget = 4; // idle - use minimum
             }
             extractionTarget = std::max<uint32_t>(4, extractionTarget); // floor at default
+            // Gate through ResourceGovernor
+            if (TuneAdvisor::enableResourceGovernor()) {
+                extractionTarget = std::min(extractionTarget, governor.maxExtractionConcurrency());
+            }
             TuneAdvisor::setPostExtractionConcurrent(extractionTarget);
 
             // KG concurrency: scale based on queue depth BUT scale DOWN on DB contention
@@ -201,6 +230,10 @@ void TuningManager::tick_once() {
                 kgTarget = std::min<uint32_t>(hwThreads / 2, 32);
             } else if (queuedItems > 100) {
                 kgTarget = 16;
+            }
+            // Gate through ResourceGovernor
+            if (TuneAdvisor::enableResourceGovernor()) {
+                kgTarget = std::min(kgTarget, governor.maxKgConcurrency());
             }
             TuneAdvisor::setPostKgConcurrent(kgTarget);
 
@@ -247,6 +280,10 @@ void TuningManager::tick_once() {
                 embedTarget = 2; // idle - minimum
             }
             embedTarget = std::max<uint32_t>(2, embedTarget); // floor
+            // Gate through ResourceGovernor
+            if (TuneAdvisor::enableResourceGovernor()) {
+                embedTarget = std::min(embedTarget, governor.maxEmbedConcurrency());
+            }
             TuneAdvisor::setPostEmbedConcurrent(embedTarget);
 
 #if defined(TRACY_ENABLE)
@@ -285,6 +322,23 @@ void TuningManager::tick_once() {
         FsmMetricsRegistry::instance().setIpcPoolSize(ipcStats.current_size);
         FsmMetricsRegistry::instance().setIoPoolSize(ioStats.current_size);
         FsmMetricsRegistry::instance().setWriterBudgetBytes(writerBudget);
+        // ResourceGovernor metrics
+        FsmMetricsRegistry::instance().setGovernorRssBytes(govSnap.rssBytes);
+        FsmMetricsRegistry::instance().setGovernorBudgetBytes(govSnap.memoryBudgetBytes);
+        FsmMetricsRegistry::instance().setGovernorPressureLevel(
+            static_cast<uint8_t>(govSnap.level));
+        FsmMetricsRegistry::instance().setGovernorHeadroomPct(
+            static_cast<uint8_t>(govSnap.scalingHeadroom * 100.0));
+        // ONNX concurrency metrics
+        auto onnxSnap = OnnxConcurrencyRegistry::instance().snapshot();
+        FsmMetricsRegistry::instance().setOnnxTotalSlots(onnxSnap.totalSlots);
+        FsmMetricsRegistry::instance().setOnnxUsedSlots(onnxSnap.usedSlots);
+        FsmMetricsRegistry::instance().setOnnxGlinerUsed(
+            onnxSnap.lanes[static_cast<size_t>(OnnxLane::Gliner)].used);
+        FsmMetricsRegistry::instance().setOnnxEmbedUsed(
+            onnxSnap.lanes[static_cast<size_t>(OnnxLane::Embedding)].used);
+        FsmMetricsRegistry::instance().setOnnxRerankerUsed(
+            onnxSnap.lanes[static_cast<size_t>(OnnxLane::Reranker)].used);
 #if defined(TRACY_ENABLE)
         TracyPlot("pool.ipc.size", static_cast<double>(ipcStats.current_size));
         TracyPlot("pool.io.size", static_cast<double>(ioStats.current_size));

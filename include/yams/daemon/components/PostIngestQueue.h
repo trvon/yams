@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <functional>
+#include <deque>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -117,6 +118,38 @@ public:
 
     void setCapacity(std::size_t cap) { capacity_ = cap > 0 ? cap : capacity_; }
 
+    // ========================================================================
+    // Pause/Resume Support (for ResourceGovernor pressure response)
+    // ========================================================================
+
+    /// Post-ingest processing stages (for pause/resume control)
+    enum class Stage : std::uint8_t {
+        Extraction = 0, // Text/content extraction
+        KnowledgeGraph, // KG triple generation
+        Symbol,         // Symbol extraction
+        Entity,         // Entity extraction (binary analysis)
+        Title           // Title extraction (GLiNER)
+    };
+
+    /// Pause a specific processing stage
+    /// @param stage The stage to pause
+    void pauseStage(Stage stage);
+
+    /// Resume a specific processing stage
+    /// @param stage The stage to resume
+    void resumeStage(Stage stage);
+
+    /// Check if a stage is paused
+    /// @param stage The stage to check
+    /// @return true if the stage is paused
+    [[nodiscard]] bool isStagePaused(Stage stage) const;
+
+    /// Pause all processing stages (emergency shutdown)
+    void pauseAll();
+
+    /// Resume all processing stages (return to normal operation)
+    void resumeAll();
+
     // Update extractors after plugins are loaded (called by ServiceManager)
     void setExtractors(std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors) {
         extractors_ = std::move(extractors);
@@ -145,6 +178,13 @@ public:
     void setDrainCallback(DrainCallback callback) {
         std::lock_guard<std::mutex> lock(drainCallbackMutex_);
         drainCallback_ = std::move(callback);
+    }
+
+    // Callback for embedding dispatch failures (e.g., to trigger repair coordinator)
+    using EmbedFailureCallback = std::function<void(const std::vector<std::string>&)>;
+    void setEmbedFailureCallback(EmbedFailureCallback callback) {
+        std::lock_guard<std::mutex> lock(embedFailureCallbackMutex_);
+        embedFailureCallback_ = std::move(callback);
     }
 
 private:
@@ -193,6 +233,11 @@ private:
     void checkDrainAndSignal(); // Check if drained and signal corpus stats stale
     std::string deriveTitle(const std::string& text, const std::string& fileName,
                             const std::string& mimeType, const std::string& extension) const;
+    void recordEmbedRetry(const std::vector<std::string>& hashes);
+    void flushEmbedRetriesOnDrain();
+    void notifyEmbedFailure(const std::vector<std::string>& hashes);
+    bool dispatchEmbedJobWithRetry(const std::vector<std::string>& hashes, bool recordOnFailure,
+                                   bool notifyOnFailure);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
@@ -208,6 +253,13 @@ private:
     std::atomic<bool> symbolStarted_{false};
     std::atomic<bool> entityStarted_{false};
     std::atomic<bool> titleStarted_{false};
+
+    // Pause flags for ResourceGovernor pressure response
+    std::atomic<bool> extractionPaused_{false};
+    std::atomic<bool> kgPaused_{false};
+    std::atomic<bool> symbolPaused_{false};
+    std::atomic<bool> entityPaused_{false};
+    std::atomic<bool> titlePaused_{false};
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};
     std::atomic<std::size_t> inFlight_{0};
@@ -234,6 +286,11 @@ private:
 
     mutable std::mutex drainCallbackMutex_;
     DrainCallback drainCallback_;
+
+    mutable std::mutex embedFailureCallbackMutex_;
+    EmbedFailureCallback embedFailureCallback_;
+    mutable std::mutex embedRetryMutex_;
+    std::deque<std::string> embedRetryHashes_;
 
     search::EntityExtractionFunc titleExtractor_;
 };

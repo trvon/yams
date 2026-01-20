@@ -70,7 +70,8 @@ private:
     vector::GenerationStats stats_;
 };
 
-AbiModelProviderAdapter::AbiModelProviderAdapter(yams_model_provider_v1* table) : table_(table) {}
+AbiModelProviderAdapter::AbiModelProviderAdapter(yams_model_provider_v1* table)
+    : table_(table), abiVersion_(table ? table->abi_version : 0) {}
 
 void AbiModelProviderAdapter::setProgressCallback(std::function<void(const ModelLoadEvent&)> cb) {
     progress_ = std::move(cb);
@@ -382,6 +383,34 @@ size_t AbiModelProviderAdapter::getMemoryUsage() const {
 }
 
 void AbiModelProviderAdapter::releaseUnusedResources() {}
+
+size_t AbiModelProviderAdapter::evictUnderPressure(double pressureLevel, bool allowHotEviction) {
+    // evict_under_pressure was added in v1.4 - must check version BEFORE accessing the field
+    // (v3 plugins don't have this field, so reading it would be UB)
+    if (!table_ || abiVersion_ < 4 || !table_->evict_under_pressure) {
+        // Plugin doesn't support eviction - return 0 (no models evicted)
+        return 0;
+    }
+
+    size_t evicted = 0;
+    auto st = table_->evict_under_pressure(table_->self, pressureLevel, allowHotEviction, &evicted);
+
+    if (st == YAMS_OK) {
+        if (evicted > 0) {
+            spdlog::info("[ABI Adapter] Evicted {} models under memory pressure ({:.0f}%)", evicted,
+                         pressureLevel * 100.0);
+        }
+        return evicted;
+    }
+
+    if (st == YAMS_ERR_UNSUPPORTED) {
+        // Plugin doesn't support eviction yet - not an error, just return 0
+        return 0;
+    }
+
+    spdlog::warn("[ABI Adapter] evict_under_pressure failed with status {}", static_cast<int>(st));
+    return 0;
+}
 
 void AbiModelProviderAdapter::shutdown() {}
 

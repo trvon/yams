@@ -49,6 +49,19 @@ public:
         uint32_t ioPoolSize{0};
         uint64_t writerBudgetBytes{0};
 
+        // ResourceGovernor metrics (from TuningManager)
+        uint64_t governorRssBytes{0};     // Current RSS
+        uint64_t governorBudgetBytes{0};  // Memory budget
+        uint8_t governorPressureLevel{0}; // 0=Normal, 1=Warning, 2=Critical, 3=Emergency
+        uint8_t governorHeadroomPct{100}; // Scaling headroom (0-100%)
+
+        // ONNX concurrency metrics
+        uint32_t onnxTotalSlots{0};
+        uint32_t onnxUsedSlots{0};
+        uint32_t onnxGlinerUsed{0};
+        uint32_t onnxEmbedUsed{0};
+        uint32_t onnxRerankerUsed{0};
+
         // Merge another snapshot into this one
         inline void merge(const Snapshot& other) noexcept {
             transitions += other.transitions;
@@ -60,6 +73,17 @@ public:
             ipcPoolSize = other.ipcPoolSize; // last-writer wins (snapshots are periodic)
             ioPoolSize = other.ioPoolSize;
             writerBudgetBytes = other.writerBudgetBytes;
+            // Governor metrics - last-writer wins
+            governorRssBytes = other.governorRssBytes;
+            governorBudgetBytes = other.governorBudgetBytes;
+            governorPressureLevel = other.governorPressureLevel;
+            governorHeadroomPct = other.governorHeadroomPct;
+            // ONNX metrics - last-writer wins
+            onnxTotalSlots = other.onnxTotalSlots;
+            onnxUsedSlots = other.onnxUsedSlots;
+            onnxGlinerUsed = other.onnxGlinerUsed;
+            onnxEmbedUsed = other.onnxEmbedUsed;
+            onnxRerankerUsed = other.onnxRerankerUsed;
         }
     };
 
@@ -123,6 +147,17 @@ public:
         out.ipcPoolSize = ipcPoolSize_.load(std::memory_order_acquire);
         out.ioPoolSize = ioPoolSize_.load(std::memory_order_acquire);
         out.writerBudgetBytes = writerBudgetBytes_.load(std::memory_order_acquire);
+        // ResourceGovernor metrics
+        out.governorRssBytes = governorRssBytes_.load(std::memory_order_acquire);
+        out.governorBudgetBytes = governorBudgetBytes_.load(std::memory_order_acquire);
+        out.governorPressureLevel = governorPressureLevel_.load(std::memory_order_acquire);
+        out.governorHeadroomPct = governorHeadroomPct_.load(std::memory_order_acquire);
+        // ONNX concurrency metrics
+        out.onnxTotalSlots = onnxTotalSlots_.load(std::memory_order_acquire);
+        out.onnxUsedSlots = onnxUsedSlots_.load(std::memory_order_acquire);
+        out.onnxGlinerUsed = onnxGlinerUsed_.load(std::memory_order_acquire);
+        out.onnxEmbedUsed = onnxEmbedUsed_.load(std::memory_order_acquire);
+        out.onnxRerankerUsed = onnxRerankerUsed_.load(std::memory_order_acquire);
         return out;
     }
 
@@ -139,6 +174,17 @@ public:
         ipcPoolSize_.store(0, std::memory_order_release);
         ioPoolSize_.store(0, std::memory_order_release);
         writerBudgetBytes_.store(0, std::memory_order_release);
+        // Reset ResourceGovernor metrics
+        governorRssBytes_.store(0, std::memory_order_release);
+        governorBudgetBytes_.store(0, std::memory_order_release);
+        governorPressureLevel_.store(0, std::memory_order_release);
+        governorHeadroomPct_.store(100, std::memory_order_release);
+        // Reset ONNX metrics
+        onnxTotalSlots_.store(0, std::memory_order_release);
+        onnxUsedSlots_.store(0, std::memory_order_release);
+        onnxGlinerUsed_.store(0, std::memory_order_release);
+        onnxEmbedUsed_.store(0, std::memory_order_release);
+        onnxRerankerUsed_.store(0, std::memory_order_release);
     }
 
     // Tuning/Pool stats exposed to FSM consumers (status/doctor)
@@ -150,6 +196,37 @@ public:
     }
     inline void setWriterBudgetBytes(uint64_t n) noexcept {
         writerBudgetBytes_.store(n, std::memory_order_relaxed);
+    }
+
+    // ResourceGovernor metrics setters
+    inline void setGovernorRssBytes(uint64_t bytes) noexcept {
+        governorRssBytes_.store(bytes, std::memory_order_relaxed);
+    }
+    inline void setGovernorBudgetBytes(uint64_t bytes) noexcept {
+        governorBudgetBytes_.store(bytes, std::memory_order_relaxed);
+    }
+    inline void setGovernorPressureLevel(uint8_t level) noexcept {
+        governorPressureLevel_.store(level, std::memory_order_relaxed);
+    }
+    inline void setGovernorHeadroomPct(uint8_t pct) noexcept {
+        governorHeadroomPct_.store(pct, std::memory_order_relaxed);
+    }
+
+    // ONNX concurrency metrics setters
+    inline void setOnnxTotalSlots(uint32_t n) noexcept {
+        onnxTotalSlots_.store(n, std::memory_order_relaxed);
+    }
+    inline void setOnnxUsedSlots(uint32_t n) noexcept {
+        onnxUsedSlots_.store(n, std::memory_order_relaxed);
+    }
+    inline void setOnnxGlinerUsed(uint32_t n) noexcept {
+        onnxGlinerUsed_.store(n, std::memory_order_relaxed);
+    }
+    inline void setOnnxEmbedUsed(uint32_t n) noexcept {
+        onnxEmbedUsed_.store(n, std::memory_order_relaxed);
+    }
+    inline void setOnnxRerankerUsed(uint32_t n) noexcept {
+        onnxRerankerUsed_.store(n, std::memory_order_relaxed);
     }
 
 private:
@@ -197,6 +274,19 @@ private:
     std::atomic<uint32_t> ipcPoolSize_{0};
     std::atomic<uint32_t> ioPoolSize_{0};
     std::atomic<uint64_t> writerBudgetBytes_{0};
+
+    // ResourceGovernor metrics
+    std::atomic<uint64_t> governorRssBytes_{0};
+    std::atomic<uint64_t> governorBudgetBytes_{0};
+    std::atomic<uint8_t> governorPressureLevel_{0};
+    std::atomic<uint8_t> governorHeadroomPct_{100};
+
+    // ONNX concurrency metrics
+    std::atomic<uint32_t> onnxTotalSlots_{0};
+    std::atomic<uint32_t> onnxUsedSlots_{0};
+    std::atomic<uint32_t> onnxGlinerUsed_{0};
+    std::atomic<uint32_t> onnxEmbedUsed_{0};
+    std::atomic<uint32_t> onnxRerankerUsed_{0};
 };
 
 } // namespace daemon

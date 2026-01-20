@@ -780,6 +780,17 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             out.ioPoolSize = fsnap.ioPoolSize;
         } catch (...) {
         }
+        // ResourceGovernor metrics
+        out.governorRssBytes = fsnap.governorRssBytes;
+        out.governorBudgetBytes = fsnap.governorBudgetBytes;
+        out.governorPressureLevel = fsnap.governorPressureLevel;
+        out.governorHeadroomPct = fsnap.governorHeadroomPct;
+        // ONNX concurrency metrics
+        out.onnxTotalSlots = fsnap.onnxTotalSlots;
+        out.onnxUsedSlots = fsnap.onnxUsedSlots;
+        out.onnxGlinerUsed = fsnap.onnxGlinerUsed;
+        out.onnxEmbedUsed = fsnap.onnxEmbedUsed;
+        out.onnxRerankerUsed = fsnap.onnxRerankerUsed;
     } catch (...) {
     }
     int64_t muxQueuedBytesLocal = 0;

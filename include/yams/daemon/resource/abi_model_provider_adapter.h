@@ -44,6 +44,7 @@ public:
 
     size_t getMemoryUsage() const override;
     void releaseUnusedResources() override;
+    size_t evictUnderPressure(double pressureLevel, bool allowHotEviction) override;
     void shutdown() override;
 
     // v1.3: Cross-encoder reranking
@@ -52,6 +53,7 @@ public:
 
 private:
     yams_model_provider_v1* table_{};
+    uint32_t abiVersion_{0}; // Stored for version-gated features (v4+ has evict_under_pressure)
     std::function<void(const ModelLoadEvent&)> progress_{};
 
     static Error mapStatus(yams_status_t st, const std::string& context = {});

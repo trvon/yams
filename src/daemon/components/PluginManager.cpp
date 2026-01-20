@@ -539,11 +539,18 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                 return false;
             }
 
-            if (table->abi_version != YAMS_IFACE_MODEL_PROVIDER_V1_VERSION) {
-                spdlog::debug("[PluginManager] ABI mismatch for '{}': got v{}, expected v{}",
-                              pluginName, table->abi_version, YAMS_IFACE_MODEL_PROVIDER_V1_VERSION);
-                embeddingFsm_.dispatch(ProviderDegradedEvent{"ABI mismatch: " + pluginName});
+            // Accept v3+ for backward compatibility; v4 adds optional evict_under_pressure
+            constexpr uint32_t kMinSupportedVersion = 3u;
+            if (table->abi_version < kMinSupportedVersion) {
+                spdlog::debug("[PluginManager] ABI too old for '{}': got v{}, need v{}+",
+                              pluginName, table->abi_version, kMinSupportedVersion);
+                embeddingFsm_.dispatch(ProviderDegradedEvent{"ABI too old: " + pluginName});
                 return false;
+            }
+            if (table->abi_version < YAMS_IFACE_MODEL_PROVIDER_V1_VERSION) {
+                spdlog::info("[PluginManager] Plugin '{}' uses ABI v{} (current v{}); "
+                             "evict_under_pressure not available",
+                             pluginName, table->abi_version, YAMS_IFACE_MODEL_PROVIDER_V1_VERSION);
             }
 
             modelProvider_ = std::make_shared<AbiModelProviderAdapter>(table);

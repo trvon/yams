@@ -11,7 +11,7 @@ extern "C" {
 
 // Interface identity
 #define YAMS_IFACE_MODEL_PROVIDER_V1 "model_provider_v1"
-#define YAMS_IFACE_MODEL_PROVIDER_V1_VERSION 3u
+#define YAMS_IFACE_MODEL_PROVIDER_V1_VERSION 4u
 
 // Status codes (int ABI)
 enum yams_status_e {
@@ -117,6 +117,16 @@ typedef struct yams_model_provider_v1 {
                                      size_t* out_count);
 
     void (*free_scores)(void* self, float* scores, size_t count);
+
+    // v1.4 extension: Memory pressure eviction (optional)
+    // Evict models to free memory when under resource pressure.
+    // pressure_level: 0.0-1.0 indicating memory pressure (1.0 = at/over budget)
+    // allow_hot_eviction: if true, evict even recently-used models (emergency mode)
+    // out_evicted: number of models actually evicted
+    // Returns YAMS_OK on success, YAMS_ERR_UNSUPPORTED if not implemented.
+    // Implementations should respect TuneAdvisor eviction cooldowns to prevent thrashing.
+    yams_status_t (*evict_under_pressure)(void* self, double pressure_level,
+                                          bool allow_hot_eviction, size_t* out_evicted);
 } yams_model_provider_v1;
 
 #ifdef __cplusplus

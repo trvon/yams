@@ -276,6 +276,32 @@ private:
         return display;
     }
 
+    // Shared helper: paint a status value with severity icon and color
+    static std::string paintStatus(Severity sev, std::string text) {
+        using namespace yams::cli::ui;
+        const char* color = Ansi::GREEN;
+        const char* icon = "✓";
+        switch (sev) {
+            case Severity::Good:
+                break;
+            case Severity::Warn:
+                color = Ansi::YELLOW;
+                icon = "⚠";
+                break;
+            case Severity::Bad:
+                color = Ansi::RED;
+                icon = "✗";
+                break;
+        }
+        return colorize(std::string(icon) + " " + std::move(text), color);
+    }
+
+    // Shared helper: neutral text (no severity icon)
+    static std::string neutralText(const std::string& text) {
+        using namespace yams::cli::ui;
+        return colorize(text, Ansi::WHITE);
+    }
+
     bool isVersionCompatible(const std::string& runningVersion) {
         std::string currentVersion = YAMS_VERSION_STRING;
 
@@ -335,8 +361,7 @@ private:
     }
 
     void cleanupDaemonFiles(const std::string& socketPath, const std::string& pidFilePath) {
-        auto removeWithRetry = [](const std::filesystem::path& path,
-                                  const std::string& label) {
+        auto removeWithRetry = [](const std::filesystem::path& path, const std::string& label) {
             if (path.empty()) {
                 return;
             }
@@ -351,8 +376,7 @@ private:
                     return;
                 }
 #ifdef _WIN32
-                if (ec.value() == ERROR_SHARING_VIOLATION ||
-                    ec.value() == ERROR_ACCESS_DENIED) {
+                if (ec.value() == ERROR_SHARING_VIOLATION || ec.value() == ERROR_ACCESS_DENIED) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     continue;
                 }
@@ -360,8 +384,7 @@ private:
                 break;
             }
             if (ec) {
-                spdlog::warn("Failed to remove {} file {}: {}", label, path.string(),
-                             ec.message());
+                spdlog::warn("Failed to remove {} file {}: {}", label, path.string(), ec.message());
             }
         };
 
@@ -1309,6 +1332,7 @@ private:
         }
 
         if (!detailed_) {
+            // Compact default view - quick health check
             std::optional<yams::cli::ui::SpinnerRunner> spinner;
             if (yams::cli::ui::stdout_is_tty()) {
                 spinner.emplace();
@@ -1328,70 +1352,7 @@ private:
             using namespace yams::cli::ui;
             const auto& s = sres.value();
 
-            auto formatDuration = [](uint64_t sec) {
-                if (sec == 0)
-                    return std::string{"0s"};
-                std::ostringstream oss;
-                if (sec >= 3600) {
-                    oss << (sec / 3600) << "h";
-                    sec %= 3600;
-                    if (sec >= 60)
-                        oss << " " << (sec / 60) << "m";
-                } else if (sec >= 60) {
-                    oss << (sec / 60) << "m";
-                }
-                if (sec % 60 && sec < 3600) {
-                    if (!oss.str().empty())
-                        oss << " ";
-                    oss << (sec % 60) << "s";
-                }
-                if (oss.str().empty())
-                    return std::to_string(sec) + "s";
-                return oss.str();
-            };
-
-            auto paint = [&](Severity sev, std::string text) {
-                const char* color = Ansi::GREEN;
-                const char* icon = "✓";
-                switch (sev) {
-                    case Severity::Good:
-                        break;
-                    case Severity::Warn:
-                        color = Ansi::YELLOW;
-                        icon = "⚠";
-                        break;
-                    case Severity::Bad:
-                        color = Ansi::RED;
-                        icon = "✗";
-                        break;
-                }
-                return colorize(std::string(icon) + " " + std::move(text), color);
-            };
-
-            std::vector<ReadinessDisplay> readinessList;
-            readinessList.reserve(s.readinessStates.size());
-            for (const auto& [key, ready] : s.readinessStates) {
-                readinessList.push_back(classifyReadiness(key, ready));
-            }
-
-            bool anyDegraded = (s.overallStatus == "degraded") || !s.lastError.empty();
-            std::vector<std::string> waiting;
-            waiting.reserve(readinessList.size());
-            for (const auto& rd : readinessList) {
-                if (rd.issue) {
-                    // Skip "build reason" keys - they're informational, not readiness indicators
-                    std::string lowerLabel = rd.label;
-                    std::transform(lowerLabel.begin(), lowerLabel.end(), lowerLabel.begin(),
-                                   ::tolower);
-                    if (lowerLabel.find("build reason") != std::string::npos)
-                        continue;
-                    anyDegraded = true;
-                    waiting.push_back(rd.label);
-                }
-            }
-            std::sort(waiting.begin(), waiting.end());
-            waiting.erase(std::unique(waiting.begin(), waiting.end()), waiting.end());
-
+            // Determine lifecycle state and severity
             std::string lifecycle = !s.lifecycleState.empty()
                                         ? humanizeToken(s.lifecycleState)
                                         : (!s.overallStatus.empty()
@@ -1409,205 +1370,89 @@ private:
             if (!s.lastError.empty())
                 stateSeverity = Severity::Bad;
 
-            std::cout << title_banner("YAMS Daemon Status") << "\n\n";
+            // Collect issues for quick summary (skip informational flags)
+            std::vector<std::string> issues;
+            for (const auto& [key, ready] : s.readinessStates) {
+                if (!ready) {
+                    std::string lowerKey = key;
+                    std::transform(lowerKey.begin(), lowerKey.end(), lowerKey.begin(), ::tolower);
+                    // Skip informational keys: build_reason, *_degraded flags
+                    if (lowerKey.find("build_reason") != std::string::npos ||
+                        lowerKey.find("build reason") != std::string::npos ||
+                        lowerKey.ends_with("_degraded")) {
+                        continue;
+                    }
+                    auto rd = classifyReadiness(key, ready);
+                    issues.push_back(rd.label);
+                }
+            }
+            std::sort(issues.begin(), issues.end());
+            issues.erase(std::unique(issues.begin(), issues.end()), issues.end());
 
+            std::cout << title_banner("YAMS Daemon") << "\n\n";
+
+            // Single overview table with essential info
             std::vector<Row> overview;
-            overview.push_back({"State", paint(stateSeverity, lifecycle),
-                                s.running
-                                    ? (s.ready ? std::string{"ready"} : std::string{"starting"})
-                                    : std::string{"stopped"}});
-            overview.push_back({"Version", s.version.empty() ? "unknown" : s.version, ""});
-            overview.push_back({"Uptime", formatDuration(s.uptimeSeconds), ""});
-            std::string connInfo =
-                std::to_string(s.activeConnections) + "/" + std::to_string(s.maxConnections);
-            if (s.connectionSlotsFree > 0) {
-                connInfo += " (" + std::to_string(s.connectionSlotsFree) + " free";
-                if (s.oldestConnectionAge > 0) {
-                    connInfo += ", oldest " + std::to_string(s.oldestConnectionAge) + "s";
-                }
-                if (s.forcedCloseCount > 0) {
-                    connInfo += ", " + std::to_string(s.forcedCloseCount) + " forced";
-                }
-                connInfo += ")";
-            }
-            overview.push_back({"Requests", std::to_string(s.requestsProcessed),
-                                std::string{"active connections: "} + connInfo});
-            if (s.retryAfterMs > 0) {
+            overview.push_back({"State", paintStatus(stateSeverity, lifecycle),
+                                s.version.empty() ? "" : "v" + s.version});
+            overview.push_back({"Uptime", format_duration(s.uptimeSeconds),
+                                std::to_string(s.requestsProcessed) + " requests"});
+
+            // Memory: show governor if available, else basic RSS
+            if (s.governorBudgetBytes > 0) {
+                const char* levelNames[] = {"Normal", "Warning", "Critical", "Emergency"};
+                uint8_t lvl = std::min(s.governorPressureLevel, static_cast<uint8_t>(3));
+                Severity pressSev = (lvl == 0)   ? Severity::Good
+                                    : (lvl == 1) ? Severity::Warn
+                                                 : Severity::Bad;
+                std::ostringstream memInfo;
+                memInfo << std::fixed << std::setprecision(0)
+                        << (static_cast<double>(s.governorRssBytes) / (1024 * 1024)) << " / "
+                        << (static_cast<double>(s.governorBudgetBytes) / (1024 * 1024)) << " MB";
                 overview.push_back(
-                    {"Backpressure",
-                     paint(Severity::Warn, std::to_string(s.retryAfterMs) + " ms cooldown"), ""});
+                    {"Memory", paintStatus(pressSev, levelNames[lvl]), memInfo.str()});
+            } else {
+                Severity memSev = s.memoryUsageMb > 4096 ? Severity::Warn : Severity::Good;
+                overview.push_back(
+                    {"Memory",
+                     paintStatus(memSev, std::to_string(static_cast<int>(s.memoryUsageMb)) + " MB"),
+                     ""});
             }
-            if (!s.lastError.empty()) {
-                overview.push_back({"Last error", paint(Severity::Bad, s.lastError), ""});
-            }
+
+            // Search summary
+            Severity searchSev = s.searchMetrics.queued > 50   ? Severity::Bad
+                                 : s.searchMetrics.queued > 10 ? Severity::Warn
+                                                               : Severity::Good;
+            std::ostringstream searchInfo;
+            searchInfo << s.searchMetrics.active << " active · " << s.searchMetrics.queued
+                       << " queued";
+            overview.push_back({"Search", paintStatus(searchSev, searchInfo.str()), ""});
+
+            // Embeddings summary
+            Severity embSev = s.embeddingAvailable ? Severity::Good : Severity::Warn;
+            std::string embText = s.embeddingAvailable ? "Available" : "Unavailable";
+            std::string embExtra = s.embeddingModel.empty() ? "" : s.embeddingModel;
+            overview.push_back({"Embeddings", paintStatus(embSev, embText), embExtra});
+
             render_rows(std::cout, overview);
 
-            std::cout << "\n" << section_header("Performance") << "\n\n";
-            std::vector<Row> perf;
-            {
-                std::ostringstream cpu;
-                cpu << std::fixed << std::setprecision(1) << s.cpuUsagePercent << "%";
-                Severity cpuSeverity =
-                    s.cpuUsagePercent >= 95.0
-                        ? Severity::Bad
-                        : (s.cpuUsagePercent >= 80.0 ? Severity::Warn : Severity::Good);
-                perf.push_back({"CPU", paint(cpuSeverity, cpu.str()), ""});
-            }
-            perf.push_back({"Memory",
-                            paint(s.memoryUsageMb > 4096 ? Severity::Warn : Severity::Good,
-                                  std::to_string(static_cast<int>(s.memoryUsageMb)) + " MB"),
-                            ""});
-            perf.push_back(
-                {"Pools",
-                 std::to_string(s.ipcPoolSize) + " ipc · " + std::to_string(s.ioPoolSize) + " io",
-                 ""});
-
-            std::size_t threads = 0, active = 0, queued = 0;
-            if (auto it = s.requestCounts.find("worker_threads"); it != s.requestCounts.end())
-                threads = it->second;
-            if (auto it = s.requestCounts.find("worker_active"); it != s.requestCounts.end())
-                active = it->second;
-            if (auto it = s.requestCounts.find("worker_queued"); it != s.requestCounts.end())
-                queued = it->second;
-            const std::size_t util =
-                threads ? static_cast<std::size_t>((100.0 * active) / threads) : 0;
-            std::ostringstream worker;
-            worker << threads << " threads · " << active << " active · " << queued << " queued";
-            Severity workerSeverity =
-                util >= 95 ? Severity::Bad : (util >= 85 ? Severity::Warn : Severity::Good);
-            perf.push_back(
-                {"Worker Util", paint(workerSeverity, std::to_string(util) + "%"), worker.str()});
-
-            render_rows(std::cout, perf);
-
-            std::cout << "\n" << section_header("Search") << "\n\n";
-            std::vector<Row> search;
-            std::ostringstream searchBase;
-            searchBase << s.searchMetrics.active << " active · " << s.searchMetrics.queued
-                       << " queued";
-            std::ostringstream searchExtra;
-            searchExtra << "executed " << s.searchMetrics.executed << " · cache " << std::fixed
-                        << std::setprecision(1) << (s.searchMetrics.cacheHitRate * 100.0)
-                        << "% · latency " << s.searchMetrics.avgLatencyUs << "µs";
-            Severity searchSeverity =
-                s.searchMetrics.queued > 50
-                    ? Severity::Bad
-                    : (s.searchMetrics.queued > 10 ? Severity::Warn : Severity::Good);
-            search.push_back(
-                {"Queries", paint(searchSeverity, searchBase.str()), searchExtra.str()});
-            if (s.searchMetrics.concurrencyLimit > 0) {
-                search.push_back(
-                    {"Concurrency", std::to_string(s.searchMetrics.concurrencyLimit), ""});
-            }
-            render_rows(std::cout, search);
-
-            std::cout << "\n" << section_header("Data Plane") << "\n\n";
-            std::vector<Row> dataRows;
-
-            auto getReadiness = [&](const char* key) -> bool {
-                auto it = s.readinessStates.find(key);
-                return it != s.readinessStates.end() && it->second;
-            };
-
-            // Vector DB
-            {
-                bool ready = getReadiness("vector_db");
-                Severity sev = ready ? Severity::Good : Severity::Warn;
-                std::string text = ready ? "Ready" : "Not initialized";
-                std::string extra = s.vectorDbDim > 0 ? "dim " + std::to_string(s.vectorDbDim) : "";
-                dataRows.push_back({"Vector DB", paint(sev, text), extra});
-            }
-
-            // Embeddings
-            {
-                bool available = s.embeddingAvailable;
-                Severity sev = available ? Severity::Good : Severity::Warn;
-                std::string text = available ? "Available" : "Unavailable";
-                std::string extra;
-                if (!s.embeddingModel.empty())
-                    extra += s.embeddingModel;
-                if (!s.embeddingBackend.empty()) {
-                    if (!extra.empty())
-                        extra += " · ";
-                    extra += s.embeddingBackend;
-                }
-                if (s.embeddingDim > 0) {
-                    if (!extra.empty())
-                        extra += " · ";
-                    extra += "dim " + std::to_string(s.embeddingDim);
-                }
-                dataRows.push_back({"Embeddings", paint(sev, text), extra});
-            }
-
-            if (!s.contentStoreRoot.empty()) {
-                dataRows.push_back({"Content Root", s.contentStoreRoot, ""});
-            }
-            render_rows(std::cout, dataRows);
-
-            std::cout << "\n" << section_header("Services") << "\n\n";
-            std::vector<Row> svcRows;
-            const std::vector<std::pair<std::string, std::string>> readinessMap = {
-                {"content_store", "Content store"},
-                {"metadata_repo", "Metadata"},
-                {"search_engine", "Search"},
-                {"model_provider", "Model provider"},
-                {"vector_embeddings_available", "Embeddings"},
-                {"vector_index", "Vector index"},
-                {"plugins_degraded", "Plugins"},
-            };
-            for (const auto& [key, label] : readinessMap) {
-                auto it = s.readinessStates.find(key);
-                if (it == s.readinessStates.end())
-                    continue;
-                auto rd = classifyReadiness(key, it->second);
-                svcRows.push_back(
-                    {label.empty() ? rd.label : label, paint(rd.severity, rd.text), ""});
-            }
-            if (!svcRows.empty())
-                render_rows(std::cout, svcRows);
-
-            if (!waiting.empty()) {
+            // Show issues if any
+            if (!issues.empty()) {
                 std::string joined;
-                const std::size_t limit = std::min<std::size_t>(waiting.size(), 4);
+                const std::size_t limit = std::min<std::size_t>(issues.size(), 4);
                 for (std::size_t i = 0; i < limit; ++i) {
                     if (i)
                         joined += ", ";
-                    joined += waiting[i];
+                    joined += issues[i];
                 }
-                if (waiting.size() > limit)
+                if (issues.size() > limit)
                     joined += ", …";
                 std::cout << "\n" << colorize("• Waiting on: " + joined, Ansi::YELLOW) << "\n";
             }
 
-            if (!s.providers.empty()) {
-                std::cout << "\n" << section_header("Model Providers") << "\n\n";
-                std::vector<Row> providerRows;
-                const std::size_t limit = std::min<std::size_t>(s.providers.size(), 6);
-                for (std::size_t i = 0; i < limit; ++i) {
-                    const auto& p = s.providers[i];
-                    Severity provSeverity = p.ready ? Severity::Good : Severity::Warn;
-                    std::string name = p.name.empty() ? "(unnamed)" : p.name;
-                    std::string extra;
-                    if (p.modelsLoaded > 0)
-                        extra += std::to_string(p.modelsLoaded) + " models";
-                    if (!p.error.empty()) {
-                        if (!extra.empty())
-                            extra += " · ";
-                        extra += p.error;
-                        provSeverity = Severity::Warn;
-                    }
-                    if (p.isProvider) {
-                        if (!extra.empty())
-                            extra += " · ";
-                        extra += "active provider";
-                    }
-                    providerRows.push_back(
-                        {name,
-                         paint(provSeverity,
-                               p.ready ? "Ready" : (p.degraded ? "Degraded" : "Starting")),
-                         extra});
-                }
-                render_rows(std::cout, providerRows);
+            // Show last error if any
+            if (!s.lastError.empty()) {
+                std::cout << "\n" << colorize("✗ Error: " + s.lastError, Ansi::RED) << "\n";
             }
 
             std::cout << "\n"
@@ -1635,48 +1480,6 @@ private:
                 }
                 using namespace yams::cli::ui;
                 const auto& status = statusResult.value();
-
-                auto formatDuration = [](uint64_t sec) {
-                    if (sec == 0)
-                        return std::string{"0s"};
-                    std::ostringstream oss;
-                    if (sec >= 3600) {
-                        oss << (sec / 3600) << "h";
-                        sec %= 3600;
-                        if (sec >= 60)
-                            oss << " " << (sec / 60) << "m";
-                    } else if (sec >= 60) {
-                        oss << (sec / 60) << "m";
-                    }
-                    if (sec % 60 && sec < 3600) {
-                        if (!oss.str().empty())
-                            oss << " ";
-                        oss << (sec % 60) << "s";
-                    }
-                    if (oss.str().empty())
-                        return std::to_string(sec) + "s";
-                    return oss.str();
-                };
-
-                auto paint = [&](Severity sev, std::string text) {
-                    const char* color = Ansi::GREEN;
-                    const char* icon = "✓";
-                    switch (sev) {
-                        case Severity::Good:
-                            break;
-                        case Severity::Warn:
-                            color = Ansi::YELLOW;
-                            icon = "⚠";
-                            break;
-                        case Severity::Bad:
-                            color = Ansi::RED;
-                            icon = "✗";
-                            break;
-                    }
-                    return colorize(std::string(icon) + " " + std::move(text), color);
-                };
-
-                auto neutral = [](std::string text) { return text; };
 
                 std::vector<ReadinessDisplay> readinessList;
                 readinessList.reserve(status.readinessStates.size());
@@ -1721,22 +1524,24 @@ private:
 
                 std::vector<Row> overview;
                 overview.push_back(
-                    {"State", paint(stateSeverity, lifecycle),
+                    {"State", paintStatus(stateSeverity, lifecycle),
                      status.running ? (status.ready ? "ready" : "starting") : "stopped"});
                 overview.push_back(
                     {"Version", status.version.empty() ? "unknown" : status.version, ""});
-                overview.push_back({"Uptime", formatDuration(status.uptimeSeconds), ""});
+                overview.push_back({"Uptime", format_duration(status.uptimeSeconds), ""});
                 overview.push_back(
                     {"Requests", std::to_string(status.requestsProcessed),
                      std::string{"connections: "} + std::to_string(status.activeConnections)});
                 if (status.retryAfterMs > 0) {
-                    overview.push_back({"Backpressure",
-                                        paint(Severity::Warn,
-                                              std::to_string(status.retryAfterMs) + " ms cooldown"),
-                                        ""});
+                    overview.push_back(
+                        {"Backpressure",
+                         paintStatus(Severity::Warn,
+                                     std::to_string(status.retryAfterMs) + " ms cooldown"),
+                         ""});
                 }
                 if (!status.lastError.empty()) {
-                    overview.push_back({"Last error", paint(Severity::Bad, status.lastError), ""});
+                    overview.push_back(
+                        {"Last error", paintStatus(Severity::Bad, status.lastError), ""});
                 }
                 render_rows(std::cout, overview);
 
@@ -1749,12 +1554,12 @@ private:
                         status.cpuUsagePercent >= 95.0
                             ? Severity::Bad
                             : (status.cpuUsagePercent >= 80.0 ? Severity::Warn : Severity::Good);
-                    resourceRows.push_back({"CPU", paint(cpuSeverity, cpu.str()), ""});
+                    resourceRows.push_back({"CPU", paintStatus(cpuSeverity, cpu.str()), ""});
                 }
                 resourceRows.push_back(
                     {"Memory",
-                     paint(status.memoryUsageMb > 4096 ? Severity::Warn : Severity::Good,
-                           std::to_string(static_cast<int>(status.memoryUsageMb)) + " MB"),
+                     paintStatus(status.memoryUsageMb > 4096 ? Severity::Warn : Severity::Good,
+                                 std::to_string(static_cast<int>(status.memoryUsageMb)) + " MB"),
                      ""});
                 resourceRows.push_back({"Pools",
                                         std::to_string(status.ipcPoolSize) + " ipc · " +
@@ -1778,9 +1583,58 @@ private:
                 Severity workerSeverity =
                     util >= 95 ? Severity::Bad : (util >= 85 ? Severity::Warn : Severity::Good);
                 resourceRows.push_back({"Worker utilization",
-                                        paint(workerSeverity, std::to_string(util) + "%"),
+                                        paintStatus(workerSeverity, std::to_string(util) + "%"),
                                         worker.str()});
                 render_rows(std::cout, resourceRows);
+
+                // Resource Governor section (memory pressure management)
+                if (status.governorBudgetBytes > 0) {
+                    std::cout << "\n" << section_header("Resource Governor") << "\n\n";
+                    std::vector<Row> governor;
+
+                    // Memory pressure level
+                    const char* levelNames[] = {"Normal", "Warning", "Critical", "Emergency"};
+                    uint8_t lvl = std::min(status.governorPressureLevel, static_cast<uint8_t>(3));
+                    Severity pressSev = (lvl == 0)   ? Severity::Good
+                                        : (lvl == 1) ? Severity::Warn
+                                                     : Severity::Bad;
+                    std::ostringstream memExtra;
+                    memExtra << std::fixed << std::setprecision(0)
+                             << (static_cast<double>(status.governorRssBytes) / (1024 * 1024))
+                             << " MB / "
+                             << (static_cast<double>(status.governorBudgetBytes) / (1024 * 1024))
+                             << " MB";
+                    governor.push_back({"Memory Pressure", paintStatus(pressSev, levelNames[lvl]),
+                                        memExtra.str()});
+
+                    // Scaling headroom
+                    Severity headroomSev = (status.governorHeadroomPct >= 50)   ? Severity::Good
+                                           : (status.governorHeadroomPct >= 20) ? Severity::Warn
+                                                                                : Severity::Bad;
+                    governor.push_back(
+                        {"Scaling Headroom",
+                         paintStatus(headroomSev, std::to_string(status.governorHeadroomPct) + "%"),
+                         ""});
+
+                    // ONNX concurrency
+                    if (status.onnxTotalSlots > 0) {
+                        std::ostringstream onnxInfo;
+                        onnxInfo << status.onnxUsedSlots << " / " << status.onnxTotalSlots
+                                 << " slots";
+                        std::ostringstream onnxBreak;
+                        onnxBreak << "gliner " << status.onnxGlinerUsed << " · embed "
+                                  << status.onnxEmbedUsed << " · rerank "
+                                  << status.onnxRerankerUsed;
+                        Severity onnxSev =
+                            (status.onnxUsedSlots >= status.onnxTotalSlots)      ? Severity::Warn
+                            : (status.onnxUsedSlots > status.onnxTotalSlots / 2) ? Severity::Good
+                                                                                 : Severity::Good;
+                        governor.push_back({"ONNX Concurrency",
+                                            paintStatus(onnxSev, onnxInfo.str()), onnxBreak.str()});
+                    }
+
+                    render_rows(std::cout, governor);
+                }
 
                 std::cout << "\n" << section_header("Transport") << "\n\n";
                 std::vector<Row> transport;
@@ -1802,12 +1656,13 @@ private:
                     muxExtra << "queued " << status.muxQueuedBytes << " B";
                     if (status.muxWriterBudgetBytes > 0)
                         muxExtra << " · budget " << status.muxWriterBudgetBytes << " B";
-                    transport.push_back({"Mux", paint(muxSeverity, muxVal.str()), muxExtra.str()});
+                    transport.push_back(
+                        {"Mux", paintStatus(muxSeverity, muxVal.str()), muxExtra.str()});
                     if (status.muxWriterBudgetBytes > 0) {
                         std::ostringstream pressureStr;
                         pressureStr << std::fixed << std::setprecision(1) << pressure << "%";
                         transport.push_back(
-                            {"Mux pressure", paint(muxSeverity, pressureStr.str()), ""});
+                            {"Mux pressure", paintStatus(muxSeverity, pressureStr.str()), ""});
                     }
                 }
                 if (status.fsmTransitions || status.fsmHeaderReads || status.fsmPayloadWrites ||
@@ -1817,11 +1672,11 @@ private:
                     std::ostringstream fsmExtra;
                     fsmExtra << "hdr " << status.fsmHeaderReads << " · read "
                              << status.fsmPayloadReads << " · write " << status.fsmPayloadWrites;
-                    transport.push_back({"IPC FSM", neutral(fsm.str()), fsmExtra.str()});
+                    transport.push_back({"IPC FSM", fsm.str(), fsmExtra.str()});
                     std::ostringstream bytes;
                     bytes << "sent " << status.fsmBytesSent << " · recv "
                           << status.fsmBytesReceived;
-                    transport.push_back({"IPC bytes", neutral(bytes.str()), ""});
+                    transport.push_back({"IPC bytes", bytes.str(), ""});
                 }
                 if (!transport.empty())
                     render_rows(std::cout, transport);
@@ -1839,7 +1694,8 @@ private:
                     status.searchMetrics.queued > 50
                         ? Severity::Bad
                         : (status.searchMetrics.queued > 10 ? Severity::Warn : Severity::Good);
-                searchRows.push_back({"Queries", paint(searchSeverity, base.str()), extra.str()});
+                searchRows.push_back(
+                    {"Queries", paintStatus(searchSeverity, base.str()), extra.str()});
                 if (status.searchMetrics.concurrencyLimit > 0) {
                     searchRows.push_back(
                         {"Concurrency", std::to_string(status.searchMetrics.concurrencyLimit), ""});
@@ -1869,18 +1725,18 @@ private:
                     Severity qSev = queued > cap * 0.8
                                         ? Severity::Bad
                                         : (queued > cap * 0.5 ? Severity::Warn : Severity::Good);
-                    postIngestRows.push_back({"Queue", paint(qSev, queueVal.str()), ""});
+                    postIngestRows.push_back({"Queue", paintStatus(qSev, queueVal.str()), ""});
 
                     std::ostringstream throughput;
                     throughput << rate << "/s · " << latency << "ms latency";
-                    postIngestRows.push_back({"Throughput", neutral(throughput.str()), ""});
+                    postIngestRows.push_back({"Throughput", throughput.str(), ""});
 
                     std::ostringstream stats;
                     stats << processed << " processed";
                     if (failed > 0)
                         stats << " · " << failed << " failed";
                     Severity statSev = failed > 0 ? Severity::Warn : Severity::Good;
-                    postIngestRows.push_back({"Stats", paint(statSev, stats.str()), ""});
+                    postIngestRows.push_back({"Stats", paintStatus(statSev, stats.str()), ""});
 
                     uint64_t watchEnabled = findPostIngestCount("watch_enabled");
                     uint64_t watchInterval = findPostIngestCount("watch_interval_ms");
@@ -1889,7 +1745,7 @@ private:
                         watchVal << (watchEnabled > 0 ? "enabled" : "disabled");
                         if (watchInterval > 0)
                             watchVal << " · " << watchInterval << "ms";
-                        postIngestRows.push_back({"Watch", neutral(watchVal.str()), ""});
+                        postIngestRows.push_back({"Watch", watchVal.str(), ""});
                     }
 
                     // Per-stage breakdown
@@ -1912,16 +1768,15 @@ private:
 
                         std::ostringstream extractVal;
                         extractVal << extractInFlight << " inflight (max 4)";
-                        postIngestRows.push_back({"  Extraction", neutral(extractVal.str()), ""});
+                        postIngestRows.push_back({"  Extraction", extractVal.str(), ""});
 
                         std::ostringstream kgVal;
                         kgVal << kgPending << " queued · " << kgInFlight << " inflight (max 8)";
-                        postIngestRows.push_back({"  Knowledge Graph", neutral(kgVal.str()), ""});
+                        postIngestRows.push_back({"  Knowledge Graph", kgVal.str(), ""});
 
                         std::ostringstream symbolVal;
                         symbolVal << symbolInFlight << " inflight (max 4)";
-                        postIngestRows.push_back(
-                            {"  Symbol Extraction", neutral(symbolVal.str()), ""});
+                        postIngestRows.push_back({"  Symbol Extraction", symbolVal.str(), ""});
                     }
                 }
                 render_rows(std::cout, postIngestRows);
@@ -1940,7 +1795,7 @@ private:
                     docsVal << docs << " docs";
                     if (indexed > 0)
                         docsVal << " · indexed " << indexed;
-                    storageRows.push_back({"Documents", neutral(docsVal.str()), ""});
+                    storageRows.push_back({"Documents", docsVal.str(), ""});
                 }
                 const uint64_t logical = findCount("storage_logical_bytes");
                 const uint64_t physical = findCount("physical_total_bytes");
@@ -1963,14 +1818,14 @@ private:
                     size << "logical " << humanBytes(logical);
                     if (physical > 0)
                         size << " · physical " << humanBytes(physical);
-                    storageRows.push_back({"Storage", neutral(size.str()), ""});
+                    storageRows.push_back({"Storage", size.str(), ""});
                 }
                 if (dedup > 0 || comp > 0) {
                     std::ostringstream savings;
                     savings << "dedup " << humanBytes(dedup);
                     if (comp > 0)
                         savings << " · compress " << humanBytes(comp);
-                    storageRows.push_back({"Savings", neutral(savings.str()), ""});
+                    storageRows.push_back({"Savings", savings.str(), ""});
                 }
 
                 // Storage breakdown with overhead details
@@ -2038,7 +1893,7 @@ private:
                     if (status.vectorDbDim > 0) {
                         extra = "dim=" + std::to_string(status.vectorDbDim);
                     }
-                    storageRows.push_back({"Vector DB", paint(sev, text), extra});
+                    storageRows.push_back({"Vector DB", paintStatus(sev, text), extra});
                 }
 
                 // Embeddings
@@ -2059,7 +1914,7 @@ private:
                             extra += " · ";
                         extra += "dim " + std::to_string(status.embeddingDim);
                     }
-                    storageRows.push_back({"Embeddings", paint(sev, text), extra});
+                    storageRows.push_back({"Embeddings", paintStatus(sev, text), extra});
                 }
 
                 if (!status.contentStoreRoot.empty()) {
@@ -2084,7 +1939,7 @@ private:
                     bool isBuildReason = lowerLabel.find("build reason") != std::string::npos;
 
                     if (!isDegraded && !isAlreadyShown && !isBuildReason && rd.issue) {
-                        issueRows.push_back({rd.label, paint(rd.severity, rd.text), ""});
+                        issueRows.push_back({rd.label, paintStatus(rd.severity, rd.text), ""});
                     }
                 }
                 if (!issueRows.empty()) {
@@ -2211,8 +2066,9 @@ private:
                         }
                         providerRows.push_back(
                             {p.name.empty() ? "(unnamed)" : p.name,
-                             paint(provSeverity,
-                                   p.ready ? "Ready" : (p.degraded ? "Degraded" : "Starting")),
+                             paintStatus(provSeverity,
+                                         p.ready ? "Ready"
+                                                 : (p.degraded ? "Degraded" : "Starting")),
                              extra});
                     }
                     render_rows(std::cout, providerRows);
@@ -2234,7 +2090,7 @@ private:
                                 detail << " · ";
                             detail << m.requestCount << " req";
                         }
-                        modelRows.push_back({m.name, neutral(m.type), detail.str()});
+                        modelRows.push_back({m.name, m.type, detail.str()});
                     }
                     render_rows(std::cout, modelRows);
                 }

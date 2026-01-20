@@ -205,6 +205,17 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.searchTuningState = snap->searchTuningState;
             res.searchTuningReason = snap->searchTuningReason;
             res.searchTuningParams = snap->searchTuningParams;
+            // ResourceGovernor metrics (memory pressure management)
+            res.governorRssBytes = snap->governorRssBytes;
+            res.governorBudgetBytes = snap->governorBudgetBytes;
+            res.governorPressureLevel = snap->governorPressureLevel;
+            res.governorHeadroomPct = snap->governorHeadroomPct;
+            // ONNX concurrency metrics
+            res.onnxTotalSlots = snap->onnxTotalSlots;
+            res.onnxUsedSlots = snap->onnxUsedSlots;
+            res.onnxGlinerUsed = snap->onnxGlinerUsed;
+            res.onnxEmbedUsed = snap->onnxEmbedUsed;
+            res.onnxRerankerUsed = snap->onnxRerankerUsed;
             // Storage size summary (exposed via requestCounts for backwards compatible clients)
             if (snap->logicalBytes > 0)
                 res.requestCounts["storage_logical_bytes"] =

@@ -284,6 +284,94 @@ void PostIngestQueue::stop() {
     spdlog::info("[PostIngestQueue] Stop requested");
 }
 
+// ============================================================================
+// Pause/Resume Support (for ResourceGovernor pressure response)
+// ============================================================================
+
+void PostIngestQueue::pauseStage(Stage stage) {
+    switch (stage) {
+        case Stage::Extraction:
+            extractionPaused_.store(true, std::memory_order_release);
+            spdlog::info("[PostIngestQueue] Paused Extraction stage");
+            break;
+        case Stage::KnowledgeGraph:
+            kgPaused_.store(true, std::memory_order_release);
+            spdlog::info("[PostIngestQueue] Paused KnowledgeGraph stage");
+            break;
+        case Stage::Symbol:
+            symbolPaused_.store(true, std::memory_order_release);
+            spdlog::info("[PostIngestQueue] Paused Symbol stage");
+            break;
+        case Stage::Entity:
+            entityPaused_.store(true, std::memory_order_release);
+            spdlog::info("[PostIngestQueue] Paused Entity stage");
+            break;
+        case Stage::Title:
+            titlePaused_.store(true, std::memory_order_release);
+            spdlog::info("[PostIngestQueue] Paused Title stage");
+            break;
+    }
+}
+
+void PostIngestQueue::resumeStage(Stage stage) {
+    switch (stage) {
+        case Stage::Extraction:
+            extractionPaused_.store(false, std::memory_order_release);
+            spdlog::info("[PostIngestQueue] Resumed Extraction stage");
+            break;
+        case Stage::KnowledgeGraph:
+            kgPaused_.store(false, std::memory_order_release);
+            spdlog::info("[PostIngestQueue] Resumed KnowledgeGraph stage");
+            break;
+        case Stage::Symbol:
+            symbolPaused_.store(false, std::memory_order_release);
+            spdlog::info("[PostIngestQueue] Resumed Symbol stage");
+            break;
+        case Stage::Entity:
+            entityPaused_.store(false, std::memory_order_release);
+            spdlog::info("[PostIngestQueue] Resumed Entity stage");
+            break;
+        case Stage::Title:
+            titlePaused_.store(false, std::memory_order_release);
+            spdlog::info("[PostIngestQueue] Resumed Title stage");
+            break;
+    }
+}
+
+bool PostIngestQueue::isStagePaused(Stage stage) const {
+    switch (stage) {
+        case Stage::Extraction:
+            return extractionPaused_.load(std::memory_order_acquire);
+        case Stage::KnowledgeGraph:
+            return kgPaused_.load(std::memory_order_acquire);
+        case Stage::Symbol:
+            return symbolPaused_.load(std::memory_order_acquire);
+        case Stage::Entity:
+            return entityPaused_.load(std::memory_order_acquire);
+        case Stage::Title:
+            return titlePaused_.load(std::memory_order_acquire);
+    }
+    return false;
+}
+
+void PostIngestQueue::pauseAll() {
+    extractionPaused_.store(true, std::memory_order_release);
+    kgPaused_.store(true, std::memory_order_release);
+    symbolPaused_.store(true, std::memory_order_release);
+    entityPaused_.store(true, std::memory_order_release);
+    titlePaused_.store(true, std::memory_order_release);
+    spdlog::warn("[PostIngestQueue] All stages paused (emergency mode)");
+}
+
+void PostIngestQueue::resumeAll() {
+    extractionPaused_.store(false, std::memory_order_release);
+    kgPaused_.store(false, std::memory_order_release);
+    symbolPaused_.store(false, std::memory_order_release);
+    entityPaused_.store(false, std::memory_order_release);
+    titlePaused_.store(false, std::memory_order_release);
+    spdlog::info("[PostIngestQueue] All stages resumed (normal operation)");
+}
+
 std::size_t PostIngestQueue::resolveChannelCapacity() const {
     std::size_t cap = capacity_;
     if (cap == 0) {
@@ -316,9 +404,142 @@ void PostIngestQueue::checkDrainAndSignal() {
                 cb();
             }
 
+            flushEmbedRetriesOnDrain();
+
             spdlog::debug(
                 "[PostIngestQueue] Queue drained, signaled corpus stats and drain callback");
         }
+    }
+}
+
+void PostIngestQueue::recordEmbedRetry(const std::vector<std::string>& hashes) {
+    if (hashes.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(embedRetryMutex_);
+    for (const auto& h : hashes) {
+        embedRetryHashes_.push_back(h);
+    }
+}
+
+void PostIngestQueue::notifyEmbedFailure(const std::vector<std::string>& hashes) {
+    if (hashes.empty()) {
+        return;
+    }
+    EmbedFailureCallback cb;
+    {
+        std::lock_guard<std::mutex> lock(embedFailureCallbackMutex_);
+        cb = embedFailureCallback_;
+    }
+    if (cb) {
+        cb(hashes);
+    }
+}
+
+bool PostIngestQueue::dispatchEmbedJobWithRetry(const std::vector<std::string>& hashes,
+                                                bool recordOnFailure, bool notifyOnFailure) {
+    if (hashes.empty()) {
+        return true;
+    }
+
+    try {
+        const std::size_t capacity = TuneAdvisor::embedChannelCapacity();
+        auto embedChannel =
+            InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
+                "embed_jobs", capacity);
+
+        if (!embedChannel) {
+            if (recordOnFailure) {
+                recordEmbedRetry(hashes);
+            }
+            if (notifyOnFailure) {
+                notifyEmbedFailure(hashes);
+            }
+            for (std::size_t i = 0; i < hashes.size(); ++i) {
+                InternalEventBus::instance().incEmbedDropped();
+            }
+            spdlog::warn("[PostIngestQueue] Embed channel unavailable for batch of {} hashes",
+                         hashes.size());
+            return false;
+        }
+
+        InternalEventBus::EmbedJob job;
+        job.hashes = hashes;
+        job.batchSize = static_cast<uint32_t>(hashes.size());
+        job.skipExisting = true;
+        job.modelName = "";
+
+        constexpr int maxRetries = 5;
+        constexpr auto kEmbedPushTimeout = std::chrono::milliseconds(100);
+        auto backoff = std::chrono::milliseconds(50);
+        constexpr auto maxBackoff = std::chrono::milliseconds(1000);
+
+        bool queued = false;
+        for (int attempt = 0; attempt <= maxRetries; ++attempt) {
+            if (embedChannel->push_wait(job, kEmbedPushTimeout)) {
+                queued = true;
+                break;
+            }
+            if (attempt < maxRetries) {
+                std::this_thread::sleep_for(backoff);
+                backoff = std::min(backoff * 2, maxBackoff);
+            }
+        }
+
+        if (queued) {
+            for (std::size_t i = 0; i < hashes.size(); ++i) {
+                InternalEventBus::instance().incEmbedQueued();
+            }
+            spdlog::debug("[PostIngestQueue] Dispatched embedding job for {} hashes",
+                          hashes.size());
+            return true;
+        }
+
+        if (recordOnFailure) {
+            recordEmbedRetry(hashes);
+        }
+        if (notifyOnFailure) {
+            notifyEmbedFailure(hashes);
+        }
+        for (std::size_t i = 0; i < hashes.size(); ++i) {
+            InternalEventBus::instance().incEmbedDropped();
+        }
+        spdlog::warn("[PostIngestQueue] Embed channel full after retries, dropping batch of {} "
+                     "hashes",
+                     hashes.size());
+        return false;
+    } catch (const std::exception& e) {
+        spdlog::error("[PostIngestQueue] Embedding batch dispatch failed: {}", e.what());
+        return false;
+    }
+}
+
+void PostIngestQueue::flushEmbedRetriesOnDrain() {
+    std::vector<std::string> pending;
+    {
+        std::lock_guard<std::mutex> lock(embedRetryMutex_);
+        if (embedRetryHashes_.empty()) {
+            return;
+        }
+        pending.assign(embedRetryHashes_.begin(), embedRetryHashes_.end());
+        embedRetryHashes_.clear();
+    }
+
+    const std::size_t batchSize = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
+    std::vector<std::string> batch;
+    batch.reserve(batchSize);
+
+    for (const auto& hash : pending) {
+        batch.push_back(hash);
+        if (batch.size() >= batchSize) {
+            if (!dispatchEmbedJobWithRetry(batch, true, true)) {
+                // If dispatch fails again, keep the hashes queued for repair.
+            }
+            batch.clear();
+        }
+    }
+    if (!batch.empty()) {
+        (void)dispatchEmbedJobWithRetry(batch, true, true);
     }
 }
 
@@ -969,48 +1190,7 @@ void PostIngestQueue::processEmbeddingBatch(const std::vector<std::string>& hash
         return;
     }
 
-    try {
-        // PBI-05b: Use TuneAdvisor for channel capacity
-        const std::size_t capacity = TuneAdvisor::embedChannelCapacity();
-        auto embedChannel =
-            InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-                "embed_jobs", capacity);
-
-        if (!embedChannel) {
-            for (std::size_t i = 0; i < hashes.size(); ++i) {
-                InternalEventBus::instance().incEmbedDropped();
-            }
-            spdlog::warn("[PostIngestQueue] Embed channel unavailable for batch of {} hashes",
-                         hashes.size());
-            return;
-        }
-
-        InternalEventBus::EmbedJob job;
-        job.hashes = hashes;
-        job.batchSize = static_cast<uint32_t>(hashes.size());
-        job.skipExisting = true;
-        job.modelName = "";
-
-        // PBI-05b: Use blocking push with short timeout to avoid stalling pipeline.
-        // If embedding can't keep up, better to queue retry than block for seconds.
-        constexpr auto kEmbedPushTimeout = std::chrono::milliseconds(100);
-        if (!embedChannel->push_wait(std::move(job), kEmbedPushTimeout)) {
-            for (std::size_t i = 0; i < hashes.size(); ++i) {
-                InternalEventBus::instance().incEmbedDropped();
-            }
-            spdlog::warn("[PostIngestQueue] Embed channel full after {}ms, dropping batch of {} "
-                         "hashes",
-                         kEmbedPushTimeout.count(), hashes.size());
-        } else {
-            for (std::size_t i = 0; i < hashes.size(); ++i) {
-                InternalEventBus::instance().incEmbedQueued();
-            }
-            spdlog::debug("[PostIngestQueue] Dispatched embedding job for {} hashes",
-                          hashes.size());
-        }
-    } catch (const std::exception& e) {
-        spdlog::error("[PostIngestQueue] Embedding batch dispatch failed: {}", e.what());
-    }
+    (void)dispatchEmbedJobWithRetry(hashes, true, true);
 }
 
 void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId,

@@ -198,6 +198,19 @@ struct MetricsSnapshot {
     std::string searchTuningState;  // e.g., "SMALL_CODE", "SCIENTIFIC", "MIXED"
     std::string searchTuningReason; // Human-readable explanation of state selection
     std::map<std::string, double> searchTuningParams; // e.g., {"textWeight": 0.55, ...}
+
+    // ResourceGovernor metrics (memory pressure management)
+    uint64_t governorRssBytes{0};     // Current process RSS
+    uint64_t governorBudgetBytes{0};  // Memory budget limit
+    uint8_t governorPressureLevel{0}; // 0=Normal, 1=Warning, 2=Critical, 3=Emergency
+    uint8_t governorHeadroomPct{100}; // Scaling headroom (0-100%)
+
+    // ONNX concurrency metrics
+    uint32_t onnxTotalSlots{0};
+    uint32_t onnxUsedSlots{0};
+    uint32_t onnxGlinerUsed{0};
+    uint32_t onnxEmbedUsed{0};
+    uint32_t onnxRerankerUsed{0};
 };
 
 class SocketServer; // Forward declaration

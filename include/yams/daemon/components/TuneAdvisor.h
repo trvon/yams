@@ -18,9 +18,17 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <thread>
+
+// Platform-specific includes for memory detection (used by detectSystemMemory)
+// Note: These are only used in the implementation of detectSystemMemory()
+// Windows: GlobalMemoryStatusEx requires windows.h
+// macOS: sysctl requires sys/sysctl.h
+// Linux: reads /proc/meminfo (no special headers)
 
 namespace yams::daemon {
 
@@ -1665,6 +1673,345 @@ private:
 
     // DB lock error tracking (rolling window counter)
     static inline std::atomic<uint64_t> dbLockErrorCount_{0};
+
+    // =========================================================================
+    // Resource Governor Configuration (Memory Pressure Management)
+    // =========================================================================
+
+public:
+    /// Enable/disable the resource governor. When disabled, no memory pressure
+    /// monitoring or adaptive scaling occurs. Default: true.
+    /// Environment: YAMS_ENABLE_RESOURCE_GOVERNOR
+    static bool enableResourceGovernor() {
+        int ov = enableResourceGovernorOverride_.load(std::memory_order_relaxed);
+        if (ov >= 0)
+            return ov > 0;
+        if (const char* s = std::getenv("YAMS_ENABLE_RESOURCE_GOVERNOR")) {
+            std::string v{s};
+            std::transform(v.begin(), v.end(), v.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (v == "0" || v == "false" || v == "off" || v == "no")
+                return false;
+        }
+        return true;
+    }
+    static void setEnableResourceGovernor(bool en) {
+        enableResourceGovernorOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
+    }
+
+    /// Enable proactive model eviction under memory pressure. Default: true.
+    /// Environment: YAMS_PROACTIVE_EVICTION
+    static bool enableProactiveEviction() {
+        int ov = enableProactiveEvictionOverride_.load(std::memory_order_relaxed);
+        if (ov >= 0)
+            return ov > 0;
+        if (const char* s = std::getenv("YAMS_PROACTIVE_EVICTION")) {
+            std::string v{s};
+            std::transform(v.begin(), v.end(), v.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (v == "0" || v == "false" || v == "off" || v == "no")
+                return false;
+        }
+        return true;
+    }
+    static void setEnableProactiveEviction(bool en) {
+        enableProactiveEvictionOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
+    }
+
+    /// Enable admission control (refuse new work when at emergency pressure). Default: true.
+    /// Environment: YAMS_ADMISSION_CONTROL
+    static bool enableAdmissionControl() {
+        int ov = enableAdmissionControlOverride_.load(std::memory_order_relaxed);
+        if (ov >= 0)
+            return ov > 0;
+        if (const char* s = std::getenv("YAMS_ADMISSION_CONTROL")) {
+            std::string v{s};
+            std::transform(v.begin(), v.end(), v.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (v == "0" || v == "false" || v == "off" || v == "no")
+                return false;
+        }
+        return true;
+    }
+    static void setEnableAdmissionControl(bool en) {
+        enableAdmissionControlOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
+    }
+
+    /// Memory budget in bytes. 0 = auto-detect based on profile:
+    ///   Efficient:  60% system RAM
+    ///   Balanced:   80% system RAM
+    ///   Aggressive: 90% system RAM
+    /// Environment: YAMS_MEMORY_BUDGET_BYTES
+    static uint64_t memoryBudgetBytes() {
+        uint64_t ov = memoryBudgetBytesOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_MEMORY_BUDGET_BYTES")) {
+            try {
+                uint64_t v = static_cast<uint64_t>(std::stoull(s));
+                if (v >= 64ull * 1024ull * 1024ull) // min 64 MiB
+                    return v;
+            } catch (...) {
+            }
+        }
+        // Auto-detect based on profile
+        uint64_t systemMem = detectSystemMemory();
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return systemMem * 60 / 100;
+            case Profile::Aggressive:
+                return systemMem * 90 / 100;
+            default:
+                return systemMem * 80 / 100;
+        }
+    }
+    static void setMemoryBudgetBytes(uint64_t bytes) {
+        memoryBudgetBytesOverride_.store(bytes, std::memory_order_relaxed);
+    }
+
+    /// Memory warning threshold (0.0-1.0). Profile-adjusted defaults:
+    ///   Efficient:  0.70 (70%)
+    ///   Balanced:   0.75 (75%)
+    ///   Aggressive: 0.80 (80%)
+    /// Environment: YAMS_MEMORY_WARNING_PCT (0-100)
+    static double memoryWarningThreshold() {
+        double ov = memoryWarningPctOverride_.load(std::memory_order_relaxed);
+        if (ov > 0.0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_MEMORY_WARNING_PCT")) {
+            try {
+                double v = std::stod(s) / 100.0;
+                if (v >= 0.5 && v <= 0.99)
+                    return v;
+            } catch (...) {
+            }
+        }
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 0.70;
+            case Profile::Aggressive:
+                return 0.80;
+            default:
+                return 0.75;
+        }
+    }
+    static void setMemoryWarningThreshold(double pct) {
+        memoryWarningPctOverride_.store(pct, std::memory_order_relaxed);
+    }
+
+    /// Memory critical threshold (0.0-1.0). Profile-adjusted defaults:
+    ///   Efficient:  0.85 (85%)
+    ///   Balanced:   0.90 (90%)
+    ///   Aggressive: 0.92 (92%)
+    /// Environment: YAMS_MEMORY_CRITICAL_PCT (0-100)
+    static double memoryCriticalThreshold() {
+        double ov = memoryCriticalPctOverride_.load(std::memory_order_relaxed);
+        if (ov > 0.0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_MEMORY_CRITICAL_PCT")) {
+            try {
+                double v = std::stod(s) / 100.0;
+                if (v >= 0.5 && v <= 0.99)
+                    return v;
+            } catch (...) {
+            }
+        }
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 0.85;
+            case Profile::Aggressive:
+                return 0.92;
+            default:
+                return 0.90;
+        }
+    }
+    static void setMemoryCriticalThreshold(double pct) {
+        memoryCriticalPctOverride_.store(pct, std::memory_order_relaxed);
+    }
+
+    /// Memory emergency threshold (0.0-1.0). Profile-adjusted defaults:
+    ///   Efficient:  0.92 (92%)
+    ///   Balanced:   0.95 (95%)
+    ///   Aggressive: 0.97 (97%)
+    /// Environment: YAMS_MEMORY_EMERGENCY_PCT (0-100)
+    static double memoryEmergencyThreshold() {
+        double ov = memoryEmergencyPctOverride_.load(std::memory_order_relaxed);
+        if (ov > 0.0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_MEMORY_EMERGENCY_PCT")) {
+            try {
+                double v = std::stod(s) / 100.0;
+                if (v >= 0.5 && v <= 0.99)
+                    return v;
+            } catch (...) {
+            }
+        }
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 0.92;
+            case Profile::Aggressive:
+                return 0.97;
+            default:
+                return 0.95;
+        }
+    }
+    static void setMemoryEmergencyThreshold(double pct) {
+        memoryEmergencyPctOverride_.store(pct, std::memory_order_relaxed);
+    }
+
+    /// Hysteresis ticks before changing pressure level (each tick ~250ms).
+    /// Prevents rapid oscillation between levels. Default: 2 (~500ms).
+    /// Environment: YAMS_MEMORY_HYSTERESIS_TICKS
+    static uint32_t memoryHysteresisTicks() {
+        uint32_t ov = memoryHysteresisTicksOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_MEMORY_HYSTERESIS_TICKS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 20)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 2;
+    }
+    static void setMemoryHysteresisTicks(uint32_t ticks) {
+        memoryHysteresisTicksOverride_.store(ticks, std::memory_order_relaxed);
+    }
+
+    /// Cooldown period between model evictions to prevent thrashing (ms). Default: 500.
+    /// Environment: YAMS_MODEL_EVICTION_COOLDOWN_MS
+    static uint32_t modelEvictionCooldownMs() {
+        uint32_t ov = modelEvictionCooldownMsOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_MODEL_EVICTION_COOLDOWN_MS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 100 && v <= 10000)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 500;
+    }
+    static void setModelEvictionCooldownMs(uint32_t ms) {
+        modelEvictionCooldownMsOverride_.store(ms, std::memory_order_relaxed);
+    }
+
+    // =========================================================================
+    // ONNX Concurrency Configuration (Global Slot Coordination)
+    // =========================================================================
+
+    /// Maximum concurrent ONNX operations (global across GLiNER, embeddings, reranking).
+    /// 0 = auto (hw_threads/2, clamped 4-16). Default: auto.
+    /// Environment: YAMS_ONNX_MAX_CONCURRENT
+    static uint32_t onnxMaxConcurrent() {
+        uint32_t ov = onnxMaxConcurrentOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_ONNX_MAX_CONCURRENT")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 64)
+                    return v;
+            } catch (...) {
+            }
+        }
+        uint32_t hw = hardwareConcurrency();
+        return std::clamp(hw / 2, 4u, 16u);
+    }
+    static void setOnnxMaxConcurrent(uint32_t n) {
+        onnxMaxConcurrentOverride_.store(n, std::memory_order_relaxed);
+    }
+
+    /// Reserved ONNX slots for GLiNER operations (entity/title extraction).
+    /// Guarantees GLiNER gets at least this many slots even under contention. Default: 1.
+    /// Environment: YAMS_ONNX_GLINER_RESERVED
+    static uint32_t onnxGlinerReserved() {
+        uint32_t ov = onnxGlinerReservedOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_ONNX_GLINER_RESERVED")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v <= 8)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 1;
+    }
+    static void setOnnxGlinerReserved(uint32_t n) {
+        onnxGlinerReservedOverride_.store(n, std::memory_order_relaxed);
+    }
+
+    /// Reserved ONNX slots for embedding operations.
+    /// Guarantees embeddings get at least this many slots even under contention. Default: 2.
+    /// Environment: YAMS_ONNX_EMBED_RESERVED
+    static uint32_t onnxEmbedReserved() {
+        uint32_t ov = onnxEmbedReservedOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_ONNX_EMBED_RESERVED")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v <= 8)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 2;
+    }
+    static void setOnnxEmbedReserved(uint32_t n) {
+        onnxEmbedReservedOverride_.store(n, std::memory_order_relaxed);
+    }
+
+    /// Reserved ONNX slots for reranking operations. Default: 1.
+    /// Environment: YAMS_ONNX_RERANKER_RESERVED
+    static uint32_t onnxRerankerReserved() {
+        uint32_t ov = onnxRerankerReservedOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_ONNX_RERANKER_RESERVED")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v <= 8)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 1;
+    }
+    static void setOnnxRerankerReserved(uint32_t n) {
+        onnxRerankerReservedOverride_.store(n, std::memory_order_relaxed);
+    }
+
+private:
+    /// Detect system memory (cross-platform). Returns bytes.
+    /// Implementation uses platform-specific APIs:
+    ///   Windows: GlobalMemoryStatusEx
+    ///   macOS: sysctlbyname("hw.memsize")
+    ///   Linux: /proc/meminfo
+    static uint64_t detectSystemMemory();
+
+    // Resource Governor overrides
+    static inline std::atomic<int> enableResourceGovernorOverride_{-1};
+    static inline std::atomic<int> enableProactiveEvictionOverride_{-1};
+    static inline std::atomic<int> enableAdmissionControlOverride_{-1};
+    static inline std::atomic<uint64_t> memoryBudgetBytesOverride_{0};
+    static inline std::atomic<double> memoryWarningPctOverride_{0.0};
+    static inline std::atomic<double> memoryCriticalPctOverride_{0.0};
+    static inline std::atomic<double> memoryEmergencyPctOverride_{0.0};
+    static inline std::atomic<uint32_t> memoryHysteresisTicksOverride_{0};
+    static inline std::atomic<uint32_t> modelEvictionCooldownMsOverride_{0};
+
+    // ONNX concurrency overrides
+    static inline std::atomic<uint32_t> onnxMaxConcurrentOverride_{0};
+    static inline std::atomic<uint32_t> onnxGlinerReservedOverride_{0};
+    static inline std::atomic<uint32_t> onnxEmbedReservedOverride_{0};
+    static inline std::atomic<uint32_t> onnxRerankerReservedOverride_{0};
 };
 
 } // namespace yams::daemon

@@ -44,6 +44,10 @@ public:
     // Snapshot stats for a component.
     Stats stats(const std::string& component) const;
 
+    /// Shrink all pools to their minimum size (called under memory pressure)
+    /// @return Number of pools that were shrunk
+    std::size_t shrinkAll();
+
 private:
     PoolManager() = default;
     struct Entry {

@@ -3750,6 +3750,19 @@ struct StatusResponse {
     std::string searchTuningReason; // Human-readable explanation of state selection
     std::map<std::string, double> searchTuningParams; // e.g., {"textWeight": 0.55, ...}
 
+    // ResourceGovernor metrics (memory pressure management)
+    uint64_t governorRssBytes{0};     // Current process RSS
+    uint64_t governorBudgetBytes{0};  // Memory budget limit
+    uint8_t governorPressureLevel{0}; // 0=Normal, 1=Warning, 2=Critical, 3=Emergency
+    uint8_t governorHeadroomPct{100}; // Scaling headroom (0-100%)
+
+    // ONNX concurrency metrics
+    uint32_t onnxTotalSlots{0};
+    uint32_t onnxUsedSlots{0};
+    uint32_t onnxGlinerUsed{0};
+    uint32_t onnxEmbedUsed{0};
+    uint32_t onnxRerankerUsed{0};
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -3821,6 +3834,16 @@ struct StatusResponse {
         for (const auto& [key, value] : searchTuningParams) {
             ser << key << value;
         }
+
+        // Serialize ResourceGovernor metrics
+        ser << static_cast<uint64_t>(governorRssBytes) << static_cast<uint64_t>(governorBudgetBytes)
+            << static_cast<uint8_t>(governorPressureLevel)
+            << static_cast<uint8_t>(governorHeadroomPct);
+
+        // Serialize ONNX concurrency metrics
+        ser << static_cast<uint32_t>(onnxTotalSlots) << static_cast<uint32_t>(onnxUsedSlots)
+            << static_cast<uint32_t>(onnxGlinerUsed) << static_cast<uint32_t>(onnxEmbedUsed)
+            << static_cast<uint32_t>(onnxRerankerUsed);
     }
 
     template <typename Deserializer>
@@ -4124,6 +4147,53 @@ struct StatusResponse {
                 return valRes.error();
             res.searchTuningParams[std::move(keyRes.value())] = valRes.value();
         }
+
+        // Deserialize ResourceGovernor metrics
+        auto govRss = deser.template read<uint64_t>();
+        if (!govRss)
+            return govRss.error();
+        res.governorRssBytes = govRss.value();
+
+        auto govBudget = deser.template read<uint64_t>();
+        if (!govBudget)
+            return govBudget.error();
+        res.governorBudgetBytes = govBudget.value();
+
+        auto govLevel = deser.template read<uint8_t>();
+        if (!govLevel)
+            return govLevel.error();
+        res.governorPressureLevel = govLevel.value();
+
+        auto govHeadroom = deser.template read<uint8_t>();
+        if (!govHeadroom)
+            return govHeadroom.error();
+        res.governorHeadroomPct = govHeadroom.value();
+
+        // Deserialize ONNX concurrency metrics
+        auto onnxTotal = deser.template read<uint32_t>();
+        if (!onnxTotal)
+            return onnxTotal.error();
+        res.onnxTotalSlots = onnxTotal.value();
+
+        auto onnxUsed = deser.template read<uint32_t>();
+        if (!onnxUsed)
+            return onnxUsed.error();
+        res.onnxUsedSlots = onnxUsed.value();
+
+        auto onnxGliner = deser.template read<uint32_t>();
+        if (!onnxGliner)
+            return onnxGliner.error();
+        res.onnxGlinerUsed = onnxGliner.value();
+
+        auto onnxEmbed = deser.template read<uint32_t>();
+        if (!onnxEmbed)
+            return onnxEmbed.error();
+        res.onnxEmbedUsed = onnxEmbed.value();
+
+        auto onnxReranker = deser.template read<uint32_t>();
+        if (!onnxReranker)
+            return onnxReranker.error();
+        res.onnxRerankerUsed = onnxReranker.value();
 
         return res;
     }

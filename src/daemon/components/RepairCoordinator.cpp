@@ -403,6 +403,26 @@ void RepairCoordinator::onDocumentAdded(const DocumentAddedEvent& event) {
     }
 }
 
+void RepairCoordinator::enqueueEmbeddingRepair(const std::vector<std::string>& hashes) {
+    if (!cfg_.enable || !running_) {
+        return;
+    }
+    if (hashes.empty()) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        for (const auto& hash : hashes) {
+            pendingDocuments_.push(hash);
+        }
+        if (state_) {
+            state_->stats.repairQueueDepth.store(static_cast<uint64_t>(pendingDocuments_.size()));
+        }
+    }
+    queueCv_.notify_one();
+    spdlog::debug("RepairCoordinator: queued {} documents for embedding repair", hashes.size());
+}
+
 void RepairCoordinator::onDocumentRemoved(const DocumentRemovedEvent& event) {
     if (!cfg_.enable || !running_) {
         return;

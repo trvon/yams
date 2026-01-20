@@ -165,6 +165,30 @@ public:
                                 pools["io"] = s.ioPoolSize;
                                 j["pools"] = std::move(pools);
                             }
+                            // Resource Governor metrics
+                            if (s.governorBudgetBytes > 0) {
+                                nlohmann::json gov = nlohmann::json::object();
+                                gov["rssBytes"] = s.governorRssBytes;
+                                gov["budgetBytes"] = s.governorBudgetBytes;
+                                const char* levelNames[] = {"normal", "warning", "critical",
+                                                            "emergency"};
+                                uint8_t lvl =
+                                    std::min(s.governorPressureLevel, static_cast<uint8_t>(3));
+                                gov["pressureLevel"] = levelNames[lvl];
+                                gov["pressureLevelNum"] = s.governorPressureLevel;
+                                gov["headroomPct"] = s.governorHeadroomPct;
+                                j["governor"] = std::move(gov);
+                            }
+                            // ONNX concurrency metrics
+                            if (s.onnxTotalSlots > 0) {
+                                nlohmann::json onnx = nlohmann::json::object();
+                                onnx["totalSlots"] = s.onnxTotalSlots;
+                                onnx["usedSlots"] = s.onnxUsedSlots;
+                                onnx["glinerUsed"] = s.onnxGlinerUsed;
+                                onnx["embedUsed"] = s.onnxEmbedUsed;
+                                onnx["rerankerUsed"] = s.onnxRerankerUsed;
+                                j["onnxConcurrency"] = std::move(onnx);
+                            }
                             if (!s.readinessStates.empty()) {
                                 nlohmann::json rj = nlohmann::json::object();
                                 bool pluginsDegraded = false;
@@ -365,6 +389,22 @@ public:
                                 std::cout << "TUNE : state=" << s.searchTuningState;
                                 if (!s.searchTuningReason.empty()) {
                                     std::cout << " (" << s.searchTuningReason << ")";
+                                }
+                                std::cout << "\n";
+                            }
+                            // ResourceGovernor metrics (memory pressure management)
+                            if (s.governorBudgetBytes > 0) {
+                                const char* levelNames[] = {"Normal", "Warning", "Critical",
+                                                            "Emergency"};
+                                uint8_t lvl =
+                                    std::min(s.governorPressureLevel, static_cast<uint8_t>(3));
+                                std::cout << "GOV  : " << levelNames[lvl] << " ("
+                                          << (s.governorRssBytes / (1024 * 1024)) << "/"
+                                          << (s.governorBudgetBytes / (1024 * 1024))
+                                          << "MB), headroom=" << (int)s.governorHeadroomPct << "%";
+                                if (s.onnxTotalSlots > 0) {
+                                    std::cout << ", onnx=" << s.onnxUsedSlots << "/"
+                                              << s.onnxTotalSlots;
                                 }
                                 std::cout << "\n";
                             }

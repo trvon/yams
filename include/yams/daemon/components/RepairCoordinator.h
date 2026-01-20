@@ -9,6 +9,7 @@
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <vector>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <yams/compat/thread_stop_compat.h>
@@ -76,6 +77,7 @@ public:
     // Event-driven interface - called when documents are added/removed
     void onDocumentAdded(const DocumentAddedEvent& event);
     void onDocumentRemoved(const DocumentRemovedEvent& event);
+    void enqueueEmbeddingRepair(const std::vector<std::string>& hashes);
 
     // Live tuning hooks (thread-safe best-effort); allow daemon to adapt scheduling
     void setMaintenanceTokens(std::uint32_t tokens) {

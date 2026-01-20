@@ -439,7 +439,7 @@ struct ProviderSingleton {
     }
 
     ProviderSingleton() {
-        vtable.abi_version = 3; // v1.3 (added score_documents for reranking)
+        vtable.abi_version = 4; // v1.4 (added evict_under_pressure for memory pressure)
         vtable.self = &ctx;
 
         // Use daemon's default logger - no separate file needed
@@ -1219,6 +1219,62 @@ struct ProviderSingleton {
         vtable.free_scores = [](void* /*self*/, float* scores, size_t /*count*/) {
             if (scores)
                 std::free(scores);
+        };
+
+        // v1.4: Memory pressure eviction
+        vtable.evict_under_pressure = [](void* self, double pressure_level, bool allow_hot_eviction,
+                                         size_t* out_evicted) -> yams_status_t {
+            if (!self || !out_evicted)
+                return YAMS_ERR_INVALID_ARG;
+            *out_evicted = 0;
+
+            try {
+                auto* c = static_cast<ProviderCtx*>(self);
+                if (c->disabled)
+                    return YAMS_ERR_UNSUPPORTED;
+                if (!c->ready || !c->pool)
+                    return YAMS_ERR_INTERNAL;
+
+                // Determine how many models to evict based on pressure level:
+                // - Emergency (>=0.95): evict all non-hot (or all if allow_hot_eviction)
+                // - Critical (>=0.85): evict up to 2 models
+                // - Warning (>=0.75): evict 1 model
+                size_t numToEvict = 0;
+                if (pressure_level >= 0.95) {
+                    numToEvict = allow_hot_eviction
+                                     ? c->pool->getLoadedModelCount()
+                                     : std::max<size_t>(1, c->pool->getLoadedModelCount() / 2);
+                } else if (pressure_level >= 0.85) {
+                    numToEvict = 2;
+                } else if (pressure_level >= 0.75) {
+                    numToEvict = 1;
+                }
+
+                if (numToEvict == 0) {
+                    return YAMS_OK;
+                }
+
+                // Use existing evictLRU method
+                size_t countBefore = c->pool->getLoadedModelCount();
+                c->pool->evictLRU(numToEvict);
+                size_t countAfter = c->pool->getLoadedModelCount();
+
+                size_t evicted = (countBefore > countAfter) ? (countBefore - countAfter) : 0;
+                *out_evicted = evicted;
+
+                if (evicted > 0) {
+                    spdlog::info("[ONNX Plugin] Evicted {} models under memory pressure ({:.0f}%)",
+                                 evicted, pressure_level * 100.0);
+                }
+
+                return YAMS_OK;
+            } catch (const std::exception& e) {
+                spdlog::error("[ONNX Plugin] evict_under_pressure exception: {}", e.what());
+                return YAMS_ERR_INTERNAL;
+            } catch (...) {
+                spdlog::error("[ONNX Plugin] evict_under_pressure unknown exception");
+                return YAMS_ERR_INTERNAL;
+            }
         };
     }
 };

@@ -63,6 +63,24 @@ PoolManager::Stats PoolManager::stats(const std::string& component) const {
     return {};
 }
 
+std::size_t PoolManager::shrinkAll() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::size_t shrunkCount = 0;
+    const auto now = now_ns();
+
+    for (auto& [name, entry] : pools_) {
+        if (entry.size > entry.cfg.min_size) {
+            entry.size = entry.cfg.min_size;
+            entry.last_resize_ns = now;
+            entry.s.resize_events++;
+            shrunkCount++;
+            YAMS_PLOT(("pool_" + name + "_size").c_str(), static_cast<int64_t>(entry.size));
+        }
+    }
+
+    return shrunkCount;
+}
+
 PoolManager::Entry& PoolManager::entry_for(const std::string& component) {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& kv : pools_) {
