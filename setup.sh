@@ -503,6 +503,52 @@ if [[ "${YAMS_DISABLE_PDF:-}" == "true" ]]; then
   MESON_OPTIONS+=("-Dplugin-pdf=false")
 fi
 
+# libSQL backend: default to libsql but fall back to sqlite on Linux when unavailable
+LIBSQL_BACKEND_INPUT=${YAMS_DATABASE_BACKEND:-libsql}
+LIBSQL_BACKEND_LOWER=$(echo "${LIBSQL_BACKEND_INPUT}" | tr '[:upper:]' '[:lower:]')
+if [[ "${LIBSQL_BACKEND_LOWER}" != "libsql" && "${LIBSQL_BACKEND_LOWER}" != "sqlite" ]]; then
+  echo "Error: Unknown database backend: ${LIBSQL_BACKEND_INPUT}. Expected libsql or sqlite." >&2
+  exit 1
+fi
+
+if [[ "${LIBSQL_BACKEND_LOWER}" == "libsql" && "$(uname -s)" != "Darwin" ]]; then
+  LIBSQL_PKG_FOUND=false
+  if command -v pkg-config >/dev/null 2>&1; then
+    if pkg-config --exists libsql || pkg-config --exists libsql-sqlite3; then
+      LIBSQL_PKG_FOUND=true
+    fi
+  fi
+
+  if [[ "${LIBSQL_PKG_FOUND}" != "true" ]]; then
+    if [[ -d "subprojects/libsql" ]]; then
+      echo "libSQL subproject detected at subprojects/libsql; keeping libsql backend"
+    elif ! command -v cargo >/dev/null 2>&1; then
+      echo "libSQL not detected on Linux (pkg-config/cargo missing); falling back to sqlite" >&2
+      LIBSQL_BACKEND_LOWER="sqlite"
+    fi
+  fi
+fi
+
+if [[ "${LIBSQL_BACKEND_LOWER}" == "libsql" ]]; then
+  echo "Database backend: libsql"
+  if [[ -f "subprojects/libsql.wrap" && ! -d "subprojects/libsql" ]]; then
+    if command -v meson >/dev/null 2>&1; then
+      echo "Fetching libSQL subproject (meson wrap)..."
+      if ! meson subprojects download libsql; then
+        echo "Failed to fetch libSQL subproject; falling back to sqlite" >&2
+        LIBSQL_BACKEND_LOWER="sqlite"
+      fi
+    else
+      echo "Meson not found; cannot fetch libSQL subproject. Falling back to sqlite" >&2
+      LIBSQL_BACKEND_LOWER="sqlite"
+    fi
+  fi
+else
+  echo "Database backend: sqlite"
+fi
+
+MESON_OPTIONS+=("-Ddatabase-backend=${LIBSQL_BACKEND_LOWER}")
+
 # ThreadSanitizer: default enabled for Debug builds, can be overridden with --tsan/--no-tsan
 if [[ -z "${ENABLE_TSAN}" ]]; then
   if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then

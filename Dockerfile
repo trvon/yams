@@ -21,6 +21,14 @@ RUN set -eux; \
   { echo "Attempt $i failed, retrying after 5s..."; sleep 5; apt-get clean; rm -rf /var/lib/apt/lists/*; }; \
   done
 
+# Install Rust toolchain for libsql build
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN set -eux; \
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal && \
+  rustc --version && cargo --version
+
 # Install Zig 0.15.2 stable for zyp PDF plugin
 RUN set -eux; \
   ARCH=$(uname -m); \
@@ -74,9 +82,8 @@ RUN --mount=type=cache,target=/root/.conan2 \
   conan remote add conancenter https://center2.conan.io; \
   fi && \
   conan remote update conancenter --url https://center2.conan.io || true && \
-  conan config set core.net.http:timeout=120 || true && \
-  conan config set core.net.http:max_retries=10 || true && \
-  conan config set core.net.http:retry_wait=5 || true && \
+  mkdir -p /root/.conan2 && \
+  echo -e "[core.net.http]\ntimeout=120\nmax_retries=10\nretry_wait=5" >> /root/.conan2/global.conf && \
   export YAMS_COMPILER=gcc; \
   export YAMS_CPPSTD=${YAMS_CPPSTD}; \
   export YAMS_EXTRA_MESON_FLAGS="-Drequire-sqlite-vec=false"; \

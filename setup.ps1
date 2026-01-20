@@ -496,8 +496,45 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
         $enableGlint = $true
     }
 
+    # Auto-detect libSQL backend: prefer libsql when subproject or pkg-config is available
+    $dbBackend = if ($env:YAMS_DATABASE_BACKEND) { $env:YAMS_DATABASE_BACKEND } else { 'libsql' }
+    $dbBackend = $dbBackend.ToLowerInvariant()
+    if ($dbBackend -ne 'libsql' -and $dbBackend -ne 'sqlite') {
+        Write-Error "Unknown database backend: $dbBackend. Expected libsql or sqlite."
+    }
+
+    if ($dbBackend -eq 'libsql') {
+        $libsqlPkgFound = $false
+        if (Get-Command pkg-config -ErrorAction SilentlyContinue) {
+            if ((pkg-config --exists libsql) -or (pkg-config --exists libsql-sqlite3)) {
+                $libsqlPkgFound = $true
+            }
+        }
+
+        if (-not $libsqlPkgFound -and -not (Test-Path 'subprojects\libsql')) {
+            if (Test-Path 'subprojects\libsql.wrap') {
+                if (Get-Command meson -ErrorAction SilentlyContinue) {
+                    Write-Host 'Fetching libSQL subproject (meson wrap)...'
+                    meson subprojects download libsql | Out-Null
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Warning 'Failed to fetch libSQL subproject; falling back to sqlite'
+                        $dbBackend = 'sqlite'
+                    }
+                } else {
+                    Write-Warning 'Meson not found; cannot fetch libSQL subproject. Falling back to sqlite'
+                    $dbBackend = 'sqlite'
+                }
+            } else {
+                Write-Warning 'libSQL wrap not found; falling back to sqlite'
+                $dbBackend = 'sqlite'
+            }
+        }
+    }
+
+    Write-Host "Database backend: $dbBackend"
+
     # Build meson command arguments as a proper array
-    $mesonArgs = @('setup', $buildDir, "--buildtype=$buildTypeLower", "--prefix=$InstallPrefix", "-Denable-modules=$enableModulesFlag")
+    $mesonArgs = @('setup', $buildDir, "--buildtype=$buildTypeLower", "--prefix=$InstallPrefix", "-Denable-modules=$enableModulesFlag", "-Ddatabase-backend=$dbBackend")
     if ($enableZyp) { $mesonArgs += '-Dplugin-zyp=true' }
     if ($enableGlint) { $mesonArgs += '-Dplugin-glint=true' }
     if ($mesonToolchainArg) { $mesonArgs += $mesonToolchainArg }
@@ -516,8 +553,45 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
 } else {
     Write-Host 'Meson builddir already configured, reconfiguring...'
     Write-Host "Ensuring prefix is set to: $InstallPrefix"
+    # Auto-detect libSQL backend for reconfigure as well
+    $dbBackend = if ($env:YAMS_DATABASE_BACKEND) { $env:YAMS_DATABASE_BACKEND } else { 'libsql' }
+    $dbBackend = $dbBackend.ToLowerInvariant()
+    if ($dbBackend -ne 'libsql' -and $dbBackend -ne 'sqlite') {
+        Write-Error "Unknown database backend: $dbBackend. Expected libsql or sqlite."
+    }
+
+    if ($dbBackend -eq 'libsql') {
+        $libsqlPkgFound = $false
+        if (Get-Command pkg-config -ErrorAction SilentlyContinue) {
+            if ((pkg-config --exists libsql) -or (pkg-config --exists libsql-sqlite3)) {
+                $libsqlPkgFound = $true
+            }
+        }
+
+        if (-not $libsqlPkgFound -and -not (Test-Path 'subprojects\libsql')) {
+            if (Test-Path 'subprojects\libsql.wrap') {
+                if (Get-Command meson -ErrorAction SilentlyContinue) {
+                    Write-Host 'Fetching libSQL subproject (meson wrap)...'
+                    meson subprojects download libsql | Out-Null
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Warning 'Failed to fetch libSQL subproject; falling back to sqlite'
+                        $dbBackend = 'sqlite'
+                    }
+                } else {
+                    Write-Warning 'Meson not found; cannot fetch libSQL subproject. Falling back to sqlite'
+                    $dbBackend = 'sqlite'
+                }
+            } else {
+                Write-Warning 'libSQL wrap not found; falling back to sqlite'
+                $dbBackend = 'sqlite'
+            }
+        }
+    }
+
+    Write-Host "Database backend: $dbBackend"
+
     # Use --reconfigure to handle Meson version upgrades gracefully
-    $reconfigureArgs = @('setup', '--reconfigure', $buildDir, "-Dprefix=$InstallPrefix")
+    $reconfigureArgs = @('setup', '--reconfigure', $buildDir, "-Dprefix=$InstallPrefix", "-Ddatabase-backend=$dbBackend")
     if ($mesonToolchainArg) { $reconfigureArgs += $mesonToolchainArg }
     if ($mesonToolchainFile) { $reconfigureArgs += $mesonToolchainFile }
     
