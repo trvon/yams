@@ -42,6 +42,8 @@ struct StateComponent;
 struct DaemonConfig;
 struct ExternalPluginHostConfig;
 
+std::string adjustOnnxConfigJson(const std::string& configJson, std::size_t defaultMax);
+
 /**
  * @brief Manages plugin lifecycle, loading, and interface adoption.
  *

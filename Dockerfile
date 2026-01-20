@@ -75,6 +75,8 @@ RUN git init 2>/dev/null || true && \
 # Configure Conan to retry downloads more aggressively for transient network failures
 RUN --mount=type=cache,target=/root/.conan2 \
   set -eux; \
+  mkdir -p /root/.conan2 && \
+  printf 'core.net.http:timeout=120\ncore.net.http:max_retries=10\ncore.download:retry=10\ncore.download:retry_wait=5\n' > /root/.conan2/global.conf && \
   conan --version && \
   conan profile detect --force && \
   echo '=== Conan remotes ==='; conan remote list || true && \
@@ -82,8 +84,6 @@ RUN --mount=type=cache,target=/root/.conan2 \
   conan remote add conancenter https://center2.conan.io; \
   fi && \
   conan remote update conancenter --url https://center2.conan.io || true && \
-  mkdir -p /root/.conan2 && \
-  printf '[core.net.http]\ntimeout=120\nmax_retries=10\nretry_wait=5\n' >> /root/.conan2/global.conf && \
   export YAMS_COMPILER=gcc; \
   export YAMS_CPPSTD=${YAMS_CPPSTD}; \
   export YAMS_EXTRA_MESON_FLAGS="-Drequire-sqlite-vec=false"; \

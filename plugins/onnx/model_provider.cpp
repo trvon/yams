@@ -46,6 +46,8 @@ struct ProviderCtx {
     bool disabled = false;
     std::string last_error;
     std::string rerankerModelPath; // Path to reranker model
+    std::size_t configuredMaxLoadedModels = 0;
+    std::size_t configuredHotPoolSize = 0;
 
     // Check if model is in cooldown period after failures
     bool isInCooldown(const std::string& modelId) const {
@@ -393,6 +395,8 @@ struct ProviderCtx {
             }
         }
 
+        configuredMaxLoadedModels = cfg.maxLoadedModels;
+        configuredHotPoolSize = cfg.hotPoolSize;
         spdlog::info("[ONNX-Plugin] Creating OnnxModelPool with modelsRoot={}", cfg.modelsRoot);
         pool = std::make_unique<yams::daemon::OnnxModelPool>(cfg);
         spdlog::info("[ONNX-Plugin] OnnxModelPool created, calling initialize()...");
@@ -1350,3 +1354,13 @@ extern "C" const char* yams_onnx_get_health_json_cstr() {
     }
     return json.c_str();
 }
+
+#ifdef YAMS_TESTING
+extern "C" void yams_onnx_test_get_pool_config(std::size_t* max_loaded, std::size_t* hot_pool) {
+    auto& c = singleton().ctx;
+    if (max_loaded)
+        *max_loaded = c.configuredMaxLoadedModels;
+    if (hot_pool)
+        *hot_pool = c.configuredHotPoolSize;
+}
+#endif

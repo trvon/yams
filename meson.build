@@ -11,6 +11,15 @@ project('yams', ['cpp', 'c'],
 fs = import('fs')
 pkg = import('pkgconfig')
 
+cpp = meson.get_compiler('cpp')
+
+_yams_include_dir = join_paths(meson.current_source_dir(), 'include')
+if cpp.get_id() == 'msvc' or cpp.get_id() == 'clang-cl'
+  add_project_arguments('/I' + _yams_include_dir, language: 'cpp')
+else
+  add_project_arguments('-I' + _yams_include_dir, language: 'cpp')
+endif
+
 if host_machine.system() == 'darwin'
   add_global_link_arguments('-Wl,-no_warn_duplicate_libraries', language: 'cpp')
 endif
@@ -27,7 +36,6 @@ endif
 
 # --- libc++ hardening mode ---
 # Apply hardening defines when using libc++ (Darwin always uses libc++, Linux when explicitly set)
-cpp = meson.get_compiler('cpp')
 libcxx_hardening = get_option('libcxx-hardening')
 
 if libcxx_hardening != 'none'
@@ -511,4 +519,3 @@ endif
 
 # Note: Runtime DLLs are now deployed via Conan's runtime_deploy deployer during conan install
 # No custom meson install script needed
-
