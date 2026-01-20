@@ -11,7 +11,6 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/ResourceGovernor.h>
-#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -20,6 +19,7 @@
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
+#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/profiling.h>
 
 namespace yams::daemon {
@@ -127,7 +127,7 @@ void TuningManager::tick_once() {
             }
             std::size_t cap = TuneAdvisor::maxIngestWorkers();
             if (cap == 0)
-                cap = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+                cap = static_cast<std::size_t>(TuneAdvisor::recommendedThreads());
             const std::size_t storageCap = TuneAdvisor::storagePoolSize();
             if (storageCap > 0)
                 cap = std::min(cap, storageCap);

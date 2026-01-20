@@ -9,6 +9,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -21,7 +22,43 @@ using Catch::Matchers::ContainsSubstring;
 
 namespace {
 
-// RAII helper to set/restore environment variables
+struct ConfigResolverFixture {
+    std::filesystem::path tempDir;
+
+    ConfigResolverFixture() {
+        tempDir = std::filesystem::temp_directory_path() /
+                  ("yams_config_test_" +
+                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(tempDir);
+    }
+
+    ~ConfigResolverFixture() {
+        std::error_code ec;
+        std::filesystem::remove_all(tempDir, ec);
+    }
+
+    std::filesystem::path writeToml(const std::string& filename, const std::string& content) {
+        auto path = tempDir / filename;
+        std::ofstream out(path);
+        out << content;
+        return path;
+    }
+};
+
+class ProfileGuard {
+    yams::daemon::TuneAdvisor::Profile prev_;
+
+public:
+    explicit ProfileGuard(yams::daemon::TuneAdvisor::Profile profile)
+        : prev_(yams::daemon::TuneAdvisor::tuningProfile()) {
+        yams::daemon::TuneAdvisor::setTuningProfile(profile);
+    }
+    ~ProfileGuard() { yams::daemon::TuneAdvisor::setTuningProfile(prev_); }
+
+    ProfileGuard(const ProfileGuard&) = delete;
+    ProfileGuard& operator=(const ProfileGuard&) = delete;
+};
+
 struct EnvGuard {
     std::string name;
     std::optional<std::string> originalValue;
@@ -55,29 +92,6 @@ struct EnvGuard {
 
     EnvGuard(const EnvGuard&) = delete;
     EnvGuard& operator=(const EnvGuard&) = delete;
-};
-
-struct ConfigResolverFixture {
-    std::filesystem::path tempDir;
-
-    ConfigResolverFixture() {
-        tempDir = std::filesystem::temp_directory_path() /
-                  ("yams_config_test_" +
-                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        std::filesystem::create_directories(tempDir);
-    }
-
-    ~ConfigResolverFixture() {
-        std::error_code ec;
-        std::filesystem::remove_all(tempDir, ec);
-    }
-
-    std::filesystem::path writeToml(const std::string& filename, const std::string& content) {
-        auto path = tempDir / filename;
-        std::ofstream out(path);
-        out << content;
-        return path;
-    }
 };
 
 } // namespace
@@ -223,4 +237,186 @@ TEST_CASE("ConfigResolver vector sentinel operations",
 
     std::error_code ec;
     std::filesystem::remove_all(tempDir, ec);
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture, "ConfigResolver parses [tuning] section",
+                 "[daemon][components][config][catch2]") {
+    SECTION("efficient profile parses correctly") {
+        auto configPath = writeToml("efficient.toml", R"(
+[tuning]
+profile = "efficient"
+)");
+        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
+        CHECK(config["tuning.profile"] == "efficient");
+    }
+
+    SECTION("balanced profile parses correctly") {
+        auto configPath = writeToml("balanced.toml", R"(
+[tuning]
+profile = "balanced"
+)");
+        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
+        CHECK(config["tuning.profile"] == "balanced");
+    }
+
+    SECTION("aggressive profile parses correctly") {
+        auto configPath = writeToml("aggressive.toml", R"(
+[tuning]
+profile = "aggressive"
+)");
+        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
+        CHECK(config["tuning.profile"] == "aggressive");
+    }
+
+    SECTION("conservative alias for efficient") {
+        auto configPath = writeToml("conservative.toml", R"(
+[tuning]
+profile = "conservative"
+)");
+        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
+        CHECK(config["tuning.profile"] == "conservative");
+    }
+
+    SECTION("case-insensitive profile names") {
+        auto configPath = writeToml("case_test.toml", R"(
+[tuning]
+profile = "EFFICIENT"
+)");
+        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
+        CHECK(config["tuning.profile"] == "EFFICIENT");
+    }
+
+    SECTION("missing tuning section returns empty") {
+        auto configPath = writeToml("no_tuning.toml", R"(
+[daemon]
+socket_path = "/tmp/test.sock"
+)");
+        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
+        CHECK(config.find("tuning.profile") == config.end());
+    }
+
+    SECTION("multiple tuning options parsed together") {
+        auto configPath = writeToml("multi_tuning.toml", R"(
+[tuning]
+profile = "aggressive"
+pool_cooldown_ms = 250
+worker_poll_ms = 100
+)");
+        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
+        CHECK(config["tuning.profile"] == "aggressive");
+        CHECK(config["tuning.pool_cooldown_ms"] == "250");
+        CHECK(config["tuning.worker_poll_ms"] == "100");
+    }
+}
+
+TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
+          "[daemon][components][config][catch2]") {
+    SECTION("efficient profile scales post-ingest concurrency down") {
+        ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Efficient);
+
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 2u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 4u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 2u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
+        CHECK(TuneAdvisor::postIngestBatchSize() == 4u);
+    }
+
+    SECTION("balanced profile uses medium values") {
+        ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Balanced);
+
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 3u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 6u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 3u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 3u);
+        CHECK(TuneAdvisor::postIngestBatchSize() == 6u);
+    }
+
+    SECTION("aggressive profile uses maximum values") {
+        ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Aggressive);
+
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 4u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 8u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 4u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 2u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 4u);
+        CHECK(TuneAdvisor::postIngestBatchSize() == 8u);
+    }
+
+    SECTION("profile affects cpuBudgetPercent") {
+        {
+            ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Efficient);
+            CHECK(TuneAdvisor::cpuBudgetPercent() == 40u);
+        }
+        {
+            ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Balanced);
+            CHECK(TuneAdvisor::cpuBudgetPercent() == 50u);
+        }
+        {
+            ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Aggressive);
+            CHECK(TuneAdvisor::cpuBudgetPercent() == 80u);
+        }
+    }
+
+    SECTION("profile affects poolCooldownMs") {
+        {
+            ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Efficient);
+            CHECK(TuneAdvisor::poolCooldownMs() == 750u);
+        }
+        {
+            ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Balanced);
+            CHECK(TuneAdvisor::poolCooldownMs() == 500u);
+        }
+        {
+            ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Aggressive);
+            CHECK(TuneAdvisor::poolCooldownMs() == 250u);
+        }
+    }
+}
+
+TEST_CASE("YAMS_TUNING_PROFILE env var overrides config", "[daemon][components][config][catch2]") {
+    auto clearProfileOverride = []() {
+        yams::daemon::TuneAdvisor::tuningProfileOverride_.store(0, std::memory_order_relaxed);
+    };
+
+    SECTION("efficient profile from env var") {
+        clearProfileOverride();
+        EnvGuard envGuard("YAMS_TUNING_PROFILE", "efficient");
+
+        auto profile = yams::daemon::TuneAdvisor::tuningProfile();
+        CHECK(profile == yams::daemon::TuneAdvisor::Profile::Efficient);
+    }
+
+    SECTION("aggressive profile from env var") {
+        clearProfileOverride();
+        EnvGuard envGuard("YAMS_TUNING_PROFILE", "aggressive");
+
+        auto profile = yams::daemon::TuneAdvisor::tuningProfile();
+        CHECK(profile == yams::daemon::TuneAdvisor::Profile::Aggressive);
+    }
+
+    SECTION("conservative alias maps to efficient") {
+        clearProfileOverride();
+        EnvGuard envGuard("YAMS_TUNING_PROFILE", "conservative");
+
+        auto profile = yams::daemon::TuneAdvisor::Profile::Efficient;
+        CHECK(yams::daemon::TuneAdvisor::tuningProfile() == profile);
+    }
+
+    SECTION("invalid env var falls back to balanced") {
+        clearProfileOverride();
+        EnvGuard envGuard("YAMS_TUNING_PROFILE", "invalid_profile");
+
+        auto profile = yams::daemon::TuneAdvisor::tuningProfile();
+        CHECK(profile == yams::daemon::TuneAdvisor::Profile::Balanced);
+    }
+
+    SECTION("empty env var falls back to balanced") {
+        clearProfileOverride();
+        EnvGuard envGuard("YAMS_TUNING_PROFILE", "");
+
+        auto profile = yams::daemon::TuneAdvisor::tuningProfile();
+        CHECK(profile == yams::daemon::TuneAdvisor::Profile::Balanced);
+    }
 }

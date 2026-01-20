@@ -16,6 +16,7 @@
 #include <yams/daemon/client/asio_connection.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 
 namespace {
 bool env_truthy(const char* value) {
@@ -137,9 +138,8 @@ void GlobalIOContext::restart() {
     io_context_->restart();
     this->work_guard_ = std::make_unique<WorkGuard>(io_context_->get_executor());
 
-    unsigned int thread_count = std::thread::hardware_concurrency();
-    if (thread_count == 0)
-        thread_count = 4;
+    unsigned int thread_count = static_cast<unsigned int>(TuneAdvisor::recommendedThreads());
+    thread_count = std::max(thread_count, 2u);
     thread_count = std::min(thread_count, 16u);
 
     this->io_threads_.reserve(thread_count);
@@ -194,9 +194,8 @@ void GlobalIOContext::ensure_initialized() {
         io_context_ = std::make_unique<boost::asio::io_context>();
         work_guard_ = std::make_unique<WorkGuard>(io_context_->get_executor());
 
-        unsigned int thread_count = std::thread::hardware_concurrency();
-        if (thread_count == 0)
-            thread_count = 4;
+        unsigned int thread_count = static_cast<unsigned int>(TuneAdvisor::recommendedThreads());
+        thread_count = std::max(thread_count, 2u);
         thread_count = std::min(thread_count, 16u);
 
         io_threads_.reserve(thread_count);

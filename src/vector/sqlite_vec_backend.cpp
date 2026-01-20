@@ -7,9 +7,11 @@
 #include <cmath>
 #include <chrono>
 #include <cstring>
+#include <algorithm>
 #include <shared_mutex>
 #include <span>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <nlohmann/json.hpp>
@@ -53,6 +55,10 @@ inline bool isFiniteEmbedding(const std::vector<float>& embedding) {
         }
     }
     return true;
+}
+
+inline bool updateOnDuplicateEnabled() {
+    return true; // default: update on duplicate for accuracy
 }
 
 // ============================================================================
@@ -571,16 +577,71 @@ public:
             return Error{ErrorCode::DatabaseError, "Failed to begin transaction"};
         }
 
-        std::vector<int64_t> rowids;
-        rowids.reserve(records.size());
+        std::vector<int64_t> rowids(records.size(), -1);
+        std::vector<std::optional<size_t>> old_dims(records.size(), std::nullopt);
+        std::vector<std::optional<int64_t>> old_rowids(records.size(), std::nullopt);
 
-        for (const auto& record : records) {
+        std::vector<size_t> unique_indices;
+        unique_indices.reserve(records.size());
+        std::unordered_map<std::string, size_t> chunk_to_pos;
+        chunk_to_pos.reserve(records.size());
+
+        size_t skipped_duplicates = 0;
+        for (size_t i = 0; i < records.size(); ++i) {
+            const auto& record = records[i];
+            auto it = chunk_to_pos.find(record.chunk_id);
+            if (it == chunk_to_pos.end()) {
+                chunk_to_pos.emplace(record.chunk_id, unique_indices.size());
+                unique_indices.push_back(i);
+            } else {
+                unique_indices[it->second] = i; // last write wins
+                ++skipped_duplicates;
+            }
+        }
+
+        size_t skipped_existing = 0;
+        size_t inserted_count = 0;
+        size_t updated_existing = 0;
+
+        for (size_t idx : unique_indices) {
+            const auto& record = records[idx];
+            auto existing_rowid = getRowidByChunkIdUnlocked(record.chunk_id);
+            if (existing_rowid) {
+                if (!updateOnDuplicateEnabled()) {
+                    ++skipped_existing;
+                    continue;
+                }
+
+                auto old_record = getVectorByChunkIdUnlocked(record.chunk_id);
+                if (old_record) {
+                    old_dims[idx] = old_record->embedding.size();
+                    old_rowids[idx] = *existing_rowid;
+                }
+
+                if (stmt_delete_by_chunk_id_) {
+                    sqlite3_reset(stmt_delete_by_chunk_id_);
+                    sqlite3_bind_text(stmt_delete_by_chunk_id_, 1, record.chunk_id.c_str(), -1,
+                                      SQLITE_TRANSIENT);
+                    stepWithRetry(stmt_delete_by_chunk_id_);
+                }
+
+                auto rowid_result = insertVectorUnlocked(record);
+                if (!rowid_result) {
+                    execWithRetry(db_, "ROLLBACK");
+                    return rowid_result.error();
+                }
+                rowids[idx] = rowid_result.value();
+                ++updated_existing;
+                continue;
+            }
+
             auto rowid_result = insertVectorUnlocked(record);
             if (!rowid_result) {
                 execWithRetry(db_, "ROLLBACK");
                 return rowid_result.error();
             }
-            rowids.push_back(rowid_result.value());
+            rowids[idx] = rowid_result.value();
+            ++inserted_count;
         }
 
         // Commit transaction with retry
@@ -593,16 +654,27 @@ public:
 
         // Group records by dimension for batch insertion into appropriate indices
         // Skip zero-norm vectors (they become dead-ends in the HNSW graph)
+        std::vector<size_t> remove_only_indices;
+        remove_only_indices.reserve(records.size());
         std::unordered_map<size_t, std::vector<std::pair<size_t, size_t>>>
             dim_records; // dim -> [(idx, rowid)]
         size_t skipped_zero_norm = 0;
         size_t skipped_invalid = 0;
         for (size_t i = 0; i < records.size(); ++i) {
+            if (rowids[i] < 0) {
+                continue;
+            }
             if (isZeroNormEmbedding(records[i].embedding)) {
+                if (old_rowids[i] && old_dims[i]) {
+                    remove_only_indices.push_back(i);
+                }
                 ++skipped_zero_norm;
                 continue;
             }
             if (!isFiniteEmbedding(records[i].embedding)) {
+                if (old_rowids[i] && old_dims[i]) {
+                    remove_only_indices.push_back(i);
+                }
                 ++skipped_invalid;
                 continue;
             }
@@ -625,6 +697,16 @@ public:
         // Threshold for using parallel build (sequential is faster for small batches)
         constexpr size_t kParallelBuildThreshold = 100;
 
+        for (size_t idx : remove_only_indices) {
+            if (old_rowids[idx] && old_dims[idx]) {
+                if (auto* old_hnsw = getHnswForDim(*old_dims[idx])) {
+                    old_hnsw->remove(static_cast<size_t>(*old_rowids[idx]));
+                }
+            }
+        }
+
+        size_t hnsw_adds = 0;
+
         for (auto& [dim, indices] : dim_records) {
             if (auto* hnsw = getOrCreateHnswForDim(dim)) {
                 size_t before_size = hnsw->size();
@@ -640,9 +722,19 @@ public:
                         ids.push_back(static_cast<size_t>(rowid));
                         vectors.emplace_back(records[idx].embedding.data(),
                                              records[idx].embedding.size());
+                        if (old_rowids[idx] && old_dims[idx]) {
+                            if (auto* old_hnsw = getHnswForDim(*old_dims[idx])) {
+                                old_hnsw->remove(static_cast<size_t>(*old_rowids[idx]));
+                            }
+                        }
+                        bool same_dim = old_dims[idx] && *old_dims[idx] == dim;
+                        if (old_rowids[idx] && same_dim && *old_rowids[idx] == rowid) {
+                            *hnsw = hnsw->compact();
+                        }
                     }
 
                     hnsw->build_parallel(std::span{ids}, std::span{vectors}, 0); // 0 = auto threads
+                    hnsw_adds += indices.size();
 
                     spdlog::debug("[HNSW] insertVectorsBatch (parallel): dim={}, added {} records, "
                                   "hnsw_size: {} -> {} (batch #{})",
@@ -652,7 +744,17 @@ public:
                     for (const auto& [idx, rowid] : indices) {
                         std::span<const float> embedding_span(records[idx].embedding.data(),
                                                               records[idx].embedding.size());
+                        if (old_rowids[idx] && old_dims[idx]) {
+                            if (auto* old_hnsw = getHnswForDim(*old_dims[idx])) {
+                                old_hnsw->remove(static_cast<size_t>(*old_rowids[idx]));
+                            }
+                        }
+                        bool same_dim = old_dims[idx] && *old_dims[idx] == dim;
+                        if (old_rowids[idx] && same_dim && *old_rowids[idx] == rowid) {
+                            *hnsw = hnsw->compact();
+                        }
                         hnsw->insert(static_cast<size_t>(rowid), embedding_span);
+                        ++hnsw_adds;
                     }
 
                     if (bc % 100 == 0 || indices.size() >= 10) {
@@ -666,9 +768,16 @@ public:
             }
         }
 
-        pending_inserts_ += records.size() - skipped_zero_norm;
+        pending_inserts_ += hnsw_adds;
         if (pending_inserts_ >= config_.checkpoint_threshold) {
             saveHnswCheckpointUnlocked();
+        }
+
+        if (skipped_existing > 0 || skipped_duplicates > 0 || updated_existing > 0) {
+            spdlog::warn(
+                "[HNSW] Batch summary: inserted={}, updated_existing={}, skipped_existing={}, "
+                "skipped_duplicates={}",
+                inserted_count, updated_existing, skipped_existing, skipped_duplicates);
         }
 
         return Result<void>{};
