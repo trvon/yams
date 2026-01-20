@@ -1070,6 +1070,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_tune_advisor_threshold_exe = executable('catch2_tune_advisor_threshold',
+    files('unit/daemon/tune_advisor_threshold_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # NOTE: onnx_model_pool tests require linking with the ONNX plugin library,
   # which is not directly available as a dependency. The original GTest version
   # was also never properly linked. Skipping Catch2 migration until plugin
@@ -2448,6 +2457,12 @@ if catch2_dep.found()
     timeout: 120,
     # Test skips on Windows (Unix domain sockets not supported)
     should_fail: host_machine.system() == 'windows'
+  )
+
+  test('tune_advisor_threshold', catch2_tune_advisor_threshold_exe,
+    suite: ['catch2', 'unit', 'daemon', 'tune', 'advisor'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   # NOTE: onnx_model_pool test registration skipped - see comment above

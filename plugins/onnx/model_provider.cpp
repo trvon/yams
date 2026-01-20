@@ -9,6 +9,7 @@
 #include <fstream>
 #include <thread>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
 #include <yams/daemon/resource/onnx_reranker_session.h>
 
@@ -1282,23 +1283,31 @@ struct ProviderSingleton {
                 if (!c->ready || !c->pool)
                     return YAMS_ERR_INTERNAL;
 
+                // Get profile-aware eviction thresholds from TuneAdvisor
+                const double warningThresh =
+                    yams::daemon::TuneAdvisor::modelEvictWarningThreshold();
+                const double criticalThresh =
+                    yams::daemon::TuneAdvisor::modelEvictCriticalThreshold();
+                const double emergencyThresh =
+                    yams::daemon::TuneAdvisor::modelEvictEmergencyThreshold();
+
                 // Determine how many models to evict based on pressure level:
-                // - Emergency (>=0.95): evict all non-hot (or all if allow_hot_eviction)
-                // - Critical (>=0.85): evict up to 2 models
-                // - Warning (>=0.75): evict 1 model
+                // - Emergency: evict all non-hot (or all if allow_hot_eviction)
+                // - Critical: evict up to 2 models
+                // - Warning: evict 1 model
                 size_t numToEvict = 0;
-                if (pressure_level >= 0.95) {
+                if (pressure_level >= emergencyThresh) {
                     numToEvict = allow_hot_eviction
                                      ? c->pool->getLoadedModelCount()
                                      : std::max<size_t>(1, c->pool->getLoadedModelCount() / 2);
-                } else if (pressure_level >= 0.85) {
+                } else if (pressure_level >= criticalThresh) {
                     numToEvict = 2;
-                } else if (pressure_level >= 0.75) {
+                } else if (pressure_level >= warningThresh) {
                     numToEvict = 1;
                 }
 
                 if (numToEvict == 0) {
-                    // pressure < 0.75: do idle maintenance instead of pressure eviction
+                    // pressure below warning threshold: do idle maintenance instead
                     c->pool->performMaintenance();
                     return YAMS_OK;
                 }

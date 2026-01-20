@@ -434,6 +434,7 @@ void TuningManager::tick_once() {
 
     // Idle model maintenance: unload models that have been idle past their timeout
     // This runs via evict_under_pressure(0.0) which triggers performMaintenance()
+    // Thresholds are profile-aware: Efficient runs more often, Aggressive only when truly idle
     try {
         if (sm_) {
             auto searchMetrics = sm_->getSearchLoadMetrics();
@@ -444,10 +445,16 @@ void TuningManager::tick_once() {
                 currentInFlight = pq->totalInFlight();
             }
 
-            bool daemonIdle = (activeConns == 0) && (searchMetrics.active == 0) &&
-                              (postIngestQueued == 0) && (currentInFlight == 0);
+            // Profile-aware thresholds: Efficient=permissive, Balanced=moderate, Aggressive=strict
+            const uint32_t connThresh = TuneAdvisor::modelMaintenanceConnThreshold();
+            const uint32_t searchThresh = TuneAdvisor::modelMaintenanceSearchThreshold();
+            const uint32_t queueThresh = TuneAdvisor::modelMaintenanceQueueThreshold();
 
-            if (daemonIdle) {
+            bool canDoMaintenance = (activeConns <= connThresh) &&
+                                    (searchMetrics.active <= searchThresh) &&
+                                    (postIngestQueued <= queueThresh) && (currentInFlight == 0);
+
+            if (canDoMaintenance) {
                 if (auto provider = sm_->getModelProvider()) {
                     provider->releaseUnusedResources();
                 }

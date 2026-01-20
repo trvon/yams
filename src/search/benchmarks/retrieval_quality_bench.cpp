@@ -1221,6 +1221,7 @@ struct BenchFixture {
             while (std::chrono::steady_clock::now() < deadline) {
                 auto statusResult = yams::cli::run_sync(client->status(), 5s);
                 if (statusResult) {
+                    const bool vectorDbReady = statusResult.value().vectorDbReady;
                     // Access vector count from requestCounts map
                     uint64_t vectorCount = 0;
                     auto it = statusResult.value().requestCounts.find("vector_count");
@@ -1248,6 +1249,10 @@ struct BenchFixture {
                     if (itD != statusResult.value().requestCounts.end()) {
                         embedDropped = itD->second;
                     }
+
+                    const bool haveQueueMetrics =
+                        (itQ != statusResult.value().requestCounts.end()) ||
+                        (itInFlight != statusResult.value().requestCounts.end());
 
                     if (vectorCount != lastVectorCount) {
                         double coverage = corpusSize > 0 ? (vectorCount * 100.0 / corpusSize) : 0;
@@ -1278,7 +1283,8 @@ struct BenchFixture {
                     // Success condition: vectors >= corpusSize AND queue drained AND no in-flight
                     // This ensures all chunks are embedded before running queries
                     bool queueDrained = (embedQueued == 0 && embedInFlight == 0);
-                    if (vectorCount >= corpusSize && queueDrained && stableCount >= 10) {
+                    if (haveQueueMetrics && vectorDbReady && vectorCount >= corpusSize &&
+                        queueDrained && stableCount >= 10) {
                         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now() - embedStartTime)
                                            .count();
@@ -1301,8 +1307,8 @@ struct BenchFixture {
                     // transient queue drain (e.g., between embedding batches)
                     double coverage = corpusSize > 0 ? (vectorCount * 100.0 / corpusSize) : 0;
                     constexpr double MIN_COVERAGE_THRESHOLD = 90.0;
-                    if (stableCount >= 40 && queueDrained && vectorCount > 0 &&
-                        coverage >= MIN_COVERAGE_THRESHOLD) {
+                    if (haveQueueMetrics && vectorDbReady && stableCount >= 40 && queueDrained &&
+                        vectorCount > 0 && coverage >= MIN_COVERAGE_THRESHOLD) {
                         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now() - embedStartTime)
                                            .count();
@@ -1320,7 +1326,7 @@ struct BenchFixture {
                     }
 
                     // If stable but queue NOT drained, warn about potential issues
-                    if (stableCount >= 20 && !queueDrained && vectorCount > 0) {
+                    if (haveQueueMetrics && stableCount >= 20 && !queueDrained && vectorCount > 0) {
                         // coverage already computed above
                         spdlog::warn("Embedding stalled at {:.1f}% but queue not drained "
                                      "(queue={}, in_flight={}). Continuing to wait...",
@@ -1352,6 +1358,16 @@ struct BenchFixture {
                 }
             } else {
                 spdlog::warn("Vector DB may not be ready or no embeddings generated");
+                // Guard: wait briefly for vector DB readiness before proceeding
+                const auto guardDeadline = std::chrono::steady_clock::now() + 300s;
+                while (std::chrono::steady_clock::now() < guardDeadline) {
+                    auto st = yams::cli::run_sync(client->status(), 5s);
+                    if (st && st.value().vectorDbReady) {
+                        spdlog::info("Vector DB is now ready after guard wait");
+                        break;
+                    }
+                    std::this_thread::sleep_for(500ms);
+                }
             }
         } else {
             spdlog::info("Vectors disabled - skipping embedding generation wait");

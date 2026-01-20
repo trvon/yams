@@ -1993,6 +1993,193 @@ public:
         onnxRerankerReservedOverride_.store(n, std::memory_order_relaxed);
     }
 
+    // =========================================================================
+    // Model Idle Maintenance Thresholds (Profile-Aware)
+    // =========================================================================
+
+    /// Maximum active connections before skipping model idle maintenance.
+    /// Profile-adjusted: Efficient=2, Balanced=1, Aggressive=0.
+    /// Environment: YAMS_MODEL_MAINT_CONN_THRESHOLD
+    static uint32_t modelMaintenanceConnThreshold() {
+        uint32_t ov = modelMaintConnThresholdOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov - 1; // stored as value+1 to distinguish 0 from unset
+        if (const char* s = std::getenv("YAMS_MODEL_MAINT_CONN_THRESHOLD")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v <= 100)
+                    return v;
+            } catch (...) {
+            }
+        }
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 2;
+            case Profile::Aggressive:
+                return 0;
+            default: // Balanced
+                return 1;
+        }
+    }
+    static void setModelMaintenanceConnThreshold(uint32_t n) {
+        modelMaintConnThresholdOverride_.store(n + 1, std::memory_order_relaxed);
+    }
+
+    /// Maximum active searches before skipping model idle maintenance.
+    /// Profile-adjusted: Efficient=2, Balanced=1, Aggressive=0.
+    /// Environment: YAMS_MODEL_MAINT_SEARCH_THRESHOLD
+    static uint32_t modelMaintenanceSearchThreshold() {
+        uint32_t ov = modelMaintSearchThresholdOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov - 1;
+        if (const char* s = std::getenv("YAMS_MODEL_MAINT_SEARCH_THRESHOLD")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v <= 100)
+                    return v;
+            } catch (...) {
+            }
+        }
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 2;
+            case Profile::Aggressive:
+                return 0;
+            default: // Balanced
+                return 1;
+        }
+    }
+    static void setModelMaintenanceSearchThreshold(uint32_t n) {
+        modelMaintSearchThresholdOverride_.store(n + 1, std::memory_order_relaxed);
+    }
+
+    /// Maximum post-ingest queue depth before skipping model idle maintenance.
+    /// Profile-adjusted: Efficient=20, Balanced=10, Aggressive=0.
+    /// Environment: YAMS_MODEL_MAINT_QUEUE_THRESHOLD
+    static uint32_t modelMaintenanceQueueThreshold() {
+        uint32_t ov = modelMaintQueueThresholdOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov - 1;
+        if (const char* s = std::getenv("YAMS_MODEL_MAINT_QUEUE_THRESHOLD")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v <= 10000)
+                    return v;
+            } catch (...) {
+            }
+        }
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 20;
+            case Profile::Aggressive:
+                return 0;
+            default: // Balanced
+                return 10;
+        }
+    }
+    static void setModelMaintenanceQueueThreshold(uint32_t n) {
+        modelMaintQueueThresholdOverride_.store(n + 1, std::memory_order_relaxed);
+    }
+
+    // =========================================================================
+    // Model Eviction Pressure Thresholds (Profile-Aware)
+    // =========================================================================
+
+    /// Pressure level to start warning-level model eviction (evict 1 model).
+    /// Profile-adjusted: Efficient=0.30, Balanced=0.60, Aggressive=0.75.
+    /// Environment: YAMS_MODEL_EVICT_WARNING_THRESHOLD
+    static double modelEvictWarningThreshold() {
+        double ov = modelEvictWarningOverride_.load(std::memory_order_relaxed);
+        if (ov > 0.0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_MODEL_EVICT_WARNING_THRESHOLD")) {
+            try {
+                double v = std::stod(s);
+                if (v > 0.0 && v < 1.0)
+                    return v;
+            } catch (...) {
+            }
+        }
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 0.30;
+            case Profile::Aggressive:
+                return 0.75;
+            default: // Balanced
+                return 0.60;
+        }
+    }
+    static void setModelEvictWarningThreshold(double v) {
+        if (v > 0.0 && v < 1.0 && std::isfinite(v))
+            modelEvictWarningOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    /// Pressure level for critical-level model eviction (evict 2 models).
+    /// Profile-adjusted: Efficient=0.50, Balanced=0.75, Aggressive=0.85.
+    /// Environment: YAMS_MODEL_EVICT_CRITICAL_THRESHOLD
+    static double modelEvictCriticalThreshold() {
+        double ov = modelEvictCriticalOverride_.load(std::memory_order_relaxed);
+        if (ov > 0.0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_MODEL_EVICT_CRITICAL_THRESHOLD")) {
+            try {
+                double v = std::stod(s);
+                if (v > 0.0 && v < 1.0)
+                    return v;
+            } catch (...) {
+            }
+        }
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 0.50;
+            case Profile::Aggressive:
+                return 0.85;
+            default: // Balanced
+                return 0.75;
+        }
+    }
+    static void setModelEvictCriticalThreshold(double v) {
+        if (v > 0.0 && v < 1.0 && std::isfinite(v))
+            modelEvictCriticalOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    /// Pressure level for emergency-level model eviction (evict all).
+    /// Profile-adjusted: Efficient=0.70, Balanced=0.90, Aggressive=0.95.
+    /// Environment: YAMS_MODEL_EVICT_EMERGENCY_THRESHOLD
+    static double modelEvictEmergencyThreshold() {
+        double ov = modelEvictEmergencyOverride_.load(std::memory_order_relaxed);
+        if (ov > 0.0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_MODEL_EVICT_EMERGENCY_THRESHOLD")) {
+            try {
+                double v = std::stod(s);
+                if (v > 0.0 && v < 1.0)
+                    return v;
+            } catch (...) {
+            }
+        }
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 0.70;
+            case Profile::Aggressive:
+                return 0.95;
+            default: // Balanced
+                return 0.90;
+        }
+    }
+    static void setModelEvictEmergencyThreshold(double v) {
+        if (v > 0.0 && v < 1.0 && std::isfinite(v))
+            modelEvictEmergencyOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    /// Clear all eviction threshold overrides, restoring profile/env var defaults.
+    /// Primarily intended for testing to ensure test isolation.
+    static void resetModelEvictThresholdOverrides() {
+        modelEvictWarningOverride_.store(0.0, std::memory_order_relaxed);
+        modelEvictCriticalOverride_.store(0.0, std::memory_order_relaxed);
+        modelEvictEmergencyOverride_.store(0.0, std::memory_order_relaxed);
+    }
+
 private:
     /// Detect system memory (cross-platform). Returns bytes.
     /// Implementation uses platform-specific APIs:
@@ -2017,6 +2204,16 @@ private:
     static inline std::atomic<uint32_t> onnxGlinerReservedOverride_{0};
     static inline std::atomic<uint32_t> onnxEmbedReservedOverride_{0};
     static inline std::atomic<uint32_t> onnxRerankerReservedOverride_{0};
+
+    // Model idle maintenance threshold overrides (stored as value+1 to distinguish 0 from unset)
+    static inline std::atomic<uint32_t> modelMaintConnThresholdOverride_{0};
+    static inline std::atomic<uint32_t> modelMaintSearchThresholdOverride_{0};
+    static inline std::atomic<uint32_t> modelMaintQueueThresholdOverride_{0};
+
+    // Model eviction pressure threshold overrides
+    static inline std::atomic<double> modelEvictWarningOverride_{0.0};
+    static inline std::atomic<double> modelEvictCriticalOverride_{0.0};
+    static inline std::atomic<double> modelEvictEmergencyOverride_{0.0};
 };
 
 } // namespace yams::daemon
