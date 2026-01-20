@@ -613,6 +613,11 @@ public:
             return ov;
 
         uint32_t baseBatchSize = 8;
+        auto embedCap = static_cast<uint32_t>(getEmbedDocCap());
+        if (embedCap == 0) {
+            embedCap = 64;
+        }
+        baseBatchSize = std::min(embedCap, 256u);
         if (const char* s = std::getenv("YAMS_POST_INGEST_BATCH_SIZE")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));

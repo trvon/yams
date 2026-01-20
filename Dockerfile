@@ -83,7 +83,7 @@ RUN --mount=type=cache,target=/root/.conan2 \
   fi && \
   conan remote update conancenter --url https://center2.conan.io || true && \
   mkdir -p /root/.conan2 && \
-  echo -e "[core.net.http]\ntimeout=120\nmax_retries=10\nretry_wait=5" >> /root/.conan2/global.conf && \
+  printf '[core.net.http]\ntimeout=120\nmax_retries=10\nretry_wait=5\n' >> /root/.conan2/global.conf && \
   export YAMS_COMPILER=gcc; \
   export YAMS_CPPSTD=${YAMS_CPPSTD}; \
   export YAMS_EXTRA_MESON_FLAGS="-Drequire-sqlite-vec=false"; \

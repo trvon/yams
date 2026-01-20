@@ -358,6 +358,36 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
                     }
                 }
 
+                const bool isModelProvider =
+                    std::find(desc.interfaces.begin(), desc.interfaces.end(),
+                              "model_provider_v1") != desc.interfaces.end();
+                const bool isOnnxPlugin = (pluginName.find("onnx") != std::string::npos);
+                if (isModelProvider && isOnnxPlugin) {
+                    nlohmann::json cfgJson = nlohmann::json::object();
+                    if (!configJson.empty()) {
+                        auto parsed = nlohmann::json::parse(configJson, nullptr, false);
+                        if (!parsed.is_discarded() && parsed.is_object()) {
+                            cfgJson = parsed;
+                        }
+                    }
+
+                    std::size_t configuredMax = 0;
+                    if (cfgJson.contains("max_loaded_models") &&
+                        cfgJson["max_loaded_models"].is_number_integer()) {
+                        configuredMax =
+                            static_cast<std::size_t>(cfgJson["max_loaded_models"].get<int>());
+                    }
+                    std::size_t defaultMax =
+                        deps_.config ? deps_.config->modelPoolConfig.maxLoadedModels : 0;
+                    std::size_t minRequired = 3; // embedding + GLiNER + reranker
+                    std::size_t desiredMax = std::max({configuredMax, defaultMax, minRequired});
+                    cfgJson["max_loaded_models"] = desiredMax;
+
+                    configJson = cfgJson.dump();
+                    spdlog::info("[PluginManager] enforcing ONNX model pool max_loaded_models={}",
+                                 desiredMax);
+                }
+
                 loadTasks.push_back(boost::asio::co_spawn(
                     executor,
                     [host, path, configJson]() -> boost::asio::awaitable<Result<PluginDescriptor>> {

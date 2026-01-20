@@ -138,6 +138,24 @@ struct ProviderCtx {
                     } catch (...) {
                     }
                 };
+                auto apply_max_loaded_models = [&](const std::string& value) {
+                    try {
+                        std::size_t v = static_cast<std::size_t>(std::stoull(value));
+                        if (v >= 1 && v <= 64) {
+                            cfg.maxLoadedModels = v;
+                        }
+                    } catch (...) {
+                    }
+                };
+                auto apply_hot_pool_size = [&](const std::string& value) {
+                    try {
+                        std::size_t v = static_cast<std::size_t>(std::stoull(value));
+                        if (v >= 1 && v <= 64) {
+                            cfg.hotPoolSize = v;
+                        }
+                    } catch (...) {
+                    }
+                };
                 auto apply_enable_gpu = [&](const std::string& value) {
                     std::string v = value;
                     for (auto& c : v)
@@ -200,6 +218,10 @@ struct ProviderCtx {
                             apply_enable_gpu(value);
                         else if (key == "num_threads")
                             apply_num_threads(value);
+                        else if (key == "max_loaded_models")
+                            apply_max_loaded_models(value);
+                        else if (key == "hot_pool_size")
+                            apply_hot_pool_size(value);
                     }
                     // New: preload list under [plugins.onnx]
                     if (section == "plugins.onnx" && key == "preload") {
@@ -229,6 +251,10 @@ struct ProviderCtx {
                             start = comma + 1;
                         }
                     }
+                    if (section == "plugins.onnx" && key == "max_loaded_models")
+                        apply_max_loaded_models(value);
+                    if (section == "plugins.onnx" && key == "hot_pool_size")
+                        apply_hot_pool_size(value);
                     // New: explicit models table entries [plugins.onnx.models.NAME]
                     if (section.rfind("plugins.onnx.models.", 0) == 0 && key == "task") {
                         // Section name encodes model_id; mark for preload as hot
@@ -331,6 +357,23 @@ struct ProviderCtx {
                             cfg.numThreads = v;
                             spdlog::info("[ONNX-Plugin] JSON config: num_threads={}",
                                          cfg.numThreads);
+                        }
+                    }
+                    if (j.contains("max_loaded_models") &&
+                        j["max_loaded_models"].is_number_integer()) {
+                        auto v = static_cast<std::size_t>(j["max_loaded_models"].get<int>());
+                        if (v >= 1 && v <= 64) {
+                            cfg.maxLoadedModels = v;
+                            spdlog::info("[ONNX-Plugin] JSON config: max_loaded_models={}",
+                                         cfg.maxLoadedModels);
+                        }
+                    }
+                    if (j.contains("hot_pool_size") && j["hot_pool_size"].is_number_integer()) {
+                        auto v = static_cast<std::size_t>(j["hot_pool_size"].get<int>());
+                        if (v >= 1 && v <= 64) {
+                            cfg.hotPoolSize = v;
+                            spdlog::info("[ONNX-Plugin] JSON config: hot_pool_size={}",
+                                         cfg.hotPoolSize);
                         }
                     }
                     // models_root - override the models directory

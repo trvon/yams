@@ -1032,7 +1032,7 @@ struct BenchFixture {
                 }
             }
 
-            spdlog::info(
+            spdlog::debug(
                 "Limited BEIR dataset to {} docs, {} queries, {} qrels (from {} docs, {} queries)",
                 dataset.documents.size(), dataset.queries.size(), dataset.qrels.size(),
                 fullDataset.documents.size(), fullDataset.queries.size());
@@ -1228,9 +1228,11 @@ struct BenchFixture {
                         vectorCount = it->second;
                     }
 
-                    // Check embed queue status (jobs waiting in channel)
+                    // Check embed queue status (jobs waiting in EmbeddingService queue)
+                    // NOTE: The key is "embed_svc_queued" in requestCounts (StatusResponse),
+                    // NOT "bus_embed_queued" which is in additionalStats (GetStatsResponse)
                     uint64_t embedQueued = 0;
-                    auto itQ = statusResult.value().requestCounts.find("bus_embed_queued");
+                    auto itQ = statusResult.value().requestCounts.find("embed_svc_queued");
                     if (itQ != statusResult.value().requestCounts.end()) {
                         embedQueued = itQ->second;
                     }
@@ -1295,8 +1297,12 @@ struct BenchFixture {
 
                     // If very stable (20s) with queue drained, we're done even if < corpusSize
                     // This handles cases where some docs have no content to embed
-                    if (stableCount >= 40 && queueDrained && vectorCount > 0) {
-                        double coverage = corpusSize > 0 ? (vectorCount * 100.0 / corpusSize) : 0;
+                    // IMPORTANT: Require minimum 90% coverage to prevent premature exit from
+                    // transient queue drain (e.g., between embedding batches)
+                    double coverage = corpusSize > 0 ? (vectorCount * 100.0 / corpusSize) : 0;
+                    constexpr double MIN_COVERAGE_THRESHOLD = 90.0;
+                    if (stableCount >= 40 && queueDrained && vectorCount > 0 &&
+                        coverage >= MIN_COVERAGE_THRESHOLD) {
                         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now() - embedStartTime)
                                            .count();
@@ -1315,7 +1321,7 @@ struct BenchFixture {
 
                     // If stable but queue NOT drained, warn about potential issues
                     if (stableCount >= 20 && !queueDrained && vectorCount > 0) {
-                        double coverage = corpusSize > 0 ? (vectorCount * 100.0 / corpusSize) : 0;
+                        // coverage already computed above
                         spdlog::warn("Embedding stalled at {:.1f}% but queue not drained "
                                      "(queue={}, in_flight={}). Continuing to wait...",
                                      coverage, embedQueued, embedInFlight);
