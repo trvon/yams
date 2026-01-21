@@ -250,8 +250,7 @@ jobs:
           echo "CCACHE_DIR=$HOME/.cache/ccache" >> $GITHUB_ENV
           echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
           echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
-            # Limit size to balance cache reuse vs storage
-          echo "CCACHE_MAXSIZE=500M" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=2G" >> $GITHUB_ENV
           ccache -p 2>/dev/null || true
           ccache -z 2>/dev/null || true
 

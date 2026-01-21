@@ -50,7 +50,7 @@ jobs:
       matrix:
         include:
           - suffix: linux-x86_64
-            runs_on: ubuntu-latest
+            runs_on: ubuntu-24.04
             conan_host_profile: ${{ inputs.conan_profile_linux }}
             conan_arch: x86_64
             needs_rosetta: false

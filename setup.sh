@@ -297,6 +297,18 @@ else
   fi
 fi
 
+# Wrap CC/CXX with ccache if available for faster incremental builds
+if command -v ccache >/dev/null 2>&1; then
+  echo "--- Enabling ccache for faster incremental builds ---"
+  # Only wrap if not already wrapped
+  if [[ "${CC:-}" != ccache* ]]; then
+    export CC="ccache ${CC:-cc}"
+    export CXX="ccache ${CXX:-c++}"
+  fi
+  # Show ccache stats if verbose
+  ccache -s 2>/dev/null | head -5 || true
+fi
+
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
   BUILD_DIR="build/profiling"
   CONAN_SUBDIR="build-profiling"
