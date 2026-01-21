@@ -642,10 +642,22 @@ private:
             spdlog::warn("[ONNX] Failed to enable CoreML provider: {}. Falling back to CPU.",
                          e.what());
         }
+#elif defined(YAMS_ONNX_MIGRAPHX_ENABLED)
+        // MIGraphX execution provider (Linux, AMD GPUs via ROCm)
+        try {
+            OrtMIGraphXProviderOptions migraphx_options{};
+            migraphx_options.device_id = 0;
+
+            sessionOptions_->AppendExecutionProvider_MIGraphX(migraphx_options);
+            spdlog::info("[ONNX] MIGraphX execution provider enabled (AMD GPU via ROCm)");
+        } catch (const Ort::Exception& e) {
+            spdlog::warn("[ONNX] Failed to enable MIGraphX provider: {}. Falling back to CPU.",
+                         e.what());
+        }
 #else
         // No GPU provider compiled in
         spdlog::warn("[ONNX] GPU requested but no GPU provider compiled. "
-                     "Rebuild with -Dwith_gpu=cuda|directml|coreml");
+                     "Rebuild with -Dwith_gpu=cuda|directml|coreml|migraphx");
 #endif
     }
 

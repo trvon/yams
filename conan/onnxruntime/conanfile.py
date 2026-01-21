@@ -16,7 +16,7 @@ class OnnxRuntimeConan(ConanFile):
     options = {
         "shared": [True, False],
         "fPIC": [True, False],
-        "with_gpu": [None, "cuda", "directml", "coreml"],
+        "with_gpu": [None, "cuda", "directml", "coreml", "migraphx"],
     }
     default_options = {
         "shared": False,
@@ -50,8 +50,10 @@ class OnnxRuntimeConan(ConanFile):
         elif gpu == "coreml":
             if os_name != "Macos":
                 raise Exception(f"CoreML is only supported on macOS, not {os_name}")
-            # Note: CoreML is included in standard macOS builds, no special download needed
-            self.output.info("CoreML is included in standard macOS ONNX Runtime builds")
+        elif gpu == "migraphx":
+            if os_name != "Linux":
+                raise Exception(f"MIGraphX is only supported on Linux, not {os_name}")
+            self.output.info("MIGraphX requires ROCm. Ensure ROCm is installed.")
     
     def _get_download_url(self):
         """Get platform-specific download URL"""
@@ -66,11 +68,23 @@ class OnnxRuntimeConan(ConanFile):
                 if gpu == "cuda":
                     # CUDA build for Linux x64
                     filename = f"onnxruntime-linux-x64-gpu-{self.version}.tgz"
+                elif gpu == "migraphx":
+                    raise Exception(
+                        "MIGraphX requires building ONNX Runtime from source with ROCm. "
+                        "Use -o onnxruntime/*:with_gpu=migraphx and ensure ROCm is installed. "
+                        "See: https://onnxruntime.ai/docs/execution-providers/MIGraphX-ExecutionProvider.html"
+                    )
                 else:
                     filename = f"onnxruntime-linux-x64-{self.version}.tgz"
             elif arch == "aarch64" or arch == "armv8":
                 if gpu == "cuda":
                     raise Exception("CUDA GPU build not available for Linux ARM64")
+                elif gpu == "migraphx":
+                    raise Exception(
+                        "MIGraphX requires building ONNX Runtime from source with ROCm. "
+                        "Use -o onnxruntime/*:with_gpu=migraphx and ensure ROCm is installed. "
+                        "See: https://onnxruntime.ai/docs/execution-providers/MIGraphX-ExecutionProvider.html"
+                    )
                 filename = f"onnxruntime-linux-aarch64-{self.version}.tgz"
             else:
                 raise Exception(f"Unsupported arch: {arch}")
@@ -226,6 +240,10 @@ Cflags: -I${{includedir}}
         elif gpu == "coreml":
             # CoreML is built into the main library on macOS
             self.cpp_info.defines = ["YAMS_ONNX_COREML_ENABLED=1"]
+        elif gpu == "migraphx":
+            # MIGraphX provider library (from ROCm builds)
+            self.cpp_info.libs.append("onnxruntime_providers_migraphx")
+            self.cpp_info.defines = ["YAMS_ONNX_MIGRAPHX_ENABLED=1"]
 
         # Set include dirs
         self.cpp_info.includedirs = ["include"]

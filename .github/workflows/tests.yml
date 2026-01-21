@@ -352,27 +352,7 @@ jobs:
           YAMS_CONAN_ARCH: ${{ matrix.conan_arch }}
           YAMS_EXTRA_MESON_FLAGS: ${{ matrix.extra_meson_flags }}
         run: |
-          # Debug: Show VS environment
-          Write-Host "=== VS Environment Debug ==="
-          Write-Host "VSINSTALLDIR: $($env:VSINSTALLDIR)"
-          Write-Host "VCToolsVersion: $($env:VCToolsVersion)"
-          Write-Host "VCINSTALLDIR: $($env:VCINSTALLDIR)"
-          Write-Host "CL.exe version: $(cl.exe 2>&1 | Select-First 1)"
-          Write-Host "================================"
-
-          # Run with error capturing
-          $ErrorActionPreference = "Continue"
-          .\setup.ps1 Debug 2>&1 | Tee-Object -FilePath "setup-output.txt"
-          $exitCode = $LASTEXITCODE
-          Write-Host "Setup exited with: $exitCode"
-
-          # Upload setup output as artifact on failure
-          if ($exitCode -ne 0 -and (Test-Path "setup-output.txt")) {
-            Write-Host "Setup failed, uploading debug artifact..."
-            Write-Host "Setup output:"
-            Get-Content "setup-output.txt" | Select -Last 100
-          }
-          exit $exitCode
+          .\setup.ps1 Debug
 
       # - name: Check mobile ABI surface
       #   shell: bash

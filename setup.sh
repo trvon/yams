@@ -17,8 +17,9 @@
 #   YAMS_ENABLE_MODULES      - Enable C++20 modules (true/false, auto-detected if not set)
 #   YAMS_LIBCXX_HARDENING    - libc++ hardening mode (none, fast, extensive, debug)
 #   YAMS_INSTALL_PREFIX      - Installation prefix (default: /usr/local or Homebrew)
-#   YAMS_ONNX_GPU            - GPU provider for ONNX (auto|cuda|coreml|none, default: auto)
-#                              auto: macOS=coreml, Linux+NVIDIA=cuda, otherwise=none
+#   YAMS_ONNX_GPU            - GPU provider for ONNX (auto|cuda|coreml|migraphx|none, default: auto)
+#                              auto: macOS=coreml, Linux+NVIDIA=cuda, Linux+ROCm=migraphx, otherwise=none
+#                              migraphx requires ROCm and building ONNX Runtime from source
 #
 # The script prefers Clang when available, falling back to GCC otherwise. It
 # ensures Conan is given a concrete C++ standard so dependencies resolve cleanly
@@ -375,7 +376,7 @@ if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
   CONAN_ARGS+=(-o "yams/*:enable_onnx=False")
 else
   # Auto-detect GPU for ONNX acceleration
-  # Override with YAMS_ONNX_GPU=cuda|coreml|none
+  # Override with YAMS_ONNX_GPU=cuda|coreml|migraphx|none
   ONNX_GPU="${YAMS_ONNX_GPU:-auto}"
   if [[ "${ONNX_GPU}" == "auto" ]]; then
     if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -401,6 +402,12 @@ else
         echo "NVIDIA GPU detected but CUDA toolkit missing: using CPU-only ONNX Runtime"
         echo "  Install CUDA toolkit for GPU acceleration: https://developer.nvidia.com/cuda-downloads"
       fi
+    elif [[ -d /opt/rocm ]] || command -v rocm-smi >/dev/null 2>&1; then
+      # ROCm detected - MIGraphX requires building ONNX Runtime from source
+      ONNX_GPU="migraphx"
+      echo "ROCm detected: MIGraphX will be used for AMD GPU acceleration"
+      echo "  Note: ONNX Runtime with MIGraphX requires building from source with ROCm"
+      echo "  See: https://onnxruntime.ai/docs/execution-providers/MIGraphX-ExecutionProvider.html"
     else
       ONNX_GPU="none"
       echo "No GPU detected: using CPU-only ONNX Runtime"
