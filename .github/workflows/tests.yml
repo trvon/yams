@@ -5,8 +5,13 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main] # Or your default branch
+
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   warm:
@@ -200,7 +205,6 @@ jobs:
           fi
 
           if [ "$RUNNER_OS" = "macOS" ]; then
-            brew update
             brew install pipx || true
             $PYTHON_CMD -m pipx ensurepath || true
             pipx install --python $PYTHON_CMD conan || pipx install conan
@@ -236,8 +240,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends liburing-dev libarchive-dev libtag1-dev ccache || true
+          sudo apt-get install -y --no-install-recommends liburing-dev libarchive-dev libtag1-dev ccache || true
           echo "Optional packages installed (best-effort)."
 
       - name: Setup ccache env
@@ -288,20 +291,6 @@ jobs:
             conan cache clean --locks --temp 2>/dev/null || true
             echo "Conan cache locks/temp cleaned"
           fi
-
-      - name: Install build tools (macOS)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          brew update || true
-          brew install pkg-config cmake ninja meson boost google-benchmark || true
-          command -v meson >/dev/null 2>&1 || {
-            python3 -m pip install --user --upgrade meson || pip3 install --user --upgrade meson || true
-            [ -d "$HOME/.local/bin" ] && echo "$HOME/.local/bin" >> "$GITHUB_PATH" || true
-          }
-          echo "meson version: $(meson --version || echo 'missing')"
-          echo "ninja version: $(ninja --version || echo 'missing')"
 
       - name: Tune Conan client (parallel downloads)
         shell: bash
@@ -363,7 +352,27 @@ jobs:
           YAMS_CONAN_ARCH: ${{ matrix.conan_arch }}
           YAMS_EXTRA_MESON_FLAGS: ${{ matrix.extra_meson_flags }}
         run: |
-          .\setup.ps1 Debug
+          # Debug: Show VS environment
+          Write-Host "=== VS Environment Debug ==="
+          Write-Host "VSINSTALLDIR: $($env:VSINSTALLDIR)"
+          Write-Host "VCToolsVersion: $($env:VCToolsVersion)"
+          Write-Host "VCINSTALLDIR: $($env:VCINSTALLDIR)"
+          Write-Host "CL.exe version: $(cl.exe 2>&1 | Select-First 1)"
+          Write-Host "================================"
+
+          # Run with error capturing
+          $ErrorActionPreference = "Continue"
+          .\setup.ps1 Debug 2>&1 | Tee-Object -FilePath "setup-output.txt"
+          $exitCode = $LASTEXITCODE
+          Write-Host "Setup exited with: $exitCode"
+
+          # Upload setup output as artifact on failure
+          if ($exitCode -ne 0 -and (Test-Path "setup-output.txt")) {
+            Write-Host "Setup failed, uploading debug artifact..."
+            Write-Host "Setup output:"
+            Get-Content "setup-output.txt" | Select -Last 100
+          }
+          exit $exitCode
 
       # - name: Check mobile ABI surface
       #   shell: bash
@@ -451,7 +460,8 @@ jobs:
             ${{ env.BUILD_DIR }}/meson-logs/
             ${{ env.BUILD_DIR }}/meson-info/
             ${{ env.BUILD_DIR }}/meson-logs/testlog.txt
-            ${{ env.BUILD_DIR }}/build-debug/conan/**/*.log
+            ${{ env.BUILD_DIR }}/**/conan-install/**/*.log
+            ${{ env.BUILD_DIR }}/**/conan*.log
           if-no-files-found: ignore
           retention-days: 14
 
