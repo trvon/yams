@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <filesystem>
 
+#include <yams/compat/unistd.h>
+
 namespace fs = std::filesystem;
 
 namespace yams::daemon {
