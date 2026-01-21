@@ -7,6 +7,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/error_hints.h>
+#include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -2181,10 +2182,7 @@ private:
             config.dataDir = cli_->getDataPath().string();
 
         auto result = daemon::DaemonClient::startDaemon(config);
-        if (!result) {
-            spdlog::error("Failed to start daemon: {}", result.error().message);
-            std::exit(1);
-        }
+        exitOnError(result, "Failed to start daemon");
 
         bool running = false;
         for (int i = 0; i < 20; ++i) {

@@ -9,6 +9,8 @@
 #include <boost/asio/detached.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/plugin_helpers.h>
+#include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/core/types.h>
@@ -18,44 +20,6 @@
 #include <yams/plugins/plugin_repo_client.hpp>
 
 namespace yams::cli {
-
-namespace {
-using StatusResult = yams::Result<yams::daemon::StatusResponse>;
-
-void print_plugin_not_ready_hint(const std::optional<yams::daemon::StatusResponse>& statusOpt) {
-    std::cout << "Plugin subsystem is not ready yet; the daemon is still initializing plugins."
-              << '\n';
-    if (statusOpt) {
-        const auto& st = *statusOpt;
-        auto it = st.readinessStates.find("plugins");
-        if (it != st.readinessStates.end()) {
-            std::cout << "  readiness.plugins=" << (it->second ? "true" : "false") << '\n';
-        }
-        if (!st.lifecycleState.empty()) {
-            std::cout << "  lifecycle=" << st.lifecycleState << '\n';
-        }
-        if (!st.lastError.empty()) {
-            std::cout << "  last_error=" << st.lastError << '\n';
-        }
-    }
-    std::cout << "Inspect 'yams daemon status -d' for detailed plugin state.\n";
-}
-
-template <typename FetchStatusFn>
-bool handle_plugin_rpc_error(const Error& err, const FetchStatusFn& fetchStatus,
-                             const std::string& actionLabel) {
-    if (err.code == ErrorCode::InvalidState) {
-        std::optional<yams::daemon::StatusResponse> statusOpt;
-        auto status = fetchStatus();
-        if (status)
-            statusOpt = status.value();
-        print_plugin_not_ready_hint(statusOpt);
-        return false;
-    }
-    std::cout << actionLabel << " failed: " << err.message << '\n';
-    return false;
-}
-} // namespace
 
 class PluginCommand : public ICommand {
 public:
@@ -723,11 +687,11 @@ void PluginCommand::loadPlugin(const std::string& arg, const std::string& cfgJso
         auto res = yams::cli::run_result<PluginLoadResponse>(client.call(req),
                                                              std::chrono::milliseconds(20000));
         if (!res) {
-            auto statusFetcher = [&]() -> StatusResult {
+            auto statusFetcher = [&]() -> plugin::StatusResult {
                 return yams::cli::run_result<yams::daemon::StatusResponse>(
                     client.status(), std::chrono::milliseconds(5000));
             };
-            if (!handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin load"))
+            if (!plugin::handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin load"))
                 return;
             return;
         }
@@ -761,11 +725,11 @@ void PluginCommand::unloadPlugin(const std::string& name) {
         auto res = yams::cli::run_result<SuccessResponse>(client.call(req),
                                                           std::chrono::milliseconds(10000));
         if (!res) {
-            auto statusFetcher = [&]() -> StatusResult {
+            auto statusFetcher = [&]() -> plugin::StatusResult {
                 return yams::cli::run_result<yams::daemon::StatusResponse>(
                     client.status(), std::chrono::milliseconds(5000));
             };
-            if (!handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin unload"))
+            if (!plugin::handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin unload"))
                 return;
             return;
         }
@@ -794,11 +758,11 @@ void PluginCommand::trustList() {
         auto res = yams::cli::run_result<PluginTrustListResponse>(client.call(req),
                                                                   std::chrono::milliseconds(15000));
         if (!res) {
-            auto statusFetcher = [&]() -> StatusResult {
+            auto statusFetcher = [&]() -> plugin::StatusResult {
                 return yams::cli::run_result<yams::daemon::StatusResponse>(
                     client.status(), std::chrono::milliseconds(5000));
             };
-            if (!handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin trust list"))
+            if (!plugin::handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin trust list"))
                 return;
             return;
         }
@@ -831,11 +795,11 @@ void PluginCommand::trustAdd(const std::string& path) {
         auto res = yams::cli::run_result<SuccessResponse>(client.call(req),
                                                           std::chrono::milliseconds(15000));
         if (!res) {
-            auto statusFetcher = [&]() -> StatusResult {
+            auto statusFetcher = [&]() -> plugin::StatusResult {
                 return yams::cli::run_result<yams::daemon::StatusResponse>(
                     client.status(), std::chrono::milliseconds(5000));
             };
-            if (!handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin trust add"))
+            if (!plugin::handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin trust add"))
                 return;
             return;
         }
@@ -866,11 +830,11 @@ void PluginCommand::trustRemove(const std::string& path) {
         auto res = yams::cli::run_result<SuccessResponse>(client.call(req),
                                                           std::chrono::milliseconds(15000));
         if (!res) {
-            auto statusFetcher = [&]() -> StatusResult {
+            auto statusFetcher = [&]() -> plugin::StatusResult {
                 return yams::cli::run_result<yams::daemon::StatusResponse>(
                     client.status(), std::chrono::milliseconds(5000));
             };
-            if (!handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin trust remove"))
+            if (!plugin::handle_plugin_rpc_error(res.error(), statusFetcher, "Plugin trust remove"))
                 return;
             return;
         }
@@ -915,10 +879,7 @@ void PluginCommand::installPlugin() {
         };
 
         auto result = installer->install(installSrc_, options);
-        if (!result) {
-            std::cout << "\nInstallation failed: " << result.error().message << "\n";
-            return;
-        }
+        returnOnError(result, "Installation");
 
         const auto& r = result.value();
         std::cout << "\nInstalled: " << r.pluginName << " v" << r.version << "\n";
@@ -947,10 +908,7 @@ void PluginCommand::uninstallPlugin() {
             makePluginInstaller(std::shared_ptr<IPluginRepoClient>(repoClient.release()));
 
         auto result = installer->uninstall(uninstallName_, !uninstallKeepTrust_);
-        if (!result) {
-            std::cout << "Uninstall failed: " << result.error().message << "\n";
-            return;
-        }
+        returnOnError(result, "Uninstall");
 
         std::cout << "Uninstalled: " << uninstallName_ << "\n";
     } catch (const std::exception& e) {
@@ -1018,10 +976,7 @@ void PluginCommand::repoListPlugins() {
     try {
         auto repoClient = makePluginRepoClient();
         auto result = repoClient->list(repoFilter_);
-        if (!result) {
-            std::cout << "Failed to list plugins: " << result.error().message << "\n";
-            return;
-        }
+        returnOnError(result, "Failed to list plugins");
 
         const auto& plugins = result.value();
         if (plugins.empty()) {
@@ -1064,10 +1019,7 @@ void PluginCommand::repoShowInfo() {
         std::optional<std::string> version =
             repoVersion_.empty() ? std::nullopt : std::make_optional(repoVersion_);
         auto result = repoClient->get(repoPluginName_, version);
-        if (!result) {
-            std::cout << "Failed to get plugin info: " << result.error().message << "\n";
-            return;
-        }
+        returnOnError(result, "Failed to get plugin info");
 
         const auto& info = result.value();
         std::cout << "Plugin: " << info.name << "\n";
@@ -1113,10 +1065,7 @@ void PluginCommand::repoShowVersions() {
     try {
         auto repoClient = makePluginRepoClient();
         auto result = repoClient->versions(repoPluginName_);
-        if (!result) {
-            std::cout << "Failed to get versions: " << result.error().message << "\n";
-            return;
-        }
+        returnOnError(result, "Failed to get versions");
 
         const auto& versions = result.value();
         if (versions.empty()) {

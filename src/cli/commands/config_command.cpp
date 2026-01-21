@@ -9,6 +9,7 @@
 #include <set>
 #include <sstream>
 #include <yams/cli/command.h>
+#include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
@@ -34,59 +35,29 @@ public:
         // Get subcommand
         auto* getCmd = cmd->add_subcommand("get", "Get a configuration value");
         getCmd->add_option("key", key_, "Configuration key to retrieve")->required();
-        getCmd->callback([this]() {
-            auto result = executeGet();
-            if (!result) {
-                spdlog::error("Config get failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        getCmd->callback([this]() { exitOnError(executeGet(), "Config get"); });
 
         // Set subcommand
         auto* setCmd = cmd->add_subcommand("set", "Set a configuration value");
         setCmd->add_option("key", key_, "Configuration key")->required();
         setCmd->add_option("value", value_, "Configuration value")->required();
-        setCmd->callback([this]() {
-            auto result = executeSet();
-            if (!result) {
-                spdlog::error("Config set failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        setCmd->callback([this]() { exitOnError(executeSet(), "Config set"); });
 
         // List subcommand
         auto* listCmd = cmd->add_subcommand("list", "List all configuration settings");
-        listCmd->callback([this]() {
-            auto result = executeList();
-            if (!result) {
-                spdlog::error("Config list failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        listCmd->callback([this]() { exitOnError(executeList(), "Config list"); });
 
         // Validate subcommand
         auto* validateCmd = cmd->add_subcommand("validate", "Validate configuration file");
         validateCmd->add_option("--config-path", configPath_, "Path to config file");
-        validateCmd->callback([this]() {
-            auto result = executeValidate();
-            if (!result) {
-                spdlog::error("Config validate failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        validateCmd->callback([this]() { exitOnError(executeValidate(), "Config validate"); });
 
         // Export subcommand
         auto* exportCmd = cmd->add_subcommand("export", "Export configuration");
         exportCmd->add_option("--format", format_, "Export format (toml, json)")
             ->default_val("toml")
             ->check(CLI::IsMember({"toml", "json"}));
-        exportCmd->callback([this]() {
-            auto result = executeExport();
-            if (!result) {
-                spdlog::error("Config export failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        exportCmd->callback([this]() { exitOnError(executeExport(), "Config export"); });
 
         // Embeddings subcommand with various actions
         auto* embeddingsCmd = cmd->add_subcommand("embeddings", "Manage embedding configuration");
@@ -95,60 +66,34 @@ public:
         // Enable auto-generation
         auto* enableCmd =
             embeddingsCmd->add_subcommand("enable", "Enable automatic embedding generation");
-        enableCmd->callback([this]() {
-            auto result = executeEmbeddingsEnable();
-            if (!result) {
-                spdlog::error("Enable embeddings failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        enableCmd->callback(
+            [this]() { exitOnError(executeEmbeddingsEnable(), "Enable embeddings"); });
 
         // Disable auto-generation
         auto* disableCmd =
             embeddingsCmd->add_subcommand("disable", "Disable automatic embedding generation");
-        disableCmd->callback([this]() {
-            auto result = executeEmbeddingsDisable();
-            if (!result) {
-                spdlog::error("Disable embeddings failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        disableCmd->callback(
+            [this]() { exitOnError(executeEmbeddingsDisable(), "Disable embeddings"); });
 
         // Show status
         auto* statusCmd =
             embeddingsCmd->add_subcommand("status", "Show embedding configuration status");
-        statusCmd->callback([this]() {
-            auto result = executeEmbeddingsStatus();
-            if (!result) {
-                spdlog::error("Embeddings status failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        statusCmd->callback(
+            [this]() { exitOnError(executeEmbeddingsStatus(), "Embeddings status"); });
 
         // Set preferred model
         auto* modelCmd = embeddingsCmd->add_subcommand("model", "Set preferred embedding model");
         modelCmd->add_option("model_name", embeddingModel_, "Model name (e.g., all-MiniLM-L6-v2)")
             ->required();
-        modelCmd->callback([this]() {
-            auto result = executeEmbeddingsModel();
-            if (!result) {
-                spdlog::error("Set embeddings model failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        modelCmd->callback(
+            [this]() { exitOnError(executeEmbeddingsModel(), "Set embeddings model"); });
 
         // Tune performance
         auto* tuneCmd = embeddingsCmd->add_subcommand("tune", "Apply performance preset");
         tuneCmd->add_option("preset", embeddingPreset_, "Preset (performance, quality, balanced)")
             ->required()
             ->check(CLI::IsMember({"performance", "quality", "balanced"}));
-        tuneCmd->callback([this]() {
-            auto result = executeEmbeddingsTune();
-            if (!result) {
-                spdlog::error("Tune embeddings failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        tuneCmd->callback([this]() { exitOnError(executeEmbeddingsTune(), "Tune embeddings"); });
 
         // Search subcommands (path-tree traversal controls)
         auto* searchCmd = cmd->add_subcommand("search", "Manage search configuration");
@@ -207,13 +152,7 @@ public:
         auto* migrateCmd = cmd->add_subcommand("migrate", "Migrate configuration to v2");
         migrateCmd->add_option("--config-path", configPath_, "Path to config file");
         migrateCmd->add_flag("--no-backup", noBackup_, "Skip creating backup");
-        migrateCmd->callback([this]() {
-            auto result = executeMigrate();
-            if (!result) {
-                spdlog::error("Config migration failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        migrateCmd->callback([this]() { exitOnError(executeMigrate(), "Config migration"); });
 
         // Update subcommand (add new v2 keys additively)
         auto* updateCmd = cmd->add_subcommand(
@@ -221,13 +160,7 @@ public:
         updateCmd->add_option("--config-path", configPath_, "Path to config file");
         updateCmd->add_flag("--no-backup", noBackup_, "Skip creating backup");
         updateCmd->add_flag("--dry-run", dryRun_, "Show changes without writing");
-        updateCmd->callback([this]() {
-            auto result = executeUpdate();
-            if (!result) {
-                spdlog::error("Config update failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        updateCmd->callback([this]() { exitOnError(executeUpdate(), "Config update"); });
 
         // Grammar subcommands for tree-sitter symbol extraction
         auto* grammarCmd =
@@ -236,13 +169,7 @@ public:
 
         auto* grammarListCmd =
             grammarCmd->add_subcommand("list", "List available and installed grammars");
-        grammarListCmd->callback([this]() {
-            auto result = executeGrammarList();
-            if (!result) {
-                spdlog::error("Grammar list failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        grammarListCmd->callback([this]() { exitOnError(executeGrammarList(), "Grammar list"); });
 
         auto* grammarDownloadCmd =
             grammarCmd->add_subcommand("download", "Download tree-sitter grammar");
@@ -250,32 +177,16 @@ public:
             ->add_option("language", grammarLanguage_,
                          "Language (cpp, python, rust, go, javascript, typescript, java)")
             ->required();
-        grammarDownloadCmd->callback([this]() {
-            auto result = executeGrammarDownload();
-            if (!result) {
-                spdlog::error("Grammar download failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        grammarDownloadCmd->callback(
+            [this]() { exitOnError(executeGrammarDownload(), "Grammar download"); });
 
         auto* grammarPathCmd = grammarCmd->add_subcommand("path", "Show grammar installation path");
-        grammarPathCmd->callback([this]() {
-            auto result = executeGrammarPath();
-            if (!result) {
-                spdlog::error("Grammar path failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        grammarPathCmd->callback([this]() { exitOnError(executeGrammarPath(), "Grammar path"); });
 
         auto* grammarAutoEnableCmd =
             grammarCmd->add_subcommand("auto-enable", "Enable automatic grammar downloads");
-        grammarAutoEnableCmd->callback([this]() {
-            auto result = executeGrammarAutoEnable();
-            if (!result) {
-                spdlog::error("Enable auto-download failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        grammarAutoEnableCmd->callback(
+            [this]() { exitOnError(executeGrammarAutoEnable(), "Enable auto-download"); });
 
         auto* grammarAutoDisableCmd =
             grammarCmd->add_subcommand("auto-disable", "Disable automatic grammar downloads");
@@ -307,23 +218,13 @@ public:
             ->add_option("preset", tuningProfile_, "Preset (efficient|balanced|aggressive)")
             ->required()
             ->check(CLI::IsMember({"efficient", "balanced", "aggressive"}));
-        tuningProfileCmd->callback([this]() {
-            auto result = executeTuningProfile();
-            if (!result) {
-                spdlog::error("Set tuning profile failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        tuningProfileCmd->callback(
+            [this]() { exitOnError(executeTuningProfile(), "Set tuning profile"); });
 
         auto* tuningStatusCmd =
             tuningCmd->add_subcommand("status", "Show current tuning configuration");
-        tuningStatusCmd->callback([this]() {
-            auto result = executeTuningStatus();
-            if (!result) {
-                spdlog::error("Tuning status failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        tuningStatusCmd->callback(
+            [this]() { exitOnError(executeTuningStatus(), "Tuning status"); });
 
         // Storage subcommand
         auto* storageCmd = cmd->add_subcommand("storage", "Configure storage settings");
@@ -335,13 +236,7 @@ public:
         storageCmd->add_option("--s3-secret-key", s3SecretKey_, "S3 secret key");
         storageCmd->add_flag("--s3-use-path-style", s3UsePathStyle_,
                              "Enable S3 path style addressing");
-        storageCmd->callback([this]() {
-            auto result = executeStorage();
-            if (!result) {
-                spdlog::error("Config storage failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        storageCmd->callback([this]() { exitOnError(executeStorage(), "Config storage"); });
     }
 
     Result<void> execute() override {

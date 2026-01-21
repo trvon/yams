@@ -4,6 +4,7 @@
 #include <spdlog/spdlog.h>
 #include <unordered_set>
 #include <yams/app/services/graph_query_service.hpp>
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -103,49 +104,13 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
 
     const auto& svcResp = result.value();
 
-    GraphQueryResponse resp;
-    resp.kgAvailable = svcResp.kgAvailable;
-    resp.warning = svcResp.warning.value_or("");
-    resp.totalNodesFound = svcResp.totalNodesFound;
-    resp.totalEdgesTraversed = svcResp.totalEdgesTraversed;
-    resp.truncated = svcResp.truncated;
-    resp.maxDepthReached = svcResp.maxDepthReached;
-
-    resp.originNode.nodeId = svcResp.originNode.node.nodeId;
-    resp.originNode.nodeKey = svcResp.originNode.node.nodeKey;
-    resp.originNode.label = svcResp.originNode.node.label.value_or("");
-    resp.originNode.type = svcResp.originNode.node.type.value_or("");
-    resp.originNode.distance = 0;
+    GraphQueryResponse resp = dispatch::GraphQueryResponseMapper::fromServiceResponse(svcResp);
 
     resp.connectedNodes.reserve(svcResp.allConnectedNodes.size());
     std::unordered_set<int64_t> seenEdges;
     for (const auto& cn : svcResp.allConnectedNodes) {
-        GraphNode graphNode;
-        graphNode.nodeId = cn.nodeMetadata.node.nodeId;
-        graphNode.nodeKey = cn.nodeMetadata.node.nodeKey;
-        graphNode.label = cn.nodeMetadata.node.label.value_or("");
-        graphNode.type = cn.nodeMetadata.node.type.value_or("");
-        graphNode.documentHash = cn.nodeMetadata.documentHash.value_or("");
-        graphNode.distance = cn.distance;
-        resp.connectedNodes.push_back(std::move(graphNode));
-
-        for (const auto& edge : cn.connectingEdges) {
-            if (edge.edgeId > 0) {
-                if (!seenEdges.insert(edge.edgeId).second) {
-                    continue;
-                }
-            }
-            GraphEdge graphEdge;
-            graphEdge.edgeId = edge.edgeId;
-            graphEdge.srcNodeId = edge.srcNodeId;
-            graphEdge.dstNodeId = edge.dstNodeId;
-            graphEdge.relation = edge.relation;
-            graphEdge.weight = edge.weight;
-            if (edge.properties.has_value()) {
-                graphEdge.properties = edge.properties.value();
-            }
-            resp.edges.push_back(std::move(graphEdge));
-        }
+        dispatch::GraphQueryResponseMapper::mapConnectedNodesAndEdges(cn, resp.connectedNodes,
+                                                                      resp.edges, seenEdges);
     }
 
     spdlog::debug("GraphQuery: returning {} connected nodes, totalFound={}, truncated={}",
@@ -181,32 +146,13 @@ RequestDispatcher::handleGraphQueryListByType(const GraphQueryRequest& req,
     }
     resp.totalNodesFound = static_cast<uint64_t>(totalCount.value());
     resp.truncated = (nodesResult.value().size() >= req.limit);
-    resp.maxDepthReached = 0; // No traversal in listByType mode
+    resp.maxDepthReached = 0;
 
-    // No origin node in listByType mode - use empty placeholder
-    resp.originNode.nodeId = -1;
-    resp.originNode.nodeKey = "";
-    resp.originNode.label = "listByType:" + req.nodeType;
-    resp.originNode.type = "query";
-    resp.originNode.distance = 0;
+    dispatch::GraphQueryResponseMapper::setOriginNode(resp, -1, "", "listByType:" + req.nodeType,
+                                                      "query");
 
-    // Convert KGNodes to GraphNodes
-    resp.connectedNodes.reserve(nodesResult.value().size());
-    for (const auto& node : nodesResult.value()) {
-        GraphNode graphNode;
-        graphNode.nodeId = node.id;
-        graphNode.nodeKey = node.nodeKey;
-        graphNode.label = node.label.value_or("");
-        graphNode.type = node.type.value_or("");
-        graphNode.distance = 0;
-
-        // Include properties if requested
-        if (req.includeNodeProperties && node.properties) {
-            graphNode.properties = node.properties.value();
-        }
-
-        resp.connectedNodes.push_back(std::move(graphNode));
-    }
+    resp.connectedNodes =
+        dispatch::KGNodeMapper::mapKGNodes(nodesResult.value(), req.includeNodeProperties);
 
     spdlog::debug("GraphQuery listByType: returning {} nodes of type '{}'",
                   resp.connectedNodes.size(), req.nodeType);
@@ -235,28 +181,11 @@ RequestDispatcher::handleGraphQueryIsolatedMode(const GraphQueryRequest& req,
     resp.truncated = (nodesResult.value().size() >= req.limit);
     resp.maxDepthReached = 0;
 
-    // No origin node in isolated mode
-    resp.originNode.nodeId = -1;
-    resp.originNode.nodeKey = "";
-    resp.originNode.label = "isolated:" + nodeType + ":" + relation;
-    resp.originNode.type = "query";
-    resp.originNode.distance = 0;
+    dispatch::GraphQueryResponseMapper::setOriginNode(
+        resp, -1, "", "isolated:" + nodeType + ":" + relation, "query");
 
-    resp.connectedNodes.reserve(nodesResult.value().size());
-    for (const auto& node : nodesResult.value()) {
-        GraphNode graphNode;
-        graphNode.nodeId = node.id;
-        graphNode.nodeKey = node.nodeKey;
-        graphNode.label = node.label.value_or("");
-        graphNode.type = node.type.value_or("");
-        graphNode.distance = 0;
-
-        if (req.includeNodeProperties && node.properties) {
-            graphNode.properties = node.properties.value();
-        }
-
-        resp.connectedNodes.push_back(std::move(graphNode));
-    }
+    resp.connectedNodes =
+        dispatch::KGNodeMapper::mapKGNodes(nodesResult.value(), req.includeNodeProperties);
 
     spdlog::debug("GraphQuery isolatedMode: found {} isolated {} nodes (no incoming {} edges)",
                   resp.connectedNodes.size(), nodeType, relation);

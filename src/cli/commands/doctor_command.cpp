@@ -7,6 +7,7 @@
 #include <yams/cli/doctor_checks.h>
 #include <yams/cli/plugin_util.h>
 #include <yams/cli/recommendation_util.h>
+#include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
@@ -2003,10 +2004,7 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     vsub->add_flag("--graph", validateGraph_, "Validate knowledge graph integrity");
     vsub->callback([this]() {
         if (validateGraph_) {
-            auto result = validateGraph();
-            if (!result) {
-                std::cerr << "Validation failed: " << result.error().message << "\n";
-            }
+            returnOnError(validateGraph(), "Validation");
         }
     });
 

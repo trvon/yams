@@ -18,6 +18,7 @@
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/recommendation_util.h>
+#include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
@@ -54,13 +55,7 @@ public:
             "--corpus", corpusStats_,
             "Show corpus statistics for search tuning (doc counts, content type ratios, coverage)");
 
-        cmd->callback([this]() {
-            auto result = execute();
-            if (!result) {
-                spdlog::error("Status command failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        cmd->callback([this]() { exitOnError(execute(), "Status command"); });
 
         // Provide a 'stats' alias that maps to the same implementation
         // Mirrors flags and behavior to ease migration from the old stats command
@@ -72,13 +67,7 @@ public:
         stats->add_flag(
             "--corpus", corpusStats_,
             "Show corpus statistics for search tuning (doc counts, content type ratios, coverage)");
-        stats->callback([this]() {
-            auto result = execute();
-            if (!result) {
-                spdlog::error("Stats (alias) failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        stats->callback([this]() { exitOnError(execute(), "Stats (alias)"); });
     }
 
     Result<void> execute() override {

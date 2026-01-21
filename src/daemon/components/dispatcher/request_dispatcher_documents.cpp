@@ -8,6 +8,7 @@
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -97,79 +98,11 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
             const auto& serviceResp = result.value();
             GetResponse response;
             if (serviceResp.document.has_value()) {
-                const auto& doc = serviceResp.document.value();
-                response.hash = doc.hash;
-                response.path = doc.path;
-                response.name = doc.name;
-                response.fileName = doc.fileName;
-                response.size = doc.size;
-                response.mimeType = doc.mimeType;
-                response.fileType = doc.fileType;
-                response.created = doc.created;
-                response.modified = doc.modified;
-                response.indexed = doc.indexed;
-                // When extract=true, prefer extractedText over raw content for display
-                if (req.extract && doc.extractedText.has_value() &&
-                    !doc.extractedText.value().empty()) {
-                    response.content = doc.extractedText.value();
-                    response.hasContent = true;
-                } else if (doc.content.has_value()) {
-                    response.content = doc.content.value();
-                    response.hasContent = true;
-                } else {
-                    response.content.clear();
-                    response.hasContent = false;
-                }
-                response.compressed = doc.compressed;
-                response.compressionAlgorithm = doc.compressionAlgorithm;
-                response.compressionLevel = doc.compressionLevel;
-                response.uncompressedSize = doc.uncompressedSize;
-                response.compressedCrc32 = doc.compressedCrc32;
-                response.uncompressedCrc32 = doc.uncompressedCrc32;
-                response.compressionHeader = doc.compressionHeader;
-                response.centroidWeight = doc.centroidWeight;
-                response.centroidDims = doc.centroidDims;
-                response.centroidPreview = doc.centroidPreview;
-                for (const auto& [key, value] : doc.metadata) {
-                    response.metadata[key] = value;
-                }
+                response = yams::daemon::dispatch::GetResponseMapper::fromServiceDoc(
+                    serviceResp.document.value(), req.extract);
             } else if (!serviceResp.documents.empty()) {
-                const auto& doc = serviceResp.documents[0];
-                response.hash = doc.hash;
-                response.path = doc.path;
-                response.name = doc.name;
-                response.fileName = doc.fileName;
-                response.size = doc.size;
-                response.mimeType = doc.mimeType;
-                response.fileType = doc.fileType;
-                response.created = doc.created;
-                response.modified = doc.modified;
-                response.indexed = doc.indexed;
-                // When extract=true, prefer extractedText over raw content for display
-                if (req.extract && doc.extractedText.has_value() &&
-                    !doc.extractedText.value().empty()) {
-                    response.content = doc.extractedText.value();
-                    response.hasContent = true;
-                } else if (doc.content.has_value()) {
-                    response.content = doc.content.value();
-                    response.hasContent = true;
-                } else {
-                    response.content.clear();
-                    response.hasContent = false;
-                }
-                response.compressed = doc.compressed;
-                response.compressionAlgorithm = doc.compressionAlgorithm;
-                response.compressionLevel = doc.compressionLevel;
-                response.uncompressedSize = doc.uncompressedSize;
-                response.compressedCrc32 = doc.compressedCrc32;
-                response.uncompressedCrc32 = doc.uncompressedCrc32;
-                response.compressionHeader = doc.compressionHeader;
-                response.centroidWeight = doc.centroidWeight;
-                response.centroidDims = doc.centroidDims;
-                response.centroidPreview = doc.centroidPreview;
-                for (const auto& [key, value] : doc.metadata) {
-                    response.metadata[key] = value;
-                }
+                response = yams::daemon::dispatch::GetResponseMapper::fromServiceDoc(
+                    serviceResp.documents[0], req.extract);
             } else {
                 co_return ErrorResponse{ErrorCode::NotFound,
                                         "No documents found matching criteria"};
@@ -359,43 +292,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
 
         const auto& serviceResp = result.value();
 
-        ListResponse response;
-        response.items.reserve(serviceResp.documents.size());
+        ListResponse response = yams::daemon::dispatch::makeListResponse(
+            serviceResp.totalFound,
+            yams::daemon::dispatch::ListEntryMapper::mapToListEntries(serviceResp.documents));
 
-        for (const auto& doc : serviceResp.documents) {
-            ListEntry item;
-            item.hash = doc.hash;
-            item.path = doc.path;
-            item.name = doc.name;
-            item.fileName = doc.fileName;
-            item.size = doc.size;
-            item.mimeType = doc.mimeType;
-            item.fileType = doc.fileType;
-            item.extension = doc.extension;
-            item.created = doc.created;
-            item.modified = doc.modified;
-            item.indexed = doc.indexed;
-            if (doc.snippet) {
-                item.snippet = doc.snippet.value();
-            }
-            item.tags = doc.tags;
-            for (const auto& [key, value] : doc.metadata) {
-                item.metadata[key] = value;
-            }
-            if (doc.changeType) {
-                item.changeType = doc.changeType.value();
-            }
-            if (doc.changeTime) {
-                item.changeTime = doc.changeTime.value();
-            }
-            item.relevanceScore = doc.relevanceScore;
-            if (doc.matchReason) {
-                item.matchReason = doc.matchReason.value();
-            }
-            response.items.push_back(std::move(item));
-        }
-
-        response.totalCount = serviceResp.totalFound;
         co_return response;
     } catch (const std::exception& e) {
         spdlog::error("[handleListRequest] Exception: {}", e.what());

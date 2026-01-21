@@ -3,6 +3,7 @@
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/client/streaming_handlers.h>
 #include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
@@ -669,64 +670,25 @@ boost::asio::awaitable<Result<void>> DaemonClient::shutdown(bool graceful) {
     ShutdownRequest req;
     req.graceful = graceful;
 
-    struct Handler : public ChunkedResponseHandler {
-        void onHeaderReceived(const Response& r) override {
-            if (auto* er = std::get_if<ErrorResponse>(&r))
-                error = Error{er->code, er->message};
-            else
-                ok = true;
-        }
-        bool onChunkReceived(const Response& r, bool /*last*/) override {
-            if (auto* er = std::get_if<ErrorResponse>(&r)) {
-                error = Error{er->code, er->message};
-                return false;
-            }
-            ok = true;
-            return true;
-        }
-        void onError(const Error& e) override { error = e; }
-        std::optional<Error> error;
-        bool ok{false};
-    };
-    auto h = std::make_shared<Handler>();
+    auto h = std::make_shared<daemon::client::ErrorOnlyHandler>();
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error.has_value())
-        co_return *h->error;
+    if (h->hasError())
+        co_return h->error();
     co_return Result<void>();
 }
 
 boost::asio::awaitable<Result<void>> DaemonClient::ping() {
     PingRequest req;
 
-    struct Handler : public ChunkedResponseHandler {
-        void onHeaderReceived(const Response& r) override {
-            if (std::holds_alternative<PongResponse>(r))
-                pong = true;
-            else if (auto* er = std::get_if<ErrorResponse>(&r))
-                error = Error{er->code, er->message};
-        }
-        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
-            if (std::holds_alternative<PongResponse>(r))
-                pong = true;
-            if (auto* er = std::get_if<ErrorResponse>(&r)) {
-                error = Error{er->code, er->message};
-                return false;
-            }
-            return true;
-        }
-        void onError(const Error& e) override { error = e; }
-        bool pong{false};
-        std::optional<Error> error;
-    };
-    auto h = std::make_shared<Handler>();
+    auto h = std::make_shared<daemon::client::SuccessHandler<PongResponse>>();
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error.has_value())
-        co_return *h->error;
-    if (h->pong)
+    if (h->hasError())
+        co_return h->error();
+    if (h->success)
         co_return Result<void>();
     co_return Error{ErrorCode::InvalidData, "Unexpected response type for ping"};
 }
@@ -1583,132 +1545,52 @@ DaemonClient::loadModel(const LoadModelRequest& req) {
 
 boost::asio::awaitable<Result<SuccessResponse>>
 DaemonClient::unloadModel(const UnloadModelRequest& req) {
-    struct Handler : public ChunkedResponseHandler {
-        void onHeaderReceived(const Response& r) override {
-            if (auto* ok = std::get_if<SuccessResponse>(&r))
-                value = *ok;
-            if (auto* er = std::get_if<ErrorResponse>(&r))
-                error = Error{er->code, er->message};
-        }
-        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
-            if (auto* ok = std::get_if<SuccessResponse>(&r))
-                value = *ok;
-            if (auto* er = std::get_if<ErrorResponse>(&r)) {
-                error = Error{er->code, er->message};
-                return false;
-            }
-            return true;
-        }
-        void onError(const Error& e) override { error = e; }
-        std::optional<Error> error;
-        std::optional<SuccessResponse> value;
-    };
-    auto h = std::make_shared<Handler>();
+    auto h = std::make_shared<daemon::client::UnaryHandler<SuccessResponse>>();
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error.has_value())
-        co_return *h->error;
-    if (h->value.has_value())
+    if (h->hasError())
+        co_return h->error();
+    if (h->value)
         co_return *h->value;
     co_return Error{ErrorCode::InvalidData, "Missing SuccessResponse in stream"};
 }
 
 boost::asio::awaitable<Result<ModelStatusResponse>>
 DaemonClient::getModelStatus(const ModelStatusRequest& req) {
-    struct Handler : public ChunkedResponseHandler {
-        void onHeaderReceived(const Response& r) override {
-            if (auto* s = std::get_if<ModelStatusResponse>(&r))
-                value = *s;
-            if (auto* er = std::get_if<ErrorResponse>(&r))
-                error = Error{er->code, er->message};
-        }
-        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
-            if (auto* s = std::get_if<ModelStatusResponse>(&r))
-                value = *s;
-            if (auto* er = std::get_if<ErrorResponse>(&r)) {
-                error = Error{er->code, er->message};
-                return false;
-            }
-            return true;
-        }
-        void onError(const Error& e) override { error = e; }
-        std::optional<Error> error;
-        std::optional<ModelStatusResponse> value;
-    };
-    auto h = std::make_shared<Handler>();
+    auto h = std::make_shared<daemon::client::UnaryHandler<ModelStatusResponse>>();
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error.has_value())
-        co_return *h->error;
-    if (h->value.has_value())
+    if (h->hasError())
+        co_return h->error();
+    if (h->value)
         co_return *h->value;
     co_return Error{ErrorCode::InvalidData, "Missing ModelStatusResponse in stream"};
 }
 
 boost::asio::awaitable<Result<GetStatsResponse>>
 DaemonClient::getStats(const GetStatsRequest& req) {
-    struct Handler : public ChunkedResponseHandler {
-        void onHeaderReceived(const Response& r) override {
-            if (auto* s = std::get_if<GetStatsResponse>(&r))
-                value = *s;
-            if (auto* er = std::get_if<ErrorResponse>(&r))
-                error = Error{er->code, er->message};
-        }
-        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
-            if (auto* s = std::get_if<GetStatsResponse>(&r))
-                value = *s;
-            if (auto* er = std::get_if<ErrorResponse>(&r)) {
-                error = Error{er->code, er->message};
-                return false;
-            }
-            return true;
-        }
-        void onError(const Error& e) override { error = e; }
-        std::optional<Error> error;
-        std::optional<GetStatsResponse> value;
-    };
-    auto h = std::make_shared<Handler>();
+    auto h = std::make_shared<daemon::client::UnaryHandler<GetStatsResponse>>();
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error.has_value())
-        co_return *h->error;
-    if (h->value.has_value())
+    if (h->hasError())
+        co_return h->error();
+    if (h->value)
         co_return *h->value;
     co_return Error{ErrorCode::InvalidData, "Missing GetStatsResponse in stream"};
 }
 
 boost::asio::awaitable<Result<UpdateDocumentResponse>>
 DaemonClient::updateDocument(const UpdateDocumentRequest& req) {
-    struct Handler : public ChunkedResponseHandler {
-        void onHeaderReceived(const Response& r) override {
-            if (auto* s = std::get_if<UpdateDocumentResponse>(&r))
-                value = *s;
-            if (auto* er = std::get_if<ErrorResponse>(&r))
-                error = Error{er->code, er->message};
-        }
-        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
-            if (auto* s = std::get_if<UpdateDocumentResponse>(&r))
-                value = *s;
-            if (auto* er = std::get_if<ErrorResponse>(&r)) {
-                error = Error{er->code, er->message};
-                return false;
-            }
-            return true;
-        }
-        void onError(const Error& e) override { error = e; }
-        std::optional<Error> error;
-        std::optional<UpdateDocumentResponse> value;
-    };
-    auto h = std::make_shared<Handler>();
+    auto h = std::make_shared<daemon::client::UnaryHandler<UpdateDocumentResponse>>();
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error.has_value())
-        co_return *h->error;
-    if (h->value.has_value())
+    if (h->hasError())
+        co_return h->error();
+    if (h->value)
         co_return *h->value;
     co_return Error{ErrorCode::InvalidData, "Missing UpdateDocumentResponse in stream"};
 }
@@ -2038,33 +1920,13 @@ void DaemonClient::setStreamingEnabled(bool enabled) {
 }
 
 boost::asio::awaitable<Result<SuccessResponse>> DaemonClient::remove(const DeleteRequest& req) {
-    struct Handler : public ChunkedResponseHandler {
-        void onHeaderReceived(const Response& r) override {
-            if (auto* s = std::get_if<SuccessResponse>(&r))
-                value = *s;
-            if (auto* er = std::get_if<ErrorResponse>(&r))
-                error = Error{er->code, er->message};
-        }
-        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
-            if (auto* s = std::get_if<SuccessResponse>(&r))
-                value = *s;
-            if (auto* er = std::get_if<ErrorResponse>(&r)) {
-                error = Error{er->code, er->message};
-                return false;
-            }
-            return true;
-        }
-        void onError(const Error& e) override { error = e; }
-        std::optional<Error> error;
-        std::optional<SuccessResponse> value;
-    };
-    auto h = std::make_shared<Handler>();
+    auto h = std::make_shared<daemon::client::UnaryHandler<SuccessResponse>>();
     auto r = co_await sendRequestStreaming(req, h);
     if (!r)
         co_return r.error();
-    if (h->error.has_value())
-        co_return *h->error;
-    if (h->value.has_value())
+    if (h->hasError())
+        co_return h->error();
+    if (h->value)
         co_return *h->value;
     co_return Error{ErrorCode::InvalidData, "Missing SuccessResponse in stream"};
 }

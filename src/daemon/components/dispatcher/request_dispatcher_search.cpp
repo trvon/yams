@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <fmt/ranges.h>
 #include <yams/app/services/services.hpp>
+#include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -74,42 +75,18 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
             co_return ErrorResponse{result.error().code, result.error().message};
         }
         const auto& serviceResp = result.value();
-        SearchResponse response;
-        response.totalCount = serviceResp.total;
-        response.elapsed = std::chrono::milliseconds(serviceResp.executionTimeMs);
 
-        // Note: pathsOnly is now a CLI-only display option, not sent to daemon.
-        // The search service always returns full results.
-
-        // Enforce limit on results (defense-in-depth)
         const size_t limit = req.limit > 0 ? req.limit : serviceResp.results.size();
-        size_t count = 0;
+        auto results = yams::daemon::dispatch::SearchResultMapper::mapToSearchResults(
+            serviceResp.results, limit);
 
-        for (const auto& item : serviceResp.results) {
-            if (count >= limit)
-                break;
-            SearchResult resultItem;
-            resultItem.id = std::to_string(item.id);
-            resultItem.title = item.title;
-            resultItem.path = item.path;
-            resultItem.score = item.score;
-            resultItem.snippet = item.snippet;
-            if (!item.hash.empty()) {
-                resultItem.metadata["hash"] = item.hash;
-            }
-            if (!item.path.empty()) {
-                resultItem.metadata["path"] = item.path;
-            }
-            if (!item.title.empty()) {
-                resultItem.metadata["title"] = item.title;
-            }
-            response.results.push_back(std::move(resultItem));
-            ++count;
-        }
         std::stable_sort(
-            response.results.begin(), response.results.end(),
+            results.begin(), results.end(),
             [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
-        co_return response;
+
+        co_return yams::daemon::dispatch::makeSearchResponse(
+            serviceResp.total, std::chrono::milliseconds(serviceResp.executionTimeMs),
+            std::move(results));
     } catch (const std::exception& e) {
         co_return ErrorResponse{ErrorCode::InternalError,
                                 std::string("Search failed: ") + e.what()};

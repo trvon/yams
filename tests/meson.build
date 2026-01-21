@@ -1063,6 +1063,7 @@ if catch2_dep.found()
 
   catch2_daemon_exe = executable('catch2_daemon',
     files('unit/daemon/daemon_catch2_test.cpp'),
+    files('unit/daemon/streaming_handlers_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],

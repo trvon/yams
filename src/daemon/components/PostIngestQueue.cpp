@@ -12,6 +12,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/api/content_store.h>
 #include <yams/common/utf8_utils.h>
+#include <yams/daemon/async_batcher.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/KGWriteQueue.h>
