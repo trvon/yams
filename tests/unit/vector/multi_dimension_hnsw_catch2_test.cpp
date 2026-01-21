@@ -330,7 +330,7 @@ TEST_CASE_METHOD(MultiDimensionFixture, "MultiDimHNSW persistence across close/r
     skipIfNeeded();
 
     // Use a temp file for persistence test
-    std::string tmpPath = std::filesystem::temp_directory_path() / "multi_dim_hnsw_test.db";
+    std::string tmpPath = (std::filesystem::temp_directory_path() / "multi_dim_hnsw_test.db").string();
 
     // Clean up any previous test
     std::filesystem::remove(tmpPath);
