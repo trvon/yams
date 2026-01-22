@@ -21,12 +21,13 @@ RUN set -eux; \
   { echo "Attempt $i failed, retrying after 5s..."; sleep 5; apt-get clean; rm -rf /var/lib/apt/lists/*; }; \
   done
 
-# Install Rust toolchain for libsql build
+# Install Rust toolchain for libsql build (pinned version to avoid cross-device link issues)
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
 RUN set -eux; \
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal && \
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.83.0 --profile minimal && \
+  rustup set auto-self-update disable && \
   rustc --version && cargo --version
 
 # Install Zig 0.15.2 stable for zyp PDF plugin
@@ -74,7 +75,12 @@ RUN git init 2>/dev/null || true && \
 # Use setup.sh with retry logic for Conan remote issues
 # Configure Conan to retry downloads more aggressively for transient network failures
 RUN --mount=type=cache,target=/root/.conan2 \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/subprojects/libsql/target \
   set -eux; \
+  # Prevent rustup from auto-updating when rust-toolchain.toml requests different targets
+  export RUSTUP_TOOLCHAIN=1.83.0 && \
   mkdir -p /root/.conan2 && \
   printf 'core.net.http:timeout=120\ncore.net.http:max_retries=10\ncore.download:retry=10\ncore.download:retry_wait=5\n' > /root/.conan2/global.conf && \
   conan --version && \
