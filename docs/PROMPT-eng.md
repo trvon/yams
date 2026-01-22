@@ -56,6 +56,15 @@ yams add . --recursive \
   --metadata "pbi=$PBI,task=$TASK,phase=start,owner=codex,source=code"
 ```
 
+### 2b) Watch During Active Work (Recommended)
+Use `yams watch` while actively editing to keep the index fresh. Still take explicit checkpoint
+adds for milestone tracking.
+
+```bash
+yams watch                     # Auto-index file changes in this repo
+yams watch --stop              # Stop watching
+```
+
 ### 3) Checkpoint Progress
 ```bash
 yams add <changed-files> \
@@ -156,7 +165,7 @@ yams search "authentication middleware" --cwd .  # Only if grep is empty
 
 ```bash
 yams status
-yams watch
+yams watch                     # Optional for continuous indexing
 
 yams add . --recursive \
   --include "*.c,*.cc,*.cpp,*.cxx,*.h,*.hpp,*.rs,*.go,*.py,*.ts,*.js" \

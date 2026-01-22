@@ -52,6 +52,10 @@ struct EmbeddingModel {
 };
 
 static const std::vector<EmbeddingModel> EMBEDDING_MODELS = {
+    {"mxbai-edge-colbert-v0-17m",
+     "https://huggingface.co/ryandono/mxbai-edge-colbert-v0-17m-onnx-int8/resolve/main/onnx/"
+     "model_quantized.onnx",
+     "Lightweight ColBERT (token-level, MaxSim) optimized for edge use", 17, 48},
     {"all-MiniLM-L6-v2",
      "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
      "Lightweight model for semantic search", 90, 384},
@@ -1308,6 +1312,8 @@ private:
 
         // Map model name to HuggingFace repo
         auto getHfRepo = [](const std::string& name) -> std::string {
+            if (name == "mxbai-edge-colbert-v0-17m")
+                return "ryandono/mxbai-edge-colbert-v0-17m-onnx-int8";
             if (name == "all-MiniLM-L6-v2")
                 return "sentence-transformers/all-MiniLM-L6-v2";
             if (name == "multi-qa-MiniLM-L6-cos-v1")
@@ -1329,6 +1335,9 @@ private:
 
         // Download model.onnx (try multiple paths)
         std::vector<std::string> modelPaths = {"onnx/model.onnx", "model.onnx"};
+        if (model.name == "mxbai-edge-colbert-v0-17m") {
+            modelPaths.insert(modelPaths.begin(), "onnx/model_quantized.onnx");
+        }
         bool downloaded = false;
         for (const auto& path : modelPaths) {
             std::string url = "https://huggingface.co/" + repo + "/resolve/main/" + path;

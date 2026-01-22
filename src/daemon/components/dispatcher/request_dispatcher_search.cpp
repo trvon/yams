@@ -80,6 +80,39 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         auto results = yams::daemon::dispatch::SearchResultMapper::mapToSearchResults(
             serviceResp.results, limit);
 
+<<<<<<< HEAD
+=======
+        for (const auto& item : serviceResp.results) {
+            if (count >= limit)
+                break;
+            SearchResult resultItem;
+            resultItem.id = std::to_string(item.id);
+            resultItem.title = item.title;
+            resultItem.path = item.path;
+            resultItem.score = item.score;
+            resultItem.snippet = item.snippet;
+            if (!item.hash.empty()) {
+                resultItem.metadata["hash"] = item.hash;
+            }
+            if (!item.mimeType.empty()) {
+                resultItem.metadata["mime_type"] = item.mimeType;
+            }
+            if (!item.fileType.empty()) {
+                resultItem.metadata["file_type"] = item.fileType;
+            }
+            if (!item.fileName.empty()) {
+                resultItem.metadata["filename"] = item.fileName;
+            }
+            if (!item.path.empty()) {
+                resultItem.metadata["path"] = item.path;
+            }
+            if (!item.title.empty()) {
+                resultItem.metadata["title"] = item.title;
+            }
+            response.results.push_back(std::move(resultItem));
+            ++count;
+        }
+>>>>>>> 55d61f143a0aff23d733b09445c36275ea582dc0
         std::stable_sort(
             results.begin(), results.end(),
             [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });

@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <cctype>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -542,15 +543,18 @@ public:
                                                               ui::Ansi::CYAN)
                                               << ":";
                                 }
-                                std::cout << sanitizeForDisplay(match.line) << std::endl;
+                                std::cout << formatSnippet(sanitizeForDisplay(match.line))
+                                          << std::endl;
 
                                 for (const auto& ctx : match.contextBefore) {
                                     std::cout << ui::colorize("  ", ui::Ansi::DIM)
-                                              << sanitizeForDisplay(ctx) << std::endl;
+                                              << formatSnippet(sanitizeForDisplay(ctx))
+                                              << std::endl;
                                 }
                                 for (const auto& ctx : match.contextAfter) {
                                     std::cout << ui::colorize("  ", ui::Ansi::DIM)
-                                              << sanitizeForDisplay(ctx) << std::endl;
+                                              << formatSnippet(sanitizeForDisplay(ctx))
+                                              << std::endl;
                                 }
                             }
                         } else {
@@ -633,19 +637,22 @@ public:
                                         std::cout << ui::colorize("[R]", ui::Ansi::GREEN) << " ";
                                     }
 
-                                    std::cout << sanitizeForDisplay(match->line) << std::endl;
+                                    std::cout << formatSnippet(sanitizeForDisplay(match->line))
+                                              << std::endl;
 
                                     // Context lines in dim
                                     for (const auto& ctx : match->contextBefore) {
                                         std::cout
                                             << ui::colorize("       ", ui::Ansi::DIM)
-                                            << ui::colorize(sanitizeForDisplay(ctx), ui::Ansi::DIM)
+                                            << ui::colorize(formatSnippet(sanitizeForDisplay(ctx)),
+                                                            ui::Ansi::DIM)
                                             << std::endl;
                                     }
                                     for (const auto& ctx : match->contextAfter) {
                                         std::cout
                                             << ui::colorize("       ", ui::Ansi::DIM)
-                                            << ui::colorize(sanitizeForDisplay(ctx), ui::Ansi::DIM)
+                                            << ui::colorize(formatSnippet(sanitizeForDisplay(ctx)),
+                                                            ui::Ansi::DIM)
                                             << std::endl;
                                     }
                                 }
@@ -774,6 +781,55 @@ private:
                 std::cerr << "\n";
             }
         }
+    }
+
+    struct SnippetAssessment {
+        double printableRatio{0.0};
+        double whitespaceRatio{0.0};
+        std::string sanitized;
+    };
+
+    SnippetAssessment assessSnippet(std::string_view snippet) const {
+        SnippetAssessment assessment;
+        if (snippet.empty()) {
+            return assessment;
+        }
+        std::string cleaned;
+        cleaned.reserve(snippet.size());
+        size_t printable = 0;
+        size_t whitespace = 0;
+        for (unsigned char c : snippet) {
+            if (c == '\n' || c == '\r' || c == '\t') {
+                whitespace++;
+                cleaned.push_back(' ');
+                continue;
+            }
+            if (c >= 0x20 && c < 0x7F) {
+                printable++;
+                if (std::isspace(c)) {
+                    whitespace++;
+                    if (!cleaned.empty() && cleaned.back() == ' ') {
+                        continue;
+                    }
+                    cleaned.push_back(' ');
+                } else {
+                    cleaned.push_back(static_cast<char>(c));
+                }
+            }
+        }
+        const double total = static_cast<double>(snippet.size());
+        assessment.printableRatio = printable / total;
+        assessment.whitespaceRatio = whitespace / total;
+        assessment.sanitized = std::move(cleaned);
+        return assessment;
+    }
+
+    std::string formatSnippet(std::string_view snippet) const {
+        auto assessment = assessSnippet(snippet);
+        if (!assessment.sanitized.empty() && assessment.printableRatio >= 0.65) {
+            return assessment.sanitized;
+        }
+        return "[binary] no text preview";
     }
 
     // Helper function to parse comma-separated strings into vector

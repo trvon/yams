@@ -102,6 +102,15 @@ yams list --format json --show-metadata \
   | jq '.documents[] | select(.metadata.task=="list-json-refresh")'
 ```
 
+### Task tracking table
+```bash
+# Default list output includes task metadata columns
+yams list --limit 10
+
+# Customize metadata columns
+yams list --metadata-fields task,pbi,phase,owner,source
+```
+
 ---
 
 ## Essential Commands
