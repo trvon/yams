@@ -55,6 +55,7 @@ struct DaemonConfig {
     bool enableAutoRepair = true;
     bool useMockModelProvider = false;
     size_t autoRepairBatchSize = 32;
+    bool autoRebuildOnDimMismatch = true;
     size_t maxPendingRepairs = 1000;
 
     // Per-plugin configuration: plugin name -> JSON config string

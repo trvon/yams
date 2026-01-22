@@ -55,6 +55,7 @@ public:
         std::uint32_t maintenanceTokens{1};       // number of concurrent heavy-stage tokens
         bool allowDegraded{true};                 // allow limited work when not fully ready
         std::uint32_t maxActiveDuringDegraded{1}; // run with up to N active connections
+        bool autoRebuildOnDimMismatch{true};      // auto rebuild vectors when dim mismatch
     };
 
     // Event types for document operations
@@ -168,6 +169,8 @@ private:
     std::atomic<std::uint64_t> totalBacklog_{0};
     std::atomic<std::uint64_t> processed_{0};
     void update_progress_pct();
+
+    std::atomic<bool> dimMismatchRebuildDone_{false};
 
     std::shared_ptr<ShutdownState> shutdownState_;
 };

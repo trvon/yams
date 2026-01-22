@@ -10,13 +10,53 @@
 #include <thread>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/resource/onnx_colbert_session.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
 #include <yams/daemon/resource/onnx_reranker_session.h>
 
 namespace {
 
+namespace fs = std::filesystem;
+
 // Global storage for plugin config JSON passed from daemon at init time
 static std::string g_plugin_config_json;
+
+static std::vector<int32_t> readColbertSkiplist(const std::string& modelsRoot,
+                                                const std::string& modelName) {
+    try {
+        fs::path file = fs::path(modelsRoot) / modelName / "skiplist.json";
+        if (!fs::exists(file))
+            return {};
+        std::ifstream in(file);
+        if (!in.good())
+            return {};
+        nlohmann::json j;
+        in >> j;
+        if (!j.is_array())
+            return {};
+        std::vector<int32_t> out;
+        out.reserve(j.size());
+        for (const auto& item : j) {
+            if (item.is_number_integer()) {
+                out.push_back(item.get<int32_t>());
+            }
+        }
+        return out;
+    } catch (...) {
+        return {};
+    }
+}
+
+static bool isColbertModelName(const std::string& name) {
+    if (name.empty()) {
+        return false;
+    }
+    std::string lower = name;
+    for (auto& c : lower) {
+        c = static_cast<char>(std::tolower(c));
+    }
+    return lower.find("colbert") != std::string::npos;
+}
 
 // Provide a C-callable function for threading control (not supported yet)
 static yams_status_t onnx_set_threading(void* /*self*/, const char* /*model_id*/, int /*intra*/,
@@ -40,6 +80,7 @@ struct ProviderCtx {
     yams_model_load_progress_cb progress_cb = nullptr;
     void* progress_user = nullptr;
     std::unique_ptr<yams::daemon::OnnxModelPool> pool;
+    std::unique_ptr<yams::daemon::OnnxColbertSession> colbert;   // ColBERT session
     std::unique_ptr<yams::daemon::OnnxRerankerSession> reranker; // Cross-encoder reranker
     std::unordered_map<std::string, State> model_states;         // per-model FSM
     std::unordered_map<std::string, FailureInfo> model_failures; // failure tracking
@@ -48,6 +89,7 @@ struct ProviderCtx {
     bool gpuEnabled = false; // Tracks whether GPU acceleration is configured
     std::string last_error;
     std::string rerankerModelPath; // Path to reranker model
+    std::string colbertModelPath;  // Path to ColBERT model
     std::size_t configuredMaxLoadedModels = 0;
     std::size_t configuredHotPoolSize = 0;
 
@@ -419,6 +461,26 @@ struct ProviderCtx {
             spdlog::error("[ONNX-Plugin] Pool initialize exception: {}", e.what());
             ready = false;
             last_error = e.what();
+        }
+
+        std::string colbertModelName = preferredModel;
+        if (colbertModelName.empty() && !preloadList.empty()) {
+            colbertModelName = preloadList.front();
+        }
+        if (isColbertModelName(colbertModelName)) {
+            colbertModelPath = cfg.modelsRoot + "/" + colbertModelName + "/model.onnx";
+            yams::daemon::ColbertConfig colbertCfg{};
+            colbertCfg.model_path = colbertModelPath;
+            colbertCfg.model_name = colbertModelName;
+            colbertCfg.enable_gpu = cfg.enableGPU;
+            colbertCfg.num_threads = static_cast<int>(cfg.numThreads);
+            colbertCfg.max_sequence_length = 512;
+            colbertCfg.token_dim = 48;
+            colbertCfg.query_marker_id = 50368;
+            colbertCfg.doc_marker_id = 50369;
+            colbertCfg.skiplist = readColbertSkiplist(cfg.modelsRoot, colbertModelName);
+            colbert = std::make_unique<yams::daemon::OnnxColbertSession>(
+                colbertModelPath, colbertModelName, colbertCfg);
         }
         spdlog::info("[ONNX-Plugin] ProviderCtx init complete: ready={} pool={}", ready,
                      pool ? "valid" : "null");
@@ -917,8 +979,19 @@ struct ProviderSingleton {
                     }
 
                     auto& session = *h.value();
-                    auto r = const_cast<yams::daemon::OnnxModelSession&>(session)
-                                 .generateBatchEmbeddings(texts);
+                    const bool isColbert = isColbertModelName(modelIdStr);
+                    yams::Result<std::vector<std::vector<float>>> r;
+                    if (isColbert) {
+                        if (!c->colbert || !c->colbert->isValid()) {
+                            r = yams::Error{yams::ErrorCode::NotSupported,
+                                            "ColBERT session not available for embeddings"};
+                        } else {
+                            r = c->colbert->encodeDocumentEmbeddings(texts);
+                        }
+                    } else {
+                        r = const_cast<yams::daemon::OnnxModelSession&>(session)
+                                .generateBatchEmbeddings(texts);
+                    }
                     if (!r) {
                         spdlog::error("[ONNX Plugin] generateBatchEmbeddings failed: {}",
                                       r.error().message);
@@ -1066,6 +1139,8 @@ struct ProviderSingleton {
                 dim = 1024;
             else if (lm.find("bge") != std::string::npos && lm.find("small") != std::string::npos)
                 dim = 384;
+            else if (lm.find("colbert") != std::string::npos)
+                dim = 48;
             else if (lm.find("e5") != std::string::npos && lm.find("large") != std::string::npos)
                 dim = 1024;
             else if (lm.find("e5") != std::string::npos && lm.find("small") != std::string::npos)
@@ -1193,6 +1268,42 @@ struct ProviderSingleton {
                 auto* c = static_cast<ProviderCtx*>(self);
                 if (c->disabled)
                     return YAMS_ERR_UNSUPPORTED;
+
+                if (c->colbert && c->colbert->isValid()) {
+                    auto queryEmb = c->colbert->encodeQuery(query);
+                    if (!queryEmb) {
+                        spdlog::warn("[ONNX Plugin] ColBERT encode query failed: {}",
+                                     queryEmb.error().message);
+                        return YAMS_ERR_INTERNAL;
+                    }
+
+                    std::vector<std::string> docs;
+                    docs.reserve(doc_count);
+                    for (size_t i = 0; i < doc_count; ++i) {
+                        docs.emplace_back(documents[i] ? documents[i] : "");
+                    }
+                    auto docEmbeddings = c->colbert->encodeDocuments(docs);
+                    if (!docEmbeddings) {
+                        spdlog::warn("[ONNX Plugin] ColBERT encode documents failed: {}",
+                                     docEmbeddings.error().message);
+                        return YAMS_ERR_INTERNAL;
+                    }
+
+                    const auto& docVecs = docEmbeddings.value();
+                    std::vector<float> scores;
+                    scores.reserve(docVecs.size());
+                    for (const auto& docEmb : docVecs) {
+                        scores.push_back(c->colbert->computeMaxSim(queryEmb.value(), docEmb));
+                    }
+
+                    float* buf = static_cast<float*>(std::malloc(sizeof(float) * scores.size()));
+                    if (!buf)
+                        return YAMS_ERR_INTERNAL;
+                    std::memcpy(buf, scores.data(), sizeof(float) * scores.size());
+                    *out_scores = buf;
+                    *out_count = scores.size();
+                    return YAMS_OK;
+                }
 
                 // Lazy-init reranker session on first use
                 if (!c->reranker) {

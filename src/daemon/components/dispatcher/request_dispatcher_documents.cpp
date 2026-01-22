@@ -834,25 +834,72 @@ RequestDispatcher::handleFileHistoryRequest(const FileHistoryRequest& req) {
                 spdlog::debug("[FileHistory] Got {} metadata entries for doc {}",
                               metadataRes.value().size(), doc.id);
 
-                auto it = metadataRes.value().find("snapshot_id");
-                if (it != metadataRes.value().end() &&
-                    it->second.type == metadata::MetadataValueType::String) {
+                std::unordered_map<std::string, int64_t> snapshotTimes;
+                std::unordered_set<std::string> snapshotIds;
+
+                for (const auto& [key, value] : metadataRes.value()) {
+                    if (key == "snapshot_id" && value.type == metadata::MetadataValueType::String) {
+                        snapshotIds.insert(value.asString());
+                        continue;
+                    }
+                    if (key.rfind("snapshot_id:", 0) == 0 &&
+                        value.type == metadata::MetadataValueType::String) {
+                        if (!value.asString().empty()) {
+                            snapshotIds.insert(value.asString());
+                        } else {
+                            snapshotIds.insert(key.substr(12));
+                        }
+                        continue;
+                    }
+                    if (key == "snapshot_time" &&
+                        value.type == metadata::MetadataValueType::String) {
+                        try {
+                            snapshotTimes[""] = std::stoll(value.asString());
+                        } catch (...) {
+                        }
+                        continue;
+                    }
+                    if (key.rfind("snapshot_time:", 0) == 0 &&
+                        value.type == metadata::MetadataValueType::String) {
+                        try {
+                            snapshotTimes[key.substr(13)] = std::stoll(value.asString());
+                        } catch (...) {
+                        }
+                        continue;
+                    }
+                }
+
+                if (snapshotIds.empty()) {
+                    spdlog::debug("[FileHistory] Doc {} has no snapshot_id metadata", doc.id);
+                    continue;
+                }
+
+                for (const auto& snapshotId : snapshotIds) {
                     FileVersion fv;
-                    fv.snapshotId = it->second.asString();
+                    fv.snapshotId = snapshotId;
                     fv.hash = doc.sha256Hash;
                     fv.size = doc.fileSize;
 
-                    // Convert indexedTime to Unix timestamp
-                    auto tp = doc.indexedTime;
-                    auto duration = tp.time_since_epoch();
-                    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
-                    fv.indexedTimestamp = seconds.count();
+                    int64_t snapshotMicros = 0;
+                    auto timeIt = snapshotTimes.find(snapshotId);
+                    if (timeIt == snapshotTimes.end()) {
+                        timeIt = snapshotTimes.find("");
+                    }
+                    if (timeIt != snapshotTimes.end()) {
+                        snapshotMicros = timeIt->second;
+                    }
+                    if (snapshotMicros > 0) {
+                        fv.indexedTimestamp = snapshotMicros / 1000000;
+                    } else {
+                        auto tp = doc.indexedTime;
+                        auto duration = tp.time_since_epoch();
+                        auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
+                        fv.indexedTimestamp = seconds.count();
+                    }
 
                     spdlog::debug("[FileHistory] Adding version: snapshot={}, hash={}",
                                   fv.snapshotId, fv.hash.substr(0, 8));
                     response.versions.push_back(std::move(fv));
-                } else {
-                    spdlog::debug("[FileHistory] Doc {} has no snapshot_id metadata", doc.id);
                 }
             }
 

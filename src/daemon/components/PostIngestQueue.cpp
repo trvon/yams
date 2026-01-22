@@ -261,6 +261,11 @@ PostIngestQueue::~PostIngestQueue() {
 void PostIngestQueue::start() {
     spdlog::info("[PostIngestQueue] start() called, stop_={}", stop_.load());
     if (!stop_.load()) {
+        TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, true);
+        TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, true);
+        TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, true);
+        TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, true);
+        TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, true);
         spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
         boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
         spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
@@ -293,6 +298,11 @@ void PostIngestQueue::start() {
 
 void PostIngestQueue::stop() {
     stop_.store(true);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, false);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, false);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, false);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, false);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, false);
     spdlog::info("[PostIngestQueue] Stop requested");
 }
 

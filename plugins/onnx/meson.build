@@ -118,6 +118,7 @@ yams_onnx_plugin_srcs = [
   'model_provider.cpp',
   'onnx_model_pool.cpp',
   'onnx_reranker_session.cpp',
+  'onnx_colbert_session.cpp',
   '../../src/genai/onnx_genai_adapter.cpp',
 ]
 
@@ -144,4 +145,3 @@ if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
     fs.copyfile(dll_src, dll_name, install: false)
   endforeach
 endif
-

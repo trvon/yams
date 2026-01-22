@@ -435,7 +435,34 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
     }
 
     auto conn = std::make_shared<AsioConnection>(opts_);
-    auto socket_res = co_await async_connect_with_timeout(opts_);
+    auto socketMissing = [&]() {
+        std::error_code ec;
+        return !std::filesystem::exists(opts_.socketPath, ec);
+    };
+
+    constexpr int kMaxRetries = 3;
+    auto backoff = std::chrono::milliseconds(50);
+    Result<std::unique_ptr<AsioConnection::socket_t>> socket_res =
+        Error{ErrorCode::NetworkError, "Connection failed"};
+    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+        if (socketMissing()) {
+            if (attempt + 1 < kMaxRetries) {
+                std::this_thread::sleep_for(backoff);
+                backoff = std::min(backoff * 2, std::chrono::milliseconds(250));
+                continue;
+            }
+        }
+        socket_res = co_await async_connect_with_timeout(opts_);
+        if (socket_res) {
+            break;
+        }
+        if (socketMissing() && attempt + 1 < kMaxRetries) {
+            std::this_thread::sleep_for(backoff);
+            backoff = std::min(backoff * 2, std::chrono::milliseconds(250));
+            continue;
+        }
+        break;
+    }
 
     // Check shutdown after connection attempt - pool may have been shut down while connecting
     if (shutdown_.load(std::memory_order_acquire)) {
@@ -448,8 +475,13 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
     }
 
     if (!socket_res) {
-        spdlog::warn("[ConnectionPool::create_connection] socket_res is error: {}",
-                     socket_res.error().message);
+        if (socketMissing()) {
+            spdlog::debug("[ConnectionPool::create_connection] socket not available: {}",
+                          opts_.socketPath.string());
+        } else {
+            spdlog::warn("[ConnectionPool::create_connection] socket_res is error: {}",
+                         socket_res.error().message);
+        }
         co_return nullptr;
     }
     conn->socket = std::move(socket_res.value());
@@ -739,11 +771,24 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                     handlerPtr = &it->second;
                 }
                 if (!handlerPtr) {
+                    bool wasTimedOut = false;
+                    if (auto it = conn->timed_out_requests.find(reqId);
+                        it != conn->timed_out_requests.end()) {
+                        wasTimedOut = true;
+                        conn->timed_out_requests.erase(it);
+                    }
                     try {
-                        spdlog::warn("ASIO read loop: no handler for daemon response with request "
-                                     "id {}. This may indicate a response was already received or "
-                                     "the request timed out.",
-                                     reqId);
+                        if (wasTimedOut) {
+                            spdlog::debug("ASIO read loop: late daemon response after timeout "
+                                          "(request id {})",
+                                          reqId);
+                        } else {
+                            spdlog::warn(
+                                "ASIO read loop: no handler for daemon response with request "
+                                "id {}. This may indicate a response was already received or "
+                                "the request timed out.",
+                                reqId);
+                        }
                     } catch (...) {
                     }
                     continue;

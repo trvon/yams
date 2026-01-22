@@ -49,6 +49,7 @@ Result<void> EmbeddingService::initialize() {
 
 void EmbeddingService::start() {
     stop_.store(false);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Embed, true);
     boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
     spdlog::info("EmbeddingService: started parallel channel poller");
 }
@@ -57,6 +58,7 @@ void EmbeddingService::shutdown() {
     if (stop_.exchange(true)) {
         return;
     }
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Embed, false);
     spdlog::info("EmbeddingService: shutting down (processed={}, failed={}, inFlight={})",
                  processed_.load(), failed_.load(), inFlight_.load());
 

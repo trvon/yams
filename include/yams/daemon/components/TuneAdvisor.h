@@ -80,13 +80,13 @@ public:
     }
 
     // Scale factor applied to several heuristics
-    // Efficient  -> 0.75 (slower growth, lower resource use)
+    // Efficient  -> 0.5 (slower growth, lower resource use)
     // Balanced   -> 1.0
     // Aggressive -> 1.5 (faster growth, lower thresholds)
     static double profileScale() {
         switch (tuningProfile()) {
             case Profile::Efficient:
-                return 0.75;
+                return 0.5;
             case Profile::Aggressive:
                 return 1.5;
             case Profile::Balanced:
@@ -96,19 +96,18 @@ public:
     }
 
     /// Profile scale for PostIngestQueue operations.
-    /// More conservative scaling: Aggressive is baseline (1.0), others reduce.
-    /// Efficient  -> 0.50 (minimal resource use)
-    /// Balanced   -> 0.75 (moderate resource use)
-    /// Aggressive -> 1.0  (current defaults, maximum throughput)
+    /// Efficient  -> 0.5 (minimal resource use)
+    /// Balanced   -> 1.0 (moderate resource use)
+    /// Aggressive -> 1.5 (maximum throughput)
     static double postIngestProfileScale() {
         switch (tuningProfile()) {
             case Profile::Efficient:
-                return 0.50;
+                return 0.5;
             case Profile::Balanced:
-                return 0.75;
+                return 1.0;
             case Profile::Aggressive:
             default:
-                return 1.0;
+                return 1.5;
         }
     }
 

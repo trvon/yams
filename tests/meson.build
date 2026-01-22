@@ -888,6 +888,7 @@ if catch2_dep.found()
         '../plugins/onnx/model_provider.cpp',
         '../plugins/onnx/onnx_model_pool.cpp',
         '../plugins/onnx/onnx_reranker_session.cpp',
+        '../plugins/onnx/onnx_colbert_session.cpp',
       ),
       include_directories: incs,
       dependencies: onnx_provider_test_deps,

@@ -395,6 +395,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"plugin_name_policy", "relaxed"},
               {"use_legacy_tuner", "false"},
               {"auto_repair_batch_size", "16"},
+              {"auto_rebuild_on_dim_mismatch", "true"},
               {"worker_threads", "0"},
               {"max_memory_gb", "0"},
               {"log_level", "info"}}},

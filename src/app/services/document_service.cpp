@@ -45,6 +45,26 @@ namespace {
 
 constexpr std::size_t kCentroidPreviewLimit = 16;
 
+std::string generateSnapshotId() {
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    auto micros =
+        std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count() %
+        1000000;
+
+    std::tm tm_utc;
+#ifdef _WIN32
+    gmtime_s(&tm_utc, &time_t_now);
+#else
+    gmtime_r(&time_t_now, &tm_utc);
+#endif
+
+    std::ostringstream oss;
+    oss << std::put_time(&tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0') << std::setw(6)
+        << micros << 'Z';
+    return oss.str();
+}
+
 // Use project compatibility helpers from cpp23_features.hpp
 using yams::features::string_starts_with;
 
@@ -531,9 +551,15 @@ public:
         if (!req.collection.empty()) {
             md.tags["collection"] = req.collection;
         }
-        if (!req.snapshotId.empty()) {
-            md.tags["snapshot_id"] = req.snapshotId;
-        }
+        const auto snapshotId = req.snapshotId.empty() ? generateSnapshotId() : req.snapshotId;
+        const auto snapshotTime =
+            std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count());
+        md.tags["snapshot_id"] = snapshotId;
+        md.tags["snapshot_time"] = snapshotTime;
+        md.tags["snapshot_id:" + snapshotId] = snapshotId;
+        md.tags["snapshot_time:" + snapshotId] = snapshotTime;
         if (!req.snapshotLabel.empty()) {
             md.tags["snapshot_label"] = req.snapshotLabel;
         }

@@ -272,6 +272,8 @@ public:
                     embeddingDim_ = 768;
                 } else if (has("minilm")) {
                     embeddingDim_ = 384;
+                } else if (has("colbert")) {
+                    embeddingDim_ = 48;
                 }
             }
             // Sequence length defaults
@@ -281,7 +283,8 @@ public:
                     maxSequenceLength_ = 8192;
                 } else if (has("minilm")) {
                     maxSequenceLength_ = 256;
-                } else if (has("mpnet") || has("bge") || has("e5") || has("gte")) {
+                } else if (has("mpnet") || has("bge") || has("e5") || has("gte") ||
+                           has("colbert")) {
                     maxSequenceLength_ = 512;
                 }
             }

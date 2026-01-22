@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <boost/asio/awaitable.hpp>
@@ -91,6 +92,7 @@ struct AsioConnection {
     std::atomic<bool> streaming_started{false};
     std::atomic<bool> in_use{false};
     std::future<void> read_loop_future;
+    std::unordered_set<uint64_t> timed_out_requests;
 
     struct UnaryHandler {
         std::shared_ptr<response_promise_t> promise;

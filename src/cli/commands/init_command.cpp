@@ -385,6 +385,7 @@ public:
                     noKeygen_ = !prompt_yes_no("Generate authentication keys? [Y/n]: ",
                                                YesNoOptions{.defaultYes = true});
                 }
+                tuningProfile_ = promptForTuningProfile();
             }
 
             // Ensure we use the resolved dataPath in CLI
@@ -405,10 +406,29 @@ public:
                 spdlog::info("YAMS is already initialized at {} (use --force to overwrite).",
                              dataPath.string());
 
+                if (!nonInteractive_) {
+                    tuningProfile_ = promptForTuningProfile();
+                    auto writeOk =
+                        config::write_config_value(configPath, "tuning.profile", tuningProfile_);
+                    if (!writeOk) {
+                        spdlog::warn("Failed to update tuning.profile in config");
+                    }
+                }
+
+                const auto preferredModel =
+                    config::parse_config_value(configPath, "embeddings", "preferred_model");
+                const bool colbertPreferred = isColbertModelName(preferredModel);
+
                 // Still offer GLiNER model, reranker model, grammar download, and skill install
                 // even if already initialized
                 maybeSetupGlinerModel(dataPath, configPath);
-                maybeSetupRerankerModel(dataPath, configPath);
+                if (colbertPreferred) {
+                    updateColbertRerankingConfig(configPath);
+                    spdlog::info("ColBERT preferred model detected; enabling MaxSim reranking via "
+                                 "ONNX plugin");
+                } else {
+                    maybeSetupRerankerModel(dataPath, configPath);
+                }
                 maybeSetupGrammars(dataPath);
                 maybeSetupAgentSkill();
                 maybeBootstrapProjectSession();
@@ -447,16 +467,19 @@ public:
             // 6) Vector Database Setup
             bool enableVectorDB = autoInit_; // Auto mode enables vector DB by default
             std::string selectedModel;
+            bool colbertSelected = false;
             if (autoInit_) {
                 // Use the default model (first in the list) for auto-init
                 selectedModel = EMBEDDING_MODELS[0].name;
                 spdlog::info("Using default embedding model: {}", selectedModel);
+                colbertSelected = isColbertModelName(selectedModel);
             } else if (!nonInteractive_) {
                 enableVectorDB =
                     prompt_yes_no("\nEnable vector database for semantic search? [Y/n]: ",
                                   YesNoOptions{.defaultYes = true});
                 if (enableVectorDB) {
                     selectedModel = promptForModel(dataPath);
+                    colbertSelected = isColbertModelName(selectedModel);
                 }
             }
 
@@ -508,7 +531,7 @@ public:
             auto updateResult =
                 updateV2Config(configPath, dataPath, privateKeyPath, publicKeyPath, apiKeyHex,
                                enableVectorDB, selectedModel, useS3, s3Url, s3Region, s3Endpoint,
-                               s3AccessKey, s3SecretKey, s3UsePathStyle);
+                               s3AccessKey, s3SecretKey, s3UsePathStyle, tuningProfile_);
             if (!updateResult) {
                 return updateResult;
             }
@@ -604,7 +627,12 @@ public:
             }
 
             // 7b) Reranker Model Setup (for two-stage hybrid search)
-            maybeSetupRerankerModel(dataPath, configPath);
+            if (enableVectorDB && colbertSelected) {
+                updateColbertRerankingConfig(configPath);
+                spdlog::info("ColBERT selected; enabling MaxSim reranking via ONNX plugin");
+            } else {
+                maybeSetupRerankerModel(dataPath, configPath);
+            }
 
             // 7) Tree-sitter Grammar Setup (for symbol extraction)
             maybeSetupGrammars(dataPath);
@@ -693,6 +721,18 @@ private:
         return oss.str();
     }
 
+    std::string promptForTuningProfile() {
+        std::vector<ChoiceItem> items = {
+            {"balanced", "Balanced (Recommended)",
+             "Default profile for general workloads and typical machines."},
+            {"efficient", "Efficient", "Lower resource usage, slower background processing."},
+            {"aggressive", "Aggressive", "Higher throughput, more background work."}};
+        ChoiceOptions opts;
+        opts.defaultIndex = 0;
+        auto choice = prompt_choice("\nSelect a tuning profile:", items, opts);
+        return items[choice].value;
+    }
+
     void maybeBootstrapProjectSession() {
         if (envTruthy(std::getenv("YAMS_DISABLE_PROJECT_SESSION")))
             return;
@@ -755,14 +795,12 @@ private:
 
     // Removed legacy promptYesNo (replaced by prompt_yes_no in prompt_util.h)
 
-    static Result<void> updateV2Config(const fs::path& configPath, const fs::path& dataDir,
-                                       const fs::path& privateKeyPath,
-                                       const fs::path& publicKeyPath, const std::string& apiKey,
-                                       bool enableVectorDB, const std::string& selectedModel,
-                                       bool useS3, const std::string& s3Url,
-                                       const std::string& s3Region, const std::string& s3Endpoint,
-                                       const std::string& s3AccessKey,
-                                       const std::string& s3SecretKey, bool s3UsePathStyle) {
+    static Result<void> updateV2Config(
+        const fs::path& configPath, const fs::path& dataDir, const fs::path& privateKeyPath,
+        const fs::path& publicKeyPath, const std::string& apiKey, bool enableVectorDB,
+        const std::string& selectedModel, bool useS3, const std::string& s3Url,
+        const std::string& s3Region, const std::string& s3Endpoint, const std::string& s3AccessKey,
+        const std::string& s3SecretKey, bool s3UsePathStyle, const std::string& tuningProfile) {
         try {
             // Read the existing v2 config
             std::ifstream in(configPath);
@@ -788,6 +826,26 @@ private:
                 if (endPos != std::string::npos) {
                     content.replace(pos, endPos - pos,
                                     "data_dir = \"" + escapeTomlString(dataDir.string()) + "\"");
+                }
+            }
+
+            if (!tuningProfile.empty()) {
+                const auto sectionPos = content.find("[tuning]");
+                if (sectionPos != std::string::npos) {
+                    const auto nextSection = content.find("[", sectionPos + 1);
+                    const auto sectionEnd =
+                        (nextSection == std::string::npos) ? content.size() : nextSection;
+                    auto keyPos = content.find("profile = ", sectionPos);
+                    if (keyPos == std::string::npos || keyPos > sectionEnd) {
+                        content.insert(sectionEnd,
+                                       "profile = \"" + escapeTomlString(tuningProfile) + "\"\n");
+                    } else {
+                        const auto lineEnd = content.find("\n", keyPos);
+                        const auto replaceEnd =
+                            (lineEnd == std::string::npos) ? content.size() : lineEnd;
+                        content.replace(keyPos, replaceEnd - keyPos,
+                                        "profile = \"" + escapeTomlString(tuningProfile) + "\"");
+                    }
                 }
             }
 
@@ -1009,6 +1067,15 @@ private:
             }
         }
         return out;
+    }
+
+    static bool isColbertModelName(const std::string& name) {
+        if (name.empty())
+            return false;
+        std::string lower = name;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return lower.find("colbert") != std::string::npos;
     }
 
     static Result<void> generateEd25519Keypair(const fs::path& privateKeyPath,
@@ -1356,6 +1423,11 @@ private:
             {"config.json", "config.json"},
             {"tokenizer.json", "tokenizer.json"},
             {"sentence_bert_config.json", "sentence_bert_config.json"}};
+        if (model.name == "mxbai-edge-colbert-v0-17m") {
+            companions.emplace_back("tokenizer_config.json", "tokenizer_config.json");
+            companions.emplace_back("special_tokens_map.json", "special_tokens_map.json");
+            companions.emplace_back("skiplist.json", "skiplist.json");
+        }
         for (const auto& [filename, localName] : companions) {
             std::string url = "https://huggingface.co/" + repo + "/resolve/main/" + filename;
             (void)downloadFile(url, outputDir / localName, filename);
@@ -1995,6 +2067,52 @@ private:
         }
     }
 
+    void updateColbertRerankingConfig(const fs::path& configPath) {
+        try {
+            std::ifstream in(configPath);
+            std::stringstream buf;
+            buf << in.rdbuf();
+            in.close();
+            std::string content = buf.str();
+
+            // Ensure [search] section exists
+            if (content.find("[search]") == std::string::npos) {
+                content.append("\n[search]\n");
+            }
+
+            auto secPos = content.find("[search]");
+            if (secPos != std::string::npos) {
+                auto nextSec = content.find("\n[", secPos + 1);
+                auto rangeEnd = (nextSec == std::string::npos) ? content.size() : nextSec;
+
+                auto enablePos = content.find("enable_reranking", secPos);
+                if (enablePos == std::string::npos || enablePos > rangeEnd) {
+                    content.insert(rangeEnd, "enable_reranking = true\n");
+                } else {
+                    auto lineEnd = content.find('\n', enablePos);
+                    if (lineEnd == std::string::npos)
+                        lineEnd = content.size();
+                    content.replace(enablePos, lineEnd - enablePos, "enable_reranking = true");
+                }
+
+                auto keyPos = content.find("reranker_model_path", secPos);
+                if (keyPos != std::string::npos && keyPos < rangeEnd) {
+                    auto lineEnd = content.find('\n', keyPos);
+                    if (lineEnd == std::string::npos)
+                        lineEnd = content.size();
+                    content.erase(keyPos, lineEnd - keyPos + 1);
+                }
+            }
+
+            std::ofstream outCfg(configPath, std::ios::trunc);
+            outCfg << content;
+            outCfg.close();
+            spdlog::info("Configured [search].enable_reranking for ColBERT MaxSim");
+        } catch (const std::exception& e) {
+            spdlog::debug("Skipping ColBERT reranking config write: {}", e.what());
+        }
+    }
+
     /**
      * @brief Unified grammar setup entry point for both init and already-initialized states.
      *
@@ -2618,6 +2736,7 @@ private:
     bool noKeygen_ = false;
     bool printConfig_ = false;
     bool enablePlugins_ = false;
+    std::string tuningProfile_{"balanced"};
 };
 
 // Factory function

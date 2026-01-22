@@ -1,5 +1,6 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -11,7 +12,6 @@
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <cctype>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -113,6 +113,7 @@ private:
     bool noSession_{false};
     std::vector<std::string> sessionPatterns_;
     bool jsonOutput_ = false;
+    bool scopeToCwd_{false};
 
     bool shouldShowSpinner() const {
         bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
@@ -137,6 +138,7 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("grep", getDescription());
+        cmd->allow_extras();
 
         // Positional pattern: make optional and provide friendly alternatives (-e/--pattern or --)
         cmd->add_option("pattern", pattern_,
@@ -219,8 +221,19 @@ public:
         cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
         cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
         cmd->add_flag("--json", jsonOutput_, "Output results as JSON");
+        cmd->add_flag("--cwd,--here", scopeToCwd_,
+                      "Scope grep to current working directory (adds CWD as path prefix filter)");
 
-        cmd->callback([this]() {
+        cmd->callback([this, cmd]() {
+            auto extras = cmd->remaining();
+            if (!extras.empty()) {
+                if (pattern_.empty() && paths_.empty()) {
+                    pattern_ = extras.front();
+                    extras.erase(extras.begin());
+                }
+                paths_.insert(paths_.end(), extras.begin(), extras.end());
+            }
+
             if (pattern_.empty() && !paths_.empty()) {
                 pattern_ = paths_.front();
                 paths_.erase(paths_.begin());
@@ -317,8 +330,39 @@ public:
 
     Result<void> execute() override {
         try {
+            auto socketPath = yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
+            if (!yams::daemon::DaemonClient::isDaemonRunning(socketPath)) {
+                spdlog::debug("grep: daemon not running; using local execution");
+                return executeLocal();
+            }
             // Attempt daemon-first grep with complete protocol mapping
             {
+                std::vector<std::string> cwdPatterns;
+                if (scopeToCwd_) {
+                    std::error_code ec;
+                    auto cwd = std::filesystem::current_path(ec);
+                    if (!ec) {
+                        std::string cwdPrefix = cwd.string();
+                        std::replace(cwdPrefix.begin(), cwdPrefix.end(), '\\', '/');
+                        if (!cwdPrefix.empty() && cwdPrefix.back() != '/') {
+                            cwdPrefix += '/';
+                        }
+                        cwdPatterns.push_back(cwdPrefix + "**/*");
+                        std::string noLeadingSlash = cwdPrefix;
+                        if (!noLeadingSlash.empty() && noLeadingSlash.front() == '/') {
+                            noLeadingSlash.erase(noLeadingSlash.begin());
+                        }
+                        if (!noLeadingSlash.empty()) {
+                            cwdPatterns.push_back(noLeadingSlash + "**/*");
+                        }
+                        auto baseName = std::filesystem::path(cwdPrefix).filename().string();
+                        if (!baseName.empty()) {
+                            cwdPatterns.push_back(baseName + "/**/*");
+                        }
+                        spdlog::debug("[CLI] Scoping grep to CWD: {}", cwdPrefix);
+                    }
+                }
+
                 yams::app::services::GrepOptions dreq;
                 dreq.pattern = pattern_;
                 dreq.paths = paths_; // Use new paths field for multiple paths
@@ -359,6 +403,10 @@ public:
                 if (!sessionPatterns_.empty()) {
                     dreq.includePatterns.insert(dreq.includePatterns.end(),
                                                 sessionPatterns_.begin(), sessionPatterns_.end());
+                }
+                if (!cwdPatterns.empty()) {
+                    dreq.includePatterns.insert(dreq.includePatterns.end(), cwdPatterns.begin(),
+                                                cwdPatterns.end());
                 }
                 dreq.recursive = true; // Default to recursive
                 dreq.wholeWord = wholeWord_;
@@ -941,6 +989,29 @@ private:
         if (!includePatterns_.empty()) {
             auto expanded = splitPatterns({includePatterns_});
             queryPatterns.insert(queryPatterns.end(), expanded.begin(), expanded.end());
+        }
+        if (scopeToCwd_) {
+            std::error_code ec;
+            auto cwd = std::filesystem::current_path(ec);
+            if (!ec) {
+                std::string cwdPrefix = cwd.string();
+                std::replace(cwdPrefix.begin(), cwdPrefix.end(), '\\', '/');
+                if (!cwdPrefix.empty() && cwdPrefix.back() != '/') {
+                    cwdPrefix += '/';
+                }
+                queryPatterns.push_back(cwdPrefix + "**/*");
+                std::string noLeadingSlash = cwdPrefix;
+                if (!noLeadingSlash.empty() && noLeadingSlash.front() == '/') {
+                    noLeadingSlash.erase(noLeadingSlash.begin());
+                }
+                if (!noLeadingSlash.empty()) {
+                    queryPatterns.push_back(noLeadingSlash + "**/*");
+                }
+                auto baseName = std::filesystem::path(cwdPrefix).filename().string();
+                if (!baseName.empty()) {
+                    queryPatterns.push_back(baseName + "/**/*");
+                }
+            }
         }
 
         if (queryPatterns.empty()) {

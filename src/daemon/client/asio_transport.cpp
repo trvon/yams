@@ -413,6 +413,10 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     // Timeout - clean up handler
     co_await boost::asio::dispatch(conn->strand, use_awaitable);
     conn->handlers.erase(msg.requestId);
+    conn->timed_out_requests.insert(msg.requestId);
+    if (conn->timed_out_requests.size() > 256) {
+        conn->timed_out_requests.clear();
+    }
     co_return Error{ErrorCode::Timeout, "Request timeout waiting for response"};
 }
 
@@ -527,6 +531,10 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         if (std::chrono::steady_clock::now() >= deadline) {
             co_await boost::asio::dispatch(conn->strand, use_awaitable);
             conn->handlers.erase(msg.requestId);
+            conn->timed_out_requests.insert(msg.requestId);
+            if (conn->timed_out_requests.size() > 256) {
+                conn->timed_out_requests.clear();
+            }
             co_return Error{ErrorCode::Timeout, "Streaming request timeout"};
         }
     }

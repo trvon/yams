@@ -313,37 +313,43 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
           "[daemon][components][config][catch2]") {
     SECTION("efficient profile scales post-ingest concurrency down") {
         ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Efficient);
+        EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
+        EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 4u);
     }
 
     SECTION("balanced profile uses medium values") {
         ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Balanced);
+        EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
+        EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
-        CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 2u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 6u);
     }
 
     SECTION("aggressive profile uses maximum values") {
         ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Aggressive);
+        EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
+        EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
-        CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 2u);
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 2u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 3u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 8u);
     }
 

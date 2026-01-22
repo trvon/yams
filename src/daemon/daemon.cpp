@@ -530,6 +530,7 @@ void YamsDaemon::runLoop() {
                         rcfg.enable = true;
                         rcfg.dataDir = config_.dataDir;
                         rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
+                        rcfg.autoRebuildOnDimMismatch = config_.autoRebuildOnDimMismatch;
                         auto activeFn = [this]() -> size_t {
                             return static_cast<size_t>(state_.stats.activeConnections.load());
                         };

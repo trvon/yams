@@ -29,6 +29,7 @@
 #endif
 
 // Fatal signal/backtrace support
+#include <cctype>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -339,6 +340,14 @@ int main(int argc, char* argv[]) {
                         spdlog::warn("Config: failed to parse daemon.auto_repair_batch_size: {}",
                                      e.what());
                     }
+                }
+                if (daemonSection.find("auto_rebuild_on_dim_mismatch") != daemonSection.end()) {
+                    std::string v = daemonSection.at("auto_rebuild_on_dim_mismatch");
+                    for (auto& c : v) {
+                        c = static_cast<char>(std::tolower(c));
+                    }
+                    config.autoRebuildOnDimMismatch =
+                        !(v == "0" || v == "false" || v == "off" || v == "no");
                 }
             } else {
                 // Daemon section missing (probably old config) - use safe defaults

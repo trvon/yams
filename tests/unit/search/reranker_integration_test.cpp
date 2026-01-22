@@ -4,14 +4,14 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
-#include <yams/search/search_engine.h>
-#include <yams/search/reranker_adapter.h>
-#include <yams/daemon/resource/model_provider.h>
 #include <yams/core/types.h>
+#include <yams/daemon/resource/model_provider.h>
+#include <yams/search/reranker_adapter.h>
+#include <yams/search/search_engine.h>
 
 #include <memory>
-#include <vector>
 #include <string>
+#include <vector>
 
 namespace yams::search {
 namespace {
@@ -278,8 +278,8 @@ TEST_CASE("SearchEngineConfig: Reranker settings", "[search][reranker][config]")
     SearchEngineConfig config;
 
     SECTION("Default reranker settings") {
-        REQUIRE_FALSE(config.enableReranking);
-        REQUIRE(config.rerankTopK == 50);
+        REQUIRE(config.enableReranking);
+        REQUIRE(config.rerankTopK == 5);
         CHECK_THAT(config.rerankWeight, Catch::Matchers::WithinAbs(0.60f, 0.001f));
         REQUIRE(config.rerankReplaceScores == true);
     }

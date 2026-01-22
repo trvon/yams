@@ -48,6 +48,10 @@ struct ModelInfo {
 
 static const std::vector<ModelInfo> AVAILABLE_MODELS = {
     // Embedding models
+    {"mxbai-edge-colbert-v0-17m",
+     "https://huggingface.co/ryandono/mxbai-edge-colbert-v0-17m-onnx-int8/resolve/main/onnx/"
+     "model_quantized.onnx",
+     "Lightweight ColBERT (token-level, MaxSim) optimized for edge use", 17, "embedding"},
     {"all-MiniLM-L6-v2",
      "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
      "Lightweight 384-dim embeddings for semantic search", 90, "embedding"},
@@ -1059,8 +1063,9 @@ private:
             // Required model: try multiple common names
             {
                 std::vector<std::string> model_candidates = {
-                    "onnx/model.onnx", "model.onnx", "onnx/model_fp16.onnx", "onnx/model-f16.onnx",
-                    "onnx/model_float32.onnx"};
+                    "onnx/model_quantized.onnx", "onnx/model.onnx",     "model.onnx",
+                    "onnx/model_fp16.onnx",      "onnx/model-f16.onnx", "onnx/model_float32.onnx",
+                };
                 auto r = dl_candidates(model_candidates, model_file, "model.onnx");
                 if (!r) {
                     // If the file appears to exist with non-zero size despite a reported error,
@@ -1078,6 +1083,15 @@ private:
             (void)dl_candidates({"sentence_bert_config.json"},
                                 output_path / "sentence_bert_config.json",
                                 "sentence_bert_config.json");
+            if (model_name == "mxbai-edge-colbert-v0-17m") {
+                (void)dl_candidates({"tokenizer_config.json"},
+                                    output_path / "tokenizer_config.json", "tokenizer_config.json");
+                (void)dl_candidates({"special_tokens_map.json"},
+                                    output_path / "special_tokens_map.json",
+                                    "special_tokens_map.json");
+                (void)dl_candidates({"skiplist.json"}, output_path / "skiplist.json",
+                                    "skiplist.json");
+            }
         }
 
         std::cout << "\n✓ Model files ready in: " << output_path << "\n";

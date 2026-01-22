@@ -20,6 +20,7 @@
 #include <boost/asio/thread_pool.hpp>
 #include <yams/core/repair_fsm.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/EntityGraphService.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -30,6 +31,7 @@
 #include <yams/extraction/content_extractor.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/repair/embedding_repair_util.h>
+#include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
 namespace yams::daemon {
@@ -838,8 +840,17 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                 auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
 
                 if (provider && provider->isAvailable()) {
-                    // Get model dimension (using empty string for default model)
-                    size_t modelDim = provider->getEmbeddingDim("");
+                    // Get model dimension using preferred model if available.
+                    size_t modelDim = 0;
+                    if (services_) {
+                        const auto preferredModel = services_->resolvePreferredModel();
+                        if (!preferredModel.empty()) {
+                            modelDim = provider->getEmbeddingDim(preferredModel);
+                        }
+                    }
+                    if (modelDim == 0) {
+                        modelDim = provider->getEmbeddingDim("");
+                    }
 
                     // Get vector DB stored dimension
                     size_t storedDim = 0;
@@ -849,12 +860,58 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
 
                     // Skip embedding repair if dimensions mismatch
                     if (modelDim > 0 && storedDim > 0 && modelDim != storedDim) {
-                        spdlog::warn(
-                            "RepairCoordinator: skipping embedding repair - model dimension ({}) "
-                            "differs from DB dimension ({}). Use 'yams repair --rebuild-vectors' "
-                            "to migrate.",
-                            modelDim, storedDim);
-                        missingEmbeddings.clear();
+                        if (cfg_.autoRebuildOnDimMismatch &&
+                            !dimMismatchRebuildDone_.exchange(true)) {
+                            spdlog::warn(
+                                "RepairCoordinator: rebuilding vectors (model dim {} != db dim "
+                                "{})",
+                                modelDim, storedDim);
+                            if (vectorDb) {
+                                try {
+                                    const auto dbPath = vectorDb->getConfig().database_path;
+                                    yams::vector::SqliteVecBackend backend;
+                                    auto initRes = backend.initialize(dbPath);
+                                    if (!initRes) {
+                                        spdlog::warn(
+                                            "RepairCoordinator: open vectors DB failed: {}",
+                                            initRes.error().message);
+                                    } else {
+                                        auto dropRes = backend.dropTables();
+                                        if (!dropRes) {
+                                            spdlog::warn("RepairCoordinator: dropTables failed: {}",
+                                                         dropRes.error().message);
+                                        } else {
+                                            auto createRes = backend.createTables(modelDim);
+                                            if (!createRes) {
+                                                spdlog::warn(
+                                                    "RepairCoordinator: createTables failed: {}",
+                                                    createRes.error().message);
+                                            } else {
+                                                ConfigResolver::writeVectorSentinel(
+                                                    cfg_.dataDir, modelDim, "vec0", 1);
+                                                spdlog::info(
+                                                    "RepairCoordinator: vector schema rebuilt to "
+                                                    "dim {}",
+                                                    modelDim);
+                                            }
+                                        }
+                                    }
+                                    backend.close();
+                                } catch (const std::exception& e) {
+                                    spdlog::warn("RepairCoordinator: rebuild failed: {}", e.what());
+                                } catch (...) {
+                                    spdlog::warn(
+                                        "RepairCoordinator: rebuild failed (unknown error)");
+                                }
+                            }
+                        } else {
+                            spdlog::warn(
+                                "RepairCoordinator: skipping embedding repair - model dimension "
+                                "({}) differs from DB dimension ({}). Use 'yams repair "
+                                "--rebuild-vectors' to migrate.",
+                                modelDim, storedDim);
+                            missingEmbeddings.clear();
+                        }
                     } else {
                         spdlog::debug(
                             "RepairCoordinator: {} docs need embeddings, model provider ready "

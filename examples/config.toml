@@ -219,6 +219,8 @@ worker_threads = 0
 max_memory_gb = 0
 # Log level for daemon background service (trace|debug|info|warn|error)
 log_level = "info"
+# Auto-rebuild vector schema when embedding dimensions change
+auto_rebuild_on_dim_mismatch = true
 # Prefer centralized tuning (TuningManager); set to true only if you need legacy in-loop tuner
 # use_legacy_tuner = false
 
