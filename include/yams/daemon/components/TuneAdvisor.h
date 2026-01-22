@@ -14,6 +14,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
@@ -21,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -585,6 +587,12 @@ public:
             v = m;
         }
         return v;
+    }
+
+    static void setHardwareConcurrencyForTests(unsigned v) {
+        if (v == 0)
+            v = 1;
+        hwCached_.store(v, std::memory_order_relaxed);
     }
 
     // Embedding max concurrency (global). Env YAMS_EMBED_MAX_CONCURRENCY wins; else budgeted 25%.
@@ -1410,23 +1418,33 @@ public:
     // PBI-05a: PostIngestQueue Dynamic Concurrency Scaling
     // =========================================================================
 
-    /// Maximum concurrent extraction tasks (profile-scaled, max 64)
-    /// Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
-    /// Environment: YAMS_POST_EXTRACTION_CONCURRENT
-    static uint32_t postExtractionConcurrent() {
-        uint32_t ov = postExtractionConcurrentOverride_.load(std::memory_order_relaxed);
+    /// Total post-ingest concurrency budget (shared across stages).
+    /// Default uses cpuBudgetPercent() via recommendedThreads().
+    /// Environment: YAMS_POST_INGEST_TOTAL_CONCURRENT
+    static uint32_t postIngestTotalConcurrent() {
+        uint32_t ov = postIngestTotalConcurrentOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_POST_EXTRACTION_CONCURRENT")) {
+        if (const char* s = std::getenv("YAMS_POST_INGEST_TOTAL_CONCURRENT")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 64)
+                if (v >= 1 && v <= 256)
                     return v;
             } catch (...) {
             }
         }
-        // Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
-        return std::max(1u, static_cast<uint32_t>(4.0 * postIngestProfileScale()));
+        return std::max<uint32_t>(1, recommendedThreads());
+    }
+    static void setPostIngestTotalConcurrent(uint32_t v) {
+        postIngestTotalConcurrentOverride_.store(std::clamp(v, 1u, 256u),
+                                                 std::memory_order_relaxed);
+    }
+
+    /// Maximum concurrent extraction tasks (profile-scaled, max 64)
+    /// Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
+    /// Environment: YAMS_POST_EXTRACTION_CONCURRENT
+    static uint32_t postExtractionConcurrent() {
+        return postIngestBudgetedConcurrency().extraction;
     }
     static void setPostExtractionConcurrent(uint32_t v) {
         postExtractionConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
@@ -1435,21 +1453,7 @@ public:
     /// Maximum concurrent KG ingestion tasks (profile-scaled, max 64)
     /// Profile-scaled: Efficient=4, Balanced=6, Aggressive=8
     /// Environment: YAMS_POST_KG_CONCURRENT
-    static uint32_t postKgConcurrent() {
-        uint32_t ov = postKgConcurrentOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = std::getenv("YAMS_POST_KG_CONCURRENT")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 64)
-                    return v;
-            } catch (...) {
-            }
-        }
-        // Profile-scaled: Efficient=4, Balanced=6, Aggressive=8
-        return std::max(1u, static_cast<uint32_t>(8.0 * postIngestProfileScale()));
-    }
+    static uint32_t postKgConcurrent() { return postIngestBudgetedConcurrency().kg; }
     static void setPostKgConcurrent(uint32_t v) {
         postKgConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
     }
@@ -1457,21 +1461,7 @@ public:
     /// Maximum concurrent symbol extraction tasks (profile-scaled, max 32)
     /// Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
     /// Environment: YAMS_POST_SYMBOL_CONCURRENT
-    static uint32_t postSymbolConcurrent() {
-        uint32_t ov = postSymbolConcurrentOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = std::getenv("YAMS_POST_SYMBOL_CONCURRENT")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 32)
-                    return v;
-            } catch (...) {
-            }
-        }
-        // Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
-        return std::max(1u, static_cast<uint32_t>(4.0 * postIngestProfileScale()));
-    }
+    static uint32_t postSymbolConcurrent() { return postIngestBudgetedConcurrency().symbol; }
     static void setPostSymbolConcurrent(uint32_t v) {
         postSymbolConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
     }
@@ -1480,45 +1470,22 @@ public:
     /// Entity extraction is CPU-heavy, so lower defaults
     /// Profile-scaled: Efficient=1, Balanced=2, Aggressive=2
     /// Environment: YAMS_POST_ENTITY_CONCURRENT
-    static uint32_t postEntityConcurrent() {
-        uint32_t ov = postEntityConcurrentOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = std::getenv("YAMS_POST_ENTITY_CONCURRENT")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 16)
-                    return v;
-            } catch (...) {
-            }
-        }
-        // Profile-scaled: Efficient=1, Balanced=2, Aggressive=2
-        // Entity extraction is CPU-heavy, keep minimum at 1
-        return std::max(1u, static_cast<uint32_t>(2.0 * postIngestProfileScale()));
-    }
+    static uint32_t postEntityConcurrent() { return postIngestBudgetedConcurrency().entity; }
     static void setPostEntityConcurrent(uint32_t v) {
         postEntityConcurrentOverride_.store(std::min(v, 16u), std::memory_order_relaxed);
+    }
+
+    /// Maximum concurrent title extraction tasks (profile-scaled, max 16)
+    /// Environment: YAMS_POST_TITLE_CONCURRENT
+    static uint32_t postTitleConcurrent() { return postIngestBudgetedConcurrency().title; }
+    static void setPostTitleConcurrent(uint32_t v) {
+        postTitleConcurrentOverride_.store(std::min(v, 16u), std::memory_order_relaxed);
     }
 
     // PBI-05b: EmbeddingService concurrency (parallel embedding workers)
     // Embeddings are compute-heavy (ONNX inference) so we need parallelism to keep up with ingest
     // Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
-    static uint32_t postEmbedConcurrent() {
-        uint32_t ov = postEmbedConcurrentOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        // Check environment
-        if (const char* val = std::getenv("YAMS_POST_EMBED_CONCURRENT")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(val));
-                if (v >= 1 && v <= 32)
-                    return v;
-            } catch (...) {
-            }
-        }
-        // Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
-        return std::max(1u, static_cast<uint32_t>(4.0 * postIngestProfileScale()));
-    }
+    static uint32_t postEmbedConcurrent() { return postIngestBudgetedConcurrency().embed; }
     static void setPostEmbedConcurrent(uint32_t v) {
         postEmbedConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
     }
@@ -1680,6 +1647,201 @@ public:
     static uint64_t dbLockErrorCount() { return dbLockErrorCount_.load(std::memory_order_relaxed); }
 
 private:
+    struct PostIngestConcurrencyBudget {
+        uint32_t extraction;
+        uint32_t kg;
+        uint32_t symbol;
+        uint32_t entity;
+        uint32_t title;
+        uint32_t embed;
+    };
+
+    static PostIngestConcurrencyBudget postIngestBudgetedConcurrency() {
+        constexpr std::size_t kStageCount = 6;
+        constexpr std::size_t kExtractionIdx = 0;
+        constexpr std::size_t kEmbedIdx = 5;
+        constexpr std::array<uint32_t, kStageCount> kWeights{1u, 1u, 1u, 1u, 1u, 3u};
+        constexpr std::array<uint32_t, kStageCount> kMaxCaps{64u, 64u, 32u, 16u, 16u, 32u};
+        const uint32_t totalBudget = std::max<uint32_t>(1, postIngestTotalConcurrent());
+
+        auto resolveOverride = [](std::atomic<uint32_t>& overrideSlot, const char* env,
+                                  uint32_t maxCap) -> std::optional<uint32_t> {
+            uint32_t ov = overrideSlot.load(std::memory_order_relaxed);
+            if (ov > 0)
+                return std::min(ov, maxCap);
+            if (const char* s = std::getenv(env)) {
+                try {
+                    uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                    if (v >= 1 && v <= maxCap)
+                        return v;
+                } catch (...) {
+                }
+            }
+            return std::nullopt;
+        };
+
+        auto allocate = [&](const std::array<uint32_t, kStageCount>& desired,
+                            const std::array<uint32_t, kStageCount>& caps) {
+            std::array<uint32_t, kStageCount> alloc{};
+            std::array<bool, kStageCount> locked{};
+            uint32_t used = 0;
+
+            for (std::size_t i = 0; i < kStageCount; ++i) {
+                alloc[i] = std::min(desired[i], caps[i]);
+                used += alloc[i];
+                locked[i] = desired[i] == caps[i];
+            }
+
+            if (used > totalBudget) {
+                double ratio = static_cast<double>(totalBudget) /
+                               static_cast<double>(std::max<uint32_t>(1, used));
+                used = 0;
+                for (std::size_t i = 0; i < kStageCount; ++i) {
+                    if (!locked[i]) {
+                        alloc[i] =
+                            std::min(caps[i], static_cast<uint32_t>(std::floor(alloc[i] * ratio)));
+                    }
+                    used += alloc[i];
+                }
+            }
+
+            if (totalBudget >= 2) {
+                if (alloc[kExtractionIdx] == 0 && caps[kExtractionIdx] > 0) {
+                    alloc[kExtractionIdx] = 1;
+                }
+                if (alloc[kEmbedIdx] == 0 && caps[kEmbedIdx] > 0) {
+                    alloc[kEmbedIdx] = 1;
+                }
+            } else if (totalBudget == 1 && caps[kExtractionIdx] > 0) {
+                alloc[kExtractionIdx] = 1;
+                alloc[kEmbedIdx] = 0;
+            }
+
+            used = 0;
+            for (auto value : alloc) {
+                used += value;
+            }
+
+            if (used > totalBudget) {
+                std::array<std::size_t, kStageCount> reduceOrder{};
+                for (std::size_t i = 0; i < kStageCount; ++i) {
+                    reduceOrder[i] = i;
+                }
+                std::sort(reduceOrder.begin(), reduceOrder.end(),
+                          [&](std::size_t a, std::size_t b) {
+                              if (kWeights[a] != kWeights[b])
+                                  return kWeights[a] < kWeights[b];
+                              return a < b;
+                          });
+                while (used > totalBudget) {
+                    bool progressed = false;
+                    for (auto idx : reduceOrder) {
+                        if (alloc[idx] == 0)
+                            continue;
+                        if (locked[idx])
+                            continue;
+                        if (idx == kExtractionIdx || idx == kEmbedIdx) {
+                            if (totalBudget >= 2 && alloc[idx] <= 1)
+                                continue;
+                        }
+                        alloc[idx] -= 1;
+                        used -= 1;
+                        progressed = true;
+                        if (used <= totalBudget)
+                            break;
+                    }
+                    if (!progressed)
+                        break;
+                }
+            }
+
+            if (used < totalBudget) {
+                uint32_t remaining = totalBudget - used;
+                std::array<std::size_t, kStageCount> order{};
+                for (std::size_t i = 0; i < kStageCount; ++i) {
+                    order[i] = i;
+                }
+                std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+                    if (kWeights[a] != kWeights[b])
+                        return kWeights[a] > kWeights[b];
+                    return a < b;
+                });
+                while (remaining > 0) {
+                    bool progressed = false;
+                    for (auto idx : order) {
+                        if (alloc[idx] >= caps[idx])
+                            continue;
+                        alloc[idx] += 1;
+                        remaining -= 1;
+                        progressed = true;
+                        if (remaining == 0)
+                            break;
+                    }
+                    if (!progressed)
+                        break;
+                }
+            }
+
+            return alloc;
+        };
+
+        std::array<uint32_t, kStageCount> defaults{};
+        uint32_t weightSum = 0;
+        for (auto w : kWeights) {
+            weightSum += w;
+        }
+        for (std::size_t i = 0; i < kStageCount; ++i) {
+            defaults[i] = static_cast<uint32_t>(
+                std::floor(static_cast<double>(totalBudget) * kWeights[i] / weightSum));
+            defaults[i] = std::min(defaults[i], kMaxCaps[i]);
+        }
+        std::array<uint32_t, kStageCount> caps = kMaxCaps;
+        auto allocDefaults = allocate(defaults, caps);
+
+        std::array<uint32_t, kStageCount> desired = allocDefaults;
+        bool hasOverride = false;
+        if (auto v = resolveOverride(postExtractionConcurrentOverride_,
+                                     "YAMS_POST_EXTRACTION_CONCURRENT", kMaxCaps[0])) {
+            desired[0] = *v;
+            caps[0] = *v;
+            hasOverride = true;
+        }
+        if (auto v = resolveOverride(postKgConcurrentOverride_, "YAMS_POST_KG_CONCURRENT",
+                                     kMaxCaps[1])) {
+            desired[1] = *v;
+            caps[1] = *v;
+            hasOverride = true;
+        }
+        if (auto v = resolveOverride(postSymbolConcurrentOverride_, "YAMS_POST_SYMBOL_CONCURRENT",
+                                     kMaxCaps[2])) {
+            desired[2] = *v;
+            caps[2] = *v;
+            hasOverride = true;
+        }
+        if (auto v = resolveOverride(postEntityConcurrentOverride_, "YAMS_POST_ENTITY_CONCURRENT",
+                                     kMaxCaps[3])) {
+            desired[3] = *v;
+            caps[3] = *v;
+            hasOverride = true;
+        }
+        if (auto v = resolveOverride(postTitleConcurrentOverride_, "YAMS_POST_TITLE_CONCURRENT",
+                                     kMaxCaps[4])) {
+            desired[4] = *v;
+            caps[4] = *v;
+            hasOverride = true;
+        }
+        if (auto v = resolveOverride(postEmbedConcurrentOverride_, "YAMS_POST_EMBED_CONCURRENT",
+                                     kMaxCaps[5])) {
+            desired[5] = *v;
+            caps[5] = *v;
+            hasOverride = true;
+        }
+
+        auto alloc = hasOverride ? allocate(desired, caps) : allocDefaults;
+        return PostIngestConcurrencyBudget{alloc[0], alloc[1], alloc[2],
+                                           alloc[3], alloc[4], alloc[5]};
+    }
+
     // Runtime policy storage (single process); defaults chosen to reduce CPU when busy
     static inline std::atomic<AutoEmbedPolicy> autoEmbedPolicy_{AutoEmbedPolicy::Idle};
     static inline std::atomic<double> cpuIdlePct_{25.0};
@@ -1714,6 +1876,7 @@ private:
     static inline std::atomic<uint32_t> poolHighWatermarkPctOverride_{0};
     static inline std::atomic<uint32_t> searchConcurrencyOverride_{0};
     static inline std::atomic<unsigned> hwCached_{0};
+    static inline std::atomic<uint32_t> postIngestTotalConcurrentOverride_{0};
     static inline std::atomic<uint32_t> postIngestQueueMaxOverride_{0};
     static inline std::atomic<uint32_t> postIngestBatchSizeOverride_{0};
     static inline std::atomic<uint32_t> ioConnPerThreadOverride_{0};
@@ -1747,6 +1910,7 @@ private:
     static inline std::atomic<uint32_t> postKgConcurrentOverride_{0};
     static inline std::atomic<uint32_t> postSymbolConcurrentOverride_{0};
     static inline std::atomic<uint32_t> postEntityConcurrentOverride_{0};
+    static inline std::atomic<uint32_t> postTitleConcurrentOverride_{0};
 
     // PBI-05b: EmbeddingService concurrency overrides
     static inline std::atomic<uint32_t> postEmbedConcurrentOverride_{0};

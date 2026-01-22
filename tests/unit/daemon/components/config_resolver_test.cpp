@@ -313,34 +313,37 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
           "[daemon][components][config][catch2]") {
     SECTION("efficient profile scales post-ingest concurrency down") {
         ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Efficient);
+        yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
-        CHECK(TuneAdvisor::postExtractionConcurrent() == 2u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 4u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 2u);
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 4u);
     }
 
     SECTION("balanced profile uses medium values") {
         ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Balanced);
+        yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
-        CHECK(TuneAdvisor::postExtractionConcurrent() == 3u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 6u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 3u);
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 3u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 6u);
     }
 
     SECTION("aggressive profile uses maximum values") {
         ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Aggressive);
+        yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
-        CHECK(TuneAdvisor::postExtractionConcurrent() == 4u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 8u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 4u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 2u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 4u);
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 2u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 3u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 8u);
     }
 

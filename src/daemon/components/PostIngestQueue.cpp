@@ -230,7 +230,7 @@ std::size_t PostIngestQueue::maxEntityConcurrent() {
 std::size_t PostIngestQueue::maxTitleConcurrent() {
     // Title extraction shares ONNX resources with embeddings, so limit concurrency
     // to allow both to run in parallel without starving each other
-    return static_cast<std::size_t>(std::max(1u, TuneAdvisor::postEntityConcurrent() / 2));
+    return static_cast<std::size_t>(TuneAdvisor::postTitleConcurrent());
 }
 
 PostIngestQueue::PostIngestQueue(

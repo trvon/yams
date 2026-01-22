@@ -185,105 +185,56 @@ void TuningManager::tick_once() {
         auto* pq = sm_->getPostIngestQueue();
         if (pq) {
             const std::size_t queuedItems = pq->size();
-            const std::size_t currentInFlight = pq->totalInFlight();
-            const uint32_t hwThreads = TuneAdvisor::hardwareConcurrency();
+            (void)pq->totalInFlight();
 
-            // Scale extraction concurrency based on queue depth
-            // When queue is large, scale up to process faster
-            // Max is capped at 50% of hardware threads or 64, whichever is smaller
-            uint32_t extractionTarget = 4; // default
-            if (queuedItems > 1000) {
-                extractionTarget = std::min<uint32_t>(hwThreads / 2, 32);
-            } else if (queuedItems > 500) {
-                extractionTarget = std::min<uint32_t>(hwThreads / 4, 16);
-            } else if (queuedItems > 100) {
-                extractionTarget = std::min<uint32_t>(hwThreads / 8 + 4, 12);
-            } else if (queuedItems > 10) {
-                extractionTarget = 8;
-            } else if (queuedItems == 0 && currentInFlight == 0) {
-                extractionTarget = 4; // idle - use minimum
-            }
-            extractionTarget = std::max<uint32_t>(4, extractionTarget); // floor at default
-            // Gate through ResourceGovernor
-            if (TuneAdvisor::enableResourceGovernor()) {
-                extractionTarget = std::min(extractionTarget, governor.maxExtractionConcurrency());
-            }
-            TuneAdvisor::setPostExtractionConcurrent(extractionTarget);
-
-            // KG concurrency: scale based on queue depth BUT scale DOWN on DB contention
-            // This prevents "database is locked" errors from overwhelming the system
-            uint32_t kgTarget = 8;
-            const uint64_t dbLockErrors = TuneAdvisor::getAndResetDbLockErrors();
-            const uint32_t lockThreshold = TuneAdvisor::dbLockErrorThreshold();
-
-            if (dbLockErrors > lockThreshold * 2) {
-                // Severe contention: drop to minimum
-                kgTarget = 2;
-                spdlog::debug("TuningManager: DB lock errors ({}) severe, KG concurrency -> 2",
-                              dbLockErrors);
-            } else if (dbLockErrors > lockThreshold) {
-                // Moderate contention: reduce significantly
-                kgTarget = 4;
-                spdlog::debug("TuningManager: DB lock errors ({}) > threshold, KG concurrency -> 4",
-                              dbLockErrors);
-            } else if (queuedItems > 500) {
-                kgTarget = std::min<uint32_t>(hwThreads / 2, 32);
-            } else if (queuedItems > 100) {
-                kgTarget = 16;
-            }
-            // Gate through ResourceGovernor
-            if (TuneAdvisor::enableResourceGovernor()) {
-                kgTarget = std::min(kgTarget, governor.maxKgConcurrency());
-            }
-            TuneAdvisor::setPostKgConcurrent(kgTarget);
-
-            // Symbol extraction - scale modestly (CPU-bound)
-            uint32_t symbolTarget = queuedItems > 100 ? std::min<uint32_t>(hwThreads / 4, 8) : 4;
-            TuneAdvisor::setPostSymbolConcurrent(symbolTarget);
-
-            // Entity extraction stays low (heavy binary analysis)
-            uint32_t entityTarget = queuedItems > 50 ? 4 : 2;
-            TuneAdvisor::setPostEntityConcurrent(entityTarget);
-
-            // PBI-05b: Embedding concurrency scaling
-            // Embeddings are compute-heavy (ONNX model inference) and often bottleneck bulk ingest.
-            // Scale aggressively when there's backlog to prevent queue overflow and job dropping.
-            // Check embed queue depth from InternalEventBus
             auto& bus = InternalEventBus::instance();
             const std::size_t embedQueued = bus.embedQueued();
             const std::size_t embedDropped = bus.embedDropped();
 
-            // Embed concurrency: also scale DOWN on DB contention
-            // Embeddings write to vector_db which shares the SQLite connection pool
-            uint32_t embedTarget = 4; // conservative baseline (was 2, caused stalls)
+            // Derive total post-ingest budget and weighted targets.
+            uint32_t totalBudget = TuneAdvisor::postIngestTotalConcurrent();
+            uint32_t scaleBias = 0;
+            if (embedQueued > 1000 || embedDropped > 100) {
+                scaleBias = 2;
+            } else if (embedQueued > 250 || embedDropped > 20) {
+                scaleBias = 1;
+            } else if (queuedItems > 500) {
+                scaleBias = 1;
+            }
+            totalBudget = std::max<uint32_t>(1, std::min<uint32_t>(256, totalBudget + scaleBias));
+            TuneAdvisor::setPostIngestTotalConcurrent(totalBudget);
+
+            const uint64_t dbLockErrors = TuneAdvisor::getAndResetDbLockErrors();
+            const uint32_t lockThreshold = TuneAdvisor::dbLockErrorThreshold();
+
+            uint32_t extractionTarget = TuneAdvisor::postExtractionConcurrent();
+            uint32_t kgTarget = TuneAdvisor::postKgConcurrent();
+            uint32_t symbolTarget = TuneAdvisor::postSymbolConcurrent();
+            uint32_t entityTarget = TuneAdvisor::postEntityConcurrent();
+            uint32_t embedTarget = TuneAdvisor::postEmbedConcurrent();
+
             if (dbLockErrors > lockThreshold * 2) {
-                // Severe DB contention: drop to minimum
-                embedTarget = 1;
-                spdlog::debug("TuningManager: DB lock errors ({}) severe, embed concurrency -> 1",
+                kgTarget = std::min<uint32_t>(kgTarget, 2);
+                embedTarget = std::min<uint32_t>(embedTarget, 1);
+                spdlog::debug("TuningManager: DB lock errors ({}) severe; KG/embed reduced",
                               dbLockErrors);
             } else if (dbLockErrors > lockThreshold) {
-                // Moderate contention: reduce to 2
-                embedTarget = 2;
-                spdlog::debug(
-                    "TuningManager: DB lock errors ({}) > threshold, embed concurrency -> 2",
-                    dbLockErrors);
-            } else if (embedQueued > 1000 || embedDropped > 100) {
-                // Heavy backlog or significant drops - scale to max
-                embedTarget = std::min<uint32_t>(hwThreads / 2, 16);
-            } else if (embedQueued > 500 || embedDropped > 10) {
-                embedTarget = std::min<uint32_t>(hwThreads / 3, 12);
-            } else if (embedQueued > 100) {
-                embedTarget = std::min<uint32_t>(hwThreads / 4, 8);
-            } else if (embedQueued > 10) {
-                embedTarget = 4;
-            } else if (embedQueued == 0 && queuedItems == 0) {
-                embedTarget = 2; // idle - minimum
+                kgTarget = std::min<uint32_t>(kgTarget, 4);
+                embedTarget = std::min<uint32_t>(embedTarget, 2);
+                spdlog::debug("TuningManager: DB lock errors ({}) > threshold; KG/embed reduced",
+                              dbLockErrors);
             }
-            embedTarget = std::max<uint32_t>(2, embedTarget); // floor
-            // Gate through ResourceGovernor
+
             if (TuneAdvisor::enableResourceGovernor()) {
+                extractionTarget = std::min(extractionTarget, governor.maxExtractionConcurrency());
+                kgTarget = std::min(kgTarget, governor.maxKgConcurrency());
                 embedTarget = std::min(embedTarget, governor.maxEmbedConcurrency());
             }
+
+            TuneAdvisor::setPostExtractionConcurrent(extractionTarget);
+            TuneAdvisor::setPostKgConcurrent(kgTarget);
+            TuneAdvisor::setPostSymbolConcurrent(symbolTarget);
+            TuneAdvisor::setPostEntityConcurrent(entityTarget);
             TuneAdvisor::setPostEmbedConcurrent(embedTarget);
 
 #if defined(TRACY_ENABLE)
