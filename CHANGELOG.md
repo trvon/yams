@@ -34,8 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Symbol-aware search ranking: definitions rank higher than usages (`YAMS_SYMBOL_WEIGHT`).
 - Zig language support: functions, structs, enums, unions, fields, imports, calls.
 - ColBERT MaxSim reranking when the preferred model is a ColBERT variant.
-- Added support for the [mxbai-edge-colbert-v0-17m](https://huggingface.co/mixedbread-ai/mxbai-edge-colbert-v0-17m) model (embedding + MaxSim reranking).
+- Added support for the [mxbai-edge-colbert-v0-17m](https://huggingface.co/mixedbread-ai/mxbai-edge-colbert-v0-17m) model (embedding + MaxSim reranking, max-pooled and L2-normalized embeddings).
 - Vector DB auto-rebuild on embedding dimension mismatch (`daemon.auto_rebuild_on_dim_mismatch`).
+- Init now prompts for a tuning profile (efficient/balanced/aggressive) and writes `tuning.profile`.
 - **WEIGHTED_MAX fusion strategy**: Takes maximum weighted score per document instead of sum.
   Prevents "hub" documents from dominating via multi-component consensus boost. Used by
   SCIENTIFIC tuning profile for benchmark corpora.
@@ -96,6 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Reranking**: Score-based reranking is now the default. Uses geometric mean of text and
   vector scores to boost documents with multi-component consensus. No external model needed.
   Cross-encoder model reranking is opt-in via `enableModelReranking` config option.
+- Tuning profile multipliers updated: efficient 0.5x, balanced 1.0x, aggressive 1.5x.
 
 ### Fixed
 - **FTS5 natural language queries**: OR fallback now correctly triggers when AND query returns
@@ -120,3 +122,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Streaming: 30s chunk timeout, backpressure stops producer on queue overflow.
 - `yams add` returns immediately; hash computed async during ingestion.
 - Replaced experimental Boost.Asio APIs with stable `async_initiate` (fixes TSAN races).
+- File history now records snapshot metadata for single-file adds, not just directory snapshots.
