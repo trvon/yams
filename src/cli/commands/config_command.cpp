@@ -108,45 +108,25 @@ public:
         pathTreeEnableCmd
             ->add_option("--mode", pathTreeMode_, "Mode when enabled (fallback|preferred)")
             ->check(CLI::IsMember({"fallback", "preferred"}));
-        pathTreeEnableCmd->callback([this]() {
-            auto result = executePathTreeEnable();
-            if (!result) {
-                spdlog::error("Enable path-tree failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        pathTreeEnableCmd->callback(
+            [this]() { exitOnError(executePathTreeEnable(), "Enable path-tree"); });
 
         auto* pathTreeDisableCmd =
             pathTreeCmd->add_subcommand("disable", "Disable path-tree traversal");
-        pathTreeDisableCmd->callback([this]() {
-            auto result = executePathTreeDisable();
-            if (!result) {
-                spdlog::error("Disable path-tree failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        pathTreeDisableCmd->callback(
+            [this]() { exitOnError(executePathTreeDisable(), "Disable path-tree"); });
 
         auto* pathTreeModeCmd = pathTreeCmd->add_subcommand("mode", "Set path-tree traversal mode");
         pathTreeModeCmd->add_option("mode", pathTreeMode_, "fallback|preferred")
             ->required()
             ->check(CLI::IsMember({"fallback", "preferred"}));
-        pathTreeModeCmd->callback([this]() {
-            auto result = executePathTreeMode();
-            if (!result) {
-                spdlog::error("Set path-tree mode failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        pathTreeModeCmd->callback(
+            [this]() { exitOnError(executePathTreeMode(), "Set path-tree mode"); });
 
         auto* pathTreeStatusCmd =
             pathTreeCmd->add_subcommand("status", "Show path-tree configuration");
-        pathTreeStatusCmd->callback([this]() {
-            auto result = executePathTreeStatus();
-            if (!result) {
-                spdlog::error("Path-tree status failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        pathTreeStatusCmd->callback(
+            [this]() { exitOnError(executePathTreeStatus(), "Path-tree status"); });
 
         // Migration subcommand
         auto* migrateCmd = cmd->add_subcommand("migrate", "Migrate configuration to v2");
@@ -190,24 +170,13 @@ public:
 
         auto* grammarAutoDisableCmd =
             grammarCmd->add_subcommand("auto-disable", "Disable automatic grammar downloads");
-        grammarAutoDisableCmd->callback([this]() {
-            auto result = executeGrammarAutoDisable();
-            if (!result) {
-                spdlog::error("Disable auto-download failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        grammarAutoDisableCmd->callback(
+            [this]() { exitOnError(executeGrammarAutoDisable(), "Disable auto-download"); });
 
         // Check subcommand to verify if migration is needed
         auto* checkCmd = cmd->add_subcommand("check", "Check if config needs migration");
         checkCmd->add_option("--config-path", configPath_, "Path to config file");
-        checkCmd->callback([this]() {
-            auto result = executeCheck();
-            if (!result) {
-                spdlog::error("Config check failed: {}", result.error().message);
-                std::exit(1);
-            }
-        });
+        checkCmd->callback([this]() { exitOnError(executeCheck(), "Config check"); });
 
         // Tuning subcommands for centralized tuning configuration
         auto* tuningCmd = cmd->add_subcommand("tuning", "Manage daemon tuning settings");

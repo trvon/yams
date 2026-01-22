@@ -5,6 +5,7 @@
 #include <spdlog/spdlog.h>
 #include <yams/api/content_store.h>
 #include <yams/app/services/graph_query_service.hpp>
+#include <yams/app/services/service_utils.hpp>
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compression_utils.h>
 #include <yams/compression/compressor_interface.h>
@@ -47,18 +48,6 @@ constexpr std::size_t kCentroidPreviewLimit = 16;
 // Use project compatibility helpers from cpp23_features.hpp
 using yams::features::string_starts_with;
 
-inline std::string normalizeExtension(const std::string& ext) {
-    if (ext.empty())
-        return {};
-    if (ext[0] == '.')
-        return ext;
-    return "." + ext;
-}
-
-inline bool isTextMime(const std::string& mime) {
-    return !mime.empty() && string_starts_with(mime, "text/");
-}
-
 // Extract searchable terms from a document for fuzzy search indexing.
 // Extracts: filename stem (without extension) and file extension.
 // Terms shorter than 2 characters are skipped to reduce noise.
@@ -89,48 +78,6 @@ indexDocumentTermsForFuzzySearch(const std::shared_ptr<metadata::MetadataReposit
             addTerm(ext.substr(1)); // Skip the leading dot
         }
     }
-}
-
-inline const char* toFileType(const std::string& mime) {
-    return isTextMime(mime) ? "text" : "binary";
-}
-
-// Convert glob to SQL LIKE pattern. This is updated to better handle subpath matching
-// by prepending a wildcard if the pattern appears to be a relative path.
-inline std::string globToSqlLike(const std::string& glob) {
-    if (glob.empty())
-        return "%";
-    std::string sql = glob;
-    std::replace(sql.begin(), sql.end(), '*', '%');
-    std::replace(sql.begin(), sql.end(), '?', '_');
-
-    // Check if the path is absolute before modifying it.
-    const bool is_absolute = !glob.empty() && std::filesystem::path(glob).is_absolute();
-
-    const bool hasSlash =
-        (sql.find('/') != std::string::npos) || (sql.find('\\') != std::string::npos);
-    if (hasSlash && sql.front() != '%' && !is_absolute) {
-        // Path segment, treat as suffix match
-        sql = "%" + sql;
-    } else if (!sql.empty() && sql.front() != '%' && !hasSlash) {
-        // Heuristic to match filename at end of path when no directory component was provided
-        sql = "%/" + sql;
-    }
-    return sql;
-}
-
-inline int64_t toEpochSeconds(const std::chrono::system_clock::time_point& tp) {
-    return std::chrono::duration_cast<std::chrono::seconds>(tp.time_since_epoch()).count();
-}
-
-inline void populatePathDerivedFields(metadata::DocumentInfo& info) {
-    auto derived = metadata::computePathDerivedValues(info.filePath);
-    info.filePath = derived.normalizedPath;
-    info.pathPrefix = derived.pathPrefix;
-    info.reversePath = derived.reversePath;
-    info.pathHash = derived.pathHash;
-    info.parentHash = derived.parentHash;
-    info.pathDepth = derived.pathDepth;
 }
 
 inline void addTagPairsToMap(const std::vector<std::string>& tags,
