@@ -1418,6 +1418,32 @@ public:
     // PBI-05a: PostIngestQueue Dynamic Concurrency Scaling
     // =========================================================================
 
+    enum class PostIngestStage : uint8_t {
+        Extraction = 0,
+        KnowledgeGraph = 1,
+        Symbol = 2,
+        Entity = 3,
+        Title = 4,
+        Embed = 5
+    };
+
+    static void setPostIngestStageActive(PostIngestStage stage, bool active) {
+        const uint32_t bit = 1u << static_cast<uint8_t>(stage);
+        uint32_t mask = postIngestStageActiveMaskOverride_.load(std::memory_order_relaxed);
+        if (active) {
+            mask |= bit;
+        } else {
+            mask &= ~bit;
+        }
+        postIngestStageActiveMaskOverride_.store(mask, std::memory_order_relaxed);
+    }
+    static uint32_t postIngestStageActiveMask() {
+        uint32_t mask = postIngestStageActiveMaskOverride_.load(std::memory_order_relaxed);
+        if (mask == 0)
+            return 0x3Fu;
+        return mask;
+    }
+
     /// Total post-ingest concurrency budget (shared across stages).
     /// Default uses cpuBudgetPercent() via recommendedThreads().
     /// Environment: YAMS_POST_INGEST_TOTAL_CONCURRENT
@@ -1436,6 +1462,10 @@ public:
         return std::max<uint32_t>(1, recommendedThreads());
     }
     static void setPostIngestTotalConcurrent(uint32_t v) {
+        if (v == 0) {
+            postIngestTotalConcurrentOverride_.store(0u, std::memory_order_relaxed);
+            return;
+        }
         postIngestTotalConcurrentOverride_.store(std::clamp(v, 1u, 256u),
                                                  std::memory_order_relaxed);
     }
@@ -1663,6 +1693,7 @@ private:
         constexpr std::array<uint32_t, kStageCount> kWeights{1u, 1u, 1u, 1u, 1u, 3u};
         constexpr std::array<uint32_t, kStageCount> kMaxCaps{64u, 64u, 32u, 16u, 16u, 32u};
         const uint32_t totalBudget = std::max<uint32_t>(1, postIngestTotalConcurrent());
+        const uint32_t activeMask = postIngestStageActiveMask();
 
         auto resolveOverride = [](std::atomic<uint32_t>& overrideSlot, const char* env,
                                   uint32_t maxCap) -> std::optional<uint32_t> {
@@ -1681,14 +1712,48 @@ private:
         };
 
         auto allocate = [&](const std::array<uint32_t, kStageCount>& desired,
-                            const std::array<uint32_t, kStageCount>& caps) {
+                            const std::array<uint32_t, kStageCount>& caps,
+                            const std::array<uint32_t, kStageCount>& weights) {
             std::array<uint32_t, kStageCount> alloc{};
             std::array<bool, kStageCount> locked{};
             uint32_t used = 0;
+            uint32_t activeStages = 0;
 
             for (std::size_t i = 0; i < kStageCount; ++i) {
-                alloc[i] = std::min(desired[i], caps[i]);
-                used += alloc[i];
+                if (caps[i] > 0)
+                    activeStages += 1;
+            }
+
+            if (activeStages > 0 && totalBudget >= activeStages) {
+                for (std::size_t i = 0; i < kStageCount; ++i) {
+                    if (caps[i] > 0) {
+                        alloc[i] = 1;
+                        used += 1;
+                    }
+                }
+            } else if (totalBudget >= 2) {
+                if (caps[kExtractionIdx] > 0) {
+                    alloc[kExtractionIdx] = 1;
+                    used += 1;
+                }
+                if (caps[kEmbedIdx] > 0) {
+                    alloc[kEmbedIdx] = 1;
+                    used += 1;
+                }
+            } else if (totalBudget == 1 && caps[kExtractionIdx] > 0) {
+                alloc[kExtractionIdx] = 1;
+                used += 1;
+            }
+
+            for (std::size_t i = 0; i < kStageCount; ++i) {
+                uint32_t target = std::min(desired[i], caps[i]);
+                if (target > alloc[i]) {
+                    uint32_t gap = target - alloc[i];
+                    uint32_t room = caps[i] - alloc[i];
+                    uint32_t add = std::min(gap, room);
+                    alloc[i] += add;
+                    used += add;
+                }
                 locked[i] = desired[i] == caps[i];
             }
 
@@ -1729,8 +1794,8 @@ private:
                 }
                 std::sort(reduceOrder.begin(), reduceOrder.end(),
                           [&](std::size_t a, std::size_t b) {
-                              if (kWeights[a] != kWeights[b])
-                                  return kWeights[a] < kWeights[b];
+                              if (weights[a] != weights[b])
+                                  return weights[a] < weights[b];
                               return a < b;
                           });
                 while (used > totalBudget) {
@@ -1762,8 +1827,8 @@ private:
                     order[i] = i;
                 }
                 std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-                    if (kWeights[a] != kWeights[b])
-                        return kWeights[a] > kWeights[b];
+                    if (weights[a] != weights[b])
+                        return weights[a] > weights[b];
                     return a < b;
                 });
                 while (remaining > 0) {
@@ -1785,59 +1850,74 @@ private:
             return alloc;
         };
 
-        std::array<uint32_t, kStageCount> defaults{};
+        std::array<uint32_t, kStageCount> caps = kMaxCaps;
+        std::array<uint32_t, kStageCount> weights = kWeights;
+        for (std::size_t i = 0; i < kStageCount; ++i) {
+            if ((activeMask & (1u << i)) == 0u) {
+                caps[i] = 0;
+                weights[i] = 0;
+            }
+        }
+
         uint32_t weightSum = 0;
-        for (auto w : kWeights) {
+        for (auto w : weights) {
             weightSum += w;
         }
+        if (weightSum == 0) {
+            weights = kWeights;
+            weightSum = 0;
+            for (auto w : weights) {
+                weightSum += w;
+            }
+            caps = kMaxCaps;
+        }
+
+        std::array<uint32_t, kStageCount> defaults{};
         for (std::size_t i = 0; i < kStageCount; ++i) {
             defaults[i] = static_cast<uint32_t>(
-                std::floor(static_cast<double>(totalBudget) * kWeights[i] / weightSum));
-            defaults[i] = std::min(defaults[i], kMaxCaps[i]);
+                std::floor(static_cast<double>(totalBudget) * weights[i] / weightSum));
+            defaults[i] = std::min(defaults[i], caps[i]);
         }
-        std::array<uint32_t, kStageCount> caps = kMaxCaps;
-        auto allocDefaults = allocate(defaults, caps);
+        auto allocDefaults = allocate(defaults, caps, weights);
 
         std::array<uint32_t, kStageCount> desired = allocDefaults;
         bool hasOverride = false;
+        auto clampLocked = [&](std::size_t idx, uint32_t value) {
+            if (caps[idx] == 0) {
+                desired[idx] = 0;
+                return;
+            }
+            desired[idx] = value;
+            caps[idx] = value;
+            hasOverride = true;
+        };
+
         if (auto v = resolveOverride(postExtractionConcurrentOverride_,
                                      "YAMS_POST_EXTRACTION_CONCURRENT", kMaxCaps[0])) {
-            desired[0] = *v;
-            caps[0] = *v;
-            hasOverride = true;
+            clampLocked(0, *v);
         }
         if (auto v = resolveOverride(postKgConcurrentOverride_, "YAMS_POST_KG_CONCURRENT",
                                      kMaxCaps[1])) {
-            desired[1] = *v;
-            caps[1] = *v;
-            hasOverride = true;
+            clampLocked(1, *v);
         }
         if (auto v = resolveOverride(postSymbolConcurrentOverride_, "YAMS_POST_SYMBOL_CONCURRENT",
                                      kMaxCaps[2])) {
-            desired[2] = *v;
-            caps[2] = *v;
-            hasOverride = true;
+            clampLocked(2, *v);
         }
         if (auto v = resolveOverride(postEntityConcurrentOverride_, "YAMS_POST_ENTITY_CONCURRENT",
                                      kMaxCaps[3])) {
-            desired[3] = *v;
-            caps[3] = *v;
-            hasOverride = true;
+            clampLocked(3, *v);
         }
         if (auto v = resolveOverride(postTitleConcurrentOverride_, "YAMS_POST_TITLE_CONCURRENT",
                                      kMaxCaps[4])) {
-            desired[4] = *v;
-            caps[4] = *v;
-            hasOverride = true;
+            clampLocked(4, *v);
         }
         if (auto v = resolveOverride(postEmbedConcurrentOverride_, "YAMS_POST_EMBED_CONCURRENT",
                                      kMaxCaps[5])) {
-            desired[5] = *v;
-            caps[5] = *v;
-            hasOverride = true;
+            clampLocked(5, *v);
         }
 
-        auto alloc = hasOverride ? allocate(desired, caps) : allocDefaults;
+        auto alloc = hasOverride ? allocate(desired, caps, weights) : allocDefaults;
         return PostIngestConcurrencyBudget{alloc[0], alloc[1], alloc[2],
                                            alloc[3], alloc[4], alloc[5]};
     }
@@ -1877,6 +1957,7 @@ private:
     static inline std::atomic<uint32_t> searchConcurrencyOverride_{0};
     static inline std::atomic<unsigned> hwCached_{0};
     static inline std::atomic<uint32_t> postIngestTotalConcurrentOverride_{0};
+    static inline std::atomic<uint32_t> postIngestStageActiveMaskOverride_{0x3Fu};
     static inline std::atomic<uint32_t> postIngestQueueMaxOverride_{0};
     static inline std::atomic<uint32_t> postIngestBatchSizeOverride_{0};
     static inline std::atomic<uint32_t> ioConnPerThreadOverride_{0};

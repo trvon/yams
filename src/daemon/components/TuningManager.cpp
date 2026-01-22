@@ -201,8 +201,11 @@ void TuningManager::tick_once() {
             } else if (queuedItems > 500) {
                 scaleBias = 1;
             }
-            totalBudget = std::max<uint32_t>(1, std::min<uint32_t>(256, totalBudget + scaleBias));
-            TuneAdvisor::setPostIngestTotalConcurrent(totalBudget);
+            if (scaleBias > 0) {
+                totalBudget =
+                    std::max<uint32_t>(1, std::min<uint32_t>(256, totalBudget + scaleBias));
+                TuneAdvisor::setPostIngestTotalConcurrent(totalBudget);
+            }
 
             const uint64_t dbLockErrors = TuneAdvisor::getAndResetDbLockErrors();
             const uint32_t lockThreshold = TuneAdvisor::dbLockErrorThreshold();

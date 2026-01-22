@@ -385,34 +385,40 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
 
     SECTION("Efficient profile uses 0.5x scaling") {
         ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+        EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
+        EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
     }
 
     SECTION("Balanced profile uses 0.75x scaling") {
         ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+        EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
+        EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
-        CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 2u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
     }
 
     SECTION("Aggressive profile uses 1.0x (defaults)") {
         ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+        EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
+        EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
-        CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 2u);
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 2u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 3u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
     }
 }
