@@ -313,9 +313,7 @@ public:
                         metaVal.value = value;
                         doc.metadata[key] = metaVal;
                     }
-                    if (showTags_) {
-                        mergeTagsIntoMetadata(e.tags, doc.metadata);
-                    }
+                    doc.tags = e.tags;
 
                     documents.push_back(doc);
                 }
@@ -775,9 +773,7 @@ private:
                         doc.metadata[key] = metaVal;
                     }
                 }
-                if (showTags_) {
-                    mergeTagsIntoMetadata(docEntry.tags, doc.metadata);
-                }
+                doc.tags = docEntry.tags;
 
                 // Handle content snippet
                 if (docEntry.snippet) {
@@ -834,6 +830,7 @@ private:
         std::string contentSnippet;
         std::string language;
         std::string extractionMethod;
+        std::vector<std::string> tags;
         bool hasContent = false;
 
         std::string getFormattedSize() const {
@@ -866,12 +863,6 @@ private:
         }
 
         std::string getTags() const {
-            std::vector<std::string> tags;
-            for (const auto& [key, value] : metadata) {
-                if (key == "tag" || key.starts_with("tag:")) {
-                    tags.push_back(value.value.empty() ? key : value.value);
-                }
-            }
             if (tags.size() > 3) {
                 return tags[0] + "," + tags[1] + "," + tags[2] + ",+" +
                        std::to_string(tags.size() - 3);
@@ -1051,6 +1042,12 @@ private:
                     }
                 }
 
+                std::cout << "\n";
+            } else if (showMetadata_ && !doc.metadata.empty()) {
+                std::cout << "    Metadata:\n";
+                for (const auto& [key, value] : doc.metadata) {
+                    std::cout << "      " << key << ": " << value.value << "\n";
+                }
                 std::cout << "\n";
             }
         }
@@ -1297,15 +1294,16 @@ private:
                 d["extraction_method"] = doc.extractionMethod;
             }
 
-            if (!doc.metadata.empty()) {
-                json metadata_obj;
-                for (const auto& [key, value] : doc.metadata) {
-                    metadata_obj[key] = value.value;
+            json metadata_obj = json::object();
+            for (const auto& [key, value] : doc.metadata) {
+                if (key == "tag" || key.starts_with("tag:")) {
+                    continue;
                 }
-                d["metadata"] = metadata_obj;
+                metadata_obj[key] = value.value;
             }
+            d["metadata"] = metadata_obj;
 
-            d["tags"] = doc.getTags();
+            d["tags"] = doc.tags;
             docs.push_back(d);
         }
 

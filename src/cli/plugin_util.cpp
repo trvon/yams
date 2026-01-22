@@ -177,7 +177,7 @@ std::optional<fs::path> resolvePlugin(const std::string& nameOrPath) {
                 continue; // Skip WASM for ABI probing
             }
 
-            void* handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
+            void* handle = dlopen(path.string().c_str(), RTLD_LAZY | RTLD_LOCAL);
             if (!handle) {
                 continue;
             }
@@ -230,7 +230,7 @@ Result<PluginInfo> probePluginAbi(const fs::path& pluginPath) {
         return Error{ErrorCode::FileNotFound, "Plugin not found: " + pluginPath.string()};
     }
 
-    void* handle = dlopen(pluginPath.c_str(), RTLD_LAZY | RTLD_LOCAL);
+    void* handle = dlopen(pluginPath.string().c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (!handle) {
         const char* err = dlerror();
         return Error{ErrorCode::InvalidData,

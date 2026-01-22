@@ -585,7 +585,12 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         opts.query = tq.query;
         opts.searchType = searchType;
         opts.limit = static_cast<std::size_t>(k);
-        opts.timeout = 5s;
+        std::chrono::milliseconds queryTimeout{20000};
+        if (const char* env = std::getenv("YAMS_BENCH_QUERY_TIMEOUT_MS")) {
+            queryTimeout = std::chrono::milliseconds{
+                static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
+        }
+        opts.timeout = queryTimeout;
         opts.symbolRank = true;
         const bool benchDiagEnabled = []() -> bool {
             if (const char* env = std::getenv("YAMS_BENCH_DIAG"); env && std::string(env) == "1") {
@@ -1097,10 +1102,13 @@ struct BenchFixture {
         bool completed = false;
         int stableChecks = 0;
 
-        // Helper to get metric from requestCounts with default 0
-        auto getMetric = [](const auto& counts, const std::string& key) -> uint64_t {
+        // Helper to get metric from requestCounts with presence flag
+        auto getMetric = [](const auto& counts,
+                            const std::string& key) -> std::pair<uint64_t, bool> {
             auto it = counts.find(key);
-            return (it != counts.end()) ? it->second : 0;
+            if (it == counts.end())
+                return {0, false};
+            return {it->second, true};
         };
 
         uint64_t lastKgInFlight = 0, lastSymbolInFlight = 0, lastEntityInFlight = 0;
@@ -1130,19 +1138,23 @@ struct BenchFixture {
             if (statusResult) {
                 const auto& counts = statusResult.value().requestCounts;
                 uint32_t depth = statusResult.value().postIngestQueueDepth;
-                uint64_t docCount = getMetric(counts, "documents_total");
-                uint64_t indexedCount = getMetric(counts, "documents_indexed");
-                uint64_t contentExtracted = getMetric(counts, "documents_content_extracted");
-                uint64_t postQueued = getMetric(counts, "post_ingest_queued");
-                uint64_t postInflight = getMetric(counts, "post_ingest_inflight");
-                uint64_t postProcessed = getMetric(counts, "post_ingest_processed");
+                auto [docCount, docCountPresent] = getMetric(counts, "documents_total");
+                auto [indexedCount, indexedPresent] = getMetric(counts, "documents_indexed");
+                auto [contentExtracted, extractedPresent] =
+                    getMetric(counts, "documents_content_extracted");
+                auto [postQueued, postQueuedPresent] = getMetric(counts, "post_ingest_queued");
+                auto [postInflight, postInflightPresent] =
+                    getMetric(counts, "post_ingest_inflight");
+                auto [postProcessed, postProcessedPresent] =
+                    getMetric(counts, "post_ingest_processed");
                 uint64_t queuedTotal = std::max<uint64_t>(depth, postQueued);
 
                 // Check all processing stage in-flight counters
-                uint64_t extractionInFlight = getMetric(counts, "extraction_inflight");
-                uint64_t kgInFlight = getMetric(counts, "kg_inflight");
-                uint64_t symbolInFlight = getMetric(counts, "symbol_inflight");
-                uint64_t entityInFlight = getMetric(counts, "entity_inflight");
+                auto [extractionInFlight, extractionPresent] =
+                    getMetric(counts, "extraction_inflight");
+                auto [kgInFlight, kgPresent] = getMetric(counts, "kg_inflight");
+                auto [symbolInFlight, symbolPresent] = getMetric(counts, "symbol_inflight");
+                auto [entityInFlight, entityPresent] = getMetric(counts, "entity_inflight");
 
                 // Total in-flight across all stages (matches PostIngestQueue::totalInFlight())
                 uint64_t totalInFlight =
@@ -1157,12 +1169,12 @@ struct BenchFixture {
                      extractionInFlight != lastExtractionInFlight);
 
                 if (statusChanged) {
-                    spdlog::info("Documents: total={} indexed={} / {} | queue={} inflight={} | "
-                                 "extracted={} processed={} | extract={} kg={} symbol={} "
-                                 "entity={} (total={})",
-                                 docCount, indexedCount, corpusSize, queuedTotal, postInflight,
-                                 contentExtracted, postProcessed, extractionInFlight, kgInFlight,
-                                 symbolInFlight, entityInFlight, totalInFlight);
+                    spdlog::info(
+                        "Documents: total={} indexed={} / {} | queue={} inflight={} | extracted={} "
+                        "processed={} | extract={} kg={} symbol={} entity={} (total={})",
+                        docCount, indexedCount, corpusSize, queuedTotal, postInflight,
+                        contentExtracted, postProcessed, extractionInFlight, kgInFlight,
+                        symbolInFlight, entityInFlight, totalInFlight);
                     lastDepth = queuedTotal;
                     lastDocCount = docCount;
                     lastIndexedDocCount = indexedCount;
@@ -1184,10 +1196,18 @@ struct BenchFixture {
                 // - indexedCount >= corpusSize (or stable for 5+ seconds after reaching target)
                 bool allStagesDrained =
                     (queuedTotal == 0 && postInflight == 0 && totalInFlight == 0);
-                bool indexedReady = indexedCount >= static_cast<uint64_t>(corpusSize);
-                bool extractedReady = (contentExtracted >= static_cast<uint64_t>(corpusSize)) ||
-                                      (contentExtracted == 0);
-                if (allStagesDrained && indexedReady && extractedReady) {
+                bool indexedReady = indexedPresent
+                                        ? (indexedCount >= static_cast<uint64_t>(corpusSize))
+                                        : (docCount >= static_cast<uint64_t>(corpusSize));
+                bool extractedReady = extractedPresent
+                                          ? (contentExtracted >= static_cast<uint64_t>(corpusSize))
+                                          : true;
+                bool processedReady = postProcessedPresent
+                                          ? (postProcessed >= static_cast<uint64_t>(corpusSize))
+                                          : true;
+                bool stableAfterDrain = (stableChecks >= 6);
+                if (allStagesDrained && indexedReady &&
+                    (extractedReady || processedReady || stableAfterDrain)) {
                     spdlog::info("Ingestion complete: total={} indexed={} (target={}), all stages "
                                  "drained (extracted={}, processed={})",
                                  docCount, indexedCount, corpusSize, contentExtracted,
@@ -1435,7 +1455,12 @@ struct BenchFixture {
             testReq.query = "test";
             testReq.searchType = "hybrid";
             testReq.limit = 1000;
-            testReq.timeout = 5s;
+            std::chrono::milliseconds queryTimeout{20000};
+            if (const char* env = std::getenv("YAMS_BENCH_QUERY_TIMEOUT_MS")) {
+                queryTimeout = std::chrono::milliseconds{
+                    static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
+            }
+            testReq.timeout = queryTimeout;
             auto testResult = yams::cli::run_sync(client->search(testReq), 10s);
             indexedDocCount = testResult ? testResult.value().results.size() : 0;
         }
@@ -1556,7 +1581,12 @@ struct BenchFixture {
                 opts.query = std::move(query);
                 opts.searchType = std::move(searchType);
                 opts.limit = 25;
-                opts.timeout = 5s;
+                std::chrono::milliseconds queryTimeout{20000};
+                if (const char* env = std::getenv("YAMS_BENCH_QUERY_TIMEOUT_MS")) {
+                    queryTimeout = std::chrono::milliseconds{
+                        static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
+                }
+                opts.timeout = queryTimeout;
                 opts.symbolRank = symbolRank;
 
                 DebugLogEntry sanityEntry;

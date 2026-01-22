@@ -58,6 +58,7 @@
 #include <yams/daemon/components/DatabaseManager.h>
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/EntityGraphService.h>
+#include <yams/daemon/components/gliner_query_extractor.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/init_utils.hpp>
@@ -68,7 +69,6 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/VectorSystemManager.h>
-#include <yams/daemon/components/gliner_query_extractor.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
@@ -78,12 +78,12 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
-#include <yams/search/reranker_adapter.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/integrity/repair_manager.h>
 #include <yams/metadata/migration.h>
 #include <yams/plugins/symbol_extractor_v1.h>
 #include <yams/repair/embedding_repair_util.h>
+#include <yams/search/reranker_adapter.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
@@ -264,9 +264,11 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
     spdlog::debug("[ServiceManager] Creating WorkCoordinator...");
     try {
         workCoordinator_ = std::make_unique<WorkCoordinator>();
-        workCoordinator_->start();
-        spdlog::info("[ServiceManager] WorkCoordinator created with {} worker threads",
-                     workCoordinator_->getWorkerCount());
+        auto threadCount = yams::daemon::TuneAdvisor::recommendedThreads();
+        workCoordinator_->start(threadCount);
+        spdlog::info("[ServiceManager] WorkCoordinator created with {} worker threads (budget {}%)",
+                     workCoordinator_->getWorkerCount(),
+                     yams::daemon::TuneAdvisor::cpuBudgetPercent());
 
         // Initialize strands for logical separation
         spdlog::debug("[ServiceManager] Creating strands...");

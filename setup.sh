@@ -17,8 +17,22 @@
 #   YAMS_ENABLE_MODULES      - Enable C++20 modules (true/false, auto-detected if not set)
 #   YAMS_LIBCXX_HARDENING    - libc++ hardening mode (none, fast, extensive, debug)
 #   YAMS_INSTALL_PREFIX      - Installation prefix (default: /usr/local or Homebrew)
-#   YAMS_ONNX_GPU            - GPU provider for ONNX (auto|cuda|coreml|none, default: auto)
-#                              auto: macOS=coreml, Linux+NVIDIA=cuda, otherwise=none
+#   YAMS_ONNX_GPU            - GPU provider for ONNX (auto|cuda|coreml|migraphx|none, default: auto)
+#                              auto: macOS=coreml, Linux+NVIDIA=cuda, Linux+ROCm=migraphx, otherwise=none
+#                              migraphx: AMD ROCm GPU acceleration (builds ONNX Runtime from source)
+#   YAMS_ROCM_PATH           - ROCm installation path for MIGraphX builds (default: /opt/rocm)
+#   YAMS_ROCM_GPU_TARGETS    - Semicolon-separated AMD GPU architectures for MIGraphX builds
+#                              (default: gfx900;gfx906;gfx908;gfx90a;gfx1030;gfx1100)
+#                              Common targets:
+#                                gfx900  = Vega 10 (MI25, Vega 56/64)
+#                                gfx906  = Vega 20 (MI50/60, Radeon VII)
+#                                gfx908  = CDNA (MI100)
+#                                gfx90a  = CDNA2 (MI200 series: MI210, MI250, MI250X)
+#                                gfx942  = CDNA3 (MI300 series: MI300A, MI300X, MI325X)
+#                                gfx1030 = RDNA2 (RX 6800/6900 series)
+#                                gfx1100 = RDNA3 (RX 7900 series)
+#                                gfx1101 = RDNA3 (RX 7700/7800 series)
+#                                gfx1200 = RDNA4 (RX 9070 series)
 #
 # The script prefers Clang when available, falling back to GCC otherwise. It
 # ensures Conan is given a concrete C++ standard so dependencies resolve cleanly
@@ -283,6 +297,18 @@ else
   fi
 fi
 
+# Wrap CC/CXX with ccache if available for faster incremental builds
+if command -v ccache >/dev/null 2>&1; then
+  echo "--- Enabling ccache for faster incremental builds ---"
+  # Only wrap if not already wrapped
+  if [[ "${CC:-}" != ccache* ]]; then
+    export CC="ccache ${CC:-cc}"
+    export CXX="ccache ${CXX:-c++}"
+  fi
+  # Show ccache stats if verbose
+  ccache -s 2>/dev/null | head -5 || true
+fi
+
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
   BUILD_DIR="build/profiling"
   CONAN_SUBDIR="build-profiling"
@@ -375,7 +401,7 @@ if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
   CONAN_ARGS+=(-o "yams/*:enable_onnx=False")
 else
   # Auto-detect GPU for ONNX acceleration
-  # Override with YAMS_ONNX_GPU=cuda|coreml|none
+  # Override with YAMS_ONNX_GPU=cuda|coreml|migraphx|none
   ONNX_GPU="${YAMS_ONNX_GPU:-auto}"
   if [[ "${ONNX_GPU}" == "auto" ]]; then
     if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -401,9 +427,55 @@ else
         echo "NVIDIA GPU detected but CUDA toolkit missing: using CPU-only ONNX Runtime"
         echo "  Install CUDA toolkit for GPU acceleration: https://developer.nvidia.com/cuda-downloads"
       fi
+    elif [[ -d /opt/rocm ]] || command -v rocm-smi >/dev/null 2>&1; then
+      # ROCm detected - use MIGraphX (builds ONNX Runtime from source)
+      # Detect ROCm path
+      if [[ -d /opt/rocm ]]; then
+        ROCM_PATH="/opt/rocm"
+      elif command -v rocm-smi >/dev/null 2>&1; then
+        ROCM_PATH="$(dirname "$(dirname "$(command -v rocm-smi)")")"
+      fi
+      # Check if MIGraphX is installed
+      if [[ -f "${ROCM_PATH}/lib/libmigraphx.so" ]]; then
+        ONNX_GPU="migraphx"
+        echo "ROCm + MIGraphX detected at ${ROCM_PATH}: enabling AMD GPU acceleration"
+        echo "  Note: ONNX Runtime will be built from source (takes ~20-30 minutes)"
+
+        # Auto-detect GPU architecture using rocminfo
+        if [[ -z "${YAMS_ROCM_GPU_TARGETS:-}" ]] && command -v rocminfo >/dev/null 2>&1; then
+          DETECTED_TARGETS=$(rocminfo 2>/dev/null | grep -oP 'gfx[0-9a-z]+' | sort -u | tr '\n' ';' | sed 's/;$//')
+          if [[ -n "${DETECTED_TARGETS}" ]]; then
+            export YAMS_ROCM_GPU_TARGETS="${DETECTED_TARGETS}"
+            echo "  Auto-detected GPU target(s): ${DETECTED_TARGETS}"
+          fi
+        fi
+      else
+        ONNX_GPU="none"
+        echo "ROCm detected at ${ROCM_PATH} but MIGraphX not found"
+        echo "  Using CPU-only ONNX Runtime"
+        echo "  Install MIGraphX for GPU acceleration: https://github.com/ROCm/AMDMIGraphX"
+      fi
     else
       ONNX_GPU="none"
       echo "No GPU detected: using CPU-only ONNX Runtime"
+    fi
+  fi
+
+  # Handle MIGraphX-specific options
+  if [[ "${ONNX_GPU}" == "migraphx" ]]; then
+    # Set ROCm path for conan (use detected path or environment override)
+    ROCM_PATH="${YAMS_ROCM_PATH:-${ROCM_PATH:-/opt/rocm}}"
+    if [[ ! -d "${ROCM_PATH}" ]]; then
+      echo "ERROR: ROCm not found at ${ROCM_PATH}" >&2
+      echo "  Set YAMS_ROCM_PATH to your ROCm installation path" >&2
+      exit 1
+    fi
+    CONAN_ARGS+=(-o "onnxruntime/*:rocm_path=${ROCM_PATH}")
+    echo "ROCm path: ${ROCM_PATH}"
+
+    # Pass GPU targets if specified
+    if [[ -n "${YAMS_ROCM_GPU_TARGETS:-}" ]]; then
+      echo "ROCm GPU targets: ${YAMS_ROCM_GPU_TARGETS}"
     fi
   fi
 

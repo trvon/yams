@@ -11,6 +11,8 @@
 #include <limits>
 #include <string>
 
+#include <yams/compat/unistd.h>
+
 using namespace yams::daemon;
 
 // =============================================================================

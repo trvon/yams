@@ -48,17 +48,29 @@ bool vectorsDisabledByEnv() {
 }
 
 // Shared thread pool for all RepairCoordinator instances
-// Uses 2 threads: one for coordination, one for DB queries
-// Static singleton - threads are detached and cleaned up by OS at exit
+// Profile-aware thread count: uses repairTokensIdle + 1 for DB queries
+// Static singleton - threads are lazily initialized
 struct RepairThreadPool {
-    boost::asio::thread_pool pool{2};
+    std::unique_ptr<boost::asio::thread_pool> pool_;
+    std::once_flag init_flag_;
 
     static RepairThreadPool& instance() {
         static RepairThreadPool instance;
         return instance;
     }
 
-    boost::asio::any_io_executor get_executor() { return pool.get_executor(); }
+    boost::asio::any_io_executor get_executor() {
+        std::call_once(init_flag_, [this]() {
+            uint32_t threads = TuneAdvisor::repairTokensIdle();
+            if (threads < 1)
+                threads = 1;
+            // Add 1 extra thread for DB query coordination
+            threads = std::max(threads + 1, 2u);
+            pool_ = std::make_unique<boost::asio::thread_pool>(threads);
+            spdlog::debug("[RepairThreadPool] Initialized with {} threads", threads);
+        });
+        return pool_->get_executor();
+    }
 
     // No explicit join in destructor to avoid double-free during static destruction
     // The OS will clean up threads when the process exits

@@ -253,12 +253,12 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
         return scan.error();
 
 #if defined(__APPLE__)
-    if (!dlopen_preflight(canon.c_str())) {
+    if (!dlopen_preflight(canon.string().c_str())) {
         return Error{ErrorCode::InvalidState, "preflight failed"};
     }
 #endif
 
-    void* handle = dlopen(canon.c_str(), RTLD_LAZY | RTLD_LOCAL);
+    void* handle = dlopen(canon.string().c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (!handle) {
         const char* err = dlerror();
         std::string msg = std::string("dlopen failed: ") + (err ? err : "unknown");

@@ -446,7 +446,7 @@ jobs:
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
 
       - name: Ensure build tools (meson, ninja) for local runners/act
-        if: ${{ matrix.hosted }}
+        if: ${{ matrix.hosted && runner.os != 'Windows' }}
         shell: bash
         run: |
           set -euo pipefail

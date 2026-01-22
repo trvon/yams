@@ -933,7 +933,7 @@ private:
         bool isTrusted = isTrustedPath(target, trusted);
 
         // dlopen and basic ABI checks
-        void* handle = dlopen(target.c_str(), RTLD_LAZY | RTLD_LOCAL);
+        void* handle = dlopen(target.string().c_str(), RTLD_LAZY | RTLD_LOCAL);
         if (!handle) {
             std::cout << "  [FAIL] dlopen: " << (dlerror() ? dlerror() : "unknown") << "\n";
             return;

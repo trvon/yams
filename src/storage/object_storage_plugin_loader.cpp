@@ -140,7 +140,7 @@ static std::unique_ptr<IStorageBackend> loadSpecific(const char* /*createSym*/,
     auto destroy =
         reinterpret_cast<DestroyFn>(GetProcAddress(handle, "yams_plugin_destroy_object_storage"));
 #else
-    void* handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
+    void* handle = dlopen(path.string().c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (!handle) {
         spdlog::warn("Failed to open {}: {}", path.string(), dlerror() ? dlerror() : "");
         return nullptr;

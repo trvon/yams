@@ -8,6 +8,8 @@
 #include <fstream>
 #include <random>
 
+#include <yams/compat/unistd.h>
+
 #include <yams/indexing/document_indexer.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/document_metadata.h>
