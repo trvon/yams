@@ -2558,6 +2558,12 @@ private:
         }
 
         fs::path homeDir(home);
+        fs::path configHome;
+        if (const char* xdgConfig = std::getenv("XDG_CONFIG_HOME"); xdgConfig && *xdgConfig) {
+            configHome = fs::path(xdgConfig);
+        } else {
+            configHome = homeDir / ".config";
+        }
         std::vector<std::pair<std::string, fs::path>> targets;
 
         if (installClaude) {
@@ -2566,7 +2572,7 @@ private:
         }
         if (installOpenCode) {
             targets.emplace_back("OpenCode",
-                                 homeDir / ".opencode" / "skills" / "yams" / "SKILL.md");
+                                 configHome / "opencode" / "skill" / "yams" / "SKILL.md");
         }
 
         for (const auto& [name, skillPath] : targets) {

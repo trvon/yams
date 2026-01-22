@@ -493,6 +493,8 @@ Description:
 - The --recent flag filters to the N most recent documents before applying other sorting options.
 - Content snippets provide quick previews of document contents.
 - Multiple output formats support different use cases from human-readable to machine processing.
+- JSON output separates `metadata` and `tags` (tags are an array, metadata excludes tag keys).
+- `--show-metadata` prints metadata even without `--verbose` for table output.
 
 Examples:
 ```
@@ -504,6 +506,7 @@ yams list --format json
 yams ls --format csv --limit 50  # Using alias
 yams list --format minimal --offset 20
 yams list --no-snippets --show-metadata  # No previews, full metadata
+yams list --format json --show-metadata | jq '.documents[] | {name,metadata,tags}'
 ```
 
 #### Tree-Based Query Optimization (v0.7.5+)

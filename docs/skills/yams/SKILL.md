@@ -6,14 +6,9 @@ compatibility: claude-code, opencode
 metadata:
   tools: cli, mcp
   categories: search, indexing, memory, knowledge-graph
-install: |
-  # Copy to skills directory (Claude Code)
-  mkdir -p ~/.claude/skills/yams && cp docs/skills/yams/SKILL.md ~/.claude/skills/yams/
-  # Or for OpenCode
-  mkdir -p ~/.opencode/skills/yams && cp docs/skills/yams/SKILL.md ~/.opencode/skills/yams/
 ---
 
-# YAMS Skill
+# YAMS Skill (agent.md)
 
 ## Quick Reference
 
@@ -37,9 +32,25 @@ yams graph --name <file>       # Show file relationships
 yams graph --list-types        # List node types with counts
 yams graph --relations         # List relation types with counts
 yams graph --search "pattern"  # Search nodes by label
+
+# Agent storage
+yams list --format json        # Scriptable list output
+yams list --show-metadata      # Include metadata for PBI tracking
 ```
 
-## Code Indexing
+## Agent Memory Workflow
+
+**YAMS is the single source of truth for agent memory and PBI tracking.**
+
+### Required Metadata (PBI Tracking)
+
+Attach metadata to every `yams add`.
+
+- `pbi` - PBI identifier (e.g., `PBI-043`)
+- `task` - short task slug (e.g., `list-json-refresh`)
+- `phase` - `start` | `checkpoint` | `complete`
+- `owner` - agent or author
+- `source` - `code` | `note` | `decision` | `research`
 
 ### Index Project Files
 
@@ -51,7 +62,7 @@ yams add . -r --include "*.ts,*.tsx,*.js"
 yams add . -r --include "*.py" --exclude "venv/**,__pycache__/**"
 
 # Index with metadata for tracking
-yams add src/ -r --metadata "task=feature-auth"
+yams add src/ -r --metadata "pbi=PBI-043,task=list-json-refresh,phase=checkpoint,owner=codex,source=code"
 ```
 
 ### Auto-Index with Watch
@@ -115,16 +126,17 @@ yams search "database connection" --limit 5
 yams search "API endpoint" --ext ts
 ```
 
-## Knowledge Management
+## Agent Storage
 
 ### Store Research
 
 ```bash
 # Index documentation
-curl -s "https://docs.example.com/api" | yams add - --name "api-docs.md"
+curl -s "https://docs.example.com/api" | yams add - --name "api-docs.md" \
+  --metadata "pbi=PBI-043,task=docs-cache,phase=checkpoint,owner=codex,source=research"
 
 # Store with metadata
-yams add notes.md --metadata "source=research,topic=auth"
+yams add notes.md --metadata "pbi=PBI-043,task=research-auth,phase=checkpoint,owner=codex,source=research"
 ```
 
 ### Store Decisions
@@ -141,7 +153,8 @@ JWT with RS256, 15min expiry, refresh tokens.
 
 ### Rationale
 Stateless, scalable, industry standard.
-" | yams add - --name "decision-jwt-auth.md"
+" | yams add - --name "decision-jwt-auth.md" \
+  --metadata "pbi=PBI-043,task=auth-decision,phase=checkpoint,owner=codex,source=decision"
 ```
 
 ### Retrieve Knowledge
@@ -150,8 +163,13 @@ Stateless, scalable, industry standard.
 # Find related decisions
 yams search "authentication decision"
 
-# Find by metadata
-yams grep "JWT" --ext md
+# Find by metadata (JSON list is the source of truth)
+yams list --format json --show-metadata \
+  | jq '.documents[] | select(.metadata.pbi=="PBI-043")'
+
+# Metadata + tags are separate in JSON output
+yams list --format json --show-metadata \
+  | jq '.documents[] | {name,metadata,tags}'
 ```
 
 ## Session Management

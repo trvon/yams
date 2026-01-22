@@ -1,32 +1,61 @@
 ---
-description: YAMS-based coding agent with persistent memory and automatic versioning
+description: YAMS-first coding agent with persistent memory and PBI tracking
 argument-hint: TASK=<description>
 ---
 
-# YAMS Agent Protocol (Simplified)
+# YAMS Agent Protocol (agent.md)
 
-**You are Codex using YAMS as persistent memory for code, documentation, and solutions.**
+**You are Codex using YAMS as the single source of truth for memory, code index, and PBI tracking.**
+
+## Core Principles
+
+1. **Search before acting** - Query YAMS for prior work and related context.
+2. **Store what matters** - Index code, notes, and decisions as you go.
+3. **PBI tracking lives in metadata** - Use structured metadata on every add.
+4. **Snapshots are automatic** - Every `yams add` creates a snapshot.
+5. **No Beads** - Do not use `bd` or Beads workflows.
+
+---
+
+## Required Metadata (PBI Tracking)
+
+Attach metadata to every `yams add` so work is traceable without Beads.
+
+**Minimum keys**
+- `pbi` - PBI identifier (e.g., `PBI-043`)
+- `task` - short task slug (e.g., `list-json-refresh`)
+- `phase` - `start` | `checkpoint` | `complete`
+- `owner` - agent or author (e.g., `codex`)
+
+**Optional keys**
+- `intent` - why the content was stored
+- `source` - `code` | `note` | `decision` | `research`
+- `refs` - related files or URLs
+
+---
 
 ## Core Workflow
 
-### 1. Search Existing Knowledge
+### 1) Search Existing Knowledge
 ```bash
-# Always search first for relevant context
+# Always search first
 yams search "$TASK$" --limit 20
 yams search "$TASK$" --fuzzy --similarity 0.7  # If exact yields nothing
+
+# If you know a file or symbol, use grep first
+yams grep "<pattern>" --ext cpp
 ```
 
-### 2. Index Working Files
+### 2) Index Working Files (Start)
 ```bash
-# Initial indexing (automatic snapshot created)
 yams add . --recursive \
   --include="*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
-  --label "Working on: $TASK$"
+  --label "Working on: $TASK$" \
+  --metadata "pbi=$PBI,task=$TASK,phase=start,owner=codex,source=code"
 ```
 
-### 3. Store Solutions & Patterns
+### 3) Store Solutions, Decisions, and Notes
 ```bash
-# After solving something useful
 echo "## Problem: $TASK$
 ## Solution:
 $1
@@ -35,115 +64,122 @@ $2
 ## Files Modified:
 $(git diff --name-only)
 " | yams add - \
-  --name "solution-$(date +%Y%m%d-%H%M%S).md"
+  --name "solution-$(date +%Y%m%d-%H%M%S).md" \
+  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=note,intent=solution"
 ```
 
-### 4. Track Changes
+### 4) Track Changes (Complete)
 ```bash
-# After making edits (creates new automatic snapshot)
 yams add . --recursive \
   --include="*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
-  --label "Completed: $TASK$"
+  --label "Completed: $TASK$" \
+  --metadata "pbi=$PBI,task=$TASK,phase=complete,owner=codex,source=code"
 
-# Compare with previous snapshot
+# Compare snapshots
 yams list --snapshots --limit 2
-# Use the timestamp IDs to diff
-yams diff <timestamp1> <timestamp2>
+yams diff <snapshotA> <snapshotB>
 ```
+
+---
+
+## PBI Tracking (YAMS Only)
+
+### Index files with PBI metadata
+```bash
+yams add src/ -r \
+  --metadata "pbi=PBI-043,task=list-json-refresh,phase=checkpoint,owner=codex,source=code"
+```
+
+### Find work by PBI
+```bash
+yams list --format json --show-metadata \
+  | jq '.documents[] | select(.metadata.pbi=="PBI-043")'
+```
+
+### Find work by task
+```bash
+yams list --format json --show-metadata \
+  | jq '.documents[] | select(.metadata.task=="list-json-refresh")'
+```
+
+---
 
 ## Essential Commands
 
 ### Search & Retrieve
 ```bash
-# Search by content
 yams search "database connection" --limit 10
-
-# Fuzzy search for exploration  
 yams search "auth" --fuzzy --similarity 0.6
-
-# List recent documents
 yams list --recent 20
-
-# Get specific file
 yams get --name "solution-20250114.md" -o solution.md
 ```
 
 ### Store Knowledge
 ```bash
-# Store external research
 curl -s "$URL" | yams add - \
   --name "research-$(date +%s).html" \
-  --metadata "url=$URL"
+  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=research,url=$URL"
 
-# Store code snippet
 cat important_function.cpp | yams add - \
-  --name "snippet-auth-validation.cpp"
+  --name "snippet-auth-validation.cpp" \
+  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=code"
 ```
 
 ### Version Tracking
 ```bash
-# List snapshots (automatic, created on every add)
 yams list --snapshots
-
-# Compare snapshots using timestamps
 yams diff 2025-01-14T09:00:00.000Z 2025-01-14T14:30:00.000Z
-
-# View file history
-yams list src/main.cpp  # Shows all versions across snapshots
+yams list src/main.cpp
 ```
+
+---
 
 ## Response Template
 ```
 TASK: $TASK$
+PBI: $PBI$
 
 CONTEXT FOUND:
-- Documents: $(yams search "$TASK$" --limit 5 | wc -l) relevant items
-- Using: [list key documents/solutions found]
+- Documents: <count>
+- Using: [key items]
 
 ACTIONS:
 - [What was implemented/changed]
 
-STORED:
-✓ Indexed files: yams add with snapshot
-✓ Solution documented: solution-<timestamp>.md
-✓ External refs: <count> cached
+YAMS STORED:
+- Indexed files: <paths>
+- Notes: <file names>
+- Metadata: pbi=$PBI,task=$TASK,phase=<phase>,owner=codex
 
 VERIFY:
-- Current snapshot: $(yams list --snapshots --limit 1)
-- Files in YAMS: $(yams list --recent 5 | wc -l)
+- Current snapshot: <snapshot id>
+- Items in YAMS: <count>
 
 NEXT: [Next steps]
 ```
 
-## Key Principles
-
-1. **Search before acting** - YAMS likely has relevant context
-2. **Store as you learn** - Document solutions immediately  
-3. **Automatic versioning** - Every `add` creates a snapshot
-4. **No tags in this repo** - Use labels and metadata instead
-5. **No complex patterns** - YAMS handles deduplication automatically
+---
 
 ## Graph Dead-Code Audit (Quick)
 ```bash
-# Ensure daemon and watcher
 yams status
 yams watch
 
-# Baseline index (adjust includes/excludes)
 yams add . --recursive \
   --include="*.c,*.cc,*.cpp,*.cxx,*.h,*.hpp,*.rs,*.go,*.py,*.ts,*.js" \
   --exclude="build/**,node_modules/**" \
-  --label "Baseline index: $TASK$"
+  --label "Baseline index: $TASK$" \
+  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=code"
 
-# Inspect a file, then list isolated nodes of that type
 yams graph --name src/example.cpp --depth 2 --format json
 yams graph --list-type <node-type> --isolated --limit 50
 ```
 
+---
+
 ## Notes
 
-- YAMS automatically creates snapshots with timestamp IDs on every add operation
-- Content is deduplicated via SHA-256 hashing
-- Search defaults to hybrid mode (keyword + semantic)
-- No need for session pinning unless optimizing frequently accessed paths
-- Focus on storing knowledge, not complex file tracking
+- YAMS automatically creates snapshots with timestamp IDs on every add operation.
+- Content is deduplicated via SHA-256 hashing.
+- Use metadata for PBI tracking instead of Beads.
+- Prefer `yams grep` for code patterns, `yams search` for semantic queries.
