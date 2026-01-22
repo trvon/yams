@@ -5,6 +5,9 @@
 
 namespace yams::cli {
 
+inline constexpr std::string_view kDaemonLoadMessage =
+    "System is under load, give time to process";
+
 /**
  * Centralized error hint system for CLI.
  * Provides actionable hints based on error codes and message patterns.
@@ -47,8 +50,7 @@ inline ErrorHint getErrorHint(ErrorCode code, std::string_view message,
     if (message.find("daemon") != std::string_view::npos ||
         message.find("socket") != std::string_view::npos ||
         message.find("connection refused") != std::string_view::npos) {
-        hint.hint = "Daemon may not be running";
-        hint.command = "yams daemon start";
+        hint.hint = std::string(kDaemonLoadMessage);
         return hint;
     }
 
@@ -122,8 +124,7 @@ inline ErrorHint getErrorHint(ErrorCode code, std::string_view message,
             break;
 
         case ErrorCode::Timeout:
-            hint.hint = "Operation timed out; the daemon may be overloaded";
-            hint.command = "yams daemon status";
+            hint.hint = std::string(kDaemonLoadMessage);
             break;
 
         case ErrorCode::ResourceExhausted:
@@ -155,6 +156,25 @@ inline ErrorHint getErrorHint(ErrorCode code, std::string_view message,
     return hint;
 }
 
+inline bool isDaemonConnectionError(ErrorCode code, std::string_view message) {
+    if (code == ErrorCode::NetworkError) {
+        return true;
+    }
+    if (message.find("daemon") != std::string_view::npos ||
+        message.find("socket") != std::string_view::npos ||
+        message.find("connection refused") != std::string_view::npos ||
+        message.find("Connection closed") != std::string_view::npos ||
+        message.find("ECONNREFUSED") != std::string_view::npos ||
+        message.find("ECONNRESET") != std::string_view::npos ||
+        message.find("Broken pipe") != std::string_view::npos ||
+        message.find("Read failed") != std::string_view::npos ||
+        message.find("read header failed") != std::string_view::npos ||
+        message.find("read payload failed") != std::string_view::npos) {
+        return true;
+    }
+    return false;
+}
+
 /**
  * Format an error message with an actionable hint.
  *
@@ -168,6 +188,9 @@ inline std::string formatErrorWithHint(ErrorCode code, std::string_view message,
     auto hint = getErrorHint(code, message, command);
 
     std::string result(message);
+    if (isDaemonConnectionError(code, message)) {
+        result = std::string(kDaemonLoadMessage);
+    }
 
     if (!hint.hint.empty()) {
         result += "\n  💡 Hint: " + hint.hint;
@@ -209,22 +232,6 @@ inline bool shouldSuggestDoctor(ErrorCode code, std::string_view message) {
         message.find("constraint") != std::string_view::npos ||
         message.find("integrity") != std::string_view::npos ||
         message.find("embedding") != std::string_view::npos) {
-        return true;
-    }
-    return false;
-}
-
-/**
- * Check if an error is related to daemon connectivity.
- */
-inline bool isDaemonConnectionError(ErrorCode code, std::string_view message) {
-    if (code == ErrorCode::NetworkError) {
-        return true;
-    }
-    if (message.find("daemon") != std::string_view::npos ||
-        message.find("socket") != std::string_view::npos ||
-        message.find("connection refused") != std::string_view::npos ||
-        message.find("ECONNREFUSED") != std::string_view::npos) {
         return true;
     }
     return false;

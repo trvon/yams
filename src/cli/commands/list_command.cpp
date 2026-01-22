@@ -78,6 +78,12 @@ public:
         cmd->add_flag("--show-snippets", showSnippets_, "Show content previews (default: true)")
             ->default_val(true);
         cmd->add_flag("--show-metadata", showMetadata_, "Show all metadata for each document");
+        cmd->add_option(
+               "--metadata-fields", metadataFieldsRaw_,
+               "Metadata fields to show as columns (comma-separated, default: task,pbi,phase,owner,source)")
+            ->default_val(metadataFieldsRaw_);
+        cmd->add_flag("--no-metadata-fields", noMetadataFields_,
+                      "Hide metadata columns from list output");
         cmd->add_flag("--show-tags", showTags_, "Show document tags (default: true)")
             ->default_val(true);
         cmd->add_flag("--group-by-session", groupBySession_, "Group documents by time periods");
@@ -163,6 +169,7 @@ public:
 
     Result<void> execute() override {
         try {
+            updateMetadataFields();
             // Task 043-05b: Smart snapshot operations
             if (listSnapshots_) {
                 return listAllSnapshots();
@@ -220,7 +227,7 @@ public:
             dreq.pathsOnly = pathsOnly_;
             dreq.showSnippets = showSnippets_ && !noSnippets_;
             dreq.snippetLength = snippetLength_;
-            dreq.showMetadata = showMetadata_;
+            dreq.showMetadata = showMetadata_ || !metadataFields_.empty();
             dreq.showTags = showTags_;
             dreq.groupBySession = groupBySession_;
             dreq.noSnippets = noSnippets_;
@@ -718,7 +725,7 @@ private:
             serviceReq.format = format_;
             serviceReq.showSnippets = showSnippets_ && !noSnippets_;
             serviceReq.snippetLength = snippetLength_;
-            serviceReq.showMetadata = showMetadata_;
+            serviceReq.showMetadata = showMetadata_ || !metadataFields_.empty();
             serviceReq.showTags = showTags_;
             serviceReq.groupBySession = groupBySession_;
             serviceReq.verbose = verbose_ || cli_->getVerbose();
@@ -913,6 +920,57 @@ private:
         }
     }
 
+    void updateMetadataFields() {
+        metadataFields_ = parseMetadataFields(metadataFieldsRaw_);
+        if (noMetadataFields_) {
+            metadataFields_.clear();
+        }
+    }
+
+    std::vector<std::string> parseMetadataFields(std::string_view raw) const {
+        std::vector<std::string> fields;
+        if (raw.empty()) {
+            return fields;
+        }
+        std::string input(raw);
+        std::istringstream ss(input);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            yams::config::trim(token);
+            if (!token.empty()) {
+                fields.push_back(token);
+            }
+        }
+        return fields;
+    }
+
+    static std::string toLower(std::string_view input) {
+        std::string out;
+        out.reserve(input.size());
+        for (char ch : input) {
+            out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+        }
+        return out;
+    }
+
+    std::optional<std::string> findMetadataValue(const EnhancedDocumentInfo& doc,
+                                                 std::string_view field) const {
+        if (field.empty()) {
+            return std::nullopt;
+        }
+        auto direct = doc.metadata.find(std::string(field));
+        if (direct != doc.metadata.end()) {
+            return direct->second.value;
+        }
+        std::string target = toLower(field);
+        for (const auto& [key, value] : doc.metadata) {
+            if (toLower(key) == target) {
+                return value.value;
+            }
+        }
+        return std::nullopt;
+    }
+
     void outputTable(const std::vector<EnhancedDocumentInfo>& documents) {
         if (documents.empty()) {
             std::cout << ui::colorize("No documents found.", ui::Ansi::DIM) << "\n";
@@ -942,6 +1000,17 @@ private:
         if (showTags_) {
             tagsIndex = columns.size();
             columns.push_back({"TAGS", 12, 8, false});
+        }
+        std::vector<size_t> metadataIndices;
+        metadataIndices.reserve(metadataFields_.size());
+        for (const auto& field : metadataFields_) {
+            std::string header = field;
+            for (auto& ch : header) {
+                ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            }
+            const size_t width = std::max<size_t>(10, std::min<size_t>(18, header.size() + 2));
+            metadataIndices.push_back(columns.size());
+            columns.push_back({header, width, 8, false});
         }
         columns.push_back(
             {isVerbose ? "INDEXED" : "WHEN", isVerbose ? 19u : 12u, isVerbose ? 16u : 8u, false});
@@ -973,6 +1042,9 @@ private:
         reduceColumn(snippetIndex);
         reduceColumn(0); // name
         reduceColumn(tagsIndex);
+        for (auto idx : metadataIndices) {
+            reduceColumn(idx);
+        }
         reduceColumn(1);                  // type
         reduceColumn(2);                  // size
         reduceColumn(columns.size() - 1); // date
@@ -1007,6 +1079,10 @@ private:
             }
             if (tagsIndex != std::numeric_limits<size_t>::max()) {
                 cells.push_back(doc.getTags());
+            }
+            for (const auto& field : metadataFields_) {
+                auto value = findMetadataValue(doc, field);
+                cells.push_back(value.value_or("-"));
             }
             cells.push_back(isVerbose ? doc.getFormattedDate() : doc.getRelativeTime());
 
@@ -1303,6 +1379,19 @@ private:
             }
             d["metadata"] = metadata_obj;
 
+            if (!metadataFields_.empty()) {
+                json selected = json::object();
+                for (const auto& field : metadataFields_) {
+                    auto value = findMetadataValue(doc, field);
+                    if (value) {
+                        selected[field] = *value;
+                    } else {
+                        selected[field] = nullptr;
+                    }
+                }
+                d["metadata_fields"] = selected;
+            }
+
             d["tags"] = doc.tags;
             docs.push_back(d);
         }
@@ -1315,21 +1404,36 @@ private:
 
     void outputCsv(const std::vector<EnhancedDocumentInfo>& documents) {
         // CSV header
-        std::cout << "hash,name,size,type,snippet,tags,indexed\n";
+        std::cout << "hash,name,size,type,snippet,tags";
+        for (const auto& field : metadataFields_) {
+            std::cout << "," << field;
+        }
+        std::cout << ",indexed\n";
 
         for (const auto& doc : documents) {
+            auto writeField = [](std::string value) {
+                std::replace(value.begin(), value.end(), '"', '\'');
+                std::replace(value.begin(), value.end(), '\n', ' ');
+                std::cout << "\"" << value << "\"";
+            };
             std::cout << doc.info.sha256Hash << ",";
-            std::cout << "" << doc.info.fileName << "";
+            writeField(doc.info.fileName);
+            std::cout << ",";
             std::cout << doc.info.fileSize << ",";
-            std::cout << "" << doc.getFileType() << "";
+            writeField(doc.getFileType());
+            std::cout << ",";
 
             std::string snippet = doc.contentSnippet;
-            std::replace(snippet.begin(), snippet.end(), '"', '\'');
-            std::replace(snippet.begin(), snippet.end(), '\n', ' ');
-            std::cout << "" << snippet << "";
+            writeField(snippet);
+            std::cout << ",";
 
-            std::cout << "" << doc.getTags() << "";
-            std::cout << doc.getFormattedDate() << "\n";
+            writeField(doc.getTags());
+            for (const auto& field : metadataFields_) {
+                auto value = findMetadataValue(doc, field);
+                std::cout << ",";
+                writeField(value.value_or(""));
+            }
+            std::cout << "," << doc.getFormattedDate() << "\n";
         }
     }
 
@@ -1641,6 +1745,9 @@ private:
     // New enhanced display options
     bool showSnippets_ = true;
     bool showMetadata_ = false;
+    std::string metadataFieldsRaw_ = "task,pbi,phase,owner,source";
+    bool noMetadataFields_ = false;
+    std::vector<std::string> metadataFields_;
     bool showTags_ = true;
     bool groupBySession_ = false;
     int snippetLength_ = 50;

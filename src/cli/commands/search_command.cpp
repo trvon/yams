@@ -1,6 +1,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -127,6 +128,8 @@ private:
         std::string title;
         std::string snippet;
         std::string hash;
+        std::string mimeType;
+        std::string fileType;
         double score{0.0};
         // Optional score breakdowns for verbose output
         std::optional<double> vectorScore;
@@ -144,6 +147,16 @@ private:
             item.score = r.score;
             if (auto it = r.metadata.find("hash"); it != r.metadata.end())
                 item.hash = it->second;
+            if (auto it = r.metadata.find("mime_type"); it != r.metadata.end())
+                item.mimeType = it->second;
+            if (auto it = r.metadata.find("mimeType"); it != r.metadata.end())
+                item.mimeType = it->second;
+            if (auto it = r.metadata.find("mime"); it != r.metadata.end())
+                item.mimeType = it->second;
+            if (auto it = r.metadata.find("file_type"); it != r.metadata.end())
+                item.fileType = it->second;
+            if (auto it = r.metadata.find("fileType"); it != r.metadata.end())
+                item.fileType = it->second;
             return item;
         }
 
@@ -155,6 +168,8 @@ private:
             item.title = r.title;
             item.snippet = r.snippet;
             item.hash = r.hash;
+            item.mimeType = r.mimeType;
+            item.fileType = r.fileType;
             item.score = r.score;
             item.vectorScore = r.vectorScore;
             item.keywordScore = r.keywordScore;
@@ -245,7 +260,7 @@ private:
                     doc["hash"] = item.hash;
                 doc["score"] = item.score;
                 if (!item.snippet.empty())
-                    doc["snippet"] = truncateSnippet(item.snippet, 200);
+                    doc["snippet"] = formatSnippet(item, 200);
 
                 if (verbose_ && (item.vectorScore || item.keywordScore || item.kgEntityScore ||
                                  item.structuralScore)) {
@@ -301,7 +316,7 @@ private:
 
                 // Snippet with line-number-style prefix
                 if (!item.snippet.empty()) {
-                    std::string snippet = truncateSnippet(item.snippet, 200);
+                    std::string snippet = formatSnippet(item, 200);
                     std::cout << ui::colorize("  1:", ui::Ansi::DIM) << " " << snippet << "\n";
                 }
                 std::cout << "\n";
@@ -415,7 +430,7 @@ private:
 
                         // Snippet with line-number-style prefix
                         if (!v.snippet.empty()) {
-                            std::string snippet = truncateSnippet(v.snippet, 200);
+                            std::string snippet = formatSnippet(v, 200);
                             std::string linePrefix = vec.size() > 1
                                                          ? ui::colorize("     1:", ui::Ansi::DIM)
                                                          : ui::colorize("  1:", ui::Ansi::DIM);
@@ -499,6 +514,81 @@ private:
 
         // Fallback to simple truncation
         return result.substr(0, maxLength - 3) + "...";
+    }
+
+    struct SnippetAssessment {
+        double printableRatio{0.0};
+        double whitespaceRatio{0.0};
+        std::string sanitized;
+    };
+
+    SnippetAssessment assessSnippet(std::string_view snippet) const {
+        SnippetAssessment assessment;
+        if (snippet.empty()) {
+            return assessment;
+        }
+        std::string cleaned;
+        cleaned.reserve(snippet.size());
+        size_t printable = 0;
+        size_t whitespace = 0;
+        for (unsigned char c : snippet) {
+            if (c == '\n' || c == '\r' || c == '\t') {
+                whitespace++;
+                cleaned.push_back(' ');
+                continue;
+            }
+            if (c >= 0x20 && c < 0x7F) {
+                printable++;
+                if (std::isspace(c)) {
+                    whitespace++;
+                    if (!cleaned.empty() && cleaned.back() == ' ') {
+                        continue;
+                    }
+                    cleaned.push_back(' ');
+                } else {
+                    cleaned.push_back(static_cast<char>(c));
+                }
+            }
+        }
+        const double total = static_cast<double>(snippet.size());
+        assessment.printableRatio = printable / total;
+        assessment.whitespaceRatio = whitespace / total;
+        assessment.sanitized = std::move(cleaned);
+        return assessment;
+    }
+
+    std::string formatSnippet(const UnifiedItem& item, size_t maxLength) {
+        auto assessment = assessSnippet(item.snippet);
+        std::string candidate = assessment.sanitized.empty() ? item.snippet : assessment.sanitized;
+        bool hasGoodText = !candidate.empty() && assessment.printableRatio >= 0.65;
+        if (hasGoodText) {
+            return truncateSnippet(candidate, maxLength);
+        }
+
+        std::string label = item.fileType;
+        if (label.empty()) {
+            if (item.mimeType.find("text/") == 0) {
+                label = "text";
+            } else if (item.mimeType.find("image/") == 0) {
+                label = "image";
+            } else if (item.mimeType.find("audio/") == 0) {
+                label = "audio";
+            } else if (item.mimeType.find("video/") == 0) {
+                label = "video";
+            } else if (item.mimeType.find("application/pdf") == 0) {
+                label = "pdf";
+            } else if (!item.mimeType.empty()) {
+                label = "binary";
+            }
+        }
+        if (label.empty()) {
+            label = "binary";
+        }
+        std::string snippet = "[" + label + "] no text preview";
+        if (!item.mimeType.empty()) {
+            snippet += " (" + item.mimeType + ")";
+        }
+        return snippet;
     }
 
     static std::string trim(const std::string& s) {
@@ -945,8 +1035,19 @@ public:
                     if (!cwdPrefix.empty() && cwdPrefix.back() != '/') {
                         cwdPrefix += '/';
                     }
-                    // Add glob pattern to match all files under CWD
+                    // Add glob patterns to match absolute + repo-relative paths under CWD
                     includeGlobsExpanded.push_back(cwdPrefix + "**/*");
+                    std::string noLeadingSlash = cwdPrefix;
+                    if (!noLeadingSlash.empty() && noLeadingSlash.front() == '/') {
+                        noLeadingSlash.erase(noLeadingSlash.begin());
+                    }
+                    if (!noLeadingSlash.empty()) {
+                        includeGlobsExpanded.push_back(noLeadingSlash + "**/*");
+                    }
+                    auto baseName = std::filesystem::path(cwdPrefix).filename().string();
+                    if (!baseName.empty()) {
+                        includeGlobsExpanded.push_back(baseName + "/**/*");
+                    }
                     spdlog::debug("[CLI] Scoping search to CWD: {}", cwdPrefix);
                 }
             }

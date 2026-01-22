@@ -97,6 +97,15 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
             if (!item.hash.empty()) {
                 resultItem.metadata["hash"] = item.hash;
             }
+            if (!item.mimeType.empty()) {
+                resultItem.metadata["mime_type"] = item.mimeType;
+            }
+            if (!item.fileType.empty()) {
+                resultItem.metadata["file_type"] = item.fileType;
+            }
+            if (!item.fileName.empty()) {
+                resultItem.metadata["filename"] = item.fileName;
+            }
             if (!item.path.empty()) {
                 resultItem.metadata["path"] = item.path;
             }
