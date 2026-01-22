@@ -904,21 +904,22 @@ struct ProviderSingleton {
                         spdlog::warn("[ONNX Plugin] generate_embedding_batch: plugin disabled");
                         return YAMS_ERR_UNSUPPORTED;
                     }
-                    if (!c->ready) {
+                    std::string modelIdStr(model_id);
+                    const bool isColbert = isColbertModelName(modelIdStr);
+                    if (!c->ready && !isColbert) {
                         spdlog::warn("[ONNX Plugin] generate_embedding_batch: plugin not ready");
                         *out_vecs = nullptr;
                         *out_batch = 0;
                         *out_dim = 0;
                         return YAMS_ERR_INTERNAL;
                     }
-                    if (!c->pool) {
+                    if (!c->pool && !isColbert) {
                         spdlog::warn("[ONNX Plugin] generate_embedding_batch: pool is null");
                         *out_vecs = nullptr;
                         *out_batch = 0;
                         *out_dim = 0;
                         return YAMS_ERR_INTERNAL;
                     }
-                    std::string modelIdStr(model_id);
 
                     // Check if model is in cooldown
                     {
@@ -979,7 +980,6 @@ struct ProviderSingleton {
                     }
 
                     auto& session = *h.value();
-                    const bool isColbert = isColbertModelName(modelIdStr);
                     yams::Result<std::vector<std::vector<float>>> r;
                     if (isColbert) {
                         if (!c->colbert || !c->colbert->isValid()) {
