@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <future>
 #include <set>
 #include <sstream>
@@ -128,6 +129,54 @@ std::string_view::size_type ci_find(std::string_view haystack, std::string_view 
         }
     }
     return std::string_view::npos;
+}
+
+bool cpuSupportsSimdSearch() {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#if defined(__clang__) || defined(__GNUC__)
+    return __builtin_cpu_supports("avx2") || __builtin_cpu_supports("sse2");
+#else
+    return false;
+#endif
+#elif defined(__aarch64__) || defined(__ARM_NEON)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool containsFast(std::string_view haystack, std::string_view needle) {
+    if (needle.empty()) {
+        return true;
+    }
+    if (needle.size() > haystack.size()) {
+        return false;
+    }
+    static const bool useSimd = cpuSupportsSimdSearch();
+    if (!useSimd) {
+        return haystack.find(needle) != std::string_view::npos;
+    }
+    const char* data = haystack.data();
+    const size_t haySize = haystack.size();
+    const size_t needleSize = needle.size();
+    const char first = needle.front();
+
+    const char* scan = data;
+    size_t remaining = haySize;
+    while (remaining >= needleSize) {
+        const void* found = std::memchr(scan, first, remaining - needleSize + 1);
+        if (!found) {
+            return false;
+        }
+        const char* candidate = static_cast<const char*>(found);
+        if (std::memcmp(candidate, needle.data(), needleSize) == 0) {
+            return true;
+        }
+        const size_t consumed = static_cast<size_t>(candidate - scan) + 1;
+        scan = candidate + 1;
+        remaining -= consumed;
+    }
+    return false;
 }
 
 float normalizedBm25Score(double rawScore, float divisor, double minScore, double maxScore) {
@@ -1167,92 +1216,87 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
         if (!conceptTerms.empty()) {
             const size_t totalResults = response.results.size();
-            std::vector<uint32_t> matchCounts(totalResults, 0);
-            const size_t minChunkSize = std::max<size_t>(1, config_.minChunkSizeForParallel);
-            const size_t maxThreads = std::max<size_t>(1, std::thread::hardware_concurrency());
-            const size_t chunkTarget = (totalResults + minChunkSize - 1) / minChunkSize;
-            const size_t numThreads = std::min(maxThreads, std::max<size_t>(1, chunkTarget));
-            const bool useParallelBoost = numThreads > 1;
+            const size_t scanLimit = std::min(workingConfig.conceptMaxScanResults, totalResults);
+            if (scanLimit > 0) {
+                std::vector<uint32_t> matchCounts(scanLimit, 0);
+                const size_t minChunkSize = std::max<size_t>(1, config_.minChunkSizeForParallel);
+                const size_t maxThreads = std::max<size_t>(1, std::thread::hardware_concurrency());
+                const size_t chunkTarget = (scanLimit + minChunkSize - 1) / minChunkSize;
+                const size_t numThreads = std::min(maxThreads, std::max<size_t>(1, chunkTarget));
+                const bool useParallelBoost = numThreads > 1;
 
-            auto computeMatches = [&](size_t start, size_t end) {
-                std::vector<uint32_t> matches;
-                matches.reserve(end - start);
-                for (size_t idx = start; idx < end; ++idx) {
-                    const auto& result = response.results[idx];
-                    std::string content = result.snippet;
-                    if (!result.document.fileName.empty()) {
-                        if (!content.empty()) {
-                            content.push_back(' ');
+                auto computeMatches = [&](size_t start, size_t end) {
+                    std::vector<uint32_t> matches;
+                    matches.reserve(end - start);
+                    for (size_t idx = start; idx < end; ++idx) {
+                        const auto& result = response.results[idx];
+                        uint32_t count = 0;
+                        for (const auto& term : conceptTerms) {
+                            if (!term.empty() && (containsFast(result.snippet, term) ||
+                                                  containsFast(result.document.fileName, term))) {
+                                count++;
+                            }
                         }
-                        content.append(result.document.fileName);
+                        matches.push_back(count);
                     }
-                    std::transform(
-                        content.begin(), content.end(), content.begin(),
-                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                    uint32_t count = 0;
-                    for (const auto& term : conceptTerms) {
-                        if (!term.empty() && content.find(term) != std::string::npos) {
-                            count++;
+                    return matches;
+                };
+
+                if (useParallelBoost) {
+                    const size_t chunkSize = (scanLimit + numThreads - 1) / numThreads;
+                    std::vector<std::future<std::vector<uint32_t>>> futures;
+                    futures.reserve(numThreads);
+                    for (size_t i = 0; i < numThreads; ++i) {
+                        const size_t start = i * chunkSize;
+                        const size_t end = std::min(start + chunkSize, scanLimit);
+                        if (start >= end) {
+                            break;
                         }
+                        futures.push_back(
+                            std::async(std::launch::async, [start, end, &computeMatches]() {
+                                return computeMatches(start, end);
+                            }));
                     }
-                    matches.push_back(count);
+
+                    size_t offset = 0;
+                    for (auto& future : futures) {
+                        auto matches = future.get();
+                        for (size_t i = 0; i < matches.size(); ++i) {
+                            matchCounts[offset + i] = matches[i];
+                        }
+                        offset += matches.size();
+                    }
+                } else {
+                    auto matches = computeMatches(0, scanLimit);
+                    for (size_t i = 0; i < matches.size(); ++i) {
+                        matchCounts[i] = matches[i];
+                    }
                 }
-                return matches;
-            };
 
-            if (useParallelBoost) {
-                const size_t chunkSize = (totalResults + numThreads - 1) / numThreads;
-                std::vector<std::future<std::vector<uint32_t>>> futures;
-                futures.reserve(numThreads);
-                for (size_t i = 0; i < numThreads; ++i) {
-                    const size_t start = i * chunkSize;
-                    const size_t end = std::min(start + chunkSize, totalResults);
-                    if (start >= end) {
+                bool boosted = false;
+                float boostBudget = workingConfig.conceptMaxBoost;
+                for (size_t i = 0; i < scanLimit; ++i) {
+                    if (boostBudget <= 0.0f) {
                         break;
                     }
-                    futures.push_back(
-                        std::async(std::launch::async, [start, end, &computeMatches]() {
-                            return computeMatches(start, end);
-                        }));
-                }
-
-                size_t offset = 0;
-                for (auto& future : futures) {
-                    auto matches = future.get();
-                    for (size_t i = 0; i < matches.size(); ++i) {
-                        matchCounts[offset + i] = matches[i];
+                    const uint32_t matchCount = matchCounts[i];
+                    if (matchCount == 0) {
+                        continue;
                     }
-                    offset += matches.size();
+                    const float desiredBoost =
+                        workingConfig.conceptBoostWeight * static_cast<float>(matchCount);
+                    const float appliedBoost = std::min(desiredBoost, boostBudget);
+                    response.results[i].score *= (1.0f + appliedBoost);
+                    boostBudget -= appliedBoost;
+                    boosted = true;
                 }
-            } else {
-                auto matches = computeMatches(0, totalResults);
-                for (size_t i = 0; i < matches.size(); ++i) {
-                    matchCounts[i] = matches[i];
-                }
-            }
 
-            bool boosted = false;
-            float boostBudget = workingConfig.conceptMaxBoost;
-            for (size_t i = 0; i < totalResults; ++i) {
-                if (boostBudget <= 0.0f) {
-                    break;
+                if (boosted) {
+                    std::sort(response.results.begin(), response.results.end(),
+                              [](const SearchResult& a, const SearchResult& b) {
+                                  return a.score > b.score;
+                              });
                 }
-                const uint32_t matchCount = matchCounts[i];
-                if (matchCount == 0) {
-                    continue;
-                }
-                const float desiredBoost =
-                    workingConfig.conceptBoostWeight * static_cast<float>(matchCount);
-                const float appliedBoost = std::min(desiredBoost, boostBudget);
-                response.results[i].score *= (1.0f + appliedBoost);
-                boostBudget -= appliedBoost;
-                boosted = true;
-            }
-
-            if (boosted) {
-                std::sort(
-                    response.results.begin(), response.results.end(),
-                    [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
             }
         }
     }

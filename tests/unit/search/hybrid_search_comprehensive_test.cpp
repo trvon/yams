@@ -733,6 +733,7 @@ TEST_CASE("HybridSearch - Concept boost elevates matches", "[search][hybrid][con
     cfg.conceptBoostWeight = 0.8f;
     cfg.conceptMaxBoost = 0.8f;
     cfg.conceptMinConfidence = 0.0f;
+    cfg.conceptMaxScanResults = 1;
     engine->setConfig(cfg);
     engine->setConceptExtractor(
         [](const std::string& /*query*/, const std::vector<std::string>& /*types*/) {
@@ -752,6 +753,42 @@ TEST_CASE("HybridSearch - Concept boost elevates matches", "[search][hybrid][con
     auto resp = fixture.executeSearch(req);
     REQUIRE(resp.results.size() > 0);
     CHECK(resp.results[0].path.find("pipeline_notes.md") != std::string::npos);
+}
+
+TEST_CASE("HybridSearch - Concept boost respects scan cap", "[search][hybrid][concept]") {
+    SKIP_HYBRID_ON_WINDOWS();
+    SearchServiceFixture fixture;
+
+    auto engine = fixture.searchEngine();
+    if (!engine) {
+        SUCCEED("SearchEngine not available; skipping concept cap test.");
+        return;
+    }
+
+    auto cfg = engine->getConfig();
+    cfg.conceptBoostWeight = 0.8f;
+    cfg.conceptMaxBoost = 0.8f;
+    cfg.conceptMinConfidence = 0.0f;
+    cfg.conceptMaxScanResults = 1;
+    engine->setConfig(cfg);
+    engine->setConceptExtractor(
+        [](const std::string& /*query*/, const std::vector<std::string>& /*types*/) {
+            QueryConceptResult result;
+            result.concepts.push_back(QueryConcept{"pipeline", "concept", 0.9f, 0, 8});
+            return Result<QueryConceptResult>(result);
+        });
+
+    fixture.createDocument("pipeline_notes.md", "pipeline boosttoken summary");
+    fixture.createDocument("search_notes.md", "boosttoken boosttoken boosttoken");
+
+    app::services::SearchRequest req;
+    req.query = "boosttoken";
+    req.type = "hybrid";
+    req.limit = 5;
+
+    auto resp = fixture.executeSearch(req);
+    REQUIRE(resp.results.size() > 0);
+    CHECK(resp.results[0].path.find("search_notes.md") != std::string::npos);
 }
 
 TEST_CASE("KeywordSearch - Stemming reverse", "[search][keyword][stemming]") {
