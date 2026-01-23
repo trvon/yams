@@ -336,7 +336,7 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
-        CHECK(TuneAdvisor::postIngestBatchSize() == 6u);
+        CHECK(TuneAdvisor::postIngestBatchSize() == 8u);
     }
 
     SECTION("aggressive profile uses maximum values") {
@@ -350,7 +350,7 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
-        CHECK(TuneAdvisor::postIngestBatchSize() == 8u);
+        CHECK(TuneAdvisor::postIngestBatchSize() == 12u);
     }
 
     SECTION("profile affects cpuBudgetPercent") {

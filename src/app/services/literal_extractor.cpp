@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <yams/app/services/literal_extractor.hpp>
 
 namespace yams {
@@ -147,13 +148,33 @@ size_t BMHSearcher::findFast(std::string_view text, size_t startPos) const {
         return std::string::npos;
     }
 
-    std::string textStr(text);
     if (ignoreCase_) {
+        std::string textStr(text);
         std::transform(textStr.begin(), textStr.end(), textStr.begin(),
                        [](unsigned char c) { return std::tolower(c); });
+        return textStr.find(pattern_, startPos);
     }
 
-    return textStr.find(pattern_, startPos);
+    const char* base = text.data();
+    const char* scan = base + startPos;
+    size_t remaining = n - startPos;
+    const char first = pattern_.front();
+
+    while (remaining >= m) {
+        const void* found = std::memchr(scan, first, remaining - m + 1);
+        if (!found) {
+            return std::string::npos;
+        }
+        const char* candidate = static_cast<const char*>(found);
+        if (std::memcmp(candidate, pattern_.data(), m) == 0) {
+            return static_cast<size_t>(candidate - base);
+        }
+        const size_t consumed = static_cast<size_t>(candidate - scan) + 1;
+        scan = candidate + 1;
+        remaining -= consumed;
+    }
+
+    return std::string::npos;
 }
 
 size_t BMHSearcher::findBMH(std::string_view text, size_t startPos) const {

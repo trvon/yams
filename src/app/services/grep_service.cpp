@@ -955,20 +955,6 @@ public:
                         return count;
                     }
 
-                    // Fast path fallback: pure literal < 3 chars, use std::string::find
-                    if (req.literalText && !req.ignoreCase) {
-                        size_t from = 0;
-                        while (true) {
-                            auto pos = line.find(rawPattern, from);
-                            if (pos == std::string::npos)
-                                break;
-                            if (boundaryOk(line, pos, rawPattern.size()))
-                                ++count;
-                            from = pos + 1;
-                        }
-                        return count;
-                    }
-
                     // Regex path: full pattern matching (after literal pre-filter if applicable)
                     std::cmatch cm;
                     const char* start = line.c_str();

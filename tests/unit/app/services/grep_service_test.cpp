@@ -174,6 +174,20 @@ TEST_CASE("GrepService - Basic Functionality", "[grep][service][basic]") {
         REQUIRE(res.value().searchStats.contains("latency_ms"));
     }
 
+    SECTION("Literal short pattern matches with boundaries") {
+        fixture.addDocument("c.txt", "alpha beta alpha\nalpha-beta\n");
+
+        GrepRequest req;
+        req.pattern = "alpha";
+        req.literalText = true;
+        req.word = true;
+
+        auto res = fixture.grep(req);
+
+        REQUIRE(res);
+        CHECK(res.value().totalMatches == 2);
+    }
+
     SECTION("Hybrid mode includes semantic suggestions") {
 // Skip semantic search on Windows - ONNX initialization hangs
 #ifdef _WIN32

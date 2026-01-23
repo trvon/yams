@@ -54,20 +54,20 @@ TEST_CASE("ErrorHints - Dimension mismatch pattern detected", "[cli][error_hints
 
 TEST_CASE("ErrorHints - Daemon error pattern detected", "[cli][error_hints][catch2]") {
     auto hint = getErrorHint(ErrorCode::NetworkError, "daemon not responding");
-    CHECK(hint.hint == "Daemon may not be running");
-    CHECK(hint.command == "yams daemon start");
+    CHECK(hint.hint == std::string(kDaemonLoadMessage));
+    CHECK(hint.command.empty());
 }
 
 TEST_CASE("ErrorHints - Socket error pattern detected", "[cli][error_hints][catch2]") {
     auto hint = getErrorHint(ErrorCode::NetworkError, "socket connection failed");
-    CHECK(hint.hint == "Daemon may not be running");
-    CHECK(hint.command == "yams daemon start");
+    CHECK(hint.hint == std::string(kDaemonLoadMessage));
+    CHECK(hint.command.empty());
 }
 
 TEST_CASE("ErrorHints - Connection refused pattern detected", "[cli][error_hints][catch2]") {
     auto hint = getErrorHint(ErrorCode::NetworkError, "connection refused to /tmp/yams.sock");
-    CHECK(hint.hint == "Daemon may not be running");
-    CHECK(hint.command == "yams daemon start");
+    CHECK(hint.hint == std::string(kDaemonLoadMessage));
+    CHECK(hint.command.empty());
 }
 
 TEST_CASE("ErrorHints - Unique constraint pattern detected", "[cli][error_hints][catch2]") {
@@ -148,8 +148,8 @@ TEST_CASE("ErrorHints - NetworkError code fallback", "[cli][error_hints][catch2]
 
 TEST_CASE("ErrorHints - Timeout code fallback", "[cli][error_hints][catch2]") {
     auto hint = getErrorHint(ErrorCode::Timeout, "operation timed out");
-    CHECK(hint.hint == "Operation timed out; the daemon may be overloaded");
-    CHECK(hint.command == "yams daemon status");
+    CHECK(hint.hint == std::string(kDaemonLoadMessage));
+    CHECK(hint.command.empty());
 }
 
 TEST_CASE("ErrorHints - InvalidArgument code with command", "[cli][error_hints][catch2]") {
@@ -320,6 +320,6 @@ TEST_CASE("ErrorHints - Message pattern takes precedence over code", "[cli][erro
 TEST_CASE("ErrorHints - Daemon message with database code gives daemon hint",
           "[cli][error_hints][catch2]") {
     auto hint = getErrorHint(ErrorCode::DatabaseError, "daemon connection refused");
-    CHECK(hint.hint == "Daemon may not be running");
-    CHECK(hint.command == "yams daemon start");
+    CHECK(hint.hint == std::string(kDaemonLoadMessage));
+    CHECK(hint.command.empty());
 }

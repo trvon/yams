@@ -62,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Search & Retrieval
 - Batch vector/KG lookups, flat_map for cache-friendly access, branch hints, memory pre-allocation.
+- Concept boost post-processing now caps scan count and uses SIMD-accelerated matching with CPU
+  feature auto-detect (fallback to scalar), reducing latency for large result sets.
 
 #### Throughput Benchmarks (Debug, macOS M3 Max)
 
