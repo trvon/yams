@@ -423,11 +423,15 @@ public:
                 // even if already initialized
                 maybeSetupGlinerModel(dataPath, configPath);
                 if (colbertPreferred) {
-                    updateColbertRerankingConfig(configPath);
-                    spdlog::info("ColBERT preferred model detected; enabling MaxSim reranking via "
-                                 "ONNX plugin");
+                    auto selected = maybeSetupRerankerModel(dataPath, configPath);
+                    if (selected.empty()) {
+                        updateColbertRerankingConfig(configPath);
+                        spdlog::info(
+                            "ColBERT preferred model detected; enabling MaxSim reranking via "
+                            "ONNX plugin");
+                    }
                 } else {
-                    maybeSetupRerankerModel(dataPath, configPath);
+                    (void)maybeSetupRerankerModel(dataPath, configPath);
                 }
                 maybeSetupGrammars(dataPath);
                 maybeSetupAgentSkill();
@@ -628,10 +632,13 @@ public:
 
             // 7b) Reranker Model Setup (for two-stage hybrid search)
             if (enableVectorDB && colbertSelected) {
-                updateColbertRerankingConfig(configPath);
-                spdlog::info("ColBERT selected; enabling MaxSim reranking via ONNX plugin");
+                auto selected = maybeSetupRerankerModel(dataPath, configPath);
+                if (selected.empty()) {
+                    updateColbertRerankingConfig(configPath);
+                    spdlog::info("ColBERT selected; enabling MaxSim reranking via ONNX plugin");
+                }
             } else {
-                maybeSetupRerankerModel(dataPath, configPath);
+                (void)maybeSetupRerankerModel(dataPath, configPath);
             }
 
             // 7) Tree-sitter Grammar Setup (for symbol extraction)
@@ -1978,7 +1985,7 @@ private:
      * - Auto mode: downloads default model without prompting
      * - Non-interactive (non-auto): skips reranker setup entirely
      */
-    void maybeSetupRerankerModel(const fs::path& dataPath, const fs::path& configPath) {
+    std::string maybeSetupRerankerModel(const fs::path& dataPath, const fs::path& configPath) {
         std::string selectedRerankerModel;
 
         if (autoInit_) {
@@ -2007,6 +2014,8 @@ private:
         if (!selectedRerankerModel.empty()) {
             updateRerankerConfig(configPath, dataPath, selectedRerankerModel);
         }
+
+        return selectedRerankerModel;
     }
 
     /**
@@ -2026,13 +2035,26 @@ private:
                 content.append("\n[search]\n");
             }
 
-            // Set reranker_model_path in [search]
+            // Set reranker_model and reranker_model_path in [search]
             fs::path rerankerModelPath =
                 dataPath / "models" / "reranker" / selectedRerankerModel / "model.onnx";
             auto secPos = content.find("[search]");
             if (secPos != std::string::npos) {
                 auto nextSec = content.find("\n[", secPos + 1);
                 auto rangeEnd = (nextSec == std::string::npos) ? content.size() : nextSec;
+
+                // Add reranker_model
+                auto namePos = content.find("reranker_model =", secPos);
+                std::string modelNameLine =
+                    "reranker_model = \"" + escapeTomlString(selectedRerankerModel) + "\"";
+                if (namePos == std::string::npos || namePos > rangeEnd) {
+                    content.insert(rangeEnd, modelNameLine + "\n");
+                } else {
+                    auto lineEnd = content.find('\n', namePos);
+                    if (lineEnd == std::string::npos)
+                        lineEnd = content.size();
+                    content.replace(namePos, lineEnd - namePos, modelNameLine);
+                }
 
                 // Add reranker_model_path
                 auto keyPos = content.find("reranker_model_path", secPos);
@@ -2101,6 +2123,14 @@ private:
                     if (lineEnd == std::string::npos)
                         lineEnd = content.size();
                     content.erase(keyPos, lineEnd - keyPos + 1);
+                }
+
+                auto namePos = content.find("reranker_model =", secPos);
+                if (namePos != std::string::npos && namePos < rangeEnd) {
+                    auto lineEnd = content.find('\n', namePos);
+                    if (lineEnd == std::string::npos)
+                        lineEnd = content.size();
+                    content.erase(namePos, lineEnd - namePos + 1);
                 }
             }
 

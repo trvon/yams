@@ -1216,7 +1216,9 @@ private:
             std::cout << "To enable reranking:\n";
             std::cout << "  1. Download the model: yams model download " << model.name << "\n";
             std::cout << "  2. Configure YAMS:\n";
-            std::cout << "     yams config set search.reranker_model_path <path>/model.onnx\n";
+            std::cout << "     yams config search reranker set " << model.name << "\n";
+            std::cout
+                << "     (Optional) yams config set search.reranker_model_path <path>/model.onnx\n";
             std::cout << "     (Reranking auto-activates when the model is detected.)\n";
         }
 

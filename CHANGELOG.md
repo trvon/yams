@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added support for the [mxbai-edge-colbert-v0-17m](https://huggingface.co/mixedbread-ai/mxbai-edge-colbert-v0-17m) model (embedding + MaxSim reranking, max-pooled and L2-normalized embeddings).
 - Vector DB auto-rebuild on embedding dimension mismatch (`daemon.auto_rebuild_on_dim_mismatch`).
 - Init now prompts for a tuning profile (efficient/balanced/aggressive) and writes `tuning.profile`.
+- Search config supports a dedicated reranker model (`search.reranker_model`) with CLI helpers (`yams config search reranker`).
 - **WEIGHTED_MAX fusion strategy**: Takes maximum weighted score per document instead of sum.
   Prevents "hub" documents from dominating via multi-component consensus boost. Used by
   SCIENTIFIC tuning profile for benchmark corpora.

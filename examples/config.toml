@@ -325,6 +325,8 @@ enable_cache = true
 cache_size = 1000
 # Cache TTL in minutes
 cache_ttl_minutes = 60
+# Preferred reranker model (optional)
+reranker_model = ""
 
 [search.path_tree]
 # Enable path-tree traversal to serve hierarchical workloads (prefix/semantic/diff)

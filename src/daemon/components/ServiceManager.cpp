@@ -1773,6 +1773,14 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 searchEngine_ = built;
             }
 
+            std::call_once(queryConceptExtractorOnce_, [this]() {
+                cachedQueryConceptExtractor_ = createGlinerExtractionFunc(getEntityExtractors());
+            });
+            if (cachedQueryConceptExtractor_) {
+                built->setConceptExtractor(cachedQueryConceptExtractor_);
+                spdlog::info("[SearchBuild] GLiNER concept extractor wired to search engine");
+            }
+
             // Wire cross-encoder reranker if available
             if (rerankerAdapter_ && rerankerAdapter_->isReady()) {
                 built->setReranker(rerankerAdapter_);

@@ -114,6 +114,12 @@ struct SearchEngineConfig {
     float tagWeight = 0.05f;           // Tag-based search weight (modifier, not standalone)
     float metadataWeight = 0.05f; // Metadata attribute matching weight (modifier, not standalone)
 
+    // Concept-based boosts (GLiNER query concepts)
+    float conceptBoostWeight = 0.10f;   // Per-concept boost factor applied to matches
+    float conceptMinConfidence = 0.40f; // Minimum confidence for concept inclusion
+    size_t conceptMaxCount = 6;         // Maximum number of concepts to apply per query
+    float conceptMaxBoost = 0.25f;      // Global boost budget per query (sum of applied boosts)
+
     // Search parameters
     size_t maxResults = 100;             // Maximum results to return
     float similarityThreshold = 0.75f;   // Higher threshold - only high-confidence vector matches

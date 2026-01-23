@@ -128,6 +128,27 @@ public:
         pathTreeStatusCmd->callback(
             [this]() { exitOnError(executePathTreeStatus(), "Path-tree status"); });
 
+        // Reranker model config
+        auto* rerankerCmd = searchCmd->add_subcommand("reranker", "Configure reranker model");
+        rerankerCmd->require_subcommand();
+
+        auto* rerankerSetCmd = rerankerCmd->add_subcommand("set", "Set reranker model name");
+        rerankerSetCmd
+            ->add_option("model_name", rerankerModel_, "Model name (e.g., bge-reranker-base)")
+            ->required();
+        rerankerSetCmd->callback(
+            [this]() { exitOnError(executeRerankerModelSet(), "Set reranker model"); });
+
+        auto* rerankerClearCmd =
+            rerankerCmd->add_subcommand("clear", "Clear reranker model override");
+        rerankerClearCmd->callback(
+            [this]() { exitOnError(executeRerankerModelClear(), "Clear reranker model"); });
+
+        auto* rerankerStatusCmd =
+            rerankerCmd->add_subcommand("status", "Show reranker configuration");
+        rerankerStatusCmd->callback(
+            [this]() { exitOnError(executeRerankerModelStatus(), "Reranker status"); });
+
         // Migration subcommand
         auto* migrateCmd = cmd->add_subcommand("migrate", "Migrate configuration to v2");
         migrateCmd->add_option("--config-path", configPath_, "Path to config file");
@@ -224,6 +245,7 @@ private:
     std::string tuningProfile_;
     std::string pathTreeMode_;
     std::string grammarLanguage_;
+    std::string rerankerModel_;
     bool noBackup_ = false;
     bool dryRun_ = false;
 
@@ -1075,6 +1097,64 @@ private:
 
             return Result<void>();
 
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executeRerankerModelSet() {
+        try {
+            auto result = writeConfigValue("search.reranker_model", rerankerModel_);
+            if (!result)
+                return result;
+            std::cout << ui::status_ok("Reranker model set to: " + rerankerModel_) << "\n";
+            std::cout << "  Reload the daemon or restart it to apply changes.\n";
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executeRerankerModelClear() {
+        try {
+            auto result = writeConfigValue("search.reranker_model", "");
+            if (!result)
+                return result;
+            std::cout << ui::status_ok("Cleared reranker model override") << "\n";
+            std::cout << "  The daemon will fall back to auto-detected reranker models.\n";
+            return Result<void>();
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executeRerankerModelStatus() {
+        try {
+            auto configPath = getConfigPath();
+            auto config = parseSimpleToml(configPath);
+            std::string rerankerModel;
+            if (auto it = config.find("search.reranker_model"); it != config.end()) {
+                rerankerModel = it->second;
+            }
+            std::string rerankerPath;
+            if (auto it = config.find("search.reranker_model_path"); it != config.end()) {
+                rerankerPath = it->second;
+            }
+            std::cout << ui::section_header("Reranker Configuration") << "\n";
+            if (!rerankerModel.empty()) {
+                std::cout << "Model: " << rerankerModel << "\n";
+            } else {
+                std::cout << "Model: (auto)\n";
+            }
+            if (!rerankerPath.empty()) {
+                std::cout << "Model path: " << rerankerPath << "\n";
+            } else {
+                std::cout << "Model path: (auto)\n";
+            }
+            std::cout << "\nCommands:\n";
+            std::cout << "  yams config search reranker set <model>\n";
+            std::cout << "  yams config search reranker clear\n";
+            return Result<void>();
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};
         }

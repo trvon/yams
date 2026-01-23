@@ -2,9 +2,9 @@
 
 #include <algorithm>
 #include <future>
-#include <yams/daemon/components/TuneAdvisor.h>
 #include <string>
 #include <unordered_map>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/search/result_ranker.h>
 
 namespace yams {

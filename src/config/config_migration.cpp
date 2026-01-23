@@ -173,6 +173,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2A
               {"interval_minutes", "60"},
               {"initial_delay_minutes", "10"}}},
             {"search.path_tree", {{"enable", "false"}, {"mode", "fallback"}}},
+            {"search", {{"reranker_model", ""}}},
             {"repair",
              {{"enable_online_repair", "false"},
               {"max_repair_concurrency", "1"},
@@ -379,7 +380,8 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"max_limit", "100"},
               {"enable_cache", "true"},
               {"cache_size", "1000"},
-              {"cache_ttl_minutes", "60"}}},
+              {"cache_ttl_minutes", "60"},
+              {"reranker_model", ""}}},
 
             {"search.path_tree", {{"enable", "false"}, {"mode", "fallback"}}},
 

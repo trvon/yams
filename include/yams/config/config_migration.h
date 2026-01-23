@@ -272,6 +272,7 @@ struct ConfigV2 {
         bool enable_cache = true;
         size_t cache_size = 1000;
         int cache_ttl_minutes = 60;
+        std::string reranker_model;
 
         // Hybrid search settings
         struct Hybrid {

@@ -608,6 +608,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             executor_);
     }
 
+    std::future<Result<QueryConceptResult>> conceptFuture;
+    std::chrono::steady_clock::time_point conceptStart;
+    if (conceptExtractor_) {
+        conceptStart = std::chrono::steady_clock::now();
+        conceptFuture = postWork(
+            [this, &query]() {
+                YAMS_ZONE_SCOPED_N("concepts::extract_async");
+                return conceptExtractor_(query, {});
+            },
+            executor_);
+    }
+
     // Helper to await embedding result when needed (called before vector search)
     auto awaitEmbedding = [&]() {
         if (embeddingFuture.valid() && !queryEmbedding.has_value()) {
@@ -1032,6 +1044,28 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.results = fusion.fuse(allComponentResults);
     }
 
+    std::vector<QueryConcept> concepts;
+    if (conceptFuture.valid() &&
+        conceptFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        auto conceptEnd = std::chrono::steady_clock::now();
+        componentTiming["concepts"] =
+            std::chrono::duration_cast<std::chrono::microseconds>(conceptEnd - conceptStart)
+                .count();
+        auto conceptResult = conceptFuture.get();
+        if (conceptResult) {
+            const auto& extracted = conceptResult.value().concepts;
+            concepts.reserve(extracted.size());
+            for (const auto& conceptItem : extracted) {
+                if (conceptItem.confidence >= workingConfig.conceptMinConfidence) {
+                    concepts.push_back(conceptItem);
+                }
+            }
+            if (concepts.size() > workingConfig.conceptMaxCount) {
+                concepts.resize(workingConfig.conceptMaxCount);
+            }
+        }
+    }
+
     // Cross-encoder reranking: second-stage ranking for improved relevance
     const bool rerankAvailable = reranker_ && reranker_->isReady();
     if (!config_.enableReranking && rerankAvailable) {
@@ -1109,6 +1143,118 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     } else if (config_.enableReranking && !rerankAvailable) {
         spdlog::debug("[reranker] Unavailable; falling back to fused scores");
+    }
+
+    if (!concepts.empty() && workingConfig.conceptBoostWeight > 0.0f &&
+        workingConfig.conceptMaxBoost > 0.0f && !response.results.empty()) {
+        YAMS_ZONE_SCOPED_N("concepts::boost");
+        std::vector<std::string> conceptTerms;
+        conceptTerms.reserve(concepts.size());
+        for (const auto& conceptItem : concepts) {
+            if (conceptItem.text.empty()) {
+                continue;
+            }
+            std::string lowered = conceptItem.text;
+            std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            conceptTerms.push_back(std::move(lowered));
+        }
+        if (!conceptTerms.empty()) {
+            std::sort(conceptTerms.begin(), conceptTerms.end());
+            conceptTerms.erase(std::unique(conceptTerms.begin(), conceptTerms.end()),
+                               conceptTerms.end());
+        }
+
+        if (!conceptTerms.empty()) {
+            const size_t totalResults = response.results.size();
+            std::vector<uint32_t> matchCounts(totalResults, 0);
+            const size_t minChunkSize = std::max<size_t>(1, config_.minChunkSizeForParallel);
+            const size_t maxThreads = std::max<size_t>(1, std::thread::hardware_concurrency());
+            const size_t chunkTarget = (totalResults + minChunkSize - 1) / minChunkSize;
+            const size_t numThreads = std::min(maxThreads, std::max<size_t>(1, chunkTarget));
+            const bool useParallelBoost = numThreads > 1;
+
+            auto computeMatches = [&](size_t start, size_t end) {
+                std::vector<uint32_t> matches;
+                matches.reserve(end - start);
+                for (size_t idx = start; idx < end; ++idx) {
+                    const auto& result = response.results[idx];
+                    std::string content = result.snippet;
+                    if (!result.document.fileName.empty()) {
+                        if (!content.empty()) {
+                            content.push_back(' ');
+                        }
+                        content.append(result.document.fileName);
+                    }
+                    std::transform(
+                        content.begin(), content.end(), content.begin(),
+                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    uint32_t count = 0;
+                    for (const auto& term : conceptTerms) {
+                        if (!term.empty() && content.find(term) != std::string::npos) {
+                            count++;
+                        }
+                    }
+                    matches.push_back(count);
+                }
+                return matches;
+            };
+
+            if (useParallelBoost) {
+                const size_t chunkSize = (totalResults + numThreads - 1) / numThreads;
+                std::vector<std::future<std::vector<uint32_t>>> futures;
+                futures.reserve(numThreads);
+                for (size_t i = 0; i < numThreads; ++i) {
+                    const size_t start = i * chunkSize;
+                    const size_t end = std::min(start + chunkSize, totalResults);
+                    if (start >= end) {
+                        break;
+                    }
+                    futures.push_back(
+                        std::async(std::launch::async, [start, end, &computeMatches]() {
+                            return computeMatches(start, end);
+                        }));
+                }
+
+                size_t offset = 0;
+                for (auto& future : futures) {
+                    auto matches = future.get();
+                    for (size_t i = 0; i < matches.size(); ++i) {
+                        matchCounts[offset + i] = matches[i];
+                    }
+                    offset += matches.size();
+                }
+            } else {
+                auto matches = computeMatches(0, totalResults);
+                for (size_t i = 0; i < matches.size(); ++i) {
+                    matchCounts[i] = matches[i];
+                }
+            }
+
+            bool boosted = false;
+            float boostBudget = workingConfig.conceptMaxBoost;
+            for (size_t i = 0; i < totalResults; ++i) {
+                if (boostBudget <= 0.0f) {
+                    break;
+                }
+                const uint32_t matchCount = matchCounts[i];
+                if (matchCount == 0) {
+                    continue;
+                }
+                const float desiredBoost =
+                    workingConfig.conceptBoostWeight * static_cast<float>(matchCount);
+                const float appliedBoost = std::min(desiredBoost, boostBudget);
+                response.results[i].score *= (1.0f + appliedBoost);
+                boostBudget -= appliedBoost;
+                boosted = true;
+            }
+
+            if (boosted) {
+                std::sort(
+                    response.results.begin(), response.results.end(),
+                    [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+            }
+        }
     }
 
     if (!response.results.empty()) {

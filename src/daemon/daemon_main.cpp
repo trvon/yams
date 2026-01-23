@@ -18,6 +18,7 @@
 #include <yams/compat/unistd.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 
@@ -421,6 +422,9 @@ int main(int argc, char* argv[]) {
                             pluginCfg[key] = true;
                         } else if (value == "false") {
                             pluginCfg[key] = false;
+                        } else if (!value.empty() && value.front() == '[') {
+                            // Keep array-like strings intact for plugin parsing.
+                            pluginCfg[key] = value;
                         } else {
                             // Try as number first
                             try {
@@ -439,6 +443,95 @@ int main(int argc, char* argv[]) {
                     config.pluginConfigs[pluginName] = pluginCfg.dump();
                     spdlog::info("Parsed plugin config for '{}': {}", pluginName,
                                  config.pluginConfigs[pluginName]);
+                }
+            }
+
+            // Map search.reranker_model into plugins.onnx config for the ONNX plugin.
+            if (tomlConfig.find("search") != tomlConfig.end()) {
+                const auto& searchSection = tomlConfig.at("search");
+                auto it = searchSection.find("reranker_model");
+                auto pathIt = searchSection.find("reranker_model_path");
+                const bool hasModel = (it != searchSection.end() && !it->second.empty());
+                const bool hasPath = (pathIt != searchSection.end() && !pathIt->second.empty());
+                if (hasModel || hasPath) {
+                    nlohmann::json onnxCfg = nlohmann::json::object();
+                    const char* onnxKeys[] = {"onnx", "onnx_plugin", "yams_onnx"};
+                    for (const char* key : onnxKeys) {
+                        if (auto pc = config.pluginConfigs.find(key);
+                            pc != config.pluginConfigs.end()) {
+                            auto parsed = nlohmann::json::parse(pc->second, nullptr, false);
+                            if (!parsed.is_discarded() && parsed.is_object()) {
+                                onnxCfg = parsed;
+                            }
+                            break;
+                        }
+                    }
+                    if (hasModel) {
+                        onnxCfg["reranker_model"] = it->second;
+                    }
+                    if (hasPath) {
+                        onnxCfg["reranker_model_path"] = pathIt->second;
+                    }
+                    const auto cfgDump = onnxCfg.dump();
+                    bool updated = false;
+                    for (const char* key : onnxKeys) {
+                        if (config.pluginConfigs.find(key) != config.pluginConfigs.end()) {
+                            config.pluginConfigs[key] = cfgDump;
+                            updated = true;
+                        }
+                    }
+                    if (!updated) {
+                        config.pluginConfigs["onnx"] = cfgDump;
+                    }
+                }
+            }
+
+            // Fallback: parse search.reranker_model/reranker_model_path for plugin config even
+            // when search section isn't mapped into DaemonConfig.
+            if (tomlConfig.find("search") == tomlConfig.end()) {
+                try {
+                    auto flat = yams::daemon::ConfigResolver::parseSimpleTomlFlat(
+                        std::filesystem::path(configPath));
+                    std::string rerankerModel;
+                    std::string rerankerPath;
+                    if (auto it = flat.find("search.reranker_model"); it != flat.end()) {
+                        rerankerModel = it->second;
+                    }
+                    if (auto it = flat.find("search.reranker_model_path"); it != flat.end()) {
+                        rerankerPath = it->second;
+                    }
+                    if (!rerankerModel.empty() || !rerankerPath.empty()) {
+                        nlohmann::json onnxCfg = nlohmann::json::object();
+                        const char* onnxKeys[] = {"onnx", "onnx_plugin", "yams_onnx"};
+                        for (const char* key : onnxKeys) {
+                            if (auto pc = config.pluginConfigs.find(key);
+                                pc != config.pluginConfigs.end()) {
+                                auto parsed = nlohmann::json::parse(pc->second, nullptr, false);
+                                if (!parsed.is_discarded() && parsed.is_object()) {
+                                    onnxCfg = parsed;
+                                }
+                                break;
+                            }
+                        }
+                        if (!rerankerModel.empty()) {
+                            onnxCfg["reranker_model"] = rerankerModel;
+                        }
+                        if (!rerankerPath.empty()) {
+                            onnxCfg["reranker_model_path"] = rerankerPath;
+                        }
+                        const auto cfgDump = onnxCfg.dump();
+                        bool updated = false;
+                        for (const char* key : onnxKeys) {
+                            if (config.pluginConfigs.find(key) != config.pluginConfigs.end()) {
+                                config.pluginConfigs[key] = cfgDump;
+                                updated = true;
+                            }
+                        }
+                        if (!updated) {
+                            config.pluginConfigs["onnx"] = cfgDump;
+                        }
+                    }
+                } catch (...) {
                 }
             }
 

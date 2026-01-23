@@ -188,6 +188,9 @@ public:
     // Public member access for tests
     std::shared_ptr<ISearchService> searchService() const { return searchService_; }
     std::shared_ptr<IDocumentService> docService() const { return docService_; }
+    std::shared_ptr<yams::search::SearchEngine> searchEngine() const {
+        return appContext_.searchEngine;
+    }
 
     // Test document hashes
     std::string hashDoc1_;      // pipeline.cpp
@@ -714,6 +717,41 @@ TEST_CASE("KeywordSearch - Stemming", "[search][keyword][stemming]") {
     REQUIRE(foundSearching);
     REQUIRE(foundSearch);
     REQUIRE(foundSearchEngine);
+}
+
+TEST_CASE("HybridSearch - Concept boost elevates matches", "[search][hybrid][concept]") {
+    SKIP_HYBRID_ON_WINDOWS();
+    SearchServiceFixture fixture;
+
+    auto engine = fixture.searchEngine();
+    if (!engine) {
+        SUCCEED("SearchEngine not available; skipping concept boost test.");
+        return;
+    }
+
+    auto cfg = engine->getConfig();
+    cfg.conceptBoostWeight = 0.8f;
+    cfg.conceptMaxBoost = 0.8f;
+    cfg.conceptMinConfidence = 0.0f;
+    engine->setConfig(cfg);
+    engine->setConceptExtractor(
+        [](const std::string& /*query*/, const std::vector<std::string>& /*types*/) {
+            QueryConceptResult result;
+            result.concepts.push_back(QueryConcept{"pipeline", "concept", 0.9f, 0, 8});
+            return Result<QueryConceptResult>(result);
+        });
+
+    fixture.createDocument("pipeline_notes.md", "pipeline boosttoken summary");
+    fixture.createDocument("search_notes.md", "unrelated content only");
+
+    app::services::SearchRequest req;
+    req.query = "boosttoken";
+    req.type = "hybrid";
+    req.limit = 5;
+
+    auto resp = fixture.executeSearch(req);
+    REQUIRE(resp.results.size() > 0);
+    CHECK(resp.results[0].path.find("pipeline_notes.md") != std::string::npos);
 }
 
 TEST_CASE("KeywordSearch - Stemming reverse", "[search][keyword][stemming]") {
