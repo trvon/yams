@@ -320,6 +320,37 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
     return preferred;
 }
 
+std::string ConfigResolver::resolveRerankerModel(const DaemonConfig& config) {
+    std::string preferred;
+
+    if (const char* envp = std::getenv("YAMS_RERANKER_MODEL")) {
+        preferred = envp;
+        if (!preferred.empty()) {
+            spdlog::debug("Reranker model from environment: {}", preferred);
+            return preferred;
+        }
+    }
+
+    try {
+        namespace fs = std::filesystem;
+        fs::path cfgPath =
+            !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto it = kv.find("search.reranker_model");
+            if (it != kv.end() && !it->second.empty()) {
+                preferred = it->second;
+                spdlog::debug("Reranker model from config: {}", preferred);
+                return preferred;
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Error reading config for reranker model: {}", e.what());
+    }
+
+    return preferred;
+}
+
 bool ConfigResolver::isSymbolExtractionEnabled(const DaemonConfig& config) {
     bool enableSymbols = true;
 

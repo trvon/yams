@@ -38,6 +38,7 @@ public:
     boost::asio::awaitable<Response> dispatch(const Request& req);
     // Expose worker executor so SocketServer can pass it into RequestHandler config
     boost::asio::any_io_executor getWorkerExecutor() const;
+    boost::asio::any_io_executor getCliExecutor() const;
     std::function<void(bool)> getWorkerJobSignal() const;
     // Optional accessor, used internally or by tests
     ServiceManager* getServiceManager() const;

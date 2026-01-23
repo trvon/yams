@@ -52,6 +52,23 @@ using boost::asio::detached;
 using boost::asio::use_awaitable;
 namespace this_coro = boost::asio::this_coro;
 
+namespace {
+
+void retire_connection(const std::shared_ptr<AsioConnection>& conn, const char* reason) {
+    if (!conn) {
+        return;
+    }
+    conn->alive.store(false, std::memory_order_release);
+    conn->streaming_started.store(false, std::memory_order_relaxed);
+    conn->in_use.store(false, std::memory_order_release);
+    conn->cancel();
+    if (reason && *reason) {
+        spdlog::debug("AsioTransportAdapter: retired connection ({})", reason);
+    }
+}
+
+} // namespace
+
 AsioTransportAdapter::AsioTransportAdapter(const Options& opts) : opts_(opts) {
     bool metrics_on = FsmMetricsRegistry::instance().enabled();
     const char* s = std::getenv("YAMS_FSM_SNAPSHOTS");
@@ -488,6 +505,11 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
             co_await boost::asio::dispatch(conn->strand, use_awaitable);
             conn->handlers.erase(msg.requestId);
             conn->in_use.store(false, std::memory_order_release);
+            if (pool) {
+                pool->retire_connection(conn, wres.error().message.c_str());
+            } else {
+                retire_connection(conn, wres.error().message.c_str());
+            }
             co_return wres.error();
         }
         spdlog::debug("AsioTransportAdapter::send_request_streaming wrote frame req_id={} type={}",
@@ -517,6 +539,11 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
                                         err_msg.find("Connection closed") != std::string::npos;
 
                     if (is_eof_error) {
+                        if (pool) {
+                            pool->retire_connection(conn, err_msg.c_str());
+                        } else {
+                            retire_connection(conn, err_msg.c_str());
+                        }
                         spdlog::debug("Connection error detected, retrying with fresh connection");
                         break;
                     }
@@ -534,6 +561,11 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
             conn->timed_out_requests.insert(msg.requestId);
             if (conn->timed_out_requests.size() > 256) {
                 conn->timed_out_requests.clear();
+            }
+            if (pool) {
+                pool->retire_connection(conn, "Streaming request timeout");
+            } else {
+                retire_connection(conn, "Streaming request timeout");
             }
             co_return Error{ErrorCode::Timeout, "Streaming request timeout"};
         }

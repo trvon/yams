@@ -42,6 +42,7 @@
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_future.hpp>
 #include <tl/expected.hpp>
 #include <yams/api/content_store_builder.h>
@@ -284,6 +285,10 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
     try {
         spdlog::debug("ServiceManager constructor start");
+        if (!cliRequestPool_) {
+            cliRequestPool_ = std::make_unique<boost::asio::thread_pool>(2);
+            spdlog::info("[ServiceManager] CLI request pool created with 2 threads");
+        }
         refreshPluginStatusSnapshot();
         // In test builds, prefer mock embedding provider unless explicitly disabled.
         // This avoids heavy ONNX runtime usage and platform-specific crashes on CI/macOS.
@@ -748,6 +753,20 @@ void ServiceManager::shutdown() {
 
     // Phase 3: (Removed - work guard now managed by WorkCoordinator)
     spdlog::info("[ServiceManager] Phase 3: Skipped (work guard managed by WorkCoordinator)");
+
+    // Phase 3.5: Stop CLI request pool to avoid starving shutdown
+    if (cliRequestPool_) {
+        try {
+            cliRequestPool_->stop();
+            cliRequestPool_->join();
+            cliRequestPool_.reset();
+            spdlog::info("[ServiceManager] Phase 3.5: CLI request pool stopped");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.5: CLI request pool stop failed: {}", e.what());
+        } catch (...) {
+            spdlog::warn("[ServiceManager] Phase 3.5: CLI request pool stop failed");
+        }
+    }
 
     // Phase 4: Cancel all asynchronous operations and stop WorkCoordinator io_context
     spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
@@ -2161,6 +2180,13 @@ boost::asio::any_io_executor ServiceManager::getWorkerExecutor() const {
     if (workCoordinator_)
         return workCoordinator_->getExecutor();
     return boost::asio::system_executor();
+}
+
+boost::asio::any_io_executor ServiceManager::getCliExecutor() const {
+    if (cliRequestPool_) {
+        return cliRequestPool_->get_executor();
+    }
+    return getWorkerExecutor();
 }
 
 bool ServiceManager::resizeWorkerPool(std::size_t target) {

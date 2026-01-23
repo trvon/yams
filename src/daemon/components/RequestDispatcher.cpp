@@ -17,8 +17,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX 1
 #endif
-#include <Windows.h>
 #include <Psapi.h>
+#include <Windows.h>
 #endif
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -364,6 +364,16 @@ boost::asio::any_io_executor RequestDispatcher::getWorkerExecutor() const {
     } catch (...) { // NOLINT(bugprone-empty-catch): fall through to throw
     }
     throw std::runtime_error("RequestDispatcher: ServiceManager not available");
+}
+
+boost::asio::any_io_executor RequestDispatcher::getCliExecutor() const {
+    try {
+        if (serviceManager_) {
+            return serviceManager_->getCliExecutor();
+        }
+    } catch (...) {
+    }
+    return getWorkerExecutor();
 }
 std::function<void(bool)> RequestDispatcher::getWorkerJobSignal() const {
     try {

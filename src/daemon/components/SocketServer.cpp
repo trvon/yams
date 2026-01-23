@@ -692,6 +692,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         if (dispatcher_) {
             try {
                 handlerConfig.worker_executor = dispatcher_->getWorkerExecutor();
+                handlerConfig.cli_executor = dispatcher_->getCliExecutor();
                 handlerConfig.worker_job_signal = dispatcher_->getWorkerJobSignal();
             } catch (...) {
             }

@@ -25,6 +25,7 @@ public:
     void release(const std::shared_ptr<AsioConnection>& conn);
     void shutdown(std::chrono::milliseconds timeout = std::chrono::milliseconds{2000});
     boost::asio::awaitable<void> ensure_read_loop_started(std::shared_ptr<AsioConnection> conn);
+    void retire_connection(const std::shared_ptr<AsioConnection>& conn, const char* reason);
 
     // Returns true if this pool is shared (from the registry) vs single-use
     bool is_shared() const { return shared_; }

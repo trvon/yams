@@ -112,6 +112,7 @@ public:
 
         // Executor for offloading CPU-bound work (worker pool)
         boost::asio::any_io_executor worker_executor{};
+        boost::asio::any_io_executor cli_executor{};
         std::function<void(bool)> worker_job_signal{};
 
         Config();

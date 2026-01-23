@@ -2548,7 +2548,7 @@ void DoctorCommand::runPrune() {
 
         daemon::ClientConfig clientCfg;
         clientCfg.socketPath = daemon::DaemonClient::resolveSocketPathConfigFirst();
-        clientCfg.requestTimeout = std::chrono::milliseconds(300000);
+        clientCfg.requestTimeout = std::chrono::minutes(10);
 
         if (!daemon::DaemonClient::isDaemonRunning(clientCfg.socketPath)) {
             std::cout << "  "
@@ -2577,26 +2577,23 @@ void DoctorCommand::runPrune() {
         auto lease = std::move(leaseRes.value());
 
         daemon::PruneResponse resp;
-        auto runPruneRequest = [&]() -> Result<void> {
-            auto respRes = run_result(lease->call<daemon::PruneRequest>(req),
-                                      std::chrono::milliseconds(300000));
-            if (!respRes)
-                return respRes.error();
-            resp = respRes.value();
-            return Result<void>();
-        };
-        auto spinnerRes = runWithSpinner("Pruning", runPruneRequest, 300000);
-        if (!spinnerRes) {
-            std::cout << "  " << ui::status_error("Prune request timed out") << "\n";
-            return;
+        std::shared_ptr<ui::SpinnerRunner> spinner;
+        if (ui::stdout_is_tty()) {
+            spinner = std::make_shared<ui::SpinnerRunner>();
+            spinner->start("Pruning...");
         }
-        if (!spinnerRes.value()) {
+
+        auto respRes = run_result(lease->call<daemon::PruneRequest>(req), std::chrono::minutes(10));
+        if (spinner) {
+            spinner->stop();
+        }
+        if (!respRes) {
             std::cout << "  "
-                      << ui::status_error("Prune request failed: " +
-                                          spinnerRes.value().error().message)
+                      << ui::status_error("Prune request failed: " + respRes.error().message)
                       << "\n";
             return;
         }
+        resp = respRes.value();
 
         if (!resp.errorMessage.empty()) {
             std::cout << "  " << ui::status_error("Prune operation failed: " + resp.errorMessage)
@@ -2618,8 +2615,17 @@ void DoctorCommand::runPrune() {
         std::cout << "\n" << yams::cli::ui::section_header("Prune Summary") << "\n\n";
 
         uint64_t totalFiles = resp.filesDeleted + resp.filesFailed;
-        std::cout << "  " << yams::cli::ui::colorize("Total files:", yams::cli::ui::Ansi::BOLD)
-                  << " " << totalFiles << "\n";
+        uint64_t totalCandidates = 0;
+        for (const auto& [cat, count] : resp.categoryCounts) {
+            totalCandidates += count;
+        }
+
+        const bool useCandidateTotal = req.dryRun && totalCandidates > 0;
+        std::cout << "  "
+                  << yams::cli::ui::colorize(useCandidateTotal ? "Total candidates:"
+                                                               : "Total files:",
+                                             yams::cli::ui::Ansi::BOLD)
+                  << " " << (useCandidateTotal ? totalCandidates : totalFiles) << "\n";
         std::cout << "  " << yams::cli::ui::colorize("Total size:", yams::cli::ui::Ansi::BOLD)
                   << " " << std::fixed << std::setprecision(2)
                   << (resp.totalBytesFreed / 1024.0 / 1024.0) << " MB\n\n";

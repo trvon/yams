@@ -117,6 +117,18 @@ public:
                                              const std::filesystem::path& resolvedDataDir);
 
     /**
+     * @brief Resolve the preferred reranker model name from env/config.
+     *
+     * Precedence:
+     * 1. Environment variable YAMS_RERANKER_MODEL (if non-empty)
+     * 2. Config file key search.reranker_model
+     *
+     * @param config Daemon configuration (used for config file path)
+     * @return Reranker model name or empty string if none found
+     */
+    static std::string resolveRerankerModel(const DaemonConfig& config);
+
+    /**
      * @brief Determine if symbol extraction plugins should be enabled.
      *
      * Reads plugins.symbol_extraction.enable from config.toml when present;

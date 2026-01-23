@@ -341,8 +341,31 @@ void AsioConnectionPool::shutdown_all(std::chrono::milliseconds timeout) {
 }
 
 void AsioConnectionPool::cleanup_stale_connections() {
-    std::erase_if(connection_pool_,
-                  [](const std::weak_ptr<AsioConnection>& weak) { return weak.expired(); });
+    std::erase_if(connection_pool_, [](const std::weak_ptr<AsioConnection>& weak) {
+        auto conn = weak.lock();
+        if (!conn) {
+            return true;
+        }
+        return !conn->alive.load(std::memory_order_acquire);
+    });
+}
+
+void AsioConnectionPool::retire_connection(const std::shared_ptr<AsioConnection>& conn,
+                                           const char* reason) {
+    if (!conn) {
+        return;
+    }
+    conn->alive.store(false, std::memory_order_release);
+    conn->streaming_started.store(false, std::memory_order_relaxed);
+    conn->in_use.store(false, std::memory_order_release);
+    conn->cancel();
+    if (reason && *reason) {
+        spdlog::debug("ConnectionPool: retired connection ({}).", reason);
+    }
+    std::lock_guard<std::mutex> lk(mutex_);
+    std::erase_if(connection_pool_, [&](const std::weak_ptr<AsioConnection>& weak) {
+        return weak.expired() || weak.lock() == conn;
+    });
 }
 
 awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
@@ -540,9 +563,10 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
     auto executor = conn->opts.executor.has_value()
                         ? *conn->opts.executor
                         : GlobalIOContext::instance().get_io_context().get_executor();
+    auto weak_pool = weak_from_this();
     conn->read_loop_future = co_spawn(
         executor,
-        [weak_conn = std::weak_ptr(conn)]() -> awaitable<void> {
+        [weak_conn = std::weak_ptr(conn), weak_pool]() -> awaitable<void> {
             auto conn = weak_conn.lock();
             if (!conn) {
                 co_return;
@@ -623,6 +647,11 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                         c->handlers.clear();
                         c->alive = false;
                         c->streaming_started.store(false, std::memory_order_relaxed);
+                        if (auto pool = weak_pool.lock()) {
+                            pool->retire_connection(c, e.message.c_str());
+                        } else {
+                            c->cancel();
+                        }
                     }
                     co_return;
                 }
@@ -682,6 +711,11 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                             c->handlers.clear();
                             c->alive = false;
                             c->streaming_started.store(false, std::memory_order_relaxed);
+                            if (auto pool = weak_pool.lock()) {
+                                pool->retire_connection(c, e.message.c_str());
+                            } else {
+                                c->cancel();
+                            }
                         }
                         co_return;
                     }
@@ -734,6 +768,11 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                         c->handlers.clear();
                         c->alive = false;
                         c->streaming_started.store(false, std::memory_order_relaxed);
+                        if (auto pool = weak_pool.lock()) {
+                            pool->retire_connection(c, e.message.c_str());
+                        } else {
+                            c->cancel();
+                        }
                     }
                     co_return;
                 }

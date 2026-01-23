@@ -40,6 +40,17 @@
 namespace yams::daemon {
 
 namespace {
+bool is_cli_retrieval_request(const Request& request) {
+    return std::holds_alternative<SearchRequest>(request) ||
+           std::holds_alternative<GrepRequest>(request) ||
+           std::holds_alternative<ListRequest>(request) ||
+           std::holds_alternative<GetRequest>(request) ||
+           std::holds_alternative<GetInitRequest>(request) ||
+           std::holds_alternative<GetChunkRequest>(request) ||
+           std::holds_alternative<GetEndRequest>(request) ||
+           std::holds_alternative<CatRequest>(request) ||
+           std::holds_alternative<PruneRequest>(request);
+}
 bool stream_trace_enabled_local() {
     static int enabled = [] {
         if (const char* raw = std::getenv("YAMS_STREAM_TRACE")) {
@@ -604,6 +615,11 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                             auto routed_request = std::move(*request_ptr);
                             auto spawn_exec = config_.worker_executor ? config_.worker_executor
                                                                       : sock->get_executor();
+                            if (config_.cli_executor && is_cli_retrieval_request(routed_request)) {
+                                spawn_exec = config_.cli_executor;
+                                spdlog::debug("[MUX_SPAWN] req_id={} using CLI executor",
+                                              request_id);
+                            }
                             boost::asio::co_spawn(
                                 spawn_exec,
                                 [self = shared_from_this(), sock, req = std::move(routed_request),
