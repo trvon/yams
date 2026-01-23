@@ -146,6 +146,8 @@ class YamsConan(ConanFile):
         if self.options.enable_onnx:  # type: ignore
             self.options["onnxruntime"].fPIC = True
             self.options["onnxruntime"].shared = True
+            # OneTBB requires hwloc with shared=True
+            self.options["hwloc"].shared = True
 
     def validate(self):
         check_min_cppstd(self, "20")

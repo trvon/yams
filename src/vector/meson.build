@@ -176,13 +176,6 @@ if onnx_feature_requested
   if onnx_genai_headers_present
     vector_cppargs += ['-DYAMS_GENAI_RUNTIME_PRESENT']
   endif
-  if onnx_runtime_link
-    vector_cppargs += ['-DYAMS_USE_ONNX_RUNTIME']
-  elif onnx_opt.enabled()
-    message('enable-onnx is enabled but onnxruntime dependency not found; building stubbed vector backend')
-  endif
-else
-  message('enable-onnx disabled by configuration; building without ONNX support')
 endif
 
 srcs = [
@@ -211,10 +204,9 @@ else
   vector_cppargs += ['-DSQLITE_VEC_STATIC=0']
 endif
 
-deps_vec = [spdlog_dep, sqlite_dep, json_dep, fmt_dep, boost_dep, yams_core, yams_metadata, tl_expected_dep]
-if onnx_runtime_link
-  deps_vec += onnx_dep
-endif
+yams_daemon_client = dependency('yams_daemon_client', required: true)
+
+deps_vec = [spdlog_dep, sqlite_dep, json_dep, fmt_dep, boost_dep, yams_core, yams_metadata, tl_expected_dep, yams_daemon_client]
 
 yams_vector = static_library('yams_vector',
   srcs,

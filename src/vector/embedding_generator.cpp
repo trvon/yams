@@ -1666,15 +1666,11 @@ private:
     mutable size_t cached_seq_len_ = 0;
 };
 
-/**
- * HybridBackend - Tries daemon first, falls back to local
- * Provides seamless failover between daemon and local ONNX
- */
 class HybridBackend : public IEmbeddingBackend {
 public:
     explicit HybridBackend(const EmbeddingConfig& config)
         : config_(config), daemon_backend_(std::make_unique<DaemonBackend>(config)),
-          local_backend_(std::make_unique<LocalOnnxBackend>(config)), initialized_(false) {}
+          initialized_(false) {}
 
     bool initialize() override {
         YAMS_ZONE_SCOPED_N("HybridBackend::initialize");
@@ -1683,30 +1679,17 @@ public:
             return true;
         }
 
-        // Try daemon first
-        bool daemon_ok = daemon_backend_->initialize();
-        if (daemon_ok) {
-            spdlog::info("HybridBackend: Daemon backend available");
-        } else {
-            spdlog::info("HybridBackend: Daemon backend not available, will use local fallback");
+        if (daemon_backend_->initialize()) {
+            initialized_ = true;
+            return true;
         }
 
-        // Always initialize local as fallback
-        bool local_ok = local_backend_->initialize();
-        if (local_ok) {
-            spdlog::info("HybridBackend: Local backend available");
-        } else if (!daemon_ok) {
-            spdlog::error("HybridBackend: Neither daemon nor local backend available");
-            return false;
-        }
-
-        initialized_ = daemon_ok || local_ok;
-        return initialized_;
+        spdlog::error("HybridBackend: Daemon not available - start with 'yams daemon start'");
+        return false;
     }
 
     void shutdown() override {
         daemon_backend_->shutdown();
-        local_backend_->shutdown();
         initialized_ = false;
         stats_ = GenerationStats{};
     }
@@ -1716,88 +1699,47 @@ public:
     Result<std::vector<float>> generateEmbedding(const std::string& text) override {
         YAMS_ZONE_SCOPED_N("HybridBackend::generateEmbedding");
 
-        // Try daemon first if available
-        if (daemon_backend_->isAvailable()) {
-            auto result = daemon_backend_->generateEmbedding(text);
-            if (result) {
-                daemon_uses_++;
-                mergeStats(daemon_backend_->getStats());
-                return result;
-            }
-            spdlog::debug("Daemon backend failed, falling back to local");
+        if (!daemon_backend_->isAvailable()) {
+            return Error{ErrorCode::NotSupported,
+                         "Daemon not available - start with 'yams daemon start'"};
         }
 
-        // Fall back to local
-        if (local_backend_->isAvailable()) {
-            auto result = local_backend_->generateEmbedding(text);
-            if (result) {
-                local_fallbacks_++;
-                mergeStats(local_backend_->getStats());
-                return result;
-            }
+        auto result = daemon_backend_->generateEmbedding(text);
+        if (result) {
+            daemon_uses_++;
+            mergeStats(daemon_backend_->getStats());
         }
-
-        return Error{ErrorCode::NotSupported, "No backend available for embedding generation"};
+        return result;
     }
 
     Result<std::vector<std::vector<float>>>
     generateEmbeddings(std::span<const std::string> texts) override {
         YAMS_EMBEDDING_ZONE_BATCH(texts.size());
 
-        // Try daemon first if available
-        if (daemon_backend_->isAvailable()) {
-            auto result = daemon_backend_->generateEmbeddings(texts);
-            if (result) {
-                daemon_uses_++;
-                mergeStats(daemon_backend_->getStats());
-                return result;
-            }
-            spdlog::debug("Daemon backend failed for batch, falling back to local");
+        if (!daemon_backend_->isAvailable()) {
+            return Error{ErrorCode::NotSupported,
+                         "Daemon not available - start with 'yams daemon start'"};
         }
 
-        // Fall back to local
-        if (local_backend_->isAvailable()) {
-            auto result = local_backend_->generateEmbeddings(texts);
-            if (result) {
-                local_fallbacks_++;
-                mergeStats(local_backend_->getStats());
-                return result;
-            }
+        auto result = daemon_backend_->generateEmbeddings(texts);
+        if (result) {
+            daemon_uses_++;
+            mergeStats(daemon_backend_->getStats());
         }
-
-        return Error{ErrorCode::NotSupported,
-                     "No backend available for batch embedding generation"};
+        return result;
     }
 
     size_t getEmbeddingDimension() const override {
-        size_t d = 0;
-        if (daemon_backend_->isAvailable()) {
-            d = daemon_backend_->getEmbeddingDimension();
-        }
-        if (d > 0)
-            return d;
-        // Fallback to local backend's actual dimension when daemon doesn't report one
-        return local_backend_->getEmbeddingDimension();
+        return daemon_backend_->getEmbeddingDimension();
     }
 
-    size_t getMaxSequenceLength() const override {
-        size_t s = 0;
-        if (daemon_backend_->isAvailable()) {
-            s = daemon_backend_->getMaxSequenceLength();
-        }
-        if (s > 0)
-            return s;
-        return local_backend_->getMaxSequenceLength();
-    }
+    size_t getMaxSequenceLength() const override { return daemon_backend_->getMaxSequenceLength(); }
 
     std::string getBackendName() const override {
-        return "Hybrid (Daemon: " + std::to_string(daemon_uses_) +
-               ", Local: " + std::to_string(local_fallbacks_) + ")";
+        return "Daemon (uses: " + std::to_string(daemon_uses_) + ")";
     }
 
-    bool isAvailable() const override {
-        return daemon_backend_->isAvailable() || local_backend_->isAvailable();
-    }
+    bool isAvailable() const override { return daemon_backend_->isAvailable(); }
 
     GenerationStats getStats() const override { return stats_; }
     void resetStats() override {
@@ -1810,7 +1752,6 @@ public:
         stats_.throughput_texts_per_sec.store(0.0);
         stats_.throughput_tokens_per_sec.store(0.0);
         daemon_uses_ = 0;
-        local_fallbacks_ = 0;
     }
 
 private:
@@ -1826,11 +1767,9 @@ private:
 
     EmbeddingConfig config_;
     std::unique_ptr<DaemonBackend> daemon_backend_;
-    std::unique_ptr<LocalOnnxBackend> local_backend_;
     bool initialized_;
     GenerationStats stats_;
     mutable size_t daemon_uses_ = 0;
-    mutable size_t local_fallbacks_ = 0;
 };
 
 // =============================================================================
@@ -1840,11 +1779,8 @@ private:
 class EmbeddingGenerator::Impl {
 public:
     explicit Impl(const EmbeddingConfig& config) : config_(config) {
-        // Select backend based on configuration
         switch (config.backend) {
             case EmbeddingConfig::Backend::Local:
-                backend_ = std::make_unique<LocalOnnxBackend>(config);
-                break;
             case EmbeddingConfig::Backend::Daemon:
                 backend_ = std::make_unique<DaemonBackend>(config);
                 break;
