@@ -14,6 +14,9 @@
 #include <string_view>
 #include <thread>
 
+#include <nlohmann/json.hpp>
+using nlohmann::json;
+
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/proto_serializer.h>
@@ -240,10 +243,12 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon signal handling and PID file", "[daemon]
 
 #ifndef _WIN32
     std::ifstream pidFile(config_.pidFile);
-    pid_t pid = 0;
-    pidFile >> pid;
+    std::string content;
+    std::getline(pidFile, content, '\0');
     pidFile.close();
-    REQUIRE(pid == getpid());
+    auto parsed = json::parse(content, nullptr, false);
+    REQUIRE_FALSE(parsed.is_discarded());
+    REQUIRE(parsed.value("pid", 0) == getpid());
 #endif
 
     daemon_->stop();

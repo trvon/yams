@@ -2,7 +2,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
+#include <string>
 #include "IComponent.h"
 #include <yams/core/types.h>
 
@@ -32,6 +34,16 @@ public:
     void shutdown() override;
 
 private:
+    struct PidFileInfo {
+        pid_t pid = 0;
+        std::uint64_t startTimeNs = 0;
+        std::string token;
+        std::string exePath;
+        bool isJson = false;
+    };
+
+    enum class PidIdentityStatus { Verified, Mismatch, Unknown };
+
     void setupSignalHandlers();
     void cleanupSignalHandlers();
     static void signalHandler(int signal);
@@ -45,6 +57,13 @@ private:
     // NOTE: Aggressive mode (terminate other daemons) is currently the default.
     // TODO: Make this configurable via CLI/config and default to safe mode outside tests.
     bool readPidFromFile(pid_t& outPid) const;
+    bool readPidFileInfo(PidFileInfo& info) const;
+    bool isPidFileLockedByOther() const;
+    bool isProcessRunning(pid_t pid) const;
+    PidIdentityStatus verifyPidIdentity(const PidFileInfo& info, std::string& detail) const;
+    std::uint64_t getProcessStartTimeNs(pid_t pid) const;
+    std::string getProcessExecutablePath(pid_t pid) const;
+    static std::string generateInstanceToken();
     Result<void> terminateProcess(pid_t pid) const;
     static bool aggressiveModeEnabled();
 
@@ -54,6 +73,8 @@ private:
     YamsDaemon* daemon_; // Non-owning pointer to the main daemon class to signal shutdown
     std::filesystem::path pidFile_;
     int pidFileFd_ = -1; // File descriptor for the locked PID file
+    std::string instanceToken_;
+    std::uint64_t startTimeNs_ = 0;
 
     static std::atomic<LifecycleComponent*>
         instance_; // Singleton instance for the static signal handler

@@ -1,5 +1,6 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
@@ -872,10 +873,38 @@ private:
         return assessment;
     }
 
+    std::string truncateSnippet(std::string_view snippet, size_t maxLength) const {
+        std::string cleaned;
+        cleaned.reserve(snippet.size());
+        bool lastWasSpace = false;
+        for (unsigned char c : snippet) {
+            if (c == ' ' || c == '\t') {
+                if (!lastWasSpace) {
+                    cleaned.push_back(' ');
+                    lastWasSpace = true;
+                }
+                continue;
+            }
+            cleaned.push_back(static_cast<char>(c));
+            lastWasSpace = false;
+        }
+
+        if (cleaned.size() <= maxLength) {
+            return cleaned;
+        }
+
+        size_t lastSpace = cleaned.rfind(' ', maxLength);
+        if (lastSpace != std::string::npos && lastSpace > maxLength * 0.7) {
+            return cleaned.substr(0, lastSpace) + "...";
+        }
+
+        return cleaned.substr(0, maxLength - 3) + "...";
+    }
+
     std::string formatSnippet(std::string_view snippet) const {
         auto assessment = assessSnippet(snippet);
         if (!assessment.sanitized.empty() && assessment.printableRatio >= 0.65) {
-            return assessment.sanitized;
+            return truncateSnippet(assessment.sanitized, 240);
         }
         return "[binary] no text preview";
     }

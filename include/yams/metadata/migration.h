@@ -218,6 +218,9 @@ private:
 
     // Version 24: Term statistics for IDF computation and query weighting
     static Migration createTermStatsSchema();
+
+    // Version 25: Repair symbol_metadata uniqueness for upserts
+    static Migration repairSymbolMetadataUniqueness();
 };
 
 /**

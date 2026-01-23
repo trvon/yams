@@ -16,6 +16,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <nlohmann/json.hpp>
+using nlohmann::json;
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -324,9 +326,28 @@ private:
             return -1;
         }
 
-        pid_t pid;
-        pidFile >> pid;
-        return pid;
+        std::string content;
+        std::getline(pidFile, content, '\0');
+        if (content.empty()) {
+            return -1;
+        }
+        while (!content.empty() && std::isspace(static_cast<unsigned char>(content.back()))) {
+            content.pop_back();
+        }
+        while (!content.empty() && std::isspace(static_cast<unsigned char>(content.front()))) {
+            content.erase(content.begin());
+        }
+        if (content.empty()) {
+            return -1;
+        }
+        if (content.front() == '{') {
+            auto parsed = json::parse(content, nullptr, false);
+            if (!parsed.is_discarded() && parsed.is_object()) {
+                return static_cast<pid_t>(parsed.value("pid", -1));
+            }
+        }
+
+        return static_cast<pid_t>(std::atoi(content.c_str()));
     }
 
     bool killDaemonByPid(pid_t pid, bool force = false) {
@@ -1134,7 +1155,7 @@ private:
                                 daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
                             std::ifstream bf(rt);
                             if (bf) {
-                                nlohmann::json j;
+                                json j;
                                 bf >> j;
                                 if (j.contains("top_slowest") && j["top_slowest"].is_array() &&
                                     !j["top_slowest"].empty()) {
@@ -1313,7 +1334,7 @@ private:
                                 daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
                             std::ifstream bf(rt);
                             if (bf) {
-                                nlohmann::json j;
+                                json j;
                                 bf >> j;
                                 if (j.contains("readiness")) {
                                     std::vector<std::string> waiting;

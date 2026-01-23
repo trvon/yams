@@ -1689,7 +1689,7 @@ private:
         constexpr std::size_t kStageCount = 6;
         constexpr std::size_t kExtractionIdx = 0;
         constexpr std::size_t kEmbedIdx = 5;
-        constexpr std::array<uint32_t, kStageCount> kWeights{1u, 1u, 1u, 1u, 1u, 3u};
+        constexpr std::array<uint32_t, kStageCount> kWeights{1u, 1u, 1u, 1u, 1u, 2u};
         constexpr std::array<uint32_t, kStageCount> kMaxCaps{64u, 64u, 32u, 16u, 16u, 32u};
         const uint32_t totalBudget = std::max<uint32_t>(1, postIngestTotalConcurrent());
         const uint32_t activeMask = postIngestStageActiveMask();

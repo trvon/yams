@@ -339,7 +339,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createRepairTrackingSchema(),
             createSymbolExtractionStateSchema(),
             createSymSpellSchema(),
-            createTermStatsSchema()};
+            createTermStatsSchema(),
+            repairSymbolMetadataUniqueness()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2270,6 +2271,53 @@ Migration YamsMetadataMigrations::createTermStatsSchema() {
         DROP TABLE IF EXISTS corpus_term_stats;
         DROP INDEX IF EXISTS idx_term_stats_df;
         DROP TABLE IF EXISTS term_stats;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::repairSymbolMetadataUniqueness() {
+    Migration m;
+    m.version = 25;
+    m.name = "Repair symbol_metadata uniqueness";
+    m.created = std::chrono::system_clock::now();
+
+    m.upFunc = [](Database& db) -> Result<void> {
+        auto tableExists = db.tableExists("symbol_metadata");
+        if (!tableExists)
+            return tableExists.error();
+        if (!tableExists.value())
+            return Result<void>();
+
+        auto dedupeRc = db.execute(R"(
+            DELETE FROM symbol_metadata
+            WHERE symbol_id NOT IN (
+                SELECT symbol_id FROM (
+                    SELECT symbol_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY document_hash, qualified_name
+                               ORDER BY symbol_id DESC
+                           ) AS rn
+                    FROM symbol_metadata
+                ) AS ranked
+                WHERE rn = 1
+            )
+        )");
+        if (!dedupeRc)
+            return dedupeRc;
+
+        auto indexRc = db.execute(R"(
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_symbol_document_qualified
+                ON symbol_metadata(document_hash, qualified_name)
+        )");
+        if (!indexRc)
+            return indexRc;
+
+        return Result<void>();
+    };
+
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS ux_symbol_document_qualified;
     )";
 
     return m;

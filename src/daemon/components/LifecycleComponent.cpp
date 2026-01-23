@@ -1,31 +1,42 @@
 #include <spdlog/spdlog.h>
+#include <array>
+#include <cctype>
 #include <chrono>
 #include <csignal>
+#include <cstring>
+#include <fstream>
 #include <future>
+#include <iomanip>
+#include <random>
+#include <sstream>
 #include <thread>
-#ifndef _WIN32
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#include <process.h>
+#include <string.h>
+#include <windows.h>
+
+#define ssize_t int
+#else
 #include <unistd.h>
+#include <sys/file.h>
+#include <sys/time.h>
+#include <sys/wait.h>
+#ifdef __APPLE__
+#include <libproc.h>
+#include <sys/sysctl.h>
 #endif
+#include <nlohmann/json.hpp>
+using nlohmann::json;
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/thread_pool.hpp>
-#ifndef _WIN32
-#include <sys/file.h>
-#include <sys/wait.h>
-#else
-#include <fcntl.h>
-#include <io.h>
-#include <process.h>
-#include <windows.h>
-
-#define strcasecmp _stricmp
-#define getpid _getpid
-#define ssize_t int
-#endif
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/LifecycleComponent.h>
 #include <yams/daemon/daemon.h>
+#endif
 
 namespace {
 
@@ -86,6 +97,21 @@ Result<void> sendShutdownRequest(const ClientConfig& cfg, std::chrono::milliseco
     }
 }
 
+bool equalsIgnoreCase(const char* a, const char* b) {
+    if (a == nullptr || b == nullptr) {
+        return a == b;
+    }
+    while (*a && *b) {
+        if (std::tolower(static_cast<unsigned char>(*a)) !=
+            std::tolower(static_cast<unsigned char>(*b))) {
+            return false;
+        }
+        ++a;
+        ++b;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
 } // namespace
 
 namespace yams {
@@ -104,63 +130,84 @@ LifecycleComponent::~LifecycleComponent() {
 
 Result<void> LifecycleComponent::initialize() {
     if (isAnotherInstanceRunning()) {
-        pid_t existingPid = 0;
-        bool havePid = readPidFromFile(existingPid);
+        PidFileInfo info;
+        bool haveInfo = readPidFileInfo(info);
+        pid_t existingPid = haveInfo ? info.pid : 0;
+        std::string identityDetail;
+        auto identity =
+            haveInfo ? verifyPidIdentity(info, identityDetail) : PidIdentityStatus::Unknown;
+
         // If the PID file points to our own process, this indicates another
         // YamsDaemon instance is already running within this process. Do NOT
         // treat it as stale; refuse to start to preserve single-instance
         // semantics expected by DaemonTest.SingleInstance.
-        if (havePid && existingPid == getpid()) {
+        if (haveInfo && existingPid == getpid()) {
             return Error{ErrorCode::InvalidState,
                          "Another daemon instance is already running in this process"};
-        } else {
-            bool anotherStopped = false;
-            if (havePid && existingPid > 0) {
-                anotherStopped = requestExistingDaemonShutdown(existingPid);
-            } else {
-                spdlog::warn("Could not read PID from file '{}' while checking existing daemon.",
-                             pidFile_.string());
+        }
+
+        if (!haveInfo) {
+            spdlog::warn("Could not read PID from file '{}' while checking existing daemon.",
+                         pidFile_.string());
+        } else if (identity == PidIdentityStatus::Unknown) {
+            spdlog::warn("Unable to verify daemon identity for PID {} ({}).", existingPid,
+                         identityDetail);
+        } else if (identity == PidIdentityStatus::Mismatch) {
+            spdlog::warn("PID {} does not match expected daemon identity ({}).", existingPid,
+                         identityDetail);
+        }
+
+        if (!haveInfo || identity != PidIdentityStatus::Verified) {
+            if (isProcessRunning(existingPid)) {
+                return Error{ErrorCode::InvalidState,
+                             "Another process is running with PID from PID file; refusing to "
+                             "shutdown without identity verification"};
             }
+        }
 
-            if (!anotherStopped) {
-                if (aggressiveModeEnabled()) {
-                    spdlog::warn(
-                        "Another daemon instance detected. Aggressive mode enabled, attempting to "
-                        "terminate it.");
-                    if (!havePid || existingPid <= 0) {
-                        havePid = readPidFromFile(existingPid);
-                    }
-                    if (havePid && existingPid > 0) {
-                        // Avoid accidentally terminating our own process
-                        if (existingPid == getpid()) {
-                            spdlog::warn(
-                                "Existing PID matches current process ({}); skipping terminate.",
-                                existingPid);
-                        } else if (auto term = terminateProcess(existingPid); !term) {
-                            return term; // propagate error
-                        }
-                    } else {
+        bool anotherStopped = false;
+        if (haveInfo && existingPid > 0 && identity == PidIdentityStatus::Verified) {
+            anotherStopped = requestExistingDaemonShutdown(existingPid);
+        }
+
+        if (!anotherStopped) {
+            if (aggressiveModeEnabled()) {
+                spdlog::warn(
+                    "Another daemon instance detected. Aggressive mode enabled, attempting to "
+                    "terminate it.");
+                if (haveInfo && existingPid > 0 && identity == PidIdentityStatus::Verified) {
+                    // Avoid accidentally terminating our own process
+                    if (existingPid == getpid()) {
                         spdlog::warn(
-                            "Could not read PID from file '{}', will attempt to remove stale file.",
-                            pidFile_.string());
-                    }
-
-                    // Remove PID file if present (stale or after termination)
-                    if (auto rm = removePidFile(); !rm) {
-                        return rm;
+                            "Existing PID matches current process ({}); skipping terminate.",
+                            existingPid);
+                    } else if (auto term = terminateProcess(existingPid); !term) {
+                        return term; // propagate error
                     }
                 } else {
-                    return Error{ErrorCode::InvalidState,
-                                 "Another daemon instance is already running, check PID file: " +
-                                     pidFile_.string()};
+                    spdlog::warn("Cannot safely terminate daemon; identity not verified for '{}'.",
+                                 pidFile_.string());
                 }
-            } else {
-                // Ensure stale PID file is cleared before continuing.
+
+                // Remove PID file if present (stale or after termination)
                 if (auto rm = removePidFile(); !rm) {
                     return rm;
                 }
+            } else {
+                return Error{ErrorCode::InvalidState,
+                             "Another daemon instance is already running, check PID file: " +
+                                 pidFile_.string()};
+            }
+        } else {
+            // Ensure stale PID file is cleared before continuing.
+            if (auto rm = removePidFile(); !rm) {
+                return rm;
             }
         }
+    }
+
+    if (auto result = createPidFile(); !result) {
+        return result;
     }
 
     // Proactively remove a stale socket file left by a previous crash before binding.
@@ -177,10 +224,6 @@ Result<void> LifecycleComponent::initialize() {
         }
     } catch (...) {
         // best effort
-    }
-
-    if (auto result = createPidFile(); !result) {
-        return result;
     }
 
     setupSignalHandlers();
@@ -215,84 +258,64 @@ bool LifecycleComponent::isAnotherInstanceRunning() const {
         return false;
     }
 
-#ifdef _WIN32
-    int fd = _open(pidFile_.string().c_str(), _O_RDONLY);
-    if (fd == -1) {
+    if (isPidFileLockedByOther()) {
+        return true;
+    }
+
+    PidFileInfo info;
+    if (!readPidFileInfo(info) || info.pid <= 0) {
+        spdlog::warn("Found unreadable PID file '{}'; leaving it in place.", pidFile_.string());
+        return true;
+    }
+
+    if (!isProcessRunning(info.pid)) {
+        spdlog::warn("Found stale PID file for a non-existent process. Removing it.");
+        removePidFile();
         return false;
     }
 
-    HANDLE hFile = (HANDLE)_get_osfhandle(fd);
-    if (hFile != INVALID_HANDLE_VALUE) {
-        OVERLAPPED overlapped = {0};
-        // Try to lock. If it fails, another process has it.
-        if (!LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0,
-                        &overlapped)) {
-            _close(fd);
-            return true;
-        }
-        UnlockFileEx(hFile, 0, 1, 0, &overlapped);
+    std::string detail;
+    auto identity = verifyPidIdentity(info, detail);
+    if (identity == PidIdentityStatus::Verified) {
+        return true;
     }
-
-    char pid_buf[16] = {0};
-    _read(fd, pid_buf, sizeof(pid_buf) - 1);
-    pid_t pid = atoi(pid_buf);
-    _close(fd);
-
-    if (pid > 0) {
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
-        if (hProcess) {
-            DWORD exitCode;
-            if (GetExitCodeProcess(hProcess, &exitCode) && exitCode == STILL_ACTIVE) {
-                CloseHandle(hProcess);
-                return true;
-            }
-            CloseHandle(hProcess);
-        }
+    if (identity == PidIdentityStatus::Mismatch) {
+        spdlog::warn("PID file identity mismatch for PID {} ({}).", info.pid, detail);
+        return true;
     }
-#else
-    int fd = open(pidFile_.c_str(), O_RDONLY);
-    if (fd == -1) {
-        return false; // Cannot open, assume not running
-    }
-
-    // Try to get an advisory lock without blocking.
-    // If we can't get it, another process is holding it.
-    if (flock(fd, LOCK_SH | LOCK_NB) == -1 && errno == EWOULDBLOCK) {
-        close(fd);
-        return true; // It's locked by another process.
-    }
-
-    // We got the lock, so no other process is holding it.
-    // But let's double-check the PID just in case.
-    char pid_buf[16] = {0};
-    read(fd, pid_buf, sizeof(pid_buf) - 1);
-    pid_t pid = atoi(pid_buf);
-
-    flock(fd, LOCK_UN);
-    close(fd);
-
-    if (pid > 0) {
-        if (kill(pid, 0) == 0) {
-            return true; // Process with that PID exists.
-        }
-
-        if (errno == EPERM) {
-            // Process exists but we lack permission to signal it; treat as running.
-            spdlog::warn("PID {} appears to be running but is owned by another user (EPERM)."
-                         " Leaving PID file in place.",
-                         pid);
-            return true;
-        }
-    }
-#endif
-
-    // If we are here, the PID file is stale.
-    spdlog::warn("Found stale PID file for a non-existent process. Removing it.");
-    removePidFile();
-    return false;
+    spdlog::warn("PID file identity unknown for PID {} ({}).", info.pid, detail);
+    return true;
 }
 
 Result<void> LifecycleComponent::createPidFile() {
+    if (instanceToken_.empty()) {
+        instanceToken_ = generateInstanceToken();
+    }
+    if (startTimeNs_ == 0) {
+        startTimeNs_ = getProcessStartTimeNs(getpid());
+    }
+    if (startTimeNs_ == 0) {
+        auto now = std::chrono::system_clock::now().time_since_epoch();
+        startTimeNs_ = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+    }
+    auto exePath = getProcessExecutablePath(getpid());
+    if (!exePath.empty()) {
+        std::error_code ec;
+        exePath = std::filesystem::weakly_canonical(exePath, ec).string();
+        if (ec) {
+            exePath.clear();
+        }
+    }
+    json payload = json::object();
+    payload["v"] = 1;
+    payload["pid"] = static_cast<std::int64_t>(getpid());
+    payload["start_ns"] = startTimeNs_;
+    payload["token"] = instanceToken_;
+    if (!exePath.empty()) {
+        payload["exe"] = exePath;
+    }
+    const std::string pid_str = payload.dump();
 #ifdef _WIN32
     pidFileFd_ =
         _open(pidFile_.string().c_str(), _O_CREAT | _O_RDWR | _O_BINARY, _S_IREAD | _S_IWRITE);
@@ -312,7 +335,6 @@ Result<void> LifecycleComponent::createPidFile() {
         }
     }
 
-    std::string pid_str = std::to_string(_getpid());
     _chsize_s(pidFileFd_, 0);
     if (_write(pidFileFd_, pid_str.c_str(), static_cast<unsigned int>(pid_str.length())) !=
         static_cast<int>(pid_str.length())) {
@@ -336,7 +358,6 @@ Result<void> LifecycleComponent::createPidFile() {
         return Error{ErrorCode::InvalidState, "Daemon already running (PID file is locked)."};
     }
 
-    std::string pid_str = std::to_string(getpid());
     if (ftruncate(pidFileFd_, 0) != 0) {
         // handle error
     }
@@ -395,31 +416,286 @@ void LifecycleComponent::handleSignal(int signal) {
 }
 
 bool LifecycleComponent::readPidFromFile(pid_t& outPid) const {
-    outPid = 0;
+    PidFileInfo info;
+    if (!readPidFileInfo(info)) {
+        outPid = 0;
+        return false;
+    }
+    outPid = info.pid;
+    return outPid > 0;
+}
+
+bool LifecycleComponent::readPidFileInfo(PidFileInfo& info) const {
+    info = PidFileInfo{};
     if (!std::filesystem::exists(pidFile_)) {
         return false;
     }
+    std::ifstream pidFile(pidFile_);
+    if (!pidFile.is_open()) {
+        return false;
+    }
+    std::string content;
+    std::getline(pidFile, content, '\0');
+    if (content.empty()) {
+        return false;
+    }
+    // Trim whitespace
+    while (!content.empty() && std::isspace(static_cast<unsigned char>(content.back()))) {
+        content.pop_back();
+    }
+    while (!content.empty() && std::isspace(static_cast<unsigned char>(content.front()))) {
+        content.erase(content.begin());
+    }
+    if (content.empty()) {
+        return false;
+    }
+    if (content.front() == '{') {
+        auto parsed = json::parse(content, nullptr, false);
+        if (!parsed.is_discarded() && parsed.is_object()) {
+            info.isJson = true;
+            info.pid = static_cast<pid_t>(parsed.value("pid", 0));
+            info.startTimeNs = parsed.value("start_ns", 0ull);
+            info.token = parsed.value("token", std::string{});
+            info.exePath = parsed.value("exe", std::string{});
+            return info.pid > 0;
+        }
+    }
+    info.pid = static_cast<pid_t>(std::atoi(content.c_str()));
+    return info.pid > 0;
+}
+
+bool LifecycleComponent::isPidFileLockedByOther() const {
 #ifdef _WIN32
     int fd = _open(pidFile_.string().c_str(), _O_RDONLY);
-#else
-    int fd = open(pidFile_.c_str(), O_RDONLY);
-#endif
     if (fd == -1) {
         return false;
     }
-    char pid_buf[32] = {0};
-#ifdef _WIN32
-    int n = _read(fd, pid_buf, sizeof(pid_buf) - 1);
+    HANDLE hFile = (HANDLE)_get_osfhandle(fd);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        OVERLAPPED overlapped = {0};
+        if (!LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0,
+                        &overlapped)) {
+            _close(fd);
+            return true;
+        }
+        UnlockFileEx(hFile, 0, 1, 0, &overlapped);
+    }
     _close(fd);
+    return false;
 #else
-    ssize_t n = read(fd, pid_buf, sizeof(pid_buf) - 1);
-    close(fd);
-#endif
-    if (n <= 0) {
+    int fd = open(pidFile_.c_str(), O_RDONLY);
+    if (fd == -1) {
         return false;
     }
-    outPid = static_cast<pid_t>(atoi(pid_buf));
-    return outPid > 0;
+    if (flock(fd, LOCK_SH | LOCK_NB) == -1 && errno == EWOULDBLOCK) {
+        close(fd);
+        return true;
+    }
+    flock(fd, LOCK_UN);
+    close(fd);
+    return false;
+#endif
+}
+
+bool LifecycleComponent::isProcessRunning(pid_t pid) const {
+    if (pid <= 0) {
+        return false;
+    }
+#ifdef _WIN32
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProcess) {
+        return false;
+    }
+    DWORD exitCode = 0;
+    bool alive = (GetExitCodeProcess(hProcess, &exitCode) && exitCode == STILL_ACTIVE);
+    CloseHandle(hProcess);
+    return alive;
+#else
+    if (kill(pid, 0) == 0) {
+        return true;
+    }
+    return errno == EPERM;
+#endif
+}
+
+LifecycleComponent::PidIdentityStatus
+LifecycleComponent::verifyPidIdentity(const PidFileInfo& info, std::string& detail) const {
+    detail.clear();
+    if (info.pid <= 0) {
+        detail = "missing pid";
+        return PidIdentityStatus::Unknown;
+    }
+    if (!isProcessRunning(info.pid)) {
+        detail = "process not running";
+        return PidIdentityStatus::Mismatch;
+    }
+    std::uint64_t liveStart = getProcessStartTimeNs(info.pid);
+    if (info.startTimeNs && liveStart) {
+        if (info.startTimeNs != liveStart) {
+            detail = "start time mismatch";
+            return PidIdentityStatus::Mismatch;
+        }
+    } else if (info.startTimeNs && !liveStart) {
+        detail = "start time unavailable";
+        return PidIdentityStatus::Unknown;
+    }
+
+    auto liveExe = getProcessExecutablePath(info.pid);
+    if (!info.exePath.empty()) {
+        if (!liveExe.empty()) {
+            std::error_code ec;
+            auto canonicalInfo = std::filesystem::weakly_canonical(info.exePath, ec).string();
+            if (ec) {
+                canonicalInfo.clear();
+            }
+            ec.clear();
+            auto canonicalExe = std::filesystem::weakly_canonical(liveExe, ec).string();
+            if (ec) {
+                canonicalExe.clear();
+            }
+            if (!canonicalInfo.empty() && !canonicalExe.empty() && canonicalInfo != canonicalExe) {
+                detail = "exe mismatch";
+                return PidIdentityStatus::Mismatch;
+            }
+        } else {
+            detail = "exe unavailable";
+            return PidIdentityStatus::Unknown;
+        }
+    } else if (!liveExe.empty()) {
+        auto currentExe = getProcessExecutablePath(getpid());
+        if (!currentExe.empty()) {
+            std::error_code ec;
+            auto canonicalLive = std::filesystem::weakly_canonical(liveExe, ec).string();
+            if (ec) {
+                canonicalLive.clear();
+            }
+            ec.clear();
+            auto canonicalCurrent = std::filesystem::weakly_canonical(currentExe, ec).string();
+            if (ec) {
+                canonicalCurrent.clear();
+            }
+            if (!canonicalLive.empty() && !canonicalCurrent.empty()) {
+                if (canonicalLive != canonicalCurrent) {
+                    detail = "exe mismatch";
+                    return PidIdentityStatus::Mismatch;
+                }
+            } else {
+                detail = "exe unavailable";
+                return PidIdentityStatus::Unknown;
+            }
+        }
+    }
+
+    detail = "verified";
+    return PidIdentityStatus::Verified;
+}
+
+std::uint64_t LifecycleComponent::getProcessStartTimeNs(pid_t pid) const {
+#ifdef _WIN32
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProcess) {
+        return 0;
+    }
+    FILETIME createTime{}, exitTime{}, kernelTime{}, userTime{};
+    if (!GetProcessTimes(hProcess, &createTime, &exitTime, &kernelTime, &userTime)) {
+        CloseHandle(hProcess);
+        return 0;
+    }
+    CloseHandle(hProcess);
+    ULARGE_INTEGER uli;
+    uli.LowPart = createTime.dwLowDateTime;
+    uli.HighPart = createTime.dwHighDateTime;
+    // FILETIME is 100ns intervals since 1601
+    return static_cast<std::uint64_t>(uli.QuadPart) * 100ull;
+#elif __APPLE__
+    struct kinfo_proc kp;
+    std::memset(&kp, 0, sizeof(kp));
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+    size_t len = sizeof(kp);
+    if (sysctl(mib, 4, &kp, &len, nullptr, 0) != 0 || len == 0) {
+        return 0;
+    }
+    auto tv = kp.kp_proc.p_starttime;
+    return static_cast<std::uint64_t>(tv.tv_sec) * 1000000000ull +
+           static_cast<std::uint64_t>(tv.tv_usec) * 1000ull;
+#else
+    std::ifstream statFile("/proc/" + std::to_string(pid) + "/stat");
+    if (!statFile.is_open()) {
+        return 0;
+    }
+    std::string statLine;
+    std::getline(statFile, statLine);
+    if (statLine.empty()) {
+        return 0;
+    }
+    auto rparen = statLine.rfind(')');
+    if (rparen == std::string::npos) {
+        return 0;
+    }
+    std::istringstream iss(statLine.substr(rparen + 1));
+    std::string token;
+    for (int i = 0; i < 19; ++i) {
+        if (!(iss >> token)) {
+            return 0;
+        }
+    }
+    unsigned long long startTicks = 0;
+    if (!(iss >> startTicks)) {
+        return 0;
+    }
+    long ticks = sysconf(_SC_CLK_TCK);
+    if (ticks <= 0) {
+        return 0;
+    }
+    double seconds = static_cast<double>(startTicks) / static_cast<double>(ticks);
+    return static_cast<std::uint64_t>(seconds * 1000000000.0);
+#endif
+}
+
+std::string LifecycleComponent::getProcessExecutablePath(pid_t pid) const {
+#ifdef _WIN32
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    if (!hProcess) {
+        return {};
+    }
+    char buffer[MAX_PATH];
+    DWORD size = static_cast<DWORD>(sizeof(buffer));
+    if (!QueryFullProcessImageNameA(hProcess, 0, buffer, &size)) {
+        CloseHandle(hProcess);
+        return {};
+    }
+    CloseHandle(hProcess);
+    return std::string(buffer, size);
+#elif __APPLE__
+    char pathbuf[PROC_PIDPATHINFO_MAXSIZE] = {0};
+    int ret = proc_pidpath(pid, pathbuf, sizeof(pathbuf));
+    if (ret <= 0) {
+        return {};
+    }
+    return std::string(pathbuf);
+#else
+    std::error_code ec;
+    auto exePath = std::filesystem::read_symlink(
+        std::filesystem::path("/proc") / std::to_string(pid) / "exe", ec);
+    if (ec) {
+        return {};
+    }
+    return exePath.string();
+#endif
+}
+
+std::string LifecycleComponent::generateInstanceToken() {
+    std::array<unsigned char, 16> bytes{};
+    std::random_device rd;
+    for (auto& b : bytes) {
+        b = static_cast<unsigned char>(rd());
+    }
+    std::ostringstream oss;
+    oss << std::hex;
+    for (auto b : bytes) {
+        oss << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+    }
+    return oss.str();
 }
 
 Result<void> LifecycleComponent::terminateProcess(pid_t pid) const {
@@ -544,8 +820,8 @@ bool LifecycleComponent::aggressiveModeEnabled() {
     // without changing the production default.
     if (const char* test_guard = std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
         test_guard && *test_guard) {
-        if (strcasecmp(test_guard, "1") == 0 || strcasecmp(test_guard, "true") == 0 ||
-            strcasecmp(test_guard, "on") == 0 || strcasecmp(test_guard, "yes") == 0) {
+        if (equalsIgnoreCase(test_guard, "1") || equalsIgnoreCase(test_guard, "true") ||
+            equalsIgnoreCase(test_guard, "on") || equalsIgnoreCase(test_guard, "yes")) {
             return false; // SAFE mode during tests
         }
     }
@@ -556,8 +832,8 @@ bool LifecycleComponent::aggressiveModeEnabled() {
         return true; // default ON
     }
     // Explicit opt-out when set to "0" or "false" (case-insensitive)
-    if ((env[0] == '0' && env[1] == '\0') || strcasecmp(env, "false") == 0 ||
-        strcasecmp(env, "off") == 0 || strcasecmp(env, "no") == 0) {
+    if ((env[0] == '0' && env[1] == '\0') || equalsIgnoreCase(env, "false") ||
+        equalsIgnoreCase(env, "off") || equalsIgnoreCase(env, "no")) {
         return false;
     }
     return true;

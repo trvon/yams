@@ -192,13 +192,13 @@ TEST_CASE("All migrations execute successfully", "[catch2][unit][metadata][migra
         REQUIRE(actual_version > 0); // Sanity check: should have at least one migration
     }
 
-    SECTION("Migration version is at least v16 (symbol_metadata)") {
-        // This ensures we haven't regressed and lost the symbol_metadata migration
+    SECTION("Migration version is at least v25 (symbol_metadata repair)") {
+        // This ensures we haven't regressed and lost the symbol_metadata repair migration
         auto result = fixture.applyAllMigrations();
         REQUIRE(result);
 
         int version = result.value();
-        REQUIRE(version >= 16);
+        REQUIRE(version >= 25);
 
         INFO("Current migration version: " << version);
     }
@@ -345,6 +345,28 @@ TEST_CASE("Core tables exist after migration", "[catch2][unit][metadata][migrati
 
         REQUIRE(result);
         REQUIRE(table_exists);
+    }
+
+    SECTION("Symbol_metadata unique index exists (v25)") {
+        bool index_exists = false;
+
+        auto result = pool->withConnection([&](Database& db) -> Result<void> {
+            auto stmt_result = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND "
+                                          "name='ux_symbol_document_qualified'");
+            if (!stmt_result)
+                return stmt_result.error();
+
+            auto stmt = std::move(stmt_result.value());
+            auto step_result = stmt.step();
+            if (!step_result)
+                return step_result.error();
+
+            index_exists = step_result.value();
+            return Result<void>();
+        });
+
+        REQUIRE(result);
+        REQUIRE(index_exists);
     }
 
     SECTION("Metadata table exists") {

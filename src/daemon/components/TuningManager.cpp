@@ -192,7 +192,10 @@ void TuningManager::tick_once() {
             const std::size_t embedDropped = bus.embedDropped();
 
             // Derive total post-ingest budget and weighted targets.
-            uint32_t totalBudget = TuneAdvisor::postIngestTotalConcurrent();
+            // Note: We compute a temporary scaled budget but do NOT persist it back
+            // to TuneAdvisor to avoid runaway scaling. The base budget from
+            // recommendedThreads() should remain stable.
+            uint32_t baseBudget = TuneAdvisor::postIngestTotalConcurrent();
             uint32_t scaleBias = 0;
             if (embedQueued > 1000 || embedDropped > 100) {
                 scaleBias = 2;
@@ -201,11 +204,9 @@ void TuningManager::tick_once() {
             } else if (queuedItems > 500) {
                 scaleBias = 1;
             }
-            if (scaleBias > 0) {
-                totalBudget =
-                    std::max<uint32_t>(1, std::min<uint32_t>(256, totalBudget + scaleBias));
-                TuneAdvisor::setPostIngestTotalConcurrent(totalBudget);
-            }
+            // Cap scaled budget to hardware concurrency to avoid oversubscription
+            uint32_t hwCap = TuneAdvisor::hardwareConcurrency();
+            uint32_t totalBudget = std::min<uint32_t>(hwCap, baseBudget + scaleBias);
 
             const uint64_t dbLockErrors = TuneAdvisor::getAndResetDbLockErrors();
             const uint32_t lockThreshold = TuneAdvisor::dbLockErrorThreshold();
