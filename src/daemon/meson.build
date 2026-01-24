@@ -1,6 +1,10 @@
 yams_daemon_client_dep = dependency('yams_daemon_client')
 protobuf_dep = dependency('protobuf')
 
+# Build yams_onnx_resource shared library first (contains OnnxConcurrencyRegistry)
+subdir('resource')
+yams_onnx_resource_dep = dependency('yams_onnx_resource')
+
 # Tracy profiling support (optional, controlled by -Denable-profiling=true)
 enable_profiling = get_option('enable-profiling')
 tracy_dep = dependency('tracy', required: enable_profiling, static: true)
@@ -150,7 +154,6 @@ yams_daemon_lib = static_library('yams_daemon',
     'resource/external_plugin_host.cpp',
     'resource/plugin_content_extractor_adapter.cpp',
     'resource/external_entity_provider_adapter.cpp',
-    'resource/OnnxConcurrencyRegistry.cpp',
     # IPC objects are now part of the library
     'ipc/request_handler.cpp',
     'ipc/streaming_processor.cpp',
@@ -183,6 +186,7 @@ yams_daemon_lib = static_library('yams_daemon',
     dependency('yams_app_services'),
     dependency('yams_config'),
     yams_daemon_client_dep,
+    yams_onnx_resource_dep,
     # Direct Boost dependency required because daemon sources (e.g. RepairCoordinator,
     # various IPC components) include boost/asio headers directly. Relying on the
     # daemon_client's transitive usage isn't sufficient for include paths at compile time.

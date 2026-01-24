@@ -17,6 +17,8 @@
 // - Reranker wraps scoring with SlotGuard(OnnxLane::Reranker)
 // - TuningManager adjusts total slots under memory pressure
 
+#include <yams/daemon/resource/onnx_resource_export.h>
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -57,7 +59,7 @@ struct OnnxLaneMetrics {
 
 /// Global ONNX concurrency coordination with reserved lanes per component.
 /// Prevents any component from being completely starved.
-class OnnxConcurrencyRegistry {
+class YAMS_ONNX_RESOURCE_API OnnxConcurrencyRegistry {
 public:
     /// Singleton accessor
     static OnnxConcurrencyRegistry& instance() noexcept;
