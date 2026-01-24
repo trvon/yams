@@ -1081,6 +1081,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_resource_governance_exe = executable('catch2_resource_governance',
+    files('unit/daemon/resource_governance_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # NOTE: onnx_model_pool tests require linking with the ONNX plugin library,
   # which is not directly available as a dependency. The original GTest version
   # was also never properly linked. Skipping Catch2 migration until plugin
@@ -2465,6 +2474,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'tune', 'advisor'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30
+  )
+
+  test('resource_governance', catch2_resource_governance_exe,
+    suite: ['catch2', 'unit', 'daemon', 'governance'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   # NOTE: onnx_model_pool test registration skipped - see comment above

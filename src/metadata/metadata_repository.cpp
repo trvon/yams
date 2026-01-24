@@ -1907,7 +1907,7 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
             // BM25 column weights: content=1.0, title=10.0
             // Boosting title matches significantly improves precision for document retrieval
             // (Source: SQLite FTS5 docs, BEIR benchmark best practices)
-            spec.columns = {"fts.rowid",
+            spec.columns = {"d.id",
                             "fts.title",
                             "snippet(documents_fts, 0, '<b>', '</b>', '...', 16) as snippet",
                             "bm25(documents_fts, 1.0, 10.0) as score",
@@ -4930,7 +4930,7 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
 
         // BM25 column weights: content=1.0, title=10.0 (match main search function)
         std::string sql = R"(
-            SELECT fts.rowid, fts.title,
+            SELECT d.id, fts.title,
                    snippet(documents_fts, 0, '<b>', '</b>', '...', 16) as snippet,
                    bm25(documents_fts, 1.0, 10.0) as score,
                    d.file_path, d.file_name, d.file_extension, d.file_size,
@@ -5386,7 +5386,6 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
             for (const auto& t : uniqueTags) {
                 tagKeys.push_back(std::string("tag:") + t);
             }
-
             // Build IN list
             auto buildInList = [](size_t count) {
                 std::string list;

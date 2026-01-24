@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <yams/genai/onnx_genai_adapter.h>
+#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/vector/embedding_generator.h>
 
 #if defined(YAMS_GENAI_RUNTIME_PRESENT)
@@ -92,6 +93,14 @@ std::vector<float> OnnxGenAIAdapter::embed(const std::string& text) const {
     if (!impl_ || !impl_->ready)
         return {};
     try {
+        // Acquire ONNX slot for embedding inference
+        daemon::OnnxConcurrencyRegistry::SlotGuard slotGuard(
+            daemon::OnnxConcurrencyRegistry::instance(), daemon::OnnxLane::Embedding);
+        if (!slotGuard.acquired()) {
+            spdlog::warn("[GenAI] ONNX slot acquisition timeout for embedding");
+            return {};
+        }
+
         const auto& c = impl_->cfg;
         // Determine sequence length
         size_t max_len = impl_->modelMgr.getModelMaxLength(c.model_name);
@@ -131,6 +140,14 @@ OnnxGenAIAdapter::embed_batch(const std::vector<std::string>& texts) const {
     if (texts.empty())
         return {};
     try {
+        // Acquire ONNX slot for batch embedding inference
+        daemon::OnnxConcurrencyRegistry::SlotGuard slotGuard(
+            daemon::OnnxConcurrencyRegistry::instance(), daemon::OnnxLane::Embedding);
+        if (!slotGuard.acquired()) {
+            spdlog::warn("[GenAI] ONNX slot acquisition timeout for batch embedding");
+            return {};
+        }
+
         const auto& c = impl_->cfg;
         size_t max_len = impl_->modelMgr.getModelMaxLength(c.model_name);
         if (max_len == 0)

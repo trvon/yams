@@ -714,6 +714,7 @@ template <> struct EntityTraits<DocumentRelationship> {
         std::tuple<Column<int64_t, DocumentRelationship>,                 // id
                    Column<int64_t, DocumentRelationship>,                 // parent_id
                    Column<int64_t, DocumentRelationship>,                 // child_id
+                   Column<std::string, DocumentRelationship>,             // relationship_type
                    Column<std::chrono::sys_seconds, DocumentRelationship> // created_time
                    >;
 
@@ -721,6 +722,8 @@ template <> struct EntityTraits<DocumentRelationship> {
         Column<int64_t, DocumentRelationship>{"id", &DocumentRelationship::id, false, true, true},
         Column<int64_t, DocumentRelationship>{"parent_id", &DocumentRelationship::parentId, true},
         Column<int64_t, DocumentRelationship>{"child_id", &DocumentRelationship::childId},
+        Column<std::string, DocumentRelationship>{"relationship_type",
+                                                  nullptr}, // extract handles this
         Column<std::chrono::sys_seconds, DocumentRelationship>{"created_time",
                                                                &DocumentRelationship::createdTime}};
 

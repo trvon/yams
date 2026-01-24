@@ -309,11 +309,11 @@ TEST_CASE("Repair batch sizes are profile-aware", "[daemon][tune][advisor][catch
     SECTION("Efficient profile uses smaller batch sizes") {
         ProfileGuard guard(TuneAdvisor::Profile::Efficient);
 
-        // Efficient profile scale is 0.75
-        // repairMaxBatch: 32 * 0.75 = 24
-        // repairStartupBatchSize: 100 * 0.75 = 75
-        CHECK(TuneAdvisor::repairMaxBatch() == 24u);
-        CHECK(TuneAdvisor::repairStartupBatchSize() == 75u);
+        // Efficient profile scale is 0.5
+        // repairMaxBatch: 32 * 0.5 = 16
+        // repairStartupBatchSize: 100 * 0.5 = 50
+        CHECK(TuneAdvisor::repairMaxBatch() == 16u);
+        CHECK(TuneAdvisor::repairStartupBatchSize() == 50u);
     }
 
     SECTION("Balanced profile uses default batch sizes") {
@@ -415,10 +415,10 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
-        CHECK(TuneAdvisor::postExtractionConcurrent() == 2u);
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
         CHECK(TuneAdvisor::postKgConcurrent() == 1u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
     }
 }

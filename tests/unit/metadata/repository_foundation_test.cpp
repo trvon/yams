@@ -191,9 +191,9 @@ TEST_CASE("EntityTraits MetadataEntry has correct table name", "[entity_traits][
 }
 
 TEST_CASE("DocumentRelationship column count is correct", "[entity_traits][phase5]") {
-    // id, parent_id, child_id, created_time (relationship_type handled separately)
+    // id, parent_id, child_id, relationship_type, created_time
     constexpr auto count = columnCount<DocumentRelationship>();
-    STATIC_REQUIRE(count == 4);
+    STATIC_REQUIRE(count == 5);
 }
 
 TEST_CASE("MetadataEntry column count is correct", "[entity_traits][phase5]") {

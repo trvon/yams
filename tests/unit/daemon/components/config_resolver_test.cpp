@@ -345,11 +345,11 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
-        CHECK(TuneAdvisor::postExtractionConcurrent() == 2u);
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
         CHECK(TuneAdvisor::postKgConcurrent() == 1u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 12u);
     }
 

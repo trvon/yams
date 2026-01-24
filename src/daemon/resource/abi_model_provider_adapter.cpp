@@ -5,6 +5,7 @@
 #include <cstring>
 #include <span>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
+#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/vector/embedding_generator.h>
 
 namespace yams::daemon {
@@ -116,6 +117,15 @@ AbiModelProviderAdapter::generateEmbeddingFor(const std::string& modelName,
                                               const std::string& text) {
     if (!table_ || !table_->generate_embedding)
         return ErrorCode::NotImplemented;
+
+    // Acquire ONNX slot for embedding inference
+    OnnxConcurrencyRegistry::SlotGuard slotGuard(OnnxConcurrencyRegistry::instance(),
+                                                 OnnxLane::Embedding);
+    if (!slotGuard.acquired()) {
+        spdlog::warn("[ABI Adapter] ONNX slot acquisition timeout for embedding");
+        return Error{ErrorCode::ResourceExhausted, "ONNX concurrency limit reached"};
+    }
+
     const auto* bytes = reinterpret_cast<const uint8_t*>(text.data());
     size_t len = text.size();
     float* vec = nullptr;
@@ -144,7 +154,7 @@ AbiModelProviderAdapter::generateBatchEmbeddingsFor(const std::string& modelName
     if (texts.empty())
         return std::vector<std::vector<float>>{};
     if (!table_->generate_embedding_batch) {
-        // Fallback: call single repeatedly
+        // Fallback: call single repeatedly (slot acquired in generateEmbeddingFor)
         std::vector<std::vector<float>> res;
         res.reserve(texts.size());
         for (const auto& t : texts) {
@@ -155,6 +165,15 @@ AbiModelProviderAdapter::generateBatchEmbeddingsFor(const std::string& modelName
         }
         return res;
     }
+
+    // Acquire ONNX slot for batch embedding inference
+    OnnxConcurrencyRegistry::SlotGuard slotGuard(OnnxConcurrencyRegistry::instance(),
+                                                 OnnxLane::Embedding);
+    if (!slotGuard.acquired()) {
+        spdlog::warn("[ABI Adapter] ONNX slot acquisition timeout for batch embedding");
+        return Error{ErrorCode::ResourceExhausted, "ONNX concurrency limit reached"};
+    }
+
     std::vector<const uint8_t*> input_ptrs;
     std::vector<size_t> input_lens;
     input_ptrs.reserve(texts.size());
@@ -431,6 +450,14 @@ AbiModelProviderAdapter::scoreDocuments(const std::string& query,
 
     if (documents.empty()) {
         return std::vector<float>{};
+    }
+
+    // Acquire ONNX slot for reranking inference
+    OnnxConcurrencyRegistry::SlotGuard slotGuard(OnnxConcurrencyRegistry::instance(),
+                                                 OnnxLane::Reranker);
+    if (!slotGuard.acquired()) {
+        spdlog::warn("[ABI Adapter] ONNX slot acquisition timeout for reranking");
+        return Error{ErrorCode::ResourceExhausted, "ONNX concurrency limit reached"};
     }
 
     // Build document pointer array for C ABI

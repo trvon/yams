@@ -347,12 +347,37 @@ TEST_F(GrepServiceExpectationsIT, FilesWithAndWithoutModes) {
     opts.recursive = false;
     opts.noEmbeddings = true;
     opts.path = f1.string();
-    ASSERT_TRUE(ing.addViaDaemon(opts));
+    auto add1 = ing.addViaDaemon(opts);
+    ASSERT_TRUE(add1) << (add1 ? "" : add1.error().message);
     opts.path = f2.string();
-    ASSERT_TRUE(ing.addViaDaemon(opts));
+    auto add2 = ing.addViaDaemon(opts);
+    ASSERT_TRUE(add2) << (add2 ? "" : add2.error().message);
 
     auto* sm = daemon_->getServiceManager();
     auto ctx = sm->getAppContext();
+
+    // Wait for metadata visibility for both documents
+    {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+        bool visible1 = false, visible2 = false;
+        while (std::chrono::steady_clock::now() < deadline && (!visible1 || !visible2)) {
+            if (!visible1) {
+                auto doc1 = ctx.metadataRepo->getDocumentByHash(add1.value().hash);
+                if (doc1 && doc1.value().has_value())
+                    visible1 = true;
+            }
+            if (!visible2) {
+                auto doc2 = ctx.metadataRepo->getDocumentByHash(add2.value().hash);
+                if (doc2 && doc2.value().has_value())
+                    visible2 = true;
+            }
+            if (!visible1 || !visible2)
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        ASSERT_TRUE(visible1) << "Document a.txt not visible in metadata after ingestion";
+        ASSERT_TRUE(visible2) << "Document b.txt not visible in metadata after ingestion";
+    }
+
     auto grepSvc = yams::app::services::makeGrepService(ctx);
 
     yams::app::services::GrepRequest rq;
@@ -360,18 +385,24 @@ TEST_F(GrepServiceExpectationsIT, FilesWithAndWithoutModes) {
     rq.filesWithMatches = true;
     rq.filesWithoutMatch = true;
     rq.paths = {(root_ / "ingest").string()};
-    auto r = grepSvc->grep(rq);
-    ASSERT_TRUE(r);
-    const auto& resp = r.value();
+
+    // Poll for results with retry
     bool hasA = false, hasB = false;
-    for (const auto& p : resp.filesWith)
-        if (p.find("a.txt") != std::string::npos)
-            hasA = true;
-    for (const auto& p : resp.filesWithout)
-        if (p.find("b.txt") != std::string::npos)
-            hasB = true;
-    EXPECT_TRUE(hasA);
-    EXPECT_TRUE(hasB);
+    for (int attempt = 0; attempt < 60 && (!hasA || !hasB); ++attempt) {
+        auto r = grepSvc->grep(rq);
+        ASSERT_TRUE(r) << (r ? "" : r.error().message);
+        const auto& resp = r.value();
+        for (const auto& p : resp.filesWith)
+            if (p.find("a.txt") != std::string::npos)
+                hasA = true;
+        for (const auto& p : resp.filesWithout)
+            if (p.find("b.txt") != std::string::npos)
+                hasB = true;
+        if (!hasA || !hasB)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    EXPECT_TRUE(hasA) << "Expected a.txt in filesWith";
+    EXPECT_TRUE(hasB) << "Expected b.txt in filesWithout";
 }
 
 // F) Invert with pathsOnly

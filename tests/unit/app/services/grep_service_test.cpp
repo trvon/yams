@@ -181,6 +181,8 @@ TEST_CASE("GrepService - Basic Functionality", "[grep][service][basic]") {
         req.pattern = "alpha";
         req.literalText = true;
         req.word = true;
+        // Scope grep to only c.txt to avoid counting matches in a.txt
+        req.paths = {(fixture.tmpDir_ / "c.txt").string()};
 
         auto res = fixture.grep(req);
 

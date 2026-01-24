@@ -1,12 +1,14 @@
 #pragma once
 
 #include <chrono>
+#include <filesystem>
 #include <future>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <yams/core/types.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/metadata/metadata_repository.h>
 
 namespace yams::test_async {
 
@@ -67,3 +69,76 @@ inline yams::Result<T> run_sync(boost::asio::awaitable<yams::Result<T>> aw,
     return yams::test_async::detail::run_with_timeout<T>(std::move(aw), timeout);
 }
 } // namespace yams::cli
+
+// Metadata visibility helper for integration tests
+// Waits until a document with the given hash is visible in the metadata repository
+namespace yams::test {
+
+template <typename MetadataRepo>
+inline bool
+waitForDocumentMetadata(MetadataRepo& repo, const std::string& hash,
+                        std::chrono::milliseconds timeout = std::chrono::milliseconds(3000)) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto doc = repo.getDocumentByHash(hash);
+        if (doc && doc.value().has_value()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return false;
+}
+
+// Helper that takes a shared_ptr to MetadataRepository
+template <typename MetadataRepo>
+inline bool
+waitForDocumentMetadata(std::shared_ptr<MetadataRepo> repo, const std::string& hash,
+                        std::chrono::milliseconds timeout = std::chrono::milliseconds(3000)) {
+    if (!repo)
+        return false;
+    return waitForDocumentMetadata(*repo, hash, timeout);
+}
+
+// Wait for at least `minCount` documents to be visible under a given path pattern.
+// Useful for directory ingestion where the response hash is empty.
+template <typename MetadataRepo>
+inline bool
+waitForDocumentsByPath(MetadataRepo& repo, const std::string& pathPattern, size_t minCount = 1,
+                       std::chrono::milliseconds timeout = std::chrono::milliseconds(5000)) {
+    // Canonicalize path to handle macOS symlinks (/var -> /private/var)
+    std::string canonicalPattern = pathPattern;
+    try {
+        if (!pathPattern.empty() && std::filesystem::exists(pathPattern)) {
+            canonicalPattern = std::filesystem::canonical(pathPattern).string();
+        }
+    } catch (...) {
+        // Ignore errors, use original pattern
+    }
+
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        // Use queryDocuments with a LIKE pattern
+        yams::metadata::DocumentQueryOptions opts;
+        opts.likePattern = canonicalPattern + "%"; // SQL LIKE pattern
+        opts.limit = static_cast<int>(minCount + 1);
+        auto docs = repo.queryDocuments(opts);
+        if (docs && docs.value().size() >= minCount) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return false;
+}
+
+// Helper that takes a shared_ptr
+template <typename MetadataRepo>
+inline bool
+waitForDocumentsByPath(std::shared_ptr<MetadataRepo> repo, const std::string& pathPattern,
+                       size_t minCount = 1,
+                       std::chrono::milliseconds timeout = std::chrono::milliseconds(5000)) {
+    if (!repo)
+        return false;
+    return waitForDocumentsByPath(*repo, pathPattern, minCount, timeout);
+}
+
+} // namespace yams::test

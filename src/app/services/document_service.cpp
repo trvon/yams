@@ -1271,8 +1271,39 @@ public:
         bool useTree = false;
         std::string treePrefix;
 
+        // Canonicalize pattern to resolve symlinks (e.g., /var -> /private/var on macOS)
+        std::string canonicalPattern = req.pattern;
         if (!req.pattern.empty()) {
-            const auto& pattern = req.pattern;
+            auto wildcardPos = req.pattern.find_first_of("*?");
+            if (wildcardPos != std::string::npos) {
+                // Extract prefix before first wildcard and try to canonicalize it
+                std::string prefix = req.pattern.substr(0, wildcardPos);
+                std::string suffix = req.pattern.substr(wildcardPos);
+                // Remove trailing slashes from prefix for proper path resolution
+                while (!prefix.empty() && (prefix.back() == '/' || prefix.back() == '\\')) {
+                    prefix.pop_back();
+                    suffix = "/" + suffix;
+                }
+                try {
+                    if (!prefix.empty() && std::filesystem::exists(prefix)) {
+                        auto canonical = std::filesystem::canonical(prefix).string();
+                        canonicalPattern = canonical + suffix;
+                    }
+                } catch (...) {
+                    // Ignore errors, use original pattern
+                }
+            } else {
+                try {
+                    if (std::filesystem::exists(req.pattern)) {
+                        canonicalPattern = std::filesystem::canonical(req.pattern).string();
+                    }
+                } catch (...) {
+                    // Ignore errors
+                }
+            }
+        }
+        if (!canonicalPattern.empty()) {
+            const auto& pattern = canonicalPattern;
             auto wildcardPos = pattern.find_first_of("*?");
             bool hasWildcard = wildcardPos != std::string::npos;
 
@@ -1294,10 +1325,6 @@ public:
                 if (!prefix.empty()) {
                     useTree = true;
                     treePrefix = prefix;
-                    spdlog::info("[LIST] Using tree-based query for prefix: '{}' (with filters: "
-                                 "tags={} mime={} ext={})",
-                                 treePrefix, !req.tags.empty(), !req.mime.empty(),
-                                 !req.extension.empty());
                 }
 
                 // Also set queryOpts for the tree path to use
@@ -1320,8 +1347,6 @@ public:
                 docs = std::move(treeDocsRes.value());
                 usedQuery = true;
                 totalFoundApprox = docs.size();
-                spdlog::info("[LIST] Tree-based query (via queryDocuments) returned {} documents",
-                             docs.size());
             } else {
                 // Tree query failed, fall back to SQL glob matching
                 spdlog::warn("[LIST] Tree-based query failed: {}, falling back to SQL glob",
@@ -1342,7 +1367,8 @@ public:
         }
 
         if (!usedQuery) {
-            std::string sqlPattern = req.pattern.empty() ? "%" : globToSqlLike(req.pattern);
+            std::string sqlPattern =
+                canonicalPattern.empty() ? "%" : globToSqlLike(canonicalPattern);
             auto docsRes = metadata::queryDocumentsByPattern(*ctx_.metadataRepo, sqlPattern);
             if (!docsRes) {
                 return Error{ErrorCode::InternalError,

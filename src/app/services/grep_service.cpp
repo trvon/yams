@@ -477,8 +477,11 @@ public:
             if (tRes) {
                 addDocs(std::move(tRes.value()));
             }
-        } else if (!req.pattern.empty() && isLikelyFtsPattern(req.pattern)) {
+        } else if (!req.pattern.empty() && isLikelyFtsPattern(req.pattern) &&
+                   !req.filesWithoutMatch) {
             // Try FTS5 first for patterns that are likely to work well with FTS tokenization
+            // IMPORTANT: Skip FTS5 optimization when filesWithoutMatch is true, as we need
+            // ALL documents (not just matches) to determine which ones don't match.
             auto sRes = retryMetadataOp(
                 [&]() { return ctx_.metadataRepo->search(req.pattern, max_docs_hot * 2); }, 4,
                 std::chrono::milliseconds(25), &metadataTelemetry);

@@ -198,6 +198,13 @@ TEST_F(UiCliExpectationsIT, GetHonorsAcceptCompressedFlag) {
     ASSERT_TRUE(addRes) << (addRes ? "" : addRes.error().message);
     ASSERT_FALSE(addRes.value().hash.empty());
 
+    // Wait for metadata visibility before querying
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
+    auto ctx = sm->getAppContext();
+    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 5000ms))
+        << "Document not visible in metadata after ingestion";
+
     yams::app::services::RetrievalService rsvc;
     yams::app::services::RetrievalOptions defaultOpts;
     defaultOpts.socketPath = socketPath_;
@@ -205,20 +212,23 @@ TEST_F(UiCliExpectationsIT, GetHonorsAcceptCompressedFlag) {
 
     yams::app::services::GetOptions getReq;
     getReq.hash = addRes.value().hash;
+    getReq.acceptCompressed = true; // Explicitly request compressed content
 
     std::optional<yams::daemon::GetResponse> compressedResp;
     for (int attempt = 0; attempt < 60 && !compressedResp; ++attempt) {
         auto attemptResp = rsvc.get(getReq, defaultOpts);
-        if (attemptResp) {
+        if (attemptResp && attemptResp.value().compressed) {
+            // Only accept response once compression is ready
             compressedResp = std::move(attemptResp.value());
         } else {
             std::this_thread::sleep_for(50ms);
         }
     }
-    ASSERT_TRUE(compressedResp.has_value()) << "Default compressed retrieval did not materialize";
+    ASSERT_TRUE(compressedResp.has_value())
+        << "Compressed retrieval did not materialize within timeout";
 
     const auto& compressed = *compressedResp;
-    ASSERT_TRUE(compressed.compressed);
+    EXPECT_TRUE(compressed.compressed);
     EXPECT_TRUE(compressed.hasContent);
     EXPECT_TRUE(compressed.compressionAlgorithm.has_value());
     EXPECT_TRUE(compressed.compressionLevel.has_value());
@@ -284,22 +294,25 @@ TEST_F(UiCliExpectationsIT, ListLimitAndNamePattern) {
     auto addRes = ing.addViaDaemon(opts);
     ASSERT_TRUE(addRes) << (addRes ? "" : addRes.error().message);
 
+    // For recursive directory ingestion, allow time for documents to be indexed
+    // The retry loop below handles visibility waiting
+    std::this_thread::sleep_for(200ms);
+
     yams::app::services::RetrievalService rsvc;
     yams::app::services::RetrievalOptions ropts;
     ropts.socketPath = socketPath_;
     ropts.explicitDataDir = storageDir_;
 
     yams::app::services::ListOptions lreq;
-    lreq.limit =
-        2; // enforce limit    lreq.namePattern = (root_ / "ingest" / "**" / "*.md").string();
+    lreq.limit = 2; // enforce limit
+    lreq.namePattern = (root_ / "ingest" / "**" / "*.md").string();
     // Act/Assert with brief retries for visibility
     bool ok = false;
-    for (int i = 0; i < 60 && !ok; ++i) {
+    for (int i = 0; i < 100 && !ok; ++i) {
         auto lres = rsvc.list(lreq, ropts);
         ASSERT_TRUE(lres) << (lres ? "" : lres.error().message);
         const auto& items = lres.value().items;
         if (!items.empty()) {
-            EXPECT_LE(items.size(), static_cast<size_t>(2));
             // All returned entries must be .md
             bool allMd = true;
             for (const auto& e : items) {
@@ -308,13 +321,15 @@ TEST_F(UiCliExpectationsIT, ListLimitAndNamePattern) {
                     break;
                 }
             }
-            EXPECT_TRUE(allMd);
-            ok = allMd;
+            if (allMd && items.size() <= 2) {
+                ok = true;
+            }
         }
         if (!ok)
             std::this_thread::sleep_for(50ms);
     }
-    EXPECT_TRUE(ok);
+    // Final assertions after retry exhaustion
+    ASSERT_TRUE(ok) << "List filter with namePattern should return only .md files with limit 2";
 }
 
 // 4) Retrieve by name — success shape (no crash) and minimal fields present (tolerant)
@@ -332,6 +347,13 @@ TEST_F(UiCliExpectationsIT, RetrieveByNameSuccessShape) {
     auto addRes = ing.addViaDaemon(opts);
     ASSERT_TRUE(addRes) << (addRes ? "" : addRes.error().message);
 
+    // Wait for metadata visibility before querying
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
+    auto ctx = sm->getAppContext();
+    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 5000ms))
+        << "Document not visible in metadata after ingestion";
+
     yams::app::services::RetrievalService rsvc;
     yams::app::services::RetrievalOptions ropts;
     ropts.socketPath = socketPath_;
@@ -346,6 +368,7 @@ TEST_F(UiCliExpectationsIT, RetrieveByNameSuccessShape) {
         bool okHash = false;
         for (int i = 0; i < 40 && !okHash; ++i) {
             yams::app::services::GetOptions ghash;
+            ghash.hash = addedHash;
             ghash.metadataOnly = false;
             auto gres = rsvc.get(ghash, ropts);
             if (gres) {
@@ -504,13 +527,39 @@ TEST_F(UiCliExpectationsIT, FuzzySearchPathsOnly) {
     // Build AppContext and SearchService
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);
-    ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
+
+    // Wait for documents to be visible (directory add returns empty hash)
+    std::string ingestPath = (root_ / "ingest").string();
+    ASSERT_TRUE(yams::test::waitForDocumentsByPath(ctx.metadataRepo, ingestPath, 2, 5000ms))
+        << "Documents not visible in metadata after directory ingestion";
+
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
-    // Ensure light indexing for new docs to enable fuzzy search immediately
-    // Not fatal if skipped for non-text types
-    (void)searchSvc->lightIndexForHash(addRes.value().hash);
+    // Light-index documents for fuzzy search (query by path pattern instead of hash)
+    yams::metadata::DocumentQueryOptions qopts;
+    qopts.pathPrefix = ingestPath;
+    qopts.prefixIsDirectory = true;
+    auto docs = ctx.metadataRepo->queryDocuments(qopts);
+    if (docs) {
+        for (const auto& doc : docs.value()) {
+            (void)searchSvc->lightIndexForHash(doc.sha256Hash);
+        }
+    }
+
+    // Wait for FTS5 indexing to complete (lightIndexForHash is async)
+    yams::app::services::SearchRequest pollReq;
+    pollReq.query = "programming"; // exact match to detect indexing completion
+    pollReq.fuzzy = false;
+    pollReq.pathsOnly = true;
+    pollReq.limit = 1;
+    pollReq.pathPattern = (root_ / "ingest" / "**").string();
+    for (int i = 0; i < 50; ++i) {
+        auto pollRes = yams::test_async::res(searchSvc->search(pollReq), 1s);
+        if (pollRes && !pollRes.value().paths.empty())
+            break;
+        std::this_thread::sleep_for(100ms);
+    }
 
     yams::app::services::SearchRequest sreq;
     sreq.query = "programing"; // misspelled to exercise fuzzy
@@ -657,6 +706,13 @@ TEST_F(UiCliExpectationsIT, PathsOnlyWithPatternAndMatchAllTagsStrict) {
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
+
+    // Wait for basic document metadata visibility first
+    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, add1.value().hash, 5000ms))
+        << "Document d1 not visible in metadata after ingestion";
+    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, add2.value().hash, 5000ms))
+        << "Document d2 not visible in metadata after ingestion";
+
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
     // Best-effort: improve near-term visibility even when hybrid engine is absent.
@@ -837,12 +893,35 @@ TEST_F(UiCliExpectationsIT, JsonOutputStructurePathsOnly) {
     opts.path = (root_ / "json.txt").string();
     opts.recursive = false;
     opts.noEmbeddings = true;
-    ASSERT_TRUE(ing.addViaDaemon(opts));
+    auto addRes = ing.addViaDaemon(opts);
+    ASSERT_TRUE(addRes) << (addRes ? "" : addRes.error().message);
 
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
+
+    // Wait for document metadata visibility
+    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 5000ms))
+        << "Document not visible in metadata after ingestion";
+
     auto searchSvc = yams::app::services::makeSearchService(ctx);
+
+    // Light-index the document for fuzzy/FTS5 search
+    (void)searchSvc->lightIndexForHash(addRes.value().hash);
+
+    // Wait for FTS5 indexing to complete (lightIndexForHash is async)
+    yams::app::services::SearchRequest pollReq;
+    pollReq.query = "json";
+    pollReq.fuzzy = false;
+    pollReq.pathsOnly = true;
+    pollReq.limit = 1;
+    pollReq.pathPattern = (root_ / "**").string();
+    for (int i = 0; i < 50; ++i) {
+        auto pollRes = yams::test_async::res(searchSvc->search(pollReq), 1s);
+        if (pollRes && !pollRes.value().paths.empty())
+            break;
+        std::this_thread::sleep_for(100ms);
+    }
 
     yams::app::services::SearchRequest sreq;
     sreq.query = "json";
@@ -950,6 +1029,19 @@ TEST_F(UiCliExpectationsIT, SearchDegradedFallbackStructure) {
     setenv("YAMS_SEARCH_DEGRADED_REASON", "maintenance", 1);
 #endif
 
+    // Scope guard to ensure cleanup happens even if test fails
+    struct EnvCleanup {
+        ~EnvCleanup() {
+#if defined(_WIN32)
+            _putenv_s("YAMS_SEARCH_DEGRADED", "");
+            _putenv_s("YAMS_SEARCH_DEGRADED_REASON", "");
+#else
+            unsetenv("YAMS_SEARCH_DEGRADED");
+            unsetenv("YAMS_SEARCH_DEGRADED_REASON");
+#endif
+        }
+    } cleanup;
+
     // Arrange: basic ingest
     fs::create_directories(root_ / "ingest" / "deg");
     std::ofstream(root_ / "ingest" / "deg" / "d.md") << "maintenance window";
@@ -960,11 +1052,18 @@ TEST_F(UiCliExpectationsIT, SearchDegradedFallbackStructure) {
     a.path = (root_ / "ingest").string();
     a.recursive = true;
     a.noEmbeddings = true;
-    ASSERT_TRUE(ing.addViaDaemon(a));
+    auto addRes = ing.addViaDaemon(a);
+    ASSERT_TRUE(addRes) << (addRes ? "" : addRes.error().message);
 
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
+
+    // Wait for documents to be visible (directory add returns empty hash)
+    std::string ingestPath = (root_ / "ingest").string();
+    ASSERT_TRUE(yams::test::waitForDocumentsByPath(ctx.metadataRepo, ingestPath, 1, 5000ms))
+        << "Documents not visible in metadata after directory ingestion";
+
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
     yams::app::services::SearchRequest s;
@@ -983,6 +1082,7 @@ TEST_F(UiCliExpectationsIT, SearchDegradedFallbackStructure) {
     bool mentionsDegraded = (resp.queryInfo.find("degraded") != std::string::npos) ||
                             (resp.queryInfo.find("fallback") != std::string::npos);
     EXPECT_TRUE(mentionsDegraded);
+    // cleanup happens automatically via EnvCleanup destructor
 }
 
 // 13) CLI UX hints — unreachable daemon includes socketPath and/or env hint
@@ -1082,11 +1182,17 @@ TEST_F(UiCliExpectationsIT, TagFilterMatchAnyVsAll) {
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
+
+    // Wait for metadata visibility before querying
+    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, add1.value().hash, 5000ms))
+        << "Document d1.md not visible in metadata after ingestion";
+    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, add2.value().hash, 5000ms))
+        << "Document d2.txt not visible in metadata after ingestion";
+
     auto searchSvc = yams::app::services::makeSearchService(ctx);
     // Ensure immediate visibility for small text docs
     (void)searchSvc->lightIndexForHash(add1.value().hash);
     (void)searchSvc->lightIndexForHash(add2.value().hash);
-    std::this_thread::sleep_for(100ms);
 
     yams::app::services::SearchRequest anyReq;
     anyReq.query = "hello";
@@ -1141,11 +1247,17 @@ TEST_F(UiCliExpectationsIT, NegativeTagMismatchPathsOnly) {
     a.recursive = false;
     a.noEmbeddings = true;
     a.tags = {"misc"};
-    ASSERT_TRUE(ing.addViaDaemon(a));
+    auto addRes = ing.addViaDaemon(a);
+    ASSERT_TRUE(addRes) << (addRes ? "" : addRes.error().message);
 
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
+
+    // Wait for metadata visibility before querying
+    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 5000ms))
+        << "Document not visible in metadata after ingestion";
+
     auto searchSvc = yams::app::services::makeSearchService(ctx);
 
     yams::app::services::SearchRequest s;

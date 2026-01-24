@@ -206,8 +206,9 @@ bool looksLikeHashQuery(const std::string& raw) {
     if (!looksLikeHash(trimmed))
         return false;
 
-    // Require long hex and at least one alpha digit to avoid common code tokens like "deadbeef".
-    if (trimmed.size() < 32)
+    // Require at least 8 chars for hash prefix searches (matches looksLikeHash minimum).
+    // Also require at least one alpha digit to avoid common code tokens like "deadbeef".
+    if (trimmed.size() < 8)
         return false;
     return std::any_of(trimmed.begin(), trimmed.end(),
                        [](unsigned char c) { return std::isalpha(c) != 0; });
@@ -372,16 +373,34 @@ static boost::asio::awaitable<bool> metadataHasTags(metadata::MetadataRepository
 
     auto& all = md.value();
 
+    // Debug: log all metadata keys for this document
+    if (!tags.empty()) {
+        std::string keys;
+        for (const auto& [k, v] : all) {
+            if (!keys.empty())
+                keys += ", ";
+            keys += k + "=" + v.asString();
+        }
+        spdlog::info(
+            "metadataHasTags: docId={} searching for tags=[{}] matchAll={} found_metadata=[{}]",
+            docId, fmt::join(tags, ","), matchAll, keys);
+    }
+
     auto hasTag = [&](const std::string& t) {
-        auto it = all.find(t);
+        // Check for normalized storage (key="tag:<name>")
+        auto it = all.find("tag:" + t);
         if (it != all.end()) {
+            spdlog::debug("metadataHasTags: found tag:{}", t);
             return true;
         }
+        // Fallback: check for legacy storage (key="tag", value="<name>")
         for (const auto& [k, v] : all) {
-            if (v.asString() == t) {
+            if (k == "tag" && v.asString() == t) {
+                spdlog::debug("metadataHasTags: found legacy tag {}", t);
                 return true;
             }
         }
+        spdlog::debug("metadataHasTags: tag '{}' not found", t);
         return false;
     };
 
@@ -693,9 +712,16 @@ public:
         if (result) {
             auto resp = std::move(result).value();
             if (forcedHybridFallback) {
-                resp.searchStats["hybrid_fallback"] =
+                const std::string fallbackReason =
                     repairDetails_.empty() ? "hybrid_disabled" : repairDetails_;
+                resp.searchStats["hybrid_fallback"] = fallbackReason;
                 resp.searchStats["effective_type"] = type;
+                resp.searchStats["mode"] = "degraded";
+                if (resp.queryInfo.empty()) {
+                    resp.queryInfo = "fallback to keyword search due to: " + fallbackReason;
+                } else {
+                    resp.queryInfo += " (degraded fallback: " + fallbackReason + ")";
+                }
             }
             auto totalElapsed = duration_cast<milliseconds>(steady_clock::now() - t0).count();
             resp.executionTimeMs = static_cast<int64_t>(totalElapsed);
@@ -1276,26 +1302,28 @@ private:
         const auto& vec = engineResponse.results;
 
         // Enforce tag filters (hybrid path previously ignored tags)
-        std::optional<std::unordered_set<int64_t>> tagDocIds;
+        // Use document hashes for filtering since SearchEngine fusion only populates hash, not ID
+        std::optional<std::unordered_set<std::string>> tagDocHashes;
         if (!req.tags.empty()) {
             auto docsResult = ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
             if (!docsResult) {
                 return docsResult.error();
             }
-            std::unordered_set<int64_t> ids;
+            std::unordered_set<std::string> hashes;
             const auto& docsVec = docsResult.value();
-            ids.reserve(docsVec.size());
+            hashes.reserve(docsVec.size());
             for (const auto& doc : docsVec) {
-                ids.insert(doc.id);
+                hashes.insert(doc.sha256Hash);
             }
-            tagDocIds = std::move(ids);
+            tagDocHashes = std::move(hashes);
         }
 
         // Always build a filtered candidate list so limits respect tag filtering
         std::vector<const metadata::SearchResult*> candidates;
         candidates.reserve(vec.size());
+
         for (const auto& r : vec) {
-            if (tagDocIds && tagDocIds->count(r.document.id) == 0) {
+            if (tagDocHashes && tagDocHashes->count(r.document.sha256Hash) == 0) {
                 continue;
             }
             candidates.push_back(&r);

@@ -97,9 +97,9 @@ TEST_CASE("TunedParams: LARGE_PROSE parameters", "[unit][search_tuner][params]")
 TEST_CASE("TunedParams: SCIENTIFIC parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::SCIENTIFIC);
 
-    CHECK(params.rrfK == 30);
-    CHECK(params.textWeight == Approx(0.55f));
-    CHECK(params.vectorWeight == Approx(0.40f));
+    CHECK(params.rrfK == 12);
+    CHECK(params.textWeight == Approx(0.60f));
+    CHECK(params.vectorWeight == Approx(0.35f));
     CHECK(params.entityVectorWeight == Approx(0.00f));
     CHECK(params.pathTreeWeight == Approx(0.00f));
     CHECK(params.kgWeight == Approx(0.00f));

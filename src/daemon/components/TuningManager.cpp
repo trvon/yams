@@ -75,6 +75,35 @@ boost::asio::awaitable<void> TuningManager::tuningLoop() {
     spdlog::debug("TuningManager loop exiting");
 }
 
+void TuningManager::configureOnnxConcurrencyRegistry() {
+    // Configure OnnxConcurrencyRegistry based on TuneAdvisor settings
+    // This should only be called once during initialization
+    auto& registry = OnnxConcurrencyRegistry::instance();
+
+    // Get profile-aware settings from TuneAdvisor
+    uint32_t maxConcurrent = TuneAdvisor::onnxMaxConcurrent();
+    uint32_t glinerReserved = TuneAdvisor::onnxGlinerReserved();
+    uint32_t embedReserved = TuneAdvisor::onnxEmbedReserved();
+    uint32_t rerankerReserved = TuneAdvisor::onnxRerankerReserved();
+
+    // Apply profile scaling to slot limits
+    // Efficient = 0.5x, Balanced = 1.0x, Aggressive = 1.5x
+    double scale = TuneAdvisor::profileScale();
+    uint32_t scaledMax = static_cast<uint32_t>(maxConcurrent * scale);
+    scaledMax = std::max(scaledMax, 2u); // Minimum 2 slots
+
+    // Configure the registry
+    registry.setMaxSlots(scaledMax);
+    registry.setReservedSlots(OnnxLane::Gliner, glinerReserved);
+    registry.setReservedSlots(OnnxLane::Embedding, embedReserved);
+    registry.setReservedSlots(OnnxLane::Reranker, rerankerReserved);
+    registry.setReservedSlots(OnnxLane::Other, 0);
+
+    spdlog::info("[TuningManager] Configured OnnxConcurrencyRegistry: maxSlots={} (profile "
+                 "scale={:.1f}), reserved=[gliner={}, embed={}, reranker={}]",
+                 scaledMax, scale, glinerReserved, embedReserved, rerankerReserved);
+}
+
 void TuningManager::tick_once() {
     YAMS_ZONE_SCOPED_N("TuningManager::tick_once");
     if (!sm_ || !state_)
@@ -84,6 +113,11 @@ void TuningManager::tick_once() {
     // to avoid acting on default PoolManager configs.
     if (!state_->readiness.metadataRepoReady.load()) {
         return;
+    }
+
+    // Configure ONNX concurrency registry once on first tick
+    if (!onnxRegistryConfigured_.exchange(true)) {
+        configureOnnxConcurrencyRegistry();
     }
 
     // =========================================================================

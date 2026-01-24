@@ -46,7 +46,24 @@ inline std::string globToSqlLike(const std::string& glob) {
     if (glob.empty())
         return "%";
     std::string sql = glob;
+
+    // Replace ** with a placeholder first, then handle single *
+    // "**" in glob matches zero or more directories, map to single "%" in SQL LIKE
+    std::string placeholder = "\x01";
+    std::size_t pos = 0;
+    while ((pos = sql.find("**", pos)) != std::string::npos) {
+        sql.replace(pos, 2, placeholder);
+        pos += placeholder.length();
+    }
+    // Replace single * with %
     std::replace(sql.begin(), sql.end(), '*', '%');
+    // Restore ** placeholders to single %
+    pos = 0;
+    while ((pos = sql.find(placeholder, pos)) != std::string::npos) {
+        sql.replace(pos, placeholder.length(), "%");
+        pos += 1;
+    }
+
     std::replace(sql.begin(), sql.end(), '?', '_');
 
     const bool is_absolute = !glob.empty() && std::filesystem::path(glob).is_absolute();

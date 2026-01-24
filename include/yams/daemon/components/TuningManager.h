@@ -55,6 +55,10 @@ private:
     uint64_t repairBatchesAtWindowStart_{0};
 
     std::function<void(std::size_t)> setWriterBudget_{};
+
+    // ONNX concurrency registry configuration tracking
+    std::atomic<bool> onnxRegistryConfigured_{false};
+    void configureOnnxConcurrencyRegistry();
 };
 
 } // namespace yams::daemon
