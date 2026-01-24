@@ -34,9 +34,10 @@ struct MetadataSchemaFixture {
         std::filesystem::remove(dbPath_);
 
         // Initialize connection pool
+        // Use higher connection count to prevent pool exhaustion with nested queries
         ConnectionPoolConfig config;
-        config.minConnections = 1;
-        config.maxConnections = 2;
+        config.minConnections = 2;
+        config.maxConnections = 4;
         pool_ = std::make_unique<ConnectionPool>(dbPath_.string(), config);
         auto initResult = pool_->initialize();
         REQUIRE(initResult.has_value());

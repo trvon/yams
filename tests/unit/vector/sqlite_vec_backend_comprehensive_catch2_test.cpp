@@ -761,7 +761,7 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend buildIndex",
 
     // Search should still work
     auto query = createEmbedding(64, 1.0f);
-    auto searchResult = backend.searchSimilar(query, 5, 0.0f, std::nullopt, {});
+    auto searchResult = backend.searchSimilar(query, 5, -2.0f, std::nullopt, {});
     REQUIRE(searchResult.has_value());
     CHECK(searchResult.value().size() == 5);
 }

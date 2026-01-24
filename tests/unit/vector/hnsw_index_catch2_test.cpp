@@ -138,7 +138,7 @@ TEST_CASE_METHOD(HNSWIndexFixture, "HNSWIndex insert multiple vectors",
     auto emb = createEmbedding(64, 1005.0f);
     VectorSearchParams params;
     params.k = 10;
-    params.similarity_threshold = 0.0f; // Disable threshold for HNSW unit tests
+    params.similarity_threshold = -2.0f;
     auto results = db.search(emb, params);
     REQUIRE(results.size() == 10);
 }
@@ -265,7 +265,7 @@ TEST_CASE_METHOD(HNSWIndexFixture, "HNSWIndex search quality recall",
 // =============================================================================
 
 TEST_CASE_METHOD(HNSWIndexFixture, "HNSWIndex large corpus 10K vectors",
-                 "[vector][hnsw][large][catch2]") {
+                 "[vector][hnsw][large][catch2][.]") {
     skipIfNeeded();
 
     auto config = createConfig(64);

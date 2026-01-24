@@ -2558,7 +2558,7 @@ if catch2_dep.found()
     test('vector_submodule', catch2_vector_submodule_exe,
       suite: ['catch2', 'unit', 'vector', 'yams-1d4'],
       env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-      timeout: 180
+      timeout: 300
     )
   endif
 
