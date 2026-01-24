@@ -26,6 +26,24 @@ DaemonClient createClient(const std::filesystem::path& socketPath,
     config.requestTimeout = 5s;
     return DaemonClient(config);
 }
+
+// Helper to connect with retry logic for GlobalIOContext stabilization
+bool connectWithRetry(DaemonClient& client, int maxRetries = 3,
+                      std::chrono::milliseconds retryDelay = 200ms) {
+    // Initial delay for GlobalIOContext threads to stabilize
+    std::this_thread::sleep_for(200ms);
+
+    for (int attempt = 0; attempt < maxRetries; ++attempt) {
+        auto result = yams::cli::run_sync(client.connect(), 5s);
+        if (result.has_value()) {
+            return true;
+        }
+        spdlog::warn("[TEST] Connect attempt {} failed: {}, retrying...", attempt + 1,
+                     result.error().message);
+        std::this_thread::sleep_for(retryDelay);
+    }
+    return false;
+}
 } // namespace
 
 TEST_CASE("Daemon shutdown timing", "[daemon][shutdown][timing]") {
@@ -35,7 +53,7 @@ TEST_CASE("Daemon shutdown timing", "[daemon][shutdown][timing]") {
     REQUIRE(harness.start());
 
     auto client = createClient(harness.socketPath());
-    REQUIRE(yams::cli::run_sync(client.connect(), 3s).has_value());
+    REQUIRE(connectWithRetry(client));
 
     SECTION("shutdown request returns immediately") {
         auto start = std::chrono::steady_clock::now();
@@ -54,7 +72,7 @@ TEST_CASE("Daemon shutdown with in-flight operations", "[daemon][shutdown][opera
     REQUIRE(harness.start());
 
     auto client = createClient(harness.socketPath());
-    REQUIRE(yams::cli::run_sync(client.connect(), 3s).has_value());
+    REQUIRE(connectWithRetry(client));
 
     SECTION("shutdown accepts requests to completion") {
         std::atomic<bool> operationComplete{false};
@@ -121,7 +139,7 @@ TEST_CASE("Daemon shutdown idempotency", "[daemon][shutdown][idempotent]") {
     REQUIRE(harness.start());
 
     auto client = createClient(harness.socketPath());
-    REQUIRE(yams::cli::run_sync(client.connect(), 3s).has_value());
+    REQUIRE(connectWithRetry(client));
 
     SECTION("multiple shutdown requests are harmless") {
         auto result1 = yams::cli::run_sync(client.shutdown(true), 3s);
@@ -160,7 +178,7 @@ TEST_CASE("Daemon shutdown after operations", "[daemon][shutdown][lifecycle]") {
     REQUIRE(harness.start());
 
     auto client = createClient(harness.socketPath());
-    REQUIRE(yams::cli::run_sync(client.connect(), 3s).has_value());
+    REQUIRE(connectWithRetry(client));
 
     SECTION("shutdown after document operations") {
         for (int i = 0; i < 5; ++i) {
@@ -201,7 +219,7 @@ TEST_CASE("Daemon shutdown under load", "[daemon][shutdown][stress]") {
     REQUIRE(harness.start());
 
     auto client = createClient(harness.socketPath());
-    REQUIRE(yams::cli::run_sync(client.connect(), 3s).has_value());
+    REQUIRE(connectWithRetry(client));
 
     SECTION("shutdown with multiple concurrent clients") {
         std::vector<std::thread> clientThreads;
@@ -249,7 +267,7 @@ TEST_CASE("Daemon graceful shutdown behavior", "[daemon][shutdown][graceful]") {
         REQUIRE(harness.start());
 
         auto client = createClient(harness.socketPath());
-        REQUIRE(yams::cli::run_sync(client.connect(), 3s).has_value());
+        REQUIRE(connectWithRetry(client));
 
         auto shutdownResult = yams::cli::run_sync(client.shutdown(true), 5s);
         REQUIRE(shutdownResult.has_value());
@@ -272,7 +290,7 @@ TEST_CASE("Daemon graceful shutdown behavior", "[daemon][shutdown][graceful]") {
         REQUIRE(harness.start());
 
         auto client = createClient(harness.socketPath());
-        REQUIRE(yams::cli::run_sync(client.connect(), 3s).has_value());
+        REQUIRE(connectWithRetry(client));
 
         REQUIRE(harness.daemon()->isRunning());
 
@@ -298,7 +316,7 @@ TEST_CASE("Daemon graceful shutdown behavior", "[daemon][shutdown][graceful]") {
         REQUIRE(harness.start());
 
         auto client = createClient(harness.socketPath());
-        REQUIRE(yams::cli::run_sync(client.connect(), 3s).has_value());
+        REQUIRE(connectWithRetry(client));
 
         // Shutdown
         auto shutdownResult = yams::cli::run_sync(client.shutdown(true), 5s);

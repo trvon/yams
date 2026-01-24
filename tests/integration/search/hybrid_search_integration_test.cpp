@@ -37,12 +37,25 @@ public:
                      clientCfg.socketPath.string());
         client_ = std::make_unique<DaemonClient>(clientCfg);
 
-        // Connect to daemon
+        // Initial delay for GlobalIOContext threads to stabilize
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        // Connect to daemon with retry logic for GlobalIOContext timing
         spdlog::info("[HybridSearchFixture] Calling client_->connect()...");
-        auto connectResult = cli::run_sync(client_->connect(), 5s);
+        Result<void> connectResult;
+        constexpr int maxRetries = 3;
+        for (int attempt = 0; attempt < maxRetries; ++attempt) {
+            connectResult = cli::run_sync(client_->connect(), 5s);
+            if (connectResult) {
+                break;
+            }
+            spdlog::warn("[HybridSearchFixture] connect() attempt {} failed: {}, retrying...",
+                         attempt + 1, connectResult.error().message);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
         if (!connectResult) {
-            spdlog::error("[HybridSearchFixture] connect() failed: {}",
-                          connectResult.error().message);
+            spdlog::error("[HybridSearchFixture] connect() failed after {} attempts: {}",
+                          maxRetries, connectResult.error().message);
             throw std::runtime_error("Failed to connect to daemon: " +
                                      connectResult.error().message);
         }

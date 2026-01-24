@@ -390,7 +390,8 @@ TEST_CASE_METHOD(HNSWIndexFixture, "HNSWIndex search with different params",
     std::vector<float> vec1(64, 0.0f);
     vec1[0] = 1.0f;
     std::vector<float> vec2(64, 0.0f);
-    vec2[0] = 0.5f;
+    vec2[0] = 0.9f;
+    vec2[1] = 0.1f; // Different angle from vec1, cosine ≈ 0.994
     std::vector<float> vec3(64, 0.0f);
     vec3[0] = -1.0f;
 
@@ -405,8 +406,8 @@ TEST_CASE_METHOD(HNSWIndexFixture, "HNSWIndex search with different params",
     auto results = db.search(vec1, params);
     REQUIRE(results.size() == 3);
 
-    // vec1 (metric_001) is identical to query, so it's the closest
-    // vec2 (metric_002) should be second closest (same direction, different magnitude)
+    // vec1 (metric_001) is identical to query, so it's the closest (cosine = 1.0)
+    // vec2 (metric_002) has slightly different angle (cosine ≈ 0.994), so second closest
     CHECK(results[0].chunk_id == "metric_001");
     CHECK(results[1].chunk_id == "metric_002");
 }

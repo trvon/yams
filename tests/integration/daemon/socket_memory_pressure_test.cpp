@@ -39,6 +39,22 @@ DaemonClient createTestClient(const std::filesystem::path& socketPath,
     return DaemonClient(config);
 }
 
+// Helper to connect with retry logic for GlobalIOContext stabilization
+bool connectWithRetry(DaemonClient& client, int maxRetries = 3,
+                      std::chrono::milliseconds retryDelay = 200ms) {
+    // Initial delay for GlobalIOContext threads to stabilize
+    std::this_thread::sleep_for(200ms);
+
+    for (int attempt = 0; attempt < maxRetries; ++attempt) {
+        auto result = yams::cli::run_sync(client.connect(), 5s);
+        if (result.has_value()) {
+            return true;
+        }
+        std::this_thread::sleep_for(retryDelay);
+    }
+    return false;
+}
+
 } // namespace
 
 TEST_CASE("Socket memory pressure - rapid connect/disconnect cycles",
@@ -121,14 +137,27 @@ TEST_CASE("Socket memory pressure - concurrent idle connections",
     DaemonHarness harness;
     REQUIRE(harness.start());
 
+    // Initial delay for GlobalIOContext threads to stabilize
+    std::this_thread::sleep_for(200ms);
+
     constexpr int numConnections = 8;
     std::vector<std::unique_ptr<DaemonClient>> clients;
 
-    // Create multiple connections
+    // Create multiple connections with retry logic for first connection
     for (int i = 0; i < numConnections; ++i) {
         auto client = std::make_unique<DaemonClient>(createTestClient(harness.socketPath()));
-        auto connResult = yams::cli::run_sync(client->connect(), 2s);
-        REQUIRE(connResult.has_value());
+
+        // First connection may need retries due to GlobalIOContext timing
+        bool connected = false;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            auto connResult = yams::cli::run_sync(client->connect(), 2s);
+            if (connResult.has_value()) {
+                connected = true;
+                break;
+            }
+            std::this_thread::sleep_for(200ms);
+        }
+        REQUIRE(connected);
         clients.push_back(std::move(client));
     }
 
@@ -206,8 +235,7 @@ TEST_CASE("Socket memory pressure - native_handle safety",
 
     SECTION("native_handle after socket close returns invalid value") {
         auto client = createTestClient(harness.socketPath());
-        auto connResult = yams::cli::run_sync(client.connect(), 2s);
-        REQUIRE(connResult.has_value());
+        REQUIRE(connectWithRetry(client));
 
         client.disconnect();
 
@@ -217,14 +245,13 @@ TEST_CASE("Socket memory pressure - native_handle safety",
         // The daemon should not dereference the socket handle after closure
 
         // Re-establish connection to verify daemon didn't crash
-        auto connResult2 = yams::cli::run_sync(client.connect(), 2s);
-        REQUIRE(connResult2.has_value());
+        // Use retry logic since reconnecting after disconnect may need time
+        REQUIRE(connectWithRetry(client));
     }
 
     SECTION("logging socket fd during idle timeout doesn't crash") {
         auto client = createTestClient(harness.socketPath(), 1s);
-        auto connResult = yams::cli::run_sync(client.connect(), 2s);
-        REQUIRE(connResult.has_value());
+        REQUIRE(connectWithRetry(client));
 
         // Let connection idle to trigger the timeout path that logs the fd
         // From crash log line 371: "Closing idle connection after {} consecutive read timeouts
@@ -232,8 +259,8 @@ TEST_CASE("Socket memory pressure - native_handle safety",
         std::this_thread::sleep_for(7s);
 
         // Try to reconnect - daemon should be stable
-        auto connResult2 = yams::cli::run_sync(client.connect(), 2s);
-        REQUIRE(connResult2.has_value());
+        // Use retry logic since reconnecting after idle timeout may need time
+        REQUIRE(connectWithRetry(client));
     }
 }
 

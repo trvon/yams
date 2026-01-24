@@ -165,6 +165,10 @@ void GlobalIOContext::restart() {
             });
         }
         this->io_threads_ = std::move(new_threads);
+
+        // Give threads time to start running io_context_->run() before returning
+        // This ensures the executor is fully functional for subsequent operations
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     } catch (...) {
         this->io_context_->stop();
         for (auto& worker : new_threads) {

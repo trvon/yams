@@ -23,6 +23,11 @@ public:
 
     static void reset();
 
+    /// Fully restart the io_context threads.
+    /// Use this after stopping a daemon to ensure the io_context is ready for new connections.
+    /// Unlike reset() which only closes connections, restart() stops and recreates all threads.
+    void restart();
+
     /// Returns true if the singleton is being/has been destroyed (static destruction in progress)
     static bool is_destroyed() noexcept;
 
@@ -40,7 +45,6 @@ private:
     std::atomic<bool> destroyed_{false};
 
     void ensure_initialized();
-    void restart();
 };
 
 class GlobalIOContextInitializer {

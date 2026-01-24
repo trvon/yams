@@ -2169,8 +2169,9 @@ private:
 
     // Ensure HNSW indices are loaded (lazy loading)
     // Discovers existing dimension-specific tables and loads each index
-    void ensureHnswLoadedUnlocked() {
-        if (hnsw_loaded_) {
+    // If force_rebuild is true, skips loading from persisted tables and rebuilds from vectors table
+    void ensureHnswLoadedUnlocked(bool force_rebuild = false) {
+        if (hnsw_loaded_ && !force_rebuild) {
             // Already loaded - log occasionally for diagnostics
             static std::atomic<uint64_t> skip_counter{0};
             uint64_t skc = skip_counter.fetch_add(1);
@@ -2187,77 +2188,88 @@ private:
             return;
         }
 
-        spdlog::info("[HNSW] ensureHnswLoadedUnlocked: first load, backend={:p}",
-                     static_cast<void*>(this));
+        spdlog::info("[HNSW] ensureHnswLoadedUnlocked: first load, backend={:p}{}",
+                     static_cast<void*>(this), force_rebuild ? " (force_rebuild)" : "");
 
-        // Discover existing dimension-specific HNSW tables
-        // Pattern: vectors_{dim}_hnsw_meta (e.g., vectors_384_hnsw_meta, vectors_768_hnsw_meta)
-        std::vector<size_t> existing_dims;
-
-        // First check for legacy single-dimension tables (vectors_hnsw_meta)
-        sqlite3_stmt* stmt = nullptr;
-        const char* check_legacy =
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='vectors_hnsw_meta'";
-        if (sqlite3_prepare_v2(db_, check_legacy, -1, &stmt, nullptr) == SQLITE_OK) {
-            if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int64(stmt, 0) > 0) {
-                // Legacy table exists - need to migrate or load with detected dimension
-                spdlog::info(
-                    "[HNSW] Found legacy vectors_hnsw_meta table, will probe for dimension");
-                // The dimension will be determined when we load from vectors table
-            }
-            sqlite3_finalize(stmt);
+        // If force_rebuild, skip table discovery and go straight to building from vectors
+        if (force_rebuild) {
+            spdlog::info("[HNSW] Force rebuilding from vectors table, skipping persisted indices");
         }
 
-        // Find all dimension-specific tables
-        const char* find_dims =
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vectors_%_hnsw_meta'";
-        if (sqlite3_prepare_v2(db_, find_dims, -1, &stmt, nullptr) == SQLITE_OK) {
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
-                const char* table_name =
-                    reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-                if (table_name) {
-                    // Parse dimension from table name: vectors_384_hnsw_meta -> 384
-                    std::string name(table_name);
-                    auto start = name.find('_') + 1;
-                    auto end = name.find('_', start);
-                    if (start != std::string::npos && end != std::string::npos) {
-                        try {
-                            size_t dim = std::stoull(name.substr(start, end - start));
-                            if (dim > 0) {
-                                existing_dims.push_back(dim);
-                                spdlog::debug("[HNSW] Found existing HNSW table for dim={}", dim);
+        // stmt is used both in table discovery and in build-from-vectors
+        sqlite3_stmt* stmt = nullptr;
+
+        // Discover existing dimension-specific HNSW tables (skip if force_rebuild)
+        if (!force_rebuild) {
+            // Pattern: vectors_{dim}_hnsw_meta (e.g., vectors_384_hnsw_meta, vectors_768_hnsw_meta)
+            std::vector<size_t> existing_dims;
+
+            // First check for legacy single-dimension tables (vectors_hnsw_meta)
+            const char* check_legacy = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "
+                                       "name='vectors_hnsw_meta'";
+            if (sqlite3_prepare_v2(db_, check_legacy, -1, &stmt, nullptr) == SQLITE_OK) {
+                if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int64(stmt, 0) > 0) {
+                    // Legacy table exists - need to migrate or load with detected dimension
+                    spdlog::info(
+                        "[HNSW] Found legacy vectors_hnsw_meta table, will probe for dimension");
+                    // The dimension will be determined when we load from vectors table
+                }
+                sqlite3_finalize(stmt);
+            }
+
+            // Find all dimension-specific tables
+            const char* find_dims = "SELECT name FROM sqlite_master WHERE type='table' AND name "
+                                    "LIKE 'vectors_%_hnsw_meta'";
+            if (sqlite3_prepare_v2(db_, find_dims, -1, &stmt, nullptr) == SQLITE_OK) {
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    const char* table_name =
+                        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                    if (table_name) {
+                        // Parse dimension from table name: vectors_384_hnsw_meta -> 384
+                        std::string name(table_name);
+                        auto start = name.find('_') + 1;
+                        auto end = name.find('_', start);
+                        if (start != std::string::npos && end != std::string::npos) {
+                            try {
+                                size_t dim = std::stoull(name.substr(start, end - start));
+                                if (dim > 0) {
+                                    existing_dims.push_back(dim);
+                                    spdlog::debug("[HNSW] Found existing HNSW table for dim={}",
+                                                  dim);
+                                }
+                            } catch (...) {
+                                // Ignore malformed table names
                             }
-                        } catch (...) {
-                            // Ignore malformed table names
                         }
                     }
                 }
+                sqlite3_finalize(stmt);
             }
-            sqlite3_finalize(stmt);
-        }
 
-        // Load existing indices
-        for (size_t dim : existing_dims) {
-            try {
-                std::string table_prefix = hnswTablePrefix(dim);
-                char* err = nullptr;
-                auto loaded_hnsw = sqlite_vec_cpp::index::load_hnsw_index<float, DistanceMetric>(
-                    db_, "main", table_prefix.c_str(), &err);
-                if (err) {
-                    spdlog::warn("[HNSW] Failed to load index for dim={}: {}", dim, err);
-                    sqlite3_free(err);
-                } else {
-                    hnsw_indices_[dim] = std::make_unique<HNSWIndex>(std::move(loaded_hnsw));
-                    hnsw_dirty_[dim] = false;
-                    spdlog::info("[HNSW] Loaded index for dim={} with {} vectors", dim,
-                                 hnsw_indices_[dim]->size());
+            // Load existing indices
+            for (size_t dim : existing_dims) {
+                try {
+                    std::string table_prefix = hnswTablePrefix(dim);
+                    char* err = nullptr;
+                    auto loaded_hnsw =
+                        sqlite_vec_cpp::index::load_hnsw_index<float, DistanceMetric>(
+                            db_, "main", table_prefix.c_str(), &err);
+                    if (err) {
+                        spdlog::warn("[HNSW] Failed to load index for dim={}: {}", dim, err);
+                        sqlite3_free(err);
+                    } else {
+                        hnsw_indices_[dim] = std::make_unique<HNSWIndex>(std::move(loaded_hnsw));
+                        hnsw_dirty_[dim] = false;
+                        spdlog::info("[HNSW] Loaded index for dim={} with {} vectors", dim,
+                                     hnsw_indices_[dim]->size());
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("[HNSW] Exception loading index for dim={}: {}", dim, e.what());
                 }
-            } catch (const std::exception& e) {
-                spdlog::warn("[HNSW] Exception loading index for dim={}: {}", dim, e.what());
             }
         }
 
-        // If no existing indices found, build from database grouped by dimension
+        // If no existing indices found (or force_rebuild), build from database grouped by dimension
         if (hnsw_indices_.empty()) {
             spdlog::info("[HNSW] No existing indices found, building from vectors table");
 
@@ -2373,11 +2385,11 @@ private:
         hnsw_dirty_.clear();
         hnsw_loaded_ = false;
 
-        // Drop persisted HNSW tables so ensureHnswLoadedUnlocked will rebuild from vectors table
-        // (otherwise it would load stale indices that don't include recent inserts)
+        // Drop persisted HNSW tables (best effort, may fail but force_rebuild handles it)
         dropHnswTablesUnlocked();
 
-        ensureHnswLoadedUnlocked();
+        // Force rebuild from vectors table, bypassing any stale persisted tables
+        ensureHnswLoadedUnlocked(/*force_rebuild=*/true);
         saveAllHnswUnlocked();
     }
 
@@ -2403,7 +2415,11 @@ private:
 
         for (const auto& sql : tables_to_drop) {
             char* err_msg = nullptr;
-            sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err_msg);
+            int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err_msg);
+            if (rc != SQLITE_OK) {
+                spdlog::warn("[HNSW] Failed to drop table: {} (sql: {})",
+                             err_msg ? err_msg : "unknown error", sql);
+            }
             if (err_msg) {
                 sqlite3_free(err_msg);
             }

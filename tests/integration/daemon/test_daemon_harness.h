@@ -252,12 +252,15 @@ public:
             // Windows thread cleanup is slower than Unix
 #ifdef _WIN32
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            // Skip GlobalIOContext::reset() on Windows for now - causes SIGSEGV
+            // Skip GlobalIOContext operations on Windows for now - causes SIGSEGV
             // The io_context threads will be cleaned up when the process exits
-            spdlog::info("[DaemonHarness] Skipping GlobalIOContext::reset() on Windows");
+            spdlog::info("[DaemonHarness] Skipping GlobalIOContext::restart() on Windows");
 #else
-            yams::daemon::GlobalIOContext::reset();
-            spdlog::info("[DaemonHarness] GlobalIOContext reset complete");
+            // Use restart() instead of reset() to ensure io_context threads are running
+            // for subsequent client connections. reset() only closes connections but doesn't
+            // restart threads, causing new client connections to fail after daemon restart.
+            yams::daemon::GlobalIOContext::instance().restart();
+            spdlog::info("[DaemonHarness] GlobalIOContext restart complete");
 #endif
 
             // Restore environment variables

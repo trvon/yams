@@ -40,16 +40,29 @@
 namespace yams::daemon {
 
 namespace {
-bool is_cli_retrieval_request(const Request& request) {
-    return std::holds_alternative<SearchRequest>(request) ||
-           std::holds_alternative<GrepRequest>(request) ||
-           std::holds_alternative<ListRequest>(request) ||
-           std::holds_alternative<GetRequest>(request) ||
-           std::holds_alternative<GetInitRequest>(request) ||
-           std::holds_alternative<GetChunkRequest>(request) ||
-           std::holds_alternative<GetEndRequest>(request) ||
-           std::holds_alternative<CatRequest>(request) ||
-           std::holds_alternative<PruneRequest>(request);
+// CLI priority requests use a dedicated thread pool to ensure responsiveness
+// even when the worker pool is saturated with heavy operations (e.g., ingestion).
+// Includes: retrieval operations, status/ping/shutdown for daemon health checks.
+bool is_cli_priority_request(const Request& request) {
+    // Retrieval operations
+    if (std::holds_alternative<SearchRequest>(request) ||
+        std::holds_alternative<GrepRequest>(request) ||
+        std::holds_alternative<ListRequest>(request) ||
+        std::holds_alternative<GetRequest>(request) ||
+        std::holds_alternative<GetInitRequest>(request) ||
+        std::holds_alternative<GetChunkRequest>(request) ||
+        std::holds_alternative<GetEndRequest>(request) ||
+        std::holds_alternative<CatRequest>(request) ||
+        std::holds_alternative<PruneRequest>(request)) {
+        return true;
+    }
+    // Daemon health/control operations - must remain responsive under load
+    if (std::holds_alternative<StatusRequest>(request) ||
+        std::holds_alternative<PingRequest>(request) ||
+        std::holds_alternative<ShutdownRequest>(request)) {
+        return true;
+    }
+    return false;
 }
 bool stream_trace_enabled_local() {
     static int enabled = [] {
@@ -615,7 +628,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                             auto routed_request = std::move(*request_ptr);
                             auto spawn_exec = config_.worker_executor ? config_.worker_executor
                                                                       : sock->get_executor();
-                            if (config_.cli_executor && is_cli_retrieval_request(routed_request)) {
+                            if (config_.cli_executor && is_cli_priority_request(routed_request)) {
                                 spawn_exec = config_.cli_executor;
                                 spdlog::debug("[MUX_SPAWN] req_id={} using CLI executor",
                                               request_id);

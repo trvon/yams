@@ -489,7 +489,9 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Full text search", "[unit][metadata][sc
         auto removeResult = repo_->removeFromIndex(docIds[0]);
         REQUIRE(removeResult.has_value());
 
-        auto afterRemove = repo_->search("quick brown fox", 10, 0);
+        // Use "lazy dog" which only appears in doc1 - avoids fuzzy OR fallback
+        // matching doc3 which contains "quick" (part of "quick brown fox")
+        auto afterRemove = repo_->search("lazy dog", 10, 0);
         REQUIRE(afterRemove.has_value());
         CHECK(afterRemove.value().results.size() == 0);
     }

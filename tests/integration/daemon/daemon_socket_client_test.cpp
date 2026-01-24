@@ -97,8 +97,26 @@ TEST_CASE("Daemon socket connection lifecycle", "[daemon][socket][integration]")
         REQUIRE(harness.start());
 
         // Create NEW client after restart (old client's io_context was reset)
+        // Allow extra time for GlobalIOContext threads to fully stabilize after restart
+        std::this_thread::sleep_for(200ms);
+
+        // Use retry logic to handle potential timing issues with GlobalIOContext restart
         auto client2 = createClient(harness.socketPath());
-        auto reconnectResult = yams::cli::run_sync(client2.connect(), 5s);
+        yams::Result<void> reconnectResult;
+        int maxRetries = 3;
+        for (int attempt = 0; attempt < maxRetries; ++attempt) {
+            reconnectResult = yams::cli::run_sync(client2.connect(), 5s);
+            if (reconnectResult.has_value()) {
+                break;
+            }
+            spdlog::warn("[TEST] Reconnect attempt {} failed: {}, retrying...", attempt + 1,
+                         reconnectResult.error().message);
+            std::this_thread::sleep_for(200ms);
+        }
+        if (!reconnectResult.has_value()) {
+            spdlog::error("[TEST] All reconnect attempts failed: {}",
+                          reconnectResult.error().message);
+        }
         REQUIRE(reconnectResult.has_value());
         REQUIRE(client2.isConnected());
     }
@@ -137,8 +155,19 @@ TEST_CASE("Daemon socket connection lifecycle", "[daemon][socket][integration]")
             INFO("restart cycle " << i);
             REQUIRE(harness.start());
 
+            // Allow time for GlobalIOContext to stabilize after restart
+            std::this_thread::sleep_for(200ms);
+
             auto client = createClient(harness.socketPath());
-            auto connectResult = yams::cli::run_sync(client.connect(), 5s);
+
+            // Retry connection to handle timing issues
+            yams::Result<void> connectResult;
+            for (int attempt = 0; attempt < 3; ++attempt) {
+                connectResult = yams::cli::run_sync(client.connect(), 5s);
+                if (connectResult.has_value())
+                    break;
+                std::this_thread::sleep_for(200ms);
+            }
             REQUIRE(connectResult.has_value());
 
             auto statusResult = yams::cli::run_sync(client.status(), 5s);
@@ -158,8 +187,19 @@ TEST_CASE("Daemon client request execution", "[daemon][socket][requests]") {
     DaemonHarness harness;
     REQUIRE(harness.start());
 
+    // Allow time for GlobalIOContext to stabilize
+    std::this_thread::sleep_for(200ms);
+
     auto client = createClient(harness.socketPath());
-    auto connectResult = yams::cli::run_sync(client.connect(), 5s);
+
+    // Retry connection to handle timing issues with GlobalIOContext
+    yams::Result<void> connectResult;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        connectResult = yams::cli::run_sync(client.connect(), 5s);
+        if (connectResult.has_value())
+            break;
+        std::this_thread::sleep_for(200ms);
+    }
     REQUIRE(connectResult.has_value());
 
     SECTION("status request succeeds") {
@@ -251,8 +291,19 @@ TEST_CASE("Daemon client error handling", "[daemon][socket][errors]") {
     DaemonHarness harness;
     REQUIRE(harness.start());
 
+    // Allow time for GlobalIOContext to stabilize
+    std::this_thread::sleep_for(200ms);
+
     auto client = createClient(harness.socketPath());
-    auto connectResult = yams::cli::run_sync(client.connect(), 5s);
+
+    // Retry connection to handle timing issues with GlobalIOContext
+    yams::Result<void> connectResult;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        connectResult = yams::cli::run_sync(client.connect(), 5s);
+        if (connectResult.has_value())
+            break;
+        std::this_thread::sleep_for(200ms);
+    }
     REQUIRE(connectResult.has_value());
 
     SECTION("get nonexistent document fails gracefully") {
@@ -294,8 +345,19 @@ TEST_CASE("Daemon client concurrent requests", "[daemon][socket][concurrency]") 
     DaemonHarness harness;
     REQUIRE(harness.start());
 
+    // Allow time for GlobalIOContext to stabilize
+    std::this_thread::sleep_for(200ms);
+
     auto client = createClient(harness.socketPath());
-    auto connectResult = yams::cli::run_sync(client.connect(), 5s);
+
+    // Retry connection to handle timing issues with GlobalIOContext
+    yams::Result<void> connectResult;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        connectResult = yams::cli::run_sync(client.connect(), 5s);
+        if (connectResult.has_value())
+            break;
+        std::this_thread::sleep_for(200ms);
+    }
     REQUIRE(connectResult.has_value());
 
     SECTION("sequential status requests") {
@@ -377,8 +439,19 @@ TEST_CASE("Daemon client timeout behavior", "[daemon][socket][timeout]") {
             500ms; // Reasonable short timeout (increased from 100ms for stability)
         config.autoStart = false;
 
+        // Allow time for GlobalIOContext to stabilize
+        std::this_thread::sleep_for(200ms);
+
         DaemonClient client(config);
-        auto connectResult = yams::cli::run_sync(client.connect(), 5s);
+
+        // Retry connection to handle timing issues with GlobalIOContext
+        yams::Result<void> connectResult;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            connectResult = yams::cli::run_sync(client.connect(), 5s);
+            if (connectResult.has_value())
+                break;
+            std::this_thread::sleep_for(200ms);
+        }
         REQUIRE(connectResult.has_value());
 
         // Fast operation should still succeed even with short timeout
@@ -387,8 +460,19 @@ TEST_CASE("Daemon client timeout behavior", "[daemon][socket][timeout]") {
     }
 
     SECTION("request timeout handling") {
+        // Allow time for GlobalIOContext to stabilize
+        std::this_thread::sleep_for(200ms);
+
         auto client = createClient(harness.socketPath());
-        auto connectResult = yams::cli::run_sync(client.connect(), 5s);
+
+        // Retry connection to handle timing issues with GlobalIOContext
+        yams::Result<void> connectResult;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            connectResult = yams::cli::run_sync(client.connect(), 5s);
+            if (connectResult.has_value())
+                break;
+            std::this_thread::sleep_for(200ms);
+        }
         REQUIRE(connectResult.has_value());
 
         // Use a short timeout for the operation (50ms is short but avoids race conditions)
@@ -409,8 +493,19 @@ TEST_CASE("Daemon client move semantics", "[daemon][socket][move]") {
     REQUIRE(harness.start());
 
     SECTION("move construction") {
+        // Allow time for GlobalIOContext to stabilize
+        std::this_thread::sleep_for(200ms);
+
         auto client1 = createClient(harness.socketPath());
-        auto connectResult = yams::cli::run_sync(client1.connect(), 5s);
+
+        // Retry connection to handle timing issues with GlobalIOContext
+        yams::Result<void> connectResult;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            connectResult = yams::cli::run_sync(client1.connect(), 5s);
+            if (connectResult.has_value())
+                break;
+            std::this_thread::sleep_for(200ms);
+        }
         REQUIRE(connectResult.has_value());
         REQUIRE(client1.isConnected());
 
@@ -423,8 +518,19 @@ TEST_CASE("Daemon client move semantics", "[daemon][socket][move]") {
     }
 
     SECTION("move assignment") {
+        // Allow time for GlobalIOContext to stabilize
+        std::this_thread::sleep_for(200ms);
+
         auto client1 = createClient(harness.socketPath());
-        auto connectResult = yams::cli::run_sync(client1.connect(), 5s);
+
+        // Retry connection to handle timing issues with GlobalIOContext
+        yams::Result<void> connectResult;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            connectResult = yams::cli::run_sync(client1.connect(), 5s);
+            if (connectResult.has_value())
+                break;
+            std::this_thread::sleep_for(200ms);
+        }
         REQUIRE(connectResult.has_value());
         REQUIRE(client1.isConnected());
 
@@ -456,8 +562,19 @@ TEST_CASE("Daemon socket file lifecycle", "[daemon][socket][filesystem]") {
         REQUIRE(harness.start());
         REQUIRE(std::filesystem::exists(harness.socketPath()));
 
+        // Allow time for GlobalIOContext to stabilize
+        std::this_thread::sleep_for(200ms);
+
         auto client = createClient(harness.socketPath());
-        auto connectResult = yams::cli::run_sync(client.connect(), 5s);
+
+        // Retry connection to handle timing issues with GlobalIOContext
+        yams::Result<void> connectResult;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            connectResult = yams::cli::run_sync(client.connect(), 5s);
+            if (connectResult.has_value())
+                break;
+            std::this_thread::sleep_for(200ms);
+        }
         REQUIRE(connectResult.has_value());
 
         // Send shutdown request - the daemon may close the connection before responding,

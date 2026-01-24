@@ -39,6 +39,10 @@ else
     'stats_command_crash_test.cpp',
   )
 
+  cli_responsiveness_under_load_srcs = files(
+    'cli_responsiveness_under_load_test.cpp',
+  )
+
   entity_graph_integration_srcs = files(
     'entity_graph_service_integration_catch2_test.cpp',
   )
@@ -234,6 +238,23 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
+    )
+
+    cli_responsiveness_under_load_exe = executable('yams_cli_responsiveness_under_load_tests_catch2',
+      cli_responsiveness_under_load_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('cli_responsiveness_under_load',
+      cli_responsiveness_under_load_exe,
+      suite: ['integration', 'daemon', 'catch2', 'cli', 'responsiveness', 'load'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 120,  # 2 minutes for load testing
+      args: ['--allow-running-no-tests'],
     )
 
     entity_graph_integration_exe = executable('yams_entity_graph_integration_tests_catch2',

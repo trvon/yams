@@ -10,6 +10,19 @@
 #include <random>
 #include <sstream>
 #include <thread>
+
+#include <nlohmann/json.hpp>
+using nlohmann::json;
+
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/thread_pool.hpp>
+
+#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/LifecycleComponent.h>
+#include <yams/daemon/daemon.h>
+
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
@@ -27,15 +40,6 @@
 #include <libproc.h>
 #include <sys/sysctl.h>
 #endif
-#include <nlohmann/json.hpp>
-using nlohmann::json;
-#include <boost/asio/awaitable.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/thread_pool.hpp>
-#include <yams/daemon/client/daemon_client.h>
-#include <yams/daemon/components/LifecycleComponent.h>
-#include <yams/daemon/daemon.h>
 #endif
 
 namespace {
