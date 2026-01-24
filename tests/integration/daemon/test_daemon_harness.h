@@ -256,11 +256,11 @@ public:
             // The io_context threads will be cleaned up when the process exits
             spdlog::info("[DaemonHarness] Skipping GlobalIOContext::restart() on Windows");
 #else
-            // Use restart() instead of reset() to ensure io_context threads are running
-            // for subsequent client connections. reset() only closes connections but doesn't
-            // restart threads, causing new client connections to fail after daemon restart.
-            yams::daemon::GlobalIOContext::instance().restart();
-            spdlog::info("[DaemonHarness] GlobalIOContext restart complete");
+            // Use safe_restart() instead of restart() to handle teardown race conditions.
+            // safe_restart() checks is_destroyed() before attempting restart, avoiding
+            // SIGSEGV when static destruction is in progress.
+            yams::daemon::GlobalIOContext::safe_restart();
+            spdlog::info("[DaemonHarness] GlobalIOContext safe_restart complete");
 #endif
 
             // Restore environment variables

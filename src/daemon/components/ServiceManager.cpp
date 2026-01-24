@@ -776,14 +776,19 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 4: WorkCoordinator stop() called");
     }
 
-    // Phase 5: Join worker threads IMMEDIATELY to ensure no threads are accessing
+    // Phase 5: Join worker threads with timeout to ensure no threads are accessing
     // shared resources when we start resetting them. This prevents race conditions
-    // during shutdown.
+    // during shutdown. Use timeout to avoid hanging on long-running operations.
     spdlog::info("[ServiceManager] Phase 5: Joining WorkCoordinator threads");
     if (workCoordinator_) {
         try {
-            workCoordinator_->join();
-            spdlog::info("[ServiceManager] Phase 5: WorkCoordinator threads joined");
+            constexpr auto kShutdownTimeout = std::chrono::seconds(5);
+            if (!workCoordinator_->joinWithTimeout(kShutdownTimeout)) {
+                spdlog::warn("[ServiceManager] Phase 5: WorkCoordinator timed out after 5s, "
+                             "force-stopping remaining workers");
+            } else {
+                spdlog::info("[ServiceManager] Phase 5: WorkCoordinator threads joined");
+            }
         } catch (const std::exception& e) {
             spdlog::warn("[ServiceManager] Phase 5: WorkCoordinator join failed: {}", e.what());
         }

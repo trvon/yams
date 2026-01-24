@@ -15,8 +15,12 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -124,6 +128,18 @@ public:
     void join();
 
     /**
+     * @brief Wait for workers with timeout, detaching any that don't finish.
+     *
+     * Like join(), but returns false if timeout expires before all workers exit.
+     * Workers that don't exit within the timeout are detached and will be cleaned
+     * up when the process terminates.
+     *
+     * @param timeout Maximum time to wait for workers to exit
+     * @return true if all workers joined within timeout, false if timeout expired
+     */
+    bool joinWithTimeout(std::chrono::milliseconds timeout);
+
+    /**
      * @brief Get shared pointer to io_context for direct access.
      *
      * Used by components that need to spawn coroutines with co_spawn.
@@ -176,6 +192,15 @@ private:
 
     /// Flag to track if start() has been called
     bool started_ = false;
+
+    /// Count of workers currently executing io_context::run()
+    std::atomic<std::size_t> activeWorkers_{0};
+
+    /// Mutex for joinWithTimeout() condition variable
+    std::mutex joinMutex_;
+
+    /// Condition variable for joinWithTimeout() to wait on worker exit
+    std::condition_variable joinCV_;
 };
 
 } // namespace yams::daemon

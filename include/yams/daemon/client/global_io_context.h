@@ -28,6 +28,10 @@ public:
     /// Unlike reset() which only closes connections, restart() stops and recreates all threads.
     void restart();
 
+    /// Safe version of restart() for use during teardown.
+    /// Returns false if singleton is destroyed, true if restart was attempted.
+    static bool safe_restart() noexcept;
+
     /// Returns true if the singleton is being/has been destroyed (static destruction in progress)
     static bool is_destroyed() noexcept;
 

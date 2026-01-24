@@ -325,6 +325,85 @@ else
       args: ['Daemon shutdown timing with external flag', '--allow-running-no-tests'],
     )
 
+    # ONNX Concurrency / TuneAdvisor integration tests
+    onnx_tuning_integration_srcs = files(
+      'onnx_tuning_integration_test.cpp',
+    )
+
+    onnx_tuning_integration_exe = executable('yams_onnx_tuning_integration_tests_catch2',
+      onnx_tuning_integration_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    # Split ONNX tuning tests into separate test cases to avoid state leakage
+    test('onnx_tuning_env_settings',
+      onnx_tuning_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'onnx', 'tuning'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 120,  # 2 minutes for multiple daemon restarts
+      args: ['OnnxConcurrencyRegistry respects TuneAdvisor env settings', '--allow-running-no-tests'],
+    )
+
+    test('onnx_tuning_embedding_lanes',
+      onnx_tuning_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'onnx', 'embedding'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Embedding lane slots are configured correctly', '--allow-running-no-tests'],
+    )
+
+    test('onnx_tuning_fsm_metrics',
+      onnx_tuning_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'onnx', 'metrics'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['FSM metrics reflect ONNX configuration', '--allow-running-no-tests'],
+    )
+
+    test('onnx_tuning_lifecycle',
+      onnx_tuning_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'onnx', 'lifecycle'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 120,  # 2 minutes for daemon restarts
+      args: ['OnnxConcurrencyRegistry state resets on daemon restart', '--allow-running-no-tests'],
+    )
+
+    test('onnx_tuning_lanes',
+      onnx_tuning_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'onnx', 'lanes'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Lane metrics update during slot acquisition', '--allow-running-no-tests'],
+    )
+
+    # Adapter test needs vectors ENABLED to test real ONNX plugin path
+    # Use _kg_test_env which doesn't have YAMS_DISABLE_VECTORS=1
+    test('onnx_tuning_adapter',
+      onnx_tuning_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'onnx', 'adapter'],
+      env: _kg_test_env,
+      is_parallel: false,
+      timeout: 300,  # 5 minutes - real ONNX model loading is slow
+      args: ['AbiModelProviderAdapter acquires SlotGuard during real embedding', '--allow-running-no-tests'],
+    )
+
+    test('onnx_tuning_timeout',
+      onnx_tuning_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'onnx', 'timeout'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['ONNX slot exhaustion causes graceful timeout', '--allow-running-no-tests'],
+    )
+
     # Diagnostic tool (not a test, but helpful for debugging)
     post_ingest_trace_exe = executable('yams_post_ingest_trace',
       post_ingest_trace_srcs,

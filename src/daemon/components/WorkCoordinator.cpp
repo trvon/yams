@@ -77,6 +77,7 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
     try {
         for (std::size_t i = 0; i < workerCount; ++i) {
             workers_.emplace_back([this, i]() {
+                activeWorkers_.fetch_add(1, std::memory_order_release);
                 try {
                     spdlog::trace("[WorkCoordinator] Worker {} starting io_context.run()", i);
                 } catch (...) {
@@ -110,6 +111,8 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
                     spdlog::trace("[WorkCoordinator] Worker {} exited io_context.run()", i);
                 } catch (...) {
                 }
+                activeWorkers_.fetch_sub(1, std::memory_order_release);
+                joinCV_.notify_all();
             });
         }
         started_ = true;
@@ -200,6 +203,58 @@ void WorkCoordinator::join() {
         spdlog::info("[WorkCoordinator] All workers joined");
     } catch (...) {
     }
+}
+
+bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
+    if (workers_.empty()) {
+        try {
+            spdlog::debug("[WorkCoordinator] joinWithTimeout() called with no workers (no-op)");
+        } catch (...) {
+        }
+        return true;
+    }
+
+    try {
+        spdlog::debug("[WorkCoordinator] joinWithTimeout({}ms) waiting for {} workers",
+                      timeout.count(), activeWorkers_.load());
+    } catch (...) {
+    }
+
+    std::unique_lock<std::mutex> lock(joinMutex_);
+    bool completed = joinCV_.wait_for(
+        lock, timeout, [this]() { return activeWorkers_.load(std::memory_order_acquire) == 0; });
+
+    if (!completed) {
+        try {
+            spdlog::warn("[WorkCoordinator] Timeout expired with {} workers still active",
+                         activeWorkers_.load());
+        } catch (...) {
+        }
+        // Detach remaining threads - they'll exit when process terminates
+        for (auto& worker : workers_) {
+            if (worker.joinable()) {
+                worker.detach();
+            }
+        }
+    } else {
+        // Join all workers that have exited
+        for (auto& worker : workers_) {
+            if (worker.joinable()) {
+                try {
+                    worker.join();
+                } catch (...) {
+                }
+            }
+        }
+    }
+
+    workers_.clear();
+    started_ = false;
+    try {
+        spdlog::info("[WorkCoordinator] joinWithTimeout complete (success={})", completed);
+    } catch (...) {
+    }
+    return completed;
 }
 
 std::shared_ptr<boost::asio::io_context> WorkCoordinator::getIOContext() const noexcept {

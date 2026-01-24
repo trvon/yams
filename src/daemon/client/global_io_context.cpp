@@ -95,6 +95,12 @@ void GlobalIOContext::restart() {
         return;
     }
 
+    // If io_context was never initialized (no client ever used GlobalIOContext),
+    // there's nothing to restart
+    if (!io_context_) {
+        return;
+    }
+
     if (this->work_guard_) {
         this->work_guard_->reset();
         this->work_guard_.reset();
@@ -185,6 +191,22 @@ void GlobalIOContext::restart() {
         }
         this->io_threads_.clear();
         throw;
+    }
+}
+
+bool GlobalIOContext::safe_restart() noexcept {
+    if (is_destroyed()) {
+        return false;
+    }
+    try {
+        instance().restart();
+        return true;
+    } catch (...) {
+        try {
+            spdlog::warn("[GlobalIOContext] safe_restart caught exception");
+        } catch (...) {
+        }
+        return false;
     }
 }
 
