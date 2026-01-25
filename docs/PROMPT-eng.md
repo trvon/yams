@@ -44,6 +44,13 @@ Attach metadata to every `yams add`.
 yams search "$TASK$" --limit 20
 yams search "$TASK$" --fuzzy --similarity 0.7  # If exact yields nothing
 
+# Metadata-only search (force metadata path)
+yams search "pbi=$PBI" --type keyword --limit 20
+yams search "task=$TASK" --type keyword --limit 20
+
+# Tag filter uses metadata keys: tag:<name>
+yams search "plan" --type keyword --tags plan --limit 20
+
 # For code patterns, use grep first
 yams grep "<pattern>" --ext cpp
 ```
@@ -54,15 +61,6 @@ yams add . --recursive \
   --include "*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
   --label "Working on: $TASK$" \
   --metadata "pbi=$PBI,task=$TASK,phase=start,owner=codex,source=code"
-```
-
-### 2b) Watch During Active Work (Recommended)
-Use `yams watch` while actively editing to keep the index fresh. Still take explicit checkpoint
-adds for milestone tracking.
-
-```bash
-yams watch                     # Auto-index file changes in this repo
-yams watch --stop              # Stop watching
 ```
 
 ### 3) Checkpoint Progress
@@ -165,7 +163,7 @@ yams search "authentication middleware" --cwd .  # Only if grep is empty
 
 ```bash
 yams status
-yams watch                     # Optional for continuous indexing
+yams watch
 
 yams add . --recursive \
   --include "*.c,*.cc,*.cpp,*.cxx,*.h,*.hpp,*.rs,*.go,*.py,*.ts,*.js" \

@@ -1,36 +1,39 @@
 ---
-description: YAMS-first coding agent with persistent memory and PBI tracking
-argument-hint: TASK=<description>
+description: YAMS-first agent with persistent memory and PBI tracking
+argument-hint: [TASK=<description>] [PBI=<pbi-id>] [PHASE=<start|checkpoint|complete>]
 ---
 
-# YAMS Agent Protocol (agent.md)
+# YAMS Agent Workflow
 
 **You are Codex using YAMS as the single source of truth for memory, code index, and PBI tracking.**
 
 ## Core Principles
 
-1. **Search before acting** - Query YAMS for prior work and related context.
-2. **Store what matters** - Index code, notes, and decisions as you go.
-3. **PBI tracking lives in metadata** - Use structured metadata on every add.
+1. **Search before acting** - YAMS likely has relevant context.
+2. **Store as you learn** - Index code, notes, and decisions as you go.
+3. **PBI tracking lives in metadata** - Always include `pbi`, `task`, `phase`.
 4. **Snapshots are automatic** - Every `yams add` creates a snapshot.
 5. **No Beads** - Do not use `bd` or Beads workflows.
+
+### Debugging
+
+```bash
+yams status       # Check daemon status
+yams daemon log   # View daemon logs
+yams doctor       # Check health
+```
 
 ---
 
 ## Required Metadata (PBI Tracking)
 
-Attach metadata to every `yams add` so work is traceable without Beads.
+Attach metadata to every `yams add`.
 
-**Minimum keys**
 - `pbi` - PBI identifier (e.g., `PBI-043`)
 - `task` - short task slug (e.g., `list-json-refresh`)
 - `phase` - `start` | `checkpoint` | `complete`
-- `owner` - agent or author (e.g., `codex`)
-
-**Optional keys**
-- `intent` - why the content was stored
+- `owner` - agent or author
 - `source` - `code` | `note` | `decision` | `research`
-- `refs` - related files or URLs
 
 ---
 
@@ -38,115 +41,148 @@ Attach metadata to every `yams add` so work is traceable without Beads.
 
 ### 1) Search Existing Knowledge
 ```bash
-# Always search first
 yams search "$TASK$" --limit 20
 yams search "$TASK$" --fuzzy --similarity 0.7  # If exact yields nothing
 
-# If you know a file or symbol, use grep first
+# Metadata-only search (force metadata path)
+yams search "pbi=$PBI" --type keyword --limit 20
+yams search "task=$TASK" --type keyword --limit 20
+
+# Tag filter uses metadata keys: tag:<name>
+yams search "plan" --type keyword --tags plan --limit 20
+
+# For code patterns, use grep first
 yams grep "<pattern>" --ext cpp
 ```
 
-### 2) Index Working Files (Start)
+### 2) Start Work (Index a Baseline)
 ```bash
 yams add . --recursive \
-  --include="*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
+  --include "*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
   --label "Working on: $TASK$" \
   --metadata "pbi=$PBI,task=$TASK,phase=start,owner=codex,source=code"
 ```
 
-### 3) Store Solutions, Decisions, and Notes
+### 3) Checkpoint Progress
 ```bash
-echo "## Problem: $TASK$
-## Solution:
-$1
-## Key Pattern:
-$2
-## Files Modified:
-$(git diff --name-only)
+yams add <changed-files> \
+  --label "$TASK$: checkpoint" \
+  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=code"
+
+echo "## Progress: $TASK$
+### Summary
+$SUMMARY
 " | yams add - \
-  --name "solution-$(date +%Y%m%d-%H%M%S).md" \
-  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=note,intent=solution"
+  --name "checkpoint-$(date +%Y%m%d-%H%M%S).md" \
+  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=note"
 ```
 
-### 4) Track Changes (Complete)
+### 4) Complete Work
 ```bash
 yams add . --recursive \
-  --include="*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
+  --include "*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
   --label "Completed: $TASK$" \
   --metadata "pbi=$PBI,task=$TASK,phase=complete,owner=codex,source=code"
 
-# Compare snapshots
 yams list --snapshots --limit 2
 yams diff <snapshotA> <snapshotB>
 ```
 
 ---
 
-## PBI Tracking (YAMS Only)
+## Knowledge Storage
 
-### Index files with PBI metadata
+### Store Research
 ```bash
-yams add src/ -r \
-  --metadata "pbi=PBI-043,task=list-json-refresh,phase=checkpoint,owner=codex,source=code"
+curl -s "$DOCS_URL" | yams add - \
+  --name "$PACKAGE-guide.md" \
+  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=research,url=$DOCS_URL"
 ```
 
-### Find work by PBI
+### Store Solutions
 ```bash
-yams list --format json --show-metadata \
-  | jq '.documents[] | select(.metadata.pbi=="PBI-043")'
+echo "## Solution: $PROBLEM_DESCRIPTION
+
+### Context
+$WHAT_WE_WERE_TRYING_TO_DO
+
+### Problem
+$WHAT_WENT_WRONG
+
+### Solution
+$HOW_WE_FIXED_IT
+
+### Code
+\`\`\`
+$SOLUTION_CODE
+\`\`\`
+" | yams add - \
+  --name "solution-$(date +%Y%m%d)-$SLUG.md" \
+  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=note,intent=solution"
 ```
 
-### Find work by task
+### Store Decisions
 ```bash
-yams list --format json --show-metadata \
-  | jq '.documents[] | select(.metadata.task=="list-json-refresh")'
-```
+echo "## Decision: $TITLE
 
-### Task tracking table
-```bash
-# Default list output includes task metadata columns
-yams list --limit 10
+### Date
+$(date -Iseconds)
 
-# Customize metadata columns
-yams list --metadata-fields task,pbi,phase,owner,source
+### Context
+$WHY_DECISION_NEEDED
+
+### Options Considered
+1. $OPTION_1 - Pros: ... Cons: ...
+2. $OPTION_2 - Pros: ... Cons: ...
+
+### Decision
+$WHAT_WE_CHOSE
+
+### Rationale
+$WHY
+" | yams add - \
+  --name "decision-$SLUG.md" \
+  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=decision"
 ```
 
 ---
 
-## Essential Commands
+## Code Search (YAMS First)
 
-### Search & Retrieve
+**ALWAYS use `yams grep` first for code pattern search.**
+
 ```bash
-yams search "database connection" --limit 10
-yams search "auth" --fuzzy --similarity 0.6
-yams list --recent 20
-yams get --name "solution-20250114.md" -o solution.md
+yams grep "authentication middleware" --cwd .
+yams grep "error.*handling.*retry" --cwd . --fuzzy
+yams search "authentication middleware" --cwd .  # Only if grep is empty
 ```
 
-### Store Knowledge
-```bash
-curl -s "$URL" | yams add - \
-  --name "research-$(date +%s).html" \
-  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=research,url=$URL"
+---
 
-cat important_function.cpp | yams add - \
-  --name "snippet-auth-validation.cpp" \
+## Graph Dead-Code Audit
+
+```bash
+yams status
+yams watch
+
+yams add . --recursive \
+  --include "*.c,*.cc,*.cpp,*.cxx,*.h,*.hpp,*.rs,*.go,*.py,*.ts,*.js" \
+  --exclude "build/**,node_modules/**" \
+  --label "Baseline index: $TASK$" \
   --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=code"
-```
 
-### Version Tracking
-```bash
-yams list --snapshots
-yams diff 2025-01-14T09:00:00.000Z 2025-01-14T14:30:00.000Z
-yams list src/main.cpp
+yams graph --name src/example.cpp --depth 2 --format json
+yams graph --list-type <node-type> --isolated --limit 50
 ```
 
 ---
 
 ## Response Template
+
 ```
 TASK: $TASK$
 PBI: $PBI$
+PHASE: $PHASE$
 
 CONTEXT FOUND:
 - Documents: <count>
@@ -158,7 +194,7 @@ ACTIONS:
 YAMS STORED:
 - Indexed files: <paths>
 - Notes: <file names>
-- Metadata: pbi=$PBI,task=$TASK,phase=<phase>,owner=codex
+- Metadata: pbi=$PBI,task=$TASK,phase=$PHASE,owner=codex
 
 VERIFY:
 - Current snapshot: <snapshot id>
@@ -169,26 +205,25 @@ NEXT: [Next steps]
 
 ---
 
-## Graph Dead-Code Audit (Quick)
-```bash
-yams status
-yams watch
+## Quick Reference (code-accurate)
 
-yams add . --recursive \
-  --include="*.c,*.cc,*.cpp,*.cxx,*.h,*.hpp,*.rs,*.go,*.py,*.ts,*.js" \
-  --exclude="build/**,node_modules/**" \
-  --label "Baseline index: $TASK$" \
-  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=code"
+### YAMS CLI
+For detailed CLI reference, use the `/yams` skill or run `yams --help`.
 
-yams graph --name src/example.cpp --depth 2 --format json
-yams graph --list-type <node-type> --isolated --limit 50
-```
+Key commands for this workflow:
+- `yams grep` - Code pattern search (use first)
+- `yams search` - Semantic/hybrid search
+- `yams add` - Index files (`-r` for recursive, `--include`/`--exclude` for filters)
+- `yams graph` - Explore relationships (`--name`, `--depth`, `--list-type --isolated`)
+- `yams watch` - Auto-index on file changes
+- `yams status` / `yams doctor` - Health checks
 
 ---
 
-## Notes
+## Critical Rules
 
-- YAMS automatically creates snapshots with timestamp IDs on every add operation.
-- Content is deduplicated via SHA-256 hashing.
-- Use metadata for PBI tracking instead of Beads.
-- Prefer `yams grep` for code patterns, `yams search` for semantic queries.
+1. **PBI tracking uses YAMS metadata** - No external task trackers.
+2. **Index ALL code changes in YAMS** - Superior search and graph connections.
+3. **Search YAMS before implementing** - ALWAYS use `yams grep` first for code patterns.
+4. **Avoid tags** - Use labels and metadata instead.
+5. **Store learnings** - Future you will thank present you.

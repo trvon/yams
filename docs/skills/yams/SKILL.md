@@ -127,6 +127,16 @@ yams search "database connection" --limit 5
 yams search "API endpoint" --ext ts
 ```
 
+### search (Metadata-Only)
+
+```bash
+# Force metadata/FTS path for structured metadata
+yams search "pbi=PBI-043" --type keyword --limit 10
+
+# Tag filters (tags are stored as metadata keys: tag:<name>)
+yams search "plan" --type keyword --tags plan --limit 10
+```
+
 ## Agent Storage
 
 ### Store Research
