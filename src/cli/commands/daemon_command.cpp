@@ -383,12 +383,16 @@ private:
     }
 
     bool waitForDaemonStop(const std::string& socketPath, const std::string& pidFilePath,
-                           std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
+                           std::chrono::milliseconds timeout = std::chrono::seconds(5),
+                           pid_t fallbackPid = -1) {
         const auto start = std::chrono::steady_clock::now();
         const auto interval = std::chrono::milliseconds(100);
 
         while (std::chrono::steady_clock::now() - start < timeout) {
             pid_t pid = readPidFromFile(pidFilePath);
+            if (pid <= 0 && fallbackPid > 0) {
+                pid = fallbackPid;
+            }
 
             bool processGone = (pid <= 0) || (kill(pid, 0) != 0);
             bool socketGone = !daemon::DaemonClient::isDaemonRunning(socketPath);
@@ -576,9 +580,11 @@ private:
                 return;
             }
 
+            pid_t pidBeforeStop = readPidFromFile(pidFile_);
             stopDaemon();
 
-            if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5))) {
+            if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5),
+                                   pidBeforeStop)) {
                 std::cerr << "Failed to stop running daemon; not starting a new one.\n";
                 return;
             }
@@ -786,11 +792,14 @@ private:
             }
         };
 
+        // Capture PID early in case the PID file disappears during shutdown
+        pid_t initialPid = readPidFromFile(pidFile_);
+
         // Check if daemon is running
         bool daemonRunning = daemon::DaemonClient::isDaemonRunning(effectiveSocket);
         if (!daemonRunning) {
             // Check if there's a stale PID file
-            pid_t pid = readPidFromFile(pidFile_);
+            pid_t pid = initialPid;
             if (pid > 0 && kill(pid, 0) == 0) {
                 spdlog::warn("Found daemon process (PID {}) not responding on socket", pid);
                 daemonRunning = true;
@@ -805,6 +814,9 @@ private:
         bool stopped = false;
         auto pidAlive = [&]() -> bool {
             pid_t pid = readPidFromFile(pidFile_);
+            if (pid <= 0) {
+                pid = initialPid;
+            }
             return pid > 0 && kill(pid, 0) == 0;
         };
 
@@ -857,6 +869,9 @@ private:
         // If socket shutdown failed, try PID-based termination
         if (!stopped) {
             pid_t pid = readPidFromFile(pidFile_);
+            if (pid <= 0) {
+                pid = initialPid;
+            }
             if (pid > 0) {
                 spdlog::info("Attempting PID-based termination for daemon (PID {})", pid);
 
@@ -2220,9 +2235,10 @@ private:
                            .string();
         }
 
+        pid_t pidBeforeStop = readPidFromFile(pidFile_);
         stopDaemon();
 
-        if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5))) {
+        if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5), pidBeforeStop)) {
             spdlog::error("Failed to stop daemon for restart");
             std::exit(1);
         }

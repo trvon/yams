@@ -217,18 +217,21 @@ public:
         int64_t documentId{-1};
         std::string filePath;
         std::vector<std::string> tags;
+        std::shared_ptr<std::vector<std::byte>> contentBytes;
     };
     struct SymbolExtractionJob {
         std::string hash;
         int64_t documentId{-1};
         std::string filePath;
         std::string language;
+        std::shared_ptr<std::vector<std::byte>> contentBytes;
     };
     struct EntityExtractionJob {
         std::string hash;
         int64_t documentId{-1};
         std::string filePath;
         std::string extension;
+        std::shared_ptr<std::vector<std::byte>> contentBytes;
     };
     // Async GLiNER job for title + NL entity extraction (single call)
     struct TitleExtractionJob {

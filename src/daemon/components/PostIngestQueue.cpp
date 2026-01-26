@@ -731,6 +731,7 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     }
 
     std::unordered_map<std::string, metadata::DocumentInfo> infoMap;
+    std::unordered_map<std::string, std::shared_ptr<std::vector<std::byte>>> contentByHash;
     std::unordered_map<int64_t, std::vector<std::string>> tagsByDocId;
     static const std::vector<std::string> kEmptyTags;
 
@@ -887,18 +888,41 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     std::vector<std::string> embeddingHashes;
     embeddingHashes.reserve(successes.size() + fallbackTasks.size());
 
+    auto getOrLoadContent =
+        [this, &contentByHash](const std::string& hash) -> std::shared_ptr<std::vector<std::byte>> {
+        if (!store_) {
+            return nullptr;
+        }
+        auto it = contentByHash.find(hash);
+        if (it != contentByHash.end()) {
+            return it->second;
+        }
+        auto contentResult = store_->retrieveBytes(hash);
+        if (!contentResult) {
+            return nullptr;
+        }
+        auto bytes = std::make_shared<std::vector<std::byte>>(std::move(contentResult.value()));
+        contentByHash.emplace(hash, bytes);
+        return bytes;
+    };
+
     for (const auto& prepared : successes) {
+        std::shared_ptr<std::vector<std::byte>> contentBytes;
+        if (prepared.shouldDispatchKg || prepared.shouldDispatchSymbol ||
+            prepared.shouldDispatchEntity) {
+            contentBytes = getOrLoadContent(prepared.hash);
+        }
         if (prepared.shouldDispatchKg) {
             dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.fileName,
-                                std::vector<std::string>(prepared.tags));
+                                std::vector<std::string>(prepared.tags), contentBytes);
         }
         if (prepared.shouldDispatchSymbol) {
             dispatchToSymbolChannel(prepared.hash, prepared.documentId, prepared.fileName,
-                                    prepared.symbolLanguage);
+                                    prepared.symbolLanguage, contentBytes);
         }
         if (prepared.shouldDispatchEntity) {
             dispatchToEntityChannel(prepared.hash, prepared.documentId, prepared.fileName,
-                                    prepared.extension);
+                                    prepared.extension, contentBytes);
         }
         if (prepared.shouldDispatchTitle) {
             dispatchToTitleChannel(prepared.hash, prepared.documentId, prepared.titleTextSnippet,
@@ -1139,7 +1163,7 @@ void PostIngestQueue::processMetadataStage(
             if (tagsOverride) {
                 tags = *tagsOverride;
             }
-            dispatchToKgChannel(hash, docId, fileName, std::move(tags));
+            dispatchToKgChannel(hash, docId, fileName, std::move(tags), nullptr);
 
             // Dispatch symbol extraction for code files (if plugin supports this extension)
             {
@@ -1150,14 +1174,14 @@ void PostIngestQueue::processMetadataStage(
                 }
                 auto it = symbolExtensionMap.find(extKey);
                 if (it != symbolExtensionMap.end()) {
-                    dispatchToSymbolChannel(hash, docId, fileName, it->second);
+                    dispatchToSymbolChannel(hash, docId, fileName, it->second, nullptr);
                 }
             }
 
             // Dispatch entity extraction for binary files (if any entity provider supports this
             // extension)
             if (extensionSupportsEntityProviders(entityProviders, extension)) {
-                dispatchToEntityChannel(hash, docId, fileName, extension);
+                dispatchToEntityChannel(hash, docId, fileName, extension, nullptr);
             }
         }
     } catch (const std::exception& e) {
@@ -1277,9 +1301,9 @@ std::string PostIngestQueue::deriveTitle(const std::string& text, const std::str
     return fileName;
 }
 
-void PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, int64_t docId,
-                                                 const std::string& filePath,
-                                                 const std::vector<std::string>& tags) {
+void PostIngestQueue::processKnowledgeGraphStage(
+    const std::string& hash, int64_t docId, const std::string& filePath,
+    const std::vector<std::string>& tags, std::shared_ptr<std::vector<std::byte>> contentBytes) {
     if (!graphComponent_) {
         spdlog::warn("[PostIngestQueue] KG stage skipped for {} - no graphComponent", hash);
         return;
@@ -1290,8 +1314,12 @@ void PostIngestQueue::processKnowledgeGraphStage(const std::string& hash, int64_
     try {
         auto startTime = std::chrono::steady_clock::now();
 
-        GraphComponent::DocumentGraphContext ctx{
-            .documentHash = hash, .filePath = filePath, .tags = tags, .documentDbId = docId};
+        GraphComponent::DocumentGraphContext ctx{.documentHash = hash,
+                                                 .filePath = filePath,
+                                                 .tags = tags,
+                                                 .documentDbId = docId,
+                                                 .contentBytes = std::move(contentBytes),
+                                                 .skipEntityExtraction = true};
 
         auto result = graphComponent_->onDocumentIngested(ctx);
         if (!result) {
@@ -1318,7 +1346,8 @@ void PostIngestQueue::processEmbeddingBatch(const std::vector<std::string>& hash
 
 void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId,
                                           const std::string& filePath,
-                                          std::vector<std::string> tags) {
+                                          std::vector<std::string> tags,
+                                          std::shared_ptr<std::vector<std::byte>> contentBytes) {
     constexpr std::size_t kgChannelCapacity = 16384;
     auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::KgJob>(
         "kg_jobs", kgChannelCapacity);
@@ -1328,6 +1357,7 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     job.documentId = docId;
     job.filePath = filePath;
     job.tags = std::move(tags);
+    job.contentBytes = std::move(contentBytes);
 
     if (!channel->try_push(std::move(job))) {
         spdlog::warn("[PostIngestQueue] KG channel full, dropping job for {}", hash);
@@ -1370,8 +1400,10 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
             kgInFlight_.fetch_add(1);
             boost::asio::post(coordinator_->getExecutor(),
                               [this, hash = std::move(job.hash), docId = job.documentId,
-                               filePath = std::move(job.filePath), tags = std::move(job.tags)]() {
-                                  processKnowledgeGraphStage(hash, docId, filePath, tags);
+                               filePath = std::move(job.filePath), tags = std::move(job.tags),
+                               contentBytes = std::move(job.contentBytes)]() mutable {
+                                  processKnowledgeGraphStage(hash, docId, filePath, tags,
+                                                             std::move(contentBytes));
                                   kgInFlight_.fetch_sub(1);
                                   checkDrainAndSignal();
                               });
@@ -1426,8 +1458,10 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
             boost::asio::post(coordinator_->getExecutor(),
                               [this, hash = std::move(job.hash), docId = job.documentId,
                                filePath = std::move(job.filePath),
-                               language = std::move(job.language)]() {
-                                  processSymbolExtractionStage(hash, docId, filePath, language);
+                               language = std::move(job.language),
+                               contentBytes = std::move(job.contentBytes)]() mutable {
+                                  processSymbolExtractionStage(hash, docId, filePath, language,
+                                                               std::move(contentBytes));
                                   symbolInFlight_.fetch_sub(1);
                                   checkDrainAndSignal();
                               });
@@ -1448,9 +1482,9 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     spdlog::info("[PostIngestQueue] Symbol extraction poller exited");
 }
 
-void PostIngestQueue::dispatchToSymbolChannel(const std::string& hash, int64_t docId,
-                                              const std::string& filePath,
-                                              const std::string& language) {
+void PostIngestQueue::dispatchToSymbolChannel(
+    const std::string& hash, int64_t docId, const std::string& filePath,
+    const std::string& language, std::shared_ptr<std::vector<std::byte>> contentBytes) {
     constexpr std::size_t symbolChannelCapacity = 16384;
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
@@ -1461,6 +1495,7 @@ void PostIngestQueue::dispatchToSymbolChannel(const std::string& hash, int64_t d
     job.documentId = docId;
     job.filePath = filePath;
     job.language = language;
+    job.contentBytes = std::move(contentBytes);
 
     if (!channel->try_push(std::move(job))) {
         spdlog::warn("[PostIngestQueue] Symbol channel full, dropping job for {}", hash);
@@ -1472,10 +1507,9 @@ void PostIngestQueue::dispatchToSymbolChannel(const std::string& hash, int64_t d
     }
 }
 
-void PostIngestQueue::processSymbolExtractionStage(const std::string& hash,
-                                                   [[maybe_unused]] int64_t docId,
-                                                   const std::string& filePath,
-                                                   const std::string& language) {
+void PostIngestQueue::processSymbolExtractionStage(
+    const std::string& hash, [[maybe_unused]] int64_t docId, const std::string& filePath,
+    const std::string& language, std::shared_ptr<std::vector<std::byte>> contentBytes) {
     if (!graphComponent_) {
         spdlog::warn("[PostIngestQueue] Symbol extraction skipped for {} - no graphComponent",
                      hash);
@@ -1494,13 +1528,13 @@ void PostIngestQueue::processSymbolExtractionStage(const std::string& hash,
         extractJob.filePath = filePath;
         extractJob.language = language;
 
-        // Load content from store
-        if (store_) {
+        std::vector<std::byte> bytes;
+        if (contentBytes) {
+            bytes = *contentBytes;
+        } else if (store_) {
             auto contentResult = store_->retrieveBytes(hash);
             if (contentResult) {
-                const auto& bytes = contentResult.value();
-                extractJob.contentUtf8 =
-                    std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+                bytes = std::move(contentResult.value());
             } else {
                 spdlog::warn("[PostIngestQueue] Failed to load content for symbol extraction: {}",
                              hash.substr(0, 12));
@@ -1510,6 +1544,8 @@ void PostIngestQueue::processSymbolExtractionStage(const std::string& hash,
             spdlog::warn("[PostIngestQueue] No content store for symbol extraction");
             return;
         }
+        extractJob.contentUtf8 =
+            std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 
         auto result = graphComponent_->submitEntityExtraction(std::move(extractJob));
         if (!result) {
@@ -1527,9 +1563,9 @@ void PostIngestQueue::processSymbolExtractionStage(const std::string& hash,
     }
 }
 
-void PostIngestQueue::dispatchToEntityChannel(const std::string& hash, int64_t docId,
-                                              const std::string& filePath,
-                                              const std::string& extension) {
+void PostIngestQueue::dispatchToEntityChannel(
+    const std::string& hash, int64_t docId, const std::string& filePath,
+    const std::string& extension, std::shared_ptr<std::vector<std::byte>> contentBytes) {
     constexpr std::size_t entityChannelCapacity = 4096;
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityExtractionJob>(
@@ -1540,6 +1576,7 @@ void PostIngestQueue::dispatchToEntityChannel(const std::string& hash, int64_t d
     job.documentId = docId;
     job.filePath = filePath;
     job.extension = extension;
+    job.contentBytes = std::move(contentBytes);
 
     if (!channel->try_push(std::move(job))) {
         spdlog::warn("[PostIngestQueue] Entity channel full, dropping job for {}", hash);
@@ -1586,8 +1623,10 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
                                                  : coordinator_->getExecutor();
             boost::asio::post(entityExec, [this, hash = std::move(job.hash), docId = job.documentId,
                                            filePath = std::move(job.filePath),
-                                           extension = std::move(job.extension)]() {
-                processEntityExtractionStage(hash, docId, filePath, extension);
+                                           extension = std::move(job.extension),
+                                           contentBytes = std::move(job.contentBytes)]() mutable {
+                processEntityExtractionStage(hash, docId, filePath, extension,
+                                             std::move(contentBytes));
                 entityInFlight_.fetch_sub(1);
                 checkDrainAndSignal();
             });
@@ -1608,9 +1647,9 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
     spdlog::info("[PostIngestQueue] Entity extraction poller exited");
 }
 
-void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int64_t /*docId*/,
-                                                   const std::string& filePath,
-                                                   const std::string& extension) {
+void PostIngestQueue::processEntityExtractionStage(
+    const std::string& hash, int64_t /*docId*/, const std::string& filePath,
+    const std::string& extension, std::shared_ptr<std::vector<std::byte>> contentBytes) {
     spdlog::info("[PostIngestQueue] Entity extraction starting for {} ({}) ext={}", filePath,
                  hash.substr(0, 12), extension);
 
@@ -1636,7 +1675,9 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
 
         // Load content from store
         std::vector<std::byte> content;
-        if (store_) {
+        if (contentBytes) {
+            content = *contentBytes;
+        } else if (store_) {
             auto contentResult = store_->retrieveBytes(hash);
             if (contentResult) {
                 content = std::move(contentResult.value());

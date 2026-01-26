@@ -26,7 +26,9 @@ bool hasPathWildcards(const std::string& path) {
 
 } // namespace
 
-bool matchGlob(const std::string& text, const std::string& pattern) {
+namespace {
+
+bool matchGlobRaw(const std::string& text, const std::string& pattern) {
     const char* s = text.c_str();
     const char* p = pattern.c_str();
     const char* star = nullptr;
@@ -49,6 +51,45 @@ bool matchGlob(const std::string& text, const std::string& pattern) {
     while (*p == '*')
         ++p;
     return *p == '\0';
+}
+
+bool containsDoubleStarDir(std::string_view pattern) {
+    return pattern.find("/**/") != std::string_view::npos ||
+           pattern.find("\\**\\") != std::string_view::npos || pattern.rfind("**/", 0) == 0 ||
+           pattern.rfind("**\\", 0) == 0;
+}
+
+std::string collapseDoubleStarDir(const std::string& pattern) {
+    std::string out = pattern;
+    std::size_t pos = 0;
+    while ((pos = out.find("/**/", pos)) != std::string::npos) {
+        out.replace(pos, 4, "/");
+        pos += 1;
+    }
+    pos = 0;
+    while ((pos = out.find("\\**\\", pos)) != std::string::npos) {
+        out.replace(pos, 4, "\\");
+        pos += 1;
+    }
+    if (out.rfind("**/", 0) == 0) {
+        out.erase(0, 3);
+    } else if (out.rfind("**\\", 0) == 0) {
+        out.erase(0, 3);
+    }
+    return out;
+}
+
+} // namespace
+
+bool matchGlob(const std::string& text, const std::string& pattern) {
+    if (matchGlobRaw(text, pattern))
+        return true;
+    if (containsDoubleStarDir(pattern)) {
+        auto collapsed = collapseDoubleStarDir(pattern);
+        if (collapsed != pattern && matchGlobRaw(text, collapsed))
+            return true;
+    }
+    return false;
 }
 
 // Create a short content snippet with basic cleanup and optional word-boundary preservation.

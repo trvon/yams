@@ -48,6 +48,13 @@ yams search "$TASK$" --fuzzy --similarity 0.7  # If exact yields nothing
 yams search "pbi=$PBI" --type keyword --limit 20
 yams search "task=$TASK" --type keyword --limit 20
 
+# Unique PBI selection (avoid collisions)
+# 1) Check exact PBI
+yams search "pbi=PBI-002" --type keyword --limit 20
+# 2) List all used PBI values with counts
+yams list --metadata-values pbi
+# 3) Choose the next unused PBI-### and continue
+
 # Tag filter uses metadata keys: tag:<name>
 yams search "plan" --type keyword --tags plan --limit 20
 

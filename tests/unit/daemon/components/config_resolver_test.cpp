@@ -321,6 +321,7 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         CHECK(TuneAdvisor::postKgConcurrent() == 0u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 4u);
     }
@@ -335,6 +336,7 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         CHECK(TuneAdvisor::postKgConcurrent() == 0u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 8u);
     }
@@ -349,6 +351,7 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         CHECK(TuneAdvisor::postKgConcurrent() == 1u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 12u);
     }

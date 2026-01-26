@@ -167,6 +167,9 @@ public:
     bool isBusy() const;
 
 private:
+    Result<EntityResult> extractEntitiesWithBase64(const std::string& base64,
+                                                   const std::string& filePath, size_t offset,
+                                                   size_t limit);
     ExternalPluginHost* host_;
     std::string pluginName_;
     std::string rpcMethod_;

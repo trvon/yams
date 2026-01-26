@@ -23,15 +23,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unique PBI selection guidance in AGENTS workflow (metadata search + list values).
 
 ### Fixed
+- Post-ingest tuning reconciles per-stage concurrency targets to the overall budget.
 - Post-ingest stage throttling now respects pause states and stage availability when computing TuneAdvisor budgets.
 - Post-ingest pollers back off when a stage is paused or has a zero concurrency cap to avoid runaway CPU.
 - Added a post-ingest stage snapshot log (active/paused/limits) at startup for easier tuning verification.
 - Grep integration tests create the ingest directory before daemon startup to avoid missing queue paths.
+- Post-ingest jobs reuse content bytes for KG/symbol/entity stages to avoid repeated content loads.
+- Post-ingest KG stage no longer triggers duplicate symbol extraction when the symbol pipeline is active.
+- External entity extraction reuses a single base64 payload per document across batches.
+- CLI snippet formatting is now shared between search and grep for consistent output.
+- `yams list` now uses the shared snippet formatter for previews.
+- `yams grep` honors `--ext` filters, accepts `--cwd` with an optional path, and treats `**/*` patterns as matching direct children.
 
 ### Documentation
 - Updated YAMS skill guide with unique PBI discovery and tagged search examples.
 
-## [v0.8.0] - Unreleased
+## [v0.8.0] - January 24, 2026
 
 ### Breaking
 - **Vector database migration required**: sqlite-vec-cpp HNSW rewrite invalidates existing vector indices. After upgrading, run:

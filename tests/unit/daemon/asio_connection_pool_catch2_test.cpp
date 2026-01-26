@@ -284,6 +284,66 @@ TEST_CASE("AsioConnectionPool handles EOF during read", "[daemon][connection-poo
     AsioConnectionPool::shutdown_all(100ms);
 }
 
+TEST_CASE("AsioConnectionPool handles read timeout", "[daemon][connection-pool][unit]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    auto runtimeDir = makeTempRuntimeDir("read-timeout-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    boost::asio::io_context server_io;
+    boost::asio::local::stream_protocol::acceptor acceptor(
+        server_io, boost::asio::local::stream_protocol::endpoint(socketPath.string()));
+
+    std::atomic<bool> stop{false};
+    std::promise<void> connected;
+
+    std::thread server_thread([&] {
+        boost::system::error_code bec;
+        boost::asio::local::stream_protocol::socket sock(server_io);
+        acceptor.accept(sock);
+        connected.set_value();
+        while (!stop.load()) {
+            std::this_thread::sleep_for(10ms);
+        }
+        sock.close(bec);
+    });
+
+    TransportOptions opts;
+    opts.socketPath = socketPath;
+    opts.requestTimeout = 50ms;
+    opts.headerTimeout = 50ms;
+    opts.bodyTimeout = 50ms;
+    opts.poolEnabled = true;
+
+    auto pool = AsioConnectionPool::get_or_create(opts);
+    auto fut = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                     boost::asio::use_future);
+    REQUIRE(fut.wait_for(1s) == std::future_status::ready);
+    auto conn = fut.get();
+    REQUIRE(conn);
+    REQUIRE(connected.get_future().wait_for(1s) == std::future_status::ready);
+
+    auto readLoopFut =
+        boost::asio::co_spawn(GlobalIOContext::global_executor(),
+                              pool->ensure_read_loop_started(conn), boost::asio::use_future);
+    REQUIRE(readLoopFut.wait_for(1s) == std::future_status::ready);
+
+    std::this_thread::sleep_for(200ms);
+    CHECK_FALSE(conn->alive.load());
+
+    pool->release(conn);
+    stop.store(true);
+    boost::system::error_code bec;
+    acceptor.close(bec);
+    server_thread.join();
+    fs::remove(socketPath, ec);
+    AsioConnectionPool::shutdown_all(100ms);
+}
+
 TEST_CASE("Non-shared pool connection stays alive via pool_keepalive",
           "[daemon][connection-pool][unit]") {
 #ifdef _WIN32

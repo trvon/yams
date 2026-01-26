@@ -115,6 +115,8 @@ private:
     std::vector<std::string> sessionPatterns_;
     bool jsonOutput_ = false;
     bool scopeToCwd_{false};
+    std::string cwdOverride_;
+    std::string extension_;
 
     bool shouldShowSpinner() const {
         bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
@@ -222,8 +224,13 @@ public:
         cmd->add_option("--session", sessionOverride_, "Use this session for scoping");
         cmd->add_flag("--no-session", noSession_, "Bypass session scoping");
         cmd->add_flag("--json", jsonOutput_, "Output results as JSON");
-        cmd->add_flag("--cwd,--here", scopeToCwd_,
+        cmd->add_option("--cwd", cwdOverride_,
+                        "Scope grep to a directory (default: current working directory)")
+            ->expected(0, 1);
+        cmd->add_flag("--here", scopeToCwd_,
                       "Scope grep to current working directory (adds CWD as path prefix filter)");
+        cmd->add_option("--ext,--extension", extension_,
+                        "Filter by file extension (e.g., .cpp or cpp)");
 
         cmd->callback([this, cmd]() {
             auto extras = cmd->remaining();
@@ -256,6 +263,9 @@ public:
                         "--include=\"docs/**/*.md\"");
                 }
             }
+
+            if (cmd->count("--cwd") > 0 && cwdOverride_.empty())
+                scopeToCwd_ = true;
 
             // Auto-detect literal strings to enable FTS fast path unless user specified regex
             if (!literalText_ && !regexOnly_) {
@@ -339,9 +349,18 @@ public:
             // Attempt daemon-first grep with complete protocol mapping
             {
                 std::vector<std::string> cwdPatterns;
-                if (scopeToCwd_) {
+                if (scopeToCwd_ || !cwdOverride_.empty()) {
                     std::error_code ec;
                     auto cwd = std::filesystem::current_path(ec);
+                    if (!cwdOverride_.empty()) {
+                        std::filesystem::path base{cwdOverride_};
+                        if (!base.is_absolute()) {
+                            base = cwd / base;
+                        }
+                        cwd = std::filesystem::weakly_canonical(base, ec);
+                        if (ec)
+                            cwd = base;
+                    }
                     if (!ec) {
                         std::string cwdPrefix = cwd.string();
                         std::replace(cwdPrefix.begin(), cwdPrefix.end(), '\\', '/');
@@ -400,6 +419,12 @@ public:
 
                 // Map all CLI options to daemon protocol
                 dreq.includePatterns = parseCommaSeparated(includePatterns_);
+                if (!extension_.empty()) {
+                    std::string ext = extension_;
+                    if (ext.front() != '.')
+                        ext.insert(ext.begin(), '.');
+                    dreq.includePatterns.push_back(std::string("**/*") + ext);
+                }
                 // Merge session patterns as include filters (not paths!)
                 if (!sessionPatterns_.empty()) {
                     dreq.includePatterns.insert(dreq.includePatterns.end(),
@@ -832,79 +857,9 @@ private:
         }
     }
 
-    struct SnippetAssessment {
-        double printableRatio{0.0};
-        double whitespaceRatio{0.0};
-        std::string sanitized;
-    };
-
-    SnippetAssessment assessSnippet(std::string_view snippet) const {
-        SnippetAssessment assessment;
-        if (snippet.empty()) {
-            return assessment;
-        }
-        std::string cleaned;
-        cleaned.reserve(snippet.size());
-        size_t printable = 0;
-        size_t whitespace = 0;
-        for (unsigned char c : snippet) {
-            if (c == '\n' || c == '\r' || c == '\t') {
-                whitespace++;
-                cleaned.push_back(' ');
-                continue;
-            }
-            if (c >= 0x20 && c < 0x7F) {
-                printable++;
-                if (std::isspace(c)) {
-                    whitespace++;
-                    if (!cleaned.empty() && cleaned.back() == ' ') {
-                        continue;
-                    }
-                    cleaned.push_back(' ');
-                } else {
-                    cleaned.push_back(static_cast<char>(c));
-                }
-            }
-        }
-        const double total = static_cast<double>(snippet.size());
-        assessment.printableRatio = printable / total;
-        assessment.whitespaceRatio = whitespace / total;
-        assessment.sanitized = std::move(cleaned);
-        return assessment;
-    }
-
-    std::string truncateSnippet(std::string_view snippet, size_t maxLength) const {
-        std::string cleaned;
-        cleaned.reserve(snippet.size());
-        bool lastWasSpace = false;
-        for (unsigned char c : snippet) {
-            if (c == ' ' || c == '\t') {
-                if (!lastWasSpace) {
-                    cleaned.push_back(' ');
-                    lastWasSpace = true;
-                }
-                continue;
-            }
-            cleaned.push_back(static_cast<char>(c));
-            lastWasSpace = false;
-        }
-
-        if (cleaned.size() <= maxLength) {
-            return cleaned;
-        }
-
-        size_t lastSpace = cleaned.rfind(' ', maxLength);
-        if (lastSpace != std::string::npos && lastSpace > maxLength * 0.7) {
-            return cleaned.substr(0, lastSpace) + "...";
-        }
-
-        return cleaned.substr(0, maxLength - 3) + "...";
-    }
-
     std::string formatSnippet(std::string_view snippet) const {
-        auto assessment = assessSnippet(snippet);
-        if (!assessment.sanitized.empty() && assessment.printableRatio >= 0.65) {
-            return truncateSnippet(assessment.sanitized, 240);
+        if (auto formatted = yams::cli::ui::format_text_snippet(snippet, 240)) {
+            return *formatted;
         }
         return "[binary] no text preview";
     }
@@ -1019,9 +974,24 @@ private:
             auto expanded = splitPatterns({includePatterns_});
             queryPatterns.insert(queryPatterns.end(), expanded.begin(), expanded.end());
         }
-        if (scopeToCwd_) {
+        if (!extension_.empty()) {
+            std::string ext = extension_;
+            if (ext.front() != '.')
+                ext.insert(ext.begin(), '.');
+            queryPatterns.push_back(std::string("**/*") + ext);
+        }
+        if (scopeToCwd_ || !cwdOverride_.empty()) {
             std::error_code ec;
             auto cwd = std::filesystem::current_path(ec);
+            if (!cwdOverride_.empty()) {
+                std::filesystem::path base{cwdOverride_};
+                if (!base.is_absolute()) {
+                    base = cwd / base;
+                }
+                cwd = std::filesystem::weakly_canonical(base, ec);
+                if (ec)
+                    cwd = base;
+            }
             if (!ec) {
                 std::string cwdPrefix = cwd.string();
                 std::replace(cwdPrefix.begin(), cwdPrefix.end(), '\\', '/');

@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
@@ -75,6 +76,7 @@ private:
     std::atomic<std::size_t> failed_{0};
     std::atomic<std::size_t> inFlight_{0}; // PBI-05b: parallel job tracking
     std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedChannel_;
+    std::vector<InternalEventBus::EmbedJob> pendingJobs_;
 };
 
 } // namespace daemon

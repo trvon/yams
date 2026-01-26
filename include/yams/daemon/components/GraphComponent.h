@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -51,6 +52,8 @@ public:
         std::optional<std::string> rootTreeHash;
         std::vector<std::string> tags;
         int64_t documentDbId;
+        std::shared_ptr<std::vector<std::byte>> contentBytes;
+        bool skipEntityExtraction{false};
     };
     Result<void> onDocumentIngested(const DocumentGraphContext& ctx);
 

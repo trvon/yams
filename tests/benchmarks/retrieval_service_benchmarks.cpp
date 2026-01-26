@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -34,6 +35,75 @@ std::unique_ptr<daemon::DaemonClient> g_client;
 std::vector<std::string> g_test_docs;      // Hashes of test documents
 std::vector<std::string> g_test_doc_names; // Names used for by-name retrieval
 
+bool waitForSearchEngineReady(std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
+        if (status) {
+            auto it = status.value().readinessStates.find("search_engine");
+            if (it != status.value().readinessStates.end() && it->second) {
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    return false;
+}
+
+bool waitForEmbeddingDrain(std::size_t minDocCount, std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    uint64_t lastVectorCount = 0;
+    int stableCount = 0;
+    constexpr int stableRequired = 10;
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
+        if (!status) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+
+        const auto& st = status.value();
+        uint64_t vectorCount = 0;
+        uint64_t embedQueued = 0;
+        uint64_t embedInFlight = 0;
+        uint64_t postQueued = 0;
+        uint64_t postInFlight = 0;
+
+        if (auto it = st.requestCounts.find("vector_count"); it != st.requestCounts.end()) {
+            vectorCount = it->second;
+        }
+        if (auto it = st.requestCounts.find("embed_svc_queued"); it != st.requestCounts.end()) {
+            embedQueued = it->second;
+        }
+        if (auto it = st.requestCounts.find("embed_in_flight"); it != st.requestCounts.end()) {
+            embedInFlight = it->second;
+        }
+        if (auto it = st.requestCounts.find("post_ingest_queued"); it != st.requestCounts.end()) {
+            postQueued = it->second;
+        }
+        if (auto it = st.requestCounts.find("post_ingest_inflight"); it != st.requestCounts.end()) {
+            postInFlight = it->second;
+        }
+
+        const bool embedDrained = (embedQueued == 0 && embedInFlight == 0);
+        const bool postDrained = (postQueued == 0 && postInFlight == 0);
+        if (vectorCount != lastVectorCount || !embedDrained || !postDrained) {
+            stableCount = 0;
+            lastVectorCount = vectorCount;
+        } else {
+            ++stableCount;
+        }
+
+        if (st.vectorDbReady && embedDrained && postDrained && stableCount >= stableRequired) {
+            return vectorCount > 0 || minDocCount == 0;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    return false;
+}
+
 // Setup: Start daemon and add test documents
 void SetupBenchmarkSuite() {
     if (g_harness)
@@ -54,6 +124,13 @@ void SetupBenchmarkSuite() {
     cc.autoStart = false;
     g_client = std::make_unique<daemon::DaemonClient>(cc);
 
+    const bool embeddingsEnabled = []() {
+        if (const char* env = std::getenv("YAMS_BENCH_ENABLE_EMBEDDINGS")) {
+            return std::string(env) == "1";
+        }
+        return false;
+    }();
+
     // Add test documents (small set for benchmarking)
     std::cout << "Adding test documents...\n";
     for (int i = 0; i < 50; ++i) {
@@ -71,7 +148,7 @@ void SetupBenchmarkSuite() {
         opts.socketPath = g_harness->socketPath().string();
         opts.explicitDataDir = g_harness->dataDir().string();
         opts.path = path.string();
-        opts.noEmbeddings = true; // Skip embeddings for speed
+        opts.noEmbeddings = !embeddingsEnabled;
 
         auto result = docSvc.addViaDaemon(opts);
         if (result) {
@@ -83,9 +160,22 @@ void SetupBenchmarkSuite() {
         }
     }
 
-    // Wait for FTS5 indexing to complete
-    std::cout << "Waiting for indexing to complete...\n";
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    std::cout << "Waiting for search engine readiness...\n";
+    if (!waitForSearchEngineReady(std::chrono::seconds(60))) {
+        std::cerr << "WARNING: Search engine not ready after 60s.\n";
+    }
+
+    if (embeddingsEnabled) {
+        std::cout << "Waiting for embedding queue to drain...\n";
+        auto timeout = std::chrono::milliseconds(600000);
+        if (const char* env = std::getenv("YAMS_BENCH_EMBED_WAIT_MS")) {
+            timeout = std::chrono::milliseconds(
+                static_cast<std::chrono::milliseconds::rep>(std::stoll(env)));
+        }
+        if (!waitForEmbeddingDrain(g_test_docs.size(), timeout)) {
+            std::cerr << "WARNING: Embedding drain timeout; proceeding anyway.\n";
+        }
+    }
 
     std::cout << "Setup complete: " << g_test_docs.size() << " documents added\n\n";
 }

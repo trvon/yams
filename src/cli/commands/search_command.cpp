@@ -20,8 +20,8 @@
 #include <yams/cli/session_store.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
-#include <yams/config/config_helpers.h>
 #include <yams/common/utf8_utils.h>
+#include <yams/config/config_helpers.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
 #include <yams/search/search_engine_builder.h>
@@ -259,8 +259,8 @@ private:
                 if (showHash_ && !item.hash.empty())
                     doc["hash"] = item.hash;
                 doc["score"] = item.score;
-                if (!item.snippet.empty())
-                    doc["snippet"] = formatSnippet(item, 200);
+                if (auto snippet = buildSnippet(item, 200))
+                    doc["snippet"] = *snippet;
 
                 if (verbose_ && (item.vectorScore || item.keywordScore || item.kgEntityScore ||
                                  item.structuralScore)) {
@@ -315,9 +315,8 @@ private:
                 std::cout << "\n";
 
                 // Snippet with line-number-style prefix
-                if (!item.snippet.empty()) {
-                    std::string snippet = formatSnippet(item, 200);
-                    std::cout << ui::colorize("  1:", ui::Ansi::DIM) << " " << snippet << "\n";
+                if (auto snippet = buildSnippet(item, 200)) {
+                    std::cout << ui::colorize("  1:", ui::Ansi::DIM) << " " << *snippet << "\n";
                 }
                 std::cout << "\n";
             }
@@ -358,8 +357,8 @@ private:
                     bestJ["score"] = best.score;
                     if (showHash_ && !best.hash.empty())
                         bestJ["hash"] = best.hash;
-                    if (!best.snippet.empty())
-                        bestJ["snippet"] = truncateSnippet(best.snippet, 200);
+                    if (auto snippet = buildSnippet(best, 200))
+                        bestJ["snippet"] = *snippet;
                     g["best"] = bestJ;
                     nlohmann::json vers = nlohmann::json::array();
                     std::size_t cap = versionsMode_ == "all" ? versionsTopk_ : 1;
@@ -372,8 +371,8 @@ private:
                         vj["score"] = v.score;
                         if (showHash_ && !v.hash.empty())
                             vj["hash"] = v.hash;
-                        if (!v.snippet.empty())
-                            vj["snippet"] = truncateSnippet(v.snippet, 200);
+                        if (auto snippet = buildSnippet(v, 200))
+                            vj["snippet"] = *snippet;
                         vers.push_back(vj);
                     }
                     g["versions"] = vers;
@@ -429,12 +428,11 @@ private:
                         }
 
                         // Snippet with line-number-style prefix
-                        if (!v.snippet.empty()) {
-                            std::string snippet = formatSnippet(v, 200);
+                        if (auto snippet = buildSnippet(v, 200)) {
                             std::string linePrefix = vec.size() > 1
                                                          ? ui::colorize("     1:", ui::Ansi::DIM)
                                                          : ui::colorize("  1:", ui::Ansi::DIM);
-                            std::cout << linePrefix << " " << snippet << "\n";
+                            std::cout << linePrefix << " " << *snippet << "\n";
                         }
 
                         if (showTools_ && !hash8.empty() && i == 0) {
@@ -558,11 +556,9 @@ private:
     }
 
     std::string formatSnippet(const UnifiedItem& item, size_t maxLength) {
-        auto assessment = assessSnippet(item.snippet);
-        std::string candidate = assessment.sanitized.empty() ? item.snippet : assessment.sanitized;
-        bool hasGoodText = !candidate.empty() && assessment.printableRatio >= 0.65;
-        if (hasGoodText) {
-            return truncateSnippet(candidate, maxLength);
+        auto formatted = ui::format_text_snippet(item.snippet, maxLength, 0.65, true);
+        if (formatted) {
+            return *formatted;
         }
 
         std::string label = item.fileType;
@@ -589,6 +585,13 @@ private:
             snippet += " (" + item.mimeType + ")";
         }
         return snippet;
+    }
+
+    std::optional<std::string> buildSnippet(const UnifiedItem& item, size_t maxLength) {
+        if (item.snippet.empty() && item.mimeType.empty() && item.fileType.empty()) {
+            return std::nullopt;
+        }
+        return formatSnippet(item, maxLength);
     }
 
     static std::string trim(const std::string& s) {

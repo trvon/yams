@@ -213,18 +213,24 @@ private:
 
     void processKnowledgeGraphStage(const std::string& hash, int64_t docId,
                                     const std::string& filePath,
-                                    const std::vector<std::string>& tags);
+                                    const std::vector<std::string>& tags,
+                                    std::shared_ptr<std::vector<std::byte>> contentBytes);
     void processSymbolExtractionStage(const std::string& hash, int64_t docId,
-                                      const std::string& filePath, const std::string& language);
+                                      const std::string& filePath, const std::string& language,
+                                      std::shared_ptr<std::vector<std::byte>> contentBytes);
     void processEmbeddingBatch(const std::vector<std::string>& hashes);
     void dispatchToKgChannel(const std::string& hash, int64_t docId, const std::string& filePath,
-                             std::vector<std::string> tags);
+                             std::vector<std::string> tags,
+                             std::shared_ptr<std::vector<std::byte>> contentBytes);
     void dispatchToSymbolChannel(const std::string& hash, int64_t docId,
-                                 const std::string& filePath, const std::string& language);
+                                 const std::string& filePath, const std::string& language,
+                                 std::shared_ptr<std::vector<std::byte>> contentBytes);
     void dispatchToEntityChannel(const std::string& hash, int64_t docId,
-                                 const std::string& filePath, const std::string& extension);
+                                 const std::string& filePath, const std::string& extension,
+                                 std::shared_ptr<std::vector<std::byte>> contentBytes);
     void processEntityExtractionStage(const std::string& hash, int64_t docId,
-                                      const std::string& filePath, const std::string& extension);
+                                      const std::string& filePath, const std::string& extension,
+                                      std::shared_ptr<std::vector<std::byte>> contentBytes);
     void dispatchToTitleChannel(const std::string& hash, int64_t docId,
                                 const std::string& textSnippet, const std::string& fallbackTitle,
                                 const std::string& filePath, const std::string& language,

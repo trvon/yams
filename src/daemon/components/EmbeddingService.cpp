@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <thread>
+#include <unordered_map>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/post.hpp>
@@ -109,31 +110,117 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
 
         // Dynamic concurrency limit from TuneAdvisor (scaled by TuningManager)
         const std::size_t maxConcurrent = TuneAdvisor::postEmbedConcurrent();
+        const std::size_t maxBatchSize = std::max<std::size_t>(1u, TuneAdvisor::getEmbedDocCap());
+        const std::size_t maxPendingJobs = std::max<std::size_t>(maxBatchSize, maxConcurrent * 2);
 
-        // Dispatch jobs up to concurrency limit
-        while (inFlight_.load() < maxConcurrent && embedChannel_ && embedChannel_->try_pop(job)) {
+        // Pull jobs into pending buffer to allow model-based grouping
+        while (embedChannel_ && embedChannel_->try_pop(job)) {
             didWork = true;
-            inFlight_.fetch_add(1);
-            InternalEventBus::instance().incEmbedConsumed();
+            this->pendingJobs_.push_back(std::move(job));
+            if (this->pendingJobs_.size() >= maxPendingJobs) {
+                break;
+            }
+        }
 
-            // Dispatch to work executor for parallel processing
-            boost::asio::post(coordinator_->getExecutor(), [this, job = std::move(job)]() mutable {
-                // Use scope guard to ensure inFlight_ is always decremented, even on exception
-                // This prevents permanent stalls if processEmbedJob throws
-                struct ScopeGuard {
-                    std::atomic<std::size_t>& counter;
-                    ~ScopeGuard() { counter.fetch_sub(1); }
-                } guard{inFlight_};
+        if (inFlight_.load() < maxConcurrent && !this->pendingJobs_.empty()) {
+            std::string defaultModel;
+            if (getPreferredModel_) {
+                defaultModel = getPreferredModel_();
+            }
+            // Group pending jobs by model name to reduce model switching
+            std::unordered_map<std::string, InternalEventBus::EmbedJob> grouped;
+            grouped.reserve(this->pendingJobs_.size());
 
-                try {
-                    processEmbedJob(std::move(job));
-                } catch (const std::exception& e) {
-                    spdlog::error("[EmbeddingService] Uncaught exception in embed job: {}",
-                                  e.what());
-                } catch (...) {
-                    spdlog::error("[EmbeddingService] Unknown exception in embed job");
+            std::vector<InternalEventBus::EmbedJob> deferred;
+            deferred.reserve(this->pendingJobs_.size());
+
+            for (auto& pending : this->pendingJobs_) {
+                if (pending.hashes.empty()) {
+                    continue;
                 }
-            });
+                if (pending.modelName.empty() && !defaultModel.empty()) {
+                    pending.modelName = defaultModel;
+                }
+                auto& bucket = grouped[pending.modelName];
+                if (bucket.hashes.empty()) {
+                    bucket.modelName = pending.modelName;
+                    bucket.skipExisting = pending.skipExisting;
+                }
+                if (bucket.skipExisting != pending.skipExisting) {
+                    deferred.push_back(std::move(pending));
+                    continue;
+                }
+                bucket.hashes.insert(bucket.hashes.end(), pending.hashes.begin(),
+                                     pending.hashes.end());
+            }
+
+            this->pendingJobs_.clear();
+            if (!deferred.empty()) {
+                this->pendingJobs_.insert(this->pendingJobs_.end(),
+                                          std::make_move_iterator(deferred.begin()),
+                                          std::make_move_iterator(deferred.end()));
+            }
+
+            auto dispatchJob = [this](InternalEventBus::EmbedJob&& dispatch) {
+                if (dispatch.hashes.empty()) {
+                    return;
+                }
+                dispatch.batchSize = static_cast<uint32_t>(dispatch.hashes.size());
+                inFlight_.fetch_add(1);
+                InternalEventBus::instance().incEmbedConsumed();
+
+                boost::asio::post(
+                    coordinator_->getExecutor(), [this, job = std::move(dispatch)]() mutable {
+                        struct ScopeGuard {
+                            std::atomic<std::size_t>& counter;
+                            ~ScopeGuard() { counter.fetch_sub(1); }
+                        } guard{inFlight_};
+
+                        try {
+                            processEmbedJob(std::move(job));
+                        } catch (const std::exception& e) {
+                            spdlog::error("[EmbeddingService] Uncaught exception in embed job: {}",
+                                          e.what());
+                        } catch (...) {
+                            spdlog::error("[EmbeddingService] Unknown exception in embed job");
+                        }
+                    });
+            };
+
+            // Dispatch grouped jobs in model-coalesced batches, preferring named models first
+            auto dispatchBuckets = [&](bool preferNamed) {
+                for (auto& [key, bucket] : grouped) {
+                    const bool isNamed = !key.empty();
+                    if (preferNamed != isNamed) {
+                        continue;
+                    }
+                    std::size_t offset = 0;
+                    while (offset < bucket.hashes.size() && inFlight_.load() < maxConcurrent) {
+                        std::size_t take = std::min(maxBatchSize, bucket.hashes.size() - offset);
+                        InternalEventBus::EmbedJob split;
+                        split.modelName = bucket.modelName;
+                        split.skipExisting = bucket.skipExisting;
+                        split.hashes.assign(
+                            bucket.hashes.begin() + static_cast<std::ptrdiff_t>(offset),
+                            bucket.hashes.begin() + static_cast<std::ptrdiff_t>(offset + take));
+                        dispatchJob(std::move(split));
+                        offset += take;
+                    }
+
+                    if (offset < bucket.hashes.size()) {
+                        InternalEventBus::EmbedJob remainder;
+                        remainder.modelName = bucket.modelName;
+                        remainder.skipExisting = bucket.skipExisting;
+                        remainder.hashes.assign(bucket.hashes.begin() +
+                                                    static_cast<std::ptrdiff_t>(offset),
+                                                bucket.hashes.end());
+                        this->pendingJobs_.push_back(std::move(remainder));
+                    }
+                }
+            };
+
+            dispatchBuckets(true);
+            dispatchBuckets(false);
         }
 
         if (didWork) {

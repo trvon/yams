@@ -1112,6 +1112,16 @@ private:
         return std::nullopt;
     }
 
+    std::string formatSnippetForDisplay(std::string_view snippet, size_t maxLength) const {
+        if (snippet.empty()) {
+            return {};
+        }
+        if (auto formatted = ui::format_text_snippet(snippet, maxLength)) {
+            return *formatted;
+        }
+        return "[binary] no text preview";
+    }
+
     void outputTable(const std::vector<EnhancedDocumentInfo>& documents) {
         if (documents.empty()) {
             std::cout << ui::colorize("No documents found.", ui::Ansi::DIM) << "\n";
@@ -1214,9 +1224,9 @@ private:
             cells.push_back(doc.getFileType());
             cells.push_back(doc.getFormattedSize());
             if (snippetIndex != std::numeric_limits<size_t>::max()) {
-                std::string snippetDisplay = doc.contentSnippet;
-                std::replace(snippetDisplay.begin(), snippetDisplay.end(), '\n', ' ');
-                cells.push_back(snippetDisplay);
+                std::string snippetDisplay =
+                    formatSnippetForDisplay(doc.contentSnippet, snippetLength_);
+                cells.push_back(snippetDisplay.empty() ? "-" : snippetDisplay);
             }
             if (tagsIndex != std::numeric_limits<size_t>::max()) {
                 cells.push_back(doc.getTags());
@@ -1246,7 +1256,11 @@ private:
                 std::cout << "    MIME: " << doc.info.mimeType << "\n";
 
                 if (doc.hasContent) {
-                    std::cout << "    Content: " << doc.contentSnippet << "\n";
+                    std::string snippetDisplay =
+                        formatSnippetForDisplay(doc.contentSnippet, snippetLength_);
+                    if (!snippetDisplay.empty()) {
+                        std::cout << "    Content: " << snippetDisplay << "\n";
+                    }
                     if (!doc.language.empty()) {
                         std::cout << "    Language: " << doc.language << "\n";
                     }

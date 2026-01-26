@@ -31,6 +31,18 @@ DaemonClient createClient(const fs::path& socketPath) {
     config.autoStart = false;
     return DaemonClient(config);
 }
+
+bool connectWithRetry(DaemonClient& client, int maxRetries = 3,
+                      std::chrono::milliseconds retryDelay = 200ms) {
+    for (int attempt = 0; attempt < maxRetries; ++attempt) {
+        auto result = yams::cli::run_sync(client.connect(), 5s);
+        if (result.has_value()) {
+            return true;
+        }
+        std::this_thread::sleep_for(retryDelay);
+    }
+    return false;
+}
 } // namespace
 
 TEST_CASE("Client timeout recovery: Immediate EOF detection and retry",
@@ -217,6 +229,87 @@ TEST_CASE("Client timeout recovery: Error message quality",
             msg.find("EOF") != std::string::npos || msg.find("End of file") != std::string::npos ||
             msg.find("socket") != std::string::npos || msg.find("connect") != std::string::npos;
 
+        REQUIRE(hasContext);
+    }
+}
+
+TEST_CASE("Client timeout recovery: Connection refused when daemon down",
+          "[daemon][timeout][connection-refused][integration]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+    DaemonHarness harness;
+    REQUIRE(harness.start(5s));
+
+    auto client = createClient(harness.socketPath());
+    REQUIRE(connectWithRetry(client));
+
+    ListRequest req1;
+    req1.limit = 1;
+    auto result1 = yams::cli::run_sync(client.list(req1), 2s);
+    REQUIRE(result1.has_value());
+
+    std::this_thread::sleep_for(200ms);
+    harness.stop();
+
+    ListRequest req2;
+    req2.limit = 1;
+    auto result2 = yams::cli::run_sync(client.list(req2), 2s);
+    REQUIRE_FALSE(result2.has_value());
+
+    const auto& msg = result2.error().message;
+    bool hasContext =
+        msg.find("Connection") != std::string::npos || msg.find("refused") != std::string::npos ||
+        msg.find("daemon") != std::string::npos || msg.find("socket") != std::string::npos ||
+        msg.find("EOF") != std::string::npos || msg.find("End of file") != std::string::npos ||
+        msg.find("closed") != std::string::npos;
+    REQUIRE(hasContext);
+}
+
+TEST_CASE("Client timeout recovery: Shutdown cancels in-flight request",
+          "[daemon][timeout][shutdown][integration]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+    DaemonHarness harness;
+    REQUIRE(harness.start(5s));
+
+    ClientConfig config;
+    config.socketPath = harness.socketPath();
+    config.requestTimeout = 10s;
+    config.headerTimeout = 10s;
+    config.bodyTimeout = 10s;
+    config.autoStart = false;
+    config.maxInflight = 1;
+    DaemonClient client(config);
+    REQUIRE(connectWithRetry(client));
+
+    std::atomic<bool> done{false};
+    std::optional<yams::Error> requestError;
+    std::thread requestThread([&]() {
+        AddDocumentRequest req;
+        req.name = "shutdown_inflight.txt";
+        req.content = std::string(2 * 1024 * 1024, 'x');
+        auto result = yams::cli::run_sync(client.streamingAddDocument(req), 10s);
+        if (!result.has_value()) {
+            requestError = result.error();
+        }
+        done.store(true);
+    });
+
+    std::this_thread::sleep_for(50ms);
+    harness.stop();
+
+    auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(10ms);
+    }
+    requestThread.join();
+
+    REQUIRE(done.load());
+    if (requestError.has_value()) {
+        const auto& msg = requestError->message;
+        bool hasContext = msg.find("cancel") != std::string::npos ||
+                          msg.find("Connection") != std::string::npos ||
+                          msg.find("closed") != std::string::npos ||
+                          msg.find("timeout") != std::string::npos ||
+                          msg.find("daemon") != std::string::npos;
         REQUIRE(hasContext);
     }
 }

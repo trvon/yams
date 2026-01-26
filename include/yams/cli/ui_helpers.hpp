@@ -20,6 +20,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -168,6 +169,113 @@ inline std::string colorize(std::string_view s, const char* code) {
     out.append(s.data(), s.size());
     out.append(Ansi::RESET);
     return out;
+}
+
+struct SnippetAssessment {
+    double printableRatio{0.0};
+    double whitespaceRatio{0.0};
+    std::string sanitized;
+};
+
+inline SnippetAssessment assess_snippet(std::string_view snippet) {
+    SnippetAssessment assessment;
+    if (snippet.empty()) {
+        return assessment;
+    }
+    std::string cleaned;
+    cleaned.reserve(snippet.size());
+    size_t printable = 0;
+    size_t whitespace = 0;
+    for (unsigned char c : snippet) {
+        if (c == '\n' || c == '\r' || c == '\t') {
+            whitespace++;
+            if (!cleaned.empty() && cleaned.back() == ' ')
+                continue;
+            cleaned.push_back(' ');
+            continue;
+        }
+        if (c >= 0x20 && c < 0x7F) {
+            printable++;
+            if (std::isspace(c)) {
+                whitespace++;
+                if (!cleaned.empty() && cleaned.back() == ' ')
+                    continue;
+                cleaned.push_back(' ');
+            } else {
+                cleaned.push_back(static_cast<char>(c));
+            }
+        }
+    }
+    const double total = static_cast<double>(snippet.size());
+    assessment.printableRatio = total > 0.0 ? (printable / total) : 0.0;
+    assessment.whitespaceRatio = total > 0.0 ? (whitespace / total) : 0.0;
+    assessment.sanitized = std::move(cleaned);
+    return assessment;
+}
+
+inline std::string strip_html_tags(std::string_view snippet) {
+    std::string cleaned;
+    cleaned.reserve(snippet.size());
+    bool inTag = false;
+    for (char c : snippet) {
+        if (c == '<') {
+            inTag = true;
+            continue;
+        }
+        if (c == '>') {
+            inTag = false;
+            continue;
+        }
+        if (!inTag) {
+            cleaned.push_back(c);
+        }
+    }
+    return cleaned;
+}
+
+inline std::string truncate_snippet(std::string_view snippet, size_t maxLength) {
+    std::string cleaned;
+    cleaned.reserve(snippet.size());
+    bool lastWasSpace = false;
+    for (unsigned char c : snippet) {
+        if (c == ' ' || c == '\t') {
+            if (!lastWasSpace) {
+                cleaned.push_back(' ');
+                lastWasSpace = true;
+            }
+            continue;
+        }
+        cleaned.push_back(static_cast<char>(c));
+        lastWasSpace = false;
+    }
+
+    if (cleaned.size() <= maxLength) {
+        return cleaned;
+    }
+
+    size_t lastSpace = cleaned.rfind(' ', maxLength);
+    if (lastSpace != std::string::npos && lastSpace > maxLength * 0.7) {
+        return cleaned.substr(0, lastSpace) + "...";
+    }
+
+    return cleaned.substr(0, maxLength - 3) + "...";
+}
+
+inline std::optional<std::string> format_text_snippet(std::string_view snippet, size_t maxLength,
+                                                      double minPrintableRatio = 0.65,
+                                                      bool stripHtml = false) {
+    auto assessment = assess_snippet(snippet);
+    if (assessment.sanitized.empty() || assessment.printableRatio < minPrintableRatio) {
+        return std::nullopt;
+    }
+    std::string candidate = assessment.sanitized;
+    if (stripHtml) {
+        candidate = strip_html_tags(candidate);
+    }
+    if (candidate.empty()) {
+        return std::nullopt;
+    }
+    return truncate_snippet(candidate, maxLength);
 }
 
 // Repeat character 'ch' n times

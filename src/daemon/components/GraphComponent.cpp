@@ -79,9 +79,9 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
         return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
     }
 
-    // Skip if no entity service available
-    if (!entityService_) {
-        spdlog::debug("[GraphComponent] No entity service, skipping extraction for {}",
+    // Skip entity extraction if requested or if no entity service available
+    if (ctx.skipEntityExtraction || !entityService_) {
+        spdlog::debug("[GraphComponent] Entity extraction skipped for {}",
                       ctx.documentHash.substr(0, 12));
         return Result<void>();
     }
@@ -159,16 +159,21 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
         return Result<void>();
     }
 
-    // Load document content
-    auto contentResult = contentStore->retrieveBytes(ctx.documentHash);
-    if (!contentResult) {
-        spdlog::warn("[GraphComponent] Failed to load content for {}: {}",
-                     ctx.documentHash.substr(0, 12), contentResult.error().message);
-        return Result<void>(); // Non-fatal, continue
+    std::vector<std::byte> bytes;
+    if (ctx.contentBytes) {
+        bytes = *ctx.contentBytes;
+    } else {
+        // Load document content
+        auto contentResult = contentStore->retrieveBytes(ctx.documentHash);
+        if (!contentResult) {
+            spdlog::warn("[GraphComponent] Failed to load content for {}: {}",
+                         ctx.documentHash.substr(0, 12), contentResult.error().message);
+            return Result<void>(); // Non-fatal, continue
+        }
+        bytes = std::move(contentResult.value());
     }
 
     // Convert bytes to UTF-8 string
-    const auto& bytes = contentResult.value();
     std::string contentUtf8(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 
     // Submit for entity extraction

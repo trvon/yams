@@ -20,6 +20,31 @@ constexpr size_t BATCH_SIZE_MEDIUM = 200; // 5-20MB: careful
 constexpr size_t BATCH_SIZE_LARGE = 100;  // 20-50MB: slow
 constexpr size_t BATCH_SIZE_HUGE = 50;    // > 50MB: very slow
 
+std::string encodeBase64(const std::vector<std::byte>& bytes) {
+    static constexpr char kBase64Chars[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string base64;
+    base64.reserve(((bytes.size() + 2) / 3) * 4);
+
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(bytes.data());
+    size_t len = bytes.size();
+
+    for (size_t i = 0; i < len; i += 3) {
+        uint32_t n = static_cast<uint32_t>(data[i]) << 16;
+        if (i + 1 < len)
+            n |= static_cast<uint32_t>(data[i + 1]) << 8;
+        if (i + 2 < len)
+            n |= static_cast<uint32_t>(data[i + 2]);
+
+        base64 += kBase64Chars[(n >> 18) & 0x3F];
+        base64 += kBase64Chars[(n >> 12) & 0x3F];
+        base64 += (i + 1 < len) ? kBase64Chars[(n >> 6) & 0x3F] : '=';
+        base64 += (i + 2 < len) ? kBase64Chars[n & 0x3F] : '=';
+    }
+
+    return base64;
+}
+
 using json = nlohmann::json;
 
 ExternalEntityProviderAdapter::ExternalEntityProviderAdapter(
@@ -58,33 +83,30 @@ Result<ExternalEntityProviderAdapter::EntityResult> ExternalEntityProviderAdapte
         return Error{ErrorCode::InvalidState, "No external plugin host"};
     }
 
+    try {
+        const std::string base64 = encodeBase64(bytes);
+        return extractEntitiesWithBase64(base64, filePath, offset, limit);
+
+    } catch (const std::exception& e) {
+        spdlog::warn("ExternalEntityProviderAdapter[{}]: extraction failed: {}", pluginName_,
+                     e.what());
+        return Error{ErrorCode::InternalError,
+                     std::string("Entity extraction failed: ") + e.what()};
+    }
+}
+
+Result<ExternalEntityProviderAdapter::EntityResult>
+ExternalEntityProviderAdapter::extractEntitiesWithBase64(const std::string& base64,
+                                                         const std::string& filePath, size_t offset,
+                                                         size_t limit) {
+    if (!host_) {
+        return Error{ErrorCode::InvalidState, "No external plugin host"};
+    }
+
     // Serialize access (external plugin can only handle one request at a time)
     std::lock_guard<std::mutex> lock(mutex_);
 
     try {
-        // Encode bytes as base64 for JSON transport
-        static constexpr char base64_chars[] =
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-        std::string base64;
-        base64.reserve(((bytes.size() + 2) / 3) * 4);
-
-        const uint8_t* data = reinterpret_cast<const uint8_t*>(bytes.data());
-        size_t len = bytes.size();
-
-        for (size_t i = 0; i < len; i += 3) {
-            uint32_t n = static_cast<uint32_t>(data[i]) << 16;
-            if (i + 1 < len)
-                n |= static_cast<uint32_t>(data[i + 1]) << 8;
-            if (i + 2 < len)
-                n |= static_cast<uint32_t>(data[i + 2]);
-
-            base64 += base64_chars[(n >> 18) & 0x3F];
-            base64 += base64_chars[(n >> 12) & 0x3F];
-            base64 += (i + 1 < len) ? base64_chars[(n >> 6) & 0x3F] : '=';
-            base64 += (i + 2 < len) ? base64_chars[n & 0x3F] : '=';
-        }
-
         // Build RPC params
         json params = {{"source", {{"type", "bytes"}, {"data", base64}}},
                        {"opts",
@@ -94,8 +116,8 @@ Result<ExternalEntityProviderAdapter::EntityResult> ExternalEntityProviderAdapte
                          {"include_call_graph", true}}}};
 
         spdlog::info(
-            "ExternalEntityProviderAdapter[{}]: calling {} ({} bytes, offset={}, limit={})",
-            pluginName_, rpcMethod_, bytes.size(), offset, limit);
+            "ExternalEntityProviderAdapter[{}]: calling {} (base64_bytes={}, offset={}, limit={})",
+            pluginName_, rpcMethod_, base64.size(), offset, limit);
 
         auto result = host_->callRpc(pluginName_, rpcMethod_, params, timeout_);
         if (!result) {
@@ -203,7 +225,6 @@ Result<ExternalEntityProviderAdapter::EntityResult> ExternalEntityProviderAdapte
                      entityResult.aliases.size(), entityResult.hasMore, entityResult.nextOffset);
 
         return entityResult;
-
     } catch (const std::exception& e) {
         spdlog::warn("ExternalEntityProviderAdapter[{}]: extraction failed: {}", pluginName_,
                      e.what());
@@ -293,6 +314,8 @@ ExternalEntityProviderAdapter::extractEntitiesStreaming(const std::vector<std::b
     ExtractionProgress progress;
     progress.binarySize = bytes.size();
 
+    std::string base64 = encodeBase64(bytes);
+
     size_t offset = 0;
     size_t batchNumber = 0;
 
@@ -301,7 +324,7 @@ ExternalEntityProviderAdapter::extractEntitiesStreaming(const std::vector<std::b
                  pluginName_, bytes.size(), effectiveBatchSize);
 
     while (true) {
-        auto batchResult = extractEntities(bytes, filePath, offset, effectiveBatchSize);
+        auto batchResult = extractEntitiesWithBase64(base64, filePath, offset, effectiveBatchSize);
         if (!batchResult) {
             spdlog::warn("ExternalEntityProviderAdapter[{}]: batch {} failed: {}", pluginName_,
                          batchNumber, batchResult.error().message);

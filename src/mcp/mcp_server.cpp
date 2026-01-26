@@ -2,9 +2,9 @@
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
-#include <yams/compression/compressor_interface.h>
-#include <yams/compression/compression_header.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/compression/compression_header.h>
+#include <yams/compression/compressor_interface.h>
 #include <yams/config/config_migration.h>
 #include <yams/core/task.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -350,11 +350,7 @@ void StdioTransport::send(const json& message) {
         try {
             std::lock_guard<std::mutex> lock(outMutex_);
 
-            // MCP stdio spec: newline-delimited JSON (NDJSON)
-            // Messages are delimited by newlines and MUST NOT contain embedded newlines
-            // Use std::endl to ensure proper flushing on all platforms
-            std::cout << message.dump() << std::endl;
-            std::cout.flush(); // Explicit flush for reliability
+            sendSerialized(message.dump());
 
         } catch (const std::exception& e) {
             spdlog::error("StdioTransport::send exception: {}", e.what());
@@ -377,15 +373,26 @@ void StdioTransport::sendFramedSerialized(const std::string& payload) {
     }
     try {
         std::lock_guard<std::mutex> lock(outMutex_);
-        auto& out = std::cout;
-        // MCP stdio spec: newline-delimited JSON
-        out << payload << "\n";
-        out.flush();
+        sendSerialized(payload);
     } catch (const std::exception& e) {
         spdlog::error("StdioTransport::sendFramedSerialized exception: {}", e.what());
     } catch (...) {
         spdlog::error("StdioTransport::sendFramedSerialized unknown exception");
     }
+}
+
+void StdioTransport::sendSerialized(const std::string& payload) {
+    auto mode = lastFraming_.load();
+    auto& out = std::cout;
+    if (mode == FramingMode::ContentLength) {
+        out << "Content-Length: " << payload.size() << "\r\n\r\n";
+        out << payload;
+        out.flush();
+        return;
+    }
+    // Default: MCP stdio spec (newline-delimited JSON)
+    out << payload << "\n";
+    out.flush();
 }
 
 bool StdioTransport::isInputAvailable(int timeoutMs) const {
@@ -523,6 +530,7 @@ MessageResult StdioTransport::receive() {
         // NDJSON (newline-delimited JSON) - MCP stdio standard format
         if (!line.empty() && (line.front() == '{' || line.front() == '[')) {
             spdlog::debug("StdioTransport: Received NDJSON message (MCP stdio standard)");
+            lastFraming_.store(FramingMode::Ndjson);
             auto parsed = json_utils::parse_json(line);
             if (!parsed) {
                 spdlog::error("StdioTransport: Failed to parse JSON: {}", line);
@@ -561,6 +569,8 @@ MessageResult StdioTransport::receive() {
                 state_.store(TransportState::Error);
             return Error{ErrorCode::InvalidData, "Malformed header line"};
         }
+
+        lastFraming_.store(FramingMode::ContentLength);
 
         // Remaining headers until blank line
         while (true) {

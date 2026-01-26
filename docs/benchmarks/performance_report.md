@@ -1,6 +1,6 @@
 # YAMS Performance Benchmark Report
 
-**Generated**: 2026-01-25
+**Generated**: 2026-01-26
 **YAMS Version**: 0.8.0-dev (`027fdc0`)
 **Test Environment**: macOS 26.2 (Apple Silicon M3 Max, 16 cores, 48GB RAM)
 **Build Configuration**: Release build
@@ -22,15 +22,15 @@
 
 This report focuses on benchmark changes that are easy to interpret and compare across runs (primarily ingestion + metadata + IPC framing). Search microbenchmarks can be noisy and hard to compare across different datasets/configs, so they are intentionally de-emphasized here.
 
-**Current Baseline (Release, 2026-01-25)**:
+**Current Baseline (Release, 2026-01-26)**:
 
 | Benchmark | Throughput | Notes |
 |-----------|------------|-------|
-| `Ingestion_SmallDocument` | 4,270 ops/s | 1 KB document |
-| `Ingestion_MediumDocument` | 304 ops/s | 100 KB document |
-| `Metadata_SingleUpdate` | 24,390 ops/s | 1,000 docs |
-| `Metadata_BulkUpdate(500)` | 120,773 ops/s | 500 updates/batch |
-| `IPC StreamingFramer_32x10` | 16,573 ops/s | 256 B chunks |
+| `Ingestion_SmallDocument` | 4,078 ops/s | 1 KB document |
+| `Ingestion_MediumDocument` | 300 ops/s | 100 KB document |
+| `Metadata_SingleUpdate` | 25,510 ops/s | 1,000 docs |
+| `Metadata_BulkUpdate(500)` | 119,002 ops/s | 500 updates/batch |
+| `IPC StreamingFramer_32x10` | 16,548 ops/s | 256 B chunks |
 | `IPC UnaryFramer_8KB` | 50,000 ops/s | 8 KB payload |
 
 **Historical Debug Baseline (Jan 2026 vs Oct 2025)**:
@@ -76,7 +76,7 @@ Located in `build/release/builddir/tests/benchmarks/`:
 
 ## Performance Benchmarks
 
-### Latest Release Runs (2026-01-25)
+### Latest Release Runs (2026-01-26)
 
 #### Quick Links
 - [API Benchmarks](#api-benchmarks)
@@ -100,10 +100,10 @@ cd build/release/builddir
 
 | Benchmark | Latency | Throughput |
 |-----------|---------|------------|
-| Ingestion_SmallDocument | 0.23 ms | 4,270 ops/sec |
-| Ingestion_MediumDocument | 3.29 ms | 304 ops/sec |
-| Metadata_SingleUpdate | 0.04 ms | 24,390 ops/sec |
-| Metadata_BulkUpdate | 4.14 ms | 120,773 ops/sec |
+| Ingestion_SmallDocument | 0.25 ms | 4,078 ops/sec |
+| Ingestion_MediumDocument | 3.34 ms | 300 ops/sec |
+| Metadata_SingleUpdate | 0.04 ms | 25,510 ops/sec |
+| Metadata_BulkUpdate | 4.20 ms | 119,002 ops/sec |
 
 #### Search Benchmarks
 
@@ -119,8 +119,8 @@ Search benchmarks are intentionally not included in the “improvements” summa
 
 | Benchmark | Latency | Throughput |
 |-----------|---------|------------|
-| StreamingFramer_32x10_256B | 0.66 ms | 16,573 ops/sec |
-| StreamingFramer_64x6_512B | 1.25 ms | 5,578 ops/sec |
+| StreamingFramer_32x10_256B | 0.66 ms | 16,548 ops/sec |
+| StreamingFramer_64x6_512B | 1.23 ms | 5,681 ops/sec |
 | UnaryFramer_Success_8KB | 0.02 ms | 50,000 ops/sec |
 
 #### Retrieval Quality Benchmark

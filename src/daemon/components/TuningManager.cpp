@@ -249,6 +249,7 @@ void TuningManager::tick_once() {
             uint32_t kgTarget = TuneAdvisor::postKgConcurrent();
             uint32_t symbolTarget = TuneAdvisor::postSymbolConcurrent();
             uint32_t entityTarget = TuneAdvisor::postEntityConcurrent();
+            uint32_t titleTarget = TuneAdvisor::postTitleConcurrent();
             uint32_t embedTarget = TuneAdvisor::postEmbedConcurrent();
 
             if (dbLockErrors > lockThreshold * 2) {
@@ -269,10 +270,73 @@ void TuningManager::tick_once() {
                 embedTarget = std::min(embedTarget, governor.maxEmbedConcurrency());
             }
 
+            // Reconcile per-stage targets to the total budget to avoid oversubscription.
+            {
+                const uint32_t activeMask = TuneAdvisor::postIngestStageActiveMask();
+                auto applyActiveMask = [&](uint32_t bit, uint32_t& target) {
+                    if ((activeMask & bit) == 0u) {
+                        target = 0;
+                    }
+                };
+                applyActiveMask(1u << 0u, extractionTarget);
+                applyActiveMask(1u << 1u, kgTarget);
+                applyActiveMask(1u << 2u, symbolTarget);
+                applyActiveMask(1u << 3u, entityTarget);
+                applyActiveMask(1u << 4u, titleTarget);
+                applyActiveMask(1u << 5u, embedTarget);
+
+                const bool extractionActive = extractionTarget > 0;
+                const bool embedActive = embedTarget > 0;
+                const uint32_t minExtraction = (totalBudget >= 1 && extractionActive) ? 1u : 0u;
+                uint32_t minEmbed = (totalBudget >= 2 && embedActive) ? 1u : 0u;
+                if (totalBudget == 1 && !extractionActive && embedActive) {
+                    minEmbed = 1u;
+                }
+
+                auto sumTargets = [&]() {
+                    return extractionTarget + kgTarget + symbolTarget + entityTarget + titleTarget +
+                           embedTarget;
+                };
+
+                uint32_t totalTarget = sumTargets();
+                if (totalTarget > totalBudget) {
+                    struct StageRef {
+                        uint32_t* value;
+                        uint32_t minValue;
+                    };
+                    std::array<StageRef, 6> reduceOrder = {
+                        StageRef{&entityTarget, 0u},
+                        StageRef{&titleTarget, 0u},
+                        StageRef{&symbolTarget, 0u},
+                        StageRef{&kgTarget, 0u},
+                        StageRef{&extractionTarget, minExtraction},
+                        StageRef{&embedTarget, minEmbed}};
+
+                    while (totalTarget > totalBudget) {
+                        bool progressed = false;
+                        for (auto& stage : reduceOrder) {
+                            if (*stage.value == 0 || *stage.value <= stage.minValue) {
+                                continue;
+                            }
+                            *stage.value -= 1;
+                            totalTarget -= 1;
+                            progressed = true;
+                            if (totalTarget <= totalBudget) {
+                                break;
+                            }
+                        }
+                        if (!progressed) {
+                            break;
+                        }
+                    }
+                }
+            }
+
             TuneAdvisor::setPostExtractionConcurrent(extractionTarget);
             TuneAdvisor::setPostKgConcurrent(kgTarget);
             TuneAdvisor::setPostSymbolConcurrent(symbolTarget);
             TuneAdvisor::setPostEntityConcurrent(entityTarget);
+            TuneAdvisor::setPostTitleConcurrent(titleTarget);
             TuneAdvisor::setPostEmbedConcurrent(embedTarget);
 
 #if defined(TRACY_ENABLE)

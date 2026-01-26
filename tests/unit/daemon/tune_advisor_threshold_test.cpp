@@ -393,6 +393,7 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         CHECK(TuneAdvisor::postKgConcurrent() == 0u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
     }
 
@@ -406,6 +407,7 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         CHECK(TuneAdvisor::postKgConcurrent() == 0u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
     }
 
@@ -419,6 +421,7 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         CHECK(TuneAdvisor::postKgConcurrent() == 1u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
     }
 }
