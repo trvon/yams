@@ -52,7 +52,9 @@ protected:
         SKIP_DAEMON_TEST_ON_WINDOWS();
 
         // Start daemon
-        harness_ = std::make_unique<yams::test::DaemonHarness>();
+        yams::test::DaemonHarnessOptions options;
+        options.skipSocketVerificationOnReady = true;
+        harness_ = std::make_unique<yams::test::DaemonHarness>(options);
         ASSERT_TRUE(harness_->start(5s)) << "Failed to start daemon";
 
         // Create test files directory

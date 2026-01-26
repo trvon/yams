@@ -90,6 +90,8 @@ public:
         cmd->add_option("--snippet-length", snippetLength_, "Length of content snippets")
             ->default_val(50);
         cmd->add_flag("--no-snippets", noSnippets_, "Disable content previews");
+        cmd->add_option("--metadata-values", metadataValuesRaw_,
+                        "Show unique metadata values with counts for keys (comma-separated)");
 
         // File type filters
         cmd->add_option("--type", fileType_,
@@ -170,6 +172,9 @@ public:
     Result<void> execute() override {
         try {
             updateMetadataFields();
+            if (!metadataValuesRaw_.empty()) {
+                return listMetadataValues();
+            }
             // Task 043-05b: Smart snapshot operations
             if (listSnapshots_) {
                 return listAllSnapshots();
@@ -925,6 +930,142 @@ private:
         if (noMetadataFields_) {
             metadataFields_.clear();
         }
+    }
+
+    Result<void> listMetadataValues() {
+        auto appContext = cli_->getAppContext();
+        if (!appContext || !appContext->metadataRepo) {
+            return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
+        }
+
+        auto keys = parseMetadataFields(metadataValuesRaw_);
+        if (keys.empty()) {
+            return Error{ErrorCode::InvalidData, "No metadata keys provided"};
+        }
+
+        metadata::DocumentQueryOptions opts;
+        opts.limit = 0;
+        opts.offset = 0;
+        opts.pathsOnly = true;
+        auto docsRes = appContext->metadataRepo->queryDocuments(opts);
+        if (!docsRes) {
+            return docsRes.error();
+        }
+
+        std::vector<int64_t> ids;
+        ids.reserve(docsRes.value().size());
+        for (const auto& doc : docsRes.value()) {
+            ids.push_back(doc.id);
+        }
+
+        if (ids.empty()) {
+            if (format_ == "json" || cli_->getJsonOutput()) {
+                json out;
+                for (const auto& key : keys) {
+                    out[key] = json::array();
+                }
+                std::cout << out.dump(2) << std::endl;
+            } else {
+                std::cout << ui::status_info("No documents found.") << "\n";
+            }
+            return Result<void>();
+        }
+
+        auto metaRes = appContext->metadataRepo->getMetadataForDocuments(ids);
+        if (!metaRes) {
+            return metaRes.error();
+        }
+
+        std::unordered_map<std::string, std::unordered_map<std::string, size_t>> counts;
+        for (const auto& key : keys) {
+            counts.emplace(key, std::unordered_map<std::string, size_t>{});
+        }
+
+        for (const auto& [docId, md] : metaRes.value()) {
+            (void)docId;
+            for (const auto& key : keys) {
+                auto it = md.find(key);
+                if (it == md.end()) {
+                    continue;
+                }
+                const auto& value = it->second.value;
+                if (!value.empty()) {
+                    counts[key][value] += 1;
+                }
+            }
+        }
+
+        auto makeRows = [&](const std::string& key) -> std::vector<std::pair<std::string, size_t>> {
+            std::vector<std::pair<std::string, size_t>> rows;
+            auto it = counts.find(key);
+            if (it == counts.end()) {
+                return rows;
+            }
+            rows.reserve(it->second.size());
+            for (const auto& [value, count] : it->second) {
+                rows.emplace_back(value, count);
+            }
+            std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+                if (a.second != b.second) {
+                    return a.second > b.second;
+                }
+                return a.first < b.first;
+            });
+            return rows;
+        };
+
+        if (format_ == "json" || cli_->getJsonOutput()) {
+            json out;
+            for (const auto& key : keys) {
+                json arr = json::array();
+                for (const auto& [value, count] : makeRows(key)) {
+                    arr.push_back({{"value", value}, {"count", count}});
+                }
+                out[key] = arr;
+            }
+            std::cout << out.dump(2) << std::endl;
+            return Result<void>();
+        }
+
+        if (format_ == "csv") {
+            std::cout << "key,value,count\n";
+            for (const auto& key : keys) {
+                for (const auto& [value, count] : makeRows(key)) {
+                    std::cout << key << "," << value << "," << count << "\n";
+                }
+            }
+            return Result<void>();
+        }
+
+        if (format_ == "minimal") {
+            for (const auto& key : keys) {
+                for (const auto& [value, count] : makeRows(key)) {
+                    std::cout << key << "\t" << value << "\t" << count << "\n";
+                }
+            }
+            return Result<void>();
+        }
+
+        for (const auto& key : keys) {
+            std::cout << ui::section_header("Metadata Values: " + key) << "\n\n";
+
+            auto rows = makeRows(key);
+            if (rows.empty()) {
+                std::cout << ui::status_info("No values found.") << "\n\n";
+                continue;
+            }
+
+            ui::Table table;
+            table.headers = {"VALUE", "COUNT"};
+            table.has_header = true;
+            for (const auto& [value, count] : rows) {
+                table.add_row({value, ui::format_number(count)});
+            }
+            ui::render_table(std::cout, table);
+            std::cout << "\n";
+        }
+
+        return Result<void>();
     }
 
     std::vector<std::string> parseMetadataFields(std::string_view raw) const {
@@ -1752,6 +1893,7 @@ private:
     bool groupBySession_ = false;
     int snippetLength_ = 50;
     bool noSnippets_ = false;
+    std::string metadataValuesRaw_{};
 
     // File type filters
     std::string fileType_;

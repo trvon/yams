@@ -37,6 +37,7 @@ yams graph --search "pattern"  # Search nodes by label
 yams list --format json        # Scriptable list output
 yams list --show-metadata      # Include metadata for PBI tracking
 yams list --metadata-fields task,pbi,phase,owner,source  # Task columns in table output
+yams list --metadata-values pbi  # Unique PBI values with counts
 ```
 
 ## Agent Memory Workflow
@@ -133,8 +134,16 @@ yams search "API endpoint" --ext ts
 # Force metadata/FTS path for structured metadata
 yams search "pbi=PBI-043" --type keyword --limit 10
 
+# Unique PBI selection (avoid collisions)
+# 1) Check exact PBI
+yams search "pbi=PBI-002" --type keyword --limit 20
+# 2) List all used PBI values with counts
+yams list --metadata-values pbi
+# 3) Choose the next unused PBI-### and continue
+
 # Tag filters (tags are stored as metadata keys: tag:<name>)
 yams search "plan" --type keyword --tags plan --limit 10
+yams search "tagged logic" --type keyword --tags plan --limit 20
 ```
 
 ## Agent Storage

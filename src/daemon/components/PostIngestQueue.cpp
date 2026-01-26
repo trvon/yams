@@ -242,6 +242,7 @@ PostIngestQueue::PostIngestQueue(
     : store_(std::move(store)), meta_(std::move(meta)), extractors_(std::move(extractors)),
       kg_(std::move(kg)), graphComponent_(std::move(graphComponent)), coordinator_(coordinator),
       entityCoordinator_(entityCoordinator), capacity_(capacity ? capacity : 1000) {
+    refreshStageAvailability();
     spdlog::info("[PostIngestQueue] Created (parallel processing via WorkCoordinator)");
 }
 
@@ -261,11 +262,8 @@ PostIngestQueue::~PostIngestQueue() {
 void PostIngestQueue::start() {
     spdlog::info("[PostIngestQueue] start() called, stop_={}", stop_.load());
     if (!stop_.load()) {
-        TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, true);
-        TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, true);
-        TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, true);
-        TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, true);
-        TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, true);
+        refreshStageAvailability();
+        logStageAvailabilitySnapshot();
         spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
         boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
         spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
@@ -314,22 +312,28 @@ void PostIngestQueue::pauseStage(Stage stage) {
     switch (stage) {
         case Stage::Extraction:
             extractionPaused_.store(true, std::memory_order_release);
+            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, false);
             spdlog::info("[PostIngestQueue] Paused Extraction stage");
             break;
         case Stage::KnowledgeGraph:
             kgPaused_.store(true, std::memory_order_release);
+            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph,
+                                                  false);
             spdlog::info("[PostIngestQueue] Paused KnowledgeGraph stage");
             break;
         case Stage::Symbol:
             symbolPaused_.store(true, std::memory_order_release);
+            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, false);
             spdlog::info("[PostIngestQueue] Paused Symbol stage");
             break;
         case Stage::Entity:
             entityPaused_.store(true, std::memory_order_release);
+            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, false);
             spdlog::info("[PostIngestQueue] Paused Entity stage");
             break;
         case Stage::Title:
             titlePaused_.store(true, std::memory_order_release);
+            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, false);
             spdlog::info("[PostIngestQueue] Paused Title stage");
             break;
     }
@@ -339,22 +343,28 @@ void PostIngestQueue::resumeStage(Stage stage) {
     switch (stage) {
         case Stage::Extraction:
             extractionPaused_.store(false, std::memory_order_release);
+            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, true);
             spdlog::info("[PostIngestQueue] Resumed Extraction stage");
             break;
         case Stage::KnowledgeGraph:
             kgPaused_.store(false, std::memory_order_release);
+            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph,
+                                                  true);
             spdlog::info("[PostIngestQueue] Resumed KnowledgeGraph stage");
             break;
         case Stage::Symbol:
             symbolPaused_.store(false, std::memory_order_release);
+            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, true);
             spdlog::info("[PostIngestQueue] Resumed Symbol stage");
             break;
         case Stage::Entity:
             entityPaused_.store(false, std::memory_order_release);
+            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, true);
             spdlog::info("[PostIngestQueue] Resumed Entity stage");
             break;
         case Stage::Title:
             titlePaused_.store(false, std::memory_order_release);
+            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, true);
             spdlog::info("[PostIngestQueue] Resumed Title stage");
             break;
     }
@@ -382,6 +392,11 @@ void PostIngestQueue::pauseAll() {
     symbolPaused_.store(true, std::memory_order_release);
     entityPaused_.store(true, std::memory_order_release);
     titlePaused_.store(true, std::memory_order_release);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, false);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, false);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, false);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, false);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, false);
     spdlog::warn("[PostIngestQueue] All stages paused (emergency mode)");
 }
 
@@ -391,7 +406,87 @@ void PostIngestQueue::resumeAll() {
     symbolPaused_.store(false, std::memory_order_release);
     entityPaused_.store(false, std::memory_order_release);
     titlePaused_.store(false, std::memory_order_release);
+    refreshStageAvailability();
     spdlog::info("[PostIngestQueue] All stages resumed (normal operation)");
+}
+
+void PostIngestQueue::setSymbolExtensionMap(std::unordered_map<std::string, std::string> extMap) {
+    {
+        std::lock_guard<std::mutex> lock(extMapMutex_);
+        symbolExtensionMap_ = std::move(extMap);
+    }
+    refreshStageAvailability();
+}
+
+void PostIngestQueue::setEntityProviders(
+    std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> providers) {
+    {
+        std::lock_guard<std::mutex> lock(entityMutex_);
+        entityProviders_ = std::move(providers);
+    }
+    refreshStageAvailability();
+}
+
+void PostIngestQueue::setTitleExtractor(search::EntityExtractionFunc extractor) {
+    titleExtractor_ = std::move(extractor);
+    refreshStageAvailability();
+}
+
+void PostIngestQueue::refreshStageAvailability() {
+    const bool extractionActive = !extractionPaused_.load(std::memory_order_acquire);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction,
+                                          extractionActive);
+
+    const bool kgActive = graphComponent_ != nullptr && !kgPaused_.load(std::memory_order_acquire);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, kgActive);
+
+    bool symbolCapable = false;
+    {
+        std::lock_guard<std::mutex> lock(extMapMutex_);
+        symbolCapable = !symbolExtensionMap_.empty();
+    }
+    const bool symbolActive = symbolCapable && !symbolPaused_.load(std::memory_order_acquire);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, symbolActive);
+
+    bool entityCapable = false;
+    {
+        std::lock_guard<std::mutex> lock(entityMutex_);
+        entityCapable = !entityProviders_.empty();
+    }
+    const bool entityActive = entityCapable && !entityPaused_.load(std::memory_order_acquire);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, entityActive);
+
+    const bool titleActive =
+        (titleExtractor_ != nullptr) && !titlePaused_.load(std::memory_order_acquire);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, titleActive);
+}
+
+void PostIngestQueue::logStageAvailabilitySnapshot() const {
+    bool symbolCapable = false;
+    {
+        std::lock_guard<std::mutex> lock(extMapMutex_);
+        symbolCapable = !symbolExtensionMap_.empty();
+    }
+    bool entityCapable = false;
+    {
+        std::lock_guard<std::mutex> lock(entityMutex_);
+        entityCapable = !entityProviders_.empty();
+    }
+
+    spdlog::info(
+        "[PostIngestQueue] Stage snapshot: active={{extraction={}, kg={}, symbol={}, entity={}, "
+        "title={}}} paused={{extraction={}, kg={}, symbol={}, entity={}, title={}}} limits={{"
+        "extraction={}, kg={}, symbol={}, entity={}, title={}}}",
+        !extractionPaused_.load(std::memory_order_acquire),
+        graphComponent_ != nullptr && !kgPaused_.load(std::memory_order_acquire),
+        symbolCapable && !symbolPaused_.load(std::memory_order_acquire),
+        entityCapable && !entityPaused_.load(std::memory_order_acquire),
+        titleExtractor_ != nullptr && !titlePaused_.load(std::memory_order_acquire),
+        extractionPaused_.load(std::memory_order_acquire),
+        kgPaused_.load(std::memory_order_acquire), symbolPaused_.load(std::memory_order_acquire),
+        entityPaused_.load(std::memory_order_acquire), titlePaused_.load(std::memory_order_acquire),
+        maxExtractionConcurrent(), maxKgConcurrent(), maxSymbolConcurrent(), maxEntityConcurrent(),
+        maxTitleConcurrent());
 }
 
 std::size_t PostIngestQueue::resolveChannelCapacity() const {
@@ -589,6 +684,14 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         batch.reserve(batchSize);
         // Dynamic concurrency limit from TuneAdvisor
         const std::size_t maxConcurrent = maxExtractionConcurrent();
+        if (extractionPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
+            timer.expires_after(idleDelay);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+            if (idleDelay < kMaxIdleDelay) {
+                idleDelay *= 2;
+            }
+            continue;
+        }
         while (inFlight_.load() < maxConcurrent && batch.size() < batchSize &&
                channel->try_pop(task)) {
             didWork = true;
@@ -1253,6 +1356,14 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         InternalEventBus::KgJob job;
         // Dynamic concurrency limit from TuneAdvisor
         const std::size_t maxConcurrent = maxKgConcurrent();
+        if (kgPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
+            timer.expires_after(idleDelay);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+            if (idleDelay < kMaxIdleDelay) {
+                idleDelay *= 2;
+            }
+            continue;
+        }
         while (kgInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
             didWork = true;
             wasActive_.store(true, std::memory_order_release);
@@ -1300,6 +1411,14 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         InternalEventBus::SymbolExtractionJob job;
         // Dynamic concurrency limit from TuneAdvisor
         const std::size_t maxConcurrent = maxSymbolConcurrent();
+        if (symbolPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
+            timer.expires_after(idleDelay);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+            if (idleDelay < kMaxIdleDelay) {
+                idleDelay *= 2;
+            }
+            continue;
+        }
         while (symbolInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
             didWork = true;
             wasActive_.store(true, std::memory_order_release);
@@ -1451,6 +1570,14 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         InternalEventBus::EntityExtractionJob job;
         // Dynamic concurrency limit from TuneAdvisor
         const std::size_t maxConcurrent = maxEntityConcurrent();
+        if (entityPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
+            timer.expires_after(idleDelay);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+            if (idleDelay < kMaxIdleDelay) {
+                idleDelay *= 2;
+            }
+            continue;
+        }
         while (entityInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
             didWork = true;
             wasActive_.store(true, std::memory_order_release);
@@ -1798,6 +1925,14 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
         InternalEventBus::TitleExtractionJob job;
         // Dynamic concurrency limit
         const std::size_t maxConcurrent = maxTitleConcurrent();
+        if (titlePaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
+            timer.expires_after(idleDelay);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+            if (idleDelay < kMaxIdleDelay) {
+                idleDelay *= 2;
+            }
+            continue;
+        }
         while (titleInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
             didWork = true;
             wasActive_.store(true, std::memory_order_release);

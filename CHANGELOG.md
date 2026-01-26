@@ -16,6 +16,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
+## [v0.8.1] - Unreleased
+
+### Added
+- `yams list --metadata-values` for showing unique metadata values with counts (useful for PBI discovery).
+- Unique PBI selection guidance in AGENTS workflow (metadata search + list values).
+
+### Fixed
+- Post-ingest stage throttling now respects pause states and stage availability when computing TuneAdvisor budgets.
+- Post-ingest pollers back off when a stage is paused or has a zero concurrency cap to avoid runaway CPU.
+- Added a post-ingest stage snapshot log (active/paused/limits) at startup for easier tuning verification.
+- Grep integration tests create the ingest directory before daemon startup to avoid missing queue paths.
+
+### Documentation
+- Updated YAMS skill guide with unique PBI discovery and tagged search examples.
+
 ## [v0.8.0] - Unreleased
 
 ### Breaking

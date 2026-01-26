@@ -1,9 +1,9 @@
 # YAMS Performance Benchmark Report
 
-**Generated**: 2026-01-07
+**Generated**: 2026-01-25
 **YAMS Version**: 0.8.0-dev (`027fdc0`)
 **Test Environment**: macOS 26.2 (Apple Silicon M3 Max, 16 cores, 48GB RAM)
-**Build Configuration**: Debug build (no TSAN)
+**Build Configuration**: Release build
 
 > Note: This page is the canonical place for benchmark results. Keep the latest numbers inlined here (avoid relying on generated `bench_results/*` artifacts).
 
@@ -12,7 +12,7 @@
 - [Executive Summary](#executive-summary)
 - [Test Environment Specifications](#test-environment-specifications)
 - [Performance Benchmarks](#performance-benchmarks)
-  - [Latest Local Runs (2026-01-07)](#latest-local-runs-2026-01-07)
+  - [Latest Release Runs (2026-01-25)](#latest-release-runs-2026-01-25)
   - [Cryptographic Operations (SHA-256)](#1-cryptographic-operations-sha-256)
   - [Content Chunking (Rabin Fingerprinting)](#2-content-chunking-rabin-fingerprinting)
   - [Compression Performance (Zstandard)](#3-compression-performance-zstandard)
@@ -22,7 +22,18 @@
 
 This report focuses on benchmark changes that are easy to interpret and compare across runs (primarily ingestion + metadata + IPC framing). Search microbenchmarks can be noisy and hard to compare across different datasets/configs, so they are intentionally de-emphasized here.
 
-**Current Baseline (Debug, 2026-01-07)**:
+**Current Baseline (Release, 2026-01-25)**:
+
+| Benchmark | Throughput | Notes |
+|-----------|------------|-------|
+| `Ingestion_SmallDocument` | 4,270 ops/s | 1 KB document |
+| `Ingestion_MediumDocument` | 304 ops/s | 100 KB document |
+| `Metadata_SingleUpdate` | 24,390 ops/s | 1,000 docs |
+| `Metadata_BulkUpdate(500)` | 120,773 ops/s | 500 updates/batch |
+| `IPC StreamingFramer_32x10` | 16,573 ops/s | 256 B chunks |
+| `IPC UnaryFramer_8KB` | 50,000 ops/s | 8 KB payload |
+
+**Historical Debug Baseline (Jan 2026 vs Oct 2025)**:
 
 | Benchmark | Oct 2025 | Jan 2026 | Change |
 |-----------|----------|----------|--------|
@@ -33,7 +44,7 @@ This report focuses on benchmark changes that are easy to interpret and compare 
 | `IPC StreamingFramer_32x10` | - | 3,732 ops/s | new |
 | `IPC UnaryFramer_8KB` | - | 10,088 ops/s | new |
 
-> **Note**: Debug builds with ThreadSanitizer (TSAN) add ~2-6x overhead. The numbers above are from Debug builds **without** TSAN for fair comparison with the October 2025 baseline.
+> **Note**: Debug builds with ThreadSanitizer (TSAN) add ~2-6x overhead. The historical numbers above are from Debug builds **without** TSAN for fair comparison with the October 2025 baseline.
 
 ## Test Environment Specifications
 
@@ -43,15 +54,15 @@ This report focuses on benchmark changes that are easy to interpret and compare 
 - **Memory**: 48 GB unified memory
 - **Cache Hierarchy**: L1D 64KB, L1I 128KB, L2 4MB (x16)
 - **Compiler**: Apple Clang 17.0.0 (clang-1700.6.3.2) with C++23 standard
-- **Build Type**: Debug (no TSAN for benchmark comparisons)
+- **Build Type**: Release
 - **Package Management**: Conan 2.0
 - **Build System**: Meson
 
-> **Note**: For fair benchmark comparisons, use Debug builds without TSAN (`./setup.sh Debug --no-tsan`). TSAN adds ~2-6x overhead.
+> **Note**: Use Release builds for public-facing numbers. Debug + TSAN can add ~2-6x overhead.
 
 ### Available Benchmark Executables
 
-Located in `builddir/tests/benchmarks/`:
+Located in `build/release/builddir/tests/benchmarks/`:
 - `yams_api_benchmarks` - API ingestion and metadata operations (writes `bench_results/api_*`)
 - `yams_search_benchmarks` - Search + query parsing (writes `bench_results/search_*`)
 - `ipc_stream_bench` - IPC streaming performance (writes `bench_results/ipc_stream_*`)
@@ -63,48 +74,9 @@ Located in `builddir/tests/benchmarks/`:
 - `ingestion_throughput_bench` - Ingestion throughput
 - `daemon_socket_accept_bench` - Daemon socket operations (GTest runner)
 
-## Test Suite Results
-
-<details>
-<summary>Historical Unit Test Coverage (October 11, 2025)</summary>
-
-
-**Test Execution Summary**:
-- **Unit Test Shards**: 6 shards with parallel execution
-- **Total Tests Executed**: ~500+ across all shards
-- **Passed Tests**: 503+ tests
-- **Failed Tests**: 6 tests  
-- **Skipped Tests**: ~10 tests
-- **Overall Pass Rate**: ~98.8%
-
-**Known Failures**:
-1. `SearchServiceTest.SnippetHydrationTimeoutReportsStats` - Timeout handling
-2. `RepairUtilScanTest.MissingEmbeddingsListStableUnderPostIngestLoad` - Load testing
-3. `ReferenceCounterTest.Statistics` - Statistics reporting
-4. `GrepServiceUnicodeTest.LiteralUnicodeAndEmoji` - Unicode handling
-5. `MCPSchemaTest.ListTools_ContainsAllExpectedTools` - MCP tool listing
-6. `FtsSearchQuerySpecIntegration.BasicFtsWhenAvailable` - FTS5 integration timing
-7. `VersioningIndexerTest.PathSeries_NewThenUpdate_CreatesVersionEdgeAndFlags` - Versioning edge cases
-
-**Component-Level Status**:
-- **Core Functionality**: ✅ STABLE (hashing, compression, chunking, WAL)
-- **Search Engine**: ✅ STABLE (503+ tests passing)
-- **Metadata Repository**: ✅ STABLE  
-- **API Services**: ✅ STABLE (124-127 tests passing per shard)
-- **Vector Database**: ⚠️ Disabled in test runs (`YAMS_DISABLE_VECTORS=1`)
-- **MCP Integration**: ⚠️ Minor issues with tool listing
-
-**Test Infrastructure**:
-- Tests run with strict memory sanitizers (ASAN, UBSAN, MSAN)
-- SQLite busy timeout: 1000ms
-- Vector database: In-memory mode
-- Test isolation: Single instance mode enabled
-
-</details>
-
 ## Performance Benchmarks
 
-### Latest Local Runs (2026-01-07)
+### Latest Release Runs (2026-01-25)
 
 #### Quick Links
 - [API Benchmarks](#api-benchmarks)
@@ -113,56 +85,47 @@ Located in `builddir/tests/benchmarks/`:
 
 #### Run Commands
 ```bash
+cd build/release/builddir
+
 # API
-YAMS_TEST_SAFE_SINGLE_INSTANCE=1 builddir/tests/benchmarks/yams_api_benchmarks --iterations 5
+./tests/benchmarks/yams_api_benchmarks --iterations 5
 
 # IPC streaming
-builddir/tests/benchmarks/ipc_stream_bench --benchmark_min_time=0.05
-
-# Retrieval quality
-YAMS_TEST_SAFE_SINGLE_INSTANCE=1 builddir/tests/benchmarks/retrieval_quality_bench
+./tests/benchmarks/ipc_stream_bench --benchmark_min_time=0.05
 ```
 
 #### API Benchmarks
 
-(From `builddir/tests/benchmarks/yams_api_benchmarks`, `--iterations 5`, Debug no TSAN)
+(From `build/release/builddir/tests/benchmarks/yams_api_benchmarks`, `--iterations 5`)
 
-| Benchmark | Latency | Throughput | vs Oct 2025 |
-|-----------|---------|------------|-------------|
-| Ingestion_SmallDocument | 0.35 ms | 2,821 ops/sec | ~same |
-| Ingestion_MediumDocument | 17.6 ms | 57 ops/sec | ~same |
-| Metadata_SingleUpdate | 0.07 ms | 13,966 ops/sec | **+33%** |
-| Metadata_BulkUpdate | 9.7 ms | 51,341 ops/sec | **+6.5x** |
+| Benchmark | Latency | Throughput |
+|-----------|---------|------------|
+| Ingestion_SmallDocument | 0.23 ms | 4,270 ops/sec |
+| Ingestion_MediumDocument | 3.29 ms | 304 ops/sec |
+| Metadata_SingleUpdate | 0.04 ms | 24,390 ops/sec |
+| Metadata_BulkUpdate | 4.14 ms | 120,773 ops/sec |
 
 #### Search Benchmarks
 
 Search benchmarks are intentionally not included in the “improvements” summary because the reported numbers can be misleading (different datasets, caching, and internal operation definitions). If you need them for profiling, run the benchmark binary and inspect its output locally:
 
 ```bash
-builddir/tests/benchmarks/yams_search_benchmarks --quiet --iterations 5
+./tests/benchmarks/yams_search_benchmarks --quiet --iterations 5
 ```
 
 #### IPC Streaming Benchmarks
 
-(From `builddir/tests/benchmarks/ipc_stream_bench`, `--benchmark_min_time=0.05`, Debug no TSAN)
+(From `build/release/builddir/tests/benchmarks/ipc_stream_bench`, `--benchmark_min_time=0.05`)
 
 | Benchmark | Latency | Throughput |
 |-----------|---------|------------|
-| StreamingFramer_32x10_256B | 2.95 ms | 3,732 ops/sec |
-| StreamingFramer_64x6_512B | 4.61 ms | 1,519 ops/sec |
-| UnaryFramer_Success_8KB | 0.10 ms | 10,088 ops/sec |
+| StreamingFramer_32x10_256B | 0.66 ms | 16,573 ops/sec |
+| StreamingFramer_64x6_512B | 1.25 ms | 5,578 ops/sec |
+| UnaryFramer_Success_8KB | 0.02 ms | 50,000 ops/sec |
 
 #### Retrieval Quality Benchmark
 
-(From `builddir/tests/benchmarks/retrieval_quality_bench` with `YAMS_TEST_SAFE_SINGLE_INSTANCE=1`)
-
-| Metric | Value |
-|--------|-------|
-| MRR | 1.0000 |
-| Recall@K | 1.8167 |
-| Precision@K | 1.0000 |
-| nDCG@K | 1.4460 |
-| MAP | 1.0000 |
+Skipped in this run (release benchmarks focused on ingestion, metadata, and IPC framing).
 
 ### 1. Cryptographic Operations (SHA-256)
 
@@ -281,6 +244,8 @@ builddir/tests/benchmarks/yams_search_benchmarks --quiet --iterations 5
 
 - `yams_search_benchmarks` can hit `database is locked` depending on run concurrency and prior temporary state. Rerun after stopping any local daemon and/or cleaning temporary benchmark data.
 - `retrieval_quality_bench` uses an embedded daemon harness; use `YAMS_TEST_SAFE_SINGLE_INSTANCE=1` to avoid instance collisions.
+- If the host is saturated, cap post-ingest concurrency with:
+  `YAMS_POST_INGEST_TOTAL_CONCURRENT=4 YAMS_POST_EXTRACTION_CONCURRENT=2 YAMS_POST_KG_CONCURRENT=2 YAMS_POST_EMBED_CONCURRENT=1`
 
 ### Test Execution
 
@@ -289,13 +254,13 @@ builddir/tests/benchmarks/yams_search_benchmarks --quiet --iterations 5
 # Configure and build release version
 cd build/release
 conan install ../.. -s build_type=Release --build=missing
-meson setup . -Dbuildtype=release -Dbuild-tests=true
+meson setup builddir -Dbuildtype=release -Dbuild-tests=true
 meson compile
 
 # Run benchmarks
-./tests/benchmarks/yams_api_benchmarks --benchmark_format=json
-./tests/benchmarks/yams_search_benchmarks --benchmark_format=json
-./tests/benchmarks/tree_diff_benchmarks --benchmark_format=json
+./builddir/tests/benchmarks/yams_api_benchmarks --benchmark_format=json
+./builddir/tests/benchmarks/yams_search_benchmarks --benchmark_format=json
+./builddir/tests/benchmarks/tree_diff_benchmarks --benchmark_format=json
 ```
 
 **For Debug Build** (current):
@@ -343,6 +308,40 @@ YAMS demonstrates strong performance characteristics across core components:
 
 The benchmark results validate YAMS as a high-performance content-addressable storage system. Test failures in non-critical modules (vector database, PDF extraction) require attention but do not impact core functionality.
 
----
+## Appendix: Test Suite Results
 
-**For questions about benchmarks**: See [Paper PBI](../delivery/paper-pbi.md) or search YAMS with tags: `benchmark`, `performance`, `evaluation`
+<details>
+<summary>Historical Unit Test Coverage (October 11, 2025)</summary>
+
+**Test Execution Summary**:
+- **Unit Test Shards**: 6 shards with parallel execution
+- **Total Tests Executed**: ~500+ across all shards
+- **Passed Tests**: 503+ tests
+- **Failed Tests**: 6 tests  
+- **Skipped Tests**: ~10 tests
+- **Overall Pass Rate**: ~98.8%
+
+**Known Failures**:
+1. `SearchServiceTest.SnippetHydrationTimeoutReportsStats` - Timeout handling
+2. `RepairUtilScanTest.MissingEmbeddingsListStableUnderPostIngestLoad` - Load testing
+3. `ReferenceCounterTest.Statistics` - Statistics reporting
+4. `GrepServiceUnicodeTest.LiteralUnicodeAndEmoji` - Unicode handling
+5. `MCPSchemaTest.ListTools_ContainsAllExpectedTools` - MCP tool listing
+6. `FtsSearchQuerySpecIntegration.BasicFtsWhenAvailable` - FTS5 integration timing
+7. `VersioningIndexerTest.PathSeries_NewThenUpdate_CreatesVersionEdgeAndFlags` - Versioning edge cases
+
+**Component-Level Status**:
+- **Core Functionality**: ✅ STABLE (hashing, compression, chunking, WAL)
+- **Search Engine**: ✅ STABLE (503+ tests passing)
+- **Metadata Repository**: ✅ STABLE  
+- **API Services**: ✅ STABLE (124-127 tests passing per shard)
+- **Vector Database**: ⚠️ Disabled in test runs (`YAMS_DISABLE_VECTORS=1`)
+- **MCP Integration**: ⚠️ Minor issues with tool listing
+
+**Test Infrastructure**:
+- Tests run with strict memory sanitizers (ASAN, UBSAN, MSAN)
+- SQLite busy timeout: 1000ms
+- Vector database: In-memory mode
+- Test isolation: Single instance mode enabled
+
+</details>

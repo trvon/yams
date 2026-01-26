@@ -35,7 +35,9 @@ static int setenv(const char* name, const char* value, int overwrite) {
     return _putenv_s(name, value);
 }
 #else
+#include <signal.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -196,6 +198,58 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon single instance enforcement", "[daemon][
     REQUIRE(result2.error().code == ErrorCode::InvalidState);
 
     daemon_->stop();
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Daemon rejects pid file pointing to current process",
+                 "[daemon][lifecycle]") {
+    SKIP_ON_WINDOWS();
+
+    json payload = json::object();
+    payload["pid"] = static_cast<std::int64_t>(getpid());
+    payload["start_ns"] = 1;
+    payload["token"] = "test";
+
+    std::ofstream pidFile(config_.pidFile);
+    pidFile << payload.dump();
+    pidFile.close();
+
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    auto result = daemon_->start();
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().code == ErrorCode::InvalidState);
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Daemon refuses pid file pointing to unrelated running process",
+                 "[daemon][lifecycle]") {
+    SKIP_ON_WINDOWS();
+
+    pid_t child = fork();
+    if (child < 0) {
+        SKIP("fork not available");
+    }
+    if (child == 0) {
+        for (;;) {
+            ::pause();
+        }
+    }
+
+    json payload = json::object();
+    payload["pid"] = static_cast<std::int64_t>(child);
+    payload["start_ns"] = 1;
+    payload["token"] = "test";
+
+    std::ofstream pidFile(config_.pidFile);
+    pidFile << payload.dump();
+    pidFile.close();
+
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    auto result = daemon_->start();
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().code == ErrorCode::InvalidState);
+
+    ::kill(child, SIGKILL);
+    int status = 0;
+    (void)::waitpid(child, &status, 0);
 }
 
 TEST_CASE_METHOD(DaemonFixture, "Daemon restart", "[daemon][lifecycle]") {

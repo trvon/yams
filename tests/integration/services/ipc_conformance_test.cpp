@@ -142,6 +142,28 @@ TEST_F(IpcConformanceFixture, CatAndCancelAndSessions) {
     // We don't assert counts; only conformance of the IPC roundtrip
 }
 
+TEST_F(IpcConformanceFixture, SingleInstanceHarnessBlocksSecondDaemon) {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+    if (!canBindUnixSocketHere()) {
+        GTEST_SKIP() << "Skipping IPC conformance: environment forbids AF_UNIX bind (sandbox).";
+    }
+    ASSERT_TRUE(startDaemon());
+
+    yams::daemon::DaemonConfig cfg;
+    cfg.dataDir = storageDir_;
+    cfg.socketPath = socketPath_;
+    cfg.pidFile = root_ / "daemon.pid";
+    cfg.logFile = root_ / "daemon-second.log";
+
+    auto other = std::make_unique<yams::daemon::YamsDaemon>(cfg);
+    auto res = other->start();
+    if (res) {
+        other->stop();
+        FAIL() << "Second daemon started; expected single-instance enforcement.";
+    }
+    EXPECT_EQ(res.error().code, yams::ErrorCode::InvalidState);
+}
+
 // Phase 1: Unreachable socket returns actionable error (tolerant envelope)
 TEST_F(IpcConformanceFixture, UnreachableSocketErrorShape) {
     SKIP_DAEMON_TEST_ON_WINDOWS();

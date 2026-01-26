@@ -51,6 +51,7 @@ protected:
         root_ = fs::temp_directory_path() / ("yams_grep_it_" + unique);
         storageDir_ = root_ / "storage";
         fs::create_directories(storageDir_);
+        fs::create_directories(root_ / "ingest");
         socketPath_ = fs::path("/tmp") / ("yams-grep-" + unique + ".sock");
 
         yams::daemon::DaemonConfig cfg;

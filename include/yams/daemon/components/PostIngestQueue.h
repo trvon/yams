@@ -1,8 +1,8 @@
 #pragma once
 
 #include <atomic>
-#include <functional>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -162,21 +162,13 @@ public:
     }
 
     // Set extension-to-language map for symbol extraction (from plugin capabilities)
-    void setSymbolExtensionMap(std::unordered_map<std::string, std::string> extMap) {
-        std::lock_guard<std::mutex> lock(extMapMutex_);
-        symbolExtensionMap_ = std::move(extMap);
-    }
+    void setSymbolExtensionMap(std::unordered_map<std::string, std::string> extMap);
 
     // Set entity providers for binary entity extraction
-    void setEntityProviders(std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> providers) {
-        std::lock_guard<std::mutex> lock(entityMutex_);
-        entityProviders_ = std::move(providers);
-    }
+    void setEntityProviders(std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> providers);
 
     // Set title extractor (GLiNER-backed) for deriving better FTS titles.
-    void setTitleExtractor(search::EntityExtractionFunc extractor) {
-        titleExtractor_ = std::move(extractor);
-    }
+    void setTitleExtractor(search::EntityExtractionFunc extractor);
 
     // Set KGWriteQueue for async NL entity KG population (merged with title extraction)
     void setKgWriteQueue(KGWriteQueue* queue) { kgWriteQueue_ = queue; }
@@ -250,6 +242,8 @@ private:
     void notifyEmbedFailure(const std::vector<std::string>& hashes);
     bool dispatchEmbedJobWithRetry(const std::vector<std::string>& hashes, bool recordOnFailure,
                                    bool notifyOnFailure);
+    void refreshStageAvailability();
+    void logStageAvailabilitySnapshot() const;
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;

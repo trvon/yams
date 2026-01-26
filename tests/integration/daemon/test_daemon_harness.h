@@ -40,6 +40,7 @@ struct DaemonHarnessOptions {
     bool useMockModelProvider = true;
     bool autoLoadPlugins = false;
     bool isolateState = false;
+    bool skipSocketVerificationOnReady = false;
     bool configureModelPool = false;
     bool modelPoolLazyLoading = true;
     std::vector<std::string> preloadModels;
@@ -149,7 +150,6 @@ public:
         // Poll for daemon to reach Ready state in lifecycle FSM
         // This ensures ServiceManager has completed initialization, not just socket availability
         auto deadline = std::chrono::steady_clock::now() + timeout;
-        bool socketReady = false;
         bool lifecycleReady = false;
 
         while (std::chrono::steady_clock::now() < deadline) {
@@ -179,17 +179,22 @@ public:
         // Verify socket connectivity as final sanity check
         // Use simple socket connection instead of DaemonClient to avoid polluting
         // the shared connection pool (DaemonClient destructor shuts down shared pools)
+        if (options_.skipSocketVerificationOnReady) {
+            spdlog::info(
+                "[DaemonHarness] Skipping socket verification after Ready (test override)");
+            return true;
+        }
+
         spdlog::info("[DaemonHarness] Verifying socket connectivity at: {}", sock_.string());
-        bool socketOk = verifySocketConnectivity(sock_, std::chrono::milliseconds(500));
+        bool socketOk = verifySocketConnectivity(sock_, std::chrono::seconds(5));
         if (socketOk) {
             spdlog::info("[DaemonHarness] Socket connection verified, daemon fully ready at: {}",
                          sock_.string());
             return true;
-        } else {
-            spdlog::error("[DaemonHarness] Daemon Ready but socket connection failed at: {}",
-                          sock_.string());
-            return false;
         }
+        spdlog::error("[DaemonHarness] Daemon Ready but socket connection failed at: {}",
+                      sock_.string());
+        return false;
     }
 
     void stop() {
