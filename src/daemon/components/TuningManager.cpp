@@ -196,6 +196,39 @@ void TuningManager::tick_once() {
     (void)workerQueued;
     (void)muxQueuedBytes;
 
+    // Adaptive worker poll cadence: ease off when idle, tighten when busy.
+    try {
+        if (!TuneAdvisor::workerPollMsPinned()) {
+            const uint32_t basePollMs = TuneAdvisor::workerPollMs();
+            const uint32_t minPollMs = 50;
+            const uint32_t maxPollMs = 1000;
+            auto clampMs = [&](uint32_t v) { return std::max(minPollMs, std::min(maxPollMs, v)); };
+            const uint32_t currentMs = clampMs(basePollMs);
+
+            bool workerQHigh = (maxWorkerQ > 0) && (workerQueued >= maxWorkerQ);
+            bool muxHigh = false;
+            try {
+                std::uint64_t muxCap = TuneAdvisor::maxMuxBytes();
+                muxHigh = (muxCap > 0 && muxQueuedBytes >= muxCap);
+            } catch (...) {
+            }
+            bool busy = (activeConns > 0) || workerQHigh || muxHigh;
+            bool idle = (activeConns == 0) && (workerQueued == 0) && (muxQueuedBytes == 0);
+            if (busy) {
+                uint32_t next = clampMs(static_cast<uint32_t>(currentMs * 0.5));
+                if (next < currentMs) {
+                    TuneAdvisor::setWorkerPollMsDynamic(next);
+                }
+            } else if (idle) {
+                uint32_t next = clampMs(static_cast<uint32_t>(currentMs * 1.25));
+                if (next > currentMs) {
+                    TuneAdvisor::setWorkerPollMsDynamic(next);
+                }
+            }
+        }
+    } catch (...) {
+    }
+
     // Search concurrency governance (no dedicated pool)
     try {
         auto searchMetrics = sm_->getSearchLoadMetrics();

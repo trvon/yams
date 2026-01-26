@@ -26,6 +26,7 @@
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/ipc/repair_scheduling_adapter.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/content_extractor.h>
@@ -508,9 +509,12 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
             break;
         }
 
+        bool didWork = false;
+
         // Process prune jobs if available
         InternalEventBus::PruneJob pruneJob;
         if (pruneQueue->try_pop(pruneJob)) {
+            didWork = true;
             spdlog::debug("RepairCoordinator: processing prune job {}", pruneJob.requestId);
             InternalEventBus::instance().incPostConsumed();
 
@@ -546,6 +550,7 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
         if (!pathTreeRepairDone) {
             InternalEventBus::PathTreeJob pathTreeJob;
             if (pathTreeQueue->try_pop(pathTreeJob)) {
+                didWork = true;
                 spdlog::debug("RepairCoordinator: processing PathTreeRepair job");
                 InternalEventBus::instance().incPostConsumed();
 
@@ -627,6 +632,15 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                 }
                 pathTreeRepairDone = true;
             }
+        }
+
+        // Idle backoff to avoid busy spinning when queues are empty
+        if (!didWork) {
+            auto snap = TuningSnapshotRegistry::instance().get();
+            uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
+            auto idleMs = std::chrono::milliseconds(std::max<uint32_t>(10, pollMs));
+            timer.expires_after(idleMs);
+            co_await timer.async_wait(boost::asio::use_awaitable);
         }
 
         if (!vectorCleanupDone && maintenance_allowed()) {

@@ -373,6 +373,43 @@ TEST_CASE("Repair batch size env var overrides", "[daemon][tune][advisor][catch2
 }
 
 // =============================================================================
+// Worker poll cadence overrides
+// =============================================================================
+
+TEST_CASE("Worker poll cadence overrides", "[daemon][tune][advisor][catch2]") {
+    SECTION("Dynamic updates apply when not pinned") {
+        EnvGuard envGuard("YAMS_WORKER_POLL_MS", "0");
+        TuneAdvisor::setWorkerPollMs(0);
+
+        TuneAdvisor::setWorkerPollMsDynamic(200);
+        CHECK(TuneAdvisor::workerPollMs() == 200u);
+
+        TuneAdvisor::setWorkerPollMs(0);
+        TuneAdvisor::setWorkerPollMsDynamic(120);
+        CHECK(TuneAdvisor::workerPollMs() == 120u);
+    }
+
+    SECTION("Dynamic updates ignored when pinned by setter") {
+        EnvGuard envGuard("YAMS_WORKER_POLL_MS", "0");
+        TuneAdvisor::setWorkerPollMs(250);
+        CHECK(TuneAdvisor::workerPollMs() == 250u);
+
+        TuneAdvisor::setWorkerPollMsDynamic(100);
+        CHECK(TuneAdvisor::workerPollMs() == 250u);
+
+        TuneAdvisor::setWorkerPollMs(0);
+    }
+
+    SECTION("Dynamic updates ignored when env pins cadence") {
+        EnvGuard envGuard("YAMS_WORKER_POLL_MS", "300");
+        TuneAdvisor::setWorkerPollMs(0);
+
+        TuneAdvisor::setWorkerPollMsDynamic(100);
+        CHECK(TuneAdvisor::workerPollMs() == 300u);
+    }
+}
+
+// =============================================================================
 // PostIngestQueue Profile-Aware Concurrency Tests
 // =============================================================================
 

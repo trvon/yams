@@ -18,6 +18,7 @@
 #include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/resource/external_entity_provider_adapter.h>
 #include <yams/extraction/extraction_util.h>
@@ -673,8 +674,12 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
 
     started_.store(true);
 
-    auto idleDelay = std::chrono::milliseconds(1);
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10);
+    auto idleDelay = std::chrono::milliseconds(5);
+    auto maxIdleDelay = []() {
+        auto snap = TuningSnapshotRegistry::instance().get();
+        uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
+        return std::chrono::milliseconds(std::max<uint32_t>(10, pollMs));
+    };
 
     while (!stop_.load()) {
         bool didWork = false;
@@ -687,8 +692,12 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         if (extractionPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
             timer.expires_after(idleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);
-            if (idleDelay < kMaxIdleDelay) {
+            const auto maxIdle = maxIdleDelay();
+            if (idleDelay < maxIdle) {
                 idleDelay *= 2;
+                if (idleDelay > maxIdle) {
+                    idleDelay = maxIdle;
+                }
             }
             continue;
         }
@@ -711,14 +720,18 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         }
 
         if (didWork) {
-            idleDelay = std::chrono::milliseconds(1);
+            idleDelay = std::chrono::milliseconds(5);
             continue;
         }
 
         timer.expires_after(idleDelay);
         co_await timer.async_wait(boost::asio::use_awaitable);
-        if (idleDelay < kMaxIdleDelay) {
+        const auto maxIdle = maxIdleDelay();
+        if (idleDelay < maxIdle) {
             idleDelay *= 2;
+            if (idleDelay > maxIdle) {
+                idleDelay = maxIdle;
+            }
         }
     }
 
@@ -1378,8 +1391,12 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
 
     kgStarted_.store(true);
 
-    auto idleDelay = std::chrono::milliseconds(1);
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10);
+    auto idleDelay = std::chrono::milliseconds(5);
+    auto maxIdleDelay = []() {
+        auto snap = TuningSnapshotRegistry::instance().get();
+        uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
+        return std::chrono::milliseconds(std::max<uint32_t>(10, pollMs));
+    };
 
     while (!stop_.load()) {
         bool didWork = false;
@@ -1389,8 +1406,12 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         if (kgPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
             timer.expires_after(idleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);
-            if (idleDelay < kMaxIdleDelay) {
+            const auto maxIdle = maxIdleDelay();
+            if (idleDelay < maxIdle) {
                 idleDelay *= 2;
+                if (idleDelay > maxIdle) {
+                    idleDelay = maxIdle;
+                }
             }
             continue;
         }
@@ -1410,14 +1431,18 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         }
 
         if (didWork) {
-            idleDelay = std::chrono::milliseconds(1);
+            idleDelay = std::chrono::milliseconds(5);
             continue;
         }
 
         timer.expires_after(idleDelay);
         co_await timer.async_wait(boost::asio::use_awaitable);
-        if (idleDelay < kMaxIdleDelay) {
+        const auto maxIdle = maxIdleDelay();
+        if (idleDelay < maxIdle) {
             idleDelay *= 2;
+            if (idleDelay > maxIdle) {
+                idleDelay = maxIdle;
+            }
         }
     }
 
@@ -1435,8 +1460,12 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     symbolStarted_.store(true);
     spdlog::info("[PostIngestQueue] Symbol extraction poller started");
 
-    auto idleDelay = std::chrono::milliseconds(1);
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10);
+    auto idleDelay = std::chrono::milliseconds(5);
+    auto maxIdleDelay = []() {
+        auto snap = TuningSnapshotRegistry::instance().get();
+        uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
+        return std::chrono::milliseconds(std::max<uint32_t>(10, pollMs));
+    };
 
     while (!stop_.load()) {
         bool didWork = false;
@@ -1446,8 +1475,12 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         if (symbolPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
             timer.expires_after(idleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);
-            if (idleDelay < kMaxIdleDelay) {
+            const auto maxIdle = maxIdleDelay();
+            if (idleDelay < maxIdle) {
                 idleDelay *= 2;
+                if (idleDelay > maxIdle) {
+                    idleDelay = maxIdle;
+                }
             }
             continue;
         }
@@ -1468,14 +1501,18 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         }
 
         if (didWork) {
-            idleDelay = std::chrono::milliseconds(1);
+            idleDelay = std::chrono::milliseconds(5);
             continue;
         }
 
         timer.expires_after(idleDelay);
         co_await timer.async_wait(boost::asio::use_awaitable);
-        if (idleDelay < kMaxIdleDelay) {
+        const auto maxIdle = maxIdleDelay();
+        if (idleDelay < maxIdle) {
             idleDelay *= 2;
+            if (idleDelay > maxIdle) {
+                idleDelay = maxIdle;
+            }
         }
     }
 
@@ -1599,8 +1636,12 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
     entityStarted_.store(true);
     spdlog::info("[PostIngestQueue] Entity extraction poller started");
 
-    auto idleDelay = std::chrono::milliseconds(1);
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10);
+    auto idleDelay = std::chrono::milliseconds(5);
+    auto maxIdleDelay = []() {
+        auto snap = TuningSnapshotRegistry::instance().get();
+        uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
+        return std::chrono::milliseconds(std::max<uint32_t>(10, pollMs));
+    };
 
     while (!stop_.load()) {
         bool didWork = false;
@@ -1610,8 +1651,12 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         if (entityPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
             timer.expires_after(idleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);
-            if (idleDelay < kMaxIdleDelay) {
+            const auto maxIdle = maxIdleDelay();
+            if (idleDelay < maxIdle) {
                 idleDelay *= 2;
+                if (idleDelay > maxIdle) {
+                    idleDelay = maxIdle;
+                }
             }
             continue;
         }
@@ -1633,14 +1678,18 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         }
 
         if (didWork) {
-            idleDelay = std::chrono::milliseconds(1);
+            idleDelay = std::chrono::milliseconds(5);
             continue;
         }
 
         timer.expires_after(idleDelay);
         co_await timer.async_wait(boost::asio::use_awaitable);
-        if (idleDelay < kMaxIdleDelay) {
+        const auto maxIdle = maxIdleDelay();
+        if (idleDelay < maxIdle) {
             idleDelay *= 2;
+            if (idleDelay > maxIdle) {
+                idleDelay = maxIdle;
+            }
         }
     }
 
@@ -1958,8 +2007,12 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
     titleStarted_.store(true);
     spdlog::info("[PostIngestQueue] Title extraction poller started");
 
-    auto idleDelay = std::chrono::milliseconds(1);
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10);
+    auto idleDelay = std::chrono::milliseconds(5);
+    auto maxIdleDelay = []() {
+        auto snap = TuningSnapshotRegistry::instance().get();
+        uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
+        return std::chrono::milliseconds(std::max<uint32_t>(10, pollMs));
+    };
 
     while (!stop_.load()) {
         bool didWork = false;
@@ -1969,8 +2022,12 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
         if (titlePaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
             timer.expires_after(idleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);
-            if (idleDelay < kMaxIdleDelay) {
+            const auto maxIdle = maxIdleDelay();
+            if (idleDelay < maxIdle) {
                 idleDelay *= 2;
+                if (idleDelay > maxIdle) {
+                    idleDelay = maxIdle;
+                }
             }
             continue;
         }
@@ -1992,14 +2049,18 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
         }
 
         if (didWork) {
-            idleDelay = std::chrono::milliseconds(1);
+            idleDelay = std::chrono::milliseconds(5);
             continue;
         }
 
         timer.expires_after(idleDelay);
         co_await timer.async_wait(boost::asio::use_awaitable);
-        if (idleDelay < kMaxIdleDelay) {
+        const auto maxIdle = maxIdleDelay();
+        if (idleDelay < maxIdle) {
             idleDelay *= 2;
+            if (idleDelay > maxIdle) {
+                idleDelay = maxIdle;
+            }
         }
     }
 

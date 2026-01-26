@@ -7,6 +7,7 @@
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/integrity/repair_manager.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -128,6 +129,11 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
             const uint32_t startupDelayMs = TuneAdvisor::fts5StartupDelayMs();
             const uint32_t startupThrottleMs = TuneAdvisor::fts5StartupThrottleMs();
             const uint32_t normalThrottleMs = 10;
+            const auto idleThrottleMs = []() {
+                auto snap = TuningSnapshotRegistry::instance().get();
+                uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
+                return std::max<uint32_t>(10, pollMs);
+            };
 
             spdlog::debug(
                 "[Fts5Job] Startup delay={}ms, startup throttle={}ms, normal throttle={}ms",
@@ -234,7 +240,7 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
                     continue;
                 }
 
-                timer.expires_after(std::chrono::milliseconds(normalThrottleMs));
+                timer.expires_after(std::chrono::milliseconds(idleThrottleMs()));
                 try {
                     co_await timer.async_wait(boost::asio::use_awaitable);
                 } catch (const boost::system::system_error& e) {

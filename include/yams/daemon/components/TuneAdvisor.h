@@ -804,6 +804,24 @@ public:
     }
     static void setWorkerPollMs(uint32_t ms) {
         workerPollMsOverride_.store(ms, std::memory_order_relaxed);
+        workerPollMsPinned_.store(ms != 0, std::memory_order_relaxed);
+    }
+    static void setWorkerPollMsDynamic(uint32_t ms) {
+        if (ms == 0 || workerPollMsPinned())
+            return;
+        workerPollMsOverride_.store(ms, std::memory_order_relaxed);
+    }
+    static bool workerPollMsPinned() {
+        if (workerPollMsPinned_.load(std::memory_order_relaxed))
+            return true;
+        if (const char* s = std::getenv("YAMS_WORKER_POLL_MS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                return (v >= 50 && v <= 2000);
+            } catch (...) {
+            }
+        }
+        return false;
     }
 
     // Idle shrink policy
@@ -1941,6 +1959,7 @@ private:
     // Overrides for config-driven tuning (0 or negative = unset)
     static inline std::atomic<uint32_t> backpressureReadPauseMsOverride_{0};
     static inline std::atomic<uint32_t> workerPollMsOverride_{0};
+    static inline std::atomic<bool> workerPollMsPinned_{false};
     static inline std::atomic<double> idleCpuPctOverride_{-1.0};
     static inline std::atomic<std::uint64_t> idleMuxLowBytesOverride_{0};
     static inline std::atomic<uint32_t> idleShrinkHoldMsOverride_{0};

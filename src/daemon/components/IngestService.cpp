@@ -7,6 +7,8 @@
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 
 namespace yams::daemon {
@@ -39,13 +41,28 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
 
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
+    auto idleDelay = std::chrono::milliseconds(5);
+    auto maxIdleDelay = []() {
+        auto snap = TuningSnapshotRegistry::instance().get();
+        uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
+        return std::chrono::milliseconds(std::max<uint32_t>(50, pollMs));
+    };
+
     while (!stop_.load()) {
         InternalEventBus::StoreDocumentTask task;
         if (channel->try_pop(task)) {
+            idleDelay = std::chrono::milliseconds(5);
             processTask(sm_, task);
         } else {
-            timer.expires_after(std::chrono::milliseconds(100));
+            timer.expires_after(idleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);
+            const auto maxIdle = maxIdleDelay();
+            if (idleDelay < maxIdle) {
+                idleDelay *= 2;
+                if (idleDelay > maxIdle) {
+                    idleDelay = maxIdle;
+                }
+            }
         }
     }
 

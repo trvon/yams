@@ -13,6 +13,7 @@
 #include <yams/core/types.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/ingest/ingest_helpers.h>
@@ -99,8 +100,12 @@ std::size_t EmbeddingService::inFlightJobs() const {
 boost::asio::awaitable<void> EmbeddingService::channelPoller() {
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
-    auto idleDelay = std::chrono::milliseconds(1);
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(50);
+    auto idleDelay = std::chrono::milliseconds(5);
+    auto maxIdleDelay = []() {
+        auto snap = TuningSnapshotRegistry::instance().get();
+        uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
+        return std::chrono::milliseconds(std::max<uint32_t>(50, pollMs));
+    };
 
     spdlog::info("[EmbeddingService] Parallel poller started");
 
@@ -224,15 +229,19 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
         }
 
         if (didWork) {
-            idleDelay = std::chrono::milliseconds(1);
+            idleDelay = std::chrono::milliseconds(5);
             continue; // Check for more work immediately
         }
 
         // Idle - wait before polling again
         timer.expires_after(idleDelay);
         co_await timer.async_wait(boost::asio::use_awaitable);
-        if (idleDelay < kMaxIdleDelay) {
+        const auto maxIdle = maxIdleDelay();
+        if (idleDelay < maxIdle) {
             idleDelay *= 2;
+            if (idleDelay > maxIdle) {
+                idleDelay = maxIdle;
+            }
         }
     }
 
