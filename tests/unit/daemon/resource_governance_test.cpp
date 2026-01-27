@@ -262,18 +262,20 @@ TEST_CASE("TuneAdvisor profile affects resource settings", "[daemon][governance]
         CHECK(scale < 1.0);
     }
 
-    SECTION("Balanced profile has default thresholds") {
+    SECTION("Balanced profile has moderate thresholds") {
         ProfileGuard guard(TuneAdvisor::Profile::Balanced);
 
         auto scale = TuneAdvisor::profileScale();
-        CHECK(scale == 1.0);
+        // Balanced profile now uses 0.75 scale (reduced from 1.0)
+        CHECK(scale == 0.75);
     }
 
-    SECTION("Aggressive profile has higher thresholds") {
+    SECTION("Aggressive profile has default thresholds") {
         ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
 
         auto scale = TuneAdvisor::profileScale();
-        CHECK(scale > 1.0);
+        // Aggressive profile now uses 1.0 scale (reduced from 1.5)
+        CHECK(scale == 1.0);
     }
 }
 
@@ -384,14 +386,21 @@ TEST_CASE("TuneAdvisor ONNX settings are profile-aware", "[daemon][governance][c
             ProfileGuard guard(TuneAdvisor::Profile::Efficient);
             double scale = TuneAdvisor::profileScale();
             uint32_t scaledMax = static_cast<uint32_t>(maxConcurrent * scale);
-            CHECK(scaledMax < maxConcurrent); // Efficient uses fewer slots
+            CHECK(scaledMax < maxConcurrent); // Efficient (0.40) uses fewer slots
+        }
+
+        {
+            ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+            double scale = TuneAdvisor::profileScale();
+            uint32_t scaledMax = static_cast<uint32_t>(maxConcurrent * scale);
+            CHECK(scaledMax < maxConcurrent); // Balanced (0.75) uses fewer slots than max
         }
 
         {
             ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
             double scale = TuneAdvisor::profileScale();
             uint32_t scaledMax = static_cast<uint32_t>(maxConcurrent * scale);
-            CHECK(scaledMax > maxConcurrent); // Aggressive uses more slots
+            CHECK(scaledMax == maxConcurrent); // Aggressive (1.0) uses full slots
         }
     }
 }

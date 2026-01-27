@@ -404,6 +404,83 @@ else
       args: ['ONNX slot exhaustion causes graceful timeout', '--allow-running-no-tests'],
     )
 
+    # ResourceGovernor integration tests - verify throttling behavior during real operations
+    resource_governor_integration_srcs = files(
+      'resource_governor_integration_test.cpp',
+    )
+
+    resource_governor_integration_exe = executable('yams_resource_governor_integration_tests_catch2',
+      resource_governor_integration_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    # Split governor tests into separate test cases to avoid state leakage
+    test('resource_governor_status_metrics',
+      resource_governor_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'governor', 'status'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['ResourceGovernor metrics exposed in daemon status', '--allow-running-no-tests'],
+    )
+
+    test('resource_governor_singleton',
+      resource_governor_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'governor', 'singleton'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['ResourceGovernor singleton is accessible during daemon operation', '--allow-running-no-tests'],
+    )
+
+    test('resource_governor_pressure_detection',
+      resource_governor_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'governor', 'pressure'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 120,  # 2 minutes for ingest + processing
+      args: ['Governor detects pressure with low CPU threshold', '--allow-running-no-tests'],
+    )
+
+    test('resource_governor_scaling_caps',
+      resource_governor_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'governor', 'scaling'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Governor scaling caps adjust based on pressure level', '--allow-running-no-tests'],
+    )
+
+    test('resource_governor_ingest_metrics',
+      resource_governor_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'governor', 'ingest'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 120,  # 2 minutes for ingest + processing
+      args: ['Status response contains governor metrics during ingest', '--allow-running-no-tests'],
+    )
+
+    test('resource_governor_snapshot',
+      resource_governor_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'governor', 'snapshot'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['ResourceGovernor snapshot contains valid metrics', '--allow-running-no-tests'],
+    )
+
+    test('resource_governor_concurrent',
+      resource_governor_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'governor', 'concurrent'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Concurrent status queries return consistent governor data', '--allow-running-no-tests'],
+    )
+
     # Diagnostic tool (not a test, but helpful for debugging)
     post_ingest_trace_exe = executable('yams_post_ingest_trace',
       post_ingest_trace_srcs,

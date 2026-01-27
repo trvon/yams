@@ -35,6 +35,17 @@ TuningManager::~TuningManager() {
 void TuningManager::start() {
     if (running_.exchange(true))
         return;
+
+    // Seed FsmMetricsRegistry with initial ResourceGovernor data immediately
+    // so status requests have valid data before the first async tick completes.
+    // This prevents CLI tools from seeing 0 values for governorBudgetBytes.
+    try {
+        tick_once();
+    } catch (const std::exception& e) {
+        spdlog::debug("TuningManager initial tick error: {}", e.what());
+    } catch (...) {
+    }
+
     tuningFuture_ = boost::asio::co_spawn(strand_, tuningLoop(), boost::asio::use_future);
 }
 

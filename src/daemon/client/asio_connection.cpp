@@ -29,12 +29,25 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
         co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
     }
 
+    // Dispatch to strand for thread-safe access to write_queue and writing flag
     co_await boost::asio::dispatch(strand, use_awaitable);
     write_queue.emplace_back(std::move(frame));
     if (writing)
         co_return Result<void>();
     writing = true;
-    while (!write_queue.empty()) {
+
+    // We must re-acquire strand after each suspension point to maintain thread safety.
+    // The while loop accesses write_queue which is shared state.
+    while (true) {
+        // Re-acquire strand at the start of each iteration since async_write suspends
+        co_await boost::asio::dispatch(strand, use_awaitable);
+
+        // Check if queue is empty (must be done while holding strand)
+        if (write_queue.empty()) {
+            writing = false;
+            co_return Result<void>();
+        }
+
         // Check cancellation at each iteration
         cs = co_await this_coro::cancellation_state;
         if (cs.cancelled() != boost::asio::cancellation_type::none) {
@@ -79,6 +92,8 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
                       frames, batched);
 
         // Race write against timeout using async_initiate (no experimental APIs)
+        // Note: After this co_await, we are no longer on the strand! The next loop iteration
+        // will re-acquire it before accessing write_queue.
         auto executor = co_await this_coro::executor;
         auto timeout = opts.requestTimeout;
 
@@ -130,6 +145,8 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
         if (write_result.index() == 1) {
             spdlog::error("AsioConnection::async_write_frame: write timeout after {}ms",
                           opts.requestTimeout.count());
+            // Re-acquire strand before modifying shared state
+            co_await boost::asio::dispatch(strand, use_awaitable);
             writing = false;
             alive = false;
             boost::system::error_code close_ec;
@@ -140,6 +157,8 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
         auto& [write_ec, result] = std::get<0>(write_result);
         if (write_ec) {
             spdlog::error("AsioConnection::async_write_frame: write error: {}", write_ec.message());
+            // Re-acquire strand before modifying shared state
+            co_await boost::asio::dispatch(strand, use_awaitable);
             writing = false;
             alive = false;
             co_return Error{ErrorCode::NetworkError, write_ec.message()};
@@ -147,14 +166,14 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
         if (result != batched) {
             spdlog::error("AsioConnection::async_write_frame: short write {} != {}", result,
                           batched);
+            // Re-acquire strand before modifying shared state
+            co_await boost::asio::dispatch(strand, use_awaitable);
             writing = false;
             alive = false;
             co_return Error{ErrorCode::NetworkError, "Short write on transport socket"};
         }
         spdlog::debug("AsioConnection::async_write_frame: successfully wrote {} bytes", result);
     }
-    writing = false;
-    co_return Result<void>();
 }
 
 } // namespace yams::daemon
