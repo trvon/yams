@@ -486,4 +486,31 @@ RequestDispatcher::handleRestoreSnapshotRequest(const RestoreSnapshotRequest& re
     co_return resp;
 }
 
+boost::asio::awaitable<Response>
+RequestDispatcher::handleMetadataValueCountsRequest(const MetadataValueCountsRequest& req) {
+    spdlog::debug("MetadataValueCounts request: keys={}", req.keys.size());
+
+    auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
+    if (!metaRepo) {
+        co_return ErrorResponse{.code = ErrorCode::InternalError,
+                                .message = "Metadata repository unavailable"};
+    }
+
+    metadata::DocumentQueryOptions opts;
+    auto result = metaRepo->getMetadataValueCounts(req.keys, opts);
+    if (!result) {
+        co_return ErrorResponse{.code = result.error().code, .message = result.error().message};
+    }
+
+    MetadataValueCountsResponse resp;
+    for (const auto& [key, values] : result.value()) {
+        for (const auto& vc : values) {
+            resp.valueCounts[key].emplace_back(vc.value, static_cast<size_t>(vc.count));
+        }
+    }
+
+    spdlog::debug("MetadataValueCounts: returning {} keys", resp.valueCounts.size());
+    co_return resp;
+}
+
 } // namespace yams::daemon

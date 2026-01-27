@@ -279,6 +279,11 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
         }
         serviceReq.matchAllTags = req.matchAllTags;
 
+        // Session filtering
+        if (!req.sessionId.empty()) {
+            serviceReq.sessionId = req.sessionId;
+        }
+
         if (!req.namePattern.empty()) {
             serviceReq.pattern = req.namePattern;
         }

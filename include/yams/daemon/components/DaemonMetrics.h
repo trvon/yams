@@ -89,6 +89,11 @@ struct MetricsSnapshot {
     std::size_t postIngestQEmb{0};
     std::size_t postIngestProcessed{0};
     std::size_t postIngestFailed{0};
+    // File/directory add tracking
+    std::uint64_t filesAdded{0};
+    std::uint64_t directoriesAdded{0};
+    std::uint64_t filesProcessed{0};
+    std::uint64_t directoriesProcessed{0};
     double postIngestLatencyMsEma{0.0};
     double postIngestRateSecEma{0.0};
     // Pipeline stage metrics (extraction → KG → symbol → entity → embedding)
@@ -97,12 +102,17 @@ struct MetricsSnapshot {
     std::size_t kgDropped{0};
     std::size_t kgConsumed{0};
     std::size_t kgInFlight{0};
+    std::size_t kgQueueDepth{0}; // Current channel queue depth
     std::size_t symbolInFlight{0};
+    std::size_t symbolQueueDepth{0}; // Current channel queue depth
     // Entity extraction metrics (external plugins like Ghidra)
     std::size_t entityQueued{0};
     std::size_t entityDropped{0};
     std::size_t entityConsumed{0};
     std::size_t entityInFlight{0};
+    std::size_t entityQueueDepth{0}; // Current channel queue depth
+    // Title extraction metrics
+    std::size_t titleQueueDepth{0}; // Current channel queue depth
     // Dynamic concurrency limits (PBI-05a)
     std::size_t postExtractionLimit{4};
     std::size_t postKgLimit{8};

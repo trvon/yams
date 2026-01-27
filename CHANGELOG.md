@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `yams list --metadata-values` for showing unique metadata values with counts (useful for PBI discovery).
+- **Post-ingest file/directory tracking**: New metrics for tracking files and directories added/processed through the ingestion pipeline (`filesAdded`, `directoriesAdded`, `filesProcessed`, `directoriesProcessed`).
+- **Per-stage queue depth exposure**: Real-time queue depth metrics for KG, symbol, entity, and title extraction stages accessible via daemon status.
+- **Progress bars in CLI**: Visual progress bars for queue utilization, worker pool, memory pressure, and pipeline stages in `yams daemon status` and `yams status` commands.
+- **Unified status UI**: `yams status` daemon-connected display now uses consistent section headers, row rendering, and status indicators matching `yams daemon status`.
 - Unique PBI selection guidance in AGENTS workflow (metadata search + list values).
 - **Data-dir single-instance enforcement**: Prevents multiple daemons from sharing the same data directory via flock-based `.yams-lock` file. Newer daemon requests shutdown of existing daemon and takes over, enabling seamless upgrades/restarts.
 

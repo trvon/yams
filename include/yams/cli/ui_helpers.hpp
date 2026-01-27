@@ -1026,6 +1026,147 @@ inline std::string center_text(std::string_view text, int width = -1) {
 }
 
 // ============================================================================
+// Severity-based status helpers
+// ============================================================================
+
+// Severity levels for metric status display
+enum class Severity { Good, Warn, Bad };
+
+// Paint text with severity color and optional status icon
+inline std::string severity_text(Severity sev, std::string_view text, bool with_icon = false) {
+    const char* color = Ansi::GREEN;
+    const char* icon = "✓";
+    switch (sev) {
+        case Severity::Good:
+            break;
+        case Severity::Warn:
+            color = Ansi::YELLOW;
+            icon = "⚠";
+            break;
+        case Severity::Bad:
+            color = Ansi::RED;
+            icon = "✗";
+            break;
+    }
+    std::string result;
+    if (with_icon) {
+        result = std::string(icon) + " " + std::string(text);
+    } else {
+        result = std::string(text);
+    }
+    return colorize(result, color);
+}
+
+// Classify a numeric value against thresholds (low = good, high = bad)
+inline Severity classify_threshold(double value, double warn_threshold, double bad_threshold) {
+    if (value >= bad_threshold)
+        return Severity::Bad;
+    if (value >= warn_threshold)
+        return Severity::Warn;
+    return Severity::Good;
+}
+
+// Classify capacity utilization (high = bad, for queues/pools)
+inline Severity classify_utilization(double fraction, double warn = 0.75, double bad = 0.9) {
+    return classify_threshold(fraction, warn, bad);
+}
+
+// ============================================================================
+// Progress bar with stats helper
+// ============================================================================
+
+// Render progress bar with optional stats display
+// Example output: "######░░░░ 60% (600/1000)"
+inline std::string
+progress_with_stats(double fraction, int bar_width = 10,
+                    std::optional<std::pair<uint64_t, uint64_t>> ratio = std::nullopt,
+                    std::string_view unit = "") {
+    double f = std::clamp(fraction, 0.0, 1.0);
+    std::ostringstream oss;
+    oss << progress_bar(f, static_cast<size_t>(bar_width), "#", "░", Ansi::GREEN, Ansi::YELLOW,
+                        Ansi::RED, true);
+    oss << " " << static_cast<int>(f * 100) << "%";
+    if (ratio.has_value()) {
+        oss << " (" << ratio->first << "/" << ratio->second;
+        if (!unit.empty()) {
+            oss << " " << unit;
+        }
+        oss << ")";
+    }
+    return oss.str();
+}
+
+// ============================================================================
+// Ratio display helpers
+// ============================================================================
+
+// Format a ratio with optional unit: "3/8 active"
+inline std::string format_ratio(uint64_t current, uint64_t total, std::string_view unit = "") {
+    std::ostringstream oss;
+    oss << current << "/" << total;
+    if (!unit.empty()) {
+        oss << " " << unit;
+    }
+    return oss.str();
+}
+
+// Format a ratio with percentage: "3/8 (38%)"
+inline std::string format_ratio_pct(uint64_t current, uint64_t total) {
+    std::ostringstream oss;
+    oss << current << "/" << total;
+    if (total > 0) {
+        double pct = static_cast<double>(current) * 100.0 / static_cast<double>(total);
+        oss << " (" << static_cast<int>(pct) << "%)";
+    }
+    return oss.str();
+}
+
+// ============================================================================
+// Attribute list formatter
+// ============================================================================
+
+// Format key-value pairs inline: "key=value, key2=value2"
+using AttrList = std::vector<std::pair<std::string, std::string>>;
+
+inline std::string format_attrs(const AttrList& attrs, std::string_view separator = ", ") {
+    std::ostringstream oss;
+    bool first = true;
+    for (const auto& [key, val] : attrs) {
+        if (!first) {
+            oss << separator;
+        }
+        first = false;
+        oss << key << "=" << val;
+    }
+    return oss.str();
+}
+
+// Builder pattern for convenience
+class AttrBuilder {
+public:
+    AttrBuilder& add(std::string_view key, std::string_view value) {
+        attrs_.emplace_back(std::string(key), std::string(value));
+        return *this;
+    }
+
+    AttrBuilder& add_if(bool cond, std::string_view key, std::string_view value) {
+        if (cond) {
+            add(key, value);
+        }
+        return *this;
+    }
+
+    std::string build(std::string_view separator = ", ") const {
+        return format_attrs(attrs_, separator);
+    }
+
+    bool empty() const { return attrs_.empty(); }
+
+private:
+    AttrList attrs_;
+};
+
+// ============================================================================
 // Batch operation helpers
 // ============================================================================
 

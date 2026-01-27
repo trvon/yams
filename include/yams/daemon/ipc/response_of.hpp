@@ -132,6 +132,11 @@ template <> struct ResponseOf<KgIngestRequest> {
     using type = KgIngestResponse;
 };
 
+// Generic metadata value counts query (MCP client mode)
+template <> struct ResponseOf<MetadataValueCountsRequest> {
+    using type = MetadataValueCountsResponse;
+};
+
 // Helper alias
 template <typename Req> using ResponseOfT = typename ResponseOf<Req>::type;
 

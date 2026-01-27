@@ -2415,6 +2415,52 @@ template <> struct ProtoBinding<GraphPathHistoryResponse> {
     }
 };
 
+template <> struct ProtoBinding<MetadataValueCountsRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kMetadataValueCountsRequest;
+    static void set(Envelope& env, const MetadataValueCountsRequest& r) {
+        auto* o = env.mutable_metadata_value_counts_request();
+        for (const auto& key : r.keys) {
+            o->add_keys(key);
+        }
+    }
+    static MetadataValueCountsRequest get(const Envelope& env) {
+        const auto& i = env.metadata_value_counts_request();
+        MetadataValueCountsRequest r{};
+        r.keys.reserve(i.keys_size());
+        for (const auto& key : i.keys()) {
+            r.keys.push_back(key);
+        }
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<MetadataValueCountsResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kMetadataValueCountsResponse;
+    static void set(Envelope& env, const MetadataValueCountsResponse& r) {
+        auto* o = env.mutable_metadata_value_counts_response();
+        for (const auto& [key, values] : r.valueCounts) {
+            auto* list = (*o->mutable_value_counts())[key].mutable_items();
+            for (const auto& [value, count] : values) {
+                auto* item = list->Add();
+                item->set_value(value);
+                item->set_count(static_cast<uint64_t>(count));
+            }
+        }
+    }
+    static MetadataValueCountsResponse get(const Envelope& env) {
+        const auto& i = env.metadata_value_counts_response();
+        MetadataValueCountsResponse r{};
+        for (const auto& [key, valueList] : i.value_counts()) {
+            auto& vec = r.valueCounts[key];
+            vec.reserve(valueList.items_size());
+            for (const auto& item : valueList.items()) {
+                vec.emplace_back(item.value(), static_cast<size_t>(item.count()));
+            }
+        }
+        return r;
+    }
+};
+
 // Helper to encode Request/Response variants using bindings
 template <typename Variant>
 static Result<void> encode_variant_into(Envelope& env, const Variant& v) {
@@ -2734,6 +2780,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kMetadataValueCountsRequest: {
+            auto v = ProtoBinding<MetadataValueCountsRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
 
         // Additional responses
         case Envelope::kSuccessResponse: {
@@ -2889,6 +2940,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kGraphPathHistoryResponse: {
             auto v = ProtoBinding<GraphPathHistoryResponse>::get(env);
             m.payload = Response{std::in_place_type<GraphPathHistoryResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kMetadataValueCountsResponse: {
+            auto v = ProtoBinding<MetadataValueCountsResponse>::get(env);
+            m.payload = Response{std::in_place_type<MetadataValueCountsResponse>, std::move(v)};
             break;
         }
         case Envelope::kEmbedEvent: {

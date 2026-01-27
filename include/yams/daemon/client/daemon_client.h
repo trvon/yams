@@ -418,7 +418,9 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             // Graph maintenance operations (PBI-009)
             std::is_same<Req, GraphRepairRequest>, std::is_same<Req, GraphValidateRequest>,
             // Graph query operations
-            std::is_same<Req, GraphQueryRequest>>,
+            std::is_same<Req, GraphQueryRequest>,
+            // Generic metadata value counts query (MCP client mode)
+            std::is_same<Req, MetadataValueCountsRequest>>,
         "Req must be a valid daemon Request alternative");
 
     // Force streaming for streaming-capable requests

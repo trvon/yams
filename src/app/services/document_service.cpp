@@ -1261,6 +1261,11 @@ public:
         if (!req.tags.empty())
             queryOpts.tags = req.tags;
 
+        // Session filtering via metadata
+        if (!req.sessionId.empty()) {
+            queryOpts.metadataFilters.emplace_back("session_id", req.sessionId);
+        }
+
         if (req.sortBy == "name") {
             queryOpts.orderByNameAsc = (req.sortOrder != "desc");
         } else {

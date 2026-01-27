@@ -115,6 +115,7 @@ struct ListOptions {
     std::string changeWindow = "24h";
     std::string filterTags;
     std::string namePattern;
+    std::string sessionId; // filter by session ID
     int offset = 0;
     int recentCount = 0;
     int snippetLength = 50;

@@ -124,6 +124,34 @@ public:
 private:
     RequestDispatcher* dispatcher_;
 };
+
+// RAII guard to signal worker job start/end for metrics tracking.
+// Increments poolActive on construction, decrements on destruction.
+class WorkerJobGuard {
+public:
+    explicit WorkerJobGuard(const std::function<void(bool)>& signal)
+        : signal_(signal), engaged_(signal != nullptr) {
+        if (engaged_) {
+            signal_(true); // Job starting
+        }
+    }
+
+    ~WorkerJobGuard() {
+        if (engaged_) {
+            signal_(false); // Job ending
+        }
+    }
+
+    // Non-copyable, non-movable
+    WorkerJobGuard(const WorkerJobGuard&) = delete;
+    WorkerJobGuard& operator=(const WorkerJobGuard&) = delete;
+    WorkerJobGuard(WorkerJobGuard&&) = delete;
+    WorkerJobGuard& operator=(WorkerJobGuard&&) = delete;
+
+private:
+    const std::function<void(bool)>& signal_;
+    bool engaged_;
+};
 } // anonymous namespace
 
 // ============================================================================
@@ -1065,6 +1093,10 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                           request_id);
             co_return Error{ErrorCode::NetworkError, "Socket closed"};
         }
+
+        // Signal worker job start/end for metrics tracking (poolActive, poolPosted, poolCompleted)
+        WorkerJobGuard job_guard(config_.worker_job_signal);
+
         // Use the configured processor (server may decorate with streaming support)
         std::shared_ptr<RequestProcessor> proc = processor_;
         spdlog::debug("handle_streaming_request: processor type={} for request_id={}",

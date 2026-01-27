@@ -722,6 +722,16 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.kgInFlight = pq->kgInFlight();
                 out.symbolInFlight = pq->symbolInFlight();
                 out.entityInFlight = pq->entityInFlight();
+                // File/directory add tracking
+                out.filesAdded = pq->filesAdded();
+                out.directoriesAdded = pq->directoriesAdded();
+                out.filesProcessed = pq->filesProcessed();
+                out.directoriesProcessed = pq->directoriesProcessed();
+                // Per-stage queue depths (approximate, from channel sizes)
+                out.kgQueueDepth = pq->kgQueueDepth();
+                out.symbolQueueDepth = pq->symbolQueueDepth();
+                out.entityQueueDepth = pq->entityQueueDepth();
+                out.titleQueueDepth = pq->titleQueueDepth();
                 // Dynamic concurrency limits (PBI-05a)
                 out.postExtractionLimit = TuneAdvisor::postExtractionConcurrent();
                 out.postKgLimit = TuneAdvisor::postKgConcurrent();

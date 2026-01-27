@@ -96,6 +96,24 @@ public:
     std::size_t size() const;
     std::size_t processed() const { return processed_.load(); }
     std::size_t failed() const { return failed_.load(); }
+
+    // File/directory add tracking
+    std::uint64_t filesAdded() const { return filesAdded_.load(); }
+    std::uint64_t directoriesAdded() const { return directoriesAdded_.load(); }
+    std::uint64_t filesProcessed() const { return filesProcessed_.load(); }
+    std::uint64_t directoriesProcessed() const { return directoriesProcessed_.load(); }
+    void incFilesAdded(std::uint64_t count = 1) {
+        filesAdded_.fetch_add(count, std::memory_order_relaxed);
+    }
+    void incDirectoriesAdded(std::uint64_t count = 1) {
+        directoriesAdded_.fetch_add(count, std::memory_order_relaxed);
+    }
+    void incFilesProcessed(std::uint64_t count = 1) {
+        filesProcessed_.fetch_add(count, std::memory_order_relaxed);
+    }
+    void incDirectoriesProcessed(std::uint64_t count = 1) {
+        directoriesProcessed_.fetch_add(count, std::memory_order_relaxed);
+    }
     double latencyMsEma() const { return latencyMsEma_.load(); }
     double ratePerSecEma() const { return ratePerSecEma_.load(); }
     std::size_t capacity() const { return capacity_; }
@@ -114,6 +132,12 @@ public:
         return inFlight_.load() + kgInFlight_.load() + symbolInFlight_.load() +
                entityInFlight_.load() + titleInFlight_.load();
     }
+
+    // Per-stage queue depths (approximate, from channel sizes)
+    std::size_t kgQueueDepth() const;
+    std::size_t symbolQueueDepth() const;
+    std::size_t entityQueueDepth() const;
+    std::size_t titleQueueDepth() const;
 
     // Stage concurrency limits (dynamic via TuneAdvisor)
     static std::size_t maxExtractionConcurrent();
@@ -274,6 +298,11 @@ private:
     std::atomic<bool> titlePaused_{false};
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};
+    // File/directory add tracking
+    std::atomic<std::uint64_t> filesAdded_{0};
+    std::atomic<std::uint64_t> directoriesAdded_{0};
+    std::atomic<std::uint64_t> filesProcessed_{0};
+    std::atomic<std::uint64_t> directoriesProcessed_{0};
     std::atomic<std::size_t> inFlight_{0};
     std::atomic<std::size_t> kgInFlight_{0};
     std::atomic<std::size_t> symbolInFlight_{0};

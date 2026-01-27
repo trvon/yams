@@ -72,6 +72,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/ipc/retrieval_session.h>
+#include <yams/daemon/ipc/fsm_metrics_registry.h>
 
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
@@ -576,6 +577,10 @@ yams::Result<void> ServiceManager::initialize() {
         PoolManager::instance().configure("ipc_io", ioCfg);
         spdlog::info("PoolManager defaults configured: ipc[min={},max={}] io[min={},max={}]",
                      ipcCfg.min_size, ipcCfg.max_size, ioCfg.min_size, ioCfg.max_size);
+
+        // Seed FsmMetricsRegistry with initial pool sizes for immediate visibility in status
+        FsmMetricsRegistry::instance().setIpcPoolSize(static_cast<uint32_t>(ipcCfg.min_size));
+        FsmMetricsRegistry::instance().setIoPoolSize(static_cast<uint32_t>(ioCfg.min_size));
     } catch (const std::exception& e) {
         spdlog::debug("PoolManager configure error: {}", e.what());
     }
@@ -2503,15 +2508,13 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
 }
 
 size_t ServiceManager::getWorkerQueueDepth() const {
-    // With the new architecture using io_context, we don't have a direct way to get queue depth
-    // Return 0 for now
-    return 0;
-    // A simple estimate of the queue depth.
-    long posted = poolPosted_.load();
-    long completed = poolCompleted_.load();
-    long active = poolActive_.load();
+    // A simple estimate of the queue depth based on job tracking counters.
+    long posted = poolPosted_.load(std::memory_order_relaxed);
+    long completed = poolCompleted_.load(std::memory_order_relaxed);
+    long active = poolActive_.load(std::memory_order_relaxed);
+
     if (posted > completed + active) {
-        return posted - completed - active;
+        return static_cast<size_t>(posted - completed - active);
     }
     return 0;
 }

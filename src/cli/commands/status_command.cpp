@@ -338,167 +338,196 @@ public:
                             }
                             std::cout << j.dump(2) << std::endl;
                         } else {
-                            std::cout << "== DAEMON STATUS ==\n";
-                            std::cout << "RUN  : " << (s.running ? "yes" : "no") << "\n";
-                            std::cout << "VER  : " << s.version << "\n";
-                            std::cout
-                                << "STATE: "
-                                << (s.overallStatus.empty()
-                                        ? (s.ready ? "Ready" : (s.running ? "Starting" : "Stopped"))
-                                        : s.overallStatus)
-                                << "\n";
-                            std::cout << "UP   : " << s.uptimeSeconds << "s\n";
-                            std::cout << "REQ  : " << s.requestsProcessed
-                                      << "  ACT: " << s.activeConnections << "/" << s.maxConnections
-                                      << " (free=" << s.connectionSlotsFree;
-                            if (s.oldestConnectionAge > 0) {
-                                std::cout << ", oldest=" << s.oldestConnectionAge << "s";
-                            }
-                            if (s.forcedCloseCount > 0) {
-                                std::cout << ", forced=" << s.forcedCloseCount;
-                            }
-                            std::cout << ")\n";
+                            using namespace yams::cli::ui;
+                            std::cout << title_banner("DAEMON STATUS") << "\n\n";
+
+                            std::vector<Row> overview;
+                            // State with indicator
+                            std::string stateStr = s.overallStatus.empty()
+                                                       ? (s.ready     ? "Ready"
+                                                          : s.running ? "Starting"
+                                                                      : "Stopped")
+                                                       : s.overallStatus;
+                            bool stateOk = (stateStr == "Ready" || stateStr == "ready");
+                            std::string stateIcon = stateOk ? "✓ " : "⚠ ";
+                            overview.push_back({"State",
+                                                colorize(stateIcon + stateStr,
+                                                         stateOk ? Ansi::GREEN : Ansi::YELLOW),
+                                                ""});
+                            overview.push_back({"Version", s.version, ""});
+                            overview.push_back({"Uptime", format_duration(s.uptimeSeconds), ""});
+                            std::ostringstream connInfo;
+                            connInfo << s.activeConnections << "/" << s.maxConnections << " active";
+                            if (s.connectionSlotsFree > 0)
+                                connInfo << ", " << s.connectionSlotsFree << " free";
+                            if (s.oldestConnectionAge > 0)
+                                connInfo << ", oldest " << s.oldestConnectionAge << "s";
+                            overview.push_back({"Connections", connInfo.str(), ""});
+                            overview.push_back(
+                                {"Requests", std::to_string(s.requestsProcessed), ""});
                             if (s.retryAfterMs > 0) {
-                                std::cout << "BACK : retry-after=" << s.retryAfterMs << "ms\n";
+                                overview.push_back(
+                                    {"Backpressure",
+                                     colorize(std::to_string(s.retryAfterMs) + "ms cooldown",
+                                              Ansi::YELLOW),
+                                     ""});
                             }
-                            std::cout << "MEM  : " << std::fixed << std::setprecision(1)
-                                      << s.memoryUsageMb << "MB  CPU: " << (int)s.cpuUsagePercent
-                                      << "%\n";
-                            std::cout << "POOL : ipc=" << s.ipcPoolSize << ", io=" << s.ioPoolSize
-                                      << "\n";
-                            std::cout << "SEARCH: act=" << s.searchMetrics.active
-                                      << ", queued=" << s.searchMetrics.queued
-                                      << ", hit=" << std::fixed << std::setprecision(1)
-                                      << (s.searchMetrics.cacheHitRate * 100.0)
-                                      << "% , lat=" << s.searchMetrics.avgLatencyUs << "us"
-                                      << ", limit=" << s.searchMetrics.concurrencyLimit << "\n";
-                            std::cout.unsetf(std::ios::floatfield);
+                            std::cout << section_header("Overview") << "\n\n";
+                            render_rows(std::cout, overview);
+
+                            // Resources with progress bars
+                            std::cout << "\n" << section_header("Resources") << "\n\n";
+                            std::vector<Row> resources;
+                            std::ostringstream cpuVal;
+                            cpuVal << std::fixed << std::setprecision(1) << s.cpuUsagePercent
+                                   << "%";
+                            resources.push_back({"CPU", cpuVal.str(), ""});
+                            resources.push_back(
+                                {"Memory", std::to_string((int)s.memoryUsageMb) + " MB", ""});
+                            resources.push_back({"Pools",
+                                                 "ipc=" + std::to_string(s.ipcPoolSize) +
+                                                     " io=" + std::to_string(s.ioPoolSize),
+                                                 ""});
+                            // Worker pool with progress bar
+                            uint64_t threads = getCount("worker_threads");
+                            uint64_t active = getCount("worker_active");
+                            uint64_t queued = getCount("worker_queued");
+                            if (threads > 0) {
+                                double workerFrac =
+                                    static_cast<double>(active) / static_cast<double>(threads);
+                                std::string workerBar = progress_with_stats(
+                                    workerFrac, 10, {{active, threads}}, "active");
+                                if (queued > 0)
+                                    workerBar += " · " + std::to_string(queued) + " queued";
+                                resources.push_back({"Workers", workerBar, ""});
+                            }
+                            render_rows(std::cout, resources);
+
+                            // Search metrics
+                            std::cout << "\n" << section_header("Search") << "\n\n";
+                            std::vector<Row> searchRows;
+                            std::ostringstream searchVal;
+                            searchVal << s.searchMetrics.active << " active · "
+                                      << s.searchMetrics.queued << " queued";
+                            searchRows.push_back({"Queries", searchVal.str(), ""});
+                            std::ostringstream searchPerf;
+                            searchPerf << std::fixed << std::setprecision(1)
+                                       << (s.searchMetrics.cacheHitRate * 100.0) << "% cache · "
+                                       << s.searchMetrics.avgLatencyUs << "µs latency";
+                            searchRows.push_back({"Performance", searchPerf.str(), ""});
+                            if (s.searchMetrics.concurrencyLimit > 0) {
+                                searchRows.push_back(
+                                    {"Concurrency",
+                                     std::to_string(s.searchMetrics.concurrencyLimit), ""});
+                            }
                             // Search tuning state (corpus-aware FSM)
                             if (!s.searchTuningState.empty()) {
-                                std::cout << "TUNE : state=" << s.searchTuningState;
-                                if (!s.searchTuningReason.empty()) {
-                                    std::cout << " (" << s.searchTuningReason << ")";
-                                }
-                                std::cout << "\n";
+                                std::ostringstream tuneVal;
+                                tuneVal << s.searchTuningState;
+                                if (!s.searchTuningReason.empty())
+                                    tuneVal << " (" << s.searchTuningReason << ")";
+                                searchRows.push_back({"Tuning", tuneVal.str(), ""});
                             }
-                            // ResourceGovernor metrics (memory pressure management)
+                            render_rows(std::cout, searchRows);
+
+                            // Resource Governor with progress bar
                             if (s.governorBudgetBytes > 0) {
+                                std::cout << "\n" << section_header("Resource Governor") << "\n\n";
+                                std::vector<Row> governor;
                                 const char* levelNames[] = {"Normal", "Warning", "Critical",
                                                             "Emergency"};
                                 uint8_t lvl =
                                     std::min(s.governorPressureLevel, static_cast<uint8_t>(3));
-                                std::cout << "GOV  : " << levelNames[lvl] << " ("
-                                          << (s.governorRssBytes / (1024 * 1024)) << "/"
-                                          << (s.governorBudgetBytes / (1024 * 1024))
-                                          << "MB), headroom=" << (int)s.governorHeadroomPct << "%";
+                                double memFrac = static_cast<double>(s.governorRssBytes) /
+                                                 static_cast<double>(s.governorBudgetBytes);
+                                uint64_t memMb = s.governorRssBytes / (1024ULL * 1024);
+                                uint64_t budgetMb = s.governorBudgetBytes / (1024ULL * 1024);
+                                std::string memBar =
+                                    progress_with_stats(memFrac, 10, {{memMb, budgetMb}}, "MB");
+                                std::string indicator = (lvl == 0)   ? " ✓"
+                                                        : (lvl == 1) ? " ⚠"
+                                                                     : " ✗";
+                                governor.push_back(
+                                    {"Memory", memBar + indicator + " " + levelNames[lvl], ""});
+                                governor.push_back(
+                                    {"Headroom", std::to_string(s.governorHeadroomPct) + "%", ""});
                                 if (s.onnxTotalSlots > 0) {
-                                    std::cout << ", onnx=" << s.onnxUsedSlots << "/"
-                                              << s.onnxTotalSlots;
+                                    double onnxFrac = static_cast<double>(s.onnxUsedSlots) /
+                                                      static_cast<double>(s.onnxTotalSlots);
+                                    std::string onnxBar = progress_with_stats(
+                                        onnxFrac, 8, {{s.onnxUsedSlots, s.onnxTotalSlots}},
+                                        "slots");
+                                    governor.push_back({"ONNX", onnxBar, ""});
                                 }
-                                std::cout << "\n";
+                                render_rows(std::cout, governor);
                             }
-                            std::cout << "WORK : thr=" << getCount("worker_threads")
-                                      << ", act=" << getCount("worker_active")
-                                      << ", queued=" << getCount("worker_queued") << "\n";
-                            // Surface degraded flags prominently when present
+                            // Storage & Embeddings section
+                            std::cout << "\n" << section_header("Storage & Embeddings") << "\n\n";
+                            std::vector<Row> storageRows;
                             try {
-                                auto it_pd = s.readinessStates.find("plugins_degraded");
-                                auto it_ed = s.readinessStates.find("embedding_degraded");
-                                if ((it_pd != s.readinessStates.end() && it_pd->second) ||
-                                    (it_ed != s.readinessStates.end() && it_ed->second)) {
-                                    std::cout << "DEGD : "
-                                              << (it_pd != s.readinessStates.end() && it_pd->second
-                                                      ? "plugins "
-                                                      : "")
-                                              << (it_ed != s.readinessStates.end() && it_ed->second
-                                                      ? "embeddings"
-                                                      : "")
-                                              << "\n";
+                                uint64_t docs = 0, logical = 0, physical = 0, indexed = 0;
+                                auto itDocsTotal = s.requestCounts.find("documents_total");
+                                if (itDocsTotal != s.requestCounts.end()) {
+                                    docs = itDocsTotal->second;
+                                } else {
+                                    auto itDocs = s.requestCounts.find("storage_documents");
+                                    if (itDocs != s.requestCounts.end())
+                                        docs = itDocs->second;
+                                }
+                                auto itIndexed = s.requestCounts.find("documents_indexed");
+                                if (itIndexed != s.requestCounts.end())
+                                    indexed = itIndexed->second;
+                                auto itLogical = s.requestCounts.find("storage_logical_bytes");
+                                if (itLogical != s.requestCounts.end())
+                                    logical = itLogical->second;
+                                auto itPhysical = s.requestCounts.find("storage_physical_bytes");
+                                if (itPhysical != s.requestCounts.end())
+                                    physical = itPhysical->second;
+
+                                std::ostringstream docVal;
+                                docVal << docs << " documents";
+                                if (indexed > 0)
+                                    docVal << " · " << indexed << " indexed";
+                                storageRows.push_back({"Documents", docVal.str(), ""});
+
+                                std::ostringstream sizeVal;
+                                sizeVal << "logical " << format_bytes(logical);
+                                if (physical > 0)
+                                    sizeVal << " · physical " << format_bytes(physical);
+                                storageRows.push_back({"Size", sizeVal.str(), ""});
+
+                                // Embedding coverage progress bar
+                                if (docs > 0 && indexed > 0) {
+                                    double embFrac =
+                                        static_cast<double>(indexed) / static_cast<double>(docs);
+                                    std::string embBar =
+                                        progress_with_stats(embFrac, 10, {{indexed, docs}});
+                                    storageRows.push_back({"Embeddings", embBar, ""});
                                 }
                             } catch (...) {
+                                storageRows.push_back({"Storage", "Error reading stats", ""});
                             }
-                            if (!s.ready && !waitingSummary.empty()) {
-                                std::cout << "WAIT : " << waitingSummary << "\n";
-                            }
-                            // Storage stats (daemon metrics only; no local scans)
-                            {
-                                try {
-                                    uint64_t docs = 0, logical = 0, physical = 0;
-                                    // Prefer documents_total (from metadata, initialized on
-                                    // startup) over storage_documents (CAS object count, requires
-                                    // scan)
-                                    auto itDocsTotal = s.requestCounts.find("documents_total");
-                                    if (itDocsTotal != s.requestCounts.end()) {
-                                        docs = itDocsTotal->second;
-                                    } else {
-                                        auto itDocs = s.requestCounts.find("storage_documents");
-                                        if (itDocs != s.requestCounts.end())
-                                            docs = itDocs->second;
-                                    }
-                                    auto itLogical = s.requestCounts.find("storage_logical_bytes");
-                                    if (itLogical != s.requestCounts.end())
-                                        logical = itLogical->second;
-                                    auto itPhysical =
-                                        s.requestCounts.find("storage_physical_bytes");
-                                    if (itPhysical != s.requestCounts.end())
-                                        physical = itPhysical->second;
-
-                                    bool storageOk = (physical > 0 || logical > 0 || docs > 0);
-
-                                    // Use shared UI helper for byte formatting
-                                    using yams::cli::ui::format_bytes;
-
-                                    uint64_t saved = 0ULL;
-                                    int pct = 0;
-                                    if (physical > 0 && logical > 0) {
-                                        saved = (logical > physical) ? (logical - physical) : 0ULL;
-                                        pct = static_cast<int>((saved * 100.0) / logical);
-                                    }
-                                    std::cout << "STOR : " << (storageOk ? "ok" : "unknown")
-                                              << ", docs=" << docs
-                                              << ", logical=" << format_bytes(logical);
-                                    if (physical > 0) {
-                                        std::cout << ", physical=" << format_bytes(physical)
-                                                  << ", saved=" << format_bytes(saved) << " ("
-                                                  << pct << "%)";
-                                    }
-                                    std::cout << "\n";
-
-                                } catch (...) {
-                                    std::cout << "STOR : error reading stats\n";
-                                }
-                            }
+                            render_rows(std::cout, storageRows);
 
                             // Post-ingest pipeline summary (show when there's activity)
-                            {
-                                uint64_t piq = getCount("post_ingest_queued");
-                                uint64_t pii = getCount("post_ingest_inflight");
-                                if (piq > 0 || pii > 0) {
-                                    std::cout << "POST : queued=" << piq << ", inflight=" << pii
-                                              << "\n";
-                                }
+                            uint64_t piq = getCount("post_ingest_queued");
+                            uint64_t pii = getCount("post_ingest_inflight");
+                            uint64_t piCap = getCount("post_ingest_capacity");
+                            if (piq > 0 || pii > 0) {
+                                std::cout << "\n"
+                                          << section_header("Post-Ingest Pipeline") << "\n\n";
+                                std::vector<Row> postRows;
+                                double qFrac = piCap > 0 ? static_cast<double>(piq) /
+                                                               static_cast<double>(piCap)
+                                                         : 0.0;
+                                std::string qBar = progress_with_stats(qFrac, 10, {{piq, piCap}});
+                                postRows.push_back({"Queue", qBar, ""});
+                                if (pii > 0)
+                                    postRows.push_back(
+                                        {"Inflight", std::to_string(pii) + " active", ""});
+                                render_rows(std::cout, postRows);
                             }
 
-                            // Short plugins summary (typed providers)
-                            if (!s.providers.empty()) {
-                                std::cout << "PLUG : " << s.providers.size() << " loaded";
-                                // Identify adopted provider and its state
-                                for (const auto& p : s.providers) {
-                                    if (p.isProvider) {
-                                        std::cout << ", provider='" << p.name << "'";
-                                        if (!p.ready)
-                                            std::cout << " [not-ready]";
-                                        if (p.degraded)
-                                            std::cout << " [degraded]";
-                                        if (p.modelsLoaded > 0)
-                                            std::cout << ", models=" << p.modelsLoaded;
-                                        if (!p.error.empty())
-                                            std::cout << ", error=\"" << p.error << "\"";
-                                        break;
-                                    }
-                                }
-                                std::cout << "\n";
-                            }
                             // Embedding runtime summary (prefer readiness when daemon omits fields)
                             bool embedAvail = s.embeddingAvailable;
                             try {
@@ -507,19 +536,89 @@ public:
                                     embedAvail = it->second;
                             } catch (...) {
                             }
-                            std::cout << "EMBED: " << (embedAvail ? "available" : "unavailable");
-                            if (!s.embeddingBackend.empty())
-                                std::cout << ", backend=" << s.embeddingBackend;
-                            if (!s.embeddingModel.empty())
-                                std::cout << ", model='" << s.embeddingModel << "'";
-                            if (!s.embeddingModelPath.empty())
-                                std::cout << ", path='" << s.embeddingModelPath << "'";
-                            if (s.embeddingDim > 0)
-                                std::cout << ", dim=" << s.embeddingDim;
-                            if (s.embeddingThreadsIntra > 0 || s.embeddingThreadsInter > 0)
-                                std::cout << ", threads=" << s.embeddingThreadsIntra << "/"
-                                          << s.embeddingThreadsInter;
-                            std::cout << "\n";
+
+                            // Plugins & Embeddings section
+                            bool hasPlugins = !s.providers.empty();
+                            bool hasEmbeddingInfo = !s.embeddingBackend.empty() ||
+                                                    !s.embeddingModel.empty() || s.embeddingDim > 0;
+                            if (hasPlugins || hasEmbeddingInfo) {
+                                std::cout << "\n" << section_header("Plugins") << "\n\n";
+                                std::vector<Row> plugRows;
+
+                                // Plugin providers
+                                for (const auto& p : s.providers) {
+                                    if (p.isProvider) {
+                                        auto sev = p.ready ? Severity::Good : Severity::Warn;
+                                        std::string statusText =
+                                            p.ready ? "Ready"
+                                                    : (p.degraded ? "Degraded" : "Not ready");
+                                        std::string extra;
+                                        if (p.modelsLoaded > 0) {
+                                            extra = std::to_string(p.modelsLoaded) + " models";
+                                        }
+                                        plugRows.push_back(
+                                            {p.name, severity_text(sev, statusText, true), extra});
+                                    }
+                                }
+
+                                // Embeddings row using AttrBuilder
+                                {
+                                    auto sev = embedAvail ? Severity::Good : Severity::Warn;
+                                    std::string statusText =
+                                        embedAvail ? "Available" : "Unavailable";
+                                    auto attrs =
+                                        AttrBuilder()
+                                            .add_if(!s.embeddingBackend.empty(), "backend",
+                                                    s.embeddingBackend)
+                                            .add_if(!s.embeddingModel.empty(), "model",
+                                                    s.embeddingModel)
+                                            .add_if(s.embeddingDim > 0, "dim",
+                                                    std::to_string(s.embeddingDim))
+                                            .add_if(s.embeddingThreadsIntra > 0 ||
+                                                        s.embeddingThreadsInter > 0,
+                                                    "threads",
+                                                    std::to_string(s.embeddingThreadsIntra) + "/" +
+                                                        std::to_string(s.embeddingThreadsInter))
+                                            .build();
+                                    plugRows.push_back({"Embeddings",
+                                                        severity_text(sev, statusText, true),
+                                                        attrs});
+                                }
+
+                                render_rows(std::cout, plugRows);
+                            }
+
+                            // Surface degraded flags prominently when present
+                            try {
+                                auto it_pd = s.readinessStates.find("plugins_degraded");
+                                auto it_ed = s.readinessStates.find("embedding_degraded");
+                                if ((it_pd != s.readinessStates.end() && it_pd->second) ||
+                                    (it_ed != s.readinessStates.end() && it_ed->second)) {
+                                    std::cout << "\n";
+                                    std::vector<Row> degraded;
+                                    if (it_pd != s.readinessStates.end() && it_pd->second) {
+                                        degraded.push_back(
+                                            {"⚠ Degraded",
+                                             colorize("Plugins may be unavailable", Ansi::YELLOW),
+                                             ""});
+                                    }
+                                    if (it_ed != s.readinessStates.end() && it_ed->second) {
+                                        degraded.push_back(
+                                            {"⚠ Degraded",
+                                             colorize("Embeddings may be unavailable",
+                                                      Ansi::YELLOW),
+                                             ""});
+                                    }
+                                    render_rows(std::cout, degraded);
+                                }
+                            } catch (...) {
+                            }
+
+                            if (!s.ready && !waitingSummary.empty()) {
+                                std::cout << "\n"
+                                          << colorize("⚠ Waiting: " + waitingSummary, Ansi::YELLOW)
+                                          << "\n";
+                            }
                         }
                         // In verbose mode, pull vector DB quick stats (size + rows) from daemon
                         // stats

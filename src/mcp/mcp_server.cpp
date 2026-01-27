@@ -5358,22 +5358,42 @@ boost::asio::awaitable<Result<MCPListCollectionsResponse>>
 MCPServer::handleListCollections(const MCPListCollectionsRequest& req) {
     (void)req; // Currently no parameters
 
-    // Use generic metadata query via getMetadataValueCounts
-    if (!metadataRepo_) {
-        co_return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
+    // Try local metadata repo first (embedded mode)
+    if (metadataRepo_) {
+        metadata::DocumentQueryOptions opts;
+        auto result = metadataRepo_->getMetadataValueCounts({"collection"}, opts);
+        if (!result) {
+            co_return result.error();
+        }
+
+        MCPListCollectionsResponse response;
+        auto it = result.value().find("collection");
+        if (it != result.value().end()) {
+            for (const auto& vc : it->second) {
+                response.collections.push_back(vc.value);
+            }
+        }
+        co_return response;
     }
 
-    metadata::DocumentQueryOptions opts;
-    auto result = metadataRepo_->getMetadataValueCounts({"collection"}, opts);
+    // Client mode: route through daemon client
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
+
+    daemon::MetadataValueCountsRequest dreq;
+    dreq.keys = {"collection"};
+
+    auto result = co_await daemon_client_->call<daemon::MetadataValueCountsRequest>(dreq);
     if (!result) {
         co_return result.error();
     }
 
     MCPListCollectionsResponse response;
-    auto it = result.value().find("collection");
-    if (it != result.value().end()) {
-        for (const auto& vc : it->second) {
-            response.collections.push_back(vc.value);
+    auto it = result.value().valueCounts.find("collection");
+    if (it != result.value().valueCounts.end()) {
+        for (const auto& [value, count] : it->second) {
+            response.collections.push_back(value);
         }
     }
     co_return response;

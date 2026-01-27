@@ -580,6 +580,7 @@ struct ListDocumentsRequest {
     std::string pattern;           // glob-like filename filter
     std::vector<std::string> tags; // filter by tags
     bool matchAllTags{false};      // require all tags vs any tag
+    std::string sessionId;         // filter by session (documents added during that session)
 
     // File type filters
     std::string type;      // "image" | "document" | "archive" | "audio" | "video" | "text" |

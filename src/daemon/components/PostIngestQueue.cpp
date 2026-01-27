@@ -1056,6 +1056,37 @@ std::size_t PostIngestQueue::size() const {
     return channel ? channel->size_approx() : 0;
 }
 
+std::size_t PostIngestQueue::kgQueueDepth() const {
+    constexpr std::size_t kgChannelCapacity = 16384;
+    auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::KgJob>(
+        "kg_jobs", kgChannelCapacity);
+    return channel ? channel->size_approx() : 0;
+}
+
+std::size_t PostIngestQueue::symbolQueueDepth() const {
+    constexpr std::size_t symbolChannelCapacity = 16384;
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
+            "symbol_extraction", symbolChannelCapacity);
+    return channel ? channel->size_approx() : 0;
+}
+
+std::size_t PostIngestQueue::entityQueueDepth() const {
+    constexpr std::size_t entityChannelCapacity = 4096;
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityExtractionJob>(
+            "entity_extraction", entityChannelCapacity);
+    return channel ? channel->size_approx() : 0;
+}
+
+std::size_t PostIngestQueue::titleQueueDepth() const {
+    constexpr std::size_t titleChannelCapacity = 4096;
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::TitleExtractionJob>(
+            "title_extraction", titleChannelCapacity);
+    return channel ? channel->size_approx() : 0;
+}
+
 void PostIngestQueue::processTask(const std::string& hash, const std::string& mime) {
     try {
         std::optional<metadata::DocumentInfo> info;

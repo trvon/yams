@@ -1011,6 +1011,9 @@ struct ListRequest {
     // Name pattern filtering
     std::string namePattern; // glob pattern for file name/path matching
 
+    // Session filtering
+    std::string sessionId; // filter by session ID
+
     // 32-bit integral fields
     int offset = 0;
     int recentCount = 0; // 0 means not set, show all
@@ -1057,8 +1060,8 @@ struct ListRequest {
         // Tag filtering
         ser << tags << filterTags << matchAllTags;
 
-        // Name pattern filtering
-        ser << namePattern;
+        // Name pattern and session filtering
+        ser << namePattern << sessionId;
     }
 
     template <typename Deserializer>
@@ -1242,6 +1245,12 @@ struct ListRequest {
         if (!namePatternResult)
             return namePatternResult.error();
         req.namePattern = std::move(namePatternResult.value());
+
+        // Session filtering
+        auto sessionIdResult = deser.readString();
+        if (!sessionIdResult)
+            return sessionIdResult.error();
+        req.sessionId = std::move(sessionIdResult.value());
 
         return req;
     }
@@ -2928,6 +2937,33 @@ struct KgIngestRequest {
     }
 };
 
+// ============================================================================
+// Metadata Value Counts Request (generic metadata query for MCP client mode)
+// ============================================================================
+
+struct MetadataValueCountsRequest {
+    std::vector<std::string> keys; // e.g., ["collection"]
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << keys;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<MetadataValueCountsRequest> deserialize(Deserializer& deser) {
+        MetadataValueCountsRequest req;
+
+        if (auto k = deser.readStringVector(); k)
+            req.keys = std::move(k.value());
+        else
+            return k.error();
+
+        return req;
+    }
+};
+
 // Forward declarations for late-defined request types used in the Request variant
 struct CatRequest;
 struct ListSessionsRequest;
@@ -2947,7 +2983,8 @@ using Request = std::variant<
     CancelRequest, CatRequest, ListSessionsRequest, UseSessionRequest, AddPathSelectorRequest,
     RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest, PruneRequest,
     ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest, GraphQueryRequest,
-    GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest, KgIngestRequest>;
+    GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest, KgIngestRequest,
+    MetadataValueCountsRequest>;
 
 // ============================================================================
 // Response Types
@@ -6126,6 +6163,67 @@ struct KgIngestResponse {
     }
 };
 
+// ============================================================================
+// Metadata Value Counts Response (generic metadata query for MCP client mode)
+// ============================================================================
+
+struct MetadataValueCountsResponse {
+    // Map: key -> list of {value, count}
+    std::unordered_map<std::string, std::vector<std::pair<std::string, size_t>>> valueCounts;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << static_cast<uint32_t>(valueCounts.size());
+        for (const auto& [key, values] : valueCounts) {
+            ser << key;
+            ser << static_cast<uint32_t>(values.size());
+            for (const auto& [value, count] : values) {
+                ser << value << static_cast<uint64_t>(count);
+            }
+        }
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<MetadataValueCountsResponse> deserialize(Deserializer& deser) {
+        MetadataValueCountsResponse res;
+
+        auto mapSize = deser.template read<uint32_t>();
+        if (!mapSize)
+            return mapSize.error();
+
+        for (uint32_t i = 0; i < mapSize.value(); ++i) {
+            auto keyResult = deser.readString();
+            if (!keyResult)
+                return keyResult.error();
+
+            auto valuesSize = deser.template read<uint32_t>();
+            if (!valuesSize)
+                return valuesSize.error();
+
+            std::vector<std::pair<std::string, size_t>> values;
+            values.reserve(valuesSize.value());
+
+            for (uint32_t j = 0; j < valuesSize.value(); ++j) {
+                auto value = deser.readString();
+                if (!value)
+                    return value.error();
+
+                auto count = deser.template read<uint64_t>();
+                if (!count)
+                    return count.error();
+
+                values.emplace_back(std::move(value.value()), static_cast<size_t>(count.value()));
+            }
+
+            res.valueCounts[std::move(keyResult.value())] = std::move(values);
+        }
+
+        return res;
+    }
+};
+
 // Plugin responses
 struct PluginRecord {
     std::string name;
@@ -6680,7 +6778,7 @@ using Response =
                  ListSessionsResponse, ListTreeDiffResponse, FileHistoryResponse, PruneResponse,
                  ListSnapshotsResponse, RestoreCollectionResponse, RestoreSnapshotResponse,
                  GraphQueryResponse, GraphPathHistoryResponse, GraphRepairResponse,
-                 GraphValidateResponse, KgIngestResponse,
+                 GraphValidateResponse, KgIngestResponse, MetadataValueCountsResponse,
                  // Streaming events (progress/heartbeats)
                  EmbeddingEvent, ModelLoadEvent>;
 
@@ -6817,6 +6915,9 @@ enum class MessageType : uint8_t {
     // KG ingest (PBI-093 Phase 2)
     KgIngestRequest = 70,
     KgIngestResponse = 168,
+    // Generic metadata value counts query (MCP client mode)
+    MetadataValueCountsRequest = 71,
+    MetadataValueCountsResponse = 169,
     // Events
     EmbeddingEvent = 149,
     ModelLoadEvent = 150,

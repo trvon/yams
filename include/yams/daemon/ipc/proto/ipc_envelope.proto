@@ -783,6 +783,25 @@ message KgIngestResponse {
   bool success = 8;
 }
 
+// Generic metadata value counts query (MCP client mode)
+message MetadataValueCount {
+  string value = 1;
+  uint64 count = 2;
+}
+
+message MetadataValueCountList {
+  repeated MetadataValueCount items = 1;
+}
+
+message MetadataValueCountsRequest {
+  repeated string keys = 1;  // e.g., ["collection"]
+}
+
+message MetadataValueCountsResponse {
+  // Map: key -> list of {value, count}
+  map<string, MetadataValueCountList> value_counts = 1;
+}
+
 // Graph Query types (PBI-009/093)
 message GraphNode {
   int64 node_id = 1;
@@ -939,6 +958,7 @@ message Envelope {
     // Graph query requests
     GraphQueryRequest graph_query_request = 55;
     GraphPathHistoryRequest graph_path_history_request = 56;
+    MetadataValueCountsRequest metadata_value_counts_request = 57;
 
     // Responses
     SuccessResponse success_response = 100;
@@ -991,6 +1011,7 @@ message Envelope {
     // Graph query responses
     GraphQueryResponse graph_query_response = 140;
     GraphPathHistoryResponse graph_path_history_response = 141;
+    MetadataValueCountsResponse metadata_value_counts_response = 142;
 
   }
 }

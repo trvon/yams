@@ -178,7 +178,8 @@ public:
     }
 
 private:
-    enum class Severity { Good, Warn, Bad };
+    // Use shared Severity enum from ui_helpers
+    using Severity = yams::cli::ui::Severity;
 
     struct ReadinessDisplay {
         std::string label;
@@ -281,23 +282,9 @@ private:
     }
 
     // Shared helper: paint a status value with severity icon and color
+    // Delegates to ui::severity_text for consistency
     static std::string paintStatus(Severity sev, std::string text) {
-        using namespace yams::cli::ui;
-        const char* color = Ansi::GREEN;
-        const char* icon = "✓";
-        switch (sev) {
-            case Severity::Good:
-                break;
-            case Severity::Warn:
-                color = Ansi::YELLOW;
-                icon = "⚠";
-                break;
-            case Severity::Bad:
-                color = Ansi::RED;
-                icon = "✗";
-                break;
-        }
-        return colorize(std::string(icon) + " " + std::move(text), color);
+        return yams::cli::ui::severity_text(sev, text, true);
     }
 
     // Shared helper: neutral text (no severity icon)
@@ -1118,6 +1105,15 @@ private:
 #endif
         }
 
+        // Final verification: check if daemon is actually still running
+        // This catches cases where the daemon stopped between our attempts
+#ifndef _WIN32
+        if (!stopped && !isDaemonProcessRunningForSocket(effectiveSocket)) {
+            spdlog::debug("Daemon not running after stop attempts - treating as success");
+            stopped = true;
+        }
+#endif
+
         // Clean up files if daemon was stopped
         if (stopped) {
 #ifndef _WIN32
@@ -1126,6 +1122,9 @@ private:
                 stopped = false;
             }
 #endif
+        }
+
+        if (stopped) {
             cleanupDaemonFiles(effectiveSocket, pidFile_);
             stopSpinner();
             std::cout << "[OK] YAMS daemon stopped successfully\n";
@@ -1134,7 +1133,9 @@ private:
             spdlog::error("Failed to stop YAMS daemon");
             std::cerr << "[FAIL] Failed to stop YAMS daemon\n";
             std::cerr << "  💡 Hint: The daemon may be unresponsive or owned by another user\n";
-            std::cerr << "  📋 Try: yams daemon stop --force\n";
+            if (!force_) {
+                std::cerr << "  📋 Try: yams daemon stop --force\n";
+            }
 #ifndef _WIN32
             std::cerr << "  📋 Or manually: pkill yams-daemon\n";
 #else
@@ -1842,13 +1843,17 @@ private:
                     queued = it->second;
                 std::size_t util =
                     threads ? static_cast<std::size_t>((100.0 * active) / threads) : 0;
-                std::ostringstream worker;
-                worker << threads << " threads · " << active << " active · " << queued << " queued";
+                double workerFraction = threads > 0 ? static_cast<double>(active) / threads : 0.0;
+                std::ostringstream workerBar;
+                workerBar << progress_bar(workerFraction, 12, "#", "░", Ansi::GREEN, Ansi::YELLOW,
+                                          Ansi::RED, true)
+                          << " " << util << "% (" << active << "/" << threads << " active)";
+                if (queued > 0)
+                    workerBar << " · " << queued << " queued";
                 Severity workerSeverity =
                     util >= 95 ? Severity::Bad : (util >= 85 ? Severity::Warn : Severity::Good);
-                resourceRows.push_back({"Worker utilization",
-                                        paintStatus(workerSeverity, std::to_string(util) + "%"),
-                                        worker.str()});
+                resourceRows.push_back(
+                    {"Workers", paintStatus(workerSeverity, workerBar.str()), ""});
                 render_rows(std::cout, resourceRows);
 
                 // Resource Governor section (memory pressure management)
@@ -1856,20 +1861,28 @@ private:
                     std::cout << "\n" << section_header("Resource Governor") << "\n\n";
                     std::vector<Row> governor;
 
-                    // Memory pressure level
+                    // Memory pressure level with progress bar
                     const char* levelNames[] = {"Normal", "Warning", "Critical", "Emergency"};
                     uint8_t lvl = std::min(status.governorPressureLevel, static_cast<uint8_t>(3));
                     Severity pressSev = (lvl == 0)   ? Severity::Good
                                         : (lvl == 1) ? Severity::Warn
                                                      : Severity::Bad;
-                    std::ostringstream memExtra;
-                    memExtra << std::fixed << std::setprecision(0)
-                             << (static_cast<double>(status.governorRssBytes) / (1024 * 1024))
-                             << " MB / "
-                             << (static_cast<double>(status.governorBudgetBytes) / (1024 * 1024))
-                             << " MB";
-                    governor.push_back({"Memory Pressure", paintStatus(pressSev, levelNames[lvl]),
-                                        memExtra.str()});
+                    double memFraction = status.governorBudgetBytes > 0
+                                             ? static_cast<double>(status.governorRssBytes) /
+                                                   status.governorBudgetBytes
+                                             : 0.0;
+                    uint64_t memMb = status.governorRssBytes / (1024 * 1024);
+                    uint64_t budgetMb = status.governorBudgetBytes / (1024 * 1024);
+                    std::ostringstream memBar;
+                    memBar << progress_bar(memFraction, 12, "#", "░", Ansi::GREEN, Ansi::YELLOW,
+                                           Ansi::RED, true)
+                           << " " << static_cast<int>(memFraction * 100) << "% (" << memMb << "/"
+                           << budgetMb << " MB)";
+                    std::string statusIndicator = (lvl == 0) ? " ✓ " : (lvl == 1) ? " ⚠ " : " ✗ ";
+                    governor.push_back(
+                        {"Memory",
+                         paintStatus(pressSev, memBar.str() + statusIndicator + levelNames[lvl]),
+                         ""});
 
                     // Scaling headroom
                     Severity headroomSev = (status.governorHeadroomPct >= 50)   ? Severity::Good
@@ -1982,14 +1995,21 @@ private:
                     uint64_t latency = findPostIngestCount("post_ingest_latency_ms_ema");
                     uint64_t rate = findPostIngestCount("post_ingest_rate_sec_ema");
 
-                    std::ostringstream queueVal;
-                    queueVal << queued << " queued · " << inflight << " inflight";
-                    if (cap > 0)
-                        queueVal << " · cap " << cap;
+                    // Queue progress bar
+                    double queueFraction = cap > 0 ? static_cast<double>(queued) / cap : 0.0;
+                    std::ostringstream queueBar;
+                    queueBar << progress_bar(queueFraction, 12, "#", "░", Ansi::GREEN, Ansi::YELLOW,
+                                             Ansi::RED, true)
+                             << " " << static_cast<int>(queueFraction * 100) << "% (" << queued
+                             << "/" << cap << ")";
                     Severity qSev = queued > cap * 0.8
                                         ? Severity::Bad
                                         : (queued > cap * 0.5 ? Severity::Warn : Severity::Good);
-                    postIngestRows.push_back({"Queue", paintStatus(qSev, queueVal.str()), ""});
+                    postIngestRows.push_back({"Queue", paintStatus(qSev, queueBar.str()), ""});
+                    if (inflight > 0) {
+                        postIngestRows.push_back(
+                            {"  Inflight", std::to_string(inflight) + " active", ""});
+                    }
 
                     std::ostringstream throughput;
                     throughput << rate << "/s · " << latency << "ms latency";
@@ -2012,12 +2032,24 @@ private:
                         postIngestRows.push_back({"Watch", watchVal.str(), ""});
                     }
 
-                    // Per-stage breakdown
+                    // Per-stage breakdown with progress bars
                     uint64_t extractInFlight = findPostIngestCount("extraction_inflight");
                     uint64_t kgQueuedTotal = findPostIngestCount("kg_queued");
                     uint64_t kgConsumed = findPostIngestCount("kg_consumed");
                     uint64_t kgInFlight = findPostIngestCount("kg_inflight");
+                    uint64_t kgQueueDepth = findPostIngestCount("kg_queue_depth");
                     uint64_t symbolInFlight = findPostIngestCount("symbol_inflight");
+                    uint64_t symbolQueueDepth = findPostIngestCount("symbol_queue_depth");
+                    uint64_t entityInFlight = findPostIngestCount("entity_inflight");
+                    uint64_t entityQueueDepth = findPostIngestCount("entity_queue_depth");
+                    uint64_t titleQueueDepth = findPostIngestCount("title_queue_depth");
+                    // Get dynamic concurrency limits
+                    uint64_t extractLimit =
+                        std::max(4ULL, findPostIngestCount("post_extraction_limit"));
+                    uint64_t kgLimit = std::max(8ULL, findPostIngestCount("post_kg_limit"));
+                    uint64_t symbolLimit = std::max(4ULL, findPostIngestCount("post_symbol_limit"));
+                    uint64_t entityLimit = std::max(4ULL, findPostIngestCount("post_entity_limit"));
+
                     // Calculate actual pending = queued - consumed - inflight
                     int64_t kgPending = static_cast<int64_t>(kgQueuedTotal) -
                                         static_cast<int64_t>(kgConsumed) -
@@ -2026,21 +2058,61 @@ private:
                         kgPending = 0;
 
                     if (extractInFlight > 0 || kgPending > 0 || kgInFlight > 0 ||
-                        symbolInFlight > 0) {
+                        symbolInFlight > 0 || entityInFlight > 0 || kgQueueDepth > 0 ||
+                        symbolQueueDepth > 0 || entityQueueDepth > 0 || titleQueueDepth > 0) {
                         postIngestRows.push_back({"", "", ""}); // Separator
                         postIngestRows.push_back({subsection_header("Pipeline Stages"), "", ""});
 
-                        std::ostringstream extractVal;
-                        extractVal << extractInFlight << " inflight (max 4)";
-                        postIngestRows.push_back({"  Extraction", extractVal.str(), ""});
+                        // Extraction stage
+                        double extractFrac = static_cast<double>(extractInFlight) / extractLimit;
+                        std::ostringstream extractBar;
+                        extractBar << progress_bar(extractFrac, 8, "#", "░", Ansi::GREEN,
+                                                   Ansi::YELLOW, Ansi::RED, true)
+                                   << " " << static_cast<int>(extractFrac * 100) << "% ("
+                                   << extractInFlight << "/" << extractLimit << " slots)";
+                        postIngestRows.push_back({"  Extraction", extractBar.str(), ""});
 
-                        std::ostringstream kgVal;
-                        kgVal << kgPending << " queued · " << kgInFlight << " inflight (max 8)";
-                        postIngestRows.push_back({"  Knowledge Graph", kgVal.str(), ""});
+                        // KG stage
+                        double kgFrac = static_cast<double>(kgInFlight) / kgLimit;
+                        std::ostringstream kgBar;
+                        kgBar << progress_bar(kgFrac, 8, "#", "░", Ansi::GREEN, Ansi::YELLOW,
+                                              Ansi::RED, true)
+                              << " " << static_cast<int>(kgFrac * 100) << "% (" << kgInFlight << "/"
+                              << kgLimit << " slots)";
+                        if (kgQueueDepth > 0)
+                            kgBar << " · queue: " << kgQueueDepth;
+                        postIngestRows.push_back({"  Knowledge Graph", kgBar.str(), ""});
 
-                        std::ostringstream symbolVal;
-                        symbolVal << symbolInFlight << " inflight (max 4)";
-                        postIngestRows.push_back({"  Symbol Extraction", symbolVal.str(), ""});
+                        // Symbol stage
+                        double symbolFrac = static_cast<double>(symbolInFlight) / symbolLimit;
+                        std::ostringstream symbolBar;
+                        symbolBar << progress_bar(symbolFrac, 8, "#", "░", Ansi::GREEN,
+                                                  Ansi::YELLOW, Ansi::RED, true)
+                                  << " " << static_cast<int>(symbolFrac * 100) << "% ("
+                                  << symbolInFlight << "/" << symbolLimit << " slots)";
+                        if (symbolQueueDepth > 0)
+                            symbolBar << " · queue: " << symbolQueueDepth;
+                        postIngestRows.push_back({"  Symbols", symbolBar.str(), ""});
+
+                        // Entity stage (if active)
+                        if (entityInFlight > 0 || entityQueueDepth > 0) {
+                            double entityFrac = static_cast<double>(entityInFlight) / entityLimit;
+                            std::ostringstream entityBar;
+                            entityBar << progress_bar(entityFrac, 8, "#", "░", Ansi::GREEN,
+                                                      Ansi::YELLOW, Ansi::RED, true)
+                                      << " " << static_cast<int>(entityFrac * 100) << "% ("
+                                      << entityInFlight << "/" << entityLimit << " slots)";
+                            if (entityQueueDepth > 0)
+                                entityBar << " · queue: " << entityQueueDepth;
+                            postIngestRows.push_back({"  Entities", entityBar.str(), ""});
+                        }
+
+                        // Title extraction queue (if active)
+                        if (titleQueueDepth > 0) {
+                            postIngestRows.push_back({"  Title Extraction",
+                                                      "queue: " + std::to_string(titleQueueDepth),
+                                                      ""});
+                        }
                     }
                 }
                 render_rows(std::cout, postIngestRows);

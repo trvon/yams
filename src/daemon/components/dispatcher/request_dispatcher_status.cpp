@@ -171,12 +171,22 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.requestCounts["kg_dropped"] = snap->kgDropped;
             res.requestCounts["kg_consumed"] = snap->kgConsumed;
             res.requestCounts["kg_inflight"] = snap->kgInFlight;
+            res.requestCounts["kg_queue_depth"] = snap->kgQueueDepth;
             res.requestCounts["symbol_inflight"] = snap->symbolInFlight;
+            res.requestCounts["symbol_queue_depth"] = snap->symbolQueueDepth;
             // Entity extraction metrics (external plugins like Ghidra)
             res.requestCounts["entity_queued"] = snap->entityQueued;
             res.requestCounts["entity_dropped"] = snap->entityDropped;
             res.requestCounts["entity_consumed"] = snap->entityConsumed;
             res.requestCounts["entity_inflight"] = snap->entityInFlight;
+            res.requestCounts["entity_queue_depth"] = snap->entityQueueDepth;
+            res.requestCounts["title_queue_depth"] = snap->titleQueueDepth;
+            // File/directory add tracking
+            res.requestCounts["files_added"] = static_cast<size_t>(snap->filesAdded);
+            res.requestCounts["directories_added"] = static_cast<size_t>(snap->directoriesAdded);
+            res.requestCounts["files_processed"] = static_cast<size_t>(snap->filesProcessed);
+            res.requestCounts["directories_processed"] =
+                static_cast<size_t>(snap->directoriesProcessed);
             // Dynamic concurrency limits (PBI-05a)
             res.requestCounts["post_extraction_limit"] = snap->postExtractionLimit;
             res.requestCounts["post_kg_limit"] = snap->postKgLimit;

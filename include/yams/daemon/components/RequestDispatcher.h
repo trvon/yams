@@ -157,6 +157,10 @@ private:
     // KG ingest handler (PBI-093 Phase 2)
     boost::asio::awaitable<Response> handleKgIngestRequest(const KgIngestRequest& req);
 
+    // Generic metadata value counts handler (MCP client mode)
+    boost::asio::awaitable<Response>
+    handleMetadataValueCountsRequest(const MetadataValueCountsRequest& req);
+
     // Legacy helper declarations removed after dispatcher split
 
 private:

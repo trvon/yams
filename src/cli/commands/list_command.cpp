@@ -105,6 +105,16 @@ public:
         cmd->add_flag("--binary", binaryOnly_, "Show only binary files");
         cmd->add_flag("--text", textOnly_, "Show only text files");
 
+        // Tag filtering
+        cmd->add_option("--tags,-t", filterTags_,
+                        "Filter by tags (comma-separated, e.g., 'task,important')");
+        cmd->add_flag("--match-all-tags", matchAllTags_,
+                      "Require all specified tags to match (default: match any)");
+
+        // Session filtering
+        cmd->add_option("--session,-s", sessionFilter_,
+                        "Filter by session ID (documents added during that session)");
+
         // Time filters
         cmd->add_option("--created-after", createdAfter_,
                         "Show files created after this time (ISO 8601, relative like '7d', or "
@@ -260,10 +270,15 @@ public:
             dreq.showDeleted = showDeleted_;
             dreq.changeWindow = changeWindow_;
 
-            // Tag filtering (legacy tags field still used by daemon)
+            // Tag filtering
             dreq.tags = {}; // Keep empty for backward compatibility
             dreq.filterTags = filterTags_;
-            dreq.matchAllTags = false; // Use filterTags for actual filtering
+            dreq.matchAllTags = matchAllTags_;
+
+            // Session filtering
+            if (!sessionFilter_.empty()) {
+                dreq.sessionId = sessionFilter_;
+            }
 
             // Name pattern filtering (detect local file path and normalize)
             if (!namePattern_.empty()) {
@@ -788,6 +803,25 @@ private:
             serviceReq.diffTags = showDiffTags_;
             serviceReq.showDeleted = showDeleted_;
             serviceReq.changeWindow = changeWindow_;
+
+            // Tag filtering - parse comma-separated tags into vector
+            if (!filterTags_.empty()) {
+                std::istringstream ss(filterTags_);
+                std::string tag;
+                while (std::getline(ss, tag, ',')) {
+                    tag.erase(0, tag.find_first_not_of(" \t"));
+                    tag.erase(tag.find_last_not_of(" \t") + 1);
+                    if (!tag.empty()) {
+                        serviceReq.tags.push_back(tag);
+                    }
+                }
+            }
+            serviceReq.matchAllTags = matchAllTags_;
+
+            // Session filtering
+            if (!sessionFilter_.empty()) {
+                serviceReq.sessionId = sessionFilter_;
+            }
 
             // Display options
             serviceReq.format = format_;
@@ -2135,7 +2169,10 @@ private:
 
     // Tag filtering
     std::string filterTags_;
-    // bool matchAllTags_ = false;  // Currently unused - reserved for future tag matching logic
+    bool matchAllTags_ = false;
+
+    // Session filtering
+    std::string sessionFilter_;
 
     // Snapshot operations (Task 043-05b)
     bool listSnapshots_ = false;
