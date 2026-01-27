@@ -127,7 +127,11 @@ private:
     Result<std::vector<metadata::DocumentInfo>>
     getDocumentsToRestore(std::shared_ptr<metadata::IMetadataRepository> metadataRepo) {
         if (!collection_.empty()) {
-            return metadataRepo->findDocumentsByCollection(collection_);
+            // Use generic metadata query for collections
+            metadata::DocumentQueryOptions opts;
+            opts.metadataFilters.emplace_back("collection", collection_);
+            opts.orderByIndexedDesc = true;
+            return metadataRepo->queryDocuments(opts);
         } else if (!snapshotId_.empty()) {
             return metadataRepo->findDocumentsBySnapshot(snapshotId_);
         } else if (!snapshotLabel_.empty()) {

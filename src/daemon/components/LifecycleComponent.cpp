@@ -214,6 +214,13 @@ Result<void> LifecycleComponent::initialize() {
         return result;
     }
 
+    // Acquire data-dir lock to prevent multiple daemons from sharing the same data directory.
+    // This check is independent of the PID file check (which is socket-based).
+    dataDirLockFile_ = daemon_->config_.dataDir / ".yams-lock";
+    if (auto result = acquireDataDirLock(); !result) {
+        return result;
+    }
+
     // Proactively remove a stale socket file left by a previous crash before binding.
     try {
         const auto& sock = daemon_->config_.socketPath;
@@ -236,6 +243,9 @@ Result<void> LifecycleComponent::initialize() {
 
 void LifecycleComponent::shutdown() {
     cleanupSignalHandlers();
+
+    // Release data-dir lock first (before PID file cleanup)
+    releaseDataDirLock();
 
     // Close and unlock file BEFORE removal (Windows holds lock while fd is open)
     if (pidFileFd_ != -1) {
@@ -841,6 +851,164 @@ bool LifecycleComponent::aggressiveModeEnabled() {
         return false;
     }
     return true;
+}
+
+Result<void> LifecycleComponent::acquireDataDirLock() {
+    // Create or open the data-dir lock file
+#ifdef _WIN32
+    dataDirLockFd_ = _open(dataDirLockFile_.string().c_str(), _O_CREAT | _O_RDWR | _O_BINARY,
+                           _S_IREAD | _S_IWRITE);
+    if (dataDirLockFd_ == -1) {
+        return Error{ErrorCode::WriteError,
+                     "Failed to open data-dir lock file: " + std::string(strerror(errno))};
+    }
+
+    HANDLE hFile = (HANDLE)_get_osfhandle(dataDirLockFd_);
+    bool lockAcquired = false;
+    if (hFile != INVALID_HANDLE_VALUE) {
+        OVERLAPPED overlapped = {0};
+        lockAcquired = LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1,
+                                  0, &overlapped);
+    }
+#else
+    dataDirLockFd_ = open(dataDirLockFile_.c_str(), O_CREAT | O_RDWR, 0644);
+    if (dataDirLockFd_ == -1) {
+        return Error{ErrorCode::WriteError,
+                     "Failed to open data-dir lock file: " + std::string(strerror(errno))};
+    }
+
+    bool lockAcquired = (flock(dataDirLockFd_, LOCK_EX | LOCK_NB) == 0);
+#endif
+
+    if (!lockAcquired) {
+        // Lock held by another daemon - read its info and request shutdown
+        auto existingInfo = readDataDirLockInfo();
+        if (existingInfo.pid > 0 && !existingInfo.socket.empty()) {
+            spdlog::info(
+                "Another daemon (PID {}) is using data-dir '{}', requesting shutdown via {}",
+                existingInfo.pid, dataDirLockFile_.parent_path().string(), existingInfo.socket);
+
+            // Send shutdown request via the existing daemon's socket
+            ClientConfig cfg;
+            cfg.socketPath = existingInfo.socket;
+            cfg.autoStart = false;
+            cfg.connectTimeout = std::chrono::milliseconds(2000);
+            cfg.requestTimeout = std::chrono::milliseconds(5000);
+            cfg.maxRetries = 1;
+
+            auto result = sendShutdownRequest(cfg, std::chrono::milliseconds(10000));
+            if (!result) {
+                spdlog::warn("Shutdown request to existing daemon failed: {}",
+                             result.error().message);
+            }
+
+            // Wait for lock to be released (up to 15 seconds)
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+            while (std::chrono::steady_clock::now() < deadline) {
+#ifdef _WIN32
+                if (hFile != INVALID_HANDLE_VALUE) {
+                    OVERLAPPED overlapped = {0};
+                    if (LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1,
+                                   0, &overlapped)) {
+                        lockAcquired = true;
+                        break;
+                    }
+                }
+#else
+                if (flock(dataDirLockFd_, LOCK_EX | LOCK_NB) == 0) {
+                    lockAcquired = true;
+                    break;
+                }
+#endif
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+
+        if (!lockAcquired) {
+#ifdef _WIN32
+            _close(dataDirLockFd_);
+#else
+            close(dataDirLockFd_);
+#endif
+            dataDirLockFd_ = -1;
+            return Error{ErrorCode::InvalidState,
+                         "Failed to acquire data-dir lock after shutdown request. "
+                         "Another daemon may still be using: " +
+                             dataDirLockFile_.parent_path().string()};
+        }
+    }
+
+    // Write our lock info
+    json lockInfo = {{"pid", static_cast<std::int64_t>(getpid())},
+                     {"socket", daemon_->config_.socketPath.string()},
+                     {"timestamp", std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count()}};
+    std::string lockStr = lockInfo.dump();
+
+#ifdef _WIN32
+    _lseek(dataDirLockFd_, 0, SEEK_SET);
+    _chsize_s(dataDirLockFd_, 0);
+    _write(dataDirLockFd_, lockStr.c_str(), static_cast<unsigned int>(lockStr.size()));
+    _commit(dataDirLockFd_);
+#else
+    lseek(dataDirLockFd_, 0, SEEK_SET);
+    if (ftruncate(dataDirLockFd_, 0) != 0) {
+        // Ignore truncate errors
+    }
+    if (write(dataDirLockFd_, lockStr.c_str(), lockStr.size()) !=
+        static_cast<ssize_t>(lockStr.size())) {
+        spdlog::warn("Failed to write data-dir lock info: {}", strerror(errno));
+    }
+#endif
+
+    spdlog::info("Acquired data-dir lock: {}", dataDirLockFile_.string());
+    return Result<void>();
+}
+
+LifecycleComponent::DataDirLockInfo LifecycleComponent::readDataDirLockInfo() const {
+    DataDirLockInfo info{};
+    if (dataDirLockFd_ == -1) {
+        return info;
+    }
+
+    char buf[2048] = {0};
+#ifdef _WIN32
+    _lseek(dataDirLockFd_, 0, SEEK_SET);
+    ssize_t n = _read(dataDirLockFd_, buf, sizeof(buf) - 1);
+#else
+    lseek(dataDirLockFd_, 0, SEEK_SET);
+    ssize_t n = read(dataDirLockFd_, buf, sizeof(buf) - 1);
+#endif
+
+    if (n > 0) {
+        auto parsed = json::parse(buf, nullptr, false);
+        if (!parsed.is_discarded() && parsed.is_object()) {
+            info.pid = static_cast<pid_t>(parsed.value("pid", 0));
+            info.socket = parsed.value("socket", std::string{});
+            info.timestamp = parsed.value("timestamp", 0ull);
+        }
+    }
+    return info;
+}
+
+void LifecycleComponent::releaseDataDirLock() {
+    if (dataDirLockFd_ != -1) {
+#ifdef _WIN32
+        HANDLE hFile = (HANDLE)_get_osfhandle(dataDirLockFd_);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            OVERLAPPED overlapped = {0};
+            UnlockFileEx(hFile, 0, 1, 0, &overlapped);
+        }
+        _close(dataDirLockFd_);
+#else
+        // flock is automatically released on close, but explicit unlock is cleaner
+        flock(dataDirLockFd_, LOCK_UN);
+        close(dataDirLockFd_);
+#endif
+        dataDirLockFd_ = -1;
+        spdlog::debug("Released data-dir lock: {}", dataDirLockFile_.string());
+    }
 }
 
 } // namespace daemon

@@ -98,9 +98,7 @@ private:
     // Prune handler (PBI-062)
     boost::asio::awaitable<Response> handlePruneRequest(const PruneRequest& req);
 
-    // Collection and snapshot handlers (PBI-066)
-    boost::asio::awaitable<Response>
-    handleListCollectionsRequest(const ListCollectionsRequest& req);
+    // Snapshot handlers (PBI-066) - collections use generic metadata query
     boost::asio::awaitable<Response> handleListSnapshotsRequest(const ListSnapshotsRequest& req);
     boost::asio::awaitable<Response>
     handleRestoreCollectionRequest(const RestoreCollectionRequest& req);

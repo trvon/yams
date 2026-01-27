@@ -1356,6 +1356,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     state_.readiness.metadataRepoReady = true;
                     // Initialize component-owned metrics (sync with DB once at startup)
                     metadataRepo_->initializeCounters();
+                    metadataRepo_->warmValueCountsCache(); // Pre-warm common queries
                     spdlog::info("Metadata repository initialized successfully");
 
                     // Note: RepairManager initialization deferred to RepairCoordinator

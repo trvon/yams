@@ -242,8 +242,8 @@ private:
     ScalingCaps scalingCaps_{};
     std::atomic<ResourcePressureLevel> currentLevel_{ResourcePressureLevel::Normal};
 
-    // Hysteresis tracking
-    std::uint32_t ticksAtProposedLevel_{0};
+    // Hysteresis tracking (time-based, decoupled from tick interval)
+    std::chrono::steady_clock::time_point proposedLevelSince_{};
     ResourcePressureLevel proposedLevel_{ResourcePressureLevel::Normal};
 
     // Eviction cooldown

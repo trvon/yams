@@ -98,7 +98,7 @@ DEFINE_REQUEST_HANDLER(RemovePathSelectorRequest, handleRemovePathSelectorReques
 DEFINE_REQUEST_HANDLER(ListTreeDiffRequest, handleListTreeDiffRequest);
 DEFINE_REQUEST_HANDLER(FileHistoryRequest, handleFileHistoryRequest);
 DEFINE_REQUEST_HANDLER(PruneRequest, handlePruneRequest);
-DEFINE_REQUEST_HANDLER(ListCollectionsRequest, handleListCollectionsRequest);
+// ListCollectionsRequest removed - use getMetadataValueCounts(["collection"], {})
 DEFINE_REQUEST_HANDLER(ListSnapshotsRequest, handleListSnapshotsRequest);
 DEFINE_REQUEST_HANDLER(RestoreCollectionRequest, handleRestoreCollectionRequest);
 DEFINE_REQUEST_HANDLER(RestoreSnapshotRequest, handleRestoreSnapshotRequest);

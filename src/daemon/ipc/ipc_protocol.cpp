@@ -126,10 +126,7 @@ template <> struct MessageTypeTraits<PrepareSessionRequest> {
     static constexpr MessageType value = MessageType::PrepareSessionRequest;
     static constexpr const char* name = "PrepareSession";
 };
-template <> struct MessageTypeTraits<ListCollectionsRequest> {
-    static constexpr MessageType value = MessageType::ListCollectionsRequest;
-    static constexpr const char* name = "ListCollections";
-};
+// ListCollectionsRequest removed - use getMetadataValueCounts(["collection"], {})
 template <> struct MessageTypeTraits<ListSnapshotsRequest> {
     static constexpr MessageType value = MessageType::ListSnapshotsRequest;
     static constexpr const char* name = "ListSnapshots";
@@ -270,9 +267,7 @@ template <> struct MessageTypeTraits<FileHistoryResponse> {
 template <> struct MessageTypeTraits<PruneResponse> {
     static constexpr MessageType value = MessageType::PruneResponse;
 };
-template <> struct MessageTypeTraits<ListCollectionsResponse> {
-    static constexpr MessageType value = MessageType::ListCollectionsResponse;
-};
+// ListCollectionsResponse removed - use getMetadataValueCounts(["collection"], {})
 template <> struct MessageTypeTraits<ListSnapshotsResponse> {
     static constexpr MessageType value = MessageType::ListSnapshotsResponse;
 };

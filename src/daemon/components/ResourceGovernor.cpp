@@ -415,29 +415,29 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
         rawLevel = std::max(rawLevel, ResourcePressureLevel::Warning);
     }
 
-    // Apply hysteresis: require consecutive ticks at a level before transitioning
-    const std::uint32_t hysteresisTicks = TuneAdvisor::memoryHysteresisTicks();
+    // Apply hysteresis: require time at a level before transitioning
+    // (decoupled from tick interval for consistent behavior at any tick rate)
+    const auto hysteresisMs = std::chrono::milliseconds(TuneAdvisor::memoryHysteresisMs());
+    auto now = std::chrono::steady_clock::now();
 
-    if (rawLevel == proposedLevel_) {
-        ++ticksAtProposedLevel_;
-    } else {
+    if (rawLevel != proposedLevel_) {
+        // Level changed - reset timer
         proposedLevel_ = rawLevel;
-        ticksAtProposedLevel_ = 1;
+        proposedLevelSince_ = now;
     }
 
-    // For escalation (getting worse), apply hysteresis
-    // For de-escalation (getting better), apply double hysteresis for stability
+    auto elapsed = now - proposedLevelSince_;
     ResourcePressureLevel currentLvl = currentLevel_.load(std::memory_order_relaxed);
 
     if (rawLevel > currentLvl) {
-        // Escalating - require hysteresis ticks
-        if (ticksAtProposedLevel_ >= hysteresisTicks) {
+        // Escalating - require hysteresisMs
+        if (elapsed >= hysteresisMs) {
             return rawLevel;
         }
         return currentLvl; // Hold at current level
     } else if (rawLevel < currentLvl) {
-        // De-escalating - require double hysteresis for stability
-        if (ticksAtProposedLevel_ >= hysteresisTicks * 2) {
+        // De-escalating - require 2× hysteresisMs for stability
+        if (elapsed >= hysteresisMs * 2) {
             return rawLevel;
         }
         return currentLvl; // Hold at current level

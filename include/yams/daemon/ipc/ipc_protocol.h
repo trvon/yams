@@ -2175,21 +2175,7 @@ struct PruneRequest {
     }
 };
 
-// Collection and snapshot requests
-struct ListCollectionsRequest {
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize([[maybe_unused]] Serializer& ser) const {
-        // No fields to serialize
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<ListCollectionsRequest> deserialize([[maybe_unused]] Deserializer& deser) {
-        return ListCollectionsRequest{};
-    }
-};
-
+// Snapshot requests (collections use generic metadata query via getMetadataValueCounts)
 struct ListSnapshotsRequest {
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -2960,9 +2946,8 @@ using Request = std::variant<
     PluginUnloadRequest, PluginTrustListRequest, PluginTrustAddRequest, PluginTrustRemoveRequest,
     CancelRequest, CatRequest, ListSessionsRequest, UseSessionRequest, AddPathSelectorRequest,
     RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest, PruneRequest,
-    ListCollectionsRequest, ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest,
-    GraphQueryRequest, GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest,
-    KgIngestRequest>;
+    ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest, GraphQueryRequest,
+    GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest, KgIngestRequest>;
 
 // ============================================================================
 // Response Types
@@ -5350,36 +5335,7 @@ struct PruneResponse {
     }
 };
 
-// Collection and snapshot responses
-struct ListCollectionsResponse {
-    std::vector<std::string> collections;
-    uint64_t totalCount{0};
-
-    template <typename Serializer>
-    requires IsSerializer<Serializer>
-    void serialize(Serializer& ser) const {
-        ser << collections << totalCount;
-    }
-
-    template <typename Deserializer>
-    requires IsDeserializer<Deserializer>
-    static Result<ListCollectionsResponse> deserialize(Deserializer& deser) {
-        ListCollectionsResponse res;
-
-        if (auto r = deser.readStringVector(); r)
-            res.collections = std::move(r.value());
-        else
-            return r.error();
-
-        if (auto r = deser.template read<uint64_t>(); r)
-            res.totalCount = r.value();
-        else
-            return r.error();
-
-        return res;
-    }
-};
-
+// Snapshot responses (collections use generic metadata query via getMetadataValueCounts)
 struct SnapshotInfo {
     std::string id;
     std::string label;
@@ -6722,9 +6678,9 @@ using Response =
                  DownloadResponse, DeleteResponse, PrepareSessionResponse, EmbedDocumentsResponse,
                  PluginScanResponse, PluginLoadResponse, PluginTrustListResponse, CatResponse,
                  ListSessionsResponse, ListTreeDiffResponse, FileHistoryResponse, PruneResponse,
-                 ListCollectionsResponse, ListSnapshotsResponse, RestoreCollectionResponse,
-                 RestoreSnapshotResponse, GraphQueryResponse, GraphPathHistoryResponse,
-                 GraphRepairResponse, GraphValidateResponse, KgIngestResponse,
+                 ListSnapshotsResponse, RestoreCollectionResponse, RestoreSnapshotResponse,
+                 GraphQueryResponse, GraphPathHistoryResponse, GraphRepairResponse,
+                 GraphValidateResponse, KgIngestResponse,
                  // Streaming events (progress/heartbeats)
                  EmbeddingEvent, ModelLoadEvent>;
 
@@ -6796,8 +6752,7 @@ enum class MessageType : uint8_t {
     FileHistoryRequest = 31,
     // Prune request (PBI-062)
     PruneRequest = 32,
-    // Collection and snapshot requests (PBI-066)
-    ListCollectionsRequest = 33,
+    // Snapshot requests (PBI-066) - collections use generic metadata query
     ListSnapshotsRequest = 34,
     RestoreCollectionRequest = 35,
     RestoreSnapshotRequest = 36,
@@ -6845,8 +6800,7 @@ enum class MessageType : uint8_t {
     FileHistoryResponse = 155,
     // Prune response (PBI-062)
     PruneResponse = 156,
-    // Collection and snapshot responses (PBI-066)
-    ListCollectionsResponse = 157,
+    // Snapshot responses (PBI-066) - collections use generic metadata query
     ListSnapshotsResponse = 158,
     RestoreCollectionResponse = 159,
     RestoreSnapshotResponse = 160,

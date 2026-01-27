@@ -21,8 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `yams list --metadata-values` for showing unique metadata values with counts (useful for PBI discovery).
 - Unique PBI selection guidance in AGENTS workflow (metadata search + list values).
+- **Data-dir single-instance enforcement**: Prevents multiple daemons from sharing the same data directory via flock-based `.yams-lock` file. Newer daemon requests shutdown of existing daemon and takes over, enabling seamless upgrades/restarts.
 
 ### Performance
+- **Reduced status tick interval**: Governor metrics now update every 50ms (was 250ms) for more responsive CLI status output. Configurable via `YAMS_STATUS_TICK_MS`.
 - **Batch snapshot info API**: New `batchGetSnapshotInfo()` method eliminates N+1 query pattern in `yams list --snapshots`. Reduces 3N queries to 1 query for N unknown snapshots.
 - **Enumeration query caching**: `getSnapshots()`, `getSnapshotLabels()`, `getCollections()`, and `getAllTags()` now use a 60-second TTL cache with signal-based invalidation. Repeated calls return cached results, reducing database scans.
 - **CPU-aware throttling**: ResourceGovernor now monitors CPU usage alongside memory pressure. Admission control rejects new work when CPU exceeds threshold (default 70%, configurable via `YAMS_CPU_HIGH_PCT`). Prevents CPU saturation during large batch adds.

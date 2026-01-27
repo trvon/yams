@@ -172,6 +172,8 @@ struct DocumentQueryOptions {
     bool includeSubdirectories{true};
     bool containsUsesFts{false};
     std::optional<std::string> likePattern;
+    // Generic metadata filtering (replaces findDocumentsByCollection)
+    std::vector<std::pair<std::string, std::string>> metadataFilters;
 };
 
 struct MetadataValueCount {
@@ -279,14 +281,11 @@ public:
     virtual Result<std::unordered_map<int64_t, DocumentContent>>
     batchGetContent(const std::vector<int64_t>& documentIds) = 0;
 
-    // Collection and snapshot operations
-    virtual Result<std::vector<DocumentInfo>>
-    findDocumentsByCollection(const std::string& collection) = 0;
+    // Snapshot operations (collections use generic metadata query via getMetadataValueCounts)
     virtual Result<std::vector<DocumentInfo>>
     findDocumentsBySnapshot(const std::string& snapshotId) = 0;
     virtual Result<std::vector<DocumentInfo>>
     findDocumentsBySnapshotLabel(const std::string& snapshotLabel) = 0;
-    virtual Result<std::vector<std::string>> getCollections() = 0;
     virtual Result<std::vector<std::string>> getSnapshots() = 0;
     virtual Result<std::vector<std::string>> getSnapshotLabels() = 0;
 
@@ -523,9 +522,7 @@ public:
     Result<std::vector<DocumentInfo>>
     findDocumentsModifiedSince(std::chrono::system_clock::time_point since) override;
 
-    // Collection and snapshot operations
-    Result<std::vector<DocumentInfo>>
-    findDocumentsByCollection(const std::string& collection) override;
+    // Snapshot operations (collections use generic metadata query via getMetadataValueCounts)
     Result<std::vector<DocumentInfo>>
     findDocumentsBySnapshot(const std::string& snapshotId) override;
     Result<std::vector<DocumentInfo>>
@@ -533,7 +530,6 @@ public:
 
     Result<std::optional<DocumentInfo>> findDocumentByExactPath(const std::string& path) override;
     Result<std::vector<DocumentInfo>> queryDocuments(const DocumentQueryOptions& options) override;
-    Result<std::vector<std::string>> getCollections() override;
     Result<std::vector<std::string>> getSnapshots() override;
     Result<std::vector<std::string>> getSnapshotLabels() override;
     Result<SnapshotInfo> getSnapshotInfo(const std::string& snapshotId) override;
@@ -581,6 +577,9 @@ public:
         return cachedExtractedCount_.load(std::memory_order_relaxed);
     }
     void initializeCounters(); // Called once during startup to sync with DB
+
+    /// Warm the metadata value counts cache for common keys (called on startup)
+    void warmValueCountsCache();
 
     // Batch operations for search/grep performance (eliminates N queries → 1 query)
     Result<std::unordered_map<std::string, DocumentInfo>>

@@ -321,9 +321,11 @@ public:
         return 0;
     }
 
-    // Status/metrics tick cadence for daemon main loop. Default 250 ms.
+    // Status/metrics tick cadence for daemon main loop. Default 5 ms.
+    // Reduced from 250ms -> 50ms -> 5ms for real-time governor metrics.
+    // Timing behaviors (hysteresis, startup) are now decoupled via ms-based constants.
     static uint32_t statusTickMs() {
-        uint32_t def = 250;
+        uint32_t def = 5;
         if (const char* s = std::getenv("YAMS_STATUS_TICK_MS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
@@ -366,11 +368,6 @@ public:
         // Profile-scaled: Efficient=75, Balanced=100, Aggressive=150
         return static_cast<uint32_t>(100.0 * profileScale());
     }
-
-    // Duration of startup phase in ticks (each tick is statusTickMs, default 250ms).
-    // During startup, smaller batch sizes are used to reduce load.
-    // Default 20 ticks = 5 seconds (20 * 250ms = 5000ms).
-    static uint32_t repairStartupDurationTicks() { return 20; }
 
     // Maintenance tokens (concurrency) when daemon is idle. Default 1.
     static uint32_t repairTokensIdle() {
@@ -2234,6 +2231,27 @@ public:
         memoryHysteresisTicksOverride_.store(ticks, std::memory_order_relaxed);
     }
 
+    /// Hysteresis duration before changing pressure level (milliseconds).
+    /// Prevents rapid oscillation between levels. Default: 500ms.
+    /// Environment: YAMS_MEMORY_HYSTERESIS_MS
+    static uint32_t memoryHysteresisMs() {
+        uint32_t ov = memoryHysteresisMsOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_MEMORY_HYSTERESIS_MS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 10 && v <= 10000)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 500; // 500ms default
+    }
+    static void setMemoryHysteresisMs(uint32_t ms) {
+        memoryHysteresisMsOverride_.store(ms, std::memory_order_relaxed);
+    }
+
     /// Cooldown period between model evictions to prevent thrashing (ms). Default: 500.
     /// Environment: YAMS_MODEL_EVICTION_COOLDOWN_MS
     static uint32_t modelEvictionCooldownMs() {
@@ -2546,6 +2564,7 @@ private:
     static inline std::atomic<double> memoryCriticalPctOverride_{0.0};
     static inline std::atomic<double> memoryEmergencyPctOverride_{0.0};
     static inline std::atomic<uint32_t> memoryHysteresisTicksOverride_{0};
+    static inline std::atomic<uint32_t> memoryHysteresisMsOverride_{0};
     static inline std::atomic<uint32_t> modelEvictionCooldownMsOverride_{0};
 
     // ONNX concurrency overrides

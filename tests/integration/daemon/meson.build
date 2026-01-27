@@ -55,6 +55,10 @@ else
     'daemon_sigterm_test.cpp',
   )
 
+  lifecycle_single_instance_srcs = files(
+    'lifecycle_single_instance_test.cpp',
+  )
+
   dbg = (get_option('buildtype') == 'debug')
   if (get_option('enable-integration-tests') or dbg) and (get_option('enable-daemon-integration') or dbg)
     # catch2_main_dep is inherited from parent tests/meson.build - no need to redeclare
@@ -323,6 +327,33 @@ else
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),
       args: ['Daemon shutdown timing with external flag', '--allow-running-no-tests'],
+    )
+
+    # Data-dir single-instance enforcement tests
+    lifecycle_single_instance_exe = executable('yams_lifecycle_single_instance_tests_catch2',
+      lifecycle_single_instance_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('lifecycle_single_instance_lock',
+      lifecycle_single_instance_exe,
+      suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'single-instance'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 120,  # 2 minutes for takeover scenarios
+      args: ['Data-dir lock prevents concurrent access', '--allow-running-no-tests'],
+    )
+
+    test('lifecycle_single_instance_release',
+      lifecycle_single_instance_exe,
+      suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'single-instance'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,  # 1 minute for sequential start/stop
+      args: ['Data-dir lock released on shutdown', '--allow-running-no-tests'],
     )
 
     # ONNX Concurrency / TuneAdvisor integration tests

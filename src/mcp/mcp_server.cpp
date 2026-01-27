@@ -5082,8 +5082,11 @@ yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollect
 
         spdlog::debug("MCP handleRestoreCollection: restoring collection '{}'", req.collection);
 
-        // Get documents from collection
-        auto docsResult = metadataRepo_->findDocumentsByCollection(req.collection);
+        // Get documents from collection using generic metadata query
+        metadata::DocumentQueryOptions queryOpts;
+        queryOpts.metadataFilters.emplace_back("collection", req.collection);
+        queryOpts.orderByIndexedDesc = true;
+        auto docsResult = metadataRepo_->queryDocuments(queryOpts);
         if (!docsResult) {
             co_return Error{ErrorCode::InternalError,
                             "Failed to find collection documents: " + docsResult.error().message};
@@ -5253,7 +5256,58 @@ yams::mcp::MCPServer::handleRestoreCollection(const yams::mcp::MCPRestoreCollect
 
 boost::asio::awaitable<yams::Result<yams::mcp::MCPRestoreSnapshotResponse>>
 yams::mcp::MCPServer::handleRestoreSnapshot(const yams::mcp::MCPRestoreSnapshotRequest& req) {
-    co_return Error{ErrorCode::NotImplemented, "Restore snapshot not yet implemented"};
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
+
+    std::string snapshotId = req.snapshotId;
+
+    // Resolve label to ID if needed
+    if (snapshotId.empty() && !req.snapshotLabel.empty()) {
+        yams::daemon::ListSnapshotsRequest listReq;
+        auto listResult = co_await daemon_client_->listSnapshots(listReq);
+        if (!listResult) {
+            co_return listResult.error();
+        }
+        for (const auto& snap : listResult.value().snapshots) {
+            if (snap.label == req.snapshotLabel) {
+                snapshotId = snap.id;
+                break;
+            }
+        }
+        if (snapshotId.empty()) {
+            co_return Error{ErrorCode::NotFound,
+                            "Snapshot with label '" + req.snapshotLabel + "' not found"};
+        }
+    }
+
+    if (snapshotId.empty()) {
+        co_return Error{ErrorCode::InvalidArgument,
+                        "Either snapshotId or snapshotLabel must be provided"};
+    }
+
+    yams::daemon::RestoreSnapshotRequest daemonReq;
+    daemonReq.snapshotId = snapshotId;
+    daemonReq.outputDirectory = req.outputDirectory;
+    daemonReq.layoutTemplate = req.layoutTemplate;
+    daemonReq.includePatterns = req.includePatterns;
+    daemonReq.excludePatterns = req.excludePatterns;
+    daemonReq.overwrite = req.overwrite;
+    daemonReq.createDirs = req.createDirs;
+    daemonReq.dryRun = req.dryRun;
+
+    auto result = co_await daemon_client_->restoreSnapshot(daemonReq);
+    if (!result) {
+        co_return result.error();
+    }
+
+    MCPRestoreSnapshotResponse response;
+    response.filesRestored = result.value().filesRestored;
+    response.dryRun = result.value().dryRun;
+    for (const auto& file : result.value().files) {
+        response.restoredPaths.push_back(file.path);
+    }
+    co_return response;
 }
 
 boost::asio::awaitable<yams::Result<yams::mcp::MCPRestoreResponse>>
@@ -5302,15 +5356,52 @@ yams::mcp::MCPServer::handleRestore(const yams::mcp::MCPRestoreRequest& req) {
 
 boost::asio::awaitable<Result<MCPListCollectionsResponse>>
 MCPServer::handleListCollections(const MCPListCollectionsRequest& req) {
+    (void)req; // Currently no parameters
+
+    // Use generic metadata query via getMetadataValueCounts
+    if (!metadataRepo_) {
+        co_return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
+    }
+
+    metadata::DocumentQueryOptions opts;
+    auto result = metadataRepo_->getMetadataValueCounts({"collection"}, opts);
+    if (!result) {
+        co_return result.error();
+    }
+
     MCPListCollectionsResponse response;
-    // TODO: Implement collection listing
+    auto it = result.value().find("collection");
+    if (it != result.value().end()) {
+        for (const auto& vc : it->second) {
+            response.collections.push_back(vc.value);
+        }
+    }
     co_return response;
 }
 
 boost::asio::awaitable<Result<MCPListSnapshotsResponse>>
 MCPServer::handleListSnapshots(const MCPListSnapshotsRequest& req) {
+    (void)req; // Daemon request has no filter fields yet
+
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
+
+    daemon::ListSnapshotsRequest daemonReq;
+    auto result = co_await daemon_client_->listSnapshots(daemonReq);
+
+    if (!result) {
+        co_return result.error();
+    }
+
     MCPListSnapshotsResponse response;
-    // TODO: Implement snapshot listing
+    // Convert SnapshotInfo to JSON objects
+    for (const auto& snap : result.value().snapshots) {
+        response.snapshots.push_back(json{{"id", snap.id},
+                                          {"label", snap.label},
+                                          {"created_at", snap.createdAt},
+                                          {"document_count", snap.documentCount}});
+    }
     co_return response;
 }
 

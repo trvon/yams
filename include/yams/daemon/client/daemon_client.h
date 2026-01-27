@@ -79,11 +79,7 @@ public:
     boost::asio::awaitable<Result<GrepResponse>> grep(const GrepRequest& req);
     boost::asio::awaitable<Result<FileHistoryResponse>> fileHistory(const FileHistoryRequest& req);
 
-    // Collection and snapshot operations (PBI-066)
-    boost::asio::awaitable<Result<ListCollectionsResponse>>
-    listCollections(const ListCollectionsRequest& req) {
-        return call<ListCollectionsRequest>(req);
-    }
+    // Snapshot operations (PBI-066) - collections use generic metadata query
     boost::asio::awaitable<Result<ListSnapshotsResponse>>
     listSnapshots(const ListSnapshotsRequest& req) {
         return call<ListSnapshotsRequest>(req);
@@ -416,9 +412,9 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, PluginTrustAddRequest>, std::is_same<Req, PluginTrustRemoveRequest>,
             // Doctor commands
             std::is_same<Req, PruneRequest>,
-            // Collection and snapshot operations (PBI-066)
-            std::is_same<Req, ListCollectionsRequest>, std::is_same<Req, ListSnapshotsRequest>,
-            std::is_same<Req, RestoreCollectionRequest>, std::is_same<Req, RestoreSnapshotRequest>,
+            // Snapshot operations (PBI-066) - collections use generic metadata query
+            std::is_same<Req, ListSnapshotsRequest>, std::is_same<Req, RestoreCollectionRequest>,
+            std::is_same<Req, RestoreSnapshotRequest>,
             // Graph maintenance operations (PBI-009)
             std::is_same<Req, GraphRepairRequest>, std::is_same<Req, GraphValidateRequest>,
             // Graph query operations

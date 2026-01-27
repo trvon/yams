@@ -1,4 +1,4 @@
-// PBI-066: Collection and snapshot request handlers
+// PBI-066: Snapshot request handlers (collections use generic metadata query)
 #include <spdlog/spdlog.h>
 #include <filesystem>
 #include <fstream>
@@ -6,29 +6,6 @@
 #include <yams/daemon/components/ServiceManager.h>
 
 namespace yams::daemon {
-
-boost::asio::awaitable<Response> RequestDispatcher::handleListCollectionsRequest(
-    [[maybe_unused]] const ListCollectionsRequest& req) {
-    spdlog::debug("ListCollections request");
-
-    auto metaRepo = serviceManager_ ? serviceManager_->getMetadataRepo() : nullptr;
-    if (!metaRepo) {
-        co_return ErrorResponse{.code = ErrorCode::InternalError,
-                                .message = "Metadata repository unavailable"};
-    }
-
-    auto result = metaRepo->getCollections();
-    if (!result) {
-        co_return ErrorResponse{.code = result.error().code, .message = result.error().message};
-    }
-
-    ListCollectionsResponse resp;
-    resp.collections = result.value();
-    resp.totalCount = resp.collections.size();
-
-    spdlog::debug("ListCollections: returning {} collections", resp.totalCount);
-    co_return resp;
-}
 
 boost::asio::awaitable<Response>
 RequestDispatcher::handleListSnapshotsRequest([[maybe_unused]] const ListSnapshotsRequest& req) {
@@ -82,8 +59,11 @@ RequestDispatcher::handleRestoreCollectionRequest(const RestoreCollectionRequest
                                 .message = "Collection name is required"};
     }
 
-    // Get documents from collection
-    auto docsResult = metaRepo->findDocumentsByCollection(req.collection);
+    // Get documents from collection using generic metadata query
+    metadata::DocumentQueryOptions queryOpts;
+    queryOpts.metadataFilters.emplace_back("collection", req.collection);
+    queryOpts.orderByIndexedDesc = true;
+    auto docsResult = metaRepo->queryDocuments(queryOpts);
     if (!docsResult) {
         co_return ErrorResponse{.code = docsResult.error().code,
                                 .message = "Failed to find collection documents: " +

@@ -42,6 +42,13 @@ private:
         bool isJson = false;
     };
 
+    // Data-dir lock info read from the lock file
+    struct DataDirLockInfo {
+        pid_t pid{0};
+        std::string socket;
+        std::uint64_t timestamp{0};
+    };
+
     enum class PidIdentityStatus { Verified, Mismatch, Unknown };
 
     void setupSignalHandlers();
@@ -70,11 +77,20 @@ private:
     bool requestExistingDaemonShutdown(pid_t pid) const;
     bool waitForProcessExit(pid_t pid, std::chrono::milliseconds timeout) const;
 
+    // Data-dir lock methods to prevent multiple daemons from sharing the same data-dir
+    Result<void> acquireDataDirLock();
+    DataDirLockInfo readDataDirLockInfo() const;
+    void releaseDataDirLock();
+
     YamsDaemon* daemon_; // Non-owning pointer to the main daemon class to signal shutdown
     std::filesystem::path pidFile_;
     int pidFileFd_ = -1; // File descriptor for the locked PID file
     std::string instanceToken_;
     std::uint64_t startTimeNs_ = 0;
+
+    // Data-dir lock state
+    int dataDirLockFd_{-1};
+    std::filesystem::path dataDirLockFile_;
 
     static std::atomic<LifecycleComponent*>
         instance_; // Singleton instance for the static signal handler

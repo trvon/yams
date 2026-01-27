@@ -245,17 +245,11 @@ public:
         return Error{ErrorCode::NotImplemented, "NI"};
     }
 
-    // Collections and snapshots (unused)
-    Result<std::vector<DocumentInfo>> findDocumentsByCollection(const std::string&) override {
-        return Error{ErrorCode::NotImplemented, "NI"};
-    }
+    // Snapshots (unused - collections now use generic metadata query)
     Result<std::vector<DocumentInfo>> findDocumentsBySnapshot(const std::string&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
     Result<std::vector<DocumentInfo>> findDocumentsBySnapshotLabel(const std::string&) override {
-        return Error{ErrorCode::NotImplemented, "NI"};
-    }
-    Result<std::vector<std::string>> getCollections() override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
     Result<std::vector<std::string>> getSnapshots() override {

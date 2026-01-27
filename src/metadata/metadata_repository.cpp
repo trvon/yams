@@ -1104,6 +1104,19 @@ MetadataRepository::generateValueCountsCacheKey(const std::vector<std::string>& 
     return cacheKey;
 }
 
+// Helper to check if any document-level filter is set (requires JOIN with documents table)
+static bool requiresDocumentJoin(const DocumentQueryOptions& options) {
+    return options.exactPath.has_value() || options.pathPrefix.has_value() ||
+           options.containsFragment.has_value() || options.likePattern.has_value() ||
+           options.fileName.has_value() || options.extension.has_value() ||
+           !options.extensions.empty() || options.mimeType.has_value() || options.textOnly ||
+           options.binaryOnly || options.createdAfter.has_value() ||
+           options.createdBefore.has_value() || options.modifiedAfter.has_value() ||
+           options.modifiedBefore.has_value() || options.indexedAfter.has_value() ||
+           options.indexedBefore.has_value() || options.changedSince.has_value() ||
+           !options.tags.empty();
+}
+
 Result<std::unordered_map<std::string, std::vector<MetadataValueCount>>>
 MetadataRepository::getMetadataValueCounts(const std::vector<std::string>& keys,
                                            const DocumentQueryOptions& options) {
@@ -1139,15 +1152,22 @@ MetadataRepository::getMetadataValueCounts(const std::vector<std::string>& keys,
         executeQuery<std::unordered_map<std::string, std::vector<MetadataValueCount>>>(
             [&](Database& db)
                 -> Result<std::unordered_map<std::string, std::vector<MetadataValueCount>>> {
+                const bool needsDocumentJoin = requiresDocumentJoin(options);
                 const bool joinFtsForContains =
-                    options.containsFragment && options.containsUsesFts &&
+                    needsDocumentJoin && options.containsFragment && options.containsUsesFts &&
                     !options.containsFragment->empty() && pathFtsAvailable_;
 
-                std::string sql =
-                    "SELECT m.key, m.value, COUNT(*) FROM metadata m JOIN documents d ON d.id = "
-                    "m.document_id";
-                if (joinFtsForContains) {
-                    sql += " JOIN documents_path_fts ON d.id = documents_path_fts.rowid";
+                std::string sql;
+                if (needsDocumentJoin) {
+                    sql = "SELECT m.key, m.value, COUNT(*) FROM metadata m "
+                          "JOIN documents d ON d.id = m.document_id";
+                    if (joinFtsForContains) {
+                        sql += " JOIN documents_path_fts ON d.id = documents_path_fts.rowid";
+                    }
+                } else {
+                    // Fast path: no document filters, skip the join entirely
+                    // Uses covering index idx_metadata_key_value for optimal performance
+                    sql = "SELECT m.key, m.value, COUNT(*) FROM metadata m";
                 }
 
                 std::vector<std::string> conditions;
@@ -2890,6 +2910,15 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
                 addText(tag);
             }
 
+            // Generic metadata key/value filtering (replaces findDocumentsByCollection)
+            for (const auto& [key, value] : options.metadataFilters) {
+                conditions.emplace_back(
+                    "EXISTS (SELECT 1 FROM metadata m WHERE m.document_id = documents.id "
+                    "AND m.key = ? AND m.value = ?)");
+                addText(key);
+                addText(value);
+            }
+
             if (!conditions.empty()) {
                 sql += " WHERE ";
                 for (size_t i = 0; i < conditions.size(); ++i) {
@@ -3099,6 +3128,22 @@ void MetadataRepository::initializeCounters() {
             cachedDocumentCount_.load(), cachedIndexedCount_.load(), cachedExtractedCount_.load());
     } catch (const std::exception& e) {
         spdlog::warn("MetadataRepository: failed to initialize counters: {}", e.what());
+    }
+}
+
+void MetadataRepository::warmValueCountsCache() {
+    // Common metadata keys to pre-warm (no filters = baseline cache)
+    static const std::vector<std::string> kCommonKeys = {"pbi"};
+
+    DocumentQueryOptions defaultOpts{}; // No filters
+
+    auto result = getMetadataValueCounts(kCommonKeys, defaultOpts);
+    if (result) {
+        spdlog::info("MetadataRepository: warmed value counts cache for {} keys, {} values",
+                     kCommonKeys.size(), result.value().size());
+    } else {
+        spdlog::warn("MetadataRepository: failed to warm value counts cache: {}",
+                     result.error().message);
     }
 }
 
@@ -5565,45 +5610,7 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
     });
 }
 
-// Collection and snapshot operations
-Result<std::vector<DocumentInfo>>
-MetadataRepository::findDocumentsByCollection(const std::string& collection) {
-    return executeQuery<std::vector<DocumentInfo>>(
-        [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT DISTINCT d.id, d.file_path, d.file_name, d.file_extension, d.file_size,
-                   d.sha256_hash, d.mime_type, d.created_time, d.modified_time,
-                   d.indexed_time, d.content_extracted, d.extraction_status,
-                   d.extraction_error
-            FROM documents d
-            JOIN metadata m ON d.id = m.document_id
-            WHERE m.key = 'collection' AND m.value = ?
-            ORDER BY d.indexed_time DESC
-        )");
-
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            auto bindResult = stmt.bind(1, collection);
-            if (!bindResult)
-                return bindResult.error();
-
-            std::vector<DocumentInfo> documents;
-            while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
-                    break;
-
-                documents.push_back(mapDocumentRow(stmt));
-            }
-
-            return documents;
-        });
-}
-
+// Snapshot operations (collections use generic metadata query via getMetadataValueCounts)
 Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsBySnapshot(const std::string& snapshotId) {
     return executeQuery<std::vector<DocumentInfo>>(
@@ -5678,67 +5685,6 @@ MetadataRepository::findDocumentsBySnapshotLabel(const std::string& snapshotLabe
 
             return documents;
         });
-}
-
-Result<std::vector<std::string>> MetadataRepository::getCollections() {
-    // Check cache under shared lock first
-    {
-        std::shared_lock<std::shared_mutex> lock(enumerationCacheMutex_);
-        if (cachedEnumerations_) {
-            auto now = std::chrono::steady_clock::now();
-            auto changeCount = metadataChangeCounter_.load(std::memory_order_acquire);
-            bool cacheValid = (now - cachedEnumerations_->cachedAt < kEnumerationCacheTtl) &&
-                              (cachedEnumerations_->metadataChangeCount == changeCount);
-            if (cacheValid && !cachedEnumerations_->collections.empty()) {
-                return cachedEnumerations_->collections;
-            }
-        }
-    }
-
-    // Cache miss - query database
-    auto result = executeQuery<std::vector<std::string>>(
-        [&](Database& db) -> Result<std::vector<std::string>> {
-            using yams::metadata::sql::QuerySpec;
-            QuerySpec spec{};
-            spec.table = "metadata";
-            spec.columns = {"DISTINCT value"};
-            spec.conditions = {"key = 'collection'"};
-            spec.orderBy = std::optional<std::string>{"value"};
-
-            auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
-
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            std::vector<std::string> collections;
-
-            while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
-                    break;
-
-                collections.push_back(stmt.getString(0));
-            }
-
-            return collections;
-        });
-
-    // Update cache on success
-    if (result) {
-        std::unique_lock<std::shared_mutex> lock(enumerationCacheMutex_);
-        if (!cachedEnumerations_) {
-            cachedEnumerations_ = std::make_unique<EnumerationCache>();
-        }
-        cachedEnumerations_->collections = result.value();
-        cachedEnumerations_->cachedAt = std::chrono::steady_clock::now();
-        cachedEnumerations_->metadataChangeCount =
-            metadataChangeCounter_.load(std::memory_order_acquire);
-    }
-
-    return result;
 }
 
 Result<std::vector<std::string>> MetadataRepository::getSnapshots() {

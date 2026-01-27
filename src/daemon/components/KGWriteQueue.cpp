@@ -160,7 +160,7 @@ boost::asio::awaitable<void> KGWriteQueue::writerLoop() {
         inFlight_.store(0);
 
         // Brief yield to allow other coroutines to run
-        pollTimer.expires_after(std::chrono::microseconds(100));
+        pollTimer.expires_after(std::chrono::milliseconds(1));
         boost::system::error_code ec;
         co_await pollTimer.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
     }

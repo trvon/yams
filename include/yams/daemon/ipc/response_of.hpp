@@ -103,10 +103,7 @@ template <> struct ResponseOf<PruneRequest> {
     using type = PruneResponse;
 };
 
-// Collection and snapshot operations (PBI-066)
-template <> struct ResponseOf<ListCollectionsRequest> {
-    using type = ListCollectionsResponse;
-};
+// Snapshot operations (PBI-066) - collections use generic metadata query
 template <> struct ResponseOf<ListSnapshotsRequest> {
     using type = ListSnapshotsResponse;
 };

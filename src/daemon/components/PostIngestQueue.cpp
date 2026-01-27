@@ -675,12 +675,10 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
 
     started_.store(true);
 
-    auto idleDelay = std::chrono::milliseconds(5);
-    auto maxIdleDelay = []() {
-        auto snap = TuningSnapshotRegistry::instance().get();
-        uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
-        return std::chrono::milliseconds(std::max<uint32_t>(10, pollMs));
-    };
+    // Adaptive backoff for CPU efficiency with governance floor
+    constexpr auto kMinIdleDelay = std::chrono::milliseconds(5);  // Governance floor
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(50); // Idle ceiling
+    auto idleDelay = kMinIdleDelay;
 
     while (!stop_.load()) {
         bool didWork = false;
@@ -690,20 +688,24 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         batch.reserve(batchSize);
         // Dynamic concurrency limit from TuneAdvisor
         std::size_t maxConcurrent = maxExtractionConcurrent();
-        // Halve concurrency at Warning level for CPU-aware throttling
-        if (ResourceGovernor::instance().getPressureLevel() == ResourcePressureLevel::Warning) {
-            maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+        // Graduated pressure response for CPU-aware throttling
+        auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
+        switch (pressureLevel) {
+            case ResourcePressureLevel::Emergency:
+                maxConcurrent = 0; // Halt (backstop for pauseAll)
+                break;
+            case ResourcePressureLevel::Critical:
+                maxConcurrent = 1; // Minimal concurrency
+                break;
+            case ResourcePressureLevel::Warning:
+                maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+                break;
+            default:
+                break;
         }
         if (extractionPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
-            timer.expires_after(idleDelay);
+            timer.expires_after(kMinIdleDelay); // Always fast when paused
             co_await timer.async_wait(boost::asio::use_awaitable);
-            const auto maxIdle = maxIdleDelay();
-            if (idleDelay < maxIdle) {
-                idleDelay *= 2;
-                if (idleDelay > maxIdle) {
-                    idleDelay = maxIdle;
-                }
-            }
             continue;
         }
         while (inFlight_.load() < maxConcurrent && batch.size() < batchSize &&
@@ -725,18 +727,15 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         }
 
         if (didWork) {
-            idleDelay = std::chrono::milliseconds(5);
+            idleDelay = kMinIdleDelay; // Reset on work
             continue;
         }
 
+        // Adaptive backoff when idle
         timer.expires_after(idleDelay);
         co_await timer.async_wait(boost::asio::use_awaitable);
-        const auto maxIdle = maxIdleDelay();
-        if (idleDelay < maxIdle) {
-            idleDelay *= 2;
-            if (idleDelay > maxIdle) {
-                idleDelay = maxIdle;
-            }
+        if (idleDelay < kMaxIdleDelay) {
+            idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
         }
     }
 
@@ -1408,32 +1407,34 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
 
     kgStarted_.store(true);
 
-    auto idleDelay = std::chrono::milliseconds(5);
-    auto maxIdleDelay = []() {
-        auto snap = TuningSnapshotRegistry::instance().get();
-        uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
-        return std::chrono::milliseconds(std::max<uint32_t>(10, pollMs));
-    };
+    // Adaptive backoff for CPU efficiency with governance floor
+    constexpr auto kMinIdleDelay = std::chrono::milliseconds(5);  // Governance floor
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(50); // Idle ceiling
+    auto idleDelay = kMinIdleDelay;
 
     while (!stop_.load()) {
         bool didWork = false;
         InternalEventBus::KgJob job;
         // Dynamic concurrency limit from TuneAdvisor
         std::size_t maxConcurrent = maxKgConcurrent();
-        // Halve concurrency at Warning level for CPU-aware throttling
-        if (ResourceGovernor::instance().getPressureLevel() == ResourcePressureLevel::Warning) {
-            maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+        // Graduated pressure response for CPU-aware throttling
+        auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
+        switch (pressureLevel) {
+            case ResourcePressureLevel::Emergency:
+                maxConcurrent = 0; // Halt (backstop for pauseAll)
+                break;
+            case ResourcePressureLevel::Critical:
+                maxConcurrent = 1; // Minimal concurrency
+                break;
+            case ResourcePressureLevel::Warning:
+                maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+                break;
+            default:
+                break;
         }
         if (kgPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
-            timer.expires_after(idleDelay);
+            timer.expires_after(kMinIdleDelay); // Always fast when paused
             co_await timer.async_wait(boost::asio::use_awaitable);
-            const auto maxIdle = maxIdleDelay();
-            if (idleDelay < maxIdle) {
-                idleDelay *= 2;
-                if (idleDelay > maxIdle) {
-                    idleDelay = maxIdle;
-                }
-            }
             continue;
         }
         while (kgInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
@@ -1452,18 +1453,15 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         }
 
         if (didWork) {
-            idleDelay = std::chrono::milliseconds(5);
+            idleDelay = kMinIdleDelay; // Reset on work
             continue;
         }
 
+        // Adaptive backoff when idle
         timer.expires_after(idleDelay);
         co_await timer.async_wait(boost::asio::use_awaitable);
-        const auto maxIdle = maxIdleDelay();
-        if (idleDelay < maxIdle) {
-            idleDelay *= 2;
-            if (idleDelay > maxIdle) {
-                idleDelay = maxIdle;
-            }
+        if (idleDelay < kMaxIdleDelay) {
+            idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
         }
     }
 
@@ -1481,32 +1479,34 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     symbolStarted_.store(true);
     spdlog::info("[PostIngestQueue] Symbol extraction poller started");
 
-    auto idleDelay = std::chrono::milliseconds(5);
-    auto maxIdleDelay = []() {
-        auto snap = TuningSnapshotRegistry::instance().get();
-        uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
-        return std::chrono::milliseconds(std::max<uint32_t>(10, pollMs));
-    };
+    // Adaptive backoff for CPU efficiency with governance floor
+    constexpr auto kMinIdleDelay = std::chrono::milliseconds(5);  // Governance floor
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(50); // Idle ceiling
+    auto idleDelay = kMinIdleDelay;
 
     while (!stop_.load()) {
         bool didWork = false;
         InternalEventBus::SymbolExtractionJob job;
         // Dynamic concurrency limit from TuneAdvisor
         std::size_t maxConcurrent = maxSymbolConcurrent();
-        // Halve concurrency at Warning level for CPU-aware throttling
-        if (ResourceGovernor::instance().getPressureLevel() == ResourcePressureLevel::Warning) {
-            maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+        // Graduated pressure response for CPU-aware throttling
+        auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
+        switch (pressureLevel) {
+            case ResourcePressureLevel::Emergency:
+                maxConcurrent = 0; // Halt (backstop for pauseAll)
+                break;
+            case ResourcePressureLevel::Critical:
+                maxConcurrent = 1; // Minimal concurrency
+                break;
+            case ResourcePressureLevel::Warning:
+                maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+                break;
+            default:
+                break;
         }
         if (symbolPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
-            timer.expires_after(idleDelay);
+            timer.expires_after(kMinIdleDelay); // Always fast when paused
             co_await timer.async_wait(boost::asio::use_awaitable);
-            const auto maxIdle = maxIdleDelay();
-            if (idleDelay < maxIdle) {
-                idleDelay *= 2;
-                if (idleDelay > maxIdle) {
-                    idleDelay = maxIdle;
-                }
-            }
             continue;
         }
         while (symbolInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
@@ -1526,18 +1526,15 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         }
 
         if (didWork) {
-            idleDelay = std::chrono::milliseconds(5);
+            idleDelay = kMinIdleDelay; // Reset on work
             continue;
         }
 
+        // Adaptive backoff when idle
         timer.expires_after(idleDelay);
         co_await timer.async_wait(boost::asio::use_awaitable);
-        const auto maxIdle = maxIdleDelay();
-        if (idleDelay < maxIdle) {
-            idleDelay *= 2;
-            if (idleDelay > maxIdle) {
-                idleDelay = maxIdle;
-            }
+        if (idleDelay < kMaxIdleDelay) {
+            idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
         }
     }
 
@@ -1661,32 +1658,34 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
     entityStarted_.store(true);
     spdlog::info("[PostIngestQueue] Entity extraction poller started");
 
-    auto idleDelay = std::chrono::milliseconds(5);
-    auto maxIdleDelay = []() {
-        auto snap = TuningSnapshotRegistry::instance().get();
-        uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
-        return std::chrono::milliseconds(std::max<uint32_t>(10, pollMs));
-    };
+    // Adaptive backoff for CPU efficiency with governance floor
+    constexpr auto kMinIdleDelay = std::chrono::milliseconds(5);  // Governance floor
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(50); // Idle ceiling
+    auto idleDelay = kMinIdleDelay;
 
     while (!stop_.load()) {
         bool didWork = false;
         InternalEventBus::EntityExtractionJob job;
         // Dynamic concurrency limit from TuneAdvisor
         std::size_t maxConcurrent = maxEntityConcurrent();
-        // Halve concurrency at Warning level for CPU-aware throttling
-        if (ResourceGovernor::instance().getPressureLevel() == ResourcePressureLevel::Warning) {
-            maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+        // Graduated pressure response for CPU-aware throttling
+        auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
+        switch (pressureLevel) {
+            case ResourcePressureLevel::Emergency:
+                maxConcurrent = 0; // Halt (backstop for pauseAll)
+                break;
+            case ResourcePressureLevel::Critical:
+                maxConcurrent = 1; // Minimal concurrency
+                break;
+            case ResourcePressureLevel::Warning:
+                maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+                break;
+            default:
+                break;
         }
         if (entityPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
-            timer.expires_after(idleDelay);
+            timer.expires_after(kMinIdleDelay); // Always fast when paused
             co_await timer.async_wait(boost::asio::use_awaitable);
-            const auto maxIdle = maxIdleDelay();
-            if (idleDelay < maxIdle) {
-                idleDelay *= 2;
-                if (idleDelay > maxIdle) {
-                    idleDelay = maxIdle;
-                }
-            }
             continue;
         }
         while (entityInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
@@ -1707,18 +1706,15 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         }
 
         if (didWork) {
-            idleDelay = std::chrono::milliseconds(5);
+            idleDelay = kMinIdleDelay; // Reset on work
             continue;
         }
 
+        // Adaptive backoff when idle
         timer.expires_after(idleDelay);
         co_await timer.async_wait(boost::asio::use_awaitable);
-        const auto maxIdle = maxIdleDelay();
-        if (idleDelay < maxIdle) {
-            idleDelay *= 2;
-            if (idleDelay > maxIdle) {
-                idleDelay = maxIdle;
-            }
+        if (idleDelay < kMaxIdleDelay) {
+            idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
         }
     }
 
@@ -2036,32 +2032,34 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
     titleStarted_.store(true);
     spdlog::info("[PostIngestQueue] Title extraction poller started");
 
-    auto idleDelay = std::chrono::milliseconds(5);
-    auto maxIdleDelay = []() {
-        auto snap = TuningSnapshotRegistry::instance().get();
-        uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
-        return std::chrono::milliseconds(std::max<uint32_t>(10, pollMs));
-    };
+    // Adaptive backoff for CPU efficiency with governance floor
+    constexpr auto kMinIdleDelay = std::chrono::milliseconds(5);  // Governance floor
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(50); // Idle ceiling
+    auto idleDelay = kMinIdleDelay;
 
     while (!stop_.load()) {
         bool didWork = false;
         InternalEventBus::TitleExtractionJob job;
         // Dynamic concurrency limit
         std::size_t maxConcurrent = maxTitleConcurrent();
-        // Halve concurrency at Warning level for CPU-aware throttling
-        if (ResourceGovernor::instance().getPressureLevel() == ResourcePressureLevel::Warning) {
-            maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+        // Graduated pressure response for CPU-aware throttling
+        auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
+        switch (pressureLevel) {
+            case ResourcePressureLevel::Emergency:
+                maxConcurrent = 0; // Halt (backstop for pauseAll)
+                break;
+            case ResourcePressureLevel::Critical:
+                maxConcurrent = 1; // Minimal concurrency
+                break;
+            case ResourcePressureLevel::Warning:
+                maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+                break;
+            default:
+                break;
         }
         if (titlePaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
-            timer.expires_after(idleDelay);
+            timer.expires_after(kMinIdleDelay); // Always fast when paused
             co_await timer.async_wait(boost::asio::use_awaitable);
-            const auto maxIdle = maxIdleDelay();
-            if (idleDelay < maxIdle) {
-                idleDelay *= 2;
-                if (idleDelay > maxIdle) {
-                    idleDelay = maxIdle;
-                }
-            }
             continue;
         }
         while (titleInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
@@ -2082,18 +2080,15 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
         }
 
         if (didWork) {
-            idleDelay = std::chrono::milliseconds(5);
+            idleDelay = kMinIdleDelay; // Reset on work
             continue;
         }
 
+        // Adaptive backoff when idle
         timer.expires_after(idleDelay);
         co_await timer.async_wait(boost::asio::use_awaitable);
-        const auto maxIdle = maxIdleDelay();
-        if (idleDelay < maxIdle) {
-            idleDelay *= 2;
-            if (idleDelay > maxIdle) {
-                idleDelay = maxIdle;
-            }
+        if (idleDelay < kMaxIdleDelay) {
+            idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
         }
     }
 

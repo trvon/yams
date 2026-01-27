@@ -396,7 +396,7 @@ private:
         }
         auto desc = describeProcess(pid);
         if (!desc.empty()) {
-            spdlog::error("Daemon PID {} still alive after signal: {}", pid, desc);
+            spdlog::debug("Daemon PID {} still alive after signal: {}", pid, desc);
         }
         return false;
     }
@@ -426,7 +426,7 @@ private:
             std::this_thread::sleep_for(interval);
         }
 
-        spdlog::warn("Timeout waiting for daemon to stop");
+        spdlog::debug("Timeout waiting for daemon to stop");
         return false;
     }
 
@@ -454,7 +454,8 @@ private:
                 break;
             }
             if (ec) {
-                spdlog::warn("Failed to remove {} file {}: {}", label, path.string(), ec.message());
+                spdlog::debug("Failed to remove {} file {}: {}", label, path.string(),
+                              ec.message());
             }
         };
 
@@ -1029,25 +1030,25 @@ private:
                         spdlog::error("Failed to kill daemon even with SIGKILL");
                     }
                 } else {
-                    spdlog::error("Daemon did not respond to SIGTERM. Use --force to kill it");
+                    spdlog::debug("Daemon did not respond to SIGTERM. Use --force to kill it");
                 }
             } else {
                 spdlog::debug("No PID file found at: {}", pidFile_);
                 // If no PID file but socket shutdown was attempted, assume it worked
                 if (daemonRunning) {
-                    spdlog::warn("Could not verify daemon stopped (no PID file), but shutdown was "
-                                 "requested");
+                    spdlog::debug("Could not verify daemon stopped (no PID file), but shutdown was "
+                                  "requested");
                 }
             }
         }
 
         // If still not stopped, try platform-specific last-resort termination for orphaned daemons
         if (!stopped && daemonRunning) {
-            spdlog::warn("Daemon not responding to shutdown, attempting to kill orphaned process");
+            spdlog::debug("Daemon not responding to shutdown, attempting to kill orphaned process");
 
             const auto socketPids = collectDaemonPidsForSocket(effectiveSocket);
             if (!socketPids.empty()) {
-                spdlog::warn("Found {} daemon PID(s) matching socket", socketPids.size());
+                spdlog::debug("Found {} daemon PID(s) matching socket", socketPids.size());
                 bool socketPidsStopped = true;
                 for (auto pid : socketPids) {
                     bool killed = false;
@@ -1058,7 +1059,7 @@ private:
                     }
                     if (!killed) {
                         socketPidsStopped = false;
-                        spdlog::error("Failed to stop daemon PID {}", pid);
+                        spdlog::debug("Failed to stop daemon PID {}", pid);
                     }
                 }
                 if (socketPidsStopped) {
@@ -1080,7 +1081,7 @@ private:
                 if (!isDaemonProcessRunningForSocket(effectiveSocket)) {
                     stopped = true;
                 } else {
-                    spdlog::warn("Daemon process still running after pkill (socket match)");
+                    spdlog::debug("Daemon process still running after pkill (socket match)");
                 }
             } else {
                 // Try a more general pkill if specific socket match fails
@@ -1092,7 +1093,7 @@ private:
                     if (!isDaemonProcessRunningForSocket(effectiveSocket)) {
                         stopped = true;
                     } else {
-                        spdlog::warn("Daemon process still running after pkill");
+                        spdlog::debug("Daemon process still running after pkill");
                     }
                 }
             }
