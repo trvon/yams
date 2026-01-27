@@ -16,12 +16,12 @@
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_concepts.h>
 #include <yams/profiling.h>
-#include <yams/daemon/components/TuneAdvisor.h>
 
 namespace yams::search {
 class SymSpellSearch; // Forward declaration for SQLite-backed fuzzy search
@@ -90,6 +90,20 @@ struct TreeSnapshotRecord {
     std::unordered_map<std::string, std::string> metadata;
 };
 
+/**
+ * @brief Derived snapshot info from document metadata (for snapshots not in tree_snapshots)
+ *
+ * Used when listing snapshots to provide information about snapshots that exist
+ * only in the document metadata table (e.g., from daemon file ingestion).
+ */
+struct SnapshotInfo {
+    std::string directoryPath;
+    std::string label;
+    std::string gitCommit;
+    int64_t fileCount = 0;
+    int64_t createdTime = 0;
+};
+
 struct TreeDiffDescriptor {
     std::string baseSnapshotId;
     std::string targetSnapshotId;
@@ -137,14 +151,18 @@ struct DocumentQueryOptions {
     std::optional<std::string> containsFragment;
     std::optional<std::string> fileName; // Exact match on file_name column
     std::optional<std::string> extension;
+    std::vector<std::string> extensions;
     std::optional<std::string> mimeType;
     bool textOnly{false};
     bool binaryOnly{false};
     std::vector<std::string> tags;
+    std::optional<int64_t> createdAfter;
+    std::optional<int64_t> createdBefore;
     std::optional<int64_t> modifiedAfter;
     std::optional<int64_t> modifiedBefore;
     std::optional<int64_t> indexedAfter;
     std::optional<int64_t> indexedBefore;
+    std::optional<int64_t> changedSince;
     int limit{0};
     int offset{0};
     bool orderByNameAsc{false};
@@ -154,6 +172,11 @@ struct DocumentQueryOptions {
     bool includeSubdirectories{true};
     bool containsUsesFts{false};
     std::optional<std::string> likePattern;
+};
+
+struct MetadataValueCount {
+    std::string value;
+    int64_t count{0};
 };
 
 /**
@@ -245,6 +268,9 @@ public:
     findDocumentsModifiedSince(std::chrono::system_clock::time_point since) = 0;
     virtual Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>
     getMetadataForDocuments(std::span<const int64_t> documentIds) = 0;
+    virtual Result<std::unordered_map<std::string, std::vector<MetadataValueCount>>>
+    getMetadataValueCounts(const std::vector<std::string>& keys,
+                           const DocumentQueryOptions& options) = 0;
 
     // Batch operations for search/grep performance (eliminates N queries → 1 query)
     virtual Result<std::unordered_map<std::string, DocumentInfo>>
@@ -263,6 +289,15 @@ public:
     virtual Result<std::vector<std::string>> getCollections() = 0;
     virtual Result<std::vector<std::string>> getSnapshots() = 0;
     virtual Result<std::vector<std::string>> getSnapshotLabels() = 0;
+
+    /// Get derived snapshot info from document metadata for a given snapshot ID
+    /// This aggregates info from documents with the specified snapshot_id in their metadata
+    virtual Result<SnapshotInfo> getSnapshotInfo(const std::string& snapshotId) = 0;
+
+    /// Batch get snapshot info for multiple IDs (replaces N+1 pattern)
+    /// Returns map of snapshotId → SnapshotInfo for all found snapshots
+    virtual Result<std::unordered_map<std::string, SnapshotInfo>>
+    batchGetSnapshotInfo(const std::vector<std::string>& snapshotIds) = 0;
 
     // Session operations (PBI-082)
     virtual Result<std::vector<DocumentInfo>>
@@ -501,6 +536,9 @@ public:
     Result<std::vector<std::string>> getCollections() override;
     Result<std::vector<std::string>> getSnapshots() override;
     Result<std::vector<std::string>> getSnapshotLabels() override;
+    Result<SnapshotInfo> getSnapshotInfo(const std::string& snapshotId) override;
+    Result<std::unordered_map<std::string, SnapshotInfo>>
+    batchGetSnapshotInfo(const std::vector<std::string>& snapshotIds) override;
 
     // Session operations (PBI-082)
     Result<std::vector<DocumentInfo>>
@@ -511,6 +549,9 @@ public:
 
     Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>
     getMetadataForDocuments(std::span<const int64_t> documentIds) override;
+    Result<std::unordered_map<std::string, std::vector<MetadataValueCount>>>
+    getMetadataValueCounts(const std::vector<std::string>& keys,
+                           const DocumentQueryOptions& options) override;
 
     // Tag operations
     Result<std::vector<DocumentInfo>> findDocumentsByTags(const std::vector<std::string>& tags,
@@ -690,6 +731,20 @@ private:
     mutable std::shared_mutex corpusStatsMutex_;
     mutable std::atomic<bool> corpusStatsStale_{false};        // Signal-based invalidation flag
     static constexpr std::chrono::seconds kCorpusStatsTtl{30}; // Base TTL
+
+    // Enumeration cache (snapshots, collections, tags) with signal-based invalidation
+    struct EnumerationCache {
+        std::vector<std::string> snapshots;
+        std::vector<std::string> snapshotLabels;
+        std::vector<std::string> collections;
+        std::vector<std::string> tags;
+        std::chrono::steady_clock::time_point cachedAt{};
+        uint64_t metadataChangeCount{0};
+    };
+    mutable std::unique_ptr<EnumerationCache> cachedEnumerations_;
+    mutable std::shared_mutex enumerationCacheMutex_;
+    mutable std::atomic<uint64_t> metadataChangeCounter_{0};
+    static constexpr std::chrono::seconds kEnumerationCacheTtl{60};
 
     // Approximate LRU hit recording (lock-free ring of path hashes)
     mutable std::unique_ptr<std::atomic<uint64_t>[]> hitRing_;

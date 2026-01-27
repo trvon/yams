@@ -213,13 +213,16 @@ private:
     // Version 22: Versioned symbol extraction state to avoid re-extraction
     static Migration createSymbolExtractionStateSchema();
 
-    // Version 23: SymSpell fuzzy search tables for fast edit-distance queries
+    // Version 23: Metadata aggregation indexes for key/value counts
+    static Migration createMetadataAggregationIndexes();
+
+    // Version 24: SymSpell fuzzy search tables for fast edit-distance queries
     static Migration createSymSpellSchema();
 
-    // Version 24: Term statistics for IDF computation and query weighting
+    // Version 25: Term statistics for IDF computation and query weighting
     static Migration createTermStatsSchema();
 
-    // Version 25: Repair symbol_metadata uniqueness for upserts
+    // Version 26: Repair symbol_metadata uniqueness for upserts
     static Migration repairSymbolMetadataUniqueness();
 };
 

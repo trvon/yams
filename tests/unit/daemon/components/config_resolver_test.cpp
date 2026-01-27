@@ -317,13 +317,14 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
+        // Efficient profile scale is 0.40, postIngestBatchSize = 8 * 0.40 = 3
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
         CHECK(TuneAdvisor::postKgConcurrent() == 0u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
         CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
-        CHECK(TuneAdvisor::postIngestBatchSize() == 4u);
+        CHECK(TuneAdvisor::postIngestBatchSize() == 3u);
     }
 
     SECTION("balanced profile uses medium values") {
@@ -332,13 +333,14 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
+        // Balanced profile scale is 0.75, postIngestBatchSize = 8 * 0.75 = 6
         CHECK(TuneAdvisor::postExtractionConcurrent() == 2u);
         CHECK(TuneAdvisor::postKgConcurrent() == 0u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
         CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
-        CHECK(TuneAdvisor::postIngestBatchSize() == 8u);
+        CHECK(TuneAdvisor::postIngestBatchSize() == 6u);
     }
 
     SECTION("aggressive profile uses maximum values") {
@@ -347,13 +349,16 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
+        // Aggressive profile scale is 1.0, postIngestBatchSize = 8 * 1.0 = 8
+        // With 8 threads and Aggressive (80% CPU budget), totalBudget = floor(0.8 * 8) = 6
+        // With 6 active stages, each stage gets at least 1
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
         CHECK(TuneAdvisor::postKgConcurrent() == 1u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
-        CHECK(TuneAdvisor::postIngestBatchSize() == 12u);
+        CHECK(TuneAdvisor::postIngestBatchSize() == 8u);
     }
 
     SECTION("profile affects cpuBudgetPercent") {

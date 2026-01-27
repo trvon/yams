@@ -23,6 +23,7 @@ using nlohmann::json;
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -357,29 +358,47 @@ private:
 
         // Check if process exists
         if (kill(pid, 0) != 0) {
-            return false; // Process doesn't exist
+            if (errno == ESRCH) {
+                return true; // Already gone
+            }
+            spdlog::error("Failed to query daemon PID {}: {}", pid, strerror(errno));
+            return false; // Process doesn't exist or not permitted
         }
 
         // Send termination signal
         int sig = force ? SIGKILL : SIGTERM;
         if (kill(pid, sig) != 0) {
+            if (errno == ESRCH) {
+                return true; // Process exited before signal
+            }
             spdlog::error("Failed to send signal to daemon (PID {}): {}", pid, strerror(errno));
+            auto desc = describeProcess(pid);
+            if (!desc.empty()) {
+                spdlog::error("Daemon PID {} state: {}", pid, desc);
+            }
             return false;
         }
 
         spdlog::info("Sent {} to daemon (PID {})", force ? "SIGKILL" : "SIGTERM", pid);
 
         // Wait for process to terminate (max 5 seconds for SIGTERM)
-        if (!force) {
-            for (int i = 0; i < 50; i++) {
-                if (kill(pid, 0) != 0) {
-                    return true; // Process terminated
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const int loops = force ? 20 : 50;
+        const auto delay = force ? std::chrono::milliseconds(50) : std::chrono::milliseconds(100);
+        for (int i = 0; i < loops; i++) {
+            if (kill(pid, 0) != 0) {
+                return true; // Process terminated
             }
+            std::this_thread::sleep_for(delay);
         }
 
-        return kill(pid, 0) != 0; // Check if process is gone
+        if (kill(pid, 0) != 0) {
+            return true;
+        }
+        auto desc = describeProcess(pid);
+        if (!desc.empty()) {
+            spdlog::error("Daemon PID {} still alive after signal: {}", pid, desc);
+        }
+        return false;
     }
 
     bool waitForDaemonStop(const std::string& socketPath, const std::string& pidFilePath,
@@ -449,6 +468,127 @@ private:
             removeWithRetry(std::filesystem::path{pidFilePath}, "PID");
         }
     }
+
+#ifndef _WIN32
+    static std::string escapeRegexLiteral(const std::string& value) {
+        std::string out;
+        out.reserve(value.size() * 2);
+        for (char ch : value) {
+            switch (ch) {
+                case '.':
+                case '^':
+                case '$':
+                case '*':
+                case '+':
+                case '?':
+                case '(':
+                case ')':
+                case '[':
+                case ']':
+                case '{':
+                case '}':
+                case '|':
+                case '\\':
+                    out.push_back('\\');
+                    break;
+                default:
+                    break;
+            }
+            out.push_back(ch);
+        }
+        return out;
+    }
+
+    static std::string shellEscapeArg(const std::string& value) {
+        std::string out;
+        out.reserve(value.size() + 2);
+        out.push_back('"');
+        for (char ch : value) {
+            if (ch == '\\' || ch == '"' || ch == '$' || ch == '`') {
+                out.push_back('\\');
+            }
+            out.push_back(ch);
+        }
+        out.push_back('"');
+        return out;
+    }
+
+    static std::string runCommandCapture(const std::string& cmd) {
+        std::string output;
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe) {
+            return output;
+        }
+        char buffer[256];
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            output.append(buffer);
+        }
+        pclose(pipe);
+        return output;
+    }
+
+    static std::string describeProcess(pid_t pid) {
+        if (pid <= 0) {
+            return "";
+        }
+        std::string cmd = "ps -o pid=,ppid=,stat=,command= -p " + std::to_string(pid);
+        auto output = runCommandCapture(cmd);
+        while (!output.empty() &&
+               (output.back() == '\n' || output.back() == '\r' || output.back() == ' ')) {
+            output.pop_back();
+        }
+        return output;
+    }
+
+    static bool isDaemonProcessRunningForSocket(const std::string& socketPath) {
+        if (socketPath.empty()) {
+            return false;
+        }
+        std::string pattern = std::string("yams-daemon.*") + escapeRegexLiteral(socketPath);
+        std::string cmd = "pgrep -f " + shellEscapeArg(pattern) + " >/dev/null 2>&1";
+        int rc = std::system(cmd.c_str());
+        return rc == 0;
+    }
+
+    static std::vector<pid_t> collectDaemonPidsForSocket(const std::string& socketPath) {
+        std::vector<pid_t> pids;
+        if (socketPath.empty()) {
+            return pids;
+        }
+        std::string pattern = std::string("yams-daemon.*") + escapeRegexLiteral(socketPath);
+        std::string cmd = "pgrep -f " + shellEscapeArg(pattern);
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe) {
+            return pids;
+        }
+        std::string output;
+        char buffer[64];
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            output.append(buffer);
+        }
+        pclose(pipe);
+        std::istringstream iss(output);
+        std::string line;
+        while (std::getline(iss, line)) {
+            if (line.empty()) {
+                continue;
+            }
+            try {
+                auto value = static_cast<pid_t>(std::stol(line));
+                if (value > 0) {
+                    pids.push_back(value);
+                }
+            } catch (...) {
+            }
+        }
+        return pids;
+    }
+
+    static bool isAnyDaemonProcessRunning() {
+        int rc = std::system("pgrep -f \"yams-daemon\" >/dev/null 2>&1");
+        return rc == 0;
+    }
+#endif
 
     bool checkAndHandleVersionMismatch(const std::string& socketPath) {
         if (!daemon::DaemonClient::isDaemonRunning(socketPath)) {
@@ -905,6 +1045,27 @@ private:
         if (!stopped && daemonRunning) {
             spdlog::warn("Daemon not responding to shutdown, attempting to kill orphaned process");
 
+            const auto socketPids = collectDaemonPidsForSocket(effectiveSocket);
+            if (!socketPids.empty()) {
+                spdlog::warn("Found {} daemon PID(s) matching socket", socketPids.size());
+                bool socketPidsStopped = true;
+                for (auto pid : socketPids) {
+                    bool killed = false;
+                    if (killDaemonByPid(pid, false)) {
+                        killed = true;
+                    } else if (force_) {
+                        killed = killDaemonByPid(pid, true);
+                    }
+                    if (!killed) {
+                        socketPidsStopped = false;
+                        spdlog::error("Failed to stop daemon PID {}", pid);
+                    }
+                }
+                if (socketPidsStopped) {
+                    stopped = true;
+                }
+            }
+
 #ifndef _WIN32
             // Unix: use pkill to find and kill yams-daemon processes with our socket
             // Use SIGKILL (-9) when --force is set, otherwise SIGTERM (default)
@@ -914,18 +1075,25 @@ private:
 
             if (pkillResult == 0) {
                 spdlog::info("Successfully killed orphaned daemon process");
-                stopped = true;
-
                 // Wait a moment for process to die
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                if (!isDaemonProcessRunningForSocket(effectiveSocket)) {
+                    stopped = true;
+                } else {
+                    spdlog::warn("Daemon process still running after pkill (socket match)");
+                }
             } else {
                 // Try a more general pkill if specific socket match fails
                 pkillCmd = "pkill " + signal + "-f 'yams-daemon'";
                 pkillResult = std::system(pkillCmd.c_str());
                 if (pkillResult == 0) {
                     spdlog::info("Killed yams-daemon process(es)");
-                    stopped = true;
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    if (!isDaemonProcessRunningForSocket(effectiveSocket)) {
+                        stopped = true;
+                    } else {
+                        spdlog::warn("Daemon process still running after pkill");
+                    }
                 }
             }
 #else
@@ -951,6 +1119,12 @@ private:
 
         // Clean up files if daemon was stopped
         if (stopped) {
+#ifndef _WIN32
+            if (isDaemonProcessRunningForSocket(effectiveSocket)) {
+                spdlog::warn("Daemon process still running after stop verification");
+                stopped = false;
+            }
+#endif
             cleanupDaemonFiles(effectiveSocket, pidFile_);
             stopSpinner();
             std::cout << "[OK] YAMS daemon stopped successfully\n";

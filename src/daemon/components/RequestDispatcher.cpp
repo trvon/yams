@@ -1,7 +1,9 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -17,8 +19,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX 1
 #endif
-#include <Windows.h>
 #include <Psapi.h>
+#include <Windows.h>
 #endif
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -393,8 +395,50 @@ RequestDispatcher::handleShutdownRequest(const ShutdownRequest& req) {
         bool inTestMode = std::getenv("YAMS_TESTING") != nullptr ||
                           std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE") != nullptr;
         daemon_->spawnShutdownThread([d = daemon_, graceful, inTestMode]() {
+            std::atomic<bool> shutdownComplete{false};
+            std::thread watchdog;
+            auto finalizeWatchdog = [&]() {
+                shutdownComplete.store(true, std::memory_order_release);
+                if (watchdog.joinable()) {
+                    watchdog.join();
+                }
+            };
             try {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+                if (!inTestMode) {
+                    int timeoutMs = 15000;
+                    if (const char* env = std::getenv("YAMS_SHUTDOWN_FORCE_EXIT_MS")) {
+                        try {
+                            int parsed = std::stoi(env);
+                            if (parsed <= 0) {
+                                timeoutMs = 0;
+                            } else {
+                                timeoutMs = std::max(parsed, 1000);
+                            }
+                        } catch (...) {
+                        }
+                    }
+                    if (timeoutMs > 0) {
+                        watchdog = std::thread([timeoutMs, &shutdownComplete]() {
+                            auto deadline = std::chrono::steady_clock::now() +
+                                            std::chrono::milliseconds(timeoutMs);
+                            while (std::chrono::steady_clock::now() < deadline) {
+                                if (shutdownComplete.load(std::memory_order_acquire)) {
+                                    return;
+                                }
+                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                            }
+                            try {
+                                spdlog::error("Shutdown exceeded {}ms; forcing process exit",
+                                              timeoutMs);
+                            } catch (...) {
+                            }
+                            raise(SIGKILL);
+                            std::_Exit(1);
+                        });
+                    }
+                }
 
                 // NOLINTBEGIN(bugprone-empty-catch): logger may be unavailable during shutdown
                 try {
@@ -402,6 +446,7 @@ RequestDispatcher::handleShutdownRequest(const ShutdownRequest& req) {
                 } catch (...) {
                 }
                 auto result = d->stop();
+                finalizeWatchdog();
                 if (!result) {
                     try {
                         spdlog::error("Daemon shutdown encountered error: {}",
@@ -410,11 +455,13 @@ RequestDispatcher::handleShutdownRequest(const ShutdownRequest& req) {
                     }
                 }
             } catch (const std::exception& e) {
+                finalizeWatchdog();
                 try {
                     spdlog::error("Exception during daemon shutdown: {}", e.what());
                 } catch (...) {
                 }
             } catch (...) {
+                finalizeWatchdog();
                 try {
                     spdlog::error("Unknown exception during daemon shutdown");
                 } catch (...) {

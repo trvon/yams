@@ -66,6 +66,7 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/PoolManager.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -2855,6 +2856,13 @@ void ServiceManager::enqueuePostIngest(const std::string& hash, const std::strin
     if (!postIngest_) {
         return;
     }
+
+    // Check admission control - document is stored, post-processing can be retried later
+    if (!ResourceGovernor::instance().canAdmitWork()) {
+        spdlog::debug("[ServiceManager] PostIngest rejected: admission control blocked");
+        return;
+    }
+
     PostIngestQueue::Task task{hash, mime,
                                "", // session
                                std::chrono::steady_clock::now(),

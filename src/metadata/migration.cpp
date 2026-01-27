@@ -338,6 +338,7 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createSessionIndexes(),
             createRepairTrackingSchema(),
             createSymbolExtractionStateSchema(),
+            createMetadataAggregationIndexes(),
             createSymSpellSchema(),
             createTermStatsSchema(),
             repairSymbolMetadataUniqueness()};
@@ -2187,9 +2188,30 @@ Migration YamsMetadataMigrations::createSymbolExtractionStateSchema() {
     return m;
 }
 
-Migration YamsMetadataMigrations::createSymSpellSchema() {
+Migration YamsMetadataMigrations::createMetadataAggregationIndexes() {
     Migration m;
     m.version = 23;
+    m.name = "Add metadata aggregation indexes";
+    m.created = std::chrono::system_clock::now();
+
+    m.upSQL = R"(
+        CREATE INDEX IF NOT EXISTS idx_metadata_key_value
+            ON metadata(key, value);
+        CREATE INDEX IF NOT EXISTS idx_metadata_key_value_doc
+            ON metadata(key, value, document_id);
+    )";
+
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_metadata_key_value;
+        DROP INDEX IF EXISTS idx_metadata_key_value_doc;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createSymSpellSchema() {
+    Migration m;
+    m.version = 24;
     m.name = "Create SymSpell fuzzy search tables";
     m.created = std::chrono::system_clock::now();
 
@@ -2234,7 +2256,7 @@ Migration YamsMetadataMigrations::createSymSpellSchema() {
 
 Migration YamsMetadataMigrations::createTermStatsSchema() {
     Migration m;
-    m.version = 24;
+    m.version = 25;
     m.name = "Create term statistics table for IDF computation";
     m.created = std::chrono::system_clock::now();
 
@@ -2278,7 +2300,7 @@ Migration YamsMetadataMigrations::createTermStatsSchema() {
 
 Migration YamsMetadataMigrations::repairSymbolMetadataUniqueness() {
     Migration m;
-    m.version = 25;
+    m.version = 26;
     m.name = "Repair symbol_metadata uniqueness";
     m.created = std::chrono::system_clock::now();
 

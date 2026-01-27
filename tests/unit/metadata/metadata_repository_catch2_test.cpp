@@ -120,6 +120,75 @@ TEST_CASE("MetadataRepository: insert and get document", "[unit][metadata][repos
     CHECK(retrievedDoc.mimeType == docInfo.mimeType);
 }
 
+TEST_CASE("MetadataRepository: getMetadataValueCounts with filters",
+          "[unit][metadata][repository]") {
+    MetadataRepositoryFixture fix;
+
+    auto now = std::chrono::system_clock::now();
+    auto nowSec = std::chrono::floor<std::chrono::seconds>(now);
+
+    // doc1: old document (outside filter range)
+    auto doc1 = makeDocumentWithPath("/tmp/a.txt", "hash-a");
+    doc1.createdTime = nowSec - std::chrono::hours(48);
+    doc1.modifiedTime = doc1.createdTime;
+    doc1.indexedTime = doc1.createdTime;
+    auto doc1Res = fix.repository_->insertDocument(doc1);
+    REQUIRE(doc1Res.has_value());
+
+    // doc2: recent document (inside filter range)
+    auto doc2 = makeDocumentWithPath("/tmp/b.txt", "hash-b");
+    doc2.createdTime = nowSec;
+    doc2.modifiedTime = nowSec;
+    doc2.indexedTime = nowSec;
+    auto doc2Res = fix.repository_->insertDocument(doc2);
+    REQUIRE(doc2Res.has_value());
+
+    // doc3: another recent document (inside filter range)
+    auto doc3 = makeDocumentWithPath("/tmp/c.txt", "hash-c");
+    doc3.createdTime = nowSec;
+    doc3.modifiedTime = nowSec;
+    doc3.indexedTime = nowSec;
+    auto doc3Res = fix.repository_->insertDocument(doc3);
+    REQUIRE(doc3Res.has_value());
+
+    MetadataValue v1;
+    v1.value = "PBI-070";
+    v1.type = MetadataValueType::String;
+    // doc1 gets PBI-070 but is outside time filter
+    REQUIRE(fix.repository_->setMetadata(doc1Res.value(), "pbi", v1).has_value());
+    // doc2 gets PBI-070 (inside time filter)
+    REQUIRE(fix.repository_->setMetadata(doc2Res.value(), "pbi", v1).has_value());
+
+    MetadataValue v2;
+    v2.value = "PBI-071";
+    v2.type = MetadataValueType::String;
+    // doc3 gets PBI-071 (inside time filter)
+    REQUIRE(fix.repository_->setMetadata(doc3Res.value(), "pbi", v2).has_value());
+
+    DocumentQueryOptions opts;
+    opts.modifiedAfter = std::chrono::duration_cast<std::chrono::seconds>(
+                             (nowSec - std::chrono::hours(24)).time_since_epoch())
+                             .count();
+
+    auto countsRes = fix.repository_->getMetadataValueCounts({"pbi"}, opts);
+    REQUIRE(countsRes.has_value());
+
+    const auto& map = countsRes.value();
+    auto it = map.find("pbi");
+    REQUIRE(it != map.end());
+
+    std::unordered_map<std::string, int64_t> counts;
+    for (const auto& row : it->second) {
+        counts[row.value] = row.count;
+    }
+
+    // Only doc2 (PBI-070) and doc3 (PBI-071) are in the time range
+    // doc1 (PBI-070) is filtered out because it's 48 hours old
+    REQUIRE(counts.size() == 2);
+    REQUIRE(counts["PBI-070"] == 1);
+    REQUIRE(counts["PBI-071"] == 1);
+}
+
 TEST_CASE("MetadataRepository: get document not found", "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;
 

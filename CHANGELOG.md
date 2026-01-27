@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `yams list --metadata-values` for showing unique metadata values with counts (useful for PBI discovery).
 - Unique PBI selection guidance in AGENTS workflow (metadata search + list values).
 
+### Performance
+- **Batch snapshot info API**: New `batchGetSnapshotInfo()` method eliminates N+1 query pattern in `yams list --snapshots`. Reduces 3N queries to 1 query for N unknown snapshots.
+- **Enumeration query caching**: `getSnapshots()`, `getSnapshotLabels()`, `getCollections()`, and `getAllTags()` now use a 60-second TTL cache with signal-based invalidation. Repeated calls return cached results, reducing database scans.
+- **CPU-aware throttling**: ResourceGovernor now monitors CPU usage alongside memory pressure. Admission control rejects new work when CPU exceeds threshold (default 70%, configurable via `YAMS_CPU_HIGH_PCT`). Prevents CPU saturation during large batch adds.
+
 ### Fixed
 - Post-ingest tuning reconciles per-stage concurrency targets to the overall budget.
 - Post-ingest stage throttling now respects pause states and stage availability when computing TuneAdvisor budgets.
@@ -34,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI snippet formatting is now shared between search and grep for consistent output.
 - `yams list` now uses the shared snippet formatter for previews.
 - `yams grep` honors `--ext` filters, accepts `--cwd` with an optional path, and treats `**/*` patterns as matching direct children.
+- `yams list --metadata-values` now aggregates counts in the database and respects list filters, avoiding large client-side scans.
+- Added metadata aggregation indexes to speed up key/value count queries.
 
 ### Documentation
 - Updated YAMS skill guide with unique PBI discovery and tagged search examples.

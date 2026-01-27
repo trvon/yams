@@ -6,6 +6,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningSnapshot.h>
@@ -49,6 +50,14 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
     };
 
     while (!stop_.load()) {
+        // Re-check admission control before processing each task
+        if (!ResourceGovernor::instance().canAdmitWork()) {
+            spdlog::debug("[IngestService] Backoff: resource pressure");
+            timer.expires_after(std::chrono::milliseconds(100));
+            co_await timer.async_wait(boost::asio::use_awaitable);
+            continue; // Skip this iteration, retry later
+        }
+
         InternalEventBus::StoreDocumentTask task;
         if (channel->try_pop(task)) {
             idleDelay = std::chrono::milliseconds(5);

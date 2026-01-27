@@ -15,7 +15,7 @@
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/profiling.h>
 
-// Platform-specific RSS reading
+// Platform-specific RSS and CPU reading
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -24,9 +24,13 @@
 #include <psapi.h>
 #elif defined(__APPLE__)
 #include <mach/mach.h>
+#include <unistd.h>
 #else
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <sstream>
+#include <unistd.h>
 #endif
 
 namespace yams::daemon {
@@ -74,6 +78,165 @@ std::uint64_t readRssBytes() {
 #endif
 }
 
+/// Read CPU usage percent for the current process using delta-based calculation.
+/// Percent is relative to total system capacity (all CPUs). A single fully utilized
+/// core on a 4-core system will report ~25%.
+/// @param lastProcJiffies Previous process CPU ticks (updated on each call)
+/// @param lastTotalJiffies Previous total system CPU ticks (updated on each call)
+/// @return CPU usage percentage (0-100 * numCores)
+double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTotalJiffies) {
+#if defined(_WIN32)
+    FILETIME idleFT{}, kernelFT{}, userFT{};
+    if (!GetSystemTimes(&idleFT, &kernelFT, &userFT)) {
+        return 0.0;
+    }
+    FILETIME createFT{}, exitFT{}, procKernelFT{}, procUserFT{};
+    if (!GetProcessTimes(GetCurrentProcess(), &createFT, &exitFT, &procKernelFT, &procUserFT)) {
+        return 0.0;
+    }
+    auto to64 = [](const FILETIME& ft) {
+        ULARGE_INTEGER li{};
+        li.LowPart = ft.dwLowDateTime;
+        li.HighPart = ft.dwHighDateTime;
+        return li.QuadPart;
+    };
+
+    const std::uint64_t procJiffies = to64(procKernelFT) + to64(procUserFT);
+    const std::uint64_t totalJiffies = to64(kernelFT) + to64(userFT);
+
+    if (lastProcJiffies == 0 || lastTotalJiffies == 0 || procJiffies < lastProcJiffies ||
+        totalJiffies < lastTotalJiffies) {
+        lastProcJiffies = procJiffies;
+        lastTotalJiffies = totalJiffies;
+        return 0.0;
+    }
+
+    const std::uint64_t dProc = procJiffies - lastProcJiffies;
+    const std::uint64_t dTotal = totalJiffies - lastTotalJiffies;
+    lastProcJiffies = procJiffies;
+    lastTotalJiffies = totalJiffies;
+    if (dTotal == 0)
+        return 0.0;
+
+    SYSTEM_INFO sysInfo{};
+    GetSystemInfo(&sysInfo);
+    const double maxPct =
+        100.0 *
+        static_cast<double>(sysInfo.dwNumberOfProcessors ? sysInfo.dwNumberOfProcessors : 1);
+    double pct = (static_cast<double>(dProc) / static_cast<double>(dTotal)) * 100.0;
+    return std::clamp(pct, 0.0, maxPct);
+
+#elif defined(__APPLE__)
+    // Process CPU time via Mach task info
+    task_thread_times_info_data_t thread_info{};
+    mach_msg_type_number_t count = TASK_THREAD_TIMES_INFO_COUNT;
+    std::uint64_t procJiffies = 0;
+    if (task_info(mach_task_self(), TASK_THREAD_TIMES_INFO,
+                  reinterpret_cast<task_info_t>(&thread_info), &count) == KERN_SUCCESS) {
+        procJiffies =
+            (thread_info.user_time.seconds + thread_info.system_time.seconds) * 100 +
+            (thread_info.user_time.microseconds + thread_info.system_time.microseconds) / 10000;
+    }
+
+    // Total CPU time via host statistics
+    host_cpu_load_info_data_t cpu_info{};
+    count = HOST_CPU_LOAD_INFO_COUNT;
+    std::uint64_t totalJiffies = 0;
+    if (host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO,
+                        reinterpret_cast<host_info_t>(&cpu_info), &count) == KERN_SUCCESS) {
+        totalJiffies = cpu_info.cpu_ticks[CPU_STATE_USER] + cpu_info.cpu_ticks[CPU_STATE_SYSTEM] +
+                       cpu_info.cpu_ticks[CPU_STATE_NICE] + cpu_info.cpu_ticks[CPU_STATE_IDLE];
+    }
+
+    if (lastProcJiffies == 0 || lastTotalJiffies == 0 || procJiffies < lastProcJiffies ||
+        totalJiffies < lastTotalJiffies) {
+        lastProcJiffies = procJiffies;
+        lastTotalJiffies = totalJiffies;
+        return 0.0;
+    }
+
+    const std::uint64_t dProc = procJiffies - lastProcJiffies;
+    const std::uint64_t dTotal = totalJiffies - lastTotalJiffies;
+    lastProcJiffies = procJiffies;
+    lastTotalJiffies = totalJiffies;
+    if (dTotal == 0)
+        return 0.0;
+
+    int numCores = static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN));
+    if (numCores < 1)
+        numCores = 1;
+    const double maxPct = 100.0 * static_cast<double>(numCores);
+    double pct = (static_cast<double>(dProc) / static_cast<double>(dTotal)) * 100.0;
+    return std::clamp(pct, 0.0, maxPct);
+
+#else
+    // Linux: read from /proc/stat and /proc/self/stat
+    std::uint64_t procJiffies = 0;
+    std::uint64_t totalJiffies = 0;
+
+    // Process jiffies from /proc/self/stat (fields 14=utime, 15=stime)
+    std::ifstream procStat("/proc/self/stat");
+    if (procStat.is_open()) {
+        std::string line;
+        if (std::getline(procStat, line)) {
+            // Skip past comm field (which may contain spaces/parens)
+            auto pos = line.rfind(')');
+            if (pos != std::string::npos && pos + 2 < line.size()) {
+                std::istringstream iss(line.substr(pos + 2));
+                std::string field;
+                // Fields after ')': state, ppid, pgrp, session, tty_nr, tpgid, flags,
+                //                   minflt, cminflt, majflt, cmajflt, utime(14), stime(15)
+                for (int i = 0; i < 11 && iss >> field; ++i) {
+                } // Skip fields 3-13
+                std::uint64_t utime = 0, stime = 0;
+                if (iss >> utime >> stime) {
+                    procJiffies = utime + stime;
+                }
+            }
+        }
+    }
+
+    // Total system jiffies from /proc/stat (first "cpu" line)
+    std::ifstream cpuStat("/proc/stat");
+    if (cpuStat.is_open()) {
+        std::string line;
+        while (std::getline(cpuStat, line)) {
+            if (line.rfind("cpu ", 0) == 0) {
+                std::istringstream iss(line.substr(4));
+                std::uint64_t user = 0, nice = 0, system = 0, idle = 0;
+                std::uint64_t iowait = 0, irq = 0, softirq = 0, steal = 0;
+                iss >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal;
+                totalJiffies = user + nice + system + idle + iowait + irq + softirq + steal;
+                break;
+            }
+        }
+    }
+
+    if (lastProcJiffies == 0 || lastTotalJiffies == 0 || procJiffies < lastProcJiffies ||
+        totalJiffies < lastTotalJiffies) {
+        lastProcJiffies = procJiffies;
+        lastTotalJiffies = totalJiffies;
+        return 0.0;
+    }
+
+    const std::uint64_t dProc = procJiffies - lastProcJiffies;
+    const std::uint64_t dTotal = totalJiffies - lastTotalJiffies;
+    lastProcJiffies = procJiffies;
+    lastTotalJiffies = totalJiffies;
+    if (dTotal == 0)
+        return 0.0;
+
+    // Get number of processors for max percentage calculation
+    long numCores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (numCores < 1)
+        numCores = 1;
+    const double maxPct = 100.0 * static_cast<double>(numCores);
+    double pct = (static_cast<double>(dProc) / static_cast<double>(dTotal)) * 100.0 *
+                 static_cast<double>(numCores);
+    return std::clamp(pct, 0.0, maxPct);
+#endif
+}
+
 } // anonymous namespace
 
 // ============================================================================
@@ -118,10 +281,11 @@ ResourceSnapshot ResourceGovernor::tick(ServiceManager* sm) {
     // Handle level transitions
     if (newLevel != oldLevel) {
         spdlog::info("[ResourceGovernor] Pressure level: {} -> {} (RSS={} MiB, budget={} MiB, "
-                     "pressure={:.1f}%)",
+                     "mem={:.1f}%, CPU={:.1f}%)",
                      pressureLevelName(oldLevel), pressureLevelName(newLevel),
                      snap.rssBytes / (1024ull * 1024ull),
-                     snap.memoryBudgetBytes / (1024ull * 1024ull), snap.memoryPressure * 100.0);
+                     snap.memoryBudgetBytes / (1024ull * 1024ull), snap.memoryPressure * 100.0,
+                     snap.cpuUsagePercent);
 
         currentLevel_.store(newLevel, std::memory_order_relaxed);
         updateScalingCaps(newLevel);
@@ -164,6 +328,9 @@ void ResourceGovernor::collectMetrics(ServiceManager* sm, ResourceSnapshot& snap
     // Memory metrics
     snap.rssBytes = readRssBytes();
     snap.memoryBudgetBytes = TuneAdvisor::memoryBudgetBytes();
+
+    // CPU metrics (delta-based, uses mutable state for jiffies tracking)
+    snap.cpuUsagePercent = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
 
     if (snap.memoryBudgetBytes > 0) {
         snap.memoryPressure =
@@ -226,12 +393,26 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
     const double criticalThresh = TuneAdvisor::memoryCriticalThreshold();
     const double emergencyThresh = TuneAdvisor::memoryEmergencyThreshold();
 
+    // Memory-based pressure level
     if (snap.memoryPressure >= emergencyThresh) {
         rawLevel = ResourcePressureLevel::Emergency;
     } else if (snap.memoryPressure >= criticalThresh) {
         rawLevel = ResourcePressureLevel::Critical;
     } else if (snap.memoryPressure >= warningThresh) {
         rawLevel = ResourcePressureLevel::Warning;
+    }
+
+    // CPU-based pressure escalation: if CPU is very high, escalate the pressure level
+    // This prevents CPU saturation even when memory is fine
+    const double cpuHighThresh = TuneAdvisor::cpuHighThresholdPercent();
+    const double cpuCriticalThresh = 85.0; // Very high CPU triggers Critical
+
+    if (snap.cpuUsagePercent >= cpuCriticalThresh) {
+        // Escalate to at least Critical if CPU is very high
+        rawLevel = std::max(rawLevel, ResourcePressureLevel::Critical);
+    } else if (snap.cpuUsagePercent >= cpuHighThresh) {
+        // Escalate to at least Warning if CPU is high
+        rawLevel = std::max(rawLevel, ResourcePressureLevel::Warning);
     }
 
     // Apply hysteresis: require consecutive ticks at a level before transitioning
@@ -404,7 +585,21 @@ bool ResourceGovernor::canAdmitWork() const {
     }
 
     std::shared_lock lock(mutex_);
-    return scalingCaps_.allowNewIngest;
+
+    // Memory-based check (existing)
+    if (!scalingCaps_.allowNewIngest) {
+        return false;
+    }
+
+    // CPU-based throttling: reject new work when CPU is at or above high threshold
+    const double cpuHighThresh = TuneAdvisor::cpuHighThresholdPercent();
+    if (lastSnapshot_.cpuUsagePercent >= cpuHighThresh) {
+        spdlog::debug("[ResourceGovernor] Throttling admission: CPU at {:.1f}% (threshold {:.0f}%)",
+                      lastSnapshot_.cpuUsagePercent, cpuHighThresh);
+        return false;
+    }
+
+    return true;
 }
 
 // ============================================================================
@@ -417,7 +612,12 @@ void ResourceGovernor::onNormalLevel(ServiceManager* sm) {
     // Restore TuneAdvisor queue limits
     TuneAdvisor::setPostIngestQueueMax(1000);
 
-    (void)sm; // May use in future for resuming paused stages
+    // Resume all stages (in case coming down from Critical/Emergency)
+    if (sm) {
+        if (auto* piq = sm->getPostIngestQueue()) {
+            piq->resumeAll();
+        }
+    }
 }
 
 void ResourceGovernor::onWarningLevel(ServiceManager* sm) {
@@ -426,7 +626,12 @@ void ResourceGovernor::onWarningLevel(ServiceManager* sm) {
     // Reduce post-ingest queue capacity to apply backpressure
     TuneAdvisor::setPostIngestQueueMax(500);
 
-    (void)sm;
+    // Resume stages (in case coming down from Critical/Emergency)
+    if (sm) {
+        if (auto* piq = sm->getPostIngestQueue()) {
+            piq->resumeAll();
+        }
+    }
 }
 
 void ResourceGovernor::onCriticalLevel(ServiceManager* sm) {
@@ -434,6 +639,17 @@ void ResourceGovernor::onCriticalLevel(ServiceManager* sm) {
 
     // Heavily reduce queue capacity
     TuneAdvisor::setPostIngestQueueMax(100);
+
+    // Pause non-essential stages to reduce memory pressure
+    if (sm) {
+        if (auto* piq = sm->getPostIngestQueue()) {
+            piq->pauseStage(PostIngestQueue::Stage::KnowledgeGraph);
+            piq->pauseStage(PostIngestQueue::Stage::Symbol);
+            piq->pauseStage(PostIngestQueue::Stage::Entity);
+            piq->pauseStage(PostIngestQueue::Stage::Title);
+            spdlog::info("[ResourceGovernor] Paused non-essential post-ingest stages");
+        }
+    }
 
     // Trigger model eviction if enabled
     if (TuneAdvisor::enableProactiveEviction() && sm && canEvict()) {
@@ -462,6 +678,14 @@ void ResourceGovernor::onEmergencyLevel(ServiceManager* sm) {
 
     // Stop accepting new ingest items
     TuneAdvisor::setPostIngestQueueMax(0);
+
+    // Pause ALL stages to stop all processing
+    if (sm) {
+        if (auto* piq = sm->getPostIngestQueue()) {
+            piq->pauseAll();
+            spdlog::warn("[ResourceGovernor] Paused ALL post-ingest stages (emergency)");
+        }
+    }
 
     // Aggressive eviction
     if (TuneAdvisor::enableProactiveEviction() && sm && canEvict()) {

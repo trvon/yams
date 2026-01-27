@@ -1,4 +1,5 @@
 #include <yams/daemon/components/KGWriteQueue.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
 #include <boost/asio/co_spawn.hpp>
@@ -8,6 +9,9 @@
 #include <boost/asio/use_awaitable.hpp>
 
 namespace yams::daemon {
+
+// Hard cap on concurrent KG batch processing to prevent CPU spikes
+static constexpr std::size_t kMaxKgBatchesPerIteration = 8;
 
 KGWriteQueue::KGWriteQueue(boost::asio::io_context& ioc,
                            std::shared_ptr<metadata::KnowledgeGraphStore> kgStore, Config config)
@@ -106,9 +110,15 @@ boost::asio::awaitable<void> KGWriteQueue::writerLoop() {
                 break;
             }
 
-            // Drain up to maxBatchSize batches
-            std::size_t count =
-                std::min(pendingBatches_.size(), static_cast<std::size_t>(config_.maxBatchSize));
+            // Determine effective batch limit based on resource pressure
+            std::size_t effectiveMax = std::min(config_.maxBatchSize, kMaxKgBatchesPerIteration);
+            // Halve batch size at Warning level for CPU-aware throttling
+            if (ResourceGovernor::instance().getPressureLevel() == ResourcePressureLevel::Warning) {
+                effectiveMax = std::max<std::size_t>(1, effectiveMax / 2);
+            }
+
+            // Drain up to effectiveMax batches
+            std::size_t count = std::min(pendingBatches_.size(), effectiveMax);
             if (count > 0) {
                 batchesToProcess.reserve(count);
                 for (std::size_t i = 0; i < count; ++i) {

@@ -31,6 +31,7 @@ namespace yamsfmt = fmt;
 #include <optional>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace yams::cli {
@@ -424,7 +425,10 @@ private:
     }
 
     /**
-     * List all available snapshots from tree_snapshots table
+     * List all available snapshots from both tree_snapshots and document metadata tables.
+     * This merges snapshots from two sources:
+     * 1. tree_snapshots - rich metadata from directory indexing (yams add --recursive)
+     * 2. document metadata - snapshot_id from daemon file ingestion (yams add <files>)
      */
     Result<void> listAllSnapshots() {
         auto appContext = cli_->getAppContext();
@@ -435,12 +439,71 @@ private:
         try {
             auto& metaRepo = appContext->metadataRepo;
 
-            // Use the public listTreeSnapshots method
-            auto result = metaRepo->listTreeSnapshots(limit_ > 0 ? limit_ : 100);
-            if (!result)
-                return result.error();
+            // Get rich tree snapshots first
+            auto treeResult = metaRepo->listTreeSnapshots(limit_ > 0 ? limit_ : 100);
+            if (!treeResult)
+                return treeResult.error();
 
-            const auto& snapshots = result.value();
+            std::vector<metadata::TreeSnapshotRecord> snapshots = std::move(treeResult.value());
+
+            // Build set of known snapshot IDs from tree_snapshots
+            std::unordered_set<std::string> knownIds;
+            for (const auto& rec : snapshots) {
+                knownIds.insert(rec.snapshotId);
+            }
+
+            // Get additional snapshots from document metadata table
+            auto metaSnapshotsResult = metaRepo->getSnapshots();
+            if (metaSnapshotsResult) {
+                // Collect unknown snapshot IDs for batch query (eliminates N+1 pattern)
+                std::vector<std::string> unknownIds;
+                for (const auto& snapshotId : metaSnapshotsResult.value()) {
+                    if (knownIds.find(snapshotId) == knownIds.end()) {
+                        unknownIds.push_back(snapshotId);
+                    }
+                }
+
+                // Single batch query instead of N individual calls
+                if (!unknownIds.empty()) {
+                    auto batchResult = metaRepo->batchGetSnapshotInfo(unknownIds);
+                    if (batchResult) {
+                        for (const auto& [snapshotId, info] : batchResult.value()) {
+                            metadata::TreeSnapshotRecord derived;
+                            derived.snapshotId = snapshotId;
+                            derived.metadata["directory_path"] = info.directoryPath;
+                            derived.metadata["snapshot_label"] = info.label;
+                            derived.metadata["git_commit"] = info.gitCommit;
+                            derived.fileCount = info.fileCount;
+                            derived.createdTime = info.createdTime;
+                            snapshots.push_back(std::move(derived));
+                            knownIds.insert(snapshotId);
+                        }
+                    } else {
+                        // Fallback: create empty records for unknown snapshots
+                        for (const auto& snapshotId : unknownIds) {
+                            metadata::TreeSnapshotRecord derived;
+                            derived.snapshotId = snapshotId;
+                            derived.metadata["directory_path"] = "";
+                            derived.fileCount = 0;
+                            derived.createdTime = 0;
+                            snapshots.push_back(std::move(derived));
+                            knownIds.insert(snapshotId);
+                        }
+                    }
+                }
+            }
+
+            // Sort by created time descending (most recent first)
+            std::sort(
+                snapshots.begin(), snapshots.end(),
+                [](const metadata::TreeSnapshotRecord& a, const metadata::TreeSnapshotRecord& b) {
+                    return a.createdTime > b.createdTime;
+                });
+
+            // Apply limit after merging
+            if (limit_ > 0 && snapshots.size() > static_cast<size_t>(limit_)) {
+                snapshots.resize(static_cast<size_t>(limit_));
+            }
 
             // Output snapshots
             if (format_ == "json" || cli_->getJsonOutput()) {
@@ -933,8 +996,13 @@ private:
     }
 
     Result<void> listMetadataValues() {
-        auto appContext = cli_->getAppContext();
-        if (!appContext || !appContext->metadataRepo) {
+        auto ensured = cli_->ensureStorageInitialized();
+        if (!ensured) {
+            return ensured;
+        }
+
+        auto metadataRepo = cli_->getMetadataRepository();
+        if (!metadataRepo) {
             return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         }
 
@@ -947,71 +1015,176 @@ private:
         opts.limit = 0;
         opts.offset = 0;
         opts.pathsOnly = true;
-        auto docsRes = appContext->metadataRepo->queryDocuments(opts);
-        if (!docsRes) {
-            return docsRes.error();
-        }
 
-        std::vector<int64_t> ids;
-        ids.reserve(docsRes.value().size());
-        for (const auto& doc : docsRes.value()) {
-            ids.push_back(doc.id);
-        }
-
-        if (ids.empty()) {
-            if (format_ == "json" || cli_->getJsonOutput()) {
-                json out;
-                for (const auto& key : keys) {
-                    out[key] = json::array();
+        if (!namePattern_.empty()) {
+            auto resolved = yams::app::services::resolveNameToPatternIfLocalFile(namePattern_);
+            const auto& pattern = resolved.pattern;
+            auto wildcardPos = pattern.find_first_of("*?");
+            bool hasWildcard = wildcardPos != std::string::npos;
+            if (!hasWildcard) {
+                opts.exactPath = pattern;
+            } else if (pattern.back() == '*') {
+                std::string prefix = pattern;
+                while (!prefix.empty() && (prefix.back() == '*' || prefix.back() == '?'))
+                    prefix.pop_back();
+                while (!prefix.empty() && (prefix.back() == '/' || prefix.back() == '\\'))
+                    prefix.pop_back();
+                if (!prefix.empty()) {
+                    opts.pathPrefix = prefix;
+                    opts.prefixIsDirectory = true;
+                } else {
+                    opts.likePattern = "%";
                 }
-                std::cout << out.dump(2) << std::endl;
+            } else if (pattern.front() == '*' &&
+                       pattern.find_first_of("*?", wildcardPos + 1) == std::string::npos) {
+                opts.containsFragment = pattern.substr(1);
+                opts.containsUsesFts = true;
             } else {
-                std::cout << ui::status_info("No documents found.") << "\n";
+                opts.likePattern = globToSqlLikePattern(pattern);
             }
-            return Result<void>();
         }
 
-        auto metaRes = appContext->metadataRepo->getMetadataForDocuments(ids);
-        if (!metaRes) {
-            return metaRes.error();
-        }
-
-        std::unordered_map<std::string, std::unordered_map<std::string, size_t>> counts;
-        for (const auto& key : keys) {
-            counts.emplace(key, std::unordered_map<std::string, size_t>{});
-        }
-
-        for (const auto& [docId, md] : metaRes.value()) {
-            (void)docId;
-            for (const auto& key : keys) {
-                auto it = md.find(key);
-                if (it == md.end()) {
+        if (!extensions_.empty()) {
+            std::istringstream ss(extensions_);
+            std::string token;
+            while (std::getline(ss, token, ',')) {
+                yams::config::trim(token);
+                if (token.empty()) {
                     continue;
                 }
-                const auto& value = it->second.value;
-                if (!value.empty()) {
-                    counts[key][value] += 1;
+                if (token[0] != '.') {
+                    token.insert(token.begin(), '.');
+                }
+                opts.extensions.push_back(token);
+            }
+        }
+
+        if (!mimeType_.empty()) {
+            opts.mimeType = mimeType_;
+        }
+
+        if (textOnly_) {
+            opts.textOnly = true;
+        } else if (binaryOnly_) {
+            opts.binaryOnly = true;
+        }
+
+        if (!filterTags_.empty()) {
+            std::istringstream ss(filterTags_);
+            std::string tag;
+            while (std::getline(ss, tag, ',')) {
+                yams::config::trim(tag);
+                if (!tag.empty()) {
+                    opts.tags.push_back(tag);
                 }
             }
         }
 
-        auto makeRows = [&](const std::string& key) -> std::vector<std::pair<std::string, size_t>> {
-            std::vector<std::pair<std::string, size_t>> rows;
-            auto it = counts.find(key);
-            if (it == counts.end()) {
-                return rows;
+        if (!createdAfter_.empty()) {
+            auto afterTime = TimeParser::parse(createdAfter_);
+            if (afterTime) {
+                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
+                               afterTime.value().time_since_epoch())
+                               .count();
+                opts.createdAfter = static_cast<int64_t>(sec);
             }
-            rows.reserve(it->second.size());
-            for (const auto& [value, count] : it->second) {
-                rows.emplace_back(value, count);
+        }
+
+        if (!createdBefore_.empty()) {
+            auto beforeTime = TimeParser::parse(createdBefore_);
+            if (beforeTime) {
+                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
+                               beforeTime.value().time_since_epoch())
+                               .count();
+                opts.createdBefore = static_cast<int64_t>(sec);
             }
-            std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
-                if (a.second != b.second) {
-                    return a.second > b.second;
-                }
-                return a.first < b.first;
-            });
-            return rows;
+        }
+
+        if (!modifiedAfter_.empty()) {
+            auto afterTime = TimeParser::parse(modifiedAfter_);
+            if (afterTime) {
+                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
+                               afterTime.value().time_since_epoch())
+                               .count();
+                opts.modifiedAfter = static_cast<int64_t>(sec);
+            }
+        }
+
+        if (!modifiedBefore_.empty()) {
+            auto beforeTime = TimeParser::parse(modifiedBefore_);
+            if (beforeTime) {
+                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
+                               beforeTime.value().time_since_epoch())
+                               .count();
+                opts.modifiedBefore = static_cast<int64_t>(sec);
+            }
+        }
+
+        if (!indexedAfter_.empty()) {
+            auto afterTime = TimeParser::parse(indexedAfter_);
+            if (afterTime) {
+                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
+                               afterTime.value().time_since_epoch())
+                               .count();
+                opts.indexedAfter = static_cast<int64_t>(sec);
+            }
+        }
+
+        if (!indexedBefore_.empty()) {
+            auto beforeTime = TimeParser::parse(indexedBefore_);
+            if (beforeTime) {
+                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
+                               beforeTime.value().time_since_epoch())
+                               .count();
+                opts.indexedBefore = static_cast<int64_t>(sec);
+            }
+        }
+
+        if (showChanges_) {
+            auto windowTime = TimeParser::parse(changeWindow_);
+            if (windowTime) {
+                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
+                               windowTime.value().time_since_epoch())
+                               .count();
+                opts.changedSince = static_cast<int64_t>(sec);
+            }
+        }
+
+        if (!sinceTime_.empty()) {
+            auto sinceTimePoint = TimeParser::parse(sinceTime_);
+            if (sinceTimePoint) {
+                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
+                               sinceTimePoint.value().time_since_epoch())
+                               .count();
+                opts.changedSince = static_cast<int64_t>(sec);
+            }
+        }
+
+        bool showSpinner =
+            !cli_->getJsonOutput() && format_ != "json" && format_ != "csv" && format_ != "minimal";
+        std::optional<ui::SpinnerRunner> spinner;
+        if (showSpinner) {
+            spinner.emplace();
+            spinner->start("Loading metadata values...");
+        }
+
+        auto metaRes = metadataRepo->getMetadataValueCounts(keys, opts);
+        if (!metaRes) {
+            if (spinner) {
+                spinner->stop();
+            }
+            return metaRes.error();
+        }
+        if (spinner) {
+            spinner->stop();
+        }
+
+        auto makeRows = [&](const std::string& key) -> std::vector<metadata::MetadataValueCount> {
+            auto it = metaRes.value().find(key);
+            if (it == metaRes.value().end()) {
+                return {};
+            }
+            return it->second;
         };
 
         if (format_ == "json" || cli_->getJsonOutput()) {
@@ -1083,6 +1256,35 @@ private:
             }
         }
         return fields;
+    }
+
+    static std::string globToSqlLikePattern(const std::string& glob) {
+        std::string result;
+        result.reserve(glob.size());
+
+        for (size_t i = 0; i < glob.size(); ++i) {
+            char c = glob[i];
+            if (c == '*') {
+                if (i + 1 < glob.size() && glob[i + 1] == '*') {
+                    result += '%';
+                    i++;
+                    if (i + 1 < glob.size() && glob[i + 1] == '/') {
+                        i++;
+                    }
+                } else {
+                    result += '%';
+                }
+            } else if (c == '?') {
+                result += '_';
+            } else if (c == '%' || c == '_') {
+                result += '\\';
+                result += c;
+            } else {
+                result += c;
+            }
+        }
+
+        return result;
     }
 
     static std::string toLower(std::string_view input) {

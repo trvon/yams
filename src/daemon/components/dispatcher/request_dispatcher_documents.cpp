@@ -11,6 +11,7 @@
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/request_context_registry.h>
@@ -429,6 +430,12 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
     YAMS_ZONE_SCOPED_N("handleAddDocumentRequest");
     co_return co_await yams::daemon::dispatch::guard_await(
         "add_document", [this, req]() -> boost::asio::awaitable<Response> {
+            // Check admission control before accepting new work
+            if (!ResourceGovernor::instance().canAdmitWork()) {
+                co_return ErrorResponse{ErrorCode::ResourceExhausted,
+                                        "System is under memory pressure. Please retry later."};
+            }
+
             // Be forgiving: if the path is a directory but recursive was not set, treat it as
             // a directory ingestion with recursive=true to avoid file_size errors sent by clients
             // that didn't set the flag (common with LLM-driven clients).

@@ -17,6 +17,7 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
@@ -688,7 +689,11 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         std::vector<InternalEventBus::PostIngestTask> batch;
         batch.reserve(batchSize);
         // Dynamic concurrency limit from TuneAdvisor
-        const std::size_t maxConcurrent = maxExtractionConcurrent();
+        std::size_t maxConcurrent = maxExtractionConcurrent();
+        // Halve concurrency at Warning level for CPU-aware throttling
+        if (ResourceGovernor::instance().getPressureLevel() == ResourcePressureLevel::Warning) {
+            maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+        }
         if (extractionPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
             timer.expires_after(idleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);
@@ -1004,6 +1009,12 @@ void PostIngestQueue::enqueue(Task t) {
 }
 
 bool PostIngestQueue::tryEnqueue(const Task& t) {
+    // Check admission control before accepting work
+    if (!ResourceGovernor::instance().canAdmitWork()) {
+        spdlog::debug("[PostIngestQueue] Rejecting enqueue: admission control blocked");
+        return false;
+    }
+
     static constexpr const char* kChannelName = "post_ingest";
     const std::size_t channelCapacity = resolveChannelCapacity();
     auto channel =
@@ -1018,6 +1029,12 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
 }
 
 bool PostIngestQueue::tryEnqueue(Task&& t) {
+    // Check admission control before accepting work
+    if (!ResourceGovernor::instance().canAdmitWork()) {
+        spdlog::debug("[PostIngestQueue] Rejecting enqueue: admission control blocked");
+        return false;
+    }
+
     static constexpr const char* kChannelName = "post_ingest";
     const std::size_t channelCapacity = resolveChannelCapacity();
     auto channel =
@@ -1402,7 +1419,11 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         bool didWork = false;
         InternalEventBus::KgJob job;
         // Dynamic concurrency limit from TuneAdvisor
-        const std::size_t maxConcurrent = maxKgConcurrent();
+        std::size_t maxConcurrent = maxKgConcurrent();
+        // Halve concurrency at Warning level for CPU-aware throttling
+        if (ResourceGovernor::instance().getPressureLevel() == ResourcePressureLevel::Warning) {
+            maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+        }
         if (kgPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
             timer.expires_after(idleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);
@@ -1471,7 +1492,11 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         bool didWork = false;
         InternalEventBus::SymbolExtractionJob job;
         // Dynamic concurrency limit from TuneAdvisor
-        const std::size_t maxConcurrent = maxSymbolConcurrent();
+        std::size_t maxConcurrent = maxSymbolConcurrent();
+        // Halve concurrency at Warning level for CPU-aware throttling
+        if (ResourceGovernor::instance().getPressureLevel() == ResourcePressureLevel::Warning) {
+            maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+        }
         if (symbolPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
             timer.expires_after(idleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);
@@ -1647,7 +1672,11 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         bool didWork = false;
         InternalEventBus::EntityExtractionJob job;
         // Dynamic concurrency limit from TuneAdvisor
-        const std::size_t maxConcurrent = maxEntityConcurrent();
+        std::size_t maxConcurrent = maxEntityConcurrent();
+        // Halve concurrency at Warning level for CPU-aware throttling
+        if (ResourceGovernor::instance().getPressureLevel() == ResourcePressureLevel::Warning) {
+            maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+        }
         if (entityPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
             timer.expires_after(idleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);
@@ -2018,7 +2047,11 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
         bool didWork = false;
         InternalEventBus::TitleExtractionJob job;
         // Dynamic concurrency limit
-        const std::size_t maxConcurrent = maxTitleConcurrent();
+        std::size_t maxConcurrent = maxTitleConcurrent();
+        // Halve concurrency at Warning level for CPU-aware throttling
+        if (ResourceGovernor::instance().getPressureLevel() == ResourcePressureLevel::Warning) {
+            maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+        }
         if (titlePaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
             timer.expires_after(idleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);

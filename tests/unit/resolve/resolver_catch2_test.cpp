@@ -264,6 +264,13 @@ public:
     Result<std::vector<std::string>> getSnapshotLabels() override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+    Result<yams::metadata::SnapshotInfo> getSnapshotInfo(const std::string&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<std::unordered_map<std::string, yams::metadata::SnapshotInfo>>
+    batchGetSnapshotInfo(const std::vector<std::string>&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
 
     // Tags (unused)
     Result<std::vector<DocumentInfo>> findDocumentsByTags(const std::vector<std::string>&,
@@ -304,6 +311,12 @@ public:
     Result<
         std::unordered_map<int64_t, std::unordered_map<std::string, yams::metadata::MetadataValue>>>
     getMetadataForDocuments(std::span<const int64_t>) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+
+    Result<std::unordered_map<std::string, std::vector<yams::metadata::MetadataValueCount>>>
+    getMetadataValueCounts(const std::vector<std::string>&,
+                           const metadata::DocumentQueryOptions&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
 

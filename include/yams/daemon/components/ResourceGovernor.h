@@ -67,6 +67,9 @@ struct ResourceSnapshot {
     std::uint64_t memoryBudgetBytes{0}; // Configured memory budget
     double memoryPressure{0.0};         // rssBytes / memoryBudgetBytes (0.0-1.0+)
 
+    // CPU metrics
+    double cpuUsagePercent{0.0}; // Process CPU % across all cores
+
     // Model dimension
     std::uint32_t loadedModels{0};
     std::uint64_t modelMemoryBytes{0};
@@ -245,6 +248,10 @@ private:
 
     // Eviction cooldown
     std::chrono::steady_clock::time_point lastEvictionTime_{};
+
+    // CPU utilization sampling state: deltas for calculating process CPU usage
+    mutable std::uint64_t lastProcJiffies_{0};
+    mutable std::uint64_t lastTotalJiffies_{0};
 };
 
 } // namespace yams::daemon

@@ -192,13 +192,13 @@ TEST_CASE("All migrations execute successfully", "[catch2][unit][metadata][migra
         REQUIRE(actual_version > 0); // Sanity check: should have at least one migration
     }
 
-    SECTION("Migration version is at least v25 (symbol_metadata repair)") {
+    SECTION("Migration version is at least v26 (symbol_metadata repair)") {
         // This ensures we haven't regressed and lost the symbol_metadata repair migration
         auto result = fixture.applyAllMigrations();
         REQUIRE(result);
 
         int version = result.value();
-        REQUIRE(version >= 25);
+        REQUIRE(version >= 26);
 
         INFO("Current migration version: " << version);
     }
