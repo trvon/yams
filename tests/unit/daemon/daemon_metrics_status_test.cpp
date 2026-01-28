@@ -400,7 +400,7 @@ TEST_CASE("DaemonMetrics: WorkCoordinator metrics export", "[daemon][metrics][wo
         REQUIRE(snap != nullptr);
         // WorkCoordinator metrics should be present
         // ServiceManager creates WorkCoordinator with hardware_concurrency() workers
-        REQUIRE(snap->workCoordinatorWorkerCount > 0); // Should have workers
+        REQUIRE(snap->workerThreads > 0);              // Should have workers (worker_threads)
         REQUIRE(snap->workCoordinatorRunning == true); // Should be running
     }
 }
