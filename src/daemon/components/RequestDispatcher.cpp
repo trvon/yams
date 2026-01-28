@@ -19,8 +19,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX 1
 #endif
-#include <Windows.h>
 #include <Psapi.h>
+#include <Windows.h>
 #endif
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -435,7 +435,9 @@ RequestDispatcher::handleShutdownRequest(const ShutdownRequest& req) {
                                               timeoutMs);
                             } catch (...) {
                             }
+#if !defined(_WIN32)
                             raise(SIGKILL);
+#endif
                             std::_Exit(1);
                         });
                     }
