@@ -20,5 +20,8 @@
 	path = third_party/symspell
 	url = https://github.com/trvon/yams-symspell.git
 [submodule "external/open-code-blackboard"]
-	path = external/open-code-blackboard
+	path = external/opencode-blackboard
+	url = git@github.com:trvon/opencode-blackboard.git
+[submodule "open-code-blackboard"]
+	path = open-code-blackboard
 	url = git@github.com:trvon/open-code-blackboard.git

@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `yams list --metadata-values` for showing unique metadata values with counts (useful for PBI discovery).
 - **Post-ingest file/directory tracking**: New metrics for tracking files and directories added/processed through the ingestion pipeline (`filesAdded`, `directoriesAdded`, `filesProcessed`, `directoriesProcessed`).
+- **OpenCode Blackboard Plugin** (`external/opencode-blackboard/`): Multi-agent blackboard architecture plugin for OpenCode using YAMS as shared memory. Enables agent-to-agent communication through structured findings, task coordination, and context grouping. Requires YAMS v0.8.1+.
 - **Per-stage queue depth exposure**: Real-time queue depth metrics for KG, symbol, entity, and title extraction stages accessible via daemon status.
 - **Progress bars in CLI**: Visual progress bars for queue utilization, worker pool, memory pressure, and pipeline stages in `yams daemon status` and `yams status` commands.
 - **Unified status UI**: `yams status` daemon-connected display now uses consistent section headers, row rendering, and status indicators matching `yams daemon status`.
