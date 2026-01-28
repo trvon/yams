@@ -15,10 +15,10 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/search_engine_builder.h>
+#include <yams/vector/dim_resolver.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/embedding_service.h>
 #include <yams/vector/sqlite_vec_backend.h>
-#include <yams/vector/dim_resolver.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
 // Error hints for actionable error messages
@@ -1020,6 +1020,90 @@ Result<void> YamsCLI::initializeStorage() {
     } catch (const std::exception& e) {
         return Error{ErrorCode::DatabaseError,
                      std::string("Failed to initialize storage: ") + e.what()};
+    }
+}
+
+Result<std::unordered_map<std::string, std::vector<metadata::MetadataValueCount>>>
+YamsCLI::fastMetadataValueCounts(const std::vector<std::string>& keys, int limit) {
+    if (keys.empty()) {
+        return std::unordered_map<std::string, std::vector<metadata::MetadataValueCount>>{};
+    }
+
+    try {
+        // Validate dataPath_ is a reasonable filesystem path
+        auto pathStr = dataPath_.string();
+        bool looksLikeDescription =
+            pathStr.find('(') != std::string::npos || pathStr.find('[') != std::string::npos ||
+            pathStr.length() > 200 || std::count(pathStr.begin(), pathStr.end(), ' ') > 3;
+
+        if (looksLikeDescription) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Data path appears invalid: '" + pathStr.substr(0, 60) +
+                             "...' - please set YAMS_DATA_DIR or use --data-dir"};
+        }
+
+        // Check database exists
+        auto dbPath = dataPath_ / "yams.db";
+        if (!std::filesystem::exists(dbPath)) {
+            return Error{ErrorCode::NotFound,
+                         "Database not found at " + dbPath.string() + ". Run 'yams init' first."};
+        }
+
+        // Open database directly (read-only, no pool needed)
+        metadata::Database db;
+        auto openResult = db.open(dbPath.string(), metadata::ConnectionMode::ReadOnly);
+        if (!openResult) {
+            return openResult.error();
+        }
+
+        // Build query
+        std::string sql = "SELECT key, value, count FROM metadata_value_counts WHERE key IN (";
+        for (size_t i = 0; i < keys.size(); ++i) {
+            if (i > 0)
+                sql += ",";
+            sql += "?";
+        }
+        sql += ") ORDER BY count DESC, value ASC";
+        if (limit > 0) {
+            sql += " LIMIT " + std::to_string(limit);
+        }
+
+        // Prepare and execute
+        auto stmtResult = db.prepare(sql);
+        if (!stmtResult) {
+            return stmtResult.error();
+        }
+
+        auto stmt = std::move(stmtResult).value();
+        for (size_t i = 0; i < keys.size(); ++i) {
+            auto bindResult = stmt.bind(static_cast<int>(i + 1), keys[i]);
+            if (!bindResult) {
+                return bindResult.error();
+            }
+        }
+
+        // Collect results
+        std::unordered_map<std::string, std::vector<metadata::MetadataValueCount>> result;
+        while (true) {
+            auto stepResult = stmt.step();
+            if (!stepResult) {
+                return stepResult.error();
+            }
+            if (!stepResult.value()) {
+                break;
+            }
+
+            metadata::MetadataValueCount row;
+            row.value = stmt.getString(1);
+            row.count = stmt.getInt64(2);
+            const std::string& key = stmt.getString(0);
+            result[key].push_back(std::move(row));
+        }
+
+        return result;
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::DatabaseError,
+                     std::string("Fast metadata query failed: ") + e.what()};
     }
 }
 

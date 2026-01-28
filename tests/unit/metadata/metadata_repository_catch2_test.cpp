@@ -189,6 +189,62 @@ TEST_CASE("MetadataRepository: getMetadataValueCounts with filters",
     REQUIRE(counts["PBI-071"] == 1);
 }
 
+TEST_CASE("MetadataRepository: metadata value counts materialized view stays consistent",
+          "[unit][metadata][repository]") {
+    MetadataRepositoryFixture fix;
+
+    auto docA = makeDocumentWithPath("/tmp/materialized_a.txt", "materialized-a");
+    auto docB = makeDocumentWithPath("/tmp/materialized_b.txt", "materialized-b");
+
+    auto docARes = fix.repository_->insertDocument(docA);
+    auto docBRes = fix.repository_->insertDocument(docB);
+    REQUIRE(docARes.has_value());
+    REQUIRE(docBRes.has_value());
+
+    MetadataValue v1;
+    v1.value = "PBI-500";
+    v1.type = MetadataValueType::String;
+    REQUIRE(fix.repository_->setMetadata(docARes.value(), "pbi", v1).has_value());
+    REQUIRE(fix.repository_->setMetadata(docBRes.value(), "pbi", v1).has_value());
+
+    DocumentQueryOptions opts;
+    auto countsRes = fix.repository_->getMetadataValueCounts({"pbi"}, opts);
+    REQUIRE(countsRes.has_value());
+    auto it = countsRes.value().find("pbi");
+    REQUIRE(it != countsRes.value().end());
+    REQUIRE(it->second.size() == 1);
+    CHECK(it->second.front().value == "PBI-500");
+    CHECK(it->second.front().count == 2);
+
+    MetadataValue v2;
+    v2.value = "PBI-600";
+    v2.type = MetadataValueType::String;
+    REQUIRE(fix.repository_->setMetadata(docBRes.value(), "pbi", v2).has_value());
+
+    countsRes = fix.repository_->getMetadataValueCounts({"pbi"}, opts);
+    REQUIRE(countsRes.has_value());
+    it = countsRes.value().find("pbi");
+    REQUIRE(it != countsRes.value().end());
+    std::unordered_map<std::string, int64_t> latest;
+    for (const auto& row : it->second) {
+        latest[row.value] = row.count;
+    }
+    REQUIRE(latest.size() == 2);
+    CHECK(latest["PBI-500"] == 1);
+    CHECK(latest["PBI-600"] == 1);
+
+    auto deleteResult = fix.repository_->deleteDocument(docARes.value());
+    REQUIRE(deleteResult.has_value());
+
+    countsRes = fix.repository_->getMetadataValueCounts({"pbi"}, opts);
+    REQUIRE(countsRes.has_value());
+    it = countsRes.value().find("pbi");
+    REQUIRE(it != countsRes.value().end());
+    REQUIRE(it->second.size() == 1);
+    CHECK(it->second.front().value == "PBI-600");
+    CHECK(it->second.front().count == 1);
+}
+
 TEST_CASE("MetadataRepository: get document not found", "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;
 

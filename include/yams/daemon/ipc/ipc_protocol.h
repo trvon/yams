@@ -983,6 +983,9 @@ struct ListRequest {
     // Tag filtering
     std::vector<std::string> tags; // requested tags filter
 
+    // Metadata key-value filters (e.g., {{"pbi", "PBI-080"}, {"task", "hook-export"}})
+    std::map<std::string, std::string> metadataFilters;
+
     // Format and display options
     std::string format = "table"; // "table" | "json" | "csv" | "minimal"
     std::string sortBy = "date";  // "name" | "size" | "date" | "hash"
@@ -1034,7 +1037,8 @@ struct ListRequest {
     bool showChanges = false;
     bool showDiffTags = false;
     bool showDeleted = false;
-    bool matchAllTags = false; // require all tags vs any tag
+    bool matchAllTags = false;    // require all tags vs any tag
+    bool matchAllMetadata = true; // AND vs OR for metadata filters (default AND)
 
     template <typename Serializer>
     requires IsSerializer<Serializer>

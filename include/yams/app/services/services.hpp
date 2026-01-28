@@ -582,6 +582,10 @@ struct ListDocumentsRequest {
     bool matchAllTags{false};      // require all tags vs any tag
     std::string sessionId;         // filter by session (documents added during that session)
 
+    // Metadata key-value filters (e.g., {{"pbi", "PBI-080"}, {"task", "hook-export"}})
+    std::map<std::string, std::string> metadataFilters;
+    bool matchAllMetadata{true}; // AND vs OR for metadata filters (default AND)
+
     // File type filters
     std::string type;      // "image" | "document" | "archive" | "audio" | "video" | "text" |
                            // "executable" | "binary"

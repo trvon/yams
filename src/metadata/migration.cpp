@@ -341,7 +341,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createMetadataAggregationIndexes(),
             createSymSpellSchema(),
             createTermStatsSchema(),
-            repairSymbolMetadataUniqueness()};
+            repairSymbolMetadataUniqueness(),
+            optimizeValueCountsQuery()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2340,6 +2341,88 @@ Migration YamsMetadataMigrations::repairSymbolMetadataUniqueness() {
 
     m.downSQL = R"(
         DROP INDEX IF EXISTS ux_symbol_document_qualified;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::optimizeValueCountsQuery() {
+    Migration m;
+    m.version = 27;
+    m.name = "Optimize metadata value counts query";
+    m.created = std::chrono::system_clock::now();
+
+    m.upSQL = R"(
+        CREATE INDEX IF NOT EXISTS idx_metadata_aggregation_filtered
+            ON metadata(key, value)
+            WHERE value != '';
+
+        CREATE TABLE IF NOT EXISTS metadata_value_counts (
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (key, value)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_metadata_value_counts_key_count
+            ON metadata_value_counts(key, count DESC, value);
+
+        INSERT INTO metadata_value_counts (key, value, count)
+        SELECT key, value, COUNT(*)
+        FROM metadata
+        WHERE value IS NOT NULL AND value != ''
+        GROUP BY key, value
+        ON CONFLICT(key, value) DO UPDATE SET count = excluded.count;
+
+        CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_insert
+        AFTER INSERT ON metadata
+        WHEN NEW.value IS NOT NULL AND NEW.value != ''
+        BEGIN
+            INSERT INTO metadata_value_counts (key, value, count)
+            VALUES (NEW.key, NEW.value, 1)
+            ON CONFLICT(key, value) DO UPDATE SET count = count + 1;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_delete
+        AFTER DELETE ON metadata
+        WHEN OLD.value IS NOT NULL AND OLD.value != ''
+        BEGIN
+            UPDATE metadata_value_counts
+            SET count = count - 1
+            WHERE key = OLD.key AND value = OLD.value;
+            DELETE FROM metadata_value_counts
+            WHERE key = OLD.key AND value = OLD.value AND count <= 0;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_update_old
+        AFTER UPDATE ON metadata
+        WHEN OLD.value IS NOT NULL AND OLD.value != '' AND (OLD.key != NEW.key OR OLD.value != NEW.value)
+        BEGIN
+            UPDATE metadata_value_counts
+            SET count = count - 1
+            WHERE key = OLD.key AND value = OLD.value;
+            DELETE FROM metadata_value_counts
+            WHERE key = OLD.key AND value = OLD.value AND count <= 0;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_update_new
+        AFTER UPDATE ON metadata
+        WHEN NEW.value IS NOT NULL AND NEW.value != '' AND (OLD.key != NEW.key OR OLD.value != NEW.value)
+        BEGIN
+            INSERT INTO metadata_value_counts (key, value, count)
+            VALUES (NEW.key, NEW.value, 1)
+            ON CONFLICT(key, value) DO UPDATE SET count = count + 1;
+        END;
+    )";
+
+    m.downSQL = R"(
+        DROP TRIGGER IF EXISTS trg_metadata_value_counts_update_new;
+        DROP TRIGGER IF EXISTS trg_metadata_value_counts_update_old;
+        DROP TRIGGER IF EXISTS trg_metadata_value_counts_delete;
+        DROP TRIGGER IF EXISTS trg_metadata_value_counts_insert;
+        DROP INDEX IF EXISTS idx_metadata_value_counts_key_count;
+        DROP TABLE IF EXISTS metadata_value_counts;
+        DROP INDEX IF EXISTS idx_metadata_aggregation_filtered;
     )";
 
     return m;

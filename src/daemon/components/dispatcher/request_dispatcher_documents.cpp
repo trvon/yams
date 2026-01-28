@@ -279,6 +279,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
         }
         serviceReq.matchAllTags = req.matchAllTags;
 
+        // Map metadata key-value filters
+        serviceReq.metadataFilters = req.metadataFilters;
+        serviceReq.matchAllMetadata = req.matchAllMetadata;
+
         // Session filtering
         if (!req.sessionId.empty()) {
             serviceReq.sessionId = req.sessionId;

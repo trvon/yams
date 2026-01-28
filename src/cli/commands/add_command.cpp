@@ -14,6 +14,7 @@
 #include <regex>
 #include <sstream>
 #include <thread>
+#include <utility>
 #include <yams/api/content_metadata.h>
 #include <yams/cli/command.h>
 #include <yams/cli/progress_indicator.h>
@@ -43,7 +44,6 @@
 #include <unistd.h>
 #else
 #include <io.h>
-#define isatty _isatty
 #define STDOUT_FILENO 1
 #endif
 
@@ -72,7 +72,11 @@ bool hasUnsupportedControlChars(std::string_view sv) {
 }
 
 bool isStdoutTty() {
+#ifdef _WIN32
+    return _isatty(STDOUT_FILENO) != 0;
+#else
     return isatty(STDOUT_FILENO) != 0;
+#endif
 }
 
 class SpinnerThread {
@@ -482,7 +486,8 @@ public:
                 }
 
                 // Process each group
-                size_t ok = 0, failed = 0;
+                size_t successfulRequests = 0;
+                std::vector<std::pair<std::filesystem::path, Error>> daemonFailures;
                 size_t totalAdded = 0, totalUpdated = 0, totalSkipped = 0;
                 bool hasStdin = false;
                 const size_t totalDaemonRequests =
@@ -577,13 +582,14 @@ public:
                         totalUpdated += result.value().documentsUpdated;
                         totalSkipped += result.value().documentsSkipped;
                         render(result.value(), filePath);
-                        ok++;
+                        successfulRequests++;
                     } else {
                         pauseProgress();
+                        const auto err = result.error();
                         spdlog::warn("Daemon add failed for file '{}': {}", filePath.string(),
-                                     result.error().message);
+                                     err.message);
                         resumeProgress();
-                        failed++;
+                        daemonFailures.emplace_back(filePath, err);
                     }
                     if (daemonSpinner.enabled()) {
                         daemonSpinner.setCounts(completedRequests, totalDaemonRequests);
@@ -638,13 +644,14 @@ public:
                         totalUpdated += result.value().documentsUpdated;
                         totalSkipped += result.value().documentsSkipped;
                         render(result.value(), dir);
-                        ok++;
+                        successfulRequests++;
                     } else {
                         pauseProgress();
+                        const auto err = result.error();
                         spdlog::warn("Daemon add failed for directory '{}': {}", dir.string(),
-                                     result.error().message);
+                                     err.message);
                         resumeProgress();
-                        failed++;
+                        daemonFailures.emplace_back(dir, err);
                     }
                     if (daemonSpinner.enabled()) {
                         daemonSpinner.setCounts(completedRequests, totalDaemonRequests);
@@ -652,31 +659,28 @@ public:
                 }
                 daemonSpinner.pause();
 
-                // If there were any non-stdin paths processed, report summary here
-                if (ok + failed > 0) {
-                    std::cout << "Daemon add completed: " << ok << " ok, " << failed << " failed";
-                    if (totalAdded == 0 && totalUpdated == 0) {
-                        std::cout << " (no changes)";
-                    } else {
-                        std::cout << ", added: " << totalAdded << ", updated: " << totalUpdated
-                                  << ", skipped: " << totalSkipped;
+                const size_t daemonRequestsAttempted = successfulRequests + daemonFailures.size();
+                if (daemonRequestsAttempted > 0) {
+                    std::cout << "Summary: added=" << totalAdded << ", updated=" << totalUpdated
+                              << ", skipped=" << totalSkipped;
+                    if (!daemonFailures.empty()) {
+                        std::cout << ", failed=" << daemonFailures.size();
                     }
                     std::cout << std::endl;
                 }
-                // If there were any failures, abort
-                if (failed > 0) {
-                    return Error{ErrorCode::InternalError, "One or more adds failed via daemon"};
+                if (!daemonFailures.empty()) {
+                    const auto& [failedPath, failure] = daemonFailures.front();
+                    std::ostringstream oss;
+                    oss << "Failed to add '" << failedPath.string() << "': " << failure.message;
+                    return Error{failure.code, oss.str()};
                 }
 
                 // Handle stdin if present
                 if (hasStdin) {
                     targetPaths_.clear();
                     targetPaths_.push_back(std::filesystem::path("-"));
-                } else {
-                    // Nothing left to do if we processed files/directories successfully
-                    if (ok > 0) {
-                        return Result<void>();
-                    }
+                } else if (daemonRequestsAttempted > 0) {
+                    return Result<void>();
                 }
             }
 

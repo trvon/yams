@@ -224,6 +224,9 @@ private:
 
     // Version 26: Repair symbol_metadata uniqueness for upserts
     static Migration repairSymbolMetadataUniqueness();
+
+    // Version 27: Partial index for metadata value aggregations
+    static Migration optimizeValueCountsQuery();
 };
 
 /**

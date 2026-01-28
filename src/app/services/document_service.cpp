@@ -1429,6 +1429,35 @@ public:
                 docs.swap(filtered);
             }
 
+            // Filter by metadata key-value pairs (PBI-080)
+            if (!req.metadataFilters.empty()) {
+                std::vector<metadata::DocumentInfo> filtered;
+                for (const auto& d : docs) {
+                    auto md = ctx_.metadataRepo->getAllMetadata(d.id);
+                    if (!md)
+                        continue;
+
+                    const auto& mdMap = md.value();
+                    bool match = req.matchAllMetadata; // true = AND start, false = OR start
+
+                    for (const auto& [key, expectedValue] : req.metadataFilters) {
+                        auto it = mdMap.find(key);
+                        bool keyMatches =
+                            (it != mdMap.end() && it->second.asString() == expectedValue);
+
+                        if (req.matchAllMetadata) {
+                            match = match && keyMatches; // AND: all must match
+                        } else {
+                            match = match || keyMatches; // OR: any must match
+                        }
+                    }
+
+                    if (match)
+                        filtered.push_back(d);
+                }
+                docs.swap(filtered);
+            }
+
             // Recent: keep N most recently indexed (desc)
             if (req.recent && *req.recent > 0) {
                 std::sort(docs.begin(), docs.end(), [](const auto& a, const auto& b) {

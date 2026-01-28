@@ -463,6 +463,9 @@ template <> struct ProtoBinding<ListRequest> {
         o->set_match_all_tags(r.matchAllTags);
         o->set_name_pattern(r.namePattern);
         o->set_paths_only(r.pathsOnly);
+        // Metadata key-value filters
+        to_kv_pairs(r.metadataFilters, o->mutable_metadata_filters());
+        o->set_match_all_metadata(r.matchAllMetadata);
     }
     static ListRequest get(const Envelope& env) {
         const auto& i = env.list_request();
@@ -502,6 +505,9 @@ template <> struct ProtoBinding<ListRequest> {
         r.matchAllTags = i.match_all_tags();
         r.namePattern = i.name_pattern();
         r.pathsOnly = i.paths_only();
+        // Metadata key-value filters
+        r.metadataFilters = from_kv_pairs(i.metadata_filters());
+        r.matchAllMetadata = i.match_all_metadata();
         return r;
     }
 };

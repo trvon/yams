@@ -168,9 +168,7 @@ public:
                 const char* datasetEnv = std::getenv("YAMS_BENCH_DATASET_DIR");
                 if (datasetEnv && std::string_view(datasetEnv).empty() == false) {
                     std::filesystem::path dir(datasetEnv);
-                    std::filesystem::path candidate = dir / "metadata.db";
-                    if (!std::filesystem::exists(candidate))
-                        candidate = dir / "yams.db";
+                    std::filesystem::path candidate = dir / "yams.db";
                     if (std::filesystem::exists(candidate))
                         dbPath = candidate;
                 }

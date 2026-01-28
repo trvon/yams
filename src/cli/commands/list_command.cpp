@@ -93,6 +93,24 @@ public:
         cmd->add_flag("--no-snippets", noSnippets_, "Disable content previews");
         cmd->add_option("--metadata-values", metadataValuesRaw_,
                         "Show unique metadata values with counts for keys (comma-separated)");
+        cmd->add_option("--metadata-values-limit", metadataValuesLimit_,
+                        "Maximum number of metadata values to show per key (default: 10000)")
+            ->default_val(10000);
+        cmd->add_flag("--all-metadata-values", allMetadataValues_,
+                      "Show all metadata values (override default limit)");
+
+        // Metadata filters (key/value)
+        cmd->add_option("--pbi", pbiFilters_, "Filter by PBI (metadata key 'pbi')")->take_all();
+        cmd->add_option("--task", taskFilters_, "Filter by task (metadata key 'task')")->take_all();
+        cmd->add_option("--phase", phaseFilters_, "Filter by phase (metadata key 'phase')")
+            ->take_all();
+        cmd->add_option("--owner", ownerFilters_, "Filter by owner (metadata key 'owner')")
+            ->take_all();
+        cmd->add_option("--metadata", metadataFiltersRaw_,
+                        "Additional metadata filters key=value (repeatable)")
+            ->take_all();
+        cmd->add_flag("--match-any-metadata", matchAnyMetadata_,
+                      "Use OR across metadata filters (default AND)");
 
         // File type filters
         cmd->add_option("--type", fileType_,
@@ -274,6 +292,38 @@ public:
             dreq.tags = {}; // Keep empty for backward compatibility
             dreq.filterTags = filterTags_;
             dreq.matchAllTags = matchAllTags_;
+
+            // Metadata filters (pbi/task/phase/owner + arbitrary key=value)
+            auto setLast = [](const std::vector<std::string>& src, const std::string& key,
+                              std::map<std::string, std::string>& dest) {
+                if (!src.empty()) {
+                    dest[key] = src.back();
+                }
+            };
+
+            std::map<std::string, std::string> metadataFilters;
+            setLast(pbiFilters_, "pbi", metadataFilters);
+            setLast(taskFilters_, "task", metadataFilters);
+            setLast(phaseFilters_, "phase", metadataFilters);
+            setLast(ownerFilters_, "owner", metadataFilters);
+
+            for (const auto& kv : metadataFiltersRaw_) {
+                auto pos = kv.find('=');
+                if (pos == std::string::npos) {
+                    return Error{ErrorCode::InvalidArgument, "Metadata filters must be key=value"};
+                }
+                std::string key = kv.substr(0, pos);
+                std::string value = kv.substr(pos + 1);
+                config::trim(key);
+                config::trim(value);
+                if (key.empty()) {
+                    return Error{ErrorCode::InvalidArgument, "Metadata key cannot be empty"};
+                }
+                metadataFilters[key] = value;
+            }
+
+            dreq.metadataFilters = std::move(metadataFilters);
+            dreq.matchAllMetadata = !matchAnyMetadata_;
 
             // Session filtering
             if (!sessionFilter_.empty()) {
@@ -832,6 +882,41 @@ private:
             serviceReq.groupBySession = groupBySession_;
             serviceReq.verbose = verbose_ || cli_->getVerbose();
 
+            // Metadata filters
+            {
+                auto setLast = [](const std::vector<std::string>& src, const std::string& key,
+                                  std::map<std::string, std::string>& dest) {
+                    if (!src.empty()) {
+                        dest[key] = src.back();
+                    }
+                };
+
+                std::map<std::string, std::string> metadataFilters;
+                setLast(pbiFilters_, "pbi", metadataFilters);
+                setLast(taskFilters_, "task", metadataFilters);
+                setLast(phaseFilters_, "phase", metadataFilters);
+                setLast(ownerFilters_, "owner", metadataFilters);
+
+                for (const auto& kv : metadataFiltersRaw_) {
+                    auto pos = kv.find('=');
+                    if (pos == std::string::npos) {
+                        return Error{ErrorCode::InvalidArgument,
+                                     "Metadata filters must be key=value"};
+                    }
+                    std::string key = kv.substr(0, pos);
+                    std::string value = kv.substr(pos + 1);
+                    config::trim(key);
+                    config::trim(value);
+                    if (key.empty()) {
+                        return Error{ErrorCode::InvalidArgument, "Metadata key cannot be empty"};
+                    }
+                    metadataFilters[key] = value;
+                }
+
+                serviceReq.metadataFilters = std::move(metadataFilters);
+                serviceReq.matchAllMetadata = !matchAnyMetadata_;
+            }
+
             // Sorting
             serviceReq.sortBy = sortBy_;
             serviceReq.reverse = reverse_;
@@ -1030,188 +1115,55 @@ private:
     }
 
     Result<void> listMetadataValues() {
-        auto ensured = cli_->ensureStorageInitialized();
-        if (!ensured) {
-            return ensured;
-        }
-
-        auto metadataRepo = cli_->getMetadataRepository();
-        if (!metadataRepo) {
-            return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
-        }
-
-        auto keys = parseMetadataFields(metadataValuesRaw_);
-        if (keys.empty()) {
-            return Error{ErrorCode::InvalidData, "No metadata keys provided"};
-        }
-
-        metadata::DocumentQueryOptions opts;
-        opts.limit = 0;
-        opts.offset = 0;
-        opts.pathsOnly = true;
-
-        if (!namePattern_.empty()) {
-            auto resolved = yams::app::services::resolveNameToPatternIfLocalFile(namePattern_);
-            const auto& pattern = resolved.pattern;
-            auto wildcardPos = pattern.find_first_of("*?");
-            bool hasWildcard = wildcardPos != std::string::npos;
-            if (!hasWildcard) {
-                opts.exactPath = pattern;
-            } else if (pattern.back() == '*') {
-                std::string prefix = pattern;
-                while (!prefix.empty() && (prefix.back() == '*' || prefix.back() == '?'))
-                    prefix.pop_back();
-                while (!prefix.empty() && (prefix.back() == '/' || prefix.back() == '\\'))
-                    prefix.pop_back();
-                if (!prefix.empty()) {
-                    opts.pathPrefix = prefix;
-                    opts.prefixIsDirectory = true;
-                } else {
-                    opts.likePattern = "%";
-                }
-            } else if (pattern.front() == '*' &&
-                       pattern.find_first_of("*?", wildcardPos + 1) == std::string::npos) {
-                opts.containsFragment = pattern.substr(1);
-                opts.containsUsesFts = true;
-            } else {
-                opts.likePattern = globToSqlLikePattern(pattern);
-            }
-        }
-
-        if (!extensions_.empty()) {
-            std::istringstream ss(extensions_);
-            std::string token;
-            while (std::getline(ss, token, ',')) {
-                yams::config::trim(token);
-                if (token.empty()) {
-                    continue;
-                }
-                if (token[0] != '.') {
-                    token.insert(token.begin(), '.');
-                }
-                opts.extensions.push_back(token);
-            }
-        }
-
-        if (!mimeType_.empty()) {
-            opts.mimeType = mimeType_;
-        }
-
-        if (textOnly_) {
-            opts.textOnly = true;
-        } else if (binaryOnly_) {
-            opts.binaryOnly = true;
-        }
-
-        if (!filterTags_.empty()) {
-            std::istringstream ss(filterTags_);
-            std::string tag;
-            while (std::getline(ss, tag, ',')) {
-                yams::config::trim(tag);
-                if (!tag.empty()) {
-                    opts.tags.push_back(tag);
-                }
-            }
-        }
-
-        if (!createdAfter_.empty()) {
-            auto afterTime = TimeParser::parse(createdAfter_);
-            if (afterTime) {
-                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
-                               afterTime.value().time_since_epoch())
-                               .count();
-                opts.createdAfter = static_cast<int64_t>(sec);
-            }
-        }
-
-        if (!createdBefore_.empty()) {
-            auto beforeTime = TimeParser::parse(createdBefore_);
-            if (beforeTime) {
-                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
-                               beforeTime.value().time_since_epoch())
-                               .count();
-                opts.createdBefore = static_cast<int64_t>(sec);
-            }
-        }
-
-        if (!modifiedAfter_.empty()) {
-            auto afterTime = TimeParser::parse(modifiedAfter_);
-            if (afterTime) {
-                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
-                               afterTime.value().time_since_epoch())
-                               .count();
-                opts.modifiedAfter = static_cast<int64_t>(sec);
-            }
-        }
-
-        if (!modifiedBefore_.empty()) {
-            auto beforeTime = TimeParser::parse(modifiedBefore_);
-            if (beforeTime) {
-                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
-                               beforeTime.value().time_since_epoch())
-                               .count();
-                opts.modifiedBefore = static_cast<int64_t>(sec);
-            }
-        }
-
-        if (!indexedAfter_.empty()) {
-            auto afterTime = TimeParser::parse(indexedAfter_);
-            if (afterTime) {
-                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
-                               afterTime.value().time_since_epoch())
-                               .count();
-                opts.indexedAfter = static_cast<int64_t>(sec);
-            }
-        }
-
-        if (!indexedBefore_.empty()) {
-            auto beforeTime = TimeParser::parse(indexedBefore_);
-            if (beforeTime) {
-                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
-                               beforeTime.value().time_since_epoch())
-                               .count();
-                opts.indexedBefore = static_cast<int64_t>(sec);
-            }
-        }
-
-        if (showChanges_) {
-            auto windowTime = TimeParser::parse(changeWindow_);
-            if (windowTime) {
-                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
-                               windowTime.value().time_since_epoch())
-                               .count();
-                opts.changedSince = static_cast<int64_t>(sec);
-            }
-        }
-
-        if (!sinceTime_.empty()) {
-            auto sinceTimePoint = TimeParser::parse(sinceTime_);
-            if (sinceTimePoint) {
-                auto sec = std::chrono::duration_cast<std::chrono::seconds>(
-                               sinceTimePoint.value().time_since_epoch())
-                               .count();
-                opts.changedSince = static_cast<int64_t>(sec);
-            }
-        }
-
+        // Start spinner early (before any blocking operations)
         bool showSpinner =
             !cli_->getJsonOutput() && format_ != "json" && format_ != "csv" && format_ != "minimal";
-        std::optional<ui::SpinnerRunner> spinner;
-        if (showSpinner) {
-            spinner.emplace();
+        std::shared_ptr<ui::SpinnerRunner> spinner =
+            showSpinner ? std::make_shared<ui::SpinnerRunner>() : nullptr;
+        if (spinner) {
             spinner->start("Loading metadata values...");
         }
-
-        auto metaRes = metadataRepo->getMetadataValueCounts(keys, opts);
-        if (!metaRes) {
+        auto stopSpinner = [&]() {
             if (spinner) {
                 spinner->stop();
             }
+        };
+
+        auto keys = parseMetadataFields(metadataValuesRaw_);
+        if (keys.empty()) {
+            stopSpinner();
+            return Error{ErrorCode::InvalidData, "No metadata keys provided"};
+        }
+
+        // Check if we can use the fast path (no document filters)
+        bool canUseFastPath =
+            namePattern_.empty() && extensions_.empty() && mimeType_.empty() && !textOnly_ &&
+            !binaryOnly_ && filterTags_.empty() && createdAfter_.empty() &&
+            createdBefore_.empty() && modifiedAfter_.empty() && modifiedBefore_.empty() &&
+            indexedAfter_.empty() && indexedBefore_.empty() && !showChanges_ && sinceTime_.empty();
+
+        Result<std::unordered_map<std::string, std::vector<metadata::MetadataValueCount>>> metaRes;
+
+        if (canUseFastPath) {
+            // Fast path: query directly without full storage initialization
+            metaRes =
+                cli_->fastMetadataValueCounts(keys, allMetadataValues_ ? 0 : metadataValuesLimit_);
+        } else {
+            // Full path: initialize storage and use metadata repository
+            return Error{ErrorCode::InvalidArgument,
+                         "--metadata-values does not support document filters"};
+        }
+
+        if (!metaRes) {
+            stopSpinner();
             return metaRes.error();
         }
-        if (spinner) {
-            spinner->stop();
+        stopSpinner();
+        if (!metaRes) {
+            stopSpinner();
+            return metaRes.error();
         }
+        stopSpinner();
 
         auto makeRows = [&](const std::string& key) -> std::vector<metadata::MetadataValueCount> {
             auto it = metaRes.value().find(key);
@@ -1253,6 +1205,10 @@ private:
             return Result<void>();
         }
 
+        // Streaming table output with fixed column widths
+        constexpr size_t kValueWidth = 48;
+        constexpr size_t kCountWidth = 10;
+
         for (const auto& key : keys) {
             std::cout << ui::section_header("Metadata Values: " + key) << "\n\n";
 
@@ -1262,13 +1218,28 @@ private:
                 continue;
             }
 
-            ui::Table table;
-            table.headers = {"VALUE", "COUNT"};
-            table.has_header = true;
+            // Print header with fixed widths
+            std::cout << "  " << ui::pad_right("VALUE", kValueWidth) << "  "
+                      << ui::pad_left("COUNT", kCountWidth) << "\n";
+            std::cout << "  " << std::string(kValueWidth, '-') << "  "
+                      << std::string(kCountWidth, '-') << "\n";
+
+            // Stream rows with fixed column widths
             for (const auto& [value, count] : rows) {
-                table.add_row({value, ui::format_number(count)});
+                std::string formattedValue = ui::truncate_to_width(value, kValueWidth);
+                std::string formattedCount = ui::format_number(count);
+                std::cout << "  " << ui::pad_right(formattedValue, kValueWidth) << "  "
+                          << ui::pad_left(formattedCount, kCountWidth) << "\n";
             }
-            ui::render_table(std::cout, table);
+
+            // Show truncation notice if we hit the limit
+            if (!allMetadataValues_ && static_cast<int>(rows.size()) >= metadataValuesLimit_) {
+                std::cout << "\n"
+                          << ui::status_info("Showing top " + std::to_string(metadataValuesLimit_) +
+                                             " values. Use --all-metadata-values to see all.")
+                          << "\n";
+            }
+
             std::cout << "\n";
         }
 
@@ -2144,6 +2115,14 @@ private:
     int snippetLength_ = 50;
     bool noSnippets_ = false;
     std::string metadataValuesRaw_{};
+    int metadataValuesLimit_ = 10000;
+    bool allMetadataValues_ = false;
+    std::vector<std::string> pbiFilters_;
+    std::vector<std::string> taskFilters_;
+    std::vector<std::string> phaseFilters_;
+    std::vector<std::string> ownerFilters_;
+    std::vector<std::string> metadataFiltersRaw_;
+    bool matchAnyMetadata_ = false;
 
     // File type filters
     std::string fileType_;

@@ -218,6 +218,8 @@ Result<yams::daemon::ListResponse> RetrievalService::list(const ListOptions& req
     req.showDiffTags = req_opts.showDiffTags;
     req.showDeleted = req_opts.showDeleted;
     req.matchAllTags = req_opts.matchAllTags;
+    req.metadataFilters = req_opts.metadataFilters;
+    req.matchAllMetadata = req_opts.matchAllMetadata;
 
     auto client = std::make_shared<yams::daemon::DaemonClient>(makeClientConfig(opts));
     std::promise<Result<yams::daemon::ListResponse>> p2;

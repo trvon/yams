@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 
@@ -100,6 +101,7 @@ struct GrepOptions {
 struct ListOptions {
     size_t limit = 20;
     std::vector<std::string> tags;
+    std::map<std::string, std::string> metadataFilters; // metadata key-value filters
     std::string format = "table";
     std::string sortBy = "date";
     std::string fileType;
@@ -134,6 +136,7 @@ struct ListOptions {
     bool showDiffTags = false;
     bool showDeleted = false;
     bool matchAllTags = false;
+    bool matchAllMetadata = true; // AND vs OR for metadata filters
 };
 
 struct GetInitOptions {

@@ -2302,17 +2302,25 @@ void DoctorCommand::runDedupe() {
         }
         namespace fs = std::filesystem;
         fs::path dataDir = cli_->getDataPath();
-        std::vector<fs::path> candidates = {dataDir / "metadata" / "metadata.db",
-                                            dataDir / "metadata.db"};
-        fs::path dbPath;
-        for (const auto& c : candidates) {
-            if (fs::exists(c)) {
-                dbPath = c;
-                break;
+
+        // Resolve knowledge_graph.db_path (default: yams.db). Accept absolute override.
+        std::string dbName = "yams.db";
+        try {
+            auto cfg = parseSimpleToml(getConfigPath());
+            auto it = cfg.find("knowledge_graph.db_path");
+            if (it != cfg.end() && !it->second.empty()) {
+                dbName = it->second;
             }
+        } catch (...) {
         }
-        if (dbPath.empty()) {
-            std::cout << "  " << ui::status_error("metadata.db not found under data path") << "\n";
+
+        fs::path dbPath = fs::path(dbName).is_absolute() ? fs::path(dbName) : dataDir / dbName;
+        if (!fs::exists(dbPath)) {
+            std::cout << "  "
+                      << ui::status_error(
+                             "metadata database not found (knowledge_graph.db_path): " +
+                             dbPath.string())
+                      << "\n";
             return;
         }
         yams::metadata::Database db;

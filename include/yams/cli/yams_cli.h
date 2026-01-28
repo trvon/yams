@@ -115,6 +115,15 @@ public:
     Result<void> ensureStorageInitialized();
 
     /**
+     * Fast path for metadata value counts query.
+     * Opens database directly without full storage initialization.
+     * Use this for simple read-only metadata queries to avoid the overhead
+     * of initializing ContentStore, VectorDatabase, EmbeddingGenerator, etc.
+     */
+    Result<std::unordered_map<std::string, std::vector<metadata::MetadataValueCount>>>
+    fastMetadataValueCounts(const std::vector<std::string>& keys, int limit = 10000);
+
+    /**
      * Whether storage is initialized
      */
     bool isStorageInitialized() const { return static_cast<bool>(contentStore_); }

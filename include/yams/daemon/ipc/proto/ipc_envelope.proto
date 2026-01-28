@@ -146,6 +146,9 @@ message ListRequest {
   bool match_all_tags = 33;
   string name_pattern = 34;
   bool paths_only = 35;
+  // Metadata key-value filters (e.g., pbi=PBI-080, task=hook-export)
+  repeated KvPair metadata_filters = 36;
+  bool match_all_metadata = 37;
 }
 
 message ShutdownRequest { bool graceful = 1; int64 timeout_s = 2; }
