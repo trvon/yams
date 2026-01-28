@@ -114,28 +114,61 @@ Result<void> PluginManager::initialize() {
     // Create plugin loader
     pluginLoader_ = std::make_unique<AbiPluginLoader>();
 
-    // Use shared plugin host if provided, otherwise create our own
+    // Use shared plugin host if provided, otherwise create our own with retry
     if (deps_.sharedPluginHost) {
         sharedPluginHost_ = deps_.sharedPluginHost;
         spdlog::info("[PluginManager] Using shared plugin host from ServiceManager");
     } else {
         std::filesystem::path trustFile = deps_.dataDir / "plugins.trust";
-        pluginHost_ = std::make_unique<AbiPluginHost>(nullptr, trustFile);
-        spdlog::info("[PluginManager] AbiPluginHost initialized with trust file: {}",
-                     trustFile.string());
+        // Retry trust verification up to 3 times with exponential backoff
+        bool trustOk = false;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            try {
+                pluginHost_ = std::make_unique<AbiPluginHost>(nullptr, trustFile);
+                spdlog::info("[PluginManager] AbiPluginHost initialized with trust file: {}",
+                             trustFile.string());
+                trustOk = true;
+                break;
+            } catch (const std::exception& e) {
+                spdlog::warn("[PluginManager] Trust verification attempt {} failed: {}",
+                             attempt + 1, e.what());
+                if (attempt == 2) {
+                    spdlog::error("[PluginManager] Trust verification failed after 3 attempts");
+                    // Continue without plugins - graceful degradation
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
+            }
+        }
+        if (!trustOk) {
+            spdlog::warn("[PluginManager] Continuing without ABI plugin host due to trust failure");
+        }
     }
 
-    // Initialize ExternalPluginHost for Python/JS plugins
-    try {
-        std::filesystem::path externalTrustFile = deps_.dataDir / "plugins.trust";
-        ExternalPluginHostConfig externalConfig;
-        externalHost_ =
-            std::make_unique<ExternalPluginHost>(nullptr, externalTrustFile, externalConfig);
-        spdlog::info("[PluginManager] ExternalPluginHost initialized (unified trust file: {})",
-                     externalTrustFile.string());
-    } catch (const std::exception& e) {
-        spdlog::warn("[PluginManager] Failed to initialize ExternalPluginHost: {}", e.what());
-        // Not fatal - external plugins just won't be available
+    // Initialize ExternalPluginHost for Python/JS plugins with retry
+    bool externalTrustOk = false;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        try {
+            std::filesystem::path externalTrustFile = deps_.dataDir / "plugins.trust";
+            ExternalPluginHostConfig externalConfig;
+            externalHost_ =
+                std::make_unique<ExternalPluginHost>(nullptr, externalTrustFile, externalConfig);
+            spdlog::info("[PluginManager] ExternalPluginHost initialized (unified trust file: {})",
+                         externalTrustFile.string());
+            externalTrustOk = true;
+            break;
+        } catch (const std::exception& e) {
+            spdlog::warn("[PluginManager] External trust verification attempt {} failed: {}",
+                         attempt + 1, e.what());
+            if (attempt == 2) {
+                spdlog::warn("[PluginManager] External trust verification failed after 3 attempts");
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
+        }
+    }
+    if (!externalTrustOk) {
+        spdlog::warn("[PluginManager] External plugins not available due to trust failure");
     }
 
     // Configure name policy

@@ -20,6 +20,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <chrono>
+
 namespace yams::daemon {
 
 DatabaseManager::DatabaseManager(Dependencies deps) : deps_(std::move(deps)) {}
@@ -57,28 +59,25 @@ boost::asio::awaitable<bool> DatabaseManager::open(const std::filesystem::path& 
     // Create database instance
     database_ = std::make_shared<metadata::Database>();
 
+    auto startTime = std::chrono::steady_clock::now();
+
     try {
-        // Use async_initiate pattern with timeout racing (no experimental APIs)
         co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
                                                        void(std::exception_ptr, bool)>(
-            [this, executor, timeoutMs](auto handler) mutable {
-                // Shared state for race coordination
+            [this, executor, timeoutMs, startTime](auto handler) mutable {
                 auto completed = std::make_shared<std::atomic<bool>>(false);
                 auto timer = std::make_shared<boost::asio::steady_timer>(executor);
                 timer->expires_after(std::chrono::milliseconds(timeoutMs));
 
-                // Capture handler in shared_ptr for safe sharing between timer and work
                 using HandlerT = std::decay_t<decltype(handler)>;
                 auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
                 auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, executor);
 
-                // Set up timeout
                 timer->async_wait([completed, handlerPtr, completion_exec,
                                    timeoutMs](const boost::system::error_code& ec) mutable {
                     if (ec)
-                        return; // Timer cancelled
+                        return;
                     if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                        // Timeout won
                         spdlog::warn("[DatabaseManager] open timed out after {} ms — degraded mode",
                                      timeoutMs);
                         boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
@@ -87,9 +86,8 @@ boost::asio::awaitable<bool> DatabaseManager::open(const std::filesystem::path& 
                     }
                 });
 
-                // Post blocking work to executor
-                boost::asio::post(executor, [this, timer, completed, handlerPtr,
-                                             completion_exec]() mutable {
+                boost::asio::post(executor, [this, timer, completed, handlerPtr, completion_exec,
+                                             startTime]() mutable {
                     bool success = false;
                     std::exception_ptr ep;
                     try {
@@ -99,18 +97,27 @@ boost::asio::awaitable<bool> DatabaseManager::open(const std::filesystem::path& 
                         if (!success) {
                             spdlog::warn("[DatabaseManager] open failed: {} — degraded mode",
                                          r.error().message);
+                            stats_.openErrors.fetch_add(1, std::memory_order_relaxed);
                         } else if (deps_.state) {
                             deps_.state->readiness.databaseReady = true;
                         }
                     } catch (const std::exception& e) {
                         spdlog::warn("[DatabaseManager] open threw: {} — degraded mode", e.what());
+                        stats_.openErrors.fetch_add(1, std::memory_order_relaxed);
                         ep = std::current_exception();
                     } catch (...) {
+                        stats_.openErrors.fetch_add(1, std::memory_order_relaxed);
                         ep = std::current_exception();
                     }
 
+                    auto endTime = std::chrono::steady_clock::now();
+                    auto durationMs =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime)
+                            .count();
+                    stats_.openDurationMs.store(static_cast<uint64_t>(durationMs),
+                                                std::memory_order_relaxed);
+
                     if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                        // Work won
                         timer->cancel();
                         if (success) {
                             spdlog::info("[DatabaseManager] Database opened successfully");
@@ -126,6 +133,7 @@ boost::asio::awaitable<bool> DatabaseManager::open(const std::filesystem::path& 
 
     } catch (const std::exception& e) {
         spdlog::warn("[DatabaseManager] open exception: {} — degraded mode", e.what());
+        stats_.openErrors.fetch_add(1, std::memory_order_relaxed);
         co_return false;
     }
 }
@@ -137,38 +145,35 @@ boost::asio::awaitable<bool> DatabaseManager::migrate(int timeoutMs,
         co_return false;
     }
 
-    // Create migration manager on heap so it survives async operations
     auto mm = std::make_shared<metadata::MigrationManager>(*database_);
     auto initResult = mm->initialize();
     if (!initResult) {
         spdlog::error("[DatabaseManager] Failed to initialize migration system: {}",
                       initResult.error().message);
+        stats_.migrationErrors.fetch_add(1, std::memory_order_relaxed);
         co_return false;
     }
     mm->registerMigrations(metadata::YamsMetadataMigrations::getAllMigrations());
 
+    auto startTime = std::chrono::steady_clock::now();
+
     try {
-        // Use async_initiate pattern with timeout racing (no experimental APIs)
         co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
                                                        void(std::exception_ptr, bool)>(
-            [mm, executor, timeoutMs](auto handler) mutable {
-                // Shared state for race coordination
+            [this, mm, executor, timeoutMs, startTime](auto handler) mutable {
                 auto completed = std::make_shared<std::atomic<bool>>(false);
                 auto timer = std::make_shared<boost::asio::steady_timer>(executor);
                 timer->expires_after(std::chrono::milliseconds(timeoutMs));
 
-                // Capture handler in shared_ptr for safe sharing between timer and work
                 using HandlerT = std::decay_t<decltype(handler)>;
                 auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
                 auto completion_exec = boost::asio::get_associated_executor(*handlerPtr, executor);
 
-                // Set up timeout
                 timer->async_wait([completed, handlerPtr, completion_exec,
                                    timeoutMs](const boost::system::error_code& ec) mutable {
                     if (ec)
-                        return; // Timer cancelled
+                        return;
                     if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                        // Timeout won
                         spdlog::warn("[DatabaseManager] migration timed out after {} ms",
                                      timeoutMs);
                         boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
@@ -177,42 +182,51 @@ boost::asio::awaitable<bool> DatabaseManager::migrate(int timeoutMs,
                     }
                 });
 
-                // Post blocking work to executor
-                boost::asio::post(
-                    executor, [mm, timer, completed, handlerPtr, completion_exec]() mutable {
-                        bool success = false;
-                        std::exception_ptr ep;
-                        try {
-                            auto r = mm->migrate();
-                            success = static_cast<bool>(r);
-                            if (!success) {
-                                spdlog::warn("[DatabaseManager] migration failed: {}",
-                                             r.error().message);
-                            }
-                        } catch (const std::exception& e) {
-                            spdlog::warn("[DatabaseManager] migration threw: {}", e.what());
-                            ep = std::current_exception();
-                        } catch (...) {
-                            ep = std::current_exception();
+                boost::asio::post(executor, [this, mm, timer, completed, handlerPtr,
+                                             completion_exec, startTime]() mutable {
+                    bool success = false;
+                    std::exception_ptr ep;
+                    try {
+                        auto r = mm->migrate();
+                        success = static_cast<bool>(r);
+                        if (!success) {
+                            spdlog::warn("[DatabaseManager] migration failed: {}",
+                                         r.error().message);
+                            stats_.migrationErrors.fetch_add(1, std::memory_order_relaxed);
                         }
+                    } catch (const std::exception& e) {
+                        spdlog::warn("[DatabaseManager] migration threw: {}", e.what());
+                        stats_.migrationErrors.fetch_add(1, std::memory_order_relaxed);
+                        ep = std::current_exception();
+                    } catch (...) {
+                        stats_.migrationErrors.fetch_add(1, std::memory_order_relaxed);
+                        ep = std::current_exception();
+                    }
 
-                        if (!completed->exchange(true, std::memory_order_acq_rel)) {
-                            // Work won
-                            timer->cancel();
-                            if (success) {
-                                spdlog::info("[DatabaseManager] Database migrations completed");
-                            }
-                            boost::asio::post(completion_exec,
-                                              [h = std::move(*handlerPtr), ep, success]() mutable {
-                                                  std::move(h)(ep, success);
-                                              });
+                    auto endTime = std::chrono::steady_clock::now();
+                    auto durationMs =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime)
+                            .count();
+                    stats_.migrationDurationMs.store(static_cast<uint64_t>(durationMs),
+                                                     std::memory_order_relaxed);
+
+                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                        timer->cancel();
+                        if (success) {
+                            spdlog::info("[DatabaseManager] Database migrations completed");
                         }
-                    });
+                        boost::asio::post(completion_exec,
+                                          [h = std::move(*handlerPtr), ep, success]() mutable {
+                                              std::move(h)(ep, success);
+                                          });
+                    }
+                });
             },
             boost::asio::use_awaitable);
 
     } catch (const std::exception& e) {
         spdlog::warn("[DatabaseManager] migration exception: {}", e.what());
+        stats_.migrationErrors.fetch_add(1, std::memory_order_relaxed);
         co_return false;
     }
 }
@@ -224,22 +238,19 @@ bool DatabaseManager::initializeRepositories(const std::filesystem::path& dbPath
     }
 
     try {
-        // Create connection pool
         metadata::ConnectionPoolConfig poolCfg{};
         connectionPool_ = std::make_shared<metadata::ConnectionPool>(dbPath.string(), poolCfg);
 
-        // Create metadata repository
         metadataRepo_ = std::make_shared<metadata::MetadataRepository>(*connectionPool_);
 
-        // Create knowledge graph store using factory
         metadata::KnowledgeGraphStoreConfig kgCfg{};
         auto kgRes = metadata::makeSqliteKnowledgeGraphStore(*connectionPool_, kgCfg);
         if (!kgRes) {
             spdlog::error("[DatabaseManager] Failed to create KnowledgeGraphStore: {}",
                           kgRes.error().message);
+            stats_.repositoryInitErrors.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
-        // Promote unique_ptr to shared_ptr for broader use
         auto uniqueKg = std::move(kgRes).value();
         kgStore_ = std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(uniqueKg));
 
@@ -252,6 +263,7 @@ bool DatabaseManager::initializeRepositories(const std::filesystem::path& dbPath
 
     } catch (const std::exception& e) {
         spdlog::error("[DatabaseManager] Failed to initialize repositories: {}", e.what());
+        stats_.repositoryInitErrors.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 }

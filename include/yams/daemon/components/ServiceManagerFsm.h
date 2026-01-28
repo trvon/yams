@@ -16,7 +16,6 @@ enum class ServiceManagerState {
     DatabaseReady,
     MigratingSchema,
     SchemaReady,
-    InitializingVectors,
     VectorsReady,
     BuildingSearchEngine,
     Ready,

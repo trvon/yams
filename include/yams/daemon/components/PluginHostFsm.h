@@ -7,14 +7,7 @@
 
 namespace yams::daemon {
 
-enum class PluginHostState {
-    NotInitialized,
-    ScanningDirectories,
-    VerifyingTrust,
-    LoadingPlugins,
-    Ready,
-    Failed
-};
+enum class PluginHostState { NotInitialized, ScanningDirectories, LoadingPlugins, Ready, Failed };
 
 struct PluginHostSnapshot {
     PluginHostState state{PluginHostState::NotInitialized};
@@ -25,8 +18,6 @@ struct PluginHostSnapshot {
 
 struct PluginScanStartedEvent {
     std::size_t directoryCount{0};
-};
-struct PluginTrustVerifiedEvent { /* path */
 };
 struct PluginLoadedEvent {
     std::string name;
@@ -48,15 +39,6 @@ public:
     void dispatch(const PluginScanStartedEvent&) {
         std::lock_guard<std::mutex> lock(mutex_);
         transitionTo(PluginHostState::ScanningDirectories);
-    }
-    void dispatch(const PluginTrustVerifiedEvent&) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        // Trust verified - transition to VerifyingTrust state
-        // This allows trust to be configured before scanning begins
-        if (snap_.state == PluginHostState::NotInitialized) {
-            transitionTo(PluginHostState::VerifyingTrust);
-        }
-        // Otherwise, stay in current state (don't regress)
     }
     void dispatch(const PluginLoadedEvent& ev) {
         std::lock_guard<std::mutex> lock(mutex_);

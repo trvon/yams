@@ -22,7 +22,14 @@ public:
         // Avoid hard link dependency on yams_wal in daemon binary linking.
         Stats s;
         auto wal = wal_.lock();
-        (void)wal;
+        if (wal) {
+            auto walStats = wal->getStats();
+            s.activeTransactions = walStats.activeTransactions;
+            s.pendingEntries = walStats.pendingEntriesCount;
+            s.totalEntries = walStats.totalEntries;
+            s.totalBytes = walStats.totalBytes;
+            s.logFileCount = walStats.logFileCount;
+        }
         return s;
     }
 

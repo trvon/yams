@@ -240,23 +240,6 @@ void TuningManager::tick_once() {
     } catch (...) {
     }
 
-    // Search concurrency governance (no dedicated pool)
-    try {
-        auto searchMetrics = sm_->getSearchLoadMetrics();
-        std::uint32_t base = std::max<std::uint32_t>(1, TuneAdvisor::recommendedThreads(0.25));
-        std::uint32_t loadHint = searchMetrics.active + searchMetrics.queued;
-        std::uint32_t target = std::max(base, loadHint);
-        auto advisorLimit = TuneAdvisor::searchConcurrencyLimit();
-        if (advisorLimit > 0)
-            target = std::min(target, advisorLimit);
-        // Gate through ResourceGovernor
-        if (TuneAdvisor::enableResourceGovernor()) {
-            target = std::min(target, governor.maxSearchConcurrency());
-        }
-        (void)sm_->applySearchConcurrencyTarget(target);
-    } catch (...) {
-    }
-
     // PBI-05a: PostIngestQueue dynamic concurrency scaling
     // Scale up when there's a large backlog, scale down when idle
     try {
@@ -411,6 +394,124 @@ void TuningManager::tick_once() {
             MuxMetricsRegistry::instance().setWriterBudget(writerBudget);
         }
     }
+
+    // Dynamic pool resizing based on load and pressure
+    // Adjust pool sizes to match demand while respecting ResourceGovernor limits
+    try {
+        auto ipcStats = pm.stats("ipc");
+        auto ioStats = pm.stats("ipc_io");
+
+        // Calculate pool utilization (active / current size)
+        double ipcUtil = (ipcStats.current_size > 0)
+                             ? static_cast<double>(activeConns) / ipcStats.current_size
+                             : 0.0;
+        double ioUtil = (ioStats.current_size > 0)
+                            ? static_cast<double>(muxQueuedBytes) / ioStats.current_size
+                            : 0.0;
+
+        // Hysteresis: only resize if utilization has been high/low for multiple ticks
+        static uint32_t ipcHighTicks = 0;
+        static uint32_t ipcLowTicks = 0;
+        static uint32_t ioHighTicks = 0;
+        static uint32_t ioLowTicks = 0;
+
+        const double highThreshold = 0.80;  // Grow when >80% utilized
+        const double lowThreshold = 0.20;   // Shrink when <20% utilized
+        const uint32_t hysteresisTicks = 3; // Require 3 consecutive ticks
+        const int32_t scaleStep = static_cast<int32_t>(TuneAdvisor::poolScaleStep());
+
+        // IPC pool sizing
+        if (ipcUtil > highThreshold) {
+            ipcHighTicks++;
+            ipcLowTicks = 0;
+            if (ipcHighTicks >= hysteresisTicks) {
+                // Grow pool
+                int32_t target = static_cast<int32_t>(ipcStats.current_size) + scaleStep;
+                int32_t maxSize = static_cast<int32_t>(TuneAdvisor::poolMaxSizeIpc());
+                // Check with ResourceGovernor if scaling is allowed
+                if (TuneAdvisor::enableResourceGovernor() &&
+                    !governor.canScaleUp("ipc", scaleStep)) {
+                    maxSize = ipcStats.current_size; // Don't grow
+                }
+                target = std::min(target, maxSize);
+                int32_t delta = target - static_cast<int32_t>(ipcStats.current_size);
+                if (delta > 0) {
+                    pm.apply_delta(
+                        {"ipc", delta, "tuning_load_grow", TuneAdvisor::poolCooldownMs()});
+                    spdlog::debug("TuningManager: IPC pool grown by {} (util={:.1f}%)", delta,
+                                  ipcUtil * 100.0);
+                }
+                ipcHighTicks = 0;
+            }
+        } else if (ipcUtil < lowThreshold) {
+            ipcLowTicks++;
+            ipcHighTicks = 0;
+            if (ipcLowTicks >= hysteresisTicks) {
+                // Shrink pool
+                int32_t target = static_cast<int32_t>(ipcStats.current_size) - scaleStep;
+                int32_t minSize = static_cast<int32_t>(TuneAdvisor::poolMinSizeIpc());
+                target = std::max(target, minSize);
+                int32_t delta = target - static_cast<int32_t>(ipcStats.current_size);
+                if (delta < 0) {
+                    pm.apply_delta(
+                        {"ipc", delta, "tuning_load_shrink", TuneAdvisor::poolCooldownMs()});
+                    spdlog::debug("TuningManager: IPC pool shrunk by {} (util={:.1f}%)", -delta,
+                                  ipcUtil * 100.0);
+                }
+                ipcLowTicks = 0;
+            }
+        } else {
+            // Reset hysteresis counters when in middle range
+            ipcHighTicks = 0;
+            ipcLowTicks = 0;
+        }
+
+        // IO pool sizing (similar logic)
+        if (ioUtil > highThreshold) {
+            ioHighTicks++;
+            ioLowTicks = 0;
+            if (ioHighTicks >= hysteresisTicks) {
+                int32_t target = static_cast<int32_t>(ioStats.current_size) + scaleStep;
+                int32_t maxSize = static_cast<int32_t>(TuneAdvisor::poolMaxSizeIpcIo());
+                // Check with ResourceGovernor if scaling is allowed
+                if (TuneAdvisor::enableResourceGovernor() &&
+                    !governor.canScaleUp("ipc_io", scaleStep)) {
+                    maxSize = ioStats.current_size; // Don't grow
+                }
+                target = std::min(target, maxSize);
+                int32_t delta = target - static_cast<int32_t>(ioStats.current_size);
+                if (delta > 0) {
+                    pm.apply_delta(
+                        {"ipc_io", delta, "tuning_load_grow", TuneAdvisor::poolCooldownMs()});
+                    spdlog::debug("TuningManager: IO pool grown by {} (util={:.1f}%)", delta,
+                                  ioUtil * 100.0);
+                }
+                ioHighTicks = 0;
+            }
+        } else if (ioUtil < lowThreshold) {
+            ioLowTicks++;
+            ioHighTicks = 0;
+            if (ioLowTicks >= hysteresisTicks) {
+                int32_t target = static_cast<int32_t>(ioStats.current_size) - scaleStep;
+                int32_t minSize = static_cast<int32_t>(TuneAdvisor::poolMinSizeIpcIo());
+                target = std::max(target, minSize);
+                int32_t delta = target - static_cast<int32_t>(ioStats.current_size);
+                if (delta < 0) {
+                    pm.apply_delta(
+                        {"ipc_io", delta, "tuning_load_shrink", TuneAdvisor::poolCooldownMs()});
+                    spdlog::debug("TuningManager: IO pool shrunk by {} (util={:.1f}%)", -delta,
+                                  ioUtil * 100.0);
+                }
+                ioLowTicks = 0;
+            }
+        } else {
+            ioHighTicks = 0;
+            ioLowTicks = 0;
+        }
+    } catch (...) {
+    }
+
+    // Expose pool sizes and writer budget to FSM metrics for downstream visibility
 
     // Expose pool sizes and writer budget to FSM metrics for downstream visibility
     try {

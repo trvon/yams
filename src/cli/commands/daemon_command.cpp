@@ -2045,10 +2045,12 @@ private:
                     uint64_t titleQueueDepth = findPostIngestCount("title_queue_depth");
                     // Get dynamic concurrency limits
                     uint64_t extractLimit =
-                        std::max(4ULL, findPostIngestCount("post_extraction_limit"));
-                    uint64_t kgLimit = std::max(8ULL, findPostIngestCount("post_kg_limit"));
-                    uint64_t symbolLimit = std::max(4ULL, findPostIngestCount("post_symbol_limit"));
-                    uint64_t entityLimit = std::max(4ULL, findPostIngestCount("post_entity_limit"));
+                        std::max<uint64_t>(4, findPostIngestCount("post_extraction_limit"));
+                    uint64_t kgLimit = std::max<uint64_t>(8, findPostIngestCount("post_kg_limit"));
+                    uint64_t symbolLimit =
+                        std::max<uint64_t>(4, findPostIngestCount("post_symbol_limit"));
+                    uint64_t entityLimit =
+                        std::max<uint64_t>(4, findPostIngestCount("post_entity_limit"));
 
                     // Calculate actual pending = queued - consumed - inflight
                     int64_t kgPending = static_cast<int64_t>(kgQueuedTotal) -
@@ -2116,6 +2118,83 @@ private:
                     }
                 }
                 render_rows(std::cout, postIngestRows);
+
+                // Internal Processing Metrics section (Stream, WorkCoordinator, InternalEventBus)
+                std::cout << "\n" << section_header("Internal Processing") << "\n\n";
+                std::vector<Row> internalRows;
+
+                // WorkCoordinator metrics
+                uint64_t workCoordWorkers = findPostIngestCount("work_coordinator_workers");
+                uint64_t workCoordActive = findPostIngestCount("work_coordinator_active");
+                uint64_t workCoordRunning = findPostIngestCount("work_coordinator_running");
+                if (workCoordRunning > 0 || workCoordWorkers > 0) {
+                    std::ostringstream workVal;
+                    workVal << (workCoordRunning > 0 ? "running" : "stopped");
+                    if (workCoordWorkers > 0) {
+                        workVal << " · " << workCoordWorkers << " workers";
+                        if (workCoordActive > 0) {
+                            workVal << " · " << workCoordActive << " active";
+                        }
+                    }
+                    internalRows.push_back({"WorkCoordinator", workVal.str(), ""});
+                }
+
+                // Stream metrics
+                uint64_t streamTotal = findPostIngestCount("stream_total");
+                uint64_t streamBatches = findPostIngestCount("stream_batches");
+                uint64_t streamKeepalives = findPostIngestCount("stream_keepalives");
+                if (streamTotal > 0 || streamBatches > 0) {
+                    std::ostringstream streamVal;
+                    streamVal << streamTotal << " streams";
+                    if (streamBatches > 0) {
+                        streamVal << " · " << streamBatches << " batches";
+                    }
+                    if (streamKeepalives > 0) {
+                        streamVal << " · " << streamKeepalives << " keepalives";
+                    }
+                    internalRows.push_back({"Streams", streamVal.str(), ""});
+                }
+
+                // InternalEventBus counters (title extraction, FTS5, symbol)
+                uint64_t titleQueued = findPostIngestCount("title_queued");
+                uint64_t titleDropped = findPostIngestCount("title_dropped");
+                uint64_t titleConsumed = findPostIngestCount("title_consumed");
+                if (titleQueued > 0 || titleDropped > 0 || titleConsumed > 0) {
+                    std::ostringstream titleVal;
+                    titleVal << "q=" << titleQueued << " · d=" << titleDropped
+                             << " · c=" << titleConsumed;
+                    Severity titleSev = titleDropped > 0 ? Severity::Warn : Severity::Good;
+                    internalRows.push_back(
+                        {"Title Extraction", paintStatus(titleSev, titleVal.str()), ""});
+                }
+
+                uint64_t fts5Queued = findPostIngestCount("fts5_queued");
+                uint64_t fts5Dropped = findPostIngestCount("fts5_dropped");
+                uint64_t fts5Consumed = findPostIngestCount("fts5_consumed");
+                if (fts5Queued > 0 || fts5Dropped > 0 || fts5Consumed > 0) {
+                    std::ostringstream fts5Val;
+                    fts5Val << "q=" << fts5Queued << " · d=" << fts5Dropped
+                            << " · c=" << fts5Consumed;
+                    Severity fts5Sev = fts5Dropped > 0 ? Severity::Warn : Severity::Good;
+                    internalRows.push_back(
+                        {"FTS5 Indexing", paintStatus(fts5Sev, fts5Val.str()), ""});
+                }
+
+                uint64_t symbolQueued = findPostIngestCount("symbol_queued");
+                uint64_t symbolDropped = findPostIngestCount("symbol_dropped");
+                uint64_t symbolConsumed = findPostIngestCount("symbol_consumed");
+                if (symbolQueued > 0 || symbolDropped > 0 || symbolConsumed > 0) {
+                    std::ostringstream symbolVal;
+                    symbolVal << "q=" << symbolQueued << " · d=" << symbolDropped
+                              << " · c=" << symbolConsumed;
+                    Severity symbolSev = symbolDropped > 0 ? Severity::Warn : Severity::Good;
+                    internalRows.push_back(
+                        {"Symbol Extraction", paintStatus(symbolSev, symbolVal.str()), ""});
+                }
+
+                if (!internalRows.empty()) {
+                    render_rows(std::cout, internalRows);
+                }
 
                 std::cout << "\n" << section_header("Storage & Embeddings") << "\n\n";
                 std::vector<Row> storageRows;

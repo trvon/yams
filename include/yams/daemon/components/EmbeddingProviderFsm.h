@@ -37,6 +37,13 @@ struct LoadFailureEvent {
 struct ProviderDegradedEvent {
     std::string reason;
 };
+// Recovery events for production resilience
+struct ModelReloadRequestedEvent {
+    std::string modelName;
+};
+struct ProviderRecoveryEvent {
+    std::string reason;
+};
 
 class EmbeddingProviderFsm {
 public:
@@ -58,6 +65,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         snap_.modelName = ev.modelName;
         snap_.embeddingDimension = ev.dimension;
+        snap_.lastError.clear();
         transitionTo(EmbeddingProviderState::ModelReady);
     }
     void dispatch(const LoadFailureEvent& ev) {
@@ -69,6 +77,26 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         snap_.lastError = ev.reason;
         transitionTo(EmbeddingProviderState::Degraded);
+    }
+    // Recovery events - allow transition from Failed/Degraded back to operational states
+    void dispatch(const ModelReloadRequestedEvent& ev) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Allow recovery from Failed or Degraded states
+        if (snap_.state == EmbeddingProviderState::Failed ||
+            snap_.state == EmbeddingProviderState::Degraded) {
+            snap_.modelName = ev.modelName;
+            snap_.lastError.clear();
+            transitionTo(EmbeddingProviderState::ModelLoading);
+        }
+    }
+    void dispatch(const ProviderRecoveryEvent&) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Allow recovery from Failed or Degraded states
+        if (snap_.state == EmbeddingProviderState::Failed ||
+            snap_.state == EmbeddingProviderState::Degraded) {
+            snap_.lastError.clear();
+            transitionTo(EmbeddingProviderState::ProviderAdopted);
+        }
     }
 
     bool isReady() const {

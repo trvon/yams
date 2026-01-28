@@ -221,6 +221,39 @@ struct MetricsSnapshot {
     uint32_t onnxGlinerUsed{0};
     uint32_t onnxEmbedUsed{0};
     uint32_t onnxRerankerUsed{0};
+
+    // DatabaseManager metrics
+    uint64_t dbOpenDurationMs{0};
+    uint64_t dbMigrationDurationMs{0};
+    uint64_t dbOpenErrors{0};
+    uint64_t dbMigrationErrors{0};
+    uint64_t dbRepositoryInitErrors{0};
+
+    // WorkCoordinator metrics
+    std::size_t workCoordinatorWorkerCount{0};
+    std::size_t workCoordinatorActiveWorkers{0};
+    bool workCoordinatorRunning{false};
+
+    // Stream metrics (from StreamMetricsRegistry)
+    uint64_t streamTotal{0};
+    uint64_t streamBatches{0};
+    uint64_t streamKeepalives{0};
+    uint64_t streamTtfbAvgMs{0};
+
+    // Title extraction metrics (from InternalEventBus)
+    uint64_t titleQueued{0};
+    uint64_t titleDropped{0};
+    uint64_t titleConsumed{0};
+
+    // FTS5 indexing metrics (full picture from InternalEventBus)
+    uint64_t fts5Queued{0};
+    uint64_t fts5Dropped{0};
+    uint64_t fts5Consumed{0};
+
+    // Symbol extraction metrics (from InternalEventBus)
+    uint64_t symbolQueued{0};
+    uint64_t symbolDropped{0};
+    uint64_t symbolConsumed{0};
 };
 
 class SocketServer; // Forward declaration

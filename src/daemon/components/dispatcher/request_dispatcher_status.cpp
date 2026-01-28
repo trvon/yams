@@ -157,6 +157,13 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     res.requestCounts["tuning_post_ingest_threads_max"] = tc.postIngestThreadsMax;
                     res.requestCounts["tuning_admit_warn_threshold"] = tc.admitWarnThreshold;
                     res.requestCounts["tuning_admit_stop_threshold"] = tc.admitStopThreshold;
+                    // WorkCoordinator metrics
+                    res.requestCounts["work_coordinator_workers"] =
+                        snap->workCoordinatorWorkerCount;
+                    res.requestCounts["work_coordinator_active"] =
+                        snap->workCoordinatorActiveWorkers;
+                    res.requestCounts["work_coordinator_running"] =
+                        snap->workCoordinatorRunning ? 1 : 0;
                 }
             } catch (...) {
             }
@@ -181,6 +188,22 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.requestCounts["entity_inflight"] = snap->entityInFlight;
             res.requestCounts["entity_queue_depth"] = snap->entityQueueDepth;
             res.requestCounts["title_queue_depth"] = snap->titleQueueDepth;
+            res.requestCounts["title_queued"] = snap->titleQueued;
+            res.requestCounts["title_dropped"] = snap->titleDropped;
+            res.requestCounts["title_consumed"] = snap->titleConsumed;
+            // FTS5 indexing metrics
+            res.requestCounts["fts5_queued"] = snap->fts5Queued;
+            res.requestCounts["fts5_dropped"] = snap->fts5Dropped;
+            res.requestCounts["fts5_consumed"] = snap->fts5Consumed;
+            // Symbol extraction metrics
+            res.requestCounts["symbol_queued"] = snap->symbolQueued;
+            res.requestCounts["symbol_dropped"] = snap->symbolDropped;
+            res.requestCounts["symbol_consumed"] = snap->symbolConsumed;
+            // Stream metrics
+            res.requestCounts["stream_total"] = snap->streamTotal;
+            res.requestCounts["stream_batches"] = snap->streamBatches;
+            res.requestCounts["stream_keepalives"] = snap->streamKeepalives;
+            res.requestCounts["stream_ttfb_avg_ms"] = snap->streamTtfbAvgMs;
             // File/directory add tracking
             res.requestCounts["files_added"] = static_cast<size_t>(snap->filesAdded);
             res.requestCounts["directories_added"] = static_cast<size_t>(snap->directoriesAdded);

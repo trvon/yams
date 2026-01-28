@@ -71,8 +71,8 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/VectorSystemManager.h>
-#include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
+#include <yams/daemon/ipc/retrieval_session.h>
 
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
@@ -432,6 +432,15 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             databaseManager_ = std::make_unique<DatabaseManager>(dbDeps);
             spdlog::debug("[ServiceManager] DatabaseManager created");
 
+            // Create WALManager (will be initialized later with resolved dataDir)
+            try {
+                walManager_ = std::make_shared<yams::wal::WALManager>();
+                spdlog::debug("[ServiceManager] WALManager created");
+            } catch (const std::exception& e) {
+                spdlog::warn("[ServiceManager] Failed to create WALManager: {}", e.what());
+                // Continue without WAL - metrics will return zeros
+            }
+
             // Create CheckpointManager
             CheckpointManager::Config checkpointConfig;
             checkpointConfig.checkpoint_interval =
@@ -500,6 +509,27 @@ yams::Result<void> ServiceManager::initialize() {
 
     // Persist resolved dataDir for downstream components/telemetry
     resolvedDataDir_ = dataDir;
+
+    // Initialize WALManager (after dataDir is resolved)
+    if (walManager_) {
+        yams::wal::WALManager::Config walConfig;
+        walConfig.walDirectory = resolvedDataDir_ / "wal";
+        try {
+            if (auto result = walManager_->initialize(); !result) {
+                spdlog::warn("[ServiceManager] WALManager initialization failed: {}",
+                             result.error().message);
+                walManager_.reset();
+            } else {
+                spdlog::info("[ServiceManager] WALManager initialized");
+                // Attach to WalMetricsProvider for metrics collection
+                attachWalManager(walManager_);
+                spdlog::debug("[ServiceManager] WALManager attached to metrics provider");
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] WALManager initialization threw: {}", e.what());
+            walManager_.reset();
+        }
+    }
 
     // Log plugin scan directories for troubleshooting
     try {
@@ -974,6 +1004,20 @@ void ServiceManager::shutdown() {
         }
     } catch (...) {
         spdlog::warn("[ServiceManager] Phase 9.3: Exception resetting DatabaseManager");
+    }
+    try {
+        if (walManager_) {
+            auto result = walManager_->shutdown();
+            if (!result) {
+                spdlog::warn("[ServiceManager] Phase 9.4: WALManager shutdown failed: {}",
+                             result.error().message);
+            } else {
+                spdlog::info("[ServiceManager] Phase 9.4: WALManager shutdown complete");
+            }
+            walManager_.reset();
+        }
+    } catch (...) {
+        spdlog::warn("[ServiceManager] Phase 9.4: Exception resetting WALManager");
     }
 
     spdlog::info("[ServiceManager] Phase 10: Releasing plugin infrastructure");
@@ -2521,18 +2565,36 @@ size_t ServiceManager::getWorkerQueueDepth() const {
 
 ServiceManager::SearchLoadMetrics ServiceManager::getSearchLoadMetrics() const {
     SearchLoadMetrics metrics;
-    // SearchExecutor has been removed - metrics are no longer available
-    // SearchEngine uses a different concurrency model
+
+    // Get search engine statistics if available
+    auto engine = getSearchEngineSnapshot();
+    if (engine) {
+        const auto& stats = engine->getStatistics();
+
+        // Map SearchEngine::Statistics to SearchLoadMetrics
+        // Note: SearchEngine is synchronous, so "active" and "queued" are conceptual
+        // "active" = 1 if engine is available and serving queries
+        // "queued" = 0 (no queue in synchronous model)
+        metrics.active = 1; // Engine is available
+        metrics.queued = 0; // No queue in synchronous model
+        metrics.executed = stats.totalQueries.load();
+        metrics.avgLatencyUs = stats.avgQueryTimeMicros.load();
+
+        // Calculate cache hit rate from successful vs total queries
+        auto total = stats.totalQueries.load();
+        auto successful = stats.successfulQueries.load();
+        if (total > 0) {
+            metrics.cacheHitRate = static_cast<double>(successful) / static_cast<double>(total);
+        } else {
+            metrics.cacheHitRate = 0.0;
+        }
+
+        // Concurrency limit is not applicable in new model, set to 1 (synchronous)
+        metrics.concurrencyLimit = 1;
+    }
+
     return metrics;
 }
-
-bool ServiceManager::applySearchConcurrencyTarget(std::size_t /*target*/) {
-    // SearchExecutor has been removed - concurrency tuning is no longer applicable
-    // SearchEngine uses a different concurrency model
-    return false;
-}
-
-// (Namespace yams::daemon remains open for subsequent member definitions)
 
 bool ServiceManager::detectEmbeddingPreloadFlag() const {
     return ConfigResolver::detectEmbeddingPreloadFlag(config_);

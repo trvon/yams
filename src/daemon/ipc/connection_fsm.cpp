@@ -1,6 +1,7 @@
 // Adapter implementation kept private; headers remain minimal and 3P-free.
 #include <yams/daemon/ipc/connection_fsm.h>
 
+#include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/socket_utils.h>
 
 #include <spdlog/spdlog.h>
@@ -373,6 +374,8 @@ bool ConnectionFsm::transition(State next, const char* reason) noexcept {
     state_ = next;
     if (auto* impl = impl_.get()) {
         impl->metrics.transitions++;
+        // Emit to FsmMetricsRegistry
+        FsmMetricsRegistry::instance().incrementTransitions(1);
         if (impl->cfg.enable_metrics) {
             YAMS_PLOT("daemon_fsm_transitions", static_cast<int64_t>(impl->metrics.transitions));
             // Also expose a simple gauge for current state id for observability
@@ -519,6 +522,8 @@ void ConnectionFsm::on_body_parsed() {
     if (auto* impl = impl_.get()) {
         impl->last_event = "body_parsed";
         impl->metrics.payload_reads_completed++;
+        // Emit to FsmMetricsRegistry
+        FsmMetricsRegistry::instance().incrementPayloadReads(1);
         if (impl->cfg.enable_metrics) {
             YAMS_PLOT("daemon_fsm_payload_reads",
                       static_cast<int64_t>(impl->metrics.payload_reads_completed));

@@ -1,6 +1,6 @@
 // Daemon metrics and status test suite (Catch2)
 // Consolidates status/metrics tests: embedding status, plugin degradation, WAL metrics, FSM states
-// Covers: DaemonMetrics, StatusResponse serialization, plugin degradation tracking, WAL metrics
+// Covers: DaemonMetrics, StatusResponse serialization, plugin degradation, WAL metrics
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -10,10 +10,13 @@
 
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/DatabaseManager.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/proto_serializer.h>
 #include <yams/daemon/resource/model_provider.h>
@@ -316,5 +319,152 @@ TEST_CASE("DaemonMetrics: FSM state export", "[daemon][metrics][fsm]") {
         // Plugin host starts in NotInitialized state until PluginManager is created
         // ServiceManager returns fallback PluginHostSnapshot{} when pluginManager_ is null
         REQUIRE(snapshot.state == PluginHostState::NotInitialized);
+    }
+}
+
+// =============================================================================
+// DatabaseManager Metrics Tests
+// =============================================================================
+
+TEST_CASE("DatabaseManager: Metrics tracking", "[daemon][metrics][database]") {
+    StateComponent state;
+    DatabaseManager::Dependencies deps{.state = &state};
+    DatabaseManager dbm(deps);
+
+    SECTION("Stats start at zero") {
+        const auto& stats = dbm.getStats();
+        REQUIRE(stats.openDurationMs.load() == 0);
+        REQUIRE(stats.migrationDurationMs.load() == 0);
+        REQUIRE(stats.openErrors.load() == 0);
+        REQUIRE(stats.migrationErrors.load() == 0);
+        REQUIRE(stats.repositoryInitErrors.load() == 0);
+    }
+
+    SECTION("Stats are returned by reference") {
+        // Verify we can access stats multiple times
+        const auto& stats1 = dbm.getStats();
+        const auto& stats2 = dbm.getStats();
+        REQUIRE(stats1.openErrors.load() == stats2.openErrors.load());
+    }
+}
+
+TEST_CASE("DaemonMetrics: DatabaseManager metrics export", "[daemon][metrics][database]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_db_metrics_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+
+    SECTION("DatabaseManager metrics are included in snapshot") {
+        DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+        auto snap = metrics.getSnapshot();
+
+        REQUIRE(snap != nullptr);
+        // DatabaseManager metrics should be present (may be 0 if not initialized)
+        REQUIRE(snap->dbOpenErrors == 0); // Default value when no errors
+    }
+}
+
+// =============================================================================
+// WorkCoordinator Metrics Tests
+// =============================================================================
+
+TEST_CASE("WorkCoordinator: Metrics tracking", "[daemon][metrics][work]") {
+    WorkCoordinator wc;
+
+    SECTION("Stats before start") {
+        auto stats = wc.getStats();
+        REQUIRE(stats.workerCount == 0);
+        REQUIRE(stats.activeWorkers == 0);
+        REQUIRE(stats.isRunning == false);
+    }
+
+    SECTION("Stats accessors don't crash") {
+        REQUIRE(wc.getWorkerCount() == 0);
+        REQUIRE(wc.getActiveWorkerCount() == 0);
+        REQUIRE(wc.isRunning() == false);
+    }
+}
+
+TEST_CASE("DaemonMetrics: WorkCoordinator metrics export", "[daemon][metrics][work]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_wc_metrics_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+
+    SECTION("WorkCoordinator metrics are included in snapshot") {
+        DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+        auto snap = metrics.getSnapshot();
+
+        REQUIRE(snap != nullptr);
+        // WorkCoordinator metrics should be present
+        // ServiceManager creates WorkCoordinator with hardware_concurrency() workers
+        REQUIRE(snap->workCoordinatorWorkerCount > 0); // Should have workers
+        REQUIRE(snap->workCoordinatorRunning == true); // Should be running
+    }
+}
+
+// =============================================================================
+// Search Load Metrics Tests
+// =============================================================================
+
+TEST_CASE("ServiceManager: Search load metrics", "[daemon][metrics][search]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_search_metrics_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+
+    SECTION("Search load metrics return valid structure") {
+        auto metrics = svc.getSearchLoadMetrics();
+        // Before search engine is built, metrics should still return valid values
+        // (active=1 if engine exists, 0 otherwise)
+        REQUIRE(metrics.active <= 1); // 0 or 1
+        REQUIRE(metrics.queued == 0); // No queue in synchronous model
+        // concurrencyLimit is 1 when engine exists, 0 otherwise
+        REQUIRE(metrics.concurrencyLimit <= 1); // 0 or 1
+    }
+}
+
+// =============================================================================
+// FsmMetricsRegistry Integration Tests
+// =============================================================================
+
+TEST_CASE("FsmMetricsRegistry: Metrics collection", "[daemon][metrics][fsm]") {
+    // Reset registry to known state
+    FsmMetricsRegistry::instance().reset();
+
+    SECTION("Registry starts with zeros") {
+        auto snap = FsmMetricsRegistry::instance().snapshot();
+        REQUIRE(snap.transitions == 0);
+        REQUIRE(snap.headerReads == 0);
+        REQUIRE(snap.payloadReads == 0);
+        REQUIRE(snap.payloadWrites == 0);
+        REQUIRE(snap.bytesSent == 0);
+        REQUIRE(snap.bytesReceived == 0);
+    }
+
+    SECTION("Registry increments correctly") {
+        FsmMetricsRegistry::instance().incrementTransitions(5);
+        FsmMetricsRegistry::instance().incrementHeaderReads(3);
+        FsmMetricsRegistry::instance().incrementPayloadReads(2);
+        FsmMetricsRegistry::instance().addBytesSent(100);
+        FsmMetricsRegistry::instance().addBytesReceived(200);
+
+        auto snap = FsmMetricsRegistry::instance().snapshot();
+        REQUIRE(snap.transitions == 5);
+        REQUIRE(snap.headerReads == 3);
+        REQUIRE(snap.payloadReads == 2);
+        REQUIRE(snap.bytesSent == 100);
+        REQUIRE(snap.bytesReceived == 200);
+    }
+
+    SECTION("Registry reset works") {
+        FsmMetricsRegistry::instance().incrementTransitions(10);
+        FsmMetricsRegistry::instance().reset();
+
+        auto snap = FsmMetricsRegistry::instance().snapshot();
+        REQUIRE(snap.transitions == 0);
     }
 }

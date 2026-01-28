@@ -22,6 +22,7 @@
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
+#include <yams/daemon/ipc/stream_metrics_registry.h>
 #include <yams/search/search_tuner.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
@@ -36,8 +37,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX 1
 #endif
-#include <Windows.h>
 #include <Psapi.h>
+#include <Windows.h>
 
 #endif
 #if defined(TRACY_ENABLE)
@@ -803,6 +804,65 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.onnxRerankerUsed = fsnap.onnxRerankerUsed;
     } catch (...) {
     }
+
+    // DatabaseManager metrics
+    try {
+        if (services_) {
+            if (auto* dbm = services_->getDatabaseManager()) {
+                const auto& dbStats = dbm->getStats();
+                out.dbOpenDurationMs = dbStats.openDurationMs.load();
+                out.dbMigrationDurationMs = dbStats.migrationDurationMs.load();
+                out.dbOpenErrors = dbStats.openErrors.load();
+                out.dbMigrationErrors = dbStats.migrationErrors.load();
+                out.dbRepositoryInitErrors = dbStats.repositoryInitErrors.load();
+            }
+        }
+    } catch (...) {
+    }
+
+    // WorkCoordinator metrics
+    try {
+        if (services_) {
+            if (auto* wc = services_->getWorkCoordinator()) {
+                auto wcStats = wc->getStats();
+                out.workCoordinatorWorkerCount = wcStats.workerCount;
+                out.workCoordinatorActiveWorkers = wcStats.activeWorkers;
+                out.workCoordinatorRunning = wcStats.isRunning;
+            }
+        }
+    } catch (...) {
+    }
+
+    // Stream metrics (from StreamMetricsRegistry)
+    try {
+        auto ssnap = StreamMetricsRegistry::instance().snapshot();
+        out.streamTotal = ssnap.totalStreams;
+        out.streamBatches = ssnap.batchesEmitted;
+        out.streamKeepalives = ssnap.keepalives;
+        if (ssnap.ttfbCount > 0) {
+            out.streamTtfbAvgMs = ssnap.ttfbSumMs / ssnap.ttfbCount;
+        }
+    } catch (...) {
+    }
+
+    // InternalEventBus metrics (title extraction, FTS5, symbol)
+    try {
+        auto& bus = InternalEventBus::instance();
+        // Title extraction
+        out.titleQueued = bus.titleQueued();
+        out.titleDropped = bus.titleDropped();
+        out.titleConsumed = bus.titleConsumed();
+        // FTS5 indexing (full picture)
+        out.fts5Queued = bus.fts5Queued();
+        out.fts5Dropped = bus.fts5Dropped();
+        out.fts5Consumed = bus.fts5Consumed();
+        // Symbol extraction
+        out.symbolQueued = bus.symbolQueued();
+        out.symbolDropped = bus.symbolDropped();
+        out.symbolConsumed = bus.symbolConsumed();
+    } catch (...) {
+    }
+
     int64_t muxQueuedBytesLocal = 0;
     try {
         auto msnap = MuxMetricsRegistry::instance().snapshot();

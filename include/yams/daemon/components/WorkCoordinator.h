@@ -179,6 +179,30 @@ public:
      */
     [[nodiscard]] std::size_t getWorkerCount() const noexcept;
 
+    /**
+     * @brief Get number of active workers currently executing work.
+     *
+     * @return Active worker count
+     */
+    [[nodiscard]] std::size_t getActiveWorkerCount() const noexcept {
+        return activeWorkers_.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Get work coordinator statistics.
+     */
+    struct Stats {
+        std::size_t workerCount{0};
+        std::size_t activeWorkers{0};
+        bool isRunning{false};
+    };
+
+    [[nodiscard]] Stats getStats() const noexcept {
+        return Stats{.workerCount = getWorkerCount(),
+                     .activeWorkers = getActiveWorkerCount(),
+                     .isRunning = isRunning()};
+    }
+
 private:
     /// Shared io_context for all async operations
     std::shared_ptr<boost::asio::io_context> ioContext_;

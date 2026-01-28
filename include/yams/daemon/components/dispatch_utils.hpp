@@ -142,9 +142,6 @@ check_provider_ready(const ServiceManager* sm) {
             case PluginHostState::ScanningDirectories:
                 message = "Plugin system scanning directories - initialization in progress";
                 break;
-            case PluginHostState::VerifyingTrust:
-                message = "Plugin system verifying trust - initialization in progress";
-                break;
             case PluginHostState::LoadingPlugins:
                 message = "Plugin system loading plugins - initialization in progress";
                 break;

@@ -19,8 +19,6 @@ std::string to_string(PluginHostState state) {
             return "not_initialized";
         case PluginHostState::ScanningDirectories:
             return "scanning";
-        case PluginHostState::VerifyingTrust:
-            return "verifying_trust";
         case PluginHostState::LoadingPlugins:
             return "loading";
         case PluginHostState::Ready:

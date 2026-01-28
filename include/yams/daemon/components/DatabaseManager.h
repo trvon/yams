@@ -98,6 +98,24 @@ public:
      */
     bool isReady() const { return database_ != nullptr && metadataRepo_ != nullptr; }
 
+    /**
+     * @brief Database operation statistics.
+     */
+    struct Stats {
+        std::atomic<uint64_t> openDurationMs{0};
+        std::atomic<uint64_t> migrationDurationMs{0};
+        std::atomic<uint64_t> openErrors{0};
+        std::atomic<uint64_t> migrationErrors{0};
+        std::atomic<uint64_t> connectionPoolSize{0};
+        std::atomic<uint64_t> activeConnections{0};
+        std::atomic<uint64_t> repositoryInitErrors{0};
+    };
+
+    /**
+     * @brief Get database statistics.
+     */
+    const Stats& getStats() const { return stats_; }
+
 private:
     Dependencies deps_;
 
@@ -107,6 +125,8 @@ private:
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
 
     std::filesystem::path dbPath_;
+
+    mutable Stats stats_;
 };
 
 } // namespace yams::daemon

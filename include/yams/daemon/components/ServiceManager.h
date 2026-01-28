@@ -54,6 +54,7 @@
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/profiling.h>
+#include <yams/wal/wal_manager.h>
 
 // Forward declarations for services
 namespace yams::api {
@@ -165,7 +166,6 @@ public:
         std::uint32_t concurrencyLimit{0};
     };
     SearchLoadMetrics getSearchLoadMetrics() const;
-    bool applySearchConcurrencyTarget(std::size_t target);
     struct IngestMetricsSnapshot {
         std::size_t queued;
         std::size_t active;
@@ -594,6 +594,7 @@ private:
     std::filesystem::path resolvedDataDir_;
 
     std::shared_ptr<WalMetricsProvider> walMetricsProvider_;
+    std::shared_ptr<yams::wal::WALManager> walManager_;
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::unique_ptr<PostIngestQueue> postIngest_;
     std::unique_ptr<EmbeddingService> embeddingService_;

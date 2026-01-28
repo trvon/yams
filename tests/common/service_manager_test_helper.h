@@ -46,7 +46,6 @@ initializeServiceManagerFully(std::shared_ptr<yams::daemon::ServiceManager> serv
         // Some integration tests only need the schema/vector DB to exist; they may not need the
         // fully built search engine.
         if (snapshot.state == yams::daemon::ServiceManagerState::SchemaReady ||
-            snapshot.state == yams::daemon::ServiceManagerState::InitializingVectors ||
             snapshot.state == yams::daemon::ServiceManagerState::VectorsReady ||
             snapshot.state == yams::daemon::ServiceManagerState::BuildingSearchEngine) {
             spdlog::warn("ServiceManager not Ready within timeout (state={}); continuing "
