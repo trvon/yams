@@ -230,7 +230,6 @@ struct MetricsSnapshot {
     uint64_t dbRepositoryInitErrors{0};
 
     // WorkCoordinator metrics
-    std::size_t workCoordinatorWorkerCount{0};
     std::size_t workCoordinatorActiveWorkers{0};
     bool workCoordinatorRunning{false};
 

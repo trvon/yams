@@ -158,8 +158,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     res.requestCounts["tuning_admit_warn_threshold"] = tc.admitWarnThreshold;
                     res.requestCounts["tuning_admit_stop_threshold"] = tc.admitStopThreshold;
                     // WorkCoordinator metrics
-                    res.requestCounts["work_coordinator_workers"] =
-                        snap->workCoordinatorWorkerCount;
                     res.requestCounts["work_coordinator_active"] =
                         snap->workCoordinatorActiveWorkers;
                     res.requestCounts["work_coordinator_running"] =

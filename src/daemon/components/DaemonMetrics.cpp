@@ -825,7 +825,6 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         if (services_) {
             if (auto* wc = services_->getWorkCoordinator()) {
                 auto wcStats = wc->getStats();
-                out.workCoordinatorWorkerCount = wcStats.workerCount;
                 out.workCoordinatorActiveWorkers = wcStats.activeWorkers;
                 out.workCoordinatorRunning = wcStats.isRunning;
             }

@@ -23,8 +23,8 @@ RUN set -eux; \
 
 # Install Rust toolchain for libsql build (pinned version to avoid cross-device link issues)
 ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH
+  CARGO_HOME=/usr/local/cargo \
+  PATH=/usr/local/cargo/bin:$PATH
 RUN set -eux; \
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.83.0 --profile minimal && \
   rustup set auto-self-update disable && \
@@ -34,9 +34,9 @@ RUN set -eux; \
 RUN set -eux; \
   ARCH=$(uname -m); \
   case "$ARCH" in \
-    x86_64) ZIG_ARCH="x86_64" ;; \
-    aarch64) ZIG_ARCH="aarch64" ;; \
-    *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
+  x86_64) ZIG_ARCH="x86_64" ;; \
+  aarch64) ZIG_ARCH="aarch64" ;; \
+  *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
   esac; \
   ZIG_VERSION="0.15.2"; \
   curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz && \
@@ -75,9 +75,9 @@ RUN git init 2>/dev/null || true && \
 # Use setup.sh with retry logic for Conan remote issues
 # Configure Conan to retry downloads more aggressively for transient network failures
 RUN --mount=type=cache,target=/root/.conan2 \
-    --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/subprojects/libsql/target \
+  --mount=type=cache,target=/usr/local/cargo/registry \
+  --mount=type=cache,target=/usr/local/cargo/git \
+  --mount=type=cache,target=/src/subprojects/libsql/target \
   set -eux; \
   # Prevent rustup from auto-updating when rust-toolchain.toml requests different targets
   export RUSTUP_TOOLCHAIN=1.83.0 && \
@@ -137,6 +137,8 @@ RUN ln -sf ${YAMS_PREFIX}/bin/yams /usr/local/bin/yams && \
 #     cp /tmp/data/magic_numbers.json /usr/local/share/yams/data/; \
 #   fi
 RUN mkdir -p /home/yams/.local/share/yams /home/yams/.config/yams && chown -R yams:yams /home/yams
+RUN mknod /dev/tty c 5 0 2>/dev/null || true && \
+  chmod 666 /dev/tty 2>/dev/null || true
 USER yams
 WORKDIR /home/yams
 ENV YAMS_STORAGE="/home/yams/.local/share/yams" \

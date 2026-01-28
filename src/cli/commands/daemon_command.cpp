@@ -1831,29 +1831,38 @@ private:
                                             std::to_string(status.ioPoolSize) + " io",
                                         ""});
 
-                std::size_t threads = 0, active = 0, queued = 0;
+                std::size_t threads = 0, activeJobs = 0, queuedJobs = 0;
                 if (auto it = status.requestCounts.find("worker_threads");
                     it != status.requestCounts.end())
                     threads = it->second;
                 if (auto it = status.requestCounts.find("worker_active");
                     it != status.requestCounts.end())
-                    active = it->second;
+                    activeJobs = it->second;
                 if (auto it = status.requestCounts.find("worker_queued");
                     it != status.requestCounts.end())
-                    queued = it->second;
+                    queuedJobs = it->second;
+
+                std::size_t workingThreads = activeJobs;
+                std::size_t sleepingThreads =
+                    (threads > workingThreads) ? (threads - workingThreads) : 0;
                 std::size_t util =
-                    threads ? static_cast<std::size_t>((100.0 * active) / threads) : 0;
-                double workerFraction = threads > 0 ? static_cast<double>(active) / threads : 0.0;
-                std::ostringstream workerBar;
-                workerBar << progress_bar(workerFraction, 12, "#", "░", Ansi::GREEN, Ansi::YELLOW,
+                    threads ? static_cast<std::size_t>((100.0 * workingThreads) / threads) : 0;
+                double workerFraction =
+                    threads > 0 ? static_cast<double>(workingThreads) / threads : 0.0;
+
+                std::ostringstream workerVal;
+                workerVal << progress_bar(workerFraction, 12, "#", "░", Ansi::GREEN, Ansi::YELLOW,
                                           Ansi::RED, true)
-                          << " " << util << "% (" << active << "/" << threads << " active)";
-                if (queued > 0)
-                    workerBar << " · " << queued << " queued";
+                          << " " << threads << " threads · " << workingThreads << " working"
+                          << " · " << sleepingThreads << " sleeping · " << activeJobs
+                          << " jobs active";
+                if (queuedJobs > 0)
+                    workerVal << " · " << queuedJobs << " queued";
+
                 Severity workerSeverity =
                     util >= 95 ? Severity::Bad : (util >= 85 ? Severity::Warn : Severity::Good);
                 resourceRows.push_back(
-                    {"Workers", paintStatus(workerSeverity, workerBar.str()), ""});
+                    {"Workers", paintStatus(workerSeverity, workerVal.str()), ""});
                 render_rows(std::cout, resourceRows);
 
                 // Resource Governor section (memory pressure management)
@@ -2059,6 +2068,43 @@ private:
                     if (kgPending < 0)
                         kgPending = 0;
 
+                    // Calculate total active job count across all stages
+                    uint64_t totalActive = extractInFlight + kgInFlight + symbolInFlight +
+                                           entityInFlight + titleQueueDepth;
+                    bool hasActivity = (totalActive > 0);
+
+                    // Add pipeline activity summary
+                    postIngestRows.push_back({"", "", ""}); // Separator
+                    postIngestRows.push_back({subsection_header("Pipeline Activity"), "", ""});
+
+                    if (hasActivity) {
+                        std::ostringstream activitySummary;
+                        activitySummary << totalActive << " jobs active across stages";
+                        std::vector<std::string> activeStages;
+                        if (extractInFlight > 0)
+                            activeStages.push_back("Extraction");
+                        if (kgInFlight > 0 || kgPending > 0)
+                            activeStages.push_back("Knowledge Graph");
+                        if (symbolInFlight > 0)
+                            activeStages.push_back("Symbols");
+                        if (entityInFlight > 0)
+                            activeStages.push_back("Entities");
+                        if (titleQueueDepth > 0)
+                            activeStages.push_back("Title Extraction");
+
+                        activitySummary << " (" << activeStages[0];
+                        for (size_t i = 1; i < activeStages.size(); ++i) {
+                            if (i == activeStages.size() - 1)
+                                activitySummary << ", " << activeStages[i];
+                            else
+                                activitySummary << ", " << activeStages[i];
+                        }
+                        activitySummary << ")";
+                        postIngestRows.push_back({"  Status", activitySummary.str(), ""});
+                    } else {
+                        postIngestRows.push_back({"  Status", neutralText("all stages idle"), ""});
+                    }
+
                     if (extractInFlight > 0 || kgPending > 0 || kgInFlight > 0 ||
                         symbolInFlight > 0 || entityInFlight > 0 || kgQueueDepth > 0 ||
                         symbolQueueDepth > 0 || entityQueueDepth > 0 || titleQueueDepth > 0) {
@@ -2124,18 +2170,16 @@ private:
                 std::vector<Row> internalRows;
 
                 // WorkCoordinator metrics
-                uint64_t workCoordWorkers = findPostIngestCount("work_coordinator_workers");
-                uint64_t workCoordActive = findPostIngestCount("work_coordinator_active");
+                uint64_t workCoordThreads = findPostIngestCount("worker_threads");
+                uint64_t workCoordActive = findPostIngestCount("worker_active");
                 uint64_t workCoordRunning = findPostIngestCount("work_coordinator_running");
-                if (workCoordRunning > 0 || workCoordWorkers > 0) {
+                uint64_t workCoordQueued = findPostIngestCount("worker_queued");
+
+                if (workCoordRunning > 0 || workCoordThreads > 0) {
                     std::ostringstream workVal;
-                    workVal << (workCoordRunning > 0 ? "running" : "stopped");
-                    if (workCoordWorkers > 0) {
-                        workVal << " · " << workCoordWorkers << " workers";
-                        if (workCoordActive > 0) {
-                            workVal << " · " << workCoordActive << " active";
-                        }
-                    }
+                    workVal << workCoordActive << "/" << workCoordThreads << " threads active";
+                    if (workCoordQueued > 0)
+                        workVal << " · " << workCoordQueued << " jobs queued";
                     internalRows.push_back({"WorkCoordinator", workVal.str(), ""});
                 }
 
@@ -2153,43 +2197,6 @@ private:
                         streamVal << " · " << streamKeepalives << " keepalives";
                     }
                     internalRows.push_back({"Streams", streamVal.str(), ""});
-                }
-
-                // InternalEventBus counters (title extraction, FTS5, symbol)
-                uint64_t titleQueued = findPostIngestCount("title_queued");
-                uint64_t titleDropped = findPostIngestCount("title_dropped");
-                uint64_t titleConsumed = findPostIngestCount("title_consumed");
-                if (titleQueued > 0 || titleDropped > 0 || titleConsumed > 0) {
-                    std::ostringstream titleVal;
-                    titleVal << "q=" << titleQueued << " · d=" << titleDropped
-                             << " · c=" << titleConsumed;
-                    Severity titleSev = titleDropped > 0 ? Severity::Warn : Severity::Good;
-                    internalRows.push_back(
-                        {"Title Extraction", paintStatus(titleSev, titleVal.str()), ""});
-                }
-
-                uint64_t fts5Queued = findPostIngestCount("fts5_queued");
-                uint64_t fts5Dropped = findPostIngestCount("fts5_dropped");
-                uint64_t fts5Consumed = findPostIngestCount("fts5_consumed");
-                if (fts5Queued > 0 || fts5Dropped > 0 || fts5Consumed > 0) {
-                    std::ostringstream fts5Val;
-                    fts5Val << "q=" << fts5Queued << " · d=" << fts5Dropped
-                            << " · c=" << fts5Consumed;
-                    Severity fts5Sev = fts5Dropped > 0 ? Severity::Warn : Severity::Good;
-                    internalRows.push_back(
-                        {"FTS5 Indexing", paintStatus(fts5Sev, fts5Val.str()), ""});
-                }
-
-                uint64_t symbolQueued = findPostIngestCount("symbol_queued");
-                uint64_t symbolDropped = findPostIngestCount("symbol_dropped");
-                uint64_t symbolConsumed = findPostIngestCount("symbol_consumed");
-                if (symbolQueued > 0 || symbolDropped > 0 || symbolConsumed > 0) {
-                    std::ostringstream symbolVal;
-                    symbolVal << "q=" << symbolQueued << " · d=" << symbolDropped
-                              << " · c=" << symbolConsumed;
-                    Severity symbolSev = symbolDropped > 0 ? Severity::Warn : Severity::Good;
-                    internalRows.push_back(
-                        {"Symbol Extraction", paintStatus(symbolSev, symbolVal.str()), ""});
                 }
 
                 if (!internalRows.empty()) {
