@@ -389,7 +389,7 @@ private:
     }
 
     bool waitForDaemonStop(const std::string& socketPath, const std::string& pidFilePath,
-                           std::chrono::milliseconds timeout = std::chrono::seconds(5),
+                           std::chrono::milliseconds timeout = std::chrono::seconds(10),
                            pid_t fallbackPid = -1) {
         const auto start = std::chrono::steady_clock::now();
         const auto interval = std::chrono::milliseconds(100);
@@ -961,8 +961,9 @@ private:
             if (shutdownResult) {
                 spdlog::info("Sent shutdown request to daemon");
 
-                // Wait for daemon to stop
-                for (int i = 0; i < 30; i++) {
+                // Wait for daemon to stop (increased timeout to account for graceful shutdown)
+                // SocketServer now waits up to 3s for connection handlers, so we need more time
+                for (int i = 0; i < 60; i++) {
                     if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
                         if (!pidAlive()) {
                             stopped = true;
@@ -981,7 +982,7 @@ private:
                 // Treat common peer-closure/transient errors as potentially-successful if the
                 // daemon disappears shortly after the request.
                 spdlog::warn("Socket shutdown encountered: {}", shutdownResult.error().message);
-                for (int i = 0; i < 30; ++i) {
+                for (int i = 0; i < 60; ++i) {
                     if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
                         if (!pidAlive()) {
                             stopped = true;

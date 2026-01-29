@@ -519,8 +519,10 @@ public:
                             std::cout << "  Note: " << resp.message << std::endl;
                         }
                     } else if (!resp.message.empty() &&
-                               resp.message.find("asynchronous") != std::string::npos) {
-                        // Directory adds are processed asynchronously - show acknowledgment
+                               (resp.message.find("asynchronous") != std::string::npos ||
+                                resp.message.find("deferred") != std::string::npos)) {
+                        // Directory adds / deferred adds are processed asynchronously - show
+                        // acknowledgment
                         std::cout << "From " << path.string() << ": " << resp.message << std::endl;
                         if (!resp.hash.empty()) {
                             std::cout << "  Hash: " << resp.hash << std::endl;

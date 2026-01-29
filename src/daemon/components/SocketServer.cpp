@@ -285,10 +285,11 @@ Result<void> SocketServer::stop() {
                 continue;
             }
             try {
-                // Use short timeout to avoid blocking shutdown
-                auto status = future.wait_for(std::chrono::milliseconds(100));
+                // Wait longer for connection handlers to complete gracefully
+                // This prevents race conditions where handlers are cancelled mid-operation
+                auto status = future.wait_for(std::chrono::seconds(2));
                 if (status == std::future_status::timeout) {
-                    spdlog::debug("Connection future timed out during shutdown");
+                    spdlog::warn("Connection future timed out during shutdown after 2s");
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("Connection future wait failed: {}", e.what());
@@ -302,13 +303,13 @@ Result<void> SocketServer::stop() {
 
         if (acceptLoopFuture_.valid()) {
             try {
-                // Use short timeout to avoid blocking shutdown
-                auto status = acceptLoopFuture_.wait_for(std::chrono::milliseconds(500));
+                // Wait longer for accept loop to complete gracefully
+                auto status = acceptLoopFuture_.wait_for(std::chrono::seconds(3));
                 if (status == std::future_status::ready) {
                     acceptLoopFuture_.get();
                     spdlog::info("SocketServer: accept_loop completed");
                 } else {
-                    spdlog::debug("SocketServer: accept_loop timed out during shutdown");
+                    spdlog::warn("SocketServer: accept_loop timed out during shutdown after 3s");
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("SocketServer: accept_loop terminated with exception: {}", e.what());

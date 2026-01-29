@@ -253,6 +253,9 @@ struct MetricsSnapshot {
     uint64_t symbolQueued{0};
     uint64_t symbolDropped{0};
     uint64_t symbolConsumed{0};
+
+    // Deferred ingestion queue depth (store_document_tasks channel)
+    std::size_t deferredQueueDepth{0};
 };
 
 class SocketServer; // Forward declaration

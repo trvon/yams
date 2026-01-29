@@ -334,6 +334,7 @@ public:
                                 stages["entity_consumed"] = getCount("entity_consumed");
                                 stages["entity_dropped"] = getCount("entity_dropped");
                                 pj["stages"] = std::move(stages);
+                                pj["deferred_queue_depth"] = getCount("deferred_queue_depth");
                                 j["post_ingest"] = std::move(pj);
                             }
                             std::cout << j.dump(2) << std::endl;
@@ -513,7 +514,8 @@ public:
                             uint64_t piq = getCount("post_ingest_queued");
                             uint64_t pii = getCount("post_ingest_inflight");
                             uint64_t piCap = getCount("post_ingest_capacity");
-                            if (piq > 0 || pii > 0) {
+                            uint64_t deferredDepth = getCount("deferred_queue_depth");
+                            if (piq > 0 || pii > 0 || deferredDepth > 0) {
                                 std::cout << "\n"
                                           << section_header("Post-Ingest Pipeline") << "\n\n";
                                 std::vector<Row> postRows;
@@ -525,6 +527,10 @@ public:
                                 if (pii > 0)
                                     postRows.push_back(
                                         {"Inflight", std::to_string(pii) + " active", ""});
+                                if (deferredDepth > 0)
+                                    postRows.push_back(
+                                        {"Deferred",
+                                         std::to_string(deferredDepth) + " pending adds", ""});
                                 render_rows(std::cout, postRows);
                             }
 

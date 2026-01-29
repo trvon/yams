@@ -441,8 +441,37 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
         "add_document", [this, req]() -> boost::asio::awaitable<Response> {
             // Check admission control before accepting new work
             if (!ResourceGovernor::instance().canAdmitWork()) {
-                co_return ErrorResponse{ErrorCode::ResourceExhausted,
-                                        "System is under memory pressure. Please retry later."};
+                // Queue for deferred processing instead of rejecting outright
+                auto channel = InternalEventBus::instance()
+                                   .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+                                       "store_document_tasks", 4096);
+                InternalEventBus::StoreDocumentTask task{req};
+                if (channel->try_push(std::move(task))) {
+                    AddDocumentResponse response;
+                    response.path = req.path.empty() ? req.name : req.path;
+                    response.documentsAdded = 0;
+                    // Compute hash for immediate feedback
+                    bool reqIsDir = (!req.path.empty() && std::filesystem::is_directory(req.path));
+                    if (!reqIsDir && !req.recursive) {
+                        try {
+                            auto hasher = yams::crypto::createSHA256Hasher();
+                            if (!req.content.empty()) {
+                                response.hash = hasher->hash(req.content);
+                            } else if (!req.path.empty()) {
+                                response.hash = hasher->hashFile(req.path);
+                            }
+                        } catch (...) {
+                            response.hash = "";
+                        }
+                    } else {
+                        response.hash = "";
+                    }
+                    response.message = "Queued for deferred processing (system under pressure).";
+                    co_return response;
+                } else {
+                    co_return ErrorResponse{ErrorCode::ResourceExhausted,
+                                            "Ingestion queue is full. Please try again later."};
+                }
             }
 
             // Be forgiving: if the path is a directory but recursive was not set, treat it as

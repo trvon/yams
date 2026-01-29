@@ -859,6 +859,13 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.symbolQueued = bus.symbolQueued();
         out.symbolDropped = bus.symbolDropped();
         out.symbolConsumed = bus.symbolConsumed();
+        // Deferred ingestion queue depth
+        try {
+            auto ch = bus.get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+                "store_document_tasks", 4096);
+            out.deferredQueueDepth = ch->size_approx();
+        } catch (...) {
+        }
     } catch (...) {
     }
 

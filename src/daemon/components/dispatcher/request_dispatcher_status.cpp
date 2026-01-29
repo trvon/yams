@@ -112,6 +112,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.requestCounts["search_concurrency_limit"] = snap->searchConcurrencyLimit;
             // PBI-040, task 040-1: Expose queue depth for FTS5 readiness checks
             res.postIngestQueueDepth = static_cast<uint32_t>(snap->postIngestQueued);
+            // Deferred ingestion queue depth (adds queued under memory pressure)
+            res.requestCounts["deferred_queue_depth"] = snap->deferredQueueDepth;
             res.requestCounts["post_ingest_inflight"] = snap->postIngestInflight;
             res.requestCounts["post_ingest_capacity"] = snap->postIngestCapacity;
             // Export selected tuning config values for clients (best-effort)

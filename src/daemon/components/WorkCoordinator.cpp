@@ -226,14 +226,32 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
 
     if (!completed) {
         try {
-            spdlog::warn("[WorkCoordinator] Timeout expired with {} workers still active",
-                         activeWorkers_.load());
+            spdlog::error(
+                "[WorkCoordinator] CRITICAL: Timeout expired with {} workers still active. "
+                "Attempting to join remaining threads...",
+                activeWorkers_.load());
         } catch (...) {
         }
-        // Detach remaining threads - they'll exit when process terminates
+        // Instead of detaching, try to join with a longer wait
+        // Detached threads can cause use-after-free when they access daemon resources
         for (auto& worker : workers_) {
             if (worker.joinable()) {
-                worker.detach();
+                try {
+                    // Use a longer timeout for joining
+                    auto start = std::chrono::steady_clock::now();
+                    while (worker.joinable() &&
+                           std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                    if (worker.joinable()) {
+                        spdlog::error("[WorkCoordinator] Failed to join worker thread after "
+                                      "extended timeout, detaching as last resort");
+                        worker.detach();
+                    }
+                } catch (...) {
+                    spdlog::error("[WorkCoordinator] Exception while joining worker thread");
+                    worker.detach();
+                }
             }
         }
     } else {

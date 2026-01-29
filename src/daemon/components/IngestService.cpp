@@ -58,11 +58,27 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
             continue; // Skip this iteration, retry later
         }
 
+        // CPU-aware batch sizing: process fewer items per cycle under load
+        int batchLimit = 10;
+        try {
+            auto snap = ResourceGovernor::instance().getSnapshot();
+            if (snap.cpuUsagePercent > 80)
+                batchLimit = 3;
+            else if (snap.cpuUsagePercent > 60)
+                batchLimit = 5;
+            else if (snap.cpuUsagePercent > 40)
+                batchLimit = 8;
+        } catch (...) {
+        }
+
         InternalEventBus::StoreDocumentTask task;
-        if (channel->try_pop(task)) {
+        int processed = 0;
+        while (processed < batchLimit && channel->try_pop(task)) {
             idleDelay = std::chrono::milliseconds(5);
             processTask(sm_, task);
-        } else {
+            ++processed;
+        }
+        if (processed == 0) {
             timer.expires_after(idleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);
             const auto maxIdle = maxIdleDelay();
