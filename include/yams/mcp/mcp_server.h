@@ -179,6 +179,7 @@ private:
     // Refactored members: No direct backend components
     std::atomic<bool> running_{false};
     std::unique_ptr<ITransport> transport_;
+    StdioTransport* cachedStdioTransport_{nullptr}; // Cache to avoid repeated dynamic_cast
     std::unique_ptr<ToolRegistry> toolRegistry_;
     std::atomic<bool>* externalShutdown_;
     std::atomic<bool> exitRequested_{false};     // Set when handling explicit 'exit' request
@@ -207,7 +208,7 @@ private:
     std::atomic<int> readyAutoCount_{0};
     std::atomic<int> readyClientCount_{0};
     std::atomic<bool> initializedNotificationSeen_{false};
-    bool earlyFeatureUse_{
+    std::atomic<bool> earlyFeatureUse_{
         false}; // Set when client invokes feature (tools/list, tools/call) pre-initialized
 
     // --- Cancellation scaffolding ---

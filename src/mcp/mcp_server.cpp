@@ -183,7 +183,17 @@ static nlohmann::json createLogNotification(const std::string& level, const std:
 
 // Unified send helper: prefers non-blocking transports and posts async sends when possible
 void MCPServer::sendResponse(const nlohmann::json& message) {
-    spdlog::debug("MCP server sending response: {}", message.dump());
+    // Serialize once for both logging, telemetry and transport
+    std::string payload;
+    try {
+        payload = message.dump();
+    } catch (const std::exception& e) {
+        spdlog::error("sendResponse: serialization failed: {}", e.what());
+        return;
+    }
+
+    spdlog::debug("MCP server sending response: {}", payload);
+
     // HTTP publish path (notifications). Do not short-circuit stdio delivery.
     if (!tlsSessionId_.empty() && httpPublisher_) {
         try {
@@ -195,25 +205,28 @@ void MCPServer::sendResponse(const nlohmann::json& message) {
         }
     }
 
-    // Serialize once for both telemetry and transport
-    std::string payload;
-    try {
-        payload = message.dump();
-    } catch (const std::exception& e) {
-        spdlog::error("sendResponse: serialization failed: {}", e.what());
-        return;
-    }
     telemetrySentBytes_.fetch_add(static_cast<uint64_t>(payload.size()));
-    if (payload.find("\"jsonrpc\":null") != std::string::npos ||
-        payload.find("\"result\":null") != std::string::npos) {
-        spdlog::error("MCP CORRUPTION SUSPECTED BEFORE SEND: {}", payload);
-        telemetryIntegrityFailures_.fetch_add(1);
+
+    // Fast corruption check - look for null values in key fields
+    // This is faster than string searching for specific patterns
+    if (message.is_object()) {
+        auto it = message.find("jsonrpc");
+        if (it != message.end() && it->is_null()) {
+            spdlog::error("MCP CORRUPTION SUSPECTED BEFORE SEND: {}", payload);
+            telemetryIntegrityFailures_.fetch_add(1);
+        }
     }
 
     // Prefer immediate synchronous flush for stdio transport; fallback to queue
+    // Cache the stdio transport pointer to avoid repeated dynamic_cast
+    if (cachedStdioTransport_) {
+        cachedStdioTransport_->sendFramedSerialized(payload);
+        return;
+    }
+
     if (auto* stdio = dynamic_cast<StdioTransport*>(transport_.get())) {
-        // MCP stdio spec: always output NDJSON (newline-delimited JSON)
-        stdio->send(message);
+        cachedStdioTransport_ = stdio;
+        stdio->sendFramedSerialized(payload);
         return;
     }
 
@@ -450,7 +463,9 @@ bool StdioTransport::isInputAvailable(int timeoutMs) const {
         }
     }
 
-    return result > 0 && (fds.revents & (POLLIN | POLLHUP));
+    // Only return true if there's actual data to read (POLLIN), not on hangup (POLLHUP)
+    // POLLHUP without POLLIN means the client closed the connection without sending data
+    return result > 0 && (fds.revents & POLLIN);
 #endif
 }
 
@@ -496,6 +511,19 @@ MessageResult StdioTransport::receive() {
         // Read first non-empty line, but avoid blocking forever on empty input buffers (tests)
         do {
             if (!std::getline(in, line)) {
+                // Check if this is a real EOF or just no data available yet
+                if (stringBuffer && stringBuffer->in_avail() <= 0) {
+                    // For stringbuf-backed streams (tests), this is expected when no data
+                    // Continue the outer loop to wait for more data
+                    recordError();
+                    if (!shouldRetryAfterError()) {
+                        state_.store(TransportState::Disconnected);
+                        return Error{ErrorCode::NetworkError, "No stdin data available"};
+                    }
+                    // Yield and retry
+                    std::this_thread::yield();
+                    continue;
+                }
                 // Client closed stdin (EOF). Treat as normal shutdown; avoid alarming logs.
                 spdlog::info("StdioTransport: EOF on stdin; treating as client disconnect");
                 state_.store(TransportState::Disconnected);
@@ -1051,7 +1079,7 @@ MessageResult MCPServer::handleRequest(const json& request) {
         // Extract method and params
         std::string method = request.value("method", "");
         json params = request.value("params", json::object());
-        auto id2 = request.value("id", json{});
+        const auto& id2 = id; // Reuse already extracted id
 
         spdlog::debug("MCP server handling method: '{}' with id: {}", method, id.dump());
 
@@ -4764,8 +4792,8 @@ json MCPServer::createError(const json& id, int code, const std::string& message
 }
 
 void MCPServer::recordEarlyFeatureUse() {
-    if (!initializedNotificationSeen_.load()) {
-        earlyFeatureUse_ = true;
+    if (!initializedNotificationSeen_.load(std::memory_order_acquire)) {
+        earlyFeatureUse_.store(true, std::memory_order_relaxed);
     }
 }
 

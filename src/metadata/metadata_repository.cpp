@@ -1032,45 +1032,102 @@ MetadataRepository::getMetadataValueCounts(const std::vector<std::string>& keys,
         return std::unordered_map<std::string, std::vector<MetadataValueCount>>{};
     }
 
-    if (requiresDocumentJoin(options)) {
-        return Error{ErrorCode::InvalidArgument,
-                     "metadata value counts require no document-level filters"};
-    }
-
     return executeQuery<std::unordered_map<std::string, std::vector<MetadataValueCount>>>(
         [&](Database& db)
             -> Result<std::unordered_map<std::string, std::vector<MetadataValueCount>>> {
-            // Fast path: use precomputed counts (document-level filters are rejected earlier)
-            std::string sql = "SELECT key, value, count FROM metadata_value_counts WHERE key IN (";
+            const bool needsDocumentJoin = requiresDocumentJoin(options);
+
+            if (!needsDocumentJoin) {
+                // Fast path: query metadata table directly (not materialized view)
+                // This ensures we get real-time counts without trigger delays
+                std::string sql =
+                    "SELECT m.key, m.value, COUNT(*) FROM metadata m WHERE m.key IN (";
+                for (size_t i = 0; i < keys.size(); ++i) {
+                    if (i > 0)
+                        sql += ",";
+                    sql += "?";
+                }
+                sql += ") AND m.value != '' GROUP BY m.key, m.value";
+
+                bool hasLimit = options.limit > 0;
+                bool hasOffset = options.offset > 0;
+                sql += " ORDER BY COUNT(*) DESC, m.value ASC";
+                if (hasLimit) {
+                    sql += " LIMIT ?";
+                }
+                if (hasOffset) {
+                    if (!hasLimit) {
+                        sql += " LIMIT -1";
+                    }
+                    sql += " OFFSET ?";
+                }
+
+                YAMS_TRY_UNWRAP(stmt, db.prepare(sql));
+                int bindIndex = 1;
+                for (const auto& key : keys) {
+                    YAMS_TRY(stmt.bind(bindIndex++, key));
+                }
+                if (hasLimit) {
+                    YAMS_TRY(stmt.bind(bindIndex++, options.limit));
+                }
+                if (hasOffset) {
+                    YAMS_TRY(stmt.bind(bindIndex++, options.offset));
+                }
+
+                std::unordered_map<std::string, std::vector<MetadataValueCount>> result;
+
+                while (true) {
+                    auto stepResult = stmt.step();
+                    if (!stepResult)
+                        return stepResult.error();
+                    if (!stepResult.value())
+                        break;
+
+                    MetadataValueCount row;
+                    row.value = stmt.getString(1);
+                    row.count = stmt.getInt64(2);
+                    const std::string& key = stmt.getString(0);
+
+                    result[key].push_back(std::move(row));
+                }
+
+                return result;
+            }
+
+            // Slow path: document filters require JOIN with metadata table
+            std::string sql = "SELECT m.key, m.value, COUNT(*) FROM metadata m "
+                              "JOIN documents d ON d.id = m.document_id WHERE ";
+
+            std::vector<std::string> conditions;
+            std::string inList = "(";
             for (size_t i = 0; i < keys.size(); ++i) {
                 if (i > 0)
-                    sql += ",";
-                sql += "?";
+                    inList += ",";
+                inList += "?";
             }
-            sql += ") ORDER BY count DESC, value ASC";
+            inList += ")";
+            conditions.push_back("m.key IN " + inList);
+            conditions.push_back("m.value != ''");
 
-            bool hasLimit = options.limit > 0;
-            bool hasOffset = options.offset > 0;
-            if (hasLimit) {
-                sql += " LIMIT ?";
+            if (options.modifiedAfter) {
+                conditions.push_back("d.modified_time >= ?");
             }
-            if (hasOffset) {
-                if (!hasLimit) {
-                    sql += " LIMIT -1";
-                }
-                sql += " OFFSET ?";
+
+            for (size_t i = 0; i < conditions.size(); ++i) {
+                if (i > 0)
+                    sql += " AND ";
+                sql += conditions[i];
             }
+
+            sql += " GROUP BY m.key, m.value ORDER BY COUNT(*) DESC, m.value ASC";
 
             YAMS_TRY_UNWRAP(stmt, db.prepare(sql));
             int bindIndex = 1;
             for (const auto& key : keys) {
                 YAMS_TRY(stmt.bind(bindIndex++, key));
             }
-            if (hasLimit) {
-                YAMS_TRY(stmt.bind(bindIndex++, options.limit));
-            }
-            if (hasOffset) {
-                YAMS_TRY(stmt.bind(bindIndex++, options.offset));
+            if (options.modifiedAfter) {
+                YAMS_TRY(stmt.bind(bindIndex++, *options.modifiedAfter));
             }
 
             std::unordered_map<std::string, std::vector<MetadataValueCount>> result;
