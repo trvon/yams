@@ -81,7 +81,7 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
     SECTION("YAMS_ONNX_MAX_CONCURRENT configures total slots") {
         // Set env vars before daemon starts (TuneAdvisor reads at startup)
         EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "6");
-        EnvGuard profileEnv("YAMS_TUNING_PROFILE", "balanced"); // scale=0.75
+        EnvGuard profileEnv("YAMS_TUNING_PROFILE", "balanced"); // scale=0.5
 
         DaemonHarness::Options opts;
         opts.useMockModelProvider = true;
@@ -92,9 +92,9 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
         REQUIRE(waitForOnnxRegistryConfiguration(3s));
 
         auto& registry = OnnxConcurrencyRegistry::instance();
-        // Balanced profile uses 0.75x scale, so 6 * 0.75 = 4.5 -> 4
+        // Balanced profile uses 0.5x scale, so 6 * 0.5 = 3
         INFO("totalSlots=" << registry.totalSlots());
-        CHECK(registry.totalSlots() == 4);
+        CHECK(registry.totalSlots() == 3);
 
         harness.stop();
     }
@@ -147,7 +147,7 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
 
     SECTION("Efficient profile scales down max slots") {
         EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "8");
-        EnvGuard profileEnv("YAMS_TUNING_PROFILE", "efficient"); // scale=0.40
+        EnvGuard profileEnv("YAMS_TUNING_PROFILE", "efficient"); // scale=0.0
 
         DaemonHarness::Options opts;
         opts.useMockModelProvider = true;
@@ -157,17 +157,17 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
         REQUIRE(waitForOnnxRegistryConfiguration(3s));
 
         auto& registry = OnnxConcurrencyRegistry::instance();
-        // Efficient profile uses 0.40x scale, so 8 * 0.40 = 3.2 -> 3
-        // Minimum is 2, so expect max(3, 2) = 3
+        // Efficient profile uses 0.0x scale, so 8 * 0.0 = 0
+        // Minimum is 2, so expect max(0, 2) = 2
         INFO("totalSlots=" << registry.totalSlots());
-        CHECK(registry.totalSlots() == 3);
+        CHECK(registry.totalSlots() == 2);
 
         harness.stop();
     }
 
     SECTION("Aggressive profile scales up max slots") {
         EnvGuard maxEnv("YAMS_ONNX_MAX_CONCURRENT", "4");
-        EnvGuard profileEnv("YAMS_TUNING_PROFILE", "aggressive"); // scale=1.5
+        EnvGuard profileEnv("YAMS_TUNING_PROFILE", "aggressive"); // scale=1.0
 
         DaemonHarness::Options opts;
         opts.useMockModelProvider = true;
@@ -209,9 +209,9 @@ TEST_CASE("Embedding lane slots are configured correctly",
     auto& registry = OnnxConcurrencyRegistry::instance();
 
     SECTION("Registry is configured with correct total and embedding slots") {
-        // Balanced profile uses 0.75x scale, so 6 * 0.75 = 4.5 -> 4
+        // Balanced profile uses 0.5x scale, so 6 * 0.5 = 3
         INFO("totalSlots=" << registry.totalSlots());
-        CHECK(registry.totalSlots() == 4);
+        CHECK(registry.totalSlots() == 3);
 
         auto embedMetrics = registry.laneMetrics(OnnxLane::Embedding);
         INFO("embedding reserved=" << embedMetrics.reserved);
@@ -281,14 +281,14 @@ TEST_CASE("FSM metrics reflect ONNX configuration", "[daemon][onnx][metrics][int
         auto& registry = OnnxConcurrencyRegistry::instance();
         auto snap = registry.snapshot();
 
-        // Balanced profile uses 0.75x scale, so 5 * 0.75 = 3.75 -> 3
+        // Balanced profile uses 0.5x scale, so 5 * 0.5 = 2.5 -> 2
         INFO("snapshot totalSlots=" << snap.totalSlots);
         INFO("snapshot usedSlots=" << snap.usedSlots);
         INFO("snapshot availableSlots=" << snap.availableSlots);
 
-        CHECK(snap.totalSlots == 3);
+        CHECK(snap.totalSlots == 2);
         CHECK(snap.usedSlots == 0);
-        CHECK(snap.availableSlots == 3);
+        CHECK(snap.availableSlots == 2);
     }
 
     SECTION("Status response includes ONNX metrics via client") {
@@ -334,9 +334,9 @@ TEST_CASE("OnnxConcurrencyRegistry state resets on daemon restart",
             REQUIRE(waitForOnnxRegistryConfiguration(3s));
 
             auto& registry = OnnxConcurrencyRegistry::instance();
-            // Balanced profile uses 0.75x scale, so 4 * 0.75 = 3
+            // Balanced profile uses 0.5x scale, so 4 * 0.5 = 2
             INFO("first daemon totalSlots=" << registry.totalSlots());
-            CHECK(registry.totalSlots() == 3);
+            CHECK(registry.totalSlots() == 2);
 
             harness.stop();
         }
@@ -353,9 +353,9 @@ TEST_CASE("OnnxConcurrencyRegistry state resets on daemon restart",
             REQUIRE(waitForOnnxRegistryConfiguration(3s));
 
             auto& registry = OnnxConcurrencyRegistry::instance();
-            // Balanced profile uses 0.75x scale, so 8 * 0.75 = 6
+            // Balanced profile uses 0.5x scale, so 8 * 0.5 = 4
             INFO("second daemon totalSlots=" << registry.totalSlots());
-            CHECK(registry.totalSlots() == 6);
+            CHECK(registry.totalSlots() == 4);
 
             harness.stop();
         }
