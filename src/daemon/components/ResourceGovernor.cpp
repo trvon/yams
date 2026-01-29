@@ -3,8 +3,8 @@
 
 #include <yams/daemon/components/ResourceGovernor.h>
 
-#include <algorithm>
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PoolManager.h>
@@ -20,11 +20,11 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <windows.h>
 #include <psapi.h>
+#include <windows.h>
 #elif defined(__APPLE__)
-#include <mach/mach.h>
 #include <unistd.h>
+#include <mach/mach.h>
 #else
 #include <cstdio>
 #include <cstring>
@@ -405,7 +405,7 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
     // CPU-based pressure escalation: if CPU is very high, escalate the pressure level
     // This prevents CPU saturation even when memory is fine
     const double cpuHighThresh = TuneAdvisor::cpuHighThresholdPercent();
-    const double cpuCriticalThresh = 85.0; // Very high CPU triggers Critical
+    const double cpuCriticalThresh = cpuHighThresh + 25.0; // 25% above high
 
     if (snap.cpuUsagePercent >= cpuCriticalThresh) {
         // Escalate to at least Critical if CPU is very high

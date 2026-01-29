@@ -38,6 +38,20 @@ constexpr size_t kMaxTitleLen = 120;
 constexpr size_t kMaxGlinerChars = 2000;
 constexpr float kMinTitleConfidence = 0.55f;
 
+bool applyCpuThrottling(boost::asio::steady_timer& timer) {
+    auto snap = ResourceGovernor::instance().getSnapshot();
+    int32_t delayMs = TuneAdvisor::computeCpuThrottleDelayMs(snap.cpuUsagePercent);
+
+    if (delayMs > 0) {
+        spdlog::debug("[PostIngestQueue] CPU throttling: {:.1f}% > {:.0f}% threshold, adding {}ms",
+                      snap.cpuUsagePercent, TuneAdvisor::cpuHighThresholdPercent(), delayMs);
+        timer.expires_after(std::chrono::milliseconds(delayMs));
+        return true;
+    }
+
+    return false;
+}
+
 // Check if GLiNER title extraction is disabled via environment variable
 // Set YAMS_DISABLE_GLINER_TITLES=1 for faster ingestion at the cost of title quality
 inline bool isGlinerTitleExtractionDisabled() {
@@ -727,6 +741,12 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         }
 
         if (didWork) {
+            if (TuneAdvisor::enableResourceGovernor()) {
+                if (applyCpuThrottling(timer)) {
+                    co_await timer.async_wait(boost::asio::use_awaitable);
+                }
+            }
+
             idleDelay = kMinIdleDelay; // Reset on work
             continue;
         }
@@ -1484,6 +1504,12 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         }
 
         if (didWork) {
+            if (TuneAdvisor::enableResourceGovernor()) {
+                if (applyCpuThrottling(timer)) {
+                    co_await timer.async_wait(boost::asio::use_awaitable);
+                }
+            }
+
             idleDelay = kMinIdleDelay; // Reset on work
             continue;
         }
@@ -1557,6 +1583,12 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         }
 
         if (didWork) {
+            if (TuneAdvisor::enableResourceGovernor()) {
+                if (applyCpuThrottling(timer)) {
+                    co_await timer.async_wait(boost::asio::use_awaitable);
+                }
+            }
+
             idleDelay = kMinIdleDelay; // Reset on work
             continue;
         }
@@ -1737,6 +1769,12 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         }
 
         if (didWork) {
+            if (TuneAdvisor::enableResourceGovernor()) {
+                if (applyCpuThrottling(timer)) {
+                    co_await timer.async_wait(boost::asio::use_awaitable);
+                }
+            }
+
             idleDelay = kMinIdleDelay; // Reset on work
             continue;
         }
@@ -2111,6 +2149,12 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
         }
 
         if (didWork) {
+            if (TuneAdvisor::enableResourceGovernor()) {
+                if (applyCpuThrottling(timer)) {
+                    co_await timer.async_wait(boost::asio::use_awaitable);
+                }
+            }
+
             idleDelay = kMinIdleDelay; // Reset on work
             continue;
         }

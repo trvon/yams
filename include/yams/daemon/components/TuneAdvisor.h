@@ -80,36 +80,26 @@ public:
     }
 
     // Scale factor applied to several heuristics
-    // Efficient  -> 0.40 (slower growth, lower resource use)
-    // Balanced   -> 0.75
-    // Aggressive -> 1.0 (faster growth, lower thresholds)
+    // Efficient  -> 0.0 (minimal resource use)
+    // Balanced   -> 0.5 (moderate resource use)
+    // Aggressive -> 1.0 (maximum throughput)
     static double profileScale() {
         switch (tuningProfile()) {
             case Profile::Efficient:
-                return 0.40;
+                return 0.0;
             case Profile::Aggressive:
                 return 1.0;
             case Profile::Balanced:
             default:
-                return 0.75;
+                return 0.5;
         }
     }
 
     /// Profile scale for PostIngestQueue operations.
-    /// Efficient  -> 0.40 (minimal resource use)
-    /// Balanced   -> 0.75 (moderate resource use)
+    /// Efficient  -> 0.0 (minimal resource use)
+    /// Balanced   -> 0.5 (moderate resource use)
     /// Aggressive -> 1.0 (maximum throughput)
-    static double postIngestProfileScale() {
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 0.40;
-            case Profile::Balanced:
-                return 0.75;
-            case Profile::Aggressive:
-            default:
-                return 1.0;
-        }
-    }
+    static double postIngestProfileScale() { return profileScale(); }
 
     // Public accessors for embedding-related knobs (used outside daemon module)
     // These forward to internal tunables while keeping implementation details private.
@@ -134,9 +124,36 @@ public:
         cpuIdlePct_.store(v, std::memory_order_relaxed);
     }
 
-    static double cpuHighThresholdPercent() { return cpuHighPct_.load(std::memory_order_relaxed); }
+    /// CPU high threshold (%) for admission control. Profile-adjusted defaults:
+    ///   Efficient:  50% (early throttling for usability)
+    ///   Balanced:   67% (clamped but reasonable throughput)
+    ///   Aggressive: 85% (late throttling, max throughput)
+    /// Environment: YAMS_CPU_HIGH_PCT (0-100)
+    static double cpuHighThresholdPercent() {
+        if (const char* s = std::getenv("YAMS_CPU_HIGH_PCT")) {
+            try {
+                double v = std::stod(s);
+                if (v >= 10.0 && v <= 100.0)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 50.0 + profileScale() * 35.0;
+    }
     static void setCpuHighThresholdPercent(double v) {
         cpuHighPct_.store(v, std::memory_order_relaxed);
+    }
+
+    /// Compute CPU-aware throttling delay in milliseconds.
+    /// Returns 0 if CPU is below threshold, otherwise 10-100ms based on severity.
+    /// Delay formula: (cpuPct - threshold) * 2ms, clamped to [10, 100]ms
+    static int32_t computeCpuThrottleDelayMs(double currentCpuPct) {
+        double threshold = cpuHighThresholdPercent();
+        if (currentCpuPct < threshold)
+            return 0;
+        double overage = currentCpuPct - threshold;
+        int32_t delayMs = static_cast<int32_t>(overage * 2.0);
+        return std::clamp(delayMs, 10, 100);
     }
 
     static std::uint64_t muxBacklogHighBytes() {
@@ -518,19 +535,7 @@ public:
     // -------- Central CPU budget and thread caps --------
     // Global CPU budget percent (10..100). Defaults adapt to profile posture.
     static uint32_t cpuBudgetPercent() {
-        uint32_t def = 50;
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                def = 40;
-                break;
-            case Profile::Aggressive:
-                def = 80;
-                break;
-            case Profile::Balanced:
-            default:
-                def = 50;
-                break;
-        }
+        uint32_t def = static_cast<uint32_t>(40.0 + profileScale() * 20.0);
         if (const char* s = std::getenv("YAMS_CPU_BUDGET_PERCENT")) {
             try {
                 int v = std::stoi(s);
@@ -1473,7 +1478,13 @@ public:
             } catch (...) {
             }
         }
-        return std::max<uint32_t>(1, recommendedThreads());
+        uint32_t hw = hardwareConcurrency();
+
+        uint32_t base = std::max(2u, (hw * 20) / 100);
+        uint32_t scaleRange = std::max(1u, (hw * 15) / 100);
+        uint32_t total = base + static_cast<uint32_t>(scaleRange * profileScale());
+
+        return std::clamp(total, 2u, hw);
     }
     static void setPostIngestTotalConcurrent(uint32_t v) {
         if (v == 0) {
@@ -2137,14 +2148,7 @@ public:
             } catch (...) {
             }
         }
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 0.70;
-            case Profile::Aggressive:
-                return 0.80;
-            default:
-                return 0.75;
-        }
+        return 0.70 + profileScale() * 0.10;
     }
     static void setMemoryWarningThreshold(double pct) {
         memoryWarningPctOverride_.store(pct, std::memory_order_relaxed);
@@ -2167,14 +2171,7 @@ public:
             } catch (...) {
             }
         }
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 0.85;
-            case Profile::Aggressive:
-                return 0.92;
-            default:
-                return 0.90;
-        }
+        return 0.85 + profileScale() * 0.07;
     }
     static void setMemoryCriticalThreshold(double pct) {
         memoryCriticalPctOverride_.store(pct, std::memory_order_relaxed);
@@ -2197,14 +2194,7 @@ public:
             } catch (...) {
             }
         }
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 0.92;
-            case Profile::Aggressive:
-                return 0.97;
-            default:
-                return 0.95;
-        }
+        return 0.92 + profileScale() * 0.05;
     }
     static void setMemoryEmergencyThreshold(double pct) {
         memoryEmergencyPctOverride_.store(pct, std::memory_order_relaxed);
@@ -2292,7 +2282,14 @@ public:
             }
         }
         uint32_t hw = hardwareConcurrency();
-        return std::clamp(hw / 2, 4u, 16u);
+        uint32_t reserved = onnxGlinerReserved() + onnxEmbedReserved() + onnxRerankerReserved();
+
+        uint32_t base = std::max(2u, (hw * 10) / 100);
+        uint32_t scaleRange = std::max(1u, (hw * 15) / 100);
+        uint32_t total = base + static_cast<uint32_t>(scaleRange * profileScale());
+        total = std::max(total, reserved);
+
+        return std::clamp(total, 2u, 12u);
     }
     static void setOnnxMaxConcurrent(uint32_t n) {
         onnxMaxConcurrentOverride_.store(n, std::memory_order_relaxed);
