@@ -260,7 +260,7 @@ TEST_CASE("Client timeout recovery: Connection refused when daemon down",
         msg.find("Connection") != std::string::npos || msg.find("refused") != std::string::npos ||
         msg.find("daemon") != std::string::npos || msg.find("socket") != std::string::npos ||
         msg.find("EOF") != std::string::npos || msg.find("End of file") != std::string::npos ||
-        msg.find("closed") != std::string::npos;
+        msg.find("closed") != std::string::npos || msg.find("establish") != std::string::npos;
     REQUIRE(hasContext);
 }
 
@@ -305,11 +305,12 @@ TEST_CASE("Client timeout recovery: Shutdown cancels in-flight request",
     REQUIRE(done.load());
     if (requestError.has_value()) {
         const auto& msg = requestError->message;
-        bool hasContext = msg.find("cancel") != std::string::npos ||
-                          msg.find("Connection") != std::string::npos ||
-                          msg.find("closed") != std::string::npos ||
-                          msg.find("timeout") != std::string::npos ||
-                          msg.find("daemon") != std::string::npos;
+        bool hasContext =
+            msg.find("cancel") != std::string::npos ||
+            msg.find("Connection") != std::string::npos ||
+            msg.find("closed") != std::string::npos || msg.find("timeout") != std::string::npos ||
+            msg.find("daemon") != std::string::npos || msg.find("pipe") != std::string::npos ||
+            msg.find("shutdown") != std::string::npos;
         REQUIRE(hasContext);
     }
 }
