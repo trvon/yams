@@ -211,6 +211,11 @@ private:
     std::atomic<bool> earlyFeatureUse_{
         false}; // Set when client invokes feature (tools/list, tools/call) pre-initialized
 
+    // --- MCP Apps Extension Support ---
+    std::atomic<bool> mcpAppsSupported_{
+        false};                   // Set when client supports io.modelcontextprotocol/ui
+    std::string mcpAppsMimeType_; // The negotiated mime type (e.g., "text/html;profile=mcp-app")
+
     // --- Cancellation scaffolding ---
     // Each in-flight request id can be marked cancelable; a cancellation sets the token to true.
     mutable std::mutex cancelMutex_;

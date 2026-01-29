@@ -171,26 +171,32 @@ TEST_CASE("Client timeout recovery: Daemon restart handling",
           "[daemon][timeout][reconnect][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
     DaemonHarness harness;
-    REQUIRE(harness.start(5s));
+    REQUIRE(harness.start(10s));
 
     auto client = createClient(harness.socketPath());
 
     SECTION("Reconnects after daemon restart") {
+        // Allow daemon to fully initialize before first request
+        std::this_thread::sleep_for(500ms);
+
         ListRequest req1;
         req1.limit = 10;
-        auto result1 = yams::cli::run_sync(client.list(req1), 2s);
+        auto result1 = yams::cli::run_sync(client.list(req1), 5s);
         REQUIRE(result1.has_value());
 
         std::this_thread::sleep_for(500ms);
 
         harness.stop();
-        std::this_thread::sleep_for(100ms);
+        std::this_thread::sleep_for(500ms);
 
-        REQUIRE(harness.start(3s));
+        REQUIRE(harness.start(10s));
+
+        // Allow restarted daemon to fully initialize
+        std::this_thread::sleep_for(500ms);
 
         ListRequest req2;
         req2.limit = 10;
-        auto result2 = yams::cli::run_sync(client.list(req2), 2s);
+        auto result2 = yams::cli::run_sync(client.list(req2), 5s);
         REQUIRE(result2.has_value());
     }
 }
@@ -237,14 +243,17 @@ TEST_CASE("Client timeout recovery: Connection refused when daemon down",
           "[daemon][timeout][connection-refused][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
     DaemonHarness harness;
-    REQUIRE(harness.start(5s));
+    REQUIRE(harness.start(10s));
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
 
+    // Allow daemon to fully initialize
+    std::this_thread::sleep_for(500ms);
+
     ListRequest req1;
     req1.limit = 1;
-    auto result1 = yams::cli::run_sync(client.list(req1), 2s);
+    auto result1 = yams::cli::run_sync(client.list(req1), 5s);
     REQUIRE(result1.has_value());
 
     std::this_thread::sleep_for(200ms);

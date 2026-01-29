@@ -543,8 +543,8 @@ awaitable<void> SocketServer::accept_loop() {
             auto tracked = std::make_shared<TrackedSocket>();
             tracked->socket = sock;
             tracked->executor = connectionExecutor;
-            tracked->created_at =
-                std::chrono::steady_clock::now(); // Track connection creation time
+            tracked->set_created_at(
+                std::chrono::steady_clock::now()); // Track connection creation time
             register_socket(tracked);
 
             // Spawn connection with use_future for graceful shutdown tracking (PBI-066-41)
@@ -759,7 +759,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
             // (replaces experimental::awaitable_operators)
             auto executor = sock->get_executor();
             auto lifetime = config_.maxConnectionLifetime;
-            auto created_at = tracked_socket->created_at;
+            auto created_at = tracked_socket->created_at(); // Thread-safe read
 
             bool timedOut =
                 co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
@@ -973,8 +973,8 @@ uint64_t SocketServer::oldestConnectionAgeSeconds() const {
 
     for (const auto& weakPtr : activeSockets_) {
         if (auto tracked = weakPtr.lock()) {
-            auto age =
-                std::chrono::duration_cast<std::chrono::seconds>(now - tracked->created_at).count();
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(now - tracked->created_at())
+                           .count();
             if (static_cast<uint64_t>(age) > oldestAge) {
                 oldestAge = static_cast<uint64_t>(age);
             }

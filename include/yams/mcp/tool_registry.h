@@ -1198,9 +1198,7 @@ public:
             json tool;
             tool["name"] = desc.name;
             tool["description"] = desc.description;
-            if (!desc.schema.empty()) {
-                tool["inputSchema"] = desc.schema;
-            }
+            tool["inputSchema"] = desc.schema.empty() ? json{{"type", "object"}} : desc.schema;
             return tool;
         });
         return json{{"tools", std::move(tools)}};

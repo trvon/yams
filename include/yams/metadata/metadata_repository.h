@@ -745,6 +745,21 @@ private:
     mutable std::atomic<uint64_t> metadataChangeCounter_{0};
     static constexpr std::chrono::seconds kEnumerationCacheTtl{60};
 
+    // Value counts cache (for getMetadataValueCounts)
+    struct MetadataValueCountsCache {
+        using CacheValue =
+            std::pair<std::chrono::steady_clock::time_point,
+                      std::unordered_map<std::string, std::vector<MetadataValueCount>>>;
+        std::unordered_map<std::string, CacheValue> entries;
+        uint64_t metadataChangeCount{0};
+    };
+    static constexpr std::chrono::seconds kValueCountsCacheTtl{120};
+    mutable std::unique_ptr<MetadataValueCountsCache> cachedValueCounts_;
+    mutable std::shared_mutex valueCountsCacheMutex_;
+
+    std::string generateValueCountsCacheKey(const std::vector<std::string>& keys,
+                                            const DocumentQueryOptions& options) const;
+
     // Approximate LRU hit recording (lock-free ring of path hashes)
     mutable std::unique_ptr<std::atomic<uint64_t>[]> hitRing_;
     mutable std::size_t hitRingSize_{0};

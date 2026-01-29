@@ -74,7 +74,22 @@ private:
     struct TrackedSocket {
         std::shared_ptr<boost::asio::local::stream_protocol::socket> socket;
         boost::asio::any_io_executor executor;
-        std::chrono::steady_clock::time_point created_at; // Connection creation time
+        // Use atomic to prevent data races when accessing creation time from multiple threads
+        // Store as nanoseconds since steady_clock epoch for thread-safety
+        std::atomic<int64_t> created_at_ns{0}; // Connection creation time in nanoseconds
+
+        // Helper to get creation time as time_point (thread-safe read)
+        std::chrono::steady_clock::time_point created_at() const {
+            return std::chrono::steady_clock::time_point(
+                std::chrono::nanoseconds(created_at_ns.load(std::memory_order_acquire)));
+        }
+
+        // Helper to set creation time (thread-safe write)
+        void set_created_at(std::chrono::steady_clock::time_point tp) {
+            created_at_ns.store(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count(),
+                std::memory_order_release);
+        }
     };
     boost::asio::awaitable<void> handle_connection(std::shared_ptr<TrackedSocket> tracked_socket,
                                                    uint64_t conn_token);

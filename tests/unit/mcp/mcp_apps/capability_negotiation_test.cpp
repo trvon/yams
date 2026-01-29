@@ -31,7 +31,7 @@ public:
 
 TEST_CASE("MCP Apps Capability - Extension Discovery",
           "[mcp][apps][capability][mcp-apps-cap-01][phase1]") {
-    SKIP("Pending MCP Apps implementation");
+    // Test implementation - verifying MCP Apps capability negotiation
 
     auto transport = std::make_unique<NullTransport>();
     auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
@@ -63,8 +63,6 @@ TEST_CASE("MCP Apps Capability - Extension Discovery",
 
 TEST_CASE("MCP Apps Capability - Extension Not Advertised When Disabled",
           "[mcp][apps][capability][mcp-apps-cap-02][phase1]") {
-    SKIP("Pending MCP Apps implementation");
-
     auto transport = std::make_unique<NullTransport>();
     auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
 
@@ -91,8 +89,6 @@ TEST_CASE("MCP Apps Capability - Extension Not Advertised When Disabled",
 
 TEST_CASE("MCP Apps Capability - Mime Type Validation Supported",
           "[mcp][apps][capability][mcp-apps-cap-03][phase1]") {
-    SKIP("Pending MCP Apps implementation");
-
     auto transport = std::make_unique<NullTransport>();
     auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
 
@@ -119,8 +115,6 @@ TEST_CASE("MCP Apps Capability - Mime Type Validation Supported",
 
 TEST_CASE("MCP Apps Capability - Mime Type Validation Unsupported",
           "[mcp][apps][capability][mcp-apps-cap-04][phase1]") {
-    SKIP("Pending MCP Apps implementation");
-
     auto transport = std::make_unique<NullTransport>();
     auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
 
@@ -152,8 +146,6 @@ TEST_CASE("MCP Apps Capability - Mime Type Validation Unsupported",
 
 TEST_CASE("MCP Apps Capability - Graceful Fallback",
           "[mcp][apps][capability][mcp-apps-cap-05][phase1]") {
-    SKIP("Pending MCP Apps implementation");
-
     auto transport = std::make_unique<NullTransport>();
     auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
 

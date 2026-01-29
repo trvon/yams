@@ -1436,6 +1436,34 @@ json MCPServer::initialize(const json& params) {
 
     negotiatedProtocolVersion_ = negotiated;
 
+    // --- MCP Apps Extension Capability Detection ---
+    // Check if client supports MCP Apps (io.modelcontextprotocol/ui extension)
+    mcpAppsSupported_.store(false);
+    mcpAppsMimeType_.clear();
+    if (params.contains("capabilities") && params["capabilities"].is_object()) {
+        const auto& caps = params["capabilities"];
+        if (caps.contains("extensions") && caps["extensions"].is_object()) {
+            const auto& extensions = caps["extensions"];
+            if (extensions.contains("io.modelcontextprotocol/ui") &&
+                extensions["io.modelcontextprotocol/ui"].is_object()) {
+                const auto& uiExt = extensions["io.modelcontextprotocol/ui"];
+                if (uiExt.contains("mimeTypes") && uiExt["mimeTypes"].is_array()) {
+                    // Check if client supports our mime type
+                    for (const auto& mimeType : uiExt["mimeTypes"]) {
+                        if (mimeType.is_string() &&
+                            mimeType.get<std::string>() == "text/html;profile=mcp-app") {
+                            mcpAppsSupported_.store(true);
+                            mcpAppsMimeType_ = "text/html;profile=mcp-app";
+                            spdlog::info("MCP Apps extension supported by client (mimeType: {})",
+                                         mcpAppsMimeType_);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Always build server capabilities (do NOT rely on client-supplied capabilities)
     json caps = buildServerCapabilities();
 
@@ -5573,10 +5601,19 @@ bool MCPServer::isCanceled(const nlohmann::json& id) const {
 }
 
 json MCPServer::buildServerCapabilities() const {
-    return {{"tools", {{"listChanged", false}}},
-            {"prompts", {{"listChanged", false}}},
-            {"resources", {{"subscribe", false}, {"listChanged", false}}},
-            {"logging", json::object()}};
+    json caps = {{"tools", {{"listChanged", false}}},
+                 {"prompts", {{"listChanged", false}}},
+                 {"resources", {{"subscribe", false}, {"listChanged", false}}},
+                 {"logging", json::object()},
+                 {"experimental", json::object()}};
+
+    // Add MCP Apps extension capability if supported by client
+    if (mcpAppsSupported_.load()) {
+        caps["extensions"] = {
+            {"io.modelcontextprotocol/ui", {{"mimeTypes", json::array({mcpAppsMimeType_})}}}};
+    }
+
+    return caps;
 }
 
 // --- Cancel & Progress Helper Implementations ---

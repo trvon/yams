@@ -20,6 +20,23 @@ using namespace yams::test;
 using namespace std::chrono_literals;
 
 namespace {
+
+// Detect if running under ThreadSanitizer to adjust timing expectations
+#if defined(__SANITIZE_THREAD__)
+constexpr bool kThreadSanitizerEnabled = true;
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+constexpr bool kThreadSanitizerEnabled = true;
+#else
+constexpr bool kThreadSanitizerEnabled = false;
+#endif
+#else
+constexpr bool kThreadSanitizerEnabled = false;
+#endif
+
+// Timeout multiplier for sanitizer builds (TSAN significantly slows down execution)
+constexpr int kSanitizerTimeoutMultiplier = kThreadSanitizerEnabled ? 3 : 1;
+
 DaemonClient createClient(const std::filesystem::path& socketPath) {
     ClientConfig config;
     config.socketPath = socketPath;
@@ -179,8 +196,8 @@ TEST_CASE("CLI commands remain responsive under heavy ingestion load",
 
             if (pingResult.has_value()) {
                 pingSuccesses.fetch_add(1);
-                // Ping should be fast even under load
-                REQUIRE(elapsed < 1s);
+                // Ping should be fast even under load (with sanitizer-adjusted timeout)
+                REQUIRE(elapsed < std::chrono::seconds(1 * kSanitizerTimeoutMultiplier));
             } else {
                 WARN("Ping failed: " << pingResult.error().message);
             }
