@@ -37,8 +37,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX 1
 #endif
-#include <Psapi.h>
 #include <Windows.h>
+#include <Psapi.h>
 
 #endif
 #if defined(TRACY_ENABLE)

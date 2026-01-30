@@ -1220,7 +1220,6 @@ if catch2_dep.found()
       'unit/mcp/mcp_apps/capability_negotiation_test.cpp',
       'unit/mcp/mcp_apps/tool_metadata_test.cpp',
       'unit/mcp/mcp_apps/ui_resource_handling_test.cpp',
-      'unit/mcp/mcp_content_length_framing_catch2_test.cpp',
       'unit/mcp/mcp_disconnect_uniform_errors_catch2_test.cpp',
       'unit/mcp/mcp_doctor_flags_catch2_test.cpp',
       'unit/mcp/mcp_jsonrpc_roundtrip_catch2_test.cpp',

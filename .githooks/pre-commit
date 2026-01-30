@@ -64,4 +64,63 @@ if [ "${YAMS_LINT_TIDY:-}" = "1" ]; then
   done
 fi
 
+# Check Windows header include order and required defines
+# Psapi.h depends on Windows.h types (BOOL, DWORD, WINAPI)
+# WIN32_LEAN_AND_MEAN and NOMINMAX should be defined before Windows.h
+windows_header_errors=()
+for f in "${files[@]}"; do
+  if [ -f "$f" ]; then
+    # Check for Psapi.h includes
+    if grep -qE '#include\s*<[^>]*[Pp]sapi\.h[^>]*>' "$f"; then
+      # Get line numbers for Psapi.h and Windows.h
+      psapi_line=$(grep -nE '#include\s*<[^>]*[Pp]sapi\.h[^>]*>' "$f" | head -1 | cut -d: -f1)
+      win_line=$(grep -nE '#include\s*<[^>]*[Ww]indows\.h[^>]*>' "$f" | head -1 | cut -d: -f1 || echo "")
+      
+      if [ -z "$win_line" ]; then
+        windows_header_errors+=("$f: Missing #include <Windows.h> before Psapi.h (Psapi.h depends on Windows types)")
+      elif [ "$psapi_line" -lt "$win_line" ]; then
+        windows_header_errors+=("$f: Psapi.h included at line $psapi_line, but Windows.h must come first (line $win_line)")
+      fi
+      
+      # Check for WIN32_LEAN_AND_MEAN
+      lean_mean_line=$(grep -nE '#define\s+WIN32_LEAN_AND_MEAN' "$f" | head -1 | cut -d: -f1 || echo "")
+      if [ -z "$lean_mean_line" ]; then
+        windows_header_errors+=("$f: Missing #define WIN32_LEAN_AND_MEAN before Windows headers")
+      elif [ -n "$win_line" ] && [ "$lean_mean_line" -gt "$win_line" ]; then
+        windows_header_errors+=("$f: WIN32_LEAN_AND_MEAN must be defined before Windows.h (currently at line $lean_mean_line, Windows.h at $win_line)")
+      fi
+      
+      # Check for NOMINMAX
+      nominmax_line=$(grep -nE '#define\s+NOMINMAX' "$f" | head -1 | cut -d: -f1 || echo "")
+      if [ -z "$nominmax_line" ]; then
+        windows_header_errors+=("$f: Missing #define NOMINMAX before Windows headers")
+      elif [ -n "$win_line" ] && [ "$nominmax_line" -gt "$win_line" ]; then
+        windows_header_errors+=("$f: NOMINMAX must be defined before Windows.h (currently at line $nominmax_line, Windows.h at $win_line)")
+      fi
+    fi
+  fi
+done
+
+if [ ${#windows_header_errors[@]} -ne 0 ]; then
+  echo ""
+  echo "ERROR: Windows header include order violations detected:" >&2
+  for err in "${windows_header_errors[@]}"; do
+    echo "  - $err" >&2
+  done
+  echo "" >&2
+  echo "Fix: Include Windows.h BEFORE Psapi.h, and define WIN32_LEAN_AND_MEAN and NOMINMAX first." >&2
+  echo "Example:" >&2
+  echo "  #ifdef _WIN32" >&2
+  echo "  #ifndef WIN32_LEAN_AND_MEAN" >&2
+  echo "  #define WIN32_LEAN_AND_MEAN 1" >&2
+  echo "  #endif" >&2
+  echo "  #ifndef NOMINMAX" >&2
+  echo "  #define NOMINMAX 1" >&2
+  echo "  #endif" >&2
+  echo "  #include <Windows.h>" >&2
+  echo "  #include <Psapi.h>" >&2
+  echo "  #endif" >&2
+  exit 1
+fi
+
 exit 0

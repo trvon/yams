@@ -88,13 +88,6 @@ private:
     std::atomic<bool>* externalShutdown_{nullptr};
     std::atomic<size_t> errorCount_{0};
 
-    enum class FramingMode {
-        Unknown,
-        Ndjson,
-        ContentLength,
-    };
-    std::atomic<FramingMode> lastFraming_{FramingMode::Unknown};
-
     // Receive poll timeout (ms). Default 500ms; configurable via env YAMS_MCP_RECV_TIMEOUT_MS.
     int recvTimeoutMs_{500};
 

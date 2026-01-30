@@ -17,11 +17,14 @@
 
 // Platform-specific RSS and CPU reading
 #if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <psapi.h>
 #include <windows.h>
+#include <psapi.h>
 #elif defined(__APPLE__)
 #include <unistd.h>
 #include <mach/mach.h>

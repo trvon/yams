@@ -499,8 +499,7 @@ MessageResult StdioTransport::receive() {
             }
         }
 
-        // Attempt to read framed headers; fallback to single-line JSON (non-seekable safe)
-        std::size_t contentLength = 0;
+        // MCP stdio spec: Read NDJSON (newline-delimited JSON)
         std::string line;
 
         // Read first non-empty line, but avoid blocking forever on empty input buffers (tests)
@@ -519,7 +518,19 @@ MessageResult StdioTransport::receive() {
                     std::this_thread::yield();
                     continue;
                 }
-                // Client closed stdin (EOF). Treat as normal shutdown; avoid alarming logs.
+
+                // For real stdin (pipes), EOF might mean no data yet OR actual disconnect
+                // Check if we've successfully read any messages before
+                if (errorCount_.load() == 0) {
+                    // No messages read yet - this is likely just waiting for input
+                    // Break out to outer loop to poll again
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    std::cin.clear(); // Clear EOF flag to allow retry
+                    line.clear();     // Ensure line is empty so outer loop continues
+                    break;            // Break out of do-while to outer while loop
+                }
+
+                // Client closed stdin (EOF) after successful communication
                 spdlog::info("StdioTransport: EOF on stdin; treating as client disconnect");
                 state_.store(TransportState::Disconnected);
                 return Error{ErrorCode::NetworkError, "EOF on stdin"};
@@ -551,9 +562,11 @@ MessageResult StdioTransport::receive() {
         spdlog::debug("StdioTransport: Read line: '{}'", line);
 
         // NDJSON (newline-delimited JSON) - MCP stdio standard format
+        // Per MCP spec 2025-06-18: "Messages are delimited by newlines and MUST NOT
+        // contain embedded newlines. Implementations SHOULD reject messages that
+        // contain embedded newlines."
         if (!line.empty() && (line.front() == '{' || line.front() == '[')) {
             spdlog::debug("StdioTransport: Received NDJSON message (MCP stdio standard)");
-            lastFraming_.store(FramingMode::Ndjson);
             auto parsed = json_utils::parse_json(line);
             if (!parsed) {
                 spdlog::error("StdioTransport: Failed to parse JSON: {}", line);
@@ -566,91 +579,12 @@ MessageResult StdioTransport::receive() {
             return parsed.value();
         }
 
-        auto parseHeader = [&](const std::string& hdr) -> bool {
-            auto pos = hdr.find(':');
-            if (pos == std::string::npos)
-                return false;
-            std::string key = hdr.substr(0, pos);
-            std::string val = hdr.substr(pos + 1);
-            while (!val.empty() && (val.front() == ' ' || val.front() == '\t'))
-                val.erase(val.begin());
-            std::transform(key.begin(), key.end(), key.begin(),
-                           [](unsigned char c) { return std::tolower(c); });
-            if (key == "content-length") {
-                try {
-                    // Validate that the value is a non-negative integer
-                    // std::stoull doesn't throw for negative values, it wraps around
-                    // So we need to check for '-' prefix explicitly
-                    if (!val.empty() && val.front() == '-') {
-                        contentLength = 0;
-                    } else {
-                        contentLength = static_cast<std::size_t>(std::stoull(val));
-                    }
-                } catch (...) {
-                    contentLength = 0;
-                }
-            }
-            return true;
-        };
-
-        if (!parseHeader(line)) {
-            recordError();
-            if (!shouldRetryAfterError())
-                state_.store(TransportState::Error);
-            return Error{ErrorCode::InvalidData, "Malformed header line"};
-        }
-
-        lastFraming_.store(FramingMode::ContentLength);
-
-        // Remaining headers until blank line
-        while (true) {
-            if (!std::getline(in, line)) {
-                state_.store(TransportState::Disconnected);
-                return Error{ErrorCode::NetworkError, "EOF during headers"};
-            }
-            if (!line.empty() && line.back() == '\r')
-                line.pop_back();
-            if (line.empty())
-                break; // end of headers
-            if (!parseHeader(line)) {
-                recordError();
-                if (!shouldRetryAfterError())
-                    state_.store(TransportState::Error);
-                return Error{ErrorCode::InvalidData, "Malformed header line"};
-            }
-        }
-
-        if (contentLength == 0) {
-            recordError();
-            if (!shouldRetryAfterError())
-                state_.store(TransportState::Error);
-            return Error{ErrorCode::InvalidData, "Missing Content-Length"};
-        }
-
-        std::string payload(contentLength, '\0');
-        spdlog::debug("StdioTransport: Reading {} bytes of content", contentLength);
-        in.read(payload.data(), static_cast<std::streamsize>(contentLength));
-        if (in.gcount() != static_cast<std::streamsize>(contentLength)) {
-            recordError();
-            if (!shouldRetryAfterError())
-                state_.store(TransportState::Error);
-            return Error{ErrorCode::NetworkError, "Short read of framed JSON payload"};
-        }
-
-        spdlog::debug("StdioTransport: Received framed message with Content-Length: {}",
-                      contentLength);
-        auto parsed = json_utils::parse_json(payload);
-        if (!parsed) {
-            spdlog::error("StdioTransport: Failed to parse framed JSON payload");
-            recordError();
-            if (!shouldRetryAfterError())
-                state_.store(TransportState::Error);
-            return parsed.error();
-        }
-        // Successfully parsed LSP-framed message (backwards compatibility)
-        // Note: We still output NDJSON per MCP spec regardless of input format
-        resetErrorCount();
-        return parsed.value();
+        // If the line doesn't start with '{' or '[', it's not valid NDJSON
+        spdlog::error("StdioTransport: Invalid message format (expected NDJSON): {}", line);
+        recordError();
+        if (!shouldRetryAfterError())
+            state_.store(TransportState::Error);
+        return Error{ErrorCode::InvalidData, "Invalid message format - expected NDJSON"};
     }
 
     return Error{ErrorCode::NetworkError, "Transport closed during receive"};
@@ -876,17 +810,32 @@ void MCPServer::start() {
 
     // Main message loop with modern error handling
     try {
+        int loopCount = 0;
         while (running_ && (!externalShutdown_ || !*externalShutdown_)) {
+            loopCount++;
+            if (loopCount <= 5 || loopCount % 100 == 0) {
+                spdlog::debug("MCP server loop iteration {}, running={}", loopCount,
+                              running_.load());
+            }
+
             auto messageResult = transport_->receive();
 
             if (!messageResult) {
                 const auto& error = messageResult.error();
+                spdlog::debug("MCP server receive error: code={}, message='{}'",
+                              static_cast<int>(error.code), error.message);
 
                 // Handle different error types
                 switch (error.code) {
                     case ErrorCode::NetworkError:
-                        spdlog::debug("Transport closed: {}", error.message);
-                        running_ = false;
+                        spdlog::debug("Transport network error (may be transient): {}",
+                                      error.message);
+                        // Only exit on persistent network errors, not initial "no data" states
+                        if (error.message.find("EOF") != std::string::npos ||
+                            error.message.find("Disconnected") != std::string::npos) {
+                            spdlog::info("Transport closed permanently: {}", error.message);
+                            running_ = false;
+                        }
                         break;
 
                     case ErrorCode::InvalidData:
@@ -4387,7 +4336,8 @@ void MCPServer::initializeToolRegistry() {
                 {"items", {{"type", "string"}}},
                 {"description", "Filter by tags (YAMS extension)"}}}}},
             {"required", json::array({"query"})}},
-        "Search documents using hybrid search (vector + full-text + knowledge graph)");
+        "Search documents using hybrid search (vector + full-text + knowledge graph)",
+        "Search Documents");
 
     toolRegistry_->registerTool<MCPGrepRequest, MCPGrepResponse>(
         "grep", [this](const MCPGrepRequest& req) { return handleGrepDocuments(req); },
@@ -4421,7 +4371,7 @@ void MCPServer::initializeToolRegistry() {
                  {"description", "Return a fast semantic-first burst"},
                  {"default", false}}}}},
              {"required", json::array({"pattern"})}},
-        "Search documents using regular expressions with grep-like functionality");
+        "Search documents using regular expressions with grep-like functionality", "Grep Search");
 
     toolRegistry_->registerTool<MCPDownloadRequest, MCPDownloadResponse>(
         "download", [this](const MCPDownloadRequest& req) { return handleDownload(req); },
@@ -4477,7 +4427,8 @@ void MCPServer::initializeToolRegistry() {
                {{"type", "string"}, {"description", "Snapshot label for indexing"}}}}},
             {"required", json::array({"url"})}},
         "Download files from URLs and store them in YAMS content-addressed storage; optionally "
-        "post-index the artifact.");
+        "post-index the artifact.",
+        "Download Files");
 
     toolRegistry_->registerTool<MCPStoreDocumentRequest, MCPStoreDocumentResponse>(
         "add", [this](const MCPStoreDocumentRequest& req) { return handleStoreDocument(req); },
@@ -4513,7 +4464,7 @@ void MCPServer::initializeToolRegistry() {
                  {"items", {{"type", "string"}}},
                  {"description", "Document tags"}}},
                {"metadata", {{"type", "object"}, {"description", "Metadata key/value pairs"}}}}}},
-        "Store documents (or directories) with deduplication; mirrors CLI add");
+        "Store documents (or directories) with deduplication; mirrors CLI add", "Add Documents");
 
     toolRegistry_->registerTool<MCPRetrieveDocumentRequest, MCPRetrieveDocumentResponse>(
         "get",
@@ -4532,7 +4483,8 @@ void MCPServer::initializeToolRegistry() {
                  {"description", "Use current session scope for name resolution"},
                  {"default", true}}},
                {"session", {{"type", "string"}, {"description", "Session name override"}}}}}},
-        "Retrieve documents from storage by hash with optional knowledge graph expansion");
+        "Retrieve documents from storage by hash with optional knowledge graph expansion",
+        "Get Documents");
 
     toolRegistry_->registerTool<MCPListDocumentsRequest, MCPListDocumentsResponse>(
         "list", [this](const MCPListDocumentsRequest& req) { return handleListDocuments(req); },
@@ -4559,7 +4511,7 @@ void MCPServer::initializeToolRegistry() {
                  {"default", 100}}},
                {"offset",
                 {{"type", "integer"}, {"description", "Offset for pagination"}, {"default", 0}}}}}},
-        "List documents with filtering by pattern, tags, type, or recency");
+        "List documents with filtering by pattern, tags, type, or recency", "List Documents");
 
     toolRegistry_->registerTool<MCPStatusRequest, MCPStatusResponse>(
         "status", [this](const MCPStatusRequest& req) { return handleGetStatus(req); },
@@ -4569,7 +4521,7 @@ void MCPServer::initializeToolRegistry() {
                 {{"type", "boolean"},
                  {"description", "Include verbose metrics"},
                  {"default", false}}}}}},
-        "Get daemon status, readiness, and metrics");
+        "Get daemon status, readiness, and metrics", "Get Status");
 
     toolRegistry_->registerTool<MCPDeleteByNameRequest, MCPDeleteByNameResponse>(
         "delete_by_name",
@@ -4587,7 +4539,7 @@ void MCPServer::initializeToolRegistry() {
                {{"type", "boolean"},
                 {"description", "Preview what would be deleted"},
                 {"default", false}}}}}},
-        "Delete documents by name, names array, or pattern");
+        "Delete documents by name, names array, or pattern", "Delete Documents");
 
     toolRegistry_->registerTool<MCPUpdateMetadataRequest, MCPUpdateMetadataResponse>(
         "update", [this](const MCPUpdateMetadataRequest& req) { return handleUpdateMetadata(req); },
@@ -4623,7 +4575,7 @@ void MCPServer::initializeToolRegistry() {
                 {{"type", "boolean"},
                  {"description", "Preview changes only"},
                  {"default", false}}}}}},
-        "Update metadata/tags by hash, name, path, names[], or pattern");
+        "Update metadata/tags by hash, name, path, names[], or pattern", "Update Metadata");
 
     // Session start/stop (simplified)
     // YAMS-specific session management tools
@@ -4643,7 +4595,7 @@ void MCPServer::initializeToolRegistry() {
                    {"memory_gb", {{"type", "integer"}, {"default", -1}}},
                    {"time_ms", {{"type", "integer"}, {"default", -1}}},
                    {"aggressive", {{"type", "boolean"}, {"default", false}}}}}},
-            "Start (and optionally warm) a session with default budgets");
+            "Start (and optionally warm) a session with default budgets", "Start Session");
 
         // session_stop
         toolRegistry_->registerTool<MCPSessionStopRequest, MCPSessionStopResponse>(
@@ -4653,7 +4605,7 @@ void MCPServer::initializeToolRegistry() {
                  {"properties",
                   {{"name", {{"type", "string"}, {"description", "Session name (optional)"}}},
                    {"clear", {{"type", "boolean"}, {"default", true}}}}}},
-            "Stop session (clear materialized cache)");
+            "Stop session (clear materialized cache)", "Stop Session");
 
         // session_pin
         toolRegistry_->registerTool<MCPSessionPinRequest, MCPSessionPinResponse>(
@@ -4669,7 +4621,7 @@ void MCPServer::initializeToolRegistry() {
                     {"description", "Additional tags"}}},
                   {"metadata", {{"type", "object"}, {"description", "Metadata key/value pairs"}}}}},
                 {"required", json::array({"path"})}},
-            "Pin documents by path pattern (adds 'pinned' tag and updates repo)");
+            "Pin documents by path pattern (adds 'pinned' tag and updates repo)", "Pin Documents");
 
         // session_unpin
         toolRegistry_->registerTool<MCPSessionUnpinRequest, MCPSessionUnpinResponse>(
@@ -4679,7 +4631,7 @@ void MCPServer::initializeToolRegistry() {
                  {"properties",
                   {{"path", {{"type", "string"}, {"description", "Path glob pattern to unpin"}}}}},
                  {"required", json::array({"path"})}},
-            "Unpin documents by path pattern by removing 'pinned' tag");
+            "Unpin documents by path pattern by removing 'pinned' tag", "Unpin Documents");
 
         // session_watch
         toolRegistry_->registerTool<MCPSessionWatchRequest, MCPSessionWatchResponse>(
@@ -4705,7 +4657,7 @@ void MCPServer::initializeToolRegistry() {
                     {{"type", "boolean"},
                      {"description", "Create session if missing"},
                      {"default", true}}}}}},
-            "Enable or disable auto-ingest for a project session");
+            "Enable or disable auto-ingest for a project session", "Watch Project");
     }
 
     // Collection/Snapshot tools (consider these as standard or extension based on use case)
@@ -4744,13 +4696,13 @@ void MCPServer::initializeToolRegistry() {
                  {"description", "Preview without writing"},
                  {"default", false}}}}},
              {"required", json::array({"output_directory"})}},
-        "Restore documents from a collection or snapshot");
+        "Restore documents from a collection or snapshot", "Restore Documents");
 
     if (areYamsExtensionsEnabled()) {
         toolRegistry_->registerTool<MCPListCollectionsRequest, MCPListCollectionsResponse>(
             "list_collections",
             [this](const MCPListCollectionsRequest& req) { return handleListCollections(req); },
-            json{{"type", "object"}}, "List available collections");
+            json{{"type", "object"}}, "List available collections", "List Collections");
 
         toolRegistry_->registerTool<MCPListSnapshotsRequest, MCPListSnapshotsResponse>(
             "list_snapshots",
@@ -4762,7 +4714,7 @@ void MCPServer::initializeToolRegistry() {
                     {{"type", "boolean"},
                      {"description", "Include snapshot labels"},
                      {"default", true}}}}}},
-            "List available snapshots");
+            "List available snapshots", "List Snapshots");
 
         toolRegistry_->registerTool<MCPGraphRequest, MCPGraphResponse>(
             "graph", [this](const MCPGraphRequest& req) { return handleGraphQuery(req); },
@@ -4808,7 +4760,8 @@ void MCPServer::initializeToolRegistry() {
                      {"default", false}}},
                    {"scope_snapshot",
                     {{"type", "string"}, {"description", "Scope results to specific snapshot"}}}}}},
-            "Query the knowledge graph to explore relationships between documents and entities");
+            "Query the knowledge graph to explore relationships between documents and entities",
+            "Query Knowledge Graph");
     }
 }
 

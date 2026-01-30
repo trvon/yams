@@ -1173,7 +1173,7 @@ public:
     requires ToolSerializable<RequestType> && ToolSerializable<ResponseType> &&
              detail::AsyncToolHandler<std::decay_t<Handler>, RequestType, ResponseType>
     void registerTool(std::string_view name, Handler&& handler, json schema = {},
-                      std::string description = {}) {
+                      std::string description = {}, std::string title = {}) {
         auto wrapper = AsyncToolWrapper<RequestType, ResponseType>(std::forward<Handler>(handler));
         auto handlerFn = [wrapper](const json& args) mutable -> boost::asio::awaitable<json> {
             return wrapper(args);
@@ -1181,7 +1181,8 @@ public:
 
         auto [it, inserted] = handlers_.emplace(std::string(name), std::move(handlerFn));
         if (inserted) {
-            descriptors_.push_back({it->first, std::move(schema), std::move(description)});
+            descriptors_.push_back(
+                {it->first, std::move(schema), std::move(description), std::move(title)});
         }
     }
 
@@ -1197,6 +1198,9 @@ public:
         std::ranges::transform(descriptors_, std::back_inserter(tools), [](const auto& desc) {
             json tool;
             tool["name"] = desc.name;
+            if (!desc.title.empty()) {
+                tool["title"] = desc.title;
+            }
             tool["description"] = desc.description;
             tool["inputSchema"] = desc.schema.empty() ? json{{"type", "object"}} : desc.schema;
             return tool;
@@ -1209,6 +1213,7 @@ private:
         std::string name;
         json schema;
         std::string description;
+        std::string title;
     };
 
     AsyncHandlerMap handlers_;
