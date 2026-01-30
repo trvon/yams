@@ -1,236 +1,193 @@
 ---
-description: YAMS-first agent with persistent memory and PBI tracking
+description: YAMS-first agent with blackboard coordination and persistent memory
 argument-hint: [TASK=<description>] [PBI=<pbi-id>] [PHASE=<start|checkpoint|complete>]
 ---
 
-# YAMS Agent Workflow
+# Agent Workflow (YAMS + Blackboard)
 
-**You are Codex using YAMS as the single source of truth for memory, code index, and PBI tracking.**
+YAMS is the single source of truth for agent memory. When multiple agents are involved, use the blackboard tools to coordinate work.
 
-## Core Principles
+## Core Identity
 
-1. **Search before acting** - YAMS likely has relevant context.
-2. **Store as you learn** - Index code, notes, and decisions as you go.
-3. **PBI tracking lives in metadata** - Always include `pbi`, `task`, `phase`.
-4. **Snapshots are automatic** - Every `yams add` creates a snapshot.
-5. **No Beads** - Do not use `bd` or Beads workflows.
+- Default mode: use YAMS for memory (code + notes + decisions + research).
+- Coordination mode: always try to register on the blackboard and use it to share findings/tasks.
+- If blackboard tools are unavailable, fall back to the YAMS-only workflow (file claiming + metadata).
 
-### Debugging
+## Agent ID Convention
 
-```bash
-yams status       # Check daemon status
-yams daemon log   # View daemon logs
-yams doctor       # Check health
-```
+- Use a stable, readable ID: `opencode-<task-slug>`.
+- Keep `<task-slug>` lowercase ASCII with dashes (example: `opencode-index-speedup`).
 
----
+## Do / Don't
 
-## Required Metadata (PBI Tracking)
+### Do
+
+- Always register on the blackboard at the start of a task.
+- Use the blackboard to coordinate: post findings, create/claim tasks, group work in contexts.
+- Search before acting: `yams grep` for code patterns; `yams search` for semantic/concept queries.
+- Index as you learn: add code, notes, decisions, and research to YAMS as you go.
+- Use metadata consistently so knowledge is queryable across sessions.
+
+### Don't
+
+- Never `git push` without first indexing the work in YAMS.
+- Never delete files without first indexing the work in YAMS.
+- Don't duplicate the skill docs in this file; keep this file focused on behavior and workflow.
+
+## Safety & Permissions
+
+### Allowed Without Asking
+
+- Read/list files, run targeted tests/lints, run builds when explicitly requested.
+- YAMS operations: add/search/grep/graph/session/watch/status/doctor.
+- Blackboard operations: post/query/search/claim/update/complete findings and tasks.
+
+### Ask First (Always)
+
+- `git push` (must index in YAMS first)
+- Deleting files (must index in YAMS first)
+- Installing new dependencies
+
+## Required Metadata (Memory + PBI Tracking)
 
 Attach metadata to every `yams add`.
 
-- `pbi` - PBI identifier (e.g., `PBI-043`)
-- `task` - short task slug (e.g., `list-json-refresh`)
+- `task` - short task slug (example: `index-speedup`)
 - `phase` - `start` | `checkpoint` | `complete`
-- `owner` - agent or author (e.g., `codex`, `claude-abc123`)
+- `owner` - `opencode` (shared owner for multi-agent retrieval)
 - `source` - `code` | `note` | `decision` | `research`
 
----
+Optional (when applicable):
 
-## Core Workflow
+- `pbi` - PBI identifier (example: `PBI-043`)
+- `agent_id` - your canonical agent ID (example: `opencode-index-speedup`)
+
+## Project Structure (Where To Look First)
+
+- CLI entry points and command wiring: `src/cli/`
+- Service layer and command handlers: `src/app/services/`
+- Search implementations (grep/semantic): `src/search/`
+- Storage engines and backends: `src/storage/`
+- Vector DB + embeddings: `src/vector/`
+- Daemon client/server: `src/daemon/`
+- MCP server implementation: `src/mcp/`
+
+## Workflow
+
+### 0) Register (Always)
+
+Try blackboard registration first. If it fails, continue with YAMS-only flow.
+
+```text
+bb_register_agent({ id: "opencode-<task-slug>", name: "OpenCode Agent", capabilities: ["yams", "code", "coordination"] })
+```
+
+### Blackboard Coordination (Minimal)
+
+Keep coordination lightweight: findings capture what was discovered; tasks capture what needs doing.
+
+```text
+bb_search_findings({ query: "<keywords>" })
+bb_post_finding({ agent_id: "opencode-<task-slug>", topic: "other", title: "<title>", content: "<markdown>" })
+bb_create_task({ title: "<work item>", type: "fix", priority: 2, created_by: "opencode-<task-slug>" })
+bb_claim_task({ task_id: "<task-id>", agent_id: "opencode-<task-slug>" })
+bb_update_task({ task_id: "<task-id>", status: "working" })
+```
 
 ### 1) Search Existing Knowledge
+
 ```bash
-yams search "$TASK$" --limit 20
-yams search "$TASK$" --fuzzy --similarity 0.7  # If exact yields nothing
+# Code patterns first
+yams grep "<pattern>" --cwd .
 
-# Metadata-only search (force metadata path)
-yams search "pbi=$PBI" --type keyword --limit 20
+# Semantic/concept search
+yams search "$TASK" --limit 20
+
+# Structured metadata lookups
 yams search "task=$TASK" --type keyword --limit 20
-
-# Unique PBI selection (avoid collisions)
-# 1) Check exact PBI
-yams search "pbi=PBI-002" --type keyword --limit 20
-# 2) List all used PBI values with counts
-yams list --metadata-values pbi
-# 3) Choose the next unused PBI-### and continue
-
-# Tag filter uses metadata keys: tag:<name>
-yams search "plan" --type keyword --tags plan --limit 20
-
-# For code patterns, use grep first
-yams grep "<pattern>" --ext cpp
 ```
 
-### 2) Start Work (Index a Baseline)
+### 2) Start Work (Index Baseline + Claim)
+
 ```bash
+# Index baseline
 yams add . --recursive \
   --include "*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
-  --label "Working on: $TASK$" \
-  --metadata "pbi=$PBI,task=$TASK,phase=start,owner=codex,source=code"
+  --label "Working on: $TASK" \
+  --metadata "pbi=$PBI,task=$TASK,phase=start,owner=opencode,source=code,agent_id=opencode-$TASK"
 ```
 
-### 3) Checkpoint Progress
+If blackboard is available, claim or create a task there. If not, "claim" files via YAMS metadata:
+
+```bash
+yams add - --name "claim-$TASK.md" \
+  --metadata "pbi=$PBI,task=$TASK,phase=start,owner=opencode,source=note,agent_id=opencode-$TASK" \
+  <<'EOF'
+## Claim
+Agent: opencode-$TASK
+Scope: <paths or subsystems>
+Goal: <one sentence>
+EOF
+```
+
+### 3) Checkpoint (Index What Changed)
+
 ```bash
 yams add <changed-files> \
-  --label "$TASK$: checkpoint" \
-  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=code"
-
-echo "## Progress: $TASK$
-### Summary
-$SUMMARY
-" | yams add - \
-  --name "checkpoint-$(date +%Y%m%d-%H%M%S).md" \
-  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=note"
+  --label "$TASK: checkpoint" \
+  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=opencode,source=code,agent_id=opencode-$TASK"
 ```
 
-### 4) Complete Work
+### 4) Complete (Index + Close Loop)
+
 ```bash
 yams add . --recursive \
   --include "*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
-  --label "Completed: $TASK$" \
-  --metadata "pbi=$PBI,task=$TASK,phase=complete,owner=codex,source=code"
-
-yams list --snapshots --limit 2
-yams diff <snapshotA> <snapshotB>
+  --label "Completed: $TASK" \
+  --metadata "pbi=$PBI,task=$TASK,phase=complete,owner=opencode,source=code,agent_id=opencode-$TASK"
 ```
-
----
-
-## Knowledge Storage
-
-### Store Research
-```bash
-curl -s "$DOCS_URL" | yams add - \
-  --name "$PACKAGE-guide.md" \
-  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=research,url=$DOCS_URL"
-```
-
-### Store Solutions
-```bash
-echo "## Solution: $PROBLEM_DESCRIPTION
-
-### Context
-$WHAT_WE_WERE_TRYING_TO_DO
-
-### Problem
-$WHAT_WENT_WRONG
-
-### Solution
-$HOW_WE_FIXED_IT
-
-### Code
-\`\`\`
-$SOLUTION_CODE
-\`\`\`
-" | yams add - \
-  --name "solution-$(date +%Y%m%d)-$SLUG.md" \
-  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=note,intent=solution"
-```
-
-### Store Decisions
-```bash
-echo "## Decision: $TITLE
-
-### Date
-$(date -Iseconds)
-
-### Context
-$WHY_DECISION_NEEDED
-
-### Options Considered
-1. $OPTION_1 - Pros: ... Cons: ...
-2. $OPTION_2 - Pros: ... Cons: ...
-
-### Decision
-$WHAT_WE_CHOSE
-
-### Rationale
-$WHY
-" | yams add - \
-  --name "decision-$SLUG.md" \
-  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=decision"
-```
-
----
-
-## Code Search (YAMS First)
-
-**ALWAYS use `yams grep` first for code pattern search.**
-
-```bash
-yams grep "authentication middleware" --cwd .
-yams grep "error.*handling.*retry" --cwd . --fuzzy
-yams search "authentication middleware" --cwd .  # Only if grep is empty
-```
-
----
-
-## Graph Dead-Code Audit
-
-```bash
-yams status
-yams watch
-
-yams add . --recursive \
-  --include "*.c,*.cc,*.cpp,*.cxx,*.h,*.hpp,*.rs,*.go,*.py,*.ts,*.js" \
-  --exclude "build/**,node_modules/**" \
-  --label "Baseline index: $TASK$" \
-  --metadata "pbi=$PBI,task=$TASK,phase=checkpoint,owner=codex,source=code"
-
-yams graph --name src/example.cpp --depth 2 --format json
-yams graph --list-type <node-type> --isolated --limit 50
-```
-
----
 
 ## Response Template
 
-```
-TASK: $TASK$
-PBI: $PBI$
-PHASE: $PHASE$
+```text
+TASK: $TASK
+PBI: $PBI
+PHASE: $PHASE
+AGENT: opencode-$TASK
 
 CONTEXT FOUND:
-- Documents: <count>
-- Using: [key items]
+- Blackboard: <notes/findings/tasks>
+- YAMS: <docs/paths>
 
 ACTIONS:
-- [What was implemented/changed]
+- <what changed and why>
 
-YAMS STORED:
-- Indexed files: <paths>
-- Notes: <file names>
-- Metadata: pbi=$PBI,task=$TASK,phase=$PHASE,owner=codex
+INDEXED:
+- <files/notes indexed>
+- Metadata: task=$TASK,phase=$PHASE,owner=opencode,agent_id=opencode-$TASK
 
-VERIFY:
-- Current snapshot: <snapshot id>
-- Items in YAMS: <count>
-
-NEXT: [Next steps]
+NEXT:
+- <next step>
 ```
 
----
+## PR Checklist
 
-## Quick Reference (code-accurate)
+- All modified/new files indexed in YAMS with metadata
+- Any coordinated work reflected in blackboard tasks/findings (if available)
+- No secret material added to the repo or indexed notes
+- Commit/PR message explains "why" (not just "what")
 
-### YAMS CLI
-For detailed CLI reference, use the `/yams` skill or run `yams --help`.
+## When Stuck
 
-Key commands for this workflow:
-- `yams grep` - Code pattern search (use first)
-- `yams search` - Semantic/hybrid search
-- `yams add` - Index files (`-r` for recursive, `--include`/`--exclude` for filters)
-- `yams graph` - Explore relationships (`--name`, `--depth`, `--list-type --isolated`)
-- `yams watch` - Auto-index on file changes
-- `yams status` / `yams doctor` - Health checks
+- Ask one targeted clarifying question, with a recommended default.
+- Post a blackboard finding if the answer should help other agents.
+- Prefer small, reversible changes; avoid speculative rewrites.
 
----
+## Context Recovery
 
-## Critical Rules
+If the chat context is compacted or lost, rebuild it from YAMS using `yams list` filtered by `owner=opencode`, `task`, and recent time.
 
-1. **PBI tracking uses YAMS metadata** - No external task trackers.
-2. **Index ALL code changes in YAMS** - Superior search and graph connections.
-3. **Search YAMS before implementing** - ALWAYS use `yams grep` first for code patterns.
-4. **Avoid tags** - Use labels and metadata instead.
-5. **Store learnings** - Future you will thank present you.
+## References (Skills)
+
+- `yams` (YAMS memory + search + graph)
+- `yams-blackboard` (blackboard coordination on top of YAMS)
