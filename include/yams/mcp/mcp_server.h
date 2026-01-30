@@ -320,10 +320,7 @@ public:
         return callToolAsync(name, arguments);
     }
 
-    void testShutdown() {
-        running_.store(false);
-        stopThreadPool();
-    }
+    void testShutdown() { stop(); }
 
     void testConfigureDaemonClient(const yams::daemon::ClientConfig& cfg) {
         daemon_client_config_ = cfg;

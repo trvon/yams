@@ -124,3 +124,48 @@ TEST_CASE("MCP ToolRegistryWrappers - Unknown tools return helpful error",
     const auto message = response["content"][0]["text"].get<std::string>();
     CHECK(message == "Unknown tool: not-registered");
 }
+
+TEST_CASE("MCP ToolRegistry - Duplicate registration updates annotations",
+          "[mcp][registry][annotations][catch2]") {
+    ToolRegistry registry;
+
+    // First registration has no annotations
+    registry.registerTool<DummyRequest, DummyResponse>(
+        "dummy",
+        [](const DummyRequest& req) -> boost::asio::awaitable<Result<DummyResponse>> {
+            co_return DummyResponse{req.value};
+        },
+        json{}, std::string{"temporary description"});
+
+    auto first = registry.listTools();
+    REQUIRE(first.contains("tools"));
+    REQUIRE(first["tools"].size() == 1);
+    REQUIRE(first["tools"][0].contains("annotations"));
+    CHECK(first["tools"][0]["annotations"].is_object());
+    CHECK(first["tools"][0]["annotations"].empty());
+
+    // Second registration uses same tool name but adds annotations
+    yams::mcp::ToolAnnotation ann;
+    ann.readOnlyHint = true;
+    ann.idempotentHint = true;
+
+    registry.registerTool<DummyRequest, DummyResponse>(
+        "dummy",
+        [](const DummyRequest& req) -> boost::asio::awaitable<Result<DummyResponse>> {
+            co_return DummyResponse{req.value + 1};
+        },
+        json{}, std::string{"updated description"}, std::string{}, ann);
+
+    auto second = registry.listTools();
+    REQUIRE(second.contains("tools"));
+    REQUIRE(second["tools"].size() == 1);
+    CHECK(second["tools"][0]["description"] == "updated description");
+    REQUIRE(second["tools"][0].contains("annotations"));
+    CHECK(second["tools"][0]["annotations"].value("readOnlyHint", false) == true);
+    CHECK(second["tools"][0]["annotations"].value("idempotentHint", false) == true);
+
+    // Confirm handler updated too
+    const auto response = runCall(registry, "dummy", json{{"value", 1}});
+    CHECK_FALSE(response.value("isError", false));
+    CHECK(response["content"][0]["text"].get<std::string>() == R"({"value":2})");
+}
