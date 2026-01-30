@@ -733,6 +733,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.symbolQueueDepth = pq->symbolQueueDepth();
                 out.entityQueueDepth = pq->entityQueueDepth();
                 out.titleQueueDepth = pq->titleQueueDepth();
+                out.titleInFlight = pq->titleInFlight();
+                out.titleConcurrencyLimit = PostIngestQueue::maxTitleConcurrent();
                 // Dynamic concurrency limits (PBI-05a)
                 out.postExtractionLimit = TuneAdvisor::postExtractionConcurrent();
                 out.postKgLimit = TuneAdvisor::postKgConcurrent();

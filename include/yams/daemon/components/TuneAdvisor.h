@@ -2317,7 +2317,7 @@ public:
     }
 
     /// Reserved ONNX slots for embedding operations.
-    /// Guarantees embeddings get at least this many slots even under contention. Default: 2.
+    /// Guarantees embeddings get at least this many slots even under contention. Default: 1.
     /// Environment: YAMS_ONNX_EMBED_RESERVED
     static uint32_t onnxEmbedReserved() {
         uint32_t ov = onnxEmbedReservedOverride_.load(std::memory_order_relaxed);
@@ -2331,7 +2331,7 @@ public:
             } catch (...) {
             }
         }
-        return 2;
+        return 1;
     }
     static void setOnnxEmbedReserved(uint32_t n) {
         onnxEmbedReservedOverride_.store(n, std::memory_order_relaxed);
@@ -2351,6 +2351,9 @@ public:
             } catch (...) {
             }
         }
+        // Efficient profile with tight budget: reranker gets no reserved slot
+        if (profileScale() == 0.0)
+            return 0;
         return 1;
     }
     static void setOnnxRerankerReserved(uint32_t n) {

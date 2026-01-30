@@ -266,8 +266,8 @@ TEST_CASE("TuneAdvisor profile affects resource settings", "[daemon][governance]
         ProfileGuard guard(TuneAdvisor::Profile::Balanced);
 
         auto scale = TuneAdvisor::profileScale();
-        // Balanced profile now uses 0.75 scale (reduced from 1.0)
-        CHECK(scale == 0.75);
+        // Balanced profile now uses 0.5 scale
+        CHECK(scale == 0.5);
     }
 
     SECTION("Aggressive profile has default thresholds") {
@@ -372,7 +372,7 @@ TEST_CASE("TuneAdvisor ONNX settings are profile-aware", "[daemon][governance][c
         auto embedReserved = TuneAdvisor::onnxEmbedReserved();
         auto rerankerReserved = TuneAdvisor::onnxRerankerReserved();
 
-        // Defaults: 1, 2, 1
+        // Defaults: 1, 1, 1
         CHECK(glinerReserved >= 0);
         CHECK(embedReserved >= 0);
         CHECK(rerankerReserved >= 0);
@@ -386,14 +386,14 @@ TEST_CASE("TuneAdvisor ONNX settings are profile-aware", "[daemon][governance][c
             ProfileGuard guard(TuneAdvisor::Profile::Efficient);
             double scale = TuneAdvisor::profileScale();
             uint32_t scaledMax = static_cast<uint32_t>(maxConcurrent * scale);
-            CHECK(scaledMax < maxConcurrent); // Efficient (0.40) uses fewer slots
+            CHECK(scaledMax < maxConcurrent); // Efficient (0.0) uses fewer slots
         }
 
         {
             ProfileGuard guard(TuneAdvisor::Profile::Balanced);
             double scale = TuneAdvisor::profileScale();
             uint32_t scaledMax = static_cast<uint32_t>(maxConcurrent * scale);
-            CHECK(scaledMax < maxConcurrent); // Balanced (0.75) uses fewer slots than max
+            CHECK(scaledMax < maxConcurrent); // Balanced (0.5) uses fewer slots than max
         }
 
         {

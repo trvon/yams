@@ -2228,6 +2228,10 @@ Result<size_t> ServiceManager::adoptEntityExtractorsFromHosts() {
         if (result) {
             if (postIngest_) {
                 auto extractor = createGlinerExtractionFunc(pluginManager_->getEntityExtractors());
+                if (!extractor) {
+                    spdlog::warn("[ServiceManager] GLiNER extraction func is null — title "
+                                 "extraction will be disabled (no entity extractors found)");
+                }
                 postIngest_->setTitleExtractor(std::move(extractor));
                 spdlog::info("[ServiceManager] Updated PostIngestQueue title extractor using {} "
                              "entity extractors",

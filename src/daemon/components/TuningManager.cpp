@@ -98,10 +98,14 @@ void TuningManager::configureOnnxConcurrencyRegistry() {
     uint32_t rerankerReserved = TuneAdvisor::onnxRerankerReserved();
 
     // Apply profile scaling to slot limits
-    // Efficient = 0.5x, Balanced = 1.0x, Aggressive = 1.5x
+    // Efficient = 0.0, Balanced = 0.5, Aggressive = 1.0
     double scale = TuneAdvisor::profileScale();
     uint32_t scaledMax = static_cast<uint32_t>(maxConcurrent * scale);
     scaledMax = std::max(scaledMax, 2u); // Minimum 2 slots
+
+    // Ensure scaledMax is at least the sum of reserved slots
+    uint32_t totalReserved = glinerReserved + embedReserved + rerankerReserved;
+    scaledMax = std::max(scaledMax, totalReserved);
 
     // Configure the registry
     registry.setMaxSlots(scaledMax);

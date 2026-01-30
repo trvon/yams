@@ -8,6 +8,7 @@
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/error_hints.h>
 #include <yams/cli/result_helpers.h>
+#include <yams/cli/pipeline_stage_render.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -2044,8 +2045,6 @@ private:
 
                     // Per-stage breakdown with progress bars
                     uint64_t extractInFlight = findPostIngestCount("extraction_inflight");
-                    uint64_t kgQueuedTotal = findPostIngestCount("kg_queued");
-                    uint64_t kgConsumed = findPostIngestCount("kg_consumed");
                     uint64_t kgInFlight = findPostIngestCount("kg_inflight");
                     uint64_t kgQueueDepth = findPostIngestCount("kg_queue_depth");
                     uint64_t symbolInFlight = findPostIngestCount("symbol_inflight");
@@ -2053,115 +2052,52 @@ private:
                     uint64_t entityInFlight = findPostIngestCount("entity_inflight");
                     uint64_t entityQueueDepth = findPostIngestCount("entity_queue_depth");
                     uint64_t titleQueueDepth = findPostIngestCount("title_queue_depth");
-                    // Get dynamic concurrency limits
+                    uint64_t titleInFlight = findPostIngestCount("title_inflight");
+                    uint64_t titleLimit =
+                        std::max<uint64_t>(1, findPostIngestCount("post_title_limit"));
+                    // Get dynamic concurrency limits (floor of 1 to prevent div-by-zero)
                     uint64_t extractLimit =
-                        std::max<uint64_t>(4, findPostIngestCount("post_extraction_limit"));
-                    uint64_t kgLimit = std::max<uint64_t>(8, findPostIngestCount("post_kg_limit"));
+                        std::max<uint64_t>(1, findPostIngestCount("post_extraction_limit"));
+                    uint64_t kgLimit = std::max<uint64_t>(1, findPostIngestCount("post_kg_limit"));
                     uint64_t symbolLimit =
-                        std::max<uint64_t>(4, findPostIngestCount("post_symbol_limit"));
+                        std::max<uint64_t>(1, findPostIngestCount("post_symbol_limit"));
                     uint64_t entityLimit =
-                        std::max<uint64_t>(4, findPostIngestCount("post_entity_limit"));
+                        std::max<uint64_t>(1, findPostIngestCount("post_entity_limit"));
 
-                    // Calculate actual pending = queued - consumed - inflight
-                    int64_t kgPending = static_cast<int64_t>(kgQueuedTotal) -
-                                        static_cast<int64_t>(kgConsumed) -
-                                        static_cast<int64_t>(kgInFlight);
-                    if (kgPending < 0)
-                        kgPending = 0;
+                    // Fetch audit metrics for all stages
+                    uint64_t kgAuditQueued = findPostIngestCount("kg_queued");
+                    uint64_t kgAuditConsumed = findPostIngestCount("kg_consumed");
+                    uint64_t kgAuditDropped = findPostIngestCount("kg_dropped");
+                    uint64_t symbolAuditQueued = findPostIngestCount("symbol_queued");
+                    uint64_t symbolAuditConsumed = findPostIngestCount("symbol_consumed");
+                    uint64_t symbolAuditDropped = findPostIngestCount("symbol_dropped");
+                    uint64_t titleAuditQueued = findPostIngestCount("title_queued");
+                    uint64_t titleAuditConsumed = findPostIngestCount("title_consumed");
+                    uint64_t titleAuditDropped = findPostIngestCount("title_dropped");
+                    uint64_t entityAuditQueued = findPostIngestCount("entity_queued");
+                    uint64_t entityAuditConsumed = findPostIngestCount("entity_consumed");
+                    uint64_t entityAuditDropped = findPostIngestCount("entity_dropped");
 
-                    // Calculate total active job count across all stages
-                    uint64_t totalActive = extractInFlight + kgInFlight + symbolInFlight +
-                                           entityInFlight + titleQueueDepth;
-                    bool hasActivity = (totalActive > 0);
+                    // Unified Pipeline Stages block
+                    using yams::cli::detail::StageInfo;
+                    StageInfo stages[] = {
+                        {"Extraction", extractInFlight, 0, extractLimit, 0, 0, 0},
+                        {"Knowledge Graph", kgInFlight, kgQueueDepth, kgLimit, kgAuditQueued,
+                         kgAuditConsumed, kgAuditDropped},
+                        {"Symbols", symbolInFlight, symbolQueueDepth, symbolLimit,
+                         symbolAuditQueued, symbolAuditConsumed, symbolAuditDropped},
+                        {"Entities", entityInFlight, entityQueueDepth, entityLimit,
+                         entityAuditQueued, entityAuditConsumed, entityAuditDropped},
+                        {"Title Extraction", titleInFlight, titleQueueDepth, titleLimit,
+                         titleAuditQueued, titleAuditConsumed, titleAuditDropped},
+                    };
 
-                    // Add pipeline activity summary
-                    postIngestRows.push_back({"", "", ""}); // Separator
-                    postIngestRows.push_back({subsection_header("Pipeline Activity"), "", ""});
-
-                    if (hasActivity) {
-                        std::ostringstream activitySummary;
-                        activitySummary << totalActive << " jobs active across stages";
-                        std::vector<std::string> activeStages;
-                        if (extractInFlight > 0)
-                            activeStages.push_back("Extraction");
-                        if (kgInFlight > 0 || kgPending > 0)
-                            activeStages.push_back("Knowledge Graph");
-                        if (symbolInFlight > 0)
-                            activeStages.push_back("Symbols");
-                        if (entityInFlight > 0)
-                            activeStages.push_back("Entities");
-                        if (titleQueueDepth > 0)
-                            activeStages.push_back("Title Extraction");
-
-                        activitySummary << " (" << activeStages[0];
-                        for (size_t i = 1; i < activeStages.size(); ++i) {
-                            if (i == activeStages.size() - 1)
-                                activitySummary << ", " << activeStages[i];
-                            else
-                                activitySummary << ", " << activeStages[i];
-                        }
-                        activitySummary << ")";
-                        postIngestRows.push_back({"  Status", activitySummary.str(), ""});
-                    } else {
-                        postIngestRows.push_back({"  Status", neutralText("all stages idle"), ""});
-                    }
-
-                    if (extractInFlight > 0 || kgPending > 0 || kgInFlight > 0 ||
-                        symbolInFlight > 0 || entityInFlight > 0 || kgQueueDepth > 0 ||
-                        symbolQueueDepth > 0 || entityQueueDepth > 0 || titleQueueDepth > 0) {
+                    auto stageRows = yams::cli::detail::renderPipelineStages(stages, 5);
+                    if (!stageRows.empty()) {
                         postIngestRows.push_back({"", "", ""}); // Separator
                         postIngestRows.push_back({subsection_header("Pipeline Stages"), "", ""});
-
-                        // Extraction stage
-                        double extractFrac = static_cast<double>(extractInFlight) / extractLimit;
-                        std::ostringstream extractBar;
-                        extractBar << progress_bar(extractFrac, 8, "#", "░", Ansi::GREEN,
-                                                   Ansi::YELLOW, Ansi::RED, true)
-                                   << " " << static_cast<int>(extractFrac * 100) << "% ("
-                                   << extractInFlight << "/" << extractLimit << " slots)";
-                        postIngestRows.push_back({"  Extraction", extractBar.str(), ""});
-
-                        // KG stage
-                        double kgFrac = static_cast<double>(kgInFlight) / kgLimit;
-                        std::ostringstream kgBar;
-                        kgBar << progress_bar(kgFrac, 8, "#", "░", Ansi::GREEN, Ansi::YELLOW,
-                                              Ansi::RED, true)
-                              << " " << static_cast<int>(kgFrac * 100) << "% (" << kgInFlight << "/"
-                              << kgLimit << " slots)";
-                        if (kgQueueDepth > 0)
-                            kgBar << " · queue: " << kgQueueDepth;
-                        postIngestRows.push_back({"  Knowledge Graph", kgBar.str(), ""});
-
-                        // Symbol stage
-                        double symbolFrac = static_cast<double>(symbolInFlight) / symbolLimit;
-                        std::ostringstream symbolBar;
-                        symbolBar << progress_bar(symbolFrac, 8, "#", "░", Ansi::GREEN,
-                                                  Ansi::YELLOW, Ansi::RED, true)
-                                  << " " << static_cast<int>(symbolFrac * 100) << "% ("
-                                  << symbolInFlight << "/" << symbolLimit << " slots)";
-                        if (symbolQueueDepth > 0)
-                            symbolBar << " · queue: " << symbolQueueDepth;
-                        postIngestRows.push_back({"  Symbols", symbolBar.str(), ""});
-
-                        // Entity stage (if active)
-                        if (entityInFlight > 0 || entityQueueDepth > 0) {
-                            double entityFrac = static_cast<double>(entityInFlight) / entityLimit;
-                            std::ostringstream entityBar;
-                            entityBar << progress_bar(entityFrac, 8, "#", "░", Ansi::GREEN,
-                                                      Ansi::YELLOW, Ansi::RED, true)
-                                      << " " << static_cast<int>(entityFrac * 100) << "% ("
-                                      << entityInFlight << "/" << entityLimit << " slots)";
-                            if (entityQueueDepth > 0)
-                                entityBar << " · queue: " << entityQueueDepth;
-                            postIngestRows.push_back({"  Entities", entityBar.str(), ""});
-                        }
-
-                        // Title extraction queue (if active)
-                        if (titleQueueDepth > 0) {
-                            postIngestRows.push_back({"  Title Extraction",
-                                                      "queue: " + std::to_string(titleQueueDepth),
-                                                      ""});
-                        }
+                        postIngestRows.insert(postIngestRows.end(), stageRows.begin(),
+                                              stageRows.end());
                     }
                 }
                 render_rows(std::cout, postIngestRows);

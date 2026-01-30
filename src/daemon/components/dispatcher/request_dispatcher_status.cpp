@@ -188,6 +188,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.requestCounts["entity_inflight"] = snap->entityInFlight;
             res.requestCounts["entity_queue_depth"] = snap->entityQueueDepth;
             res.requestCounts["title_queue_depth"] = snap->titleQueueDepth;
+            res.requestCounts["title_inflight"] = snap->titleInFlight;
+            res.requestCounts["post_title_limit"] = snap->titleConcurrencyLimit;
             res.requestCounts["title_queued"] = snap->titleQueued;
             res.requestCounts["title_dropped"] = snap->titleDropped;
             res.requestCounts["title_consumed"] = snap->titleConsumed;

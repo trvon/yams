@@ -395,15 +395,10 @@ void StdioTransport::sendFramedSerialized(const std::string& payload) {
 }
 
 void StdioTransport::sendSerialized(const std::string& payload) {
-    auto mode = lastFraming_.load();
+    // Per MCP spec: always output NDJSON (newline-delimited JSON)
+    // regardless of input framing mode. The lastFraming_ variable
+    // is only used for input parsing, not output formatting.
     auto& out = std::cout;
-    if (mode == FramingMode::ContentLength) {
-        out << "Content-Length: " << payload.size() << "\r\n\r\n";
-        out << payload;
-        out.flush();
-        return;
-    }
-    // Default: MCP stdio spec (newline-delimited JSON)
     out << payload << "\n";
     out.flush();
 }
@@ -583,7 +578,14 @@ MessageResult StdioTransport::receive() {
                            [](unsigned char c) { return std::tolower(c); });
             if (key == "content-length") {
                 try {
-                    contentLength = static_cast<std::size_t>(std::stoull(val));
+                    // Validate that the value is a non-negative integer
+                    // std::stoull doesn't throw for negative values, it wraps around
+                    // So we need to check for '-' prefix explicitly
+                    if (!val.empty() && val.front() == '-') {
+                        contentLength = 0;
+                    } else {
+                        contentLength = static_cast<std::size_t>(std::stoull(val));
+                    }
                 } catch (...) {
                     contentLength = 0;
                 }

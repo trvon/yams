@@ -32,6 +32,7 @@ yams_cli_sources = [
   'commands/repair_command.cpp',
   'commands/model_command.cpp',
   'commands/daemon_command.cpp',
+  'commands/pipeline_stage_render.cpp',
   'commands/download_command.cpp',
   'commands/watch_command.cpp',
   'commands/plugin_command.cpp',

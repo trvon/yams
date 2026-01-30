@@ -2107,63 +2107,76 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
     auto idleDelay = kMinIdleDelay;
 
     while (!stop_.load()) {
-        bool didWork = false;
-        InternalEventBus::TitleExtractionJob job;
-        // Dynamic concurrency limit
-        std::size_t maxConcurrent = maxTitleConcurrent();
-        // Graduated pressure response for CPU-aware throttling
-        auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
-        switch (pressureLevel) {
-            case ResourcePressureLevel::Emergency:
-                maxConcurrent = 0; // Halt (backstop for pauseAll)
-                break;
-            case ResourcePressureLevel::Critical:
-                maxConcurrent = 1; // Minimal concurrency
-                break;
-            case ResourcePressureLevel::Warning:
-                maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
-                break;
-            default:
-                break;
-        }
-        if (titlePaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
-            timer.expires_after(kMinIdleDelay); // Always fast when paused
-            co_await timer.async_wait(boost::asio::use_awaitable);
-            continue;
-        }
-        while (titleInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
-            didWork = true;
-            wasActive_.store(true, std::memory_order_release);
-            titleInFlight_.fetch_add(1);
-            boost::asio::post(
-                coordinator_->getExecutor(),
-                [this, hash = std::move(job.hash), docId = job.documentId,
-                 textSnippet = std::move(job.textSnippet),
-                 fallbackTitle = std::move(job.fallbackTitle), filePath = std::move(job.filePath),
-                 language = std::move(job.language), mimeType = std::move(job.mimeType)]() {
-                    processTitleExtractionStage(hash, docId, textSnippet, fallbackTitle, filePath,
-                                                language, mimeType);
-                    titleInFlight_.fetch_sub(1);
-                    checkDrainAndSignal();
-                });
-        }
-
-        if (didWork) {
-            if (TuneAdvisor::enableResourceGovernor()) {
-                if (applyCpuThrottling(timer)) {
-                    co_await timer.async_wait(boost::asio::use_awaitable);
+        try {
+            bool didWork = false;
+            InternalEventBus::TitleExtractionJob job;
+            // Dynamic concurrency limit
+            std::size_t maxConcurrent = maxTitleConcurrent();
+            // Graduated pressure response for CPU-aware throttling
+            auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
+            switch (pressureLevel) {
+                case ResourcePressureLevel::Emergency:
+                    maxConcurrent = 0; // Halt (backstop for pauseAll)
+                    break;
+                case ResourcePressureLevel::Critical:
+                    maxConcurrent = 1; // Minimal concurrency
+                    break;
+                case ResourcePressureLevel::Warning:
+                    maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+                    break;
+                default:
+                    break;
+            }
+            if (titlePaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
+                // Periodic warning when poller is idle with zero budget
+                if (maxConcurrent == 0) {
+                    spdlog::warn("[PostIngestQueue] titlePoller idle "
+                                 "(maxConcurrent=0, paused={})",
+                                 titlePaused_.load(std::memory_order_relaxed));
                 }
+                timer.expires_after(kMinIdleDelay); // Always fast when paused
+                co_await timer.async_wait(boost::asio::use_awaitable);
+                continue;
+            }
+            while (titleInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
+                didWork = true;
+                wasActive_.store(true, std::memory_order_release);
+                titleInFlight_.fetch_add(1);
+                boost::asio::post(
+                    coordinator_->getExecutor(),
+                    [this, hash = std::move(job.hash), docId = job.documentId,
+                     textSnippet = std::move(job.textSnippet),
+                     fallbackTitle = std::move(job.fallbackTitle),
+                     filePath = std::move(job.filePath), language = std::move(job.language),
+                     mimeType = std::move(job.mimeType)]() {
+                        processTitleExtractionStage(hash, docId, textSnippet, fallbackTitle,
+                                                    filePath, language, mimeType);
+                        titleInFlight_.fetch_sub(1);
+                        checkDrainAndSignal();
+                    });
             }
 
-            idleDelay = kMinIdleDelay; // Reset on work
-            continue;
-        }
+            if (didWork) {
+                if (TuneAdvisor::enableResourceGovernor()) {
+                    if (applyCpuThrottling(timer)) {
+                        co_await timer.async_wait(boost::asio::use_awaitable);
+                    }
+                }
 
-        // Adaptive backoff when idle
-        timer.expires_after(idleDelay);
-        co_await timer.async_wait(boost::asio::use_awaitable);
-        if (idleDelay < kMaxIdleDelay) {
-            idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
+                idleDelay = kMinIdleDelay; // Reset on work
+                continue;
+            }
+
+            // Adaptive backoff when idle
+            timer.expires_after(idleDelay);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+            if (idleDelay < kMaxIdleDelay) {
+                idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
+            }
+        } catch (const std::exception& e) {
+            spdlog::error("[PostIngestQueue] titlePoller exception: {}", e.what());
+            // Set recovery delay (co_await not allowed in catch handler)
+            idleDelay = std::chrono::milliseconds(100);
         }
     }
 

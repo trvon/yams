@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 #include <yams/plugins/abi.h>
 #include <yams/plugins/entity_extractor_v2.h>
+#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 
 #include "gliner_session.h"
 
@@ -124,11 +125,18 @@ int extract_abi(void*, const char* content, size_t content_len,
         }
     }
 
-    // Extract entities
+    // Extract entities (acquire ONNX slot for fairness with embeddings/reranker)
     std::string_view text(content, content_len);
     std::vector<yams::glint::EntitySpan> spans;
 
     {
+        yams::daemon::OnnxConcurrencyRegistry::SlotGuard slotGuard(
+            yams::daemon::OnnxConcurrencyRegistry::instance(), yams::daemon::OnnxLane::Gliner);
+        if (!slotGuard.acquired()) {
+            r->error = dup_cstr("ONNX slot timeout for GLiNER");
+            *out = r;
+            return YAMS_PLUGIN_OK;
+        }
         std::lock_guard<std::mutex> lock(get_ctx().mutex);
         if (labels.empty()) {
             spans = get_ctx().session->extract(text);

@@ -24,7 +24,7 @@ OnnxConcurrencyRegistry::OnnxConcurrencyRegistry()
     // Default reserved slots by lane (conservative defaults)
     // These can be overridden by TuneAdvisor env vars
     laneStates_[static_cast<std::size_t>(OnnxLane::Gliner)].reserved.store(1);
-    laneStates_[static_cast<std::size_t>(OnnxLane::Embedding)].reserved.store(2);
+    laneStates_[static_cast<std::size_t>(OnnxLane::Embedding)].reserved.store(1);
     laneStates_[static_cast<std::size_t>(OnnxLane::Reranker)].reserved.store(1);
     laneStates_[static_cast<std::size_t>(OnnxLane::Other)].reserved.store(0);
 
@@ -45,17 +45,36 @@ bool OnnxConcurrencyRegistry::acquireSlot(OnnxLane lane, std::chrono::millisecon
     // Track queued count for metrics
     state.queued.fetch_add(1, std::memory_order_relaxed);
 
-    // First, try to use the lane's reserved capacity
-    // A lane can use a reserved slot if: used < reserved
-    std::uint32_t currentUsed = state.used.load(std::memory_order_acquire);
-    std::uint32_t reserved = state.reserved.load(std::memory_order_acquire);
+    // First, try to use the lane's reserved capacity via CAS loop (no TOCTOU)
+    {
+        std::uint32_t currentUsed = state.used.load(std::memory_order_acquire);
+        std::uint32_t reserved = state.reserved.load(std::memory_order_acquire);
 
-    if (currentUsed < reserved) {
-        // Can use reserved slot - just increment used count
-        state.used.fetch_add(1, std::memory_order_release);
-        state.queued.fetch_sub(1, std::memory_order_relaxed);
-        totalUsed_.fetch_add(1, std::memory_order_relaxed);
-        return true;
+        while (currentUsed < reserved) {
+            if (state.used.compare_exchange_weak(currentUsed, currentUsed + 1,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire)) {
+                state.queued.fetch_sub(1, std::memory_order_relaxed);
+                totalUsed_.fetch_add(1, std::memory_order_relaxed);
+                return true;
+            }
+            // currentUsed reloaded by CAS failure; re-check against reserved
+            reserved = state.reserved.load(std::memory_order_acquire);
+        }
+    }
+
+    // Check global budget before trying shared pool
+    {
+        std::uint32_t total = totalUsed_.load(std::memory_order_acquire);
+        std::uint32_t max = maxSlots_.load(std::memory_order_acquire);
+        if (total >= max) {
+            // Over budget — don't even try the semaphore
+            state.queued.fetch_sub(1, std::memory_order_relaxed);
+            state.timeouts.fetch_add(1, std::memory_order_relaxed);
+            spdlog::debug("[OnnxConcurrencyRegistry] Over budget ({}/{}) for lane {}", total, max,
+                          laneIdx);
+            return false;
+        }
     }
 
     // Reserved slots exhausted, try shared pool

@@ -15,7 +15,8 @@ if not onnxruntime_dep.found()
   onnxruntime_dep = dependency('libonnxruntime', required: false)
 endif
 
-glint_deps = [spdlog_dep, nlohmann_json_dep, yams_config_dep]
+yams_onnx_resource_dep = dependency('yams_onnx_resource', required: true)
+glint_deps = [spdlog_dep, nlohmann_json_dep, yams_config_dep, yams_onnx_resource_dep]
 glint_cpp_args = ['-std=c++23']
 
 if onnxruntime_dep.found()

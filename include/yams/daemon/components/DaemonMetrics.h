@@ -113,6 +113,8 @@ struct MetricsSnapshot {
     std::size_t entityQueueDepth{0}; // Current channel queue depth
     // Title extraction metrics
     std::size_t titleQueueDepth{0}; // Current channel queue depth
+    std::size_t titleInFlight{0};
+    std::size_t titleConcurrencyLimit{0};
     // Dynamic concurrency limits (PBI-05a)
     std::size_t postExtractionLimit{4};
     std::size_t postKgLimit{8};
