@@ -255,7 +255,8 @@ public:
     /**
      * @brief Update an entity vector by node_key + embedding_type
      */
-    Result<void> updateEntityVector(const std::string& node_key, EntityEmbeddingType type,
+    Result<void> updateEntityVector(const std::string& node_key,
+                                    [[maybe_unused]] EntityEmbeddingType type,
                                     const EntityVectorRecord& record);
 
     /**

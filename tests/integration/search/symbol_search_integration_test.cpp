@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright 2025 Trevon Wright
 //
 // Integration test: Symbol extractor plugin integration with search engine

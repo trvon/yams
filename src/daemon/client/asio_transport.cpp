@@ -374,8 +374,8 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
         co_return Error{ErrorCode::ResourceExhausted, "Too many in-flight requests"};
     }
     {
-        AsioConnection::Handler h;
-        h.unary.emplace(AsioConnection::UnaryHandler{response_promise});
+        AsioConnection::Handler h{};
+        h.unary = std::make_optional<AsioConnection::UnaryHandler>(response_promise);
         conn->handlers.emplace(msg.requestId, std::move(h));
     }
 

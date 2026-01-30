@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 // IPC Protocol Fuzzer - Targets message framing and deserialization
 
 #include <cstddef>

@@ -62,7 +62,7 @@ LiteralExtractor::ExtractionResult LiteralExtractor::extract(std::string_view pa
             result.isComplete = false;
             if (!currentLiteral.empty()) {
                 result.literals.push_back(currentLiteral);
-                currentLiteral.clear();
+                (void)currentLiteral.clear();
             }
         } else {
             currentLiteral += c;

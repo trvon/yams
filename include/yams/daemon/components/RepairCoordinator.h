@@ -71,7 +71,7 @@ public:
     // activeConnFn returns current active connection count
     RepairCoordinator(ServiceManager* services, StateComponent* state,
                       std::function<size_t()> activeConnFn, Config cfg);
-    ~RepairCoordinator();
+    virtual ~RepairCoordinator();
 
     void start();
     void stop();

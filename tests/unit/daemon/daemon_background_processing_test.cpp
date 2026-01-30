@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2025 Trevon Helm
 // Consolidated background processing tests (3 → 1): PostIngestQueue, InternalEventBus, MPMC
 // concurrency Covers: queue lifecycle, async processing, bus integration, stress testing, MPMC

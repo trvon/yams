@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 // ProtoSerializer Fuzzer - Targets protobuf encoding/decoding of IPC messages
 
 #include <cstddef>

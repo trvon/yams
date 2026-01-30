@@ -1,5 +1,5 @@
 // Copyright (c) 2025 YAMS Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 // Unit tests for ABI Model Provider dimension handling and error messages
 #include <catch2/catch_test_macros.hpp>

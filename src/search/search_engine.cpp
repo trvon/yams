@@ -798,8 +798,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::future<Result<std::vector<ComponentResult>>> tagFuture;
         std::future<Result<std::vector<ComponentResult>>> metaFuture;
 
-        auto schedule = [&](const char* name, float weight, std::atomic<uint64_t>& queryCount,
-                            std::atomic<uint64_t>& avgTime,
+        auto schedule = [&]([[maybe_unused]] const char* name, [[maybe_unused]] float weight,
+                            [[maybe_unused]] std::atomic<uint64_t>& queryCount,
+                            [[maybe_unused]] std::atomic<uint64_t>& avgTime,
                             auto&& fn) -> std::future<Result<std::vector<ComponentResult>>> {
             if (weight <= 0.0f) {
                 return {};

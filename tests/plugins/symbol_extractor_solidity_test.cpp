@@ -137,7 +137,7 @@ TEST(SymbolExtractorSolidity, ERC20TokenContract) {
     ASSERT_TRUE(plugin.has_value()) << "Failed to load symbol extractor plugin";
 
     std::string solidityCode = R"(
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity ^0.8.0;
 
 contract MyToken {
@@ -206,7 +206,7 @@ TEST(SymbolExtractorSolidity, ContractInheritance) {
     ASSERT_TRUE(plugin.has_value()) << "Failed to load symbol extractor plugin";
 
     std::string code = R"(
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity ^0.8.0;
 
 interface IERC20 {
@@ -257,7 +257,7 @@ TEST(SymbolExtractorSolidity, StructsAndEnums) {
     ASSERT_TRUE(plugin.has_value()) << "Failed to load symbol extractor plugin";
 
     std::string code = R"(
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity ^0.8.0;
 
 contract DataTypes {
@@ -302,7 +302,7 @@ TEST(SymbolExtractorSolidity, LibraryDeclaration) {
     ASSERT_TRUE(plugin.has_value()) << "Failed to load symbol extractor plugin";
 
     std::string code = R"(
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity ^0.8.0;
 
 library SafeMath {
@@ -344,7 +344,7 @@ TEST(SymbolExtractorSolidity, EmptySolidityFile) {
     ASSERT_TRUE(plugin.has_value()) << "Failed to load symbol extractor plugin";
 
     std::string code = R"(
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity ^0.8.0;
 )";
 

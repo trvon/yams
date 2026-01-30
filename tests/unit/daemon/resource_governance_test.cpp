@@ -422,3 +422,128 @@ TEST_CASE("Governor and Registry are independently accessible", "[daemon][govern
     auto caps = governor.getScalingCaps();
     (void)caps; // Just verify it's callable
 }
+
+// =============================================================================
+// Exact profileScale() Values
+// =============================================================================
+
+TEST_CASE("profileScale returns exact values per profile", "[daemon][governance][catch2]") {
+    SECTION("Efficient profile scale is exactly 0.0") {
+        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+        CHECK(TuneAdvisor::profileScale() == 0.0);
+    }
+
+    SECTION("Balanced profile scale is exactly 0.5") {
+        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+        CHECK(TuneAdvisor::profileScale() == 0.5);
+    }
+
+    SECTION("Aggressive profile scale is exactly 1.0") {
+        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+        CHECK(TuneAdvisor::profileScale() == 1.0);
+    }
+}
+
+// =============================================================================
+// ONNX Reserved Slot Defaults Per Profile
+// =============================================================================
+
+TEST_CASE("ONNX reserved slot defaults match profile", "[daemon][governance][catch2]") {
+    SECTION("All profiles: gliner=1, embed=1") {
+        for (auto profile : {TuneAdvisor::Profile::Efficient, TuneAdvisor::Profile::Balanced,
+                             TuneAdvisor::Profile::Aggressive}) {
+            ProfileGuard guard(profile);
+            CHECK(TuneAdvisor::onnxGlinerReserved() == 1);
+            CHECK(TuneAdvisor::onnxEmbedReserved() == 1);
+        }
+    }
+
+    SECTION("Efficient: reranker=0") {
+        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
+        CHECK(TuneAdvisor::onnxRerankerReserved() == 0);
+    }
+
+    SECTION("Balanced: reranker=1") {
+        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+        CHECK(TuneAdvisor::onnxRerankerReserved() == 1);
+    }
+
+    SECTION("Aggressive: reranker=1") {
+        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+        CHECK(TuneAdvisor::onnxRerankerReserved() == 1);
+    }
+}
+
+// =============================================================================
+// Slot Arithmetic Invariant
+// =============================================================================
+
+TEST_CASE("Reserved slots never exceed max concurrent", "[daemon][governance][catch2]") {
+    for (auto profile : {TuneAdvisor::Profile::Efficient, TuneAdvisor::Profile::Balanced,
+                         TuneAdvisor::Profile::Aggressive}) {
+        ProfileGuard guard(profile);
+        uint32_t totalReserved = TuneAdvisor::onnxGlinerReserved() +
+                                 TuneAdvisor::onnxEmbedReserved() +
+                                 TuneAdvisor::onnxRerankerReserved();
+        CHECK(totalReserved <= TuneAdvisor::onnxMaxConcurrent());
+    }
+}
+
+// =============================================================================
+// Env Var Override for Reserved Slots
+// =============================================================================
+
+TEST_CASE("ONNX reserved slot env var overrides", "[daemon][governance][catch2]") {
+    ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
+
+    SECTION("YAMS_ONNX_EMBED_RESERVED overrides default") {
+        EnvGuard envGuard("YAMS_ONNX_EMBED_RESERVED", "3");
+        CHECK(TuneAdvisor::onnxEmbedReserved() == 3);
+    }
+
+    SECTION("YAMS_ONNX_RERANKER_RESERVED overrides profile-aware default") {
+        EnvGuard envGuard("YAMS_ONNX_RERANKER_RESERVED", "4");
+        CHECK(TuneAdvisor::onnxRerankerReserved() == 4);
+    }
+}
+
+// =============================================================================
+// Lane-Specific Slot Acquisition Across Lanes
+// =============================================================================
+
+TEST_CASE("Slots acquired across multiple lanes", "[daemon][governance][catch2]") {
+    auto& reg = OnnxConcurrencyRegistry::instance();
+    SlotConfigGuard configGuard(8);
+
+    uint32_t beforeUsed = reg.usedSlots();
+
+    {
+        OnnxConcurrencyRegistry::SlotGuard glinerSlot(reg, OnnxLane::Gliner, 100ms);
+        OnnxConcurrencyRegistry::SlotGuard embedSlot(reg, OnnxLane::Embedding, 100ms);
+        OnnxConcurrencyRegistry::SlotGuard rerankerSlot(reg, OnnxLane::Reranker, 100ms);
+
+        CHECK(glinerSlot.acquired());
+        CHECK(embedSlot.acquired());
+        CHECK(rerankerSlot.acquired());
+        CHECK(reg.usedSlots() == beforeUsed + 3);
+    }
+
+    CHECK(reg.usedSlots() == beforeUsed);
+}
+
+// =============================================================================
+// Memory Threshold Ordering Across All Profiles
+// =============================================================================
+
+TEST_CASE("Memory thresholds maintain ordering invariant", "[daemon][governance][catch2]") {
+    TuneAdvisor::resetModelEvictThresholdOverrides();
+
+    for (auto profile : {TuneAdvisor::Profile::Efficient, TuneAdvisor::Profile::Balanced,
+                         TuneAdvisor::Profile::Aggressive}) {
+        ProfileGuard guard(profile);
+        CHECK(TuneAdvisor::modelEvictWarningThreshold() <
+              TuneAdvisor::modelEvictCriticalThreshold());
+        CHECK(TuneAdvisor::modelEvictCriticalThreshold() <
+              TuneAdvisor::modelEvictEmergencyThreshold());
+    }
+}

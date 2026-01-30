@@ -695,7 +695,8 @@ public:
                         }
 
                         // Skip oversized files
-                        if (d.fileSize > MAX_FILE_SIZE) {
+                        if (static_cast<int64_t>(d.fileSize) >
+                            static_cast<int64_t>(MAX_FILE_SIZE)) {
                             continue;
                         }
 
@@ -734,7 +735,7 @@ public:
                 }
 
                 // Skip oversized files
-                if (d.fileSize > MAX_FILE_SIZE) {
+                if (static_cast<int64_t>(d.fileSize) > static_cast<int64_t>(MAX_FILE_SIZE)) {
                     filesSkippedSize++;
                     continue;
                 }

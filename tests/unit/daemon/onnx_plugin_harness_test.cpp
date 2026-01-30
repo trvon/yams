@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2025 Trevon Helm
 // Plugin harness test: isolated plugin loading with graceful degradation
 // Migrated from GTest to Catch2, enhanced with timeout and multi-plugin support

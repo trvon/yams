@@ -254,7 +254,8 @@ Result<void> VectorSchemaMigration::migrateV2ToV2_1(sqlite3* db) {
     return Result<void>{};
 }
 
-Result<void> VectorSchemaMigration::migrateV1ToV2(sqlite3* db, size_t embedding_dim) {
+Result<void> VectorSchemaMigration::migrateV1ToV2(sqlite3* db,
+                                                  [[maybe_unused]] size_t embedding_dim) {
     if (!db) {
         return Error{ErrorCode::InvalidArgument, "Database handle is null"};
     }

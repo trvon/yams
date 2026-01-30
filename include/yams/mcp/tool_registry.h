@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 #include <concepts>
 #include <functional>
+#include <iostream>
 #include <iterator>
 #include <optional>
 #include <ranges>
@@ -604,17 +605,26 @@ struct MCPAddDirectoryResponse {
     json toJson() const;
 };
 
+// Tool annotations per MCP 2024-11-05 spec
+struct ToolAnnotation {
+    std::optional<bool> readOnlyHint;
+    std::optional<bool> destructiveHint;
+    std::optional<bool> idempotentHint;
+    std::optional<bool> openWorldHint;
+};
+
 // Tool descriptor for registry
 struct ToolDescriptor {
     std::string name;
     std::function<json(const json&)> handler;
     json schema;
     std::string description;
+    std::optional<ToolAnnotation> annotations;
 
     ToolDescriptor(std::string n, std::function<json(const json&)> h, json s = {},
-                   std::string d = {})
+                   std::string d = {}, std::optional<ToolAnnotation> ann = std::nullopt)
         : name(std::move(n)), handler(std::move(h)), schema(std::move(s)),
-          description(std::move(d)) {}
+          description(std::move(d)), annotations(std::move(ann)) {}
 };
 
 // Get by name DTOs
@@ -1173,7 +1183,12 @@ public:
     requires ToolSerializable<RequestType> && ToolSerializable<ResponseType> &&
              detail::AsyncToolHandler<std::decay_t<Handler>, RequestType, ResponseType>
     void registerTool(std::string_view name, Handler&& handler, json schema = {},
-                      std::string description = {}, std::string title = {}) {
+                      std::string description = {}, std::string title = {},
+                      std::optional<ToolAnnotation> annotations = std::nullopt) {
+        if (annotations) {
+            // Use stderr so we don't corrupt stdio JSON-RPC streams.
+            std::cerr << "Registering tool " << name << " with annotations" << std::endl;
+        }
         auto wrapper = AsyncToolWrapper<RequestType, ResponseType>(std::forward<Handler>(handler));
         auto handlerFn = [wrapper](const json& args) mutable -> boost::asio::awaitable<json> {
             return wrapper(args);
@@ -1181,8 +1196,34 @@ public:
 
         auto [it, inserted] = handlers_.emplace(std::string(name), std::move(handlerFn));
         if (inserted) {
-            descriptors_.push_back(
-                {it->first, std::move(schema), std::move(description), std::move(title)});
+            descriptors_.push_back({it->first, std::move(schema), std::move(description),
+                                    std::move(title), std::move(annotations)});
+            return;
+        }
+
+        // Tool already registered: keep handler map current and patch descriptor metadata.
+        // This avoids losing newly-added annotations when a tool is registered more than once.
+        it->second = std::move(handlerFn);
+
+        auto dit = std::ranges::find_if(
+            descriptors_, [&](const AsyncToolDescriptor& d) { return d.name == it->first; });
+        if (dit == descriptors_.end()) {
+            descriptors_.push_back({it->first, std::move(schema), std::move(description),
+                                    std::move(title), std::move(annotations)});
+            return;
+        }
+
+        if (!schema.empty()) {
+            dit->schema = std::move(schema);
+        }
+        if (!description.empty()) {
+            dit->description = std::move(description);
+        }
+        if (!title.empty()) {
+            dit->title = std::move(title);
+        }
+        if (annotations.has_value()) {
+            dit->annotations = std::move(annotations);
         }
     }
 
@@ -1203,6 +1244,24 @@ public:
             }
             tool["description"] = desc.description;
             tool["inputSchema"] = desc.schema.empty() ? json{{"type", "object"}} : desc.schema;
+            // Always include annotations field per MCP 2024-11-05 (even if empty, clients expect
+            // it)
+            json ann = json::object();
+            if (desc.annotations) {
+                if (desc.annotations->readOnlyHint.has_value()) {
+                    ann["readOnlyHint"] = desc.annotations->readOnlyHint.value();
+                }
+                if (desc.annotations->destructiveHint.has_value()) {
+                    ann["destructiveHint"] = desc.annotations->destructiveHint.value();
+                }
+                if (desc.annotations->idempotentHint.has_value()) {
+                    ann["idempotentHint"] = desc.annotations->idempotentHint.value();
+                }
+                if (desc.annotations->openWorldHint.has_value()) {
+                    ann["openWorldHint"] = desc.annotations->openWorldHint.value();
+                }
+            }
+            tool["annotations"] = ann;
             return tool;
         });
         return json{{"tools", std::move(tools)}};
@@ -1214,6 +1273,7 @@ private:
         json schema;
         std::string description;
         std::string title;
+        std::optional<ToolAnnotation> annotations;
     };
 
     AsyncHandlerMap handlers_;

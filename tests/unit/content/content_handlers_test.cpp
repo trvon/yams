@@ -1,5 +1,5 @@
 // Copyright (c) 2025 YAMS Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 // Content Handlers Test Suite (Catch2)
 // Consolidates: encoding_detector_test.cpp, text_handler_test.cpp,

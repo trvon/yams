@@ -309,29 +309,29 @@ TEST_CASE("Repair batch sizes are profile-aware", "[daemon][tune][advisor][catch
     SECTION("Efficient profile uses smaller batch sizes") {
         ProfileGuard guard(TuneAdvisor::Profile::Efficient);
 
-        // Efficient profile scale is 0.40
-        // repairMaxBatch: 32 * 0.40 = 12
-        // repairStartupBatchSize: 100 * 0.40 = 40
-        CHECK(TuneAdvisor::repairMaxBatch() == 12u);
-        CHECK(TuneAdvisor::repairStartupBatchSize() == 40u);
+        // Efficient profile scale is 0.0
+        // repairMaxBatch: 8 + 24*0.0 = 8
+        // repairStartupBatchSize: 25 + 75*0.0 = 25
+        CHECK(TuneAdvisor::repairMaxBatch() == 8u);
+        CHECK(TuneAdvisor::repairStartupBatchSize() == 25u);
     }
 
     SECTION("Balanced profile uses default batch sizes") {
         ProfileGuard guard(TuneAdvisor::Profile::Balanced);
 
-        // Balanced profile scale is 0.75
-        // repairMaxBatch: 32 * 0.75 = 24
-        // repairStartupBatchSize: 100 * 0.75 = 75
-        CHECK(TuneAdvisor::repairMaxBatch() == 24u);
-        CHECK(TuneAdvisor::repairStartupBatchSize() == 75u);
+        // Balanced profile scale is 0.5
+        // repairMaxBatch: 8 + 24*0.5 = 20
+        // repairStartupBatchSize: 25 + 75*0.5 = 62
+        CHECK(TuneAdvisor::repairMaxBatch() == 20u);
+        CHECK(TuneAdvisor::repairStartupBatchSize() == 62u);
     }
 
     SECTION("Aggressive profile uses larger batch sizes") {
         ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
 
         // Aggressive profile scale is 1.0
-        // repairMaxBatch: 32 * 1.0 = 32
-        // repairStartupBatchSize: 100 * 1.0 = 100
+        // repairMaxBatch: 8 + 24*1.0 = 32
+        // repairStartupBatchSize: 25 + 75*1.0 = 100
         CHECK(TuneAdvisor::repairMaxBatch() == 32u);
         CHECK(TuneAdvisor::repairStartupBatchSize() == 100u);
     }
@@ -355,22 +355,22 @@ TEST_CASE("Repair batch size env var overrides", "[daemon][tune][advisor][catch2
     SECTION("Invalid env var falls back to profile default") {
         EnvGuard envGuard("YAMS_REPAIR_MAX_BATCH", "invalid");
 
-        // Should fall back to profile default (24 for Balanced at 0.75 scale)
-        CHECK(TuneAdvisor::repairMaxBatch() == 24u);
+        // Should fall back to profile default (20 for Balanced at 0.5 scale)
+        CHECK(TuneAdvisor::repairMaxBatch() == 20u);
     }
 
     SECTION("Zero env var falls back to profile default") {
         EnvGuard envGuard("YAMS_REPAIR_MAX_BATCH", "0");
 
         // 0 is rejected, should fall back to profile default
-        CHECK(TuneAdvisor::repairMaxBatch() == 24u);
+        CHECK(TuneAdvisor::repairMaxBatch() == 20u);
     }
 
     SECTION("Env var > 1000 falls back to profile default") {
         EnvGuard envGuard("YAMS_REPAIR_MAX_BATCH", "1001");
 
         // > 1000 is rejected, should fall back to profile default
-        CHECK(TuneAdvisor::repairMaxBatch() == 24u);
+        CHECK(TuneAdvisor::repairMaxBatch() == 20u);
     }
 }
 
@@ -422,7 +422,7 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(value);
     };
 
-    SECTION("Efficient profile uses 0.5x scaling") {
+    SECTION("Efficient profile uses 0.0 scaling") {
         ProfileGuard guard(TuneAdvisor::Profile::Efficient);
         EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
@@ -433,21 +433,21 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
         CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
     }
 
-    SECTION("Balanced profile uses 0.75x scaling") {
+    SECTION("Balanced profile uses 0.5 scaling") {
         ProfileGuard guard(TuneAdvisor::Profile::Balanced);
         EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
-        CHECK(TuneAdvisor::postExtractionConcurrent() == 2u);
+        CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
         CHECK(TuneAdvisor::postKgConcurrent() == 0u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
         CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
     }
 
     SECTION("Aggressive profile uses 1.0x (defaults)") {
@@ -456,13 +456,13 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
-        // With 8 threads and Aggressive (80% CPU budget), totalBudget = floor(0.8 * 8) = 6
-        // With 6 active stages, each stage gets at least 1
+        // With hw=8: base=max(2,(8*20)/100)=2, scaleRange=max(1,(8*15)/100)=1
+        // total=2+1=3, extraction=1, embed=2, others=0
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
     }
 }

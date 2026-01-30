@@ -38,6 +38,7 @@
 #define NOMINMAX 1
 #endif
 #include <Windows.h>
+
 #include <Psapi.h>
 
 #endif
@@ -1279,8 +1280,9 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                                            now - lastTunerStateAt_)
                                            .count();
                         // Recompute if: TTL expired OR corpus docCount changed
-                        needsRefresh = (elapsed > tunerStateTtlMs_) ||
-                                       (stats.docCount != cachedTunerDocCount_);
+                        needsRefresh =
+                            (elapsed > tunerStateTtlMs_) ||
+                            (static_cast<uint64_t>(stats.docCount) != cachedTunerDocCount_);
                     }
 
                     if (needsRefresh) {

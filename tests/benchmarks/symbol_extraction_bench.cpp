@@ -475,7 +475,7 @@ TEST_CASE("Solidity Symbol Extraction Benchmark", "[benchmark][solidity][!benchm
     SECTION("Real-World Smart Contracts") {
         // Sample Solidity contracts for testing
         std::map<std::string, std::string> contracts = {{"ERC20", R"(
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity ^0.8.0;
 
 contract ERC20Token {
@@ -494,7 +494,7 @@ contract ERC20Token {
 }
 )"},
                                                         {"Uniswap", R"(
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity ^0.8.0;
 
 interface IUniswapV2Pair {

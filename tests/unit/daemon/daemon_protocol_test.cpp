@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2025 Trevon Helm
 // Consolidated protocol tests (6 → 1): message framing, serialization, type mappings, roundtrip
 // Covers: MessageFramer, ProtoSerializer, response_of.hpp, getMessageType, getRequestName

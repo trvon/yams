@@ -35,7 +35,10 @@
 
 namespace yams::cli {
 
-static std::atomic<bool> g_shutdown{false};
+// MCPServer::start() interprets externalShutdown_ with "running" semantics:
+// the main loop continues while *externalShutdown_ is true, and exits when false.
+// So this flag must start true and be set to false on shutdown.
+static std::atomic<bool> g_running{true};
 
 class ServeCommand : public ICommand {
 public:
@@ -158,7 +161,7 @@ public:
             // Signal handlers
 #ifdef _WIN32
             auto handler = [](int sig) {
-                g_shutdown = true;
+                g_running = false;
                 std::cerr << "\n[Signal " << sig << " received, shutting down...]\n";
                 if (std::cin.fail())
                     std::cin.clear();
@@ -170,7 +173,7 @@ public:
 #else
             struct sigaction sa = {};
             sa.sa_handler = [](int sig) {
-                g_shutdown = true;
+                g_running = false;
                 std::cerr << "\n[Signal " << sig << " received, shutting down...]\n";
                 if (std::cin.fail())
                     std::cin.clear();
@@ -213,7 +216,7 @@ private:
 
         auto transport = std::make_unique<mcp::StdioTransport>();
         auto server =
-            std::make_unique<mcp::MCPServer>(std::move(transport), &g_shutdown, daemonSocket_);
+            std::make_unique<mcp::MCPServer>(std::move(transport), &g_running, daemonSocket_);
         server->start();
         spdlog::info("MCP stdio server stopped");
         return {};

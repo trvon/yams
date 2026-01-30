@@ -1,5 +1,5 @@
 // Copyright (c) 2024 The YAMS Authors. All rights reserved.
-// SPDX-License-Identifier: BSD-3-Clause
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "yams/daemon/components/RequestDispatcher.h"
 #include "yams/daemon/components/ServiceManager.h"

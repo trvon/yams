@@ -1,5 +1,6 @@
 option('build-cli', type: 'boolean', value: true, description: 'Build CLI tools')
 option('build-mcp-server', type: 'boolean', value: true, description: 'Build MCP server')
+option('wasi', type: 'boolean', value: false, description: 'Build a WASI-friendly subset (no daemon IPC, no dynamic plugins, limited features)')
 option('use-lld', type: 'feature', value: 'auto', description: 'Use LLD linker (auto: enabled with Clang, disabled otherwise; enabled: force LLD; disabled: never use LLD)')
 option('enable-lzma', type: 'feature', value: 'auto', description: 'Enable LZMA via liblzma (xz)')
 option('enable-onnx', type: 'feature', value: 'auto', description: 'ONNX Runtime integration in vector library (auto-detect)')

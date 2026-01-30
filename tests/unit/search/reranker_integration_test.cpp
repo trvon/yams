@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Unit tests for reranker integration into search pipeline
 
 #include <catch2/catch_test_macros.hpp>

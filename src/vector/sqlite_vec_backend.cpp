@@ -4,10 +4,10 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 
 #include <sqlite3.h>
-#include <cmath>
-#include <chrono>
-#include <cstring>
 #include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstring>
 #include <shared_mutex>
 #include <span>
 #include <thread>
@@ -728,7 +728,8 @@ public:
                             }
                         }
                         bool same_dim = old_dims[idx] && *old_dims[idx] == dim;
-                        if (old_rowids[idx] && same_dim && *old_rowids[idx] == rowid) {
+                        if (old_rowids[idx] && same_dim &&
+                            static_cast<size_t>(*old_rowids[idx]) == rowid) {
                             *hnsw = hnsw->compact();
                         }
                     }
@@ -750,7 +751,8 @@ public:
                             }
                         }
                         bool same_dim = old_dims[idx] && *old_dims[idx] == dim;
-                        if (old_rowids[idx] && same_dim && *old_rowids[idx] == rowid) {
+                        if (old_rowids[idx] && same_dim &&
+                            static_cast<size_t>(*old_rowids[idx]) == rowid) {
                             *hnsw = hnsw->compact();
                         }
                         hnsw->insert(static_cast<size_t>(rowid), embedding_span);

@@ -13,6 +13,11 @@ pkg = import('pkgconfig')
 
 cpp = meson.get_compiler('cpp')
 
+wasi_enabled = get_option('wasi')
+if wasi_enabled
+  add_project_arguments('-DYAMS_WASI=1', language: 'cpp')
+endif
+
 _yams_include_dir = join_paths(meson.current_source_dir(), 'include')
 if cpp.get_id() == 'msvc' or cpp.get_id() == 'clang-cl'
   add_project_arguments('/I' + _yams_include_dir, language: 'cpp')
@@ -240,68 +245,70 @@ endif
 
 onnx_opt = get_option('enable-onnx')
 
-# Database backend selection (libsql or sqlite)
-db_backend = get_option('database-backend')
-require_fts5 = get_option('require-fts5')
+if not wasi_enabled
+  # Database backend selection (libsql or sqlite)
+  db_backend = get_option('database-backend')
+  require_fts5 = get_option('require-fts5')
 
-# Try to find the selected database backend
-using_libsql = false
-if db_backend == 'libsql'
-  # Try to find libsql (provides sqlite3-compatible API)
-  # 1. First try system-installed libsql via pkg-config
-  libsql_dep = dependency('libsql', required: false)
-  if not libsql_dep.found()
-    libsql_dep = dependency('libsql-sqlite3', required: false)
-  endif
+  # Try to find the selected database backend
+  using_libsql = false
+  if db_backend == 'libsql'
+    # Try to find libsql (provides sqlite3-compatible API)
+    # 1. First try system-installed libsql via pkg-config
+    libsql_dep = dependency('libsql', required: false)
+    if not libsql_dep.found()
+      libsql_dep = dependency('libsql-sqlite3', required: false)
+    endif
 
-  # 2. If not found, try building from subproject (requires Rust toolchain)
-  if not libsql_dep.found()
-    cargo_prog = find_program('cargo', required: false)
-    if cargo_prog.found()
-      message('libSQL not found on system, building from subproject (requires Rust)...')
-      libsql_subproj = subproject('libsql', required: false)
-      if libsql_subproj.found()
-        libsql_dep = libsql_subproj.get_variable('libsql_dep')
+    # 2. If not found, try building from subproject (requires Rust toolchain)
+    if not libsql_dep.found()
+      cargo_prog = find_program('cargo', required: false)
+      if cargo_prog.found()
+        message('libSQL not found on system, building from subproject (requires Rust)...')
+        libsql_subproj = subproject('libsql', required: false)
+        if libsql_subproj.found()
+          libsql_dep = libsql_subproj.get_variable('libsql_dep')
+        endif
       endif
     endif
-  endif
 
-  if libsql_dep.found()
-    sqlite_dep = libsql_dep
-    using_libsql = true
-    message('Using libSQL database backend (MVCC concurrent writes enabled)')
-  else
-    warning('libSQL not found and subproject build failed. Falling back to standard SQLite3.')
-    warning('To use libSQL: install Rust toolchain (rustup) or system libsql package.')
-    sqlite_dep = dependency('sqlite3', required: true)
-  endif
-else
-  sqlite_dep = dependency('sqlite3', required: true)
-  message('Using standard SQLite3 database backend')
-endif
-
-# Add compile definition for backend detection
-if using_libsql
-  add_project_arguments('-DYAMS_LIBSQL_BACKEND=1', language: 'cpp')
-else
-  add_project_arguments('-DYAMS_LIBSQL_BACKEND=0', language: 'cpp')
-endif
-
-# Skip runtime test when cross-compiling or using subproject sqlite (internal dep can't be used with cpp.run in newer meson)
-if meson.is_cross_build()
-  warning('Cross-compiling: skipping SQLite FTS5 runtime check. Ensure FTS5 is enabled in your target SQLite build.')
-elif sqlite_dep.type_name() == 'internal'
-  warning('Using subproject sqlite3: skipping FTS5 runtime check. Subproject sqlite3 has FTS5 enabled by default.')
-elif using_libsql
-  message('Using libSQL: skipping FTS5 runtime check. libSQL includes FTS5 support.')
-else
-  fts5_prog = cpp.run(files('meson/fts5_check.cpp'), dependencies: sqlite_dep, name: 'sqlite3 FTS5 check')
-  if fts5_prog.returncode() != 0
-    msg = 'SQLite3 built without FTS5 support. Enable FTS5 in your package manager or Conan (e.g., -o "sqlite3/*:fts5=True").'
-    if require_fts5
-      error(msg)
+    if libsql_dep.found()
+      sqlite_dep = libsql_dep
+      using_libsql = true
+      message('Using libSQL database backend (MVCC concurrent writes enabled)')
     else
-      warning(msg)
+      warning('libSQL not found and subproject build failed. Falling back to standard SQLite3.')
+      warning('To use libSQL: install Rust toolchain (rustup) or system libsql package.')
+      sqlite_dep = dependency('sqlite3', required: true)
+    endif
+  else
+    sqlite_dep = dependency('sqlite3', required: true)
+    message('Using standard SQLite3 database backend')
+  endif
+
+  # Add compile definition for backend detection
+  if using_libsql
+    add_project_arguments('-DYAMS_LIBSQL_BACKEND=1', language: 'cpp')
+  else
+    add_project_arguments('-DYAMS_LIBSQL_BACKEND=0', language: 'cpp')
+  endif
+
+  # Skip runtime test when cross-compiling or using subproject sqlite (internal dep can't be used with cpp.run in newer meson)
+  if meson.is_cross_build()
+    warning('Cross-compiling: skipping SQLite FTS5 runtime check. Ensure FTS5 is enabled in your target SQLite build.')
+  elif sqlite_dep.type_name() == 'internal'
+    warning('Using subproject sqlite3: skipping FTS5 runtime check. Subproject sqlite3 has FTS5 enabled by default.')
+  elif using_libsql
+    message('Using libSQL: skipping FTS5 runtime check. libSQL includes FTS5 support.')
+  else
+    fts5_prog = cpp.run(files('meson/fts5_check.cpp'), dependencies: sqlite_dep, name: 'sqlite3 FTS5 check')
+    if fts5_prog.returncode() != 0
+      msg = 'SQLite3 built without FTS5 support. Enable FTS5 in your package manager or Conan (e.g., -o "sqlite3/*:fts5=True").'
+      if require_fts5
+        error(msg)
+      else
+        warning(msg)
+      endif
     endif
   endif
 endif
@@ -382,7 +389,7 @@ version_header = configure_file(
 # CLI will include as "version_generated.h" directly
 generated_inc = include_directories('.')
 
-yams_build_cli = get_option('build-cli')
+yams_build_cli = get_option('build-cli') and not wasi_enabled
 yams_build_mcp = get_option('build-mcp-server')
 
 # Install public headers under the compiler's include prefix without duplicating
@@ -403,48 +410,59 @@ if not _tl_expected_dep.found()
 endif
 meson.override_dependency('tl-expected', _tl_expected_dep)
 
-# Core libraries (ordered by dependency)
-subdir('src/core')
-subdir('src/crypto')
-subdir('src/chunking')
-subdir('src/compression')
-subdir('src/storage')
-subdir('src/wal')
-subdir('src/manifest')
-subdir('src/metadata')
-subdir('src/integrity')
-subdir('src/config')
-subdir('src/extraction')
-subdir('src/detection')
-subdir('src/content')
-subdir('src/downloader')
-subdir('src/plugins')
-subdir('src/indexing')
-subdir('src/genai')
-subdir('src/daemon/client')
-subdir('src/vector')
+if wasi_enabled
+  # WASI profile: compile a minimal subset (no daemon IPC, no plugins, no downloads).
+  # Keep this intentionally small so cross-compilers don't need system libs like
+  # OpenSSL/libcurl/sqlite/onnx.
+  subdir('src/core')
 
-# Third-party libraries (must come before src/search which depends on symspell)
-subdir('third_party/symspell')
+  if get_option('build-mcp-server')
+    subdir('src/mcp')
+  endif
+else
+  # Core libraries (ordered by dependency)
+  subdir('src/core')
+  subdir('src/crypto')
+  subdir('src/chunking')
+  subdir('src/compression')
+  subdir('src/storage')
+  subdir('src/wal')
+  subdir('src/manifest')
+  subdir('src/metadata')
+  subdir('src/integrity')
+  subdir('src/config')
+  subdir('src/extraction')
+  subdir('src/detection')
+  subdir('src/content')
+  subdir('src/downloader')
+  subdir('src/plugins')
+  subdir('src/indexing')
+  subdir('src/genai')
+  subdir('src/daemon/client')
+  subdir('src/vector')
 
-subdir('src/search')
-subdir('src/api')
-subdir('src/ingest')
-subdir('src/repair')
-subdir('src/app/services')
-subdir('src/daemon')
-subdir('src/mobile')
-subdir('src/benchmarks')
+  # Third-party libraries (must come before src/search which depends on symspell)
+  subdir('third_party/symspell')
 
-if get_option('build-mcp-server')
-  subdir('src/mcp')
+  subdir('src/search')
+  subdir('src/api')
+  subdir('src/ingest')
+  subdir('src/repair')
+  subdir('src/app/services')
+  subdir('src/daemon')
+  subdir('src/mobile')
+  subdir('src/benchmarks')
+
+  if get_option('build-mcp-server')
+    subdir('src/mcp')
+  endif
 endif
 
-if get_option('build-plugins')
+if get_option('build-plugins') and not wasi_enabled
   subdir('plugins')
 endif
 
-if get_option('build-cli')
+if get_option('build-cli') and not wasi_enabled
   subdir('src/cli')
   subdir('tools/yams-cli')
   if get_option('build-mcp-server')
@@ -455,13 +473,13 @@ endif
 # Tests (enabled by default in Debug builds)
 _tests_opt = get_option('build-tests')
 _buildtype = get_option('buildtype')
-_tests_enabled = _tests_opt or (_buildtype == 'debug')
+_tests_enabled = (not wasi_enabled) and (_tests_opt or (_buildtype == 'debug'))
 if _tests_enabled
   subdir('tests')
 endif
 
 # Fuzzing harnesses (AFL++/libFuzzer)
-if get_option('build-fuzzers')
+if get_option('build-fuzzers') and not wasi_enabled
   subdir('tools/fuzzing')
 endif
 

@@ -1,5 +1,5 @@
 // Copyright 2025 The YAMS Authors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Backward compatibility header - use plugin_content_extractor_adapter.h directly
 //

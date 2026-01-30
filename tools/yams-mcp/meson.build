@@ -7,15 +7,18 @@ deps = [
   dependency('yams_app_services'),
   dependency('yams_downloader'),
   dependency('yams_config'),
-  dependency('yams_daemon'),
-  dependency('yams_daemon_client'),
   dependency('nlohmann_json'),
   dependency('spdlog'),
   dependency('boost'),
-  dependency('OpenSSL'),
   dependency('threads'),
   dependency('CLI11'),
 ]
+
+if not get_option('wasi')
+  deps += dependency('yams_daemon')
+  deps += dependency('yams_daemon_client')
+  deps += dependency('OpenSSL')
+endif
 
 yams_mcp_exe = executable('yams-mcp-server',
   'main.cpp',
@@ -36,4 +39,3 @@ if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
     fs.copyfile(dll_src, dll_name, install: true, install_dir: get_option('bindir'))
   endforeach
 endif
-

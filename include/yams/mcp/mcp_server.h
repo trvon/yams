@@ -3,17 +3,25 @@
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/strand.hpp>
+#if !defined(YAMS_WASI)
 #include <yams/api/content_store.h>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/list_input_resolver.hpp>
 #include <yams/app/services/services.hpp>
+#endif
+#if !defined(YAMS_WASI)
 #include <yams/cli/daemon_helpers.h>
+#endif
 #include <yams/core/types.h>
+#if !defined(YAMS_WASI)
 #include <yams/daemon/client/daemon_client.h>
+#endif
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/tool_registry.h>
+#if !defined(YAMS_WASI)
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
+#endif
 #include <yams/version.hpp>
 
 #include <nlohmann/json.hpp>
@@ -131,7 +139,7 @@ public:
     void stop();
     bool isRunning() const { return running_.load(); }
 
-#if defined(YAMS_TESTING)
+#if defined(YAMS_TESTING) && !defined(YAMS_WASI)
     // Testing hooks: allow unit tests to intercept daemon client creation and
     // validate the resolved socket path and dataDir without making a real connection.
     void
@@ -215,11 +223,15 @@ private:
     std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> cancelTokens_;
 
     // Single multiplexed daemon client lease (shared transport context)
+#if !defined(YAMS_WASI)
     std::shared_ptr<yams::cli::DaemonClientPool::Lease> daemon_client_lease_;
     yams::daemon::DaemonClient* daemon_client_{nullptr};
     yams::daemon::ClientConfig daemon_client_config_{};
     std::filesystem::path daemonSocketOverride_;
     std::function<Result<void>(const yams::daemon::ClientConfig&)> testEnsureDaemonClientHook_{};
+#else
+    std::filesystem::path daemonSocketOverride_;
+#endif
     struct ClientInfo {
         std::string name;
         std::string version;
@@ -227,6 +239,7 @@ private:
 
     // Methods
     MessageResult handleRequest(const nlohmann::json& request);
+    boost::asio::awaitable<MessageResult> handleRequestAsync(const nlohmann::json& request);
     nlohmann::json initialize(const nlohmann::json& params);
     nlohmann::json listTools();
     nlohmann::json callTool(const std::string& name, const nlohmann::json& arguments);
@@ -298,7 +311,7 @@ public:
     void testSetPromptsDir(const std::filesystem::path& p) { promptsDir_ = p; }
 #endif
 
-#ifdef YAMS_TESTING
+#if defined(YAMS_TESTING) && !defined(YAMS_WASI)
 public:
     // Public testing interface - only available when building tests
     json testListTools() { return listTools(); }
@@ -350,6 +363,17 @@ public:
 #endif
 
 private:
+#if defined(YAMS_WASI)
+    // WASI profile: only the minimal protocol surface is supported.
+    // Keep these as lightweight stubs so we don't pull in the full YAMS stack.
+    nlohmann::json listTools();
+    nlohmann::json listResources();
+    nlohmann::json readResource(const std::string& uri);
+    nlohmann::json listPrompts();
+    void initializeToolRegistry();
+    boost::asio::awaitable<Result<MCPStatusResponse>> handleGetStatus(const MCPStatusRequest& req);
+#endif
+
     // Modern C++20 tool handlers (type-safe, clean)
     boost::asio::awaitable<Result<MCPSearchResponse>>
     handleSearchDocuments(const MCPSearchRequest& req);
@@ -442,6 +466,7 @@ private:
     std::string formatGrepContext(const std::string& content, size_t lineNumber, int beforeContext,
                                   int afterContext);
 
+#if !defined(YAMS_WASI)
     // Helper structures and methods for knowledge graph functionality
     struct RelatedDocument {
         std::string hash;
@@ -475,6 +500,7 @@ private:
     std::shared_ptr<app::services::IIndexingService> indexingService_;
     std::shared_ptr<app::services::IStatsService> statsService_;
     std::unique_ptr<yams::metadata::ConnectionPool> localMetaPool_;
+#endif
 
     std::atomic<bool> initialized_{false};
     // readyPending_ removed (deprecated after canonical tools/call refactor)
@@ -490,22 +516,6 @@ private:
 
     // Negotiated protocol version (set during initialize)
     std::string negotiatedProtocolVersion_{"2025-06-18"};
-
-    // === Thread pool scaffolding for MCP request handling ===
-    // Fixed-size worker pool with a task queue
-    std::vector<std::thread> workerPool_;
-    std::mutex taskMutex_;
-    std::condition_variable taskCv_;
-    std::deque<std::function<void()>> taskQueue_;
-    std::atomic<bool> stopWorkers_{false};
-    std::atomic<std::size_t> mcpWorkerActive_{0};
-    std::atomic<std::size_t> mcpWorkerProcessed_{0};
-    std::atomic<std::size_t> mcpWorkerFailed_{0};
-
-    // Start/stop the pool and enqueue tasks
-    void startThreadPool(std::size_t threads);
-    void stopThreadPool();
-    void enqueueTask(std::function<void()> task);
 
 public:
     // Process a single JSON-RPC message. For requests (with id), returns a JSON-RPC response.

@@ -55,14 +55,6 @@ public:
                 // best-effort: continue
             }
 
-            auto envTruthy = [](const char* env) {
-                if (!env || !*env)
-                    return false;
-                std::string v(env);
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                return v == "1" || v == "true" || v == "yes" || v == "on";
-            };
-
             // Allow test/CI override to force in-memory vector DB
             std::string db_path = config_.database_path;
             bool force_in_memory = config_.use_in_memory;
@@ -614,6 +606,7 @@ public:
 
     Result<void> updateEntityVector(const std::string& node_key, EntityEmbeddingType type,
                                     const EntityVectorRecord& record) {
+        (void)type;
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (!initialized_) {

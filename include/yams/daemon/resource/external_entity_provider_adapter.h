@@ -1,5 +1,5 @@
 // Copyright 2025 The YAMS Authors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Adapter for external plugin kg_entity_provider_v1 interface.
 // Enables ingestion of KG entities from binary analysis plugins like Ghidra.

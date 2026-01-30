@@ -331,11 +331,11 @@ void ConnectionFsm::debug_dump_snapshots(std::size_t max_entries) const noexcept
         static_cast<std::uint32_t>(std::min<std::size_t>(max_entries, impl->snapshots.size));
     std::uint32_t start = (impl->snapshots.head + (impl->snapshots.size + cap - count) % cap) % cap;
     for (std::uint32_t i = 0; i < count; ++i) {
-        const auto& s = impl->snapshots.buf[(start + i) % cap];
+        [[maybe_unused]] const auto& s = impl->snapshots.buf[(start + i) % cap];
     }
 }
 
-bool ConnectionFsm::transition(State next, const char* reason) noexcept {
+bool ConnectionFsm::transition(State next, [[maybe_unused]] const char* reason) noexcept {
     if (state_ == next)
         return true; // no-op but not an error
     auto from = state_;
@@ -559,7 +559,7 @@ void ConnectionFsm::on_stream_next(bool done) {
     }
 }
 
-void ConnectionFsm::on_timeout(Operation op) {
+void ConnectionFsm::on_timeout([[maybe_unused]] Operation op) {
     if (auto* impl = impl_.get())
         impl->last_event = "timeout";
     if (auto* impl = impl_.get()) {

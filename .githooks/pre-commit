@@ -123,4 +123,58 @@ if [ ${#windows_header_errors[@]} -ne 0 ]; then
   exit 1
 fi
 
+# Check for non-GPL license headers
+# Only check new/changed files, exclude third_party and subprojects
+license_errors=()
+for f in "${files[@]}"; do
+  if [ -f "$f" ]; then
+    # Skip third-party directories
+    if [[ "$f" == *"third_party/"* ]] || [[ "$f" == *"subprojects/"* ]] || [[ "$f" == *"external/"* ]]; then
+      continue
+    fi
+    
+    # Check for Apache-2.0 license
+    if grep -qE "SPDX-License-Identifier:\s*Apache-2\.0" "$f"; then
+      license_errors+=("$f: Found SPDX-License-Identifier: Apache-2.0 (must be GPL-3.0-or-later)")
+    fi
+    
+    # Check for MIT license  
+    if grep -qE "SPDX-License-Identifier:\s*MIT" "$f"; then
+      license_errors+=("$f: Found SPDX-License-Identifier: MIT (must be GPL-3.0-or-later)")
+    fi
+    
+    # Check for BSD license
+    if grep -qE "SPDX-License-Identifier:\s*BSD" "$f"; then
+      license_errors+=("$f: Found SPDX-License-Identifier: BSD-XX (must be GPL-3.0-or-later)")
+    fi
+    
+    # Check for full Apache license text
+    if grep -qE "Licensed under the Apache License, Version 2\.0" "$f"; then
+      license_errors+=("$f: Found Apache License text (must be GPL-3.0-or-later)")
+    fi
+    
+    # Check for full MIT license text
+    if grep -qE "Permission is hereby granted, free of charge" "$f"; then
+      license_errors+=("$f: Found MIT License text (must be GPL-3.0-or-later)")
+    fi
+  fi
+done
+
+if [ ${#license_errors[@]} -ne 0 ]; then
+  echo ""
+  echo "ERROR: Non-GPL license headers detected:" >&2
+  for err in "${license_errors[@]}"; do
+    echo "  - $err" >&2
+  done
+  echo "" >&2
+  echo "Fix: Update license header to GPL-3.0-or-later:" >&2
+  echo "  // SPDX-License-Identifier: GPL-3.0-or-later" >&2
+  echo "" >&2
+  echo "Or run the license update script:" >&2
+  echo "  python3 scripts/update-licenses.py" >&2
+  echo "" >&2
+  echo "Note: third_party/, subprojects/, and external/ directories are excluded from this check." >&2
+  exit 1
+fi
+
 exit 0

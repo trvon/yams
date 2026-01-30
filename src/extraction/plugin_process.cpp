@@ -83,8 +83,8 @@ public:
     // Non-copyable, move-only
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
-    Impl(Impl&&) noexcept = default;
-    Impl& operator=(Impl&&) noexcept = default;
+    Impl(Impl&&) noexcept = delete;
+    Impl& operator=(Impl&&) noexcept = delete;
 
     [[nodiscard]] ProcessState state() const noexcept;
     [[nodiscard]] bool is_alive() const noexcept;

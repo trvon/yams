@@ -1,5 +1,5 @@
 // Copyright 2025 The YAMS Authors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <yams/daemon/resource/external_entity_provider_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>

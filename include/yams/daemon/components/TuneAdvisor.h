@@ -366,12 +366,14 @@ public:
             } catch (...) {
             }
         }
-        // Profile-scaled: Efficient=24, Balanced=32, Aggressive=48
-        return static_cast<uint32_t>(32.0 * profileScale());
+        // Profile-scaled: Efficient=8, Balanced=20, Aggressive=32
+        uint32_t base = 8;
+        uint32_t range = 24;
+        return base + static_cast<uint32_t>(range * profileScale());
     }
 
     // Batch size for repair operations during startup phase.
-    // Profile-scaled: Efficient=75, Balanced=100, Aggressive=150
+    // Profile-scaled: Efficient=25, Balanced=62, Aggressive=100
     // Smaller batches reduce startup load. Normal operation uses repairMaxBatch().
     static uint32_t repairStartupBatchSize() {
         if (const char* s = std::getenv("YAMS_REPAIR_STARTUP_BATCH")) {
@@ -382,8 +384,10 @@ public:
             } catch (...) {
             }
         }
-        // Profile-scaled: Efficient=75, Balanced=100, Aggressive=150
-        return static_cast<uint32_t>(100.0 * profileScale());
+        // Profile-scaled: Efficient=25, Balanced=62, Aggressive=100
+        uint32_t base = 25;
+        uint32_t range = 75;
+        return base + static_cast<uint32_t>(range * profileScale());
     }
 
     // Maintenance tokens (concurrency) when daemon is idle. Default 1.

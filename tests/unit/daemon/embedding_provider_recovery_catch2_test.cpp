@@ -1,5 +1,5 @@
 // Copyright (c) 2025 YAMS Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 // Validates degraded->ready recovery via ServiceManager's FSM helper.
 #include <catch2/catch_test_macros.hpp>
