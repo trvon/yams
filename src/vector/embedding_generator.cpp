@@ -1371,6 +1371,17 @@ public:
                     }
                 }
                 if (provider_ready) {
+                    bool model_already_loaded = false;
+                    try {
+                        for (const auto& m : s.models) {
+                            if (m.name == config_.model_name) {
+                                model_already_loaded = true;
+                                break;
+                            }
+                        }
+                    } catch (...) {
+                    }
+
                     // Allow extended preload timeout via env (default 30s)
                     std::chrono::milliseconds preload_timeout = std::chrono::seconds(30);
                     if (const char* t = std::getenv("YAMS_MODEL_PRELOAD_TIMEOUT_MS")) {
@@ -1381,14 +1392,21 @@ public:
                         } catch (...) {
                         }
                     }
-                    daemon::LoadModelRequest req;
-                    req.modelName = config_.model_name;
-                    req.preload = true;
-                    auto lm = await_with_timeout<yams::daemon::ModelLoadResponse>(
-                        [&]() { return daemon_client_->loadModel(req); }, preload_timeout);
-                    if (!lm) {
-                        spdlog::debug("Preload model in daemon did not complete: {}",
-                                      lm.error().message);
+
+                    if (model_already_loaded) {
+                        spdlog::debug(
+                            "Daemon already has model loaded; skipping preload (model={})",
+                            config_.model_name);
+                    } else {
+                        daemon::LoadModelRequest req;
+                        req.modelName = config_.model_name;
+                        req.preload = true;
+                        auto lm = await_with_timeout<yams::daemon::ModelLoadResponse>(
+                            [&]() { return daemon_client_->loadModel(req); }, preload_timeout);
+                        if (!lm) {
+                            spdlog::debug("Preload model in daemon did not complete: {}",
+                                          lm.error().message);
+                        }
                     }
                 } else {
                     spdlog::debug("Daemon model provider not ready; skipping preload");

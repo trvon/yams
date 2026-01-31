@@ -122,6 +122,7 @@ static std::filesystem::path findReferenceSchemaSql() {
 
     // 3. Check common installation paths
     searchPaths.push_back("/usr/local/share/yams/sql/reference_schema.sql");
+    searchPaths.push_back("/opt/homebrew/share/yams/sql/reference_schema.sql");
     searchPaths.push_back("/usr/share/yams/sql/reference_schema.sql");
     searchPaths.push_back("/opt/yams/share/sql/reference_schema.sql");
 

@@ -74,6 +74,15 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
         if (req.modelName.empty()) {
             co_return makeError(ErrorCode::InvalidData, "modelName is required");
         }
+
+        // Dedupe work: ensure_model_loaded() is already idempotent, but rebuild scheduling is not.
+        // Capture whether this request actually changes provider state.
+        bool was_loaded = false;
+        try {
+            was_loaded = provider->isModelLoaded(req.modelName);
+        } catch (...) {
+        }
+
         int timeout_ms = 30000;
         if (const char* env = std::getenv("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
             try {
@@ -96,14 +105,47 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
             if (serviceManager_ && daemon_) {
                 daemon_->setSubsystemDegraded("embedding", false, "");
                 try {
-                    auto exec = serviceManager_->getWorkerExecutor();
-                    auto self = serviceManager_;
-                    boost::asio::co_spawn(
-                        exec,
-                        [self]() -> boost::asio::awaitable<void> {
-                            co_await self->co_enableEmbeddingsAndRebuild();
-                        },
-                        boost::asio::detached);
+                    // Only rebuild when it helps:
+                    // - A model transitioned from not-loaded -> loaded (vector scoring can now be
+                    // enabled)
+                    // - Or the current engine is unhealthy due to missing embedding generator
+                    bool should_rebuild = !was_loaded;
+                    if (!should_rebuild) {
+                        try {
+                            if (auto* eng = serviceManager_->getCachedSearchEngine(); eng) {
+                                auto hc = eng->healthCheck();
+                                if (!hc) {
+                                    // Heuristic: if the engine complains about missing embedding
+                                    // generator, a rebuild after embeddings become available is
+                                    // useful.
+                                    if (hc.error().message.find(
+                                            "Embedding generator not initialized") !=
+                                        std::string::npos) {
+                                        should_rebuild = true;
+                                    }
+                                }
+                            }
+                        } catch (...) {
+                        }
+                    }
+
+                    if (should_rebuild) {
+                        spdlog::info("[RequestDispatcher] scheduling enableEmbeddingsAndRebuild "
+                                     "(model_loaded={}, model={})",
+                                     was_loaded ? "true" : "false", req.modelName);
+                        auto exec = serviceManager_->getWorkerExecutor();
+                        auto self = serviceManager_;
+                        boost::asio::co_spawn(
+                            exec,
+                            [self]() -> boost::asio::awaitable<void> {
+                                co_await self->co_enableEmbeddingsAndRebuild();
+                            },
+                            boost::asio::detached);
+                    } else {
+                        spdlog::debug("[RequestDispatcher] skipping rebuild; model already loaded "
+                                      "and engine healthy (model={})",
+                                      req.modelName);
+                    }
                 } catch (...) {
                 }
             }

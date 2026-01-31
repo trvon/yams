@@ -2306,18 +2306,19 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
 boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
     spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: starting");
 
-    // Protect against concurrent rebuilds
-    bool buildingAlready = false;
+    // Protect against concurrent rebuilds.
+    // NOTE: ServiceManagerFsm is a startup lifecycle FSM and is not reliably driven for
+    // model-load-triggered rebuilds. Use SearchEngineManager/SearchEngineFsm as the source of
+    // truth.
     try {
-        buildingAlready =
-            (serviceFsm_.snapshot().state == ServiceManagerState::BuildingSearchEngine);
+        const auto snap = searchEngineManager_.getSnapshot();
+        if (snap.state == SearchEngineState::Building ||
+            snap.state == SearchEngineState::AwaitingDrain) {
+            spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: rebuild already in "
+                         "progress (SearchEngineFsm), skipping");
+            co_return;
+        }
     } catch (...) {
-    }
-
-    if (buildingAlready) {
-        spdlog::info("[ServiceManager] co_enableEmbeddingsAndRebuild: rebuild already in progress, "
-                     "skipping");
-        co_return;
     }
 
     try {

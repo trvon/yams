@@ -700,14 +700,21 @@ jobs:
           export YAMS_CONAN_ARCH="$ARCH"
           export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${{ steps.meta.outputs.version }} -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto ${{ matrix.meson_args }}"
           
-          # Set install prefix: /usr for Linux packages, /usr/local for macOS
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            export YAMS_INSTALL_PREFIX="/usr"
-          else
-            export YAMS_INSTALL_PREFIX="/usr/local"
-            # Enable CoreML GPU acceleration for macOS builds
-            export YAMS_ONNX_GPU="coreml"
-          fi
+           # Set install prefix: /usr for Linux packages, /usr/local for macOS
+           if [ "$RUNNER_OS" = "Linux" ]; then
+             export YAMS_INSTALL_PREFIX="/usr"
+           else
+             if [ "${{ matrix.suffix }}" = "macos-arm64" ]; then
+               export YAMS_INSTALL_PREFIX="/opt/homebrew"
+             else
+               export YAMS_INSTALL_PREFIX="/usr/local"
+             fi
+             # Enable CoreML GPU acceleration for macOS builds
+             export YAMS_ONNX_GPU="coreml"
+           fi
+
+           # Persist prefix for later steps
+           echo "YAMS_INSTALL_PREFIX=$YAMS_INSTALL_PREFIX" >> "$GITHUB_ENV"
           
           # For cross-compilation, ensure pkg-config is available
           export PKG_CONFIG="$(command -v pkg-config)"
@@ -772,6 +779,35 @@ jobs:
             exit 1
           fi
           echo "STAGE_DIR=$BD/stage" >> "$GITHUB_ENV"
+
+      - name: Verify staged runtime assets (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${STAGE_DIR:?STAGE_DIR not set}"
+
+          PREFIX="${YAMS_INSTALL_PREFIX:-}"
+          if [ -z "$PREFIX" ]; then
+            if [ "$RUNNER_OS" = "Linux" ]; then
+              PREFIX="/usr"
+            else
+              PREFIX="/usr/local"
+            fi
+          fi
+
+          if [ ! -f "$STAGE_DIR$PREFIX/share/yams/sql/reference_schema.sql" ]; then
+            echo "Missing staged reference schema: $STAGE_DIR$PREFIX/share/yams/sql/reference_schema.sql" >&2
+            echo "Stage tree (top):" >&2
+            ls -al "$STAGE_DIR" >&2 || true
+            exit 1
+          fi
+
+          # Plugins are expected for full releases; warn loudly if absent.
+          if [ ! -d "$STAGE_DIR$PREFIX/lib/yams/plugins" ]; then
+            echo "Missing staged plugins dir: $STAGE_DIR$PREFIX/lib/yams/plugins" >&2
+            exit 1
+          fi
 
       - name: Install and Package MSI (Windows)
         if: runner.os == 'Windows' && inputs.fast_mode != 'true'
@@ -1342,11 +1378,19 @@ jobs:
           fi
           
           # Update nightly formula (now safe to modify after checkout)
-          NIGHTLY_FORMULA="$TAP_PATH/Formula/yams@nightly.rb"
-          if [ ! -f "$NIGHTLY_FORMULA" ]; then
-            echo "Nightly formula not found at $NIGHTLY_FORMULA; skipping" >&2
-            exit 0
+          TEMPLATE_PATH="packaging/homebrew/yams-nightly.rb.template"
+          if [ ! -f "$TEMPLATE_PATH" ]; then
+            echo "Nightly Homebrew template not found at $TEMPLATE_PATH" >&2
+            exit 1
           fi
+
+          NIGHTLY_FORMULA="$TAP_PATH/Formula/yams-nightly.rb"
+          mkdir -p "$TAP_PATH/Formula"
+          cp "$TEMPLATE_PATH" "$NIGHTLY_FORMULA"
+
+          # Ensure tap alias exists so users can install via yams@nightly
+          mkdir -p "$TAP_PATH/Aliases"
+          printf '%s\n' "../Formula/yams-nightly.rb" > "$TAP_PATH/Aliases/yams@nightly"
           
           # Replace placeholders
           sed -i.bak \
@@ -1362,7 +1406,7 @@ jobs:
           pushd "$TAP_PATH" >/dev/null
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/yams@nightly.rb || true
+          git add Formula/yams-nightly.rb Aliases/yams@nightly || true
           if git diff --cached --quiet; then
             echo "Nightly formula unchanged; skipping push" >&2
             popd >/dev/null

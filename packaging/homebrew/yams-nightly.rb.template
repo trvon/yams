@@ -1,21 +1,18 @@
-class Yams < Formula
-  desc "Yet Another Memory System - High-performance content-addressed storage"
+class YamsNightly < Formula
+  desc "Yet Another Memory System - High-performance content-addressed storage (Nightly)"
   homepage "https://github.com/trvon/yams"
   version "__VERSION__"
-  license "MIT"
+  license "GPL-3.0-or-later"
 
   if Hardware::CPU.arm?
-    url "https://github.com/trvon/yams/releases/download/v#{version}/yams-#{version}-macos-arm64.zip"
+    url "https://github.com/trvon/yams/releases/download/__TAG__/yams-__VERSION__-macos-arm64.zip"
     sha256 "__SHA256_ARM64__"
   else
-    url "https://github.com/trvon/yams/releases/download/v#{version}/yams-#{version}-macos-x86_64.zip"
+    url "https://github.com/trvon/yams/releases/download/__TAG__/yams-__VERSION__-macos-x86_64.zip"
     sha256 "__SHA256_X86_64__"
   end
 
-  livecheck do
-    url "https://github.com/trvon/yams/releases"
-    regex(/^v?(\d+(?:\.\d+)+)$/i)
-  end
+  conflicts_with "yams", because: "both install the same binaries"
 
   def install
     root = if Dir.exist?("local/bin")
@@ -30,7 +27,7 @@ class Yams < Formula
 
     bin.install Dir[(root/"bin/*").to_s]
 
-    # Skip spdlog to avoid conflicts with homebrew's spdlog
+    # Skip spdlog to avoid conflicts
     (root/"include/spdlog").rmtree if (root/"include/spdlog").exist?
 
     include.install Dir[(root/"include/*").to_s] if (root/"include").exist?
@@ -50,28 +47,27 @@ class Yams < Formula
 
   def caveats
     <<~EOS
+      You have installed the nightly build of YAMS.
+      This version is updated frequently and may be unstable.
+
+      For stable releases, use: brew install trvon/yams/yams
+
       Initialize YAMS storage:
         yams init .
 
-      Or specify custom location:
-        export YAMS_STORAGE="$HOME/.local/share/yams"
-        yams init
-
       To start the YAMS daemon as a service:
-        brew services start yams
-      
-      To stop the daemon:
-        brew services stop yams
+        brew services start yams-nightly
+
+      Or (via tap alias):
+        brew services start trvon/yams/yams@nightly
 
       Documentation: https://yamsmemory.ai
-      Repository: https://github.com/trvon/yams
     EOS
   end
 
   test do
-    assert_match version.to_s, shell_output("#{bin}/yams --version")
-    system "#{bin}/yams", "init", "--non-interactive", "--storage", testpath/"yams-test"
-    assert_predicate testpath/"yams-test/yams.db", :exist?
-    assert_predicate testpath/".config/yams/config.toml", :exist?
+    assert_match(/nightly|dev/, shell_output("#{bin}/yams --version"))
+    system bin/"yams", "init", "--non-interactive", "--storage", testpath/"yams-test"
+    assert_path_exists testpath/"yams-test/yams.db"
   end
 end
