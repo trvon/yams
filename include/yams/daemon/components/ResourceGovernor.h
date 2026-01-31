@@ -225,6 +225,9 @@ private:
     /// Compute pressure level from snapshot with hysteresis
     ResourcePressureLevel computeLevel(const ResourceSnapshot& snap);
 
+    /// Update CPU-based admission control with hysteresis
+    void updateCpuAdmissionControl(const ResourceSnapshot& snap);
+
     /// Update scaling caps based on pressure level
     void updateScalingCaps(ResourcePressureLevel level);
 
@@ -252,6 +255,18 @@ private:
     // CPU utilization sampling state: deltas for calculating process CPU usage
     mutable std::uint64_t lastProcJiffies_{0};
     mutable std::uint64_t lastTotalJiffies_{0};
+
+    // CPU admission control state (time-based hysteresis)
+    std::atomic<bool> cpuAdmissionBlocked_{false};
+    std::chrono::steady_clock::time_point cpuHighSince_{};
+    std::chrono::steady_clock::time_point cpuLowSince_{};
+
+    // Startup grace period: prevent false Emergency during early init
+    std::chrono::steady_clock::time_point startupTime_{std::chrono::steady_clock::now()};
+    static constexpr auto kStartupGracePeriod = std::chrono::seconds(10);
+    [[nodiscard]] bool startupGraceActive() const noexcept {
+        return (std::chrono::steady_clock::now() - startupTime_) < kStartupGracePeriod;
+    }
 };
 
 } // namespace yams::daemon

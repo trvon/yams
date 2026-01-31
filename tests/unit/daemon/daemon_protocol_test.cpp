@@ -445,6 +445,78 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         auto req = std::get<Request>(dec.value().payload);
         REQUIRE(std::holds_alternative<ListSessionsRequest>(req));
     }
+
+    SECTION("SearchRequest carries session") {
+        SearchRequest sr;
+        sr.query = "hello";
+        sr.useSession = true;
+        sr.sessionName = "feature-auth";
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{sr}, 10));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+        REQUIRE(std::holds_alternative<Request>(dec.value().payload));
+
+        auto* got = std::get_if<SearchRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        REQUIRE(got->useSession);
+        REQUIRE(got->sessionName == "feature-auth");
+    }
+
+    SECTION("GrepRequest carries session") {
+        GrepRequest gr;
+        gr.pattern = "TODO";
+        gr.useSession = true;
+        gr.sessionName = "feature-auth";
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{gr}, 11));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+        REQUIRE(std::holds_alternative<Request>(dec.value().payload));
+
+        auto* got = std::get_if<GrepRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        REQUIRE(got->useSession);
+        REQUIRE(got->sessionName == "feature-auth");
+    }
+
+    SECTION("AddDocumentRequest carries session") {
+        AddDocumentRequest ar;
+        ar.path = "/tmp/a.txt";
+        ar.sessionId = "feature-auth";
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{ar}, 12));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+        REQUIRE(std::holds_alternative<Request>(dec.value().payload));
+
+        auto* got = std::get_if<AddDocumentRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        REQUIRE(got->sessionId == "feature-auth");
+    }
+
+    SECTION("ListRequest carries session") {
+        ListRequest lr;
+        lr.limit = 5;
+        lr.sessionId = "feature-auth";
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{lr}, 13));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+        REQUIRE(std::holds_alternative<Request>(dec.value().payload));
+
+        auto* got = std::get_if<ListRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        REQUIRE(got->sessionId == "feature-auth");
+    }
 }
 
 TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serialization]") {

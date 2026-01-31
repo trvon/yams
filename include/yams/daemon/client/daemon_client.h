@@ -222,6 +222,9 @@ public:
         }
         co_return Result<void>();
     }
+    boost::asio::awaitable<Result<CatResponse>> cat(const CatRequest& req) {
+        return call<CatRequest>(req);
+    }
     boost::asio::awaitable<Result<SuccessResponse>> remove(const DeleteRequest& req);
     // Returns a lightweight snapshot; does not request detailed (no heavy scans)
     boost::asio::awaitable<Result<StatusResponse>> status();
@@ -419,6 +422,8 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, GraphRepairRequest>, std::is_same<Req, GraphValidateRequest>,
             // Graph query operations
             std::is_same<Req, GraphQueryRequest>,
+            // Cat operations
+            std::is_same<Req, CatRequest>,
             // Generic metadata value counts query (MCP client mode)
             std::is_same<Req, MetadataValueCountsRequest>>,
         "Req must be a valid daemon Request alternative");

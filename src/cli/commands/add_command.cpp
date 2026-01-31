@@ -308,6 +308,15 @@ public:
         cmd->add_flag("--no-embeddings", noEmbeddings_,
                       "Disable automatic embedding generation for added documents");
 
+        // Sync extraction wait options
+        cmd->add_flag(
+            "--sync", waitForProcessing_,
+            "Wait for text extraction to complete before returning (default timeout: 30s)");
+        cmd->add_option("--sync-timeout", waitTimeoutSeconds_,
+                        "Timeout for --sync mode (seconds, 0 = no timeout)")
+            ->default_val(30)
+            ->check(CLI::Range(0, 300));
+
         // Daemon interaction robustness controls (always use daemon for file/dir)
         cmd->add_option("--daemon-timeout-ms", daemonTimeoutMs_,
                         "Per-request timeout when talking to the daemon (ms)")
@@ -567,6 +576,8 @@ public:
                     }
                     aopts.disableAutoMime = disableAutoMime_;
                     aopts.noEmbeddings = noEmbeddings_;
+                    aopts.waitForProcessing = waitForProcessing_;
+                    aopts.waitTimeoutSeconds = waitTimeoutSeconds_;
                     if (cli_->hasExplicitDataDir()) {
                         aopts.explicitDataDir = cli_->getDataPath();
                     }
@@ -629,6 +640,8 @@ public:
                     }
                     aopts.disableAutoMime = disableAutoMime_;
                     aopts.noEmbeddings = noEmbeddings_;
+                    aopts.waitForProcessing = waitForProcessing_;
+                    aopts.waitTimeoutSeconds = waitTimeoutSeconds_;
                     if (cli_->hasExplicitDataDir()) {
                         aopts.explicitDataDir = cli_->getDataPath();
                     }
@@ -984,6 +997,11 @@ private:
 
     // Member variables
     YamsCLI* cli_ = nullptr;
+
+    // Sync extraction wait options (must be declared before registerCommand uses them)
+    bool waitForProcessing_ = false;
+    int waitTimeoutSeconds_ = 30;
+
     // Multi-path support
     std::vector<std::filesystem::path> targetPaths_;
     std::filesystem::path legacyTargetPath_;

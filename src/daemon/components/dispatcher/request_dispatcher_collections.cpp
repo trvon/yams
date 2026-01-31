@@ -513,4 +513,29 @@ RequestDispatcher::handleMetadataValueCountsRequest(const MetadataValueCountsReq
     co_return resp;
 }
 
+boost::asio::awaitable<Response> RequestDispatcher::handleBatchRequest(const BatchRequest& req) {
+    spdlog::debug("BatchRequest: processing {} items", req.items.size());
+
+    BatchResponse resp;
+    resp.totalCount = static_cast<uint32_t>(req.items.size());
+    auto startTime = std::chrono::steady_clock::now();
+
+    for (const auto& item : req.items) {
+        BatchItemResponse itemResp;
+        itemResp.sequenceId = item.sequenceId;
+        itemResp.success = false;
+        itemResp.response = ErrorResponse{.code = ErrorCode::NotImplemented,
+                                          .message = "Batch request handling not yet implemented"};
+        resp.items.push_back(std::move(itemResp));
+        resp.errorCount++;
+    }
+
+    resp.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - startTime);
+
+    spdlog::debug("BatchRequest: completed {} items in {}ms", resp.items.size(),
+                  resp.elapsed.count());
+    co_return resp;
+}
+
 } // namespace yams::daemon

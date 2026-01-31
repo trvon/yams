@@ -174,20 +174,24 @@ Result<void> SocketServer::start() {
 
         actualSocketPath_ = sockPath;
 
-        connectionSlots_ = std::make_unique<std::counting_semaphore<>>(config_.maxConnections);
-        spdlog::info("SocketServer: bounded concurrency enabled (max {} slots)",
-                     config_.maxConnections);
+        // Determine initial connection slots: use config if specified, otherwise compute from
+        // hardware/profile
+        size_t initialSlots = config_.maxConnections;
+        if (initialSlots == 0) {
+            initialSlots = TuneAdvisor::connectionSlotsTarget();
+            spdlog::info("SocketServer: using computed connection slots: {} (from TuneAdvisor)",
+                         initialSlots);
+        }
+
+        connectionSlots_ = std::make_unique<std::counting_semaphore<>>(initialSlots);
+        slotLimit_.store(initialSlots, std::memory_order_relaxed);
+        spdlog::info("SocketServer: bounded concurrency enabled (max {} slots)", initialSlots);
 
         if (state_) {
-            const size_t maxConn = (config_.maxConnections > 0) ? config_.maxConnections : 1024;
-            state_->stats.maxConnections.store(maxConn, std::memory_order_relaxed);
-            state_->stats.connectionSlotsFree.store(maxConn, std::memory_order_relaxed);
+            state_->stats.maxConnections.store(initialSlots, std::memory_order_relaxed);
+            state_->stats.connectionSlotsFree.store(initialSlots, std::memory_order_relaxed);
             state_->stats.oldestConnectionAge.store(0, std::memory_order_relaxed);
             state_->stats.forcedCloseCount.store(0, std::memory_order_relaxed);
-            if (maxConn == 0 || config_.maxConnections == 0) {
-                spdlog::warn("SocketServer: connection limit is 0 (config={}, using={})",
-                             config_.maxConnections, maxConn);
-            }
         }
 
         // Seed writer budget prior to first connection
@@ -201,11 +205,90 @@ Result<void> SocketServer::start() {
         acceptLoopFuture_ = co_spawn(
             coordinator_->getExecutor(),
             [this]() -> awaitable<void> {
-                co_await accept_loop();
+                co_await accept_loop(false);
                 co_return;
             },
             boost::asio::use_future);
         spdlog::info("SocketServer: accept_loop scheduled on WorkCoordinator");
+
+        // Start proxy acceptor if configured
+        if (!config_.proxySocketPath.empty()) {
+            auto proxySockPath = config_.proxySocketPath;
+            if (!proxySockPath.is_absolute()) {
+                try {
+                    proxySockPath = std::filesystem::absolute(proxySockPath);
+                } catch (...) {
+                }
+            }
+
+            std::error_code proxy_ec;
+            std::filesystem::remove(proxySockPath, proxy_ec);
+            auto proxyParent = proxySockPath.parent_path();
+            if (!proxyParent.empty() && !std::filesystem::exists(proxyParent)) {
+                std::filesystem::create_directories(proxyParent);
+            }
+
+#ifndef _WIN32
+            {
+                std::string psp = proxySockPath.string();
+                if (psp.size() >= sizeof(sockaddr_un::sun_path)) {
+                    spdlog::warn("Proxy socket path too long for AF_UNIX, skipping proxy: {}", psp);
+                    goto skip_proxy;
+                }
+            }
+#endif
+
+            {
+                std::promise<void> proxyReady;
+                auto proxyFut = proxyReady.get_future();
+                std::exception_ptr proxyExc;
+                std::string proxyPathStr = proxySockPath.string();
+
+                boost::asio::post(*io_context, [this, io_context, &proxyPathStr, &proxyExc,
+                                                &proxyReady]() {
+                    try {
+                        proxyAcceptor_ = std::make_unique<local::acceptor>(*io_context);
+                        local::endpoint ep(proxyPathStr);
+                        proxyAcceptor_->open(ep.protocol());
+                        proxyAcceptor_->bind(ep);
+                        proxyAcceptor_->listen(boost::asio::socket_base::max_listen_connections);
+                    } catch (...) {
+                        proxyExc = std::current_exception();
+                    }
+                    proxyReady.set_value();
+                });
+
+                proxyFut.get();
+                if (proxyExc) {
+                    try {
+                        std::rethrow_exception(proxyExc);
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Failed to start proxy acceptor: {}", e.what());
+                        goto skip_proxy;
+                    }
+                }
+
+#ifndef _WIN32
+                std::filesystem::permissions(proxySockPath,
+                                             std::filesystem::perms::owner_all |
+                                                 std::filesystem::perms::group_read |
+                                                 std::filesystem::perms::group_write);
+#endif
+
+                proxySocketPath_ = proxySockPath;
+
+                proxyAcceptLoopFuture_ = co_spawn(
+                    coordinator_->getExecutor(),
+                    [this]() -> awaitable<void> {
+                        co_await accept_loop(true);
+                        co_return;
+                    },
+                    boost::asio::use_future);
+                spdlog::info("SocketServer: proxy accept_loop scheduled on {}",
+                             proxySockPath.string());
+            }
+        skip_proxy:;
+        }
 
         // WorkCoordinator handles all threading - no need for separate worker pool
         spdlog::info("SocketServer: using WorkCoordinator ({} threads) for async execution",
@@ -298,6 +381,34 @@ Result<void> SocketServer::stop() {
             }
         }
 
+        // Close proxy acceptor first
+        if (proxyAcceptor_) {
+            try {
+                execute_on_io_context([this]() {
+                    if (!proxyAcceptor_)
+                        return;
+                    boost::system::error_code ec;
+                    proxyAcceptor_->cancel(ec);
+                    if (proxyAcceptor_->is_open())
+                        proxyAcceptor_->close(ec);
+                });
+            } catch (const std::exception& e) {
+                spdlog::warn("SocketServer: failed to close proxy acceptor: {}", e.what());
+            }
+        }
+        if (proxyAcceptLoopFuture_.valid()) {
+            try {
+                auto status = proxyAcceptLoopFuture_.wait_for(std::chrono::seconds(2));
+                if (status == std::future_status::ready) {
+                    proxyAcceptLoopFuture_.get();
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("Proxy accept_loop terminated: {}", e.what());
+            }
+            proxyAcceptLoopFuture_ = {};
+        }
+        proxyAcceptor_.reset();
+
         // Close acceptor on executor thread and wait for accept loop completion
         close_acceptor_on_executor();
 
@@ -332,11 +443,16 @@ Result<void> SocketServer::stop() {
             state_->readiness.ipcServerReady.store(false);
         }
 
-        // Cleanup socket file
+        // Cleanup socket files
         if (!actualSocketPath_.empty()) {
             std::error_code ec;
             std::filesystem::remove(actualSocketPath_, ec);
             actualSocketPath_.clear();
+        }
+        if (!proxySocketPath_.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(proxySocketPath_, ec);
+            proxySocketPath_.clear();
         }
 
         spdlog::info("Socket server stopped (total_conn={} active_conn={})",
@@ -363,11 +479,15 @@ void SocketServer::setWriterBudget(std::size_t bytes) {
     MuxMetricsRegistry::instance().setWriterBudget(bytes);
 }
 
-awaitable<void> SocketServer::accept_loop() {
+awaitable<void> SocketServer::accept_loop(bool isProxy) {
     static const bool trace = stream_trace_enabled();
     static bool trace_env_logged = false;
     static bool logged_entry = false;
-    spdlog::debug("Accept loop started");
+
+    const char* loopLabel = isProxy ? "proxy" : "main";
+    auto* activeAcceptor = isProxy ? proxyAcceptor_.get() : acceptor_.get();
+
+    spdlog::debug("{} accept loop started", loopLabel);
     if (!logged_entry) {
         logged_entry = true;
         spdlog::info("SocketServer: accept_loop coroutine entered");
@@ -381,9 +501,16 @@ awaitable<void> SocketServer::accept_loop() {
         }
     }
     if (trace) {
-        spdlog::info(
-            "stream-trace: accept_loop starting (max_conn={} socket={})", config_.maxConnections,
-            actualSocketPath_.empty() ? config_.socketPath.string() : actualSocketPath_.string());
+        spdlog::info("stream-trace: accept_loop starting ({}, max_conn={} socket={})", loopLabel,
+                     isProxy ? config_.proxyMaxConnections : config_.maxConnections,
+                     isProxy ? proxySocketPath_.string()
+                             : (actualSocketPath_.empty() ? config_.socketPath.string()
+                                                          : actualSocketPath_.string()));
+    }
+
+    if (!activeAcceptor) {
+        spdlog::warn("SocketServer: {} acceptor is null, exiting accept_loop", loopLabel);
+        co_return;
     }
 
     while (running_ && !stopping_) {
@@ -425,7 +552,7 @@ awaitable<void> SocketServer::accept_loop() {
 
             // Use as_tuple to avoid exception overhead during shutdown
             auto [ec, socket] =
-                co_await acceptor_->async_accept(boost::asio::as_tuple(use_awaitable));
+                co_await activeAcceptor->async_accept(boost::asio::as_tuple(use_awaitable));
 
             // Handle errors without exception
             if (ec) {
@@ -455,20 +582,28 @@ awaitable<void> SocketServer::accept_loop() {
                     if (einval_streak >= 3) {
                         try {
                             boost::system::error_code rebuild_ec;
-                            if (acceptor_)
-                                acceptor_->close(rebuild_ec);
-                            auto rebuildPath = actualSocketPath_;
-                            if (rebuildPath.empty()) {
-                                rebuildPath = config_.socketPath;
-                            }
+                            if (activeAcceptor)
+                                activeAcceptor->close(rebuild_ec);
+                            auto rebuildPath =
+                                isProxy ? proxySocketPath_
+                                        : (actualSocketPath_.empty() ? config_.socketPath
+                                                                     : actualSocketPath_);
                             std::filesystem::remove(rebuildPath, rebuild_ec);
-                            acceptor_ =
+                            auto rebuilt =
                                 std::make_unique<local::acceptor>(*coordinator_->getIOContext());
                             local::endpoint endpoint(rebuildPath.string());
-                            acceptor_->open(endpoint.protocol());
-                            acceptor_->bind(endpoint);
-                            acceptor_->listen(boost::asio::socket_base::max_listen_connections);
-                            actualSocketPath_ = rebuildPath;
+                            rebuilt->open(endpoint.protocol());
+                            rebuilt->bind(endpoint);
+                            rebuilt->listen(boost::asio::socket_base::max_listen_connections);
+                            if (isProxy) {
+                                proxyAcceptor_ = std::move(rebuilt);
+                                activeAcceptor = proxyAcceptor_.get();
+                                proxySocketPath_ = rebuildPath;
+                            } else {
+                                acceptor_ = std::move(rebuilt);
+                                activeAcceptor = acceptor_.get();
+                                actualSocketPath_ = rebuildPath;
+                            }
                             static std::atomic<bool> s_warned_once{false};
                             static const bool s_quiet = []() {
                                 if (const char* v = std::getenv("YAMS_QUIET_EINVAL_REBUILD")) {
@@ -525,9 +660,12 @@ awaitable<void> SocketServer::accept_loop() {
 
             auto current = activeConnections_.fetch_add(1) + 1;
             totalConnections_.fetch_add(1);
+            if (isProxy) {
+                proxyActiveConnections_.fetch_add(1, std::memory_order_relaxed);
+            }
 
-            spdlog::info("SocketServer: [conn={}] accepted connection, active={} total={}",
-                         conn_token, current, totalConnections_.load());
+            spdlog::info("SocketServer: [conn={}] accepted {} connection, active={} total={}",
+                         conn_token, loopLabel, current, totalConnections_.load());
 
             if (state_) {
                 state_->stats.activeConnections.store(current);
@@ -560,19 +698,33 @@ awaitable<void> SocketServer::accept_loop() {
                 }
 
                 // Create a capturing lambda that releases the semaphore on completion
-                auto wrapped_handler = [this, conn_token, tracked]() mutable -> awaitable<void> {
-                    // RAII guard for semaphore - releases on any exit path
+                auto wrapped_handler = [this, conn_token, tracked,
+                                        isProxy]() mutable -> awaitable<void> {
+                    // RAII guard for semaphore - handles shrink debt for graceful downsizing
                     struct SemaphoreGuard {
+                        SocketServer* server;
                         std::counting_semaphore<>* sem;
                         ~SemaphoreGuard() {
-                            if (sem) {
-                                sem->release();
+                            if (!sem || !server)
+                                return;
+                            // Check shrink debt: if downsizing is in progress, consume debt
+                            // instead of releasing the semaphore back to the pool
+                            int32_t debt = server->shrinkDebt_.load(std::memory_order_relaxed);
+                            if (debt > 0) {
+                                // Try to decrement debt (may race with other connections,
+                                // which is fine - we just need eventual convergence)
+                                if (server->shrinkDebt_.compare_exchange_weak(
+                                        debt, debt - 1, std::memory_order_relaxed)) {
+                                    // Debt consumed, don't release semaphore
+                                    return;
+                                }
                             }
+                            sem->release();
                         }
-                    } guard{connectionSlots_.get()};
+                    } guard{this, connectionSlots_.get()};
 
                     // Handle the connection with tracing token
-                    co_await handle_connection(tracked, conn_token);
+                    co_await handle_connection(tracked, conn_token, isProxy);
                 };
 
                 // Spawn and track the connection
@@ -598,7 +750,7 @@ awaitable<void> SocketServer::accept_loop() {
 }
 
 awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> tracked_socket,
-                                                uint64_t conn_token) {
+                                                uint64_t conn_token, bool isProxy) {
     YAMS_ZONE_SCOPED_N("SocketServer::handle_connection");
     static const bool trace = stream_trace_enabled();
     const auto handler_start_time = std::chrono::steady_clock::now();
@@ -641,8 +793,12 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         bool trace;
         uint64_t conn_token;
         std::chrono::steady_clock::time_point start_time;
+        bool proxyConn;
         ~CleanupGuard() {
             auto current = server->activeConnections_.fetch_sub(1) - 1;
+            if (proxyConn) {
+                server->proxyActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
+            }
             if (server->state_) {
                 server->state_->stats.activeConnections.store(current);
                 auto maxConn = server->state_->stats.maxConnections.load(std::memory_order_relaxed);
@@ -664,7 +820,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                               conn_token, current, duration_ms);
             }
         }
-    } guard{this, trace, conn_token, handler_start_time};
+    } guard{this, trace, conn_token, handler_start_time, isProxy};
 
     if (trace) {
         spdlog::info("stream-trace: [conn={}] handler_ready active={} total={} socket_valid={}",
@@ -754,7 +910,8 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         ipcTracker.markActive();
 
         // Enforce maximum connection lifetime to prevent zombie connections
-        if (config_.maxConnectionLifetime.count() > 0) {
+        // Proxy connections are persistent — skip lifetime enforcement
+        if (!isProxy && config_.maxConnectionLifetime.count() > 0) {
             // Use async_initiate to race connection handler against lifetime timer
             // (replaces experimental::awaitable_operators)
             auto executor = sock->get_executor();
@@ -982,6 +1139,82 @@ uint64_t SocketServer::oldestConnectionAgeSeconds() const {
     }
 
     return oldestAge;
+}
+
+// -------- Dynamic connection slot sizing (PBI-085) --------
+
+bool SocketServer::resizeConnectionSlots(size_t newSize) {
+    if (!connectionSlots_ || newSize == 0) {
+        return false;
+    }
+
+    size_t currentLimit = slotLimit_.load(std::memory_order_relaxed);
+    if (newSize == currentLimit) {
+        return true; // No change needed
+    }
+
+    // Growing: release additional permits
+    if (newSize > currentLimit) {
+        size_t delta = newSize - currentLimit;
+        for (size_t i = 0; i < delta; ++i) {
+            connectionSlots_->release();
+        }
+        slotLimit_.store(newSize, std::memory_order_relaxed);
+        // Clear any shrink debt when growing
+        shrinkDebt_.store(0, std::memory_order_relaxed);
+
+        // Update state stats
+        if (state_) {
+            state_->stats.maxConnections.store(newSize, std::memory_order_relaxed);
+        }
+
+        spdlog::debug("SocketServer: connection slots grown from {} to {} (+{})", currentLimit,
+                      newSize, delta);
+        return true;
+    }
+
+    // Shrinking: use debt tracking for graceful downsize
+    size_t active = activeConnections_.load(std::memory_order_relaxed);
+
+    if (newSize >= active) {
+        // Safe to shrink immediately - no active connections would be affected
+        // Consume permits to reduce availability
+        size_t delta = currentLimit - newSize;
+        for (size_t i = 0; i < delta; ++i) {
+            // Try to acquire without blocking - if we can't, that's ok,
+            // the semaphore will naturally limit new connections
+            (void)connectionSlots_->try_acquire();
+        }
+        slotLimit_.store(newSize, std::memory_order_relaxed);
+        shrinkDebt_.store(0, std::memory_order_relaxed);
+    } else {
+        // Would affect active connections - set up shrink debt
+        int32_t debt = static_cast<int32_t>(active - newSize);
+        shrinkDebt_.store(debt, std::memory_order_relaxed);
+        slotLimit_.store(newSize, std::memory_order_relaxed);
+
+        spdlog::debug("SocketServer: connection slots shrinking from {} to {} "
+                      "(debt={} active connections will drain first)",
+                      currentLimit, newSize, debt);
+    }
+
+    // Update state stats
+    if (state_) {
+        state_->stats.maxConnections.store(newSize, std::memory_order_relaxed);
+        auto slotsFree = (active < newSize) ? (newSize - active) : 0;
+        state_->stats.connectionSlotsFree.store(slotsFree, std::memory_order_relaxed);
+    }
+
+    return true;
+}
+
+double SocketServer::getSlotUtilization() const {
+    size_t active = activeConnections_.load(std::memory_order_relaxed);
+    size_t limit = slotLimit_.load(std::memory_order_relaxed);
+    if (limit == 0) {
+        return 0.0;
+    }
+    return static_cast<double>(active) / static_cast<double>(limit);
 }
 
 } // namespace yams::daemon

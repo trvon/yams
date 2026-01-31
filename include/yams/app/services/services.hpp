@@ -10,8 +10,8 @@
 #include <yams/core/types.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/search/search_engine.h>
 #include <yams/search/query_concept_extractor.h>
+#include <yams/search/search_engine.h>
 // Required for yams::extraction::IContentExtractor
 #include <yams/extraction/content_extractor.h>
 
@@ -654,6 +654,9 @@ struct DocumentEntry {
     // Scoring/ranking info
     double relevanceScore{0.0};             // search/filter relevance
     std::optional<std::string> matchReason; // why this document matched
+
+    // Extraction status: "pending", "success", "failed", "skipped"
+    std::string extractionStatus = "pending";
 };
 
 struct ListDocumentsResponse {

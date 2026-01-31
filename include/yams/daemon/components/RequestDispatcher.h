@@ -161,6 +161,9 @@ private:
     boost::asio::awaitable<Response>
     handleMetadataValueCountsRequest(const MetadataValueCountsRequest& req);
 
+    // Batch request handler (Track B: Communication Overhead Reduction)
+    boost::asio::awaitable<Response> handleBatchRequest(const BatchRequest& req);
+
     // Legacy helper declarations removed after dispatcher split
 
 private:

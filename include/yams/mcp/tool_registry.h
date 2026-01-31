@@ -77,6 +77,56 @@ void readStringArray(const json& j, std::string_view key, Container& out) {
     return result;
 }
 
+// MCP 2024-11-05: Enhanced tool result with structured content
+// This supports both legacy content array and new structuredContent field
+[[maybe_unused]] inline nlohmann::json wrapToolResultStructured(
+    const nlohmann::json& content_items, // Array of content items (text, image, etc.)
+    const std::optional<nlohmann::json>& structured_content = std::nullopt, bool is_error = false) {
+    nlohmann::json result;
+    result["content"] = content_items;
+    if (structured_content.has_value()) {
+        result["structuredContent"] = structured_content.value();
+    }
+    if (is_error) {
+        result["isError"] = true;
+    }
+    return result;
+}
+
+// MCP 2024-11-05: Structured content support
+// Creates a content item for different types
+namespace content {
+
+inline nlohmann::json text(const std::string& text_content) {
+    return nlohmann::json{{"type", "text"}, {"text", text_content}};
+}
+
+// Convenience helper: represent JSON as a text content item.
+// (The MCP content array is primarily for human-readable text; structured JSON should go in
+// structuredContent.)
+inline nlohmann::json json(const nlohmann::json& json_content, int indent = -1) {
+    return text(json_content.dump(indent));
+}
+
+inline nlohmann::json image(const std::string& base64_data,
+                            const std::string& mime_type = "image/png") {
+    return nlohmann::json{{"type", "image"}, {"data", base64_data}, {"mimeType", mime_type}};
+}
+
+inline nlohmann::json resource(const std::string& uri, const std::string& mime_type = "",
+                               const std::optional<std::string>& text_content = std::nullopt) {
+    nlohmann::json res{{"type", "resource"}, {"resource", {{"uri", uri}}}};
+    if (!mime_type.empty()) {
+        res["resource"]["mimeType"] = mime_type;
+    }
+    if (text_content.has_value()) {
+        res["resource"]["text"] = *text_content;
+    }
+    return res;
+}
+
+} // namespace content
+
 // C++20 concepts for tool system
 template <typename T>
 concept ToolRequest = requires {
@@ -1185,10 +1235,6 @@ public:
     void registerTool(std::string_view name, Handler&& handler, json schema = {},
                       std::string description = {}, std::string title = {},
                       std::optional<ToolAnnotation> annotations = std::nullopt) {
-        if (annotations) {
-            // Use stderr so we don't corrupt stdio JSON-RPC streams.
-            std::cerr << "Registering tool " << name << " with annotations" << std::endl;
-        }
         auto wrapper = AsyncToolWrapper<RequestType, ResponseType>(std::forward<Handler>(handler));
         auto handlerFn = [wrapper](const json& args) mutable -> boost::asio::awaitable<json> {
             return wrapper(args);
@@ -1204,6 +1250,71 @@ public:
         // Tool already registered: keep handler map current and patch descriptor metadata.
         // This avoids losing newly-added annotations when a tool is registered more than once.
         it->second = std::move(handlerFn);
+
+        // Should be unreachable (handled above), but keep behavior safe.
+        auto dit = std::ranges::find_if(
+            descriptors_, [&](const AsyncToolDescriptor& d) { return d.name == it->first; });
+        if (dit == descriptors_.end()) {
+            descriptors_.push_back({it->first, std::move(schema), std::move(description),
+                                    std::move(title), std::move(annotations)});
+            return;
+        }
+
+        if (!schema.empty()) {
+            dit->schema = std::move(schema);
+        }
+        if (!description.empty()) {
+            dit->description = std::move(description);
+        }
+        if (!title.empty()) {
+            dit->title = std::move(title);
+        }
+        if (annotations.has_value()) {
+            dit->annotations = std::move(annotations);
+        }
+    }
+
+    // Register a tool handler that already returns a fully-formed MCP CallToolResult payload
+    // (content array, optional structuredContent, isError).
+    void registerRawTool(std::string_view name,
+                         std::function<boost::asio::awaitable<json>(const json&)> handler,
+                         json schema = {}, std::string description = {}, std::string title = {},
+                         std::optional<ToolAnnotation> annotations = std::nullopt) {
+        const std::string key(name);
+
+        if (auto it = handlers_.find(key); it != handlers_.end()) {
+            // Tool already registered: keep handler map current and patch descriptor metadata.
+            it->second = std::move(handler);
+
+            auto dit = std::ranges::find_if(
+                descriptors_, [&](const AsyncToolDescriptor& d) { return d.name == it->first; });
+            if (dit == descriptors_.end()) {
+                descriptors_.push_back({it->first, std::move(schema), std::move(description),
+                                        std::move(title), std::move(annotations)});
+                return;
+            }
+
+            if (!schema.empty()) {
+                dit->schema = std::move(schema);
+            }
+            if (!description.empty()) {
+                dit->description = std::move(description);
+            }
+            if (!title.empty()) {
+                dit->title = std::move(title);
+            }
+            if (annotations.has_value()) {
+                dit->annotations = std::move(annotations);
+            }
+            return;
+        }
+
+        auto [it, inserted] = handlers_.emplace(key, std::move(handler));
+        if (inserted) {
+            descriptors_.push_back({it->first, std::move(schema), std::move(description),
+                                    std::move(title), std::move(annotations)});
+            return;
+        }
 
         auto dit = std::ranges::find_if(
             descriptors_, [&](const AsyncToolDescriptor& d) { return d.name == it->first; });
@@ -1244,8 +1355,8 @@ public:
             }
             tool["description"] = desc.description;
             tool["inputSchema"] = desc.schema.empty() ? json{{"type", "object"}} : desc.schema;
-            // Always include annotations field per MCP 2024-11-05 (even if empty, clients expect
-            // it)
+            // Always include annotations field per MCP 2024-11-05 (even if empty, clients
+            // expect it)
             json ann = json::object();
             if (desc.annotations) {
                 if (desc.annotations->readOnlyHint.has_value()) {

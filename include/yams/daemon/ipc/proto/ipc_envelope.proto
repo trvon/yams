@@ -48,6 +48,7 @@ message SearchRequest {
   int32 vector_stage_timeout_ms = 31;
   int32 keyword_stage_timeout_ms = 32;
   int32 snippet_hydration_timeout_ms = 33;
+  string session_id = 99;
 }
 
 message GetRequest {
@@ -108,6 +109,7 @@ message DeleteRequest {
   bool keep_refs = 9;
   bool recursive = 10;
   bool verbose = 11;
+  string session_id = 99;
 }
 
 message ListRequest {
@@ -149,6 +151,7 @@ message ListRequest {
   // Metadata key-value filters (e.g., pbi=PBI-080, task=hook-export)
   repeated KvPair metadata_filters = 36;
   bool match_all_metadata = 37;
+  string session_id = 99;
 }
 
 message ShutdownRequest { bool graceful = 1; int64 timeout_s = 2; }
@@ -207,6 +210,7 @@ message AddDocumentRequest {
   string mime_type = 13;
   bool disable_auto_mime = 14;
   bool no_embeddings = 15;
+  string session_id = 99;
 }
 
 message GrepRequest {
@@ -236,6 +240,7 @@ message GrepRequest {
   int32 before_context = 24;
   int32 after_context = 25;
   bool show_diff = 26;
+  string session_id = 99;
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +284,7 @@ message UpdateDocumentRequest {
   bool atomic = 7;
   bool create_backup = 8;
   bool verbose = 9;
+  string session_id = 99;
 }
 
 message DownloadRequest {
@@ -287,6 +293,7 @@ message DownloadRequest {
   repeated string tags = 3;
   repeated KvPair metadata = 4;
   bool quiet = 5;
+  string session_id = 99;
 }
 
 message GetStatsRequest {
@@ -298,6 +305,7 @@ message GetStatsRequest {
   bool show_dedup = 6;
   bool show_performance = 7;
   bool include_health = 8;
+  string session_id = 99;
 }
 
 // Session preparation (warming) with resource budgets
@@ -387,6 +395,7 @@ message ListEntry {
   int64 change_time = 18;
   double relevance_score = 19;
   string match_reason = 20;
+  string extraction_status = 21;
 }
 
 message ListResponse { repeated ListEntry items = 1; uint64 total_count = 2; }
@@ -843,6 +852,7 @@ message GraphQueryRequest {
   bool include_edge_properties = 15;
   bool include_node_properties = 16;
   bool hydrate_fully = 17;
+  string session_id = 99;
 }
 
 message NodeTypeCount {
@@ -1015,6 +1025,57 @@ message Envelope {
     GraphQueryResponse graph_query_response = 140;
     GraphPathHistoryResponse graph_path_history_response = 141;
     MetadataValueCountsResponse metadata_value_counts_response = 142;
+    // Batch request/response (Track B)
+    BatchRequest batch_request = 143;
+    BatchResponse batch_response = 144;
 
+  }
+}
+
+// =============================================================================
+// Batch Request/Response Types (Track B: Communication Overhead Reduction)
+// =============================================================================
+
+message BatchRequest {
+  repeated BatchItem items = 1;
+  bool continue_on_error = 2;
+  string session_id = 99;
+}
+
+message BatchItem {
+  uint32 sequence_id = 1;
+  oneof request {
+    SearchRequest search_request = 11;
+    GetRequest get_request = 13;
+    AddDocumentRequest add_document_request = 26;
+    GrepRequest grep_request = 27;
+    UpdateDocumentRequest update_document_request = 28;
+    DeleteRequest delete_request = 17;
+    ListRequest list_request = 18;
+    GraphQueryRequest graph_query_request = 55;
+  }
+}
+
+message BatchResponse {
+  repeated BatchItemResponse items = 1;
+  uint32 total_count = 2;
+  uint32 success_count = 3;
+  uint32 error_count = 4;
+  int64 elapsed_ms = 5;
+}
+
+message BatchItemResponse {
+  uint32 sequence_id = 1;
+  bool success = 2;
+  oneof response {
+    SearchResponse search_response = 103;
+    GetResponse get_response = 105;
+    AddDocumentResponse add_document_response = 114;
+    GrepResponse grep_response = 115;
+    UpdateDocumentResponse update_document_response = 116;
+    DeleteResponse delete_response = 119;
+    ListResponse list_response = 113;
+    GraphQueryResponse graph_query_response = 140;
+    ErrorResponse error = 101;
   }
 }

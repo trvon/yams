@@ -5,8 +5,10 @@
 #include <boost/asio/strand.hpp>
 #if !defined(YAMS_WASI)
 #include <yams/api/content_store.h>
+#include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/list_input_resolver.hpp>
+#include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #endif
 #if !defined(YAMS_WASI)
@@ -229,6 +231,10 @@ private:
     yams::daemon::ClientConfig daemon_client_config_{};
     std::filesystem::path daemonSocketOverride_;
     std::function<Result<void>(const yams::daemon::ClientConfig&)> testEnsureDaemonClientHook_{};
+
+    // Service facades sharing daemon_client_ via non-owning shared_ptr
+    std::unique_ptr<app::services::RetrievalService> retrieval_svc_;
+    std::unique_ptr<app::services::DocumentIngestionService> ingestion_svc_;
 #else
     std::filesystem::path daemonSocketOverride_;
 #endif
@@ -284,6 +290,9 @@ private:
     beginSessionContext(std::string sessionId,
                         std::function<void(const std::string&, const nlohmann::json&)> publisher);
     void endSessionContext();
+
+    // --- MCP listChanged notification (MCP 2025-06-18 spec) ---
+    void notifyToolsListChanged();
 
     // --- Unified outbound mechanism (strand-like ordering on IO context) ---
     void enqueueOutbound(std::string payload);
@@ -363,12 +372,9 @@ private:
 #if defined(YAMS_WASI)
     // WASI profile: only the minimal protocol surface is supported.
     // Keep these as lightweight stubs so we don't pull in the full YAMS stack.
-    nlohmann::json listTools();
-    nlohmann::json listResources();
-    nlohmann::json readResource(const std::string& uri);
-    nlohmann::json listPrompts();
-    void initializeToolRegistry();
-    boost::asio::awaitable<Result<MCPStatusResponse>> handleGetStatus(const MCPStatusRequest& req);
+    // NOTE: The generic handlers (listTools/listResources/...) are already declared above.
+    // The WASI build provides simplified implementations in the .cpp guarded by YAMS_WASI.
+    // (No additional declarations needed here.)
 #endif
 
     // Modern C++20 tool handlers (type-safe, clean)

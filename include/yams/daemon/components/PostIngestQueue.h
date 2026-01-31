@@ -93,6 +93,10 @@ public:
     bool tryEnqueue(const Task& t);
     bool tryEnqueue(Task&& t);
 
+    /// Dispatch an embedding job for already-extracted documents (e.g. fast-track).
+    bool dispatchEmbedJobWithRetry(const std::vector<std::string>& hashes, bool recordOnFailure,
+                                   bool notifyOnFailure);
+
     std::size_t size() const;
     std::size_t processed() const { return processed_.load(); }
     std::size_t failed() const { return failed_.load(); }
@@ -270,8 +274,6 @@ private:
     void recordEmbedRetry(const std::vector<std::string>& hashes);
     void flushEmbedRetriesOnDrain();
     void notifyEmbedFailure(const std::vector<std::string>& hashes);
-    bool dispatchEmbedJobWithRetry(const std::vector<std::string>& hashes, bool recordOnFailure,
-                                   bool notifyOnFailure);
     void refreshStageAvailability();
     void logStageAvailabilitySnapshot() const;
 

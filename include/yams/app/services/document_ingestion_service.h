@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -10,6 +11,7 @@
 // Ensure boost::asio types used by daemon_client.h are declared
 #include <boost/asio/awaitable.hpp>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
 
 namespace yams::app::services {
 
@@ -44,18 +46,56 @@ struct AddOptions {
     int timeoutMs{30000};
     int retries{3};
     int backoffMs{250};
+
+    // Sync extraction wait options
+    bool waitForProcessing{false}; // Wait for text extraction to complete before returning
+    int waitTimeoutSeconds{30};    // Max seconds to wait for extraction (0 = no timeout)
+};
+
+struct DeleteOptions {
+    std::optional<std::filesystem::path> socketPath;
+    std::optional<std::filesystem::path> explicitDataDir;
+    std::vector<std::string> hashes;
+    std::vector<std::string> names;
+    std::string sessionId;
+    bool dryRun = false;
+    int timeoutMs = 30000;
+};
+
+struct UpdateOptions {
+    std::optional<std::filesystem::path> socketPath;
+    std::optional<std::filesystem::path> explicitDataDir;
+    std::string hash;
+    std::string name;
+    std::vector<std::string> addTags;
+    std::vector<std::string> removeTags;
+    std::map<std::string, std::string> setMetadata;
+    std::vector<std::string> removeMetadata;
+    std::string sessionId;
+    int timeoutMs = 30000;
 };
 
 class DocumentIngestionService {
 public:
     DocumentIngestionService() = default;
+    explicit DocumentIngestionService(std::shared_ptr<yams::daemon::DaemonClient> client);
 
     // Perform daemon-first add. Builds AddDocumentRequest, configures DaemonClient,
     // and calls streamingAddDocument. Caller can implement fallback to local services on error.
     Result<yams::daemon::AddDocumentResponse> addViaDaemon(const AddOptions& opts) const;
 
+    // New operations
+    Result<yams::daemon::DeleteResponse> deleteDocument(const DeleteOptions& opts) const;
+    Result<yams::daemon::UpdateDocumentResponse> updateDocument(const UpdateOptions& opts) const;
+
     // Utility: normalize a provided path to absolute/canonical when possible
     static std::string normalizePath(const std::string& inPath);
+
+private:
+    std::shared_ptr<yams::daemon::DaemonClient> client_;
+    std::shared_ptr<yams::daemon::DaemonClient> getOrCreateClient(const AddOptions& opts) const;
+    std::shared_ptr<yams::daemon::DaemonClient> getOrCreateClient(const DeleteOptions& opts) const;
+    std::shared_ptr<yams::daemon::DaemonClient> getOrCreateClient(const UpdateOptions& opts) const;
 };
 
 } // namespace yams::app::services

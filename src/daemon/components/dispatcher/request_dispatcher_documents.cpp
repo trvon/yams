@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <future>
 #include <sstream>
+#include <thread>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/crypto/hasher.h>
@@ -15,6 +16,9 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/request_context_registry.h>
+#include <yams/extraction/extraction_util.h>
+#include <yams/ingest/ingest_helpers.h>
+#include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
 #include <yams/vector/embedding_service.h>
 
@@ -572,10 +576,105 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             response.size = serviceResp.bytesStored;
             response.message = "Document stored successfully.";
 
-            // Enqueue for post-ingest processing (embeddings, etc.)
-            if (serviceManager_ && serviceManager_->getPostIngestQueue() &&
+            // Fast-track: small documents (<10KB) get extracted synchronously
+            constexpr size_t kFastTrackThreshold = 10 * 1024; // 10KB
+            bool fastTracked = false;
+            bool enqueued = false;
+
+            if (serviceResp.bytesStored > 0 && serviceResp.bytesStored < kFastTrackThreshold &&
+                serviceManager_ && !serviceResp.hash.empty()) {
+                // Try to extract synchronously for small documents
+                auto metaRepo = serviceManager_->getMetadataRepo();
+                auto contentStore = serviceManager_->getContentStore();
+                auto extractors = serviceManager_->getContentExtractors();
+
+                if (metaRepo && contentStore && !extractors.empty()) {
+                    auto docInfoRes = metaRepo->getDocumentByHash(serviceResp.hash);
+                    if (docInfoRes && docInfoRes.value().has_value()) {
+                        const auto& docInfo = docInfoRes.value().value();
+                        auto text = extraction::util::extractDocumentText(
+                            contentStore, serviceResp.hash,
+                            docInfo.mimeType.empty() ? req.mimeType : docInfo.mimeType,
+                            docInfo.fileExtension, extractors);
+
+                        if (text && !text->empty()) {
+                            // Persist extracted text synchronously
+                            auto persistRes = ingest::persist_content_and_index(
+                                *metaRepo, docInfo.id, docInfo.fileName, *text, docInfo.mimeType,
+                                "fast_track_sync");
+
+                            if (persistRes) {
+                                fastTracked = true;
+                                response.message = "Document stored and extracted (fast-track).";
+                                response.extractionStatus = "success";
+
+                                // Dispatch embed job so fast-tracked docs get embeddings
+                                if (serviceManager_ && serviceManager_->getPostIngestQueue()) {
+                                    serviceManager_->getPostIngestQueue()
+                                        ->dispatchEmbedJobWithRetry({serviceResp.hash}, true, true);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Enqueue for post-ingest processing if not fast-tracked
+            if (!fastTracked && serviceManager_ && serviceManager_->getPostIngestQueue() &&
                 !serviceResp.hash.empty()) {
                 serviceManager_->enqueuePostIngest(serviceResp.hash, req.mimeType);
+                enqueued = true;
+            }
+
+            // Sync mode: wait for extraction to complete (unless not enqueued)
+            if (req.waitForProcessing && enqueued && response.extractionStatus != "success") {
+                auto metaRepo = serviceManager_->getMetadataRepo();
+                if (metaRepo) {
+                    const int timeoutSeconds =
+                        req.waitTimeoutSeconds > 0 ? req.waitTimeoutSeconds : 30;
+                    const auto startTime = std::chrono::steady_clock::now();
+                    bool extractionComplete = false;
+
+                    // Poll for extraction status
+                    while (!extractionComplete) {
+                        auto docInfoRes = metaRepo->getDocumentByHash(serviceResp.hash);
+                        if (docInfoRes && docInfoRes.value().has_value()) {
+                            const auto& docInfo = docInfoRes.value().value();
+
+                            if (docInfo.extractionStatus == metadata::ExtractionStatus::Success) {
+                                response.extractionStatus = "success";
+                                extractionComplete = true;
+                                response.message = "Document stored and extracted.";
+                            } else if (docInfo.extractionStatus ==
+                                       metadata::ExtractionStatus::Failed) {
+                                response.extractionStatus = "failed";
+                                extractionComplete = true;
+                                response.message = "Document stored but extraction failed.";
+                            } else if (docInfo.extractionStatus ==
+                                       metadata::ExtractionStatus::Skipped) {
+                                response.extractionStatus = "skipped";
+                                extractionComplete = true;
+                                response.message = "Document stored (extraction skipped).";
+                            }
+                        }
+
+                        if (!extractionComplete) {
+                            // Check timeout
+                            auto elapsed = std::chrono::steady_clock::now() - startTime;
+                            if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() >=
+                                timeoutSeconds) {
+                                response.extractionStatus = "pending";
+                                response.message = "Document stored (extraction in progress).";
+                                break;
+                            }
+
+                            // Wait a bit before polling again
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        }
+                    }
+                }
+            } else if (!fastTracked) {
+                response.extractionStatus = enqueued ? "pending" : "skipped";
             }
 
             co_return response;

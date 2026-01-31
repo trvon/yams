@@ -383,6 +383,7 @@ public:
                     doc.contentSnippet = e.snippet;
                     doc.language = e.language;
                     doc.extractionMethod = e.extractionMethod;
+                    doc.extractionStatus = e.extractionStatus;
                     doc.hasContent = !e.snippet.empty();
 
                     // Handle metadata and tags
@@ -969,7 +970,8 @@ private:
                 }
                 doc.tags = docEntry.tags;
 
-                // Handle content snippet
+                // Handle content snippet and extraction status
+                doc.extractionStatus = docEntry.extractionStatus;
                 if (docEntry.snippet) {
                     doc.contentSnippet = docEntry.snippet.value();
                     doc.hasContent = true;
@@ -1024,6 +1026,7 @@ private:
         std::string contentSnippet;
         std::string language;
         std::string extractionMethod;
+        std::string extractionStatus;
         std::vector<std::string> tags;
         bool hasContent = false;
 
@@ -1431,9 +1434,17 @@ private:
             cells.push_back(doc.getFileType());
             cells.push_back(doc.getFormattedSize());
             if (snippetIndex != std::numeric_limits<size_t>::max()) {
-                std::string snippetDisplay =
-                    formatSnippetForDisplay(doc.contentSnippet, snippetLength_);
-                cells.push_back(snippetDisplay.empty() ? "-" : snippetDisplay);
+                std::string snippetDisplay;
+                if (doc.extractionStatus == "pending") {
+                    snippetDisplay = "[pending]";
+                } else if (doc.extractionStatus == "failed") {
+                    snippetDisplay = "[failed]";
+                } else {
+                    snippetDisplay = formatSnippetForDisplay(doc.contentSnippet, snippetLength_);
+                    if (snippetDisplay.empty())
+                        snippetDisplay = "-";
+                }
+                cells.push_back(snippetDisplay);
             }
             if (tagsIndex != std::numeric_limits<size_t>::max()) {
                 cells.push_back(doc.getTags());

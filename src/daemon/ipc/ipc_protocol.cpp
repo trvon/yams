@@ -191,6 +191,10 @@ template <> struct MessageTypeTraits<MetadataValueCountsRequest> {
     static constexpr MessageType value = MessageType::MetadataValueCountsRequest;
     static constexpr const char* name = "MetadataValueCounts";
 };
+template <> struct MessageTypeTraits<BatchRequest> {
+    static constexpr MessageType value = MessageType::BatchRequest;
+    static constexpr const char* name = "Batch";
+};
 
 // Response type mappings
 template <> struct MessageTypeTraits<SearchResponse> {
@@ -316,6 +320,9 @@ template <> struct MessageTypeTraits<KgIngestResponse> {
 };
 template <> struct MessageTypeTraits<MetadataValueCountsResponse> {
     static constexpr MessageType value = MessageType::MetadataValueCountsResponse;
+};
+template <> struct MessageTypeTraits<BatchResponse> {
+    static constexpr MessageType value = MessageType::BatchResponse;
 };
 
 MessageType getMessageType(const Request& req) {
