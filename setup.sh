@@ -12,6 +12,7 @@
 #   YAMS_CONAN_HOST_PROFILE  - Path to Conan host profile (bypasses auto-detection)
 #   YAMS_CONAN_ARCH          - Target architecture (x86_64, armv8, etc.)
 #   YAMS_EXTRA_MESON_FLAGS   - Additional Meson setup flags
+#   YAMS_ENABLE_MOBILE_BINDINGS - Build mobile C ABI shared library (true/false)
 #   YAMS_COMPILER            - Force compiler (clang or gcc)
 #   YAMS_CPPSTD              - C++ standard (17, 20, 23)
 #   YAMS_ENABLE_MODULES      - Enable C++20 modules (true/false, auto-detected if not set)
@@ -370,8 +371,12 @@ echo "--- Exporting custom Conan recipes... ---"
 
 # Export custom onnxruntime recipe if it exists
 if [[ -f "conan/onnxruntime/conanfile.py" ]]; then
+  # Avoid sporadic Conan cache race/collision errors by retrying export once.
   echo "Exporting onnxruntime/1.23.2 from conan/onnxruntime/"
-  conan export conan/onnxruntime --name=onnxruntime --version=1.23.2
+  if ! conan export conan/onnxruntime --name=onnxruntime --version=1.23.2; then
+    echo "Retrying conan export onnxruntime/1.23.2..."
+    conan export conan/onnxruntime --name=onnxruntime --version=1.23.2
+  fi
 fi
 
 echo "--- Running conan install... ---"
@@ -636,6 +641,15 @@ fi
 
 MESON_OPTIONS+=("-Ddatabase-backend=${LIBSQL_BACKEND_LOWER}")
 
+# Mobile bindings are off by default; allow CI/users to opt-in.
+if [[ "${YAMS_ENABLE_MOBILE_BINDINGS:-}" == "true" ]]; then
+  MESON_OPTIONS+=("-Denable-mobile-bindings=true")
+  echo "Mobile bindings enabled (YAMS_ENABLE_MOBILE_BINDINGS=true)"
+elif [[ "${YAMS_ENABLE_MOBILE_BINDINGS:-}" == "false" ]]; then
+  MESON_OPTIONS+=("-Denable-mobile-bindings=false")
+  echo "Mobile bindings disabled (YAMS_ENABLE_MOBILE_BINDINGS=false)"
+fi
+
 # ThreadSanitizer: default enabled for Debug builds, can be overridden with --tsan/--no-tsan
 if [[ -z "${ENABLE_TSAN}" ]]; then
   if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
@@ -654,9 +668,14 @@ if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true"
   echo "Vector/embedding tests enabled for ${BUILD_TYPE} build"
 fi
 
+MESON_OPTIONS+=("-Denable-tsan=${ENABLE_TSAN}")
 if [[ "${ENABLE_TSAN}" == "true" ]]; then
-  MESON_OPTIONS+=("-Denable-tsan=true" "-Db_sanitize=thread")
+  MESON_OPTIONS+=("-Db_sanitize=thread")
   echo "ThreadSanitizer enabled (race detection)"
+else
+  # Ensure any previous sanitizer setting doesn't persist across reconfigure.
+  # Users can override via YAMS_EXTRA_MESON_FLAGS.
+  MESON_OPTIONS+=("-Db_sanitize=none")
 fi
 
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then

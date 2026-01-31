@@ -335,6 +335,7 @@ jobs:
           export YAMS_CONAN_HOST_PROFILE="${{ matrix.conan_host_profile }}"
           export YAMS_CONAN_ARCH="${{ matrix.conan_arch }}"
           export YAMS_EXTRA_MESON_FLAGS="${{ matrix.extra_meson_flags }}"
+          export YAMS_ENABLE_MOBILE_BINDINGS=false
           # Disable TSAN in CI - boost::asio strand destruction causes heap-use-after-free
           # that TSAN detects but cannot be suppressed. Run TSAN locally for development.
           export ENABLE_TSAN=false
@@ -350,6 +351,7 @@ jobs:
           YAMS_CONAN_HOST_PROFILE: ${{ matrix.conan_host_profile }}
           YAMS_CONAN_ARCH: ${{ matrix.conan_arch }}
           YAMS_EXTRA_MESON_FLAGS: ${{ matrix.extra_meson_flags }}
+          YAMS_ENABLE_MOBILE_BINDINGS: "false"
         run: |
           .\setup.ps1 Debug
 

@@ -493,12 +493,12 @@ struct yams_mobile_document_get_result_t {
     std::string content;
 };
 
-yams_mobile_version_info yams_mobile_get_version(void) {
+YAMS_MOBILE_API yams_mobile_version_info yams_mobile_get_version(void) {
     return kVersion;
 }
 
-yams_mobile_status yams_mobile_context_create(const yams_mobile_context_config* config,
-                                              yams_mobile_context_t** out_context) {
+YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
+    const yams_mobile_context_config* config, yams_mobile_context_t** out_context) {
     if (out_context == nullptr) {
         set_last_error("out_context pointer is null");
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
@@ -635,7 +635,7 @@ yams_mobile_status yams_mobile_context_create(const yams_mobile_context_config* 
     }
 }
 
-void yams_mobile_context_destroy(yams_mobile_context_t* ctx) {
+YAMS_MOBILE_API void yams_mobile_context_destroy(yams_mobile_context_t* ctx) {
     if (!ctx)
         return;
     if (ctx->state.worker_pool) {
@@ -644,9 +644,9 @@ void yams_mobile_context_destroy(yams_mobile_context_t* ctx) {
     delete ctx;
 }
 
-yams_mobile_status yams_mobile_grep_execute(yams_mobile_context_t* ctx,
-                                            const yams_mobile_grep_request* request,
-                                            yams_mobile_grep_result_t** out_result) {
+YAMS_MOBILE_API yams_mobile_status
+yams_mobile_grep_execute(yams_mobile_context_t* ctx, const yams_mobile_grep_request* request,
+                         yams_mobile_grep_result_t** out_result) {
     if (out_result)
         *out_result = nullptr;
     if (!ctx || !request) {
@@ -696,13 +696,13 @@ yams_mobile_status yams_mobile_grep_execute(yams_mobile_context_t* ctx,
     return YAMS_MOBILE_STATUS_OK;
 }
 
-void yams_mobile_grep_result_destroy(yams_mobile_grep_result_t* result) {
+YAMS_MOBILE_API void yams_mobile_grep_result_destroy(yams_mobile_grep_result_t* result) {
     delete result;
 }
 
-yams_mobile_status yams_mobile_search_execute(yams_mobile_context_t* ctx,
-                                              const yams_mobile_search_request* request,
-                                              yams_mobile_search_result_t** out_result) {
+YAMS_MOBILE_API yams_mobile_status
+yams_mobile_search_execute(yams_mobile_context_t* ctx, const yams_mobile_search_request* request,
+                           yams_mobile_search_result_t** out_result) {
     if (out_result)
         *out_result = nullptr;
     if (!ctx || !request) {
@@ -780,13 +780,13 @@ yams_mobile_status yams_mobile_search_execute(yams_mobile_context_t* ctx,
     }
 }
 
-void yams_mobile_search_result_destroy(yams_mobile_search_result_t* result) {
+YAMS_MOBILE_API void yams_mobile_search_result_destroy(yams_mobile_search_result_t* result) {
     delete result;
 }
 
-yams_mobile_status yams_mobile_store_document(yams_mobile_context_t* ctx,
-                                              const yams_mobile_document_store_request* request,
-                                              yams_mobile_string_view* out_hash) {
+YAMS_MOBILE_API yams_mobile_status yams_mobile_store_document(
+    yams_mobile_context_t* ctx, const yams_mobile_document_store_request* request,
+    yams_mobile_string_view* out_hash) {
     if (out_hash) {
         out_hash->data = nullptr;
         out_hash->length = 0;
@@ -829,8 +829,8 @@ yams_mobile_status yams_mobile_store_document(yams_mobile_context_t* ctx,
     return YAMS_MOBILE_STATUS_OK;
 }
 
-yams_mobile_status yams_mobile_remove_document(yams_mobile_context_t* ctx,
-                                               const char* document_hash) {
+YAMS_MOBILE_API yams_mobile_status yams_mobile_remove_document(yams_mobile_context_t* ctx,
+                                                               const char* document_hash) {
     if (!ctx || !document_hash || *document_hash == '\0') {
         set_last_error("invalid arguments");
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
@@ -869,9 +869,9 @@ yams_mobile_status yams_mobile_remove_document(yams_mobile_context_t* ctx,
     return YAMS_MOBILE_STATUS_OK;
 }
 
-yams_mobile_status yams_mobile_get_metadata(yams_mobile_context_t* ctx,
-                                            const yams_mobile_metadata_request* request,
-                                            yams_mobile_metadata_result_t** out_result) {
+YAMS_MOBILE_API yams_mobile_status
+yams_mobile_get_metadata(yams_mobile_context_t* ctx, const yams_mobile_metadata_request* request,
+                         yams_mobile_metadata_result_t** out_result) {
     if (out_result)
         *out_result = nullptr;
     if (!ctx) {
@@ -947,13 +947,13 @@ yams_mobile_status yams_mobile_get_metadata(yams_mobile_context_t* ctx,
     return YAMS_MOBILE_STATUS_OK;
 }
 
-void yams_mobile_metadata_result_destroy(yams_mobile_metadata_result_t* result) {
+YAMS_MOBILE_API void yams_mobile_metadata_result_destroy(yams_mobile_metadata_result_t* result) {
     delete result;
 }
 
-yams_mobile_status yams_mobile_get_vector_status(yams_mobile_context_t* ctx,
-                                                 const yams_mobile_vector_status_request* request,
-                                                 yams_mobile_vector_status_result_t** out_result) {
+YAMS_MOBILE_API yams_mobile_status yams_mobile_get_vector_status(
+    yams_mobile_context_t* ctx, const yams_mobile_vector_status_request* request,
+    yams_mobile_vector_status_result_t** out_result) {
     if (out_result)
         *out_result = nullptr;
     if (!ctx) {
@@ -994,13 +994,14 @@ yams_mobile_status yams_mobile_get_vector_status(yams_mobile_context_t* ctx,
     return YAMS_MOBILE_STATUS_OK;
 }
 
-void yams_mobile_vector_status_result_destroy(yams_mobile_vector_status_result_t* result) {
+YAMS_MOBILE_API void
+yams_mobile_vector_status_result_destroy(yams_mobile_vector_status_result_t* result) {
     delete result;
 }
 
-yams_mobile_status yams_mobile_list_documents(yams_mobile_context_t* ctx,
-                                              const yams_mobile_list_request* request,
-                                              yams_mobile_list_result_t** out_result) {
+YAMS_MOBILE_API yams_mobile_status
+yams_mobile_list_documents(yams_mobile_context_t* ctx, const yams_mobile_list_request* request,
+                           yams_mobile_list_result_t** out_result) {
     if (out_result)
         *out_result = nullptr;
     if (!ctx) {
@@ -1063,13 +1064,13 @@ yams_mobile_status yams_mobile_list_documents(yams_mobile_context_t* ctx,
     return YAMS_MOBILE_STATUS_OK;
 }
 
-void yams_mobile_list_result_destroy(yams_mobile_list_result_t* result) {
+YAMS_MOBILE_API void yams_mobile_list_result_destroy(yams_mobile_list_result_t* result) {
     delete result;
 }
 
-yams_mobile_status yams_mobile_get_document(yams_mobile_context_t* ctx,
-                                            const yams_mobile_document_get_request* request,
-                                            yams_mobile_document_get_result_t** out_result) {
+YAMS_MOBILE_API yams_mobile_status yams_mobile_get_document(
+    yams_mobile_context_t* ctx, const yams_mobile_document_get_request* request,
+    yams_mobile_document_get_result_t** out_result) {
     if (out_result)
         *out_result = nullptr;
     if (!ctx) {
@@ -1139,25 +1140,26 @@ yams_mobile_status yams_mobile_get_document(yams_mobile_context_t* ctx,
     return YAMS_MOBILE_STATUS_OK;
 }
 
-void yams_mobile_document_get_result_destroy(yams_mobile_document_get_result_t* result) {
+YAMS_MOBILE_API void
+yams_mobile_document_get_result_destroy(yams_mobile_document_get_result_t* result) {
     delete result;
 }
 
-yams_mobile_string_view
+YAMS_MOBILE_API yams_mobile_string_view
 yams_mobile_metadata_result_json(const yams_mobile_metadata_result_t* result) {
     if (!result)
         return {nullptr, 0};
     return {result->json.c_str(), result->json.size()};
 }
 
-yams_mobile_string_view
+YAMS_MOBILE_API yams_mobile_string_view
 yams_mobile_vector_status_result_json(const yams_mobile_vector_status_result_t* result) {
     if (!result)
         return {nullptr, 0};
     return {result->json.c_str(), result->json.size()};
 }
 
-yams_mobile_string_view
+YAMS_MOBILE_API yams_mobile_string_view
 yams_mobile_grep_result_stats_json(const yams_mobile_grep_result_t* result) {
     if (!result)
         return {nullptr, 0};
@@ -1170,7 +1172,7 @@ yams_mobile_grep_result_stats_json(const yams_mobile_grep_result_t* result) {
     return {g_temp_string.c_str(), g_temp_string.size()};
 }
 
-yams_mobile_string_view
+YAMS_MOBILE_API yams_mobile_string_view
 yams_mobile_search_result_stats_json(const yams_mobile_search_result_t* result) {
     if (!result)
         return {nullptr, 0};
@@ -1184,7 +1186,8 @@ yams_mobile_search_result_stats_json(const yams_mobile_search_result_t* result) 
     return {g_temp_string.c_str(), g_temp_string.size()};
 }
 
-yams_mobile_string_view yams_mobile_search_result_json(const yams_mobile_search_result_t* result) {
+YAMS_MOBILE_API yams_mobile_string_view
+yams_mobile_search_result_json(const yams_mobile_search_result_t* result) {
     if (!result)
         return {nullptr, 0};
 
@@ -1264,7 +1267,8 @@ yams_mobile_string_view yams_mobile_search_result_json(const yams_mobile_search_
     return {g_temp_string.c_str(), g_temp_string.size()};
 }
 
-yams_mobile_string_view yams_mobile_grep_result_json(const yams_mobile_grep_result_t* result) {
+YAMS_MOBILE_API yams_mobile_string_view
+yams_mobile_grep_result_json(const yams_mobile_grep_result_t* result) {
     if (!result)
         return {nullptr, 0};
 
@@ -1334,26 +1338,27 @@ yams_mobile_string_view yams_mobile_grep_result_json(const yams_mobile_grep_resu
     return {g_temp_string.c_str(), g_temp_string.size()};
 }
 
-yams_mobile_string_view yams_mobile_list_result_json(const yams_mobile_list_result_t* result) {
+YAMS_MOBILE_API yams_mobile_string_view
+yams_mobile_list_result_json(const yams_mobile_list_result_t* result) {
     if (!result)
         return {nullptr, 0};
     return {result->json.c_str(), result->json.size()};
 }
 
-yams_mobile_string_view
+YAMS_MOBILE_API yams_mobile_string_view
 yams_mobile_document_get_result_json(const yams_mobile_document_get_result_t* result) {
     if (!result)
         return {nullptr, 0};
     return {result->json.c_str(), result->json.size()};
 }
 
-yams_mobile_string_view
+YAMS_MOBILE_API yams_mobile_string_view
 yams_mobile_document_get_result_content(const yams_mobile_document_get_result_t* result) {
     if (!result || result->content.empty())
         return {nullptr, 0};
     return {result->content.c_str(), result->content.size()};
 }
 
-const char* yams_mobile_last_error_message(void) {
+YAMS_MOBILE_API const char* yams_mobile_last_error_message(void) {
     return g_last_error.c_str();
 }

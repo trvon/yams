@@ -223,6 +223,8 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon refuses pid file pointing to unrelated r
                  "[daemon][lifecycle]") {
     SKIP_ON_WINDOWS();
 
+#ifndef _WIN32
+
     pid_t child = fork();
     if (child < 0) {
         SKIP("fork not available");
@@ -250,6 +252,10 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon refuses pid file pointing to unrelated r
     ::kill(child, SIGKILL);
     int status = 0;
     (void)::waitpid(child, &status, 0);
+
+#else
+    SKIP("POSIX process APIs not available on Windows");
+#endif
 }
 
 TEST_CASE_METHOD(DaemonFixture, "Daemon restart", "[daemon][lifecycle]") {

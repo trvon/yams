@@ -435,7 +435,9 @@ else
   subdir('src/detection')
   subdir('src/content')
   subdir('src/downloader')
-  subdir('src/plugins')
+  if get_option('build-plugins')
+    subdir('src/plugins')
+  endif
   subdir('src/indexing')
   subdir('src/genai')
   subdir('src/daemon/client')
@@ -450,7 +452,9 @@ else
   subdir('src/repair')
   subdir('src/app/services')
   subdir('src/daemon')
-  subdir('src/mobile')
+  if get_option('enable-mobile-bindings')
+    subdir('src/mobile')
+  endif
   subdir('src/benchmarks')
 
   if get_option('build-mcp-server')

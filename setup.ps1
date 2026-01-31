@@ -465,6 +465,16 @@ if ($env:YAMS_INSTALL_PREFIX) {
 }
 Write-Host "Install Prefix:    $InstallPrefix"
 
+# Mobile bindings are off by default; allow CI/users to opt-in.
+$enableMobileBindingsArg = $null
+if ($env:YAMS_ENABLE_MOBILE_BINDINGS -eq 'true') {
+    $enableMobileBindingsArg = '-Denable-mobile-bindings=true'
+    Write-Host 'Mobile bindings enabled (YAMS_ENABLE_MOBILE_BINDINGS=true)'
+} elseif ($env:YAMS_ENABLE_MOBILE_BINDINGS -eq 'false') {
+    $enableMobileBindingsArg = '-Denable-mobile-bindings=false'
+    Write-Host 'Mobile bindings disabled (YAMS_ENABLE_MOBILE_BINDINGS=false)'
+}
+
 if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     Write-Host 'Configuring Meson builddir...'
     $buildTypeLower = $BuildType.ToLower()
@@ -556,6 +566,7 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     $mesonArgs = @('setup', $buildDir, "--buildtype=$buildTypeLower", "--prefix=$InstallPrefix", "-Denable-modules=$enableModulesFlag", "-Ddatabase-backend=$dbBackend")
     if ($enableZyp) { $mesonArgs += '-Dplugin-zyp=true' }
     if ($enableGlint) { $mesonArgs += '-Dplugin-glint=true' }
+    if ($enableMobileBindingsArg) { $mesonArgs += $enableMobileBindingsArg }
     if ($mesonToolchainArg) { $mesonArgs += $mesonToolchainArg }
     if ($mesonToolchainFile) { $mesonArgs += $mesonToolchainFile }
     
@@ -613,6 +624,7 @@ if (-not (Test-Path (Join-Path $buildDir 'meson-private'))) {
     $reconfigureArgs = @('setup', '--reconfigure', $buildDir, "-Dprefix=$InstallPrefix", "-Ddatabase-backend=$dbBackend")
     if ($mesonToolchainArg) { $reconfigureArgs += $mesonToolchainArg }
     if ($mesonToolchainFile) { $reconfigureArgs += $mesonToolchainFile }
+    if ($enableMobileBindingsArg) { $reconfigureArgs += $enableMobileBindingsArg }
     
     # Ensure vector tests are enabled for Debug/Profiling/Fuzzing builds (parity with setup.sh)
     if ($BuildType -in @('Debug','Profiling','Fuzzing')) {

@@ -110,6 +110,7 @@ jobs:
           # Ensure Conan pulls test/bench deps when build-tests is enabled in Meson
           export YAMS_CONAN_EXTRA_OPTIONS="-o build_tests=True -o build_benchmarks=True"
           export YAMS_EXTRA_MESON_FLAGS="-Dbuild-tests=true -Denable-onnx=disabled"
+          export YAMS_ENABLE_MOBILE_BINDINGS=false
           
           ./setup.sh Debug
           meson compile -C builddir

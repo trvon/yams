@@ -47,24 +47,28 @@ if get_option('enable-tsan')
   endif
 endif
 
-yams_mobile_lib = shared_library('yams_mobile',
-  mobile_sources,
-  dependencies: mobile_deps,
-  include_directories: include_directories('../../include'),
-  cpp_args: mobile_cpp_args,
-  link_args: mobile_link_args,
-  install: true,
-)
+if get_option('enable-mobile-bindings')
+  yams_mobile_lib = shared_library('yams_mobile',
+    mobile_sources,
+    dependencies: mobile_deps,
+    include_directories: include_directories('../../include'),
+    cpp_args: mobile_cpp_args,
+    link_args: mobile_link_args,
+    install: true,
+  )
 
-yams_mobile_dep = declare_dependency(
-  link_with: yams_mobile_lib,
-  include_directories: include_directories('../../include'),
-)
+  yams_mobile_dep = declare_dependency(
+    link_with: yams_mobile_lib,
+    include_directories: include_directories('../../include'),
+  )
 
-meson.override_dependency('yams_mobile', yams_mobile_dep)
+  meson.override_dependency('yams_mobile', yams_mobile_dep)
 
-pkg.generate(yams_mobile_lib,
-  name: 'yams_mobile',
-  description: 'YAMS mobile C ABI',
-  subdirs: ['yams/api'],
-)
+  pkg.generate(yams_mobile_lib,
+    name: 'yams_mobile',
+    description: 'YAMS mobile C ABI',
+    subdirs: ['yams/api'],
+  )
+else
+  yams_mobile_dep = disabler()
+endif

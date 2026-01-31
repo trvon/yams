@@ -698,6 +698,7 @@ jobs:
           # Use setup.sh with CI environment variables for consistent configuration
           export YAMS_CONAN_HOST_PROFILE="$HOST_PROFILE"
           export YAMS_CONAN_ARCH="$ARCH"
+          export YAMS_ENABLE_MOBILE_BINDINGS=false
           export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${{ steps.meta.outputs.version }} -Dwerror=false -Dwarning_level=2 -Denable-lzma=auto ${{ matrix.meson_args }}"
           
            # Set install prefix: /usr for Linux packages, /usr/local for macOS

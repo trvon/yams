@@ -36,6 +36,7 @@ option('enable-integration-services', type: 'boolean', value: false, description
 option('enable-integration-smoke', type: 'boolean', value: false, description: 'Register integration smoke test binary')
 option('enable-daemon-integration', type: 'boolean', value: false, description: 'Register daemon integration test binary (e2e with running daemon)')
 option('enable-mobile-tests', type: 'boolean', value: false, description: 'Register mobile ABI tests')
+option('enable-mobile-bindings', type: 'boolean', value: false, description: 'Build mobile C ABI shared library (yams_mobile)')
 option('enable-full-unit', type: 'boolean', value: true, description: 'Register full unit shards (instead of only unit_safe/targeted)')
 option('enable-vector-tests', type: 'boolean', value: false, description: 'Include vector/embedding tests (requires ONNX runtime and model downloads)')
 option('enable-bench-tests', type: 'boolean', value: false, description: 'Register bench/isolated performance-heavy unit tests')

@@ -16,8 +16,12 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
-#include <sys/wait.h>
+
 #include <yams/compat/unistd.h>
+
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -46,10 +50,15 @@ struct PluginProcess {
         }
 
         if (pid > 0) {
+#ifdef _WIN32
+            // No fork/kill/waitpid-based lifecycle on Windows.
+            pid = -1;
+#else
             kill(pid, SIGTERM);
             int status;
             waitpid(pid, &status, 0);
             pid = -1;
+#endif
         }
     }
 };
@@ -58,6 +67,12 @@ struct PluginProcess {
  * Spawn plugin process with stdio pipes
  */
 bool spawnPlugin(PluginProcess& proc, const fs::path& pluginPath, const fs::path& sdkPath) {
+#ifdef _WIN32
+    (void)proc;
+    (void)pluginPath;
+    (void)sdkPath;
+    return false;
+#else
     int stdinPipe[2], stdoutPipe[2], stderrPipe[2];
 
     if (pipe(stdinPipe) == -1 || pipe(stdoutPipe) == -1 || pipe(stderrPipe) == -1) {
@@ -114,6 +129,7 @@ bool spawnPlugin(PluginProcess& proc, const fs::path& pluginPath, const fs::path
     proc.stderrFd = stderrPipe[0];
 
     return true;
+#endif
 }
 
 /**
@@ -173,6 +189,9 @@ fs::path getRepoRoot() {
 } // anonymous namespace
 
 TEST_CASE("Ghidra plugin - Spawn and handshake", "[integration][ghidra][plugin]") {
+#ifdef _WIN32
+    SKIP("Ghidra plugin communication test uses POSIX process APIs");
+#endif
     // Find plugin and SDK paths
     auto repoRoot = getRepoRoot();
     auto pluginPath = repoRoot / "plugins" / "yams-ghidra-plugin" / "plugin.py";
@@ -232,6 +251,9 @@ TEST_CASE("Ghidra plugin - Spawn and handshake", "[integration][ghidra][plugin]"
 }
 
 TEST_CASE("Ghidra plugin - Process lifecycle", "[integration][ghidra][plugin]") {
+#ifdef _WIN32
+    SKIP("Ghidra plugin communication test uses POSIX process APIs");
+#endif
     auto repoRoot = getRepoRoot();
     auto pluginPath = repoRoot / "plugins" / "yams-ghidra-plugin" / "plugin.py";
     auto sdkPath = repoRoot / "external" / "yams-sdk";
@@ -267,6 +289,9 @@ TEST_CASE("Ghidra plugin - Process lifecycle", "[integration][ghidra][plugin]") 
 }
 
 TEST_CASE("Ghidra plugin - Error handling", "[integration][ghidra][plugin]") {
+#ifdef _WIN32
+    SKIP("Ghidra plugin communication test uses POSIX process APIs");
+#endif
     auto repoRoot = getRepoRoot();
     auto pluginPath = repoRoot / "plugins" / "yams-ghidra-plugin" / "plugin.py";
     auto sdkPath = repoRoot / "external" / "yams-sdk";

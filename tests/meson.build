@@ -274,7 +274,9 @@ test_cpp_noerror_args = cxx.get_supported_arguments([
 ## Meson-native test discovery via structured subdirs (no shell globs)
 # Build unit test object library in subdir and link here for the aggregate runner
 subdir('unit')
-subdir('plugins')
+if get_option('build-plugins')
+  subdir('plugins')
+endif
 
 
 
