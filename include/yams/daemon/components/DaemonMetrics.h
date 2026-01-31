@@ -43,8 +43,10 @@ struct MetricsSnapshot {
     std::size_t connectionSlotsFree{0}; // Available connection slots
     uint64_t oldestConnectionAge{0};    // Age of oldest active connection (seconds)
     uint64_t forcedCloseCount{0};       // Connections closed due to lifetime exceeded
-    std::size_t ipcTasksPending{0};     // IPC handlers spawned but not yet started
-    std::size_t ipcTasksActive{0};      // IPC handlers currently executing
+    std::size_t proxyActiveConnections{0};
+    std::string proxySocketPath;
+    std::size_t ipcTasksPending{0}; // IPC handlers spawned but not yet started
+    std::size_t ipcTasksActive{0};  // IPC handlers currently executing
     double memoryUsageMb{0.0};
     double cpuUsagePercent{0.0};
 

@@ -617,6 +617,10 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         // Compute oldestConnectionAge on-demand from SocketServer (requires lock, but cached)
         out.oldestConnectionAge = socketServer_ ? socketServer_->oldestConnectionAgeSeconds() : 0;
         out.forcedCloseCount = state_->stats.forcedCloseCount.load();
+        if (socketServer_) {
+            out.proxyActiveConnections = socketServer_->proxyActiveConnections();
+            out.proxySocketPath = socketServer_->proxySocketPath().string();
+        }
         out.ipcTasksPending = state_->stats.ipcTasksPending.load();
         out.ipcTasksActive = state_->stats.ipcTasksActive.load();
     } catch (...) {

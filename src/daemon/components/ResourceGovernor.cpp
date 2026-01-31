@@ -18,13 +18,15 @@
 // Platform-specific RSS and CPU reading
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN 1
 #endif
 #ifndef NOMINMAX
-#define NOMINMAX
+#define NOMINMAX 1
 #endif
-#include <windows.h>
-#include <psapi.h>
+// clang-format off
+#include <Windows.h>
+#include <Psapi.h>
+// clang-format on
 #elif defined(__APPLE__)
 #include <unistd.h>
 #include <mach/mach.h>
@@ -86,7 +88,7 @@ std::uint64_t readRssBytes() {
 /// core on a 4-core system will report ~25%.
 /// @param lastProcJiffies Previous process CPU ticks (updated on each call)
 /// @param lastTotalJiffies Previous total system CPU ticks (updated on each call)
-/// @return CPU usage percentage (0-100 * numCores)
+/// @return CPU usage percentage (0-100)
 double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTotalJiffies) {
 #if defined(_WIN32)
     FILETIME idleFT{}, kernelFT{}, userFT{};
@@ -123,11 +125,8 @@ double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTo
 
     SYSTEM_INFO sysInfo{};
     GetSystemInfo(&sysInfo);
-    const double maxPct =
-        100.0 *
-        static_cast<double>(sysInfo.dwNumberOfProcessors ? sysInfo.dwNumberOfProcessors : 1);
     double pct = (static_cast<double>(dProc) / static_cast<double>(dTotal)) * 100.0;
-    return std::clamp(pct, 0.0, maxPct);
+    return std::clamp(pct, 0.0, 100.0);
 
 #elif defined(__APPLE__)
     // Process CPU time via Mach task info
@@ -165,12 +164,8 @@ double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTo
     if (dTotal == 0)
         return 0.0;
 
-    int numCores = static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN));
-    if (numCores < 1)
-        numCores = 1;
-    const double maxPct = 100.0 * static_cast<double>(numCores);
     double pct = (static_cast<double>(dProc) / static_cast<double>(dTotal)) * 100.0;
-    return std::clamp(pct, 0.0, maxPct);
+    return std::clamp(pct, 0.0, 100.0);
 
 #else
     // Linux: read from /proc/stat and /proc/self/stat
@@ -229,14 +224,8 @@ double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTo
     if (dTotal == 0)
         return 0.0;
 
-    // Get number of processors for max percentage calculation
-    long numCores = sysconf(_SC_NPROCESSORS_ONLN);
-    if (numCores < 1)
-        numCores = 1;
-    const double maxPct = 100.0 * static_cast<double>(numCores);
-    double pct = (static_cast<double>(dProc) / static_cast<double>(dTotal)) * 100.0 *
-                 static_cast<double>(numCores);
-    return std::clamp(pct, 0.0, maxPct);
+    double pct = (static_cast<double>(dProc) / static_cast<double>(dTotal)) * 100.0;
+    return std::clamp(pct, 0.0, 100.0);
 #endif
 }
 
@@ -276,6 +265,9 @@ ResourceSnapshot ResourceGovernor::tick(ServiceManager* sm) {
 
     // Collect metrics from all sources
     collectMetrics(sm, snap);
+
+    // Update admission control decisions based on CPU with hysteresis
+    updateCpuAdmissionControl(snap);
 
     // Compute pressure level with hysteresis
     ResourcePressureLevel newLevel = computeLevel(snap);
@@ -319,6 +311,48 @@ ResourceSnapshot ResourceGovernor::tick(ServiceManager* sm) {
     }
 
     return snap;
+}
+
+void ResourceGovernor::updateCpuAdmissionControl(const ResourceSnapshot& snap) {
+    // Fast path: admission control disabled
+    if (!TuneAdvisor::enableResourceGovernor() || !TuneAdvisor::enableAdmissionControl()) {
+        cpuAdmissionBlocked_.store(false, std::memory_order_relaxed);
+        cpuHighSince_ = {};
+        cpuLowSince_ = {};
+        return;
+    }
+
+    // cpuUsagePercent is 0..100 semantics (percent of total host capacity).
+    double cpuPct = snap.cpuUsagePercent;
+
+    const double cpuHighThresh = TuneAdvisor::cpuHighThresholdPercent();
+    const auto highHold = std::chrono::milliseconds(TuneAdvisor::cpuAdmissionHighHoldMs());
+    const auto lowHold = std::chrono::milliseconds(TuneAdvisor::cpuAdmissionLowHoldMs());
+    auto now = snap.timestamp;
+
+    // Above threshold: track high duration; clear low timer.
+    if (cpuPct >= cpuHighThresh) {
+        if (cpuHighSince_.time_since_epoch().count() == 0) {
+            cpuHighSince_ = now;
+        }
+        cpuLowSince_ = {};
+
+        if (!cpuAdmissionBlocked_.load(std::memory_order_relaxed) &&
+            (now - cpuHighSince_) >= highHold) {
+            cpuAdmissionBlocked_.store(true, std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    // Below threshold: track low duration; clear high timer.
+    cpuHighSince_ = {};
+    if (cpuLowSince_.time_since_epoch().count() == 0) {
+        cpuLowSince_ = now;
+    }
+
+    if (cpuAdmissionBlocked_.load(std::memory_order_relaxed) && (now - cpuLowSince_) >= lowHold) {
+        cpuAdmissionBlocked_.store(false, std::memory_order_relaxed);
+    }
 }
 
 // ============================================================================
@@ -594,11 +628,12 @@ bool ResourceGovernor::canAdmitWork() const {
         return false;
     }
 
-    // CPU-based throttling: reject new work when CPU is at or above high threshold
-    const double cpuHighThresh = TuneAdvisor::cpuHighThresholdPercent();
-    if (lastSnapshot_.cpuUsagePercent >= cpuHighThresh) {
-        spdlog::debug("[ResourceGovernor] Throttling admission: CPU at {:.1f}% (threshold {:.0f}%)",
-                      lastSnapshot_.cpuUsagePercent, cpuHighThresh);
+    // CPU-based throttling (with hysteresis): reject new work only after sustained high CPU.
+    if (cpuAdmissionBlocked_.load(std::memory_order_relaxed)) {
+        const double cpuHighThresh = TuneAdvisor::cpuHighThresholdPercent();
+        spdlog::debug(
+            "[ResourceGovernor] Throttling admission: sustained CPU at {:.1f}% (threshold {:.0f}%)",
+            lastSnapshot_.cpuUsagePercent, cpuHighThresh);
         return false;
     }
 
@@ -757,7 +792,13 @@ ResourceSnapshot ResourceGovernor::getSnapshot() const {
 }
 
 ResourcePressureLevel ResourceGovernor::getPressureLevel() const noexcept {
-    return currentLevel_.load(std::memory_order_relaxed);
+    auto level = currentLevel_.load(std::memory_order_relaxed);
+    // During startup grace period, cap at Warning to prevent false Emergency
+    // from stalling pollers before metrics are populated.
+    if (startupGraceActive() && level > ResourcePressureLevel::Warning) {
+        return ResourcePressureLevel::Warning;
+    }
+    return level;
 }
 
 ScalingCaps ResourceGovernor::getScalingCaps() const {

@@ -136,7 +136,9 @@ public:
     std::unique_ptr<LifecycleComponent> lifecycleManager_;
     std::shared_ptr<ServiceManager> serviceManager_;
     std::unique_ptr<RequestDispatcher> requestDispatcher_;
-    std::unique_ptr<DaemonMetrics> metrics_;
+    // Accessed from multiple threads (runLoop + request handling/shutdown). Guard with mutex.
+    mutable std::mutex metricsMutex_;
+    std::shared_ptr<DaemonMetrics> metrics_;
     // Integrated socket server (replaces external yams-socket-server)
     std::unique_ptr<SocketServer> socketServer_;
     std::unique_ptr<RepairCoordinator> repairCoordinator_;

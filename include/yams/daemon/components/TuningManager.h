@@ -37,6 +37,11 @@ public:
         setWriterBudget_ = std::move(cb);
     }
 
+    // Optional hook: invoked to resize SocketServer connection slots (PBI-085)
+    void setConnectionSlotsHook(std::function<void(std::size_t)> cb) {
+        setConnectionSlots_ = std::move(cb);
+    }
+
 private:
     boost::asio::awaitable<void> tuningLoop();
     void tick_once();
@@ -55,6 +60,9 @@ private:
     uint64_t repairBatchesAtWindowStart_{0};
 
     std::function<void(std::size_t)> setWriterBudget_{};
+
+    // Connection slot resizing hook (PBI-085)
+    std::function<void(std::size_t)> setConnectionSlots_{};
 
     // ONNX concurrency registry configuration tracking
     std::atomic<bool> onnxRegistryConfigured_{false};

@@ -1966,6 +1966,12 @@ private:
                           << status.fsmBytesReceived;
                     transport.push_back({"IPC bytes", bytes.str(), ""});
                 }
+                // Proxy socket info
+                if (!status.proxySocketPath.empty()) {
+                    std::ostringstream proxyVal;
+                    proxyVal << status.proxyActiveConnections << " active";
+                    transport.push_back({"Proxy", proxyVal.str(), status.proxySocketPath});
+                }
                 if (!transport.empty())
                     render_rows(std::cout, transport);
 

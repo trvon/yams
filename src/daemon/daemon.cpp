@@ -67,10 +67,16 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
     serviceManager_ = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
 
     // Create metrics aggregator before the dispatcher so status can pull from a single snapshot
-    metrics_ = std::make_unique<DaemonMetrics>(&lifecycleFsm_, &state_, serviceManager_.get(),
-                                               serviceManager_->getWorkCoordinator());
-    requestDispatcher_ =
-        std::make_unique<RequestDispatcher>(this, serviceManager_.get(), &state_, metrics_.get());
+    {
+        std::lock_guard<std::mutex> lk(metricsMutex_);
+        metrics_ = std::make_shared<DaemonMetrics>(&lifecycleFsm_, &state_, serviceManager_.get(),
+                                                   serviceManager_->getWorkCoordinator());
+    }
+    requestDispatcher_ = std::make_unique<RequestDispatcher>(
+        this, serviceManager_.get(), &state_, [&]() -> DaemonMetrics* {
+            std::lock_guard<std::mutex> lk(metricsMutex_);
+            return metrics_.get();
+        }());
     // Prepare centralized tuning manager early; start it in start() before sockets/services
     try {
         tuningManager_ = std::make_unique<TuningManager>(serviceManager_.get(), &state_,
@@ -199,15 +205,24 @@ Result<void> YamsDaemon::start() {
     }
 
     // Recreate metrics if destroyed
-    if (!metrics_) {
-        metrics_ = std::make_unique<DaemonMetrics>(&lifecycleFsm_, &state_, serviceManager_.get(),
-                                                   serviceManager_->getWorkCoordinator());
+    {
+        std::lock_guard<std::mutex> lk(metricsMutex_);
+        if (!metrics_) {
+            metrics_ =
+                std::make_shared<DaemonMetrics>(&lifecycleFsm_, &state_, serviceManager_.get(),
+                                                serviceManager_->getWorkCoordinator());
+        }
     }
 
     // Recreate request dispatcher if needed (it depends on metrics)
     if (!requestDispatcher_) {
-        requestDispatcher_ = std::make_unique<RequestDispatcher>(this, serviceManager_.get(),
-                                                                 &state_, metrics_.get());
+        DaemonMetrics* m = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(metricsMutex_);
+            m = metrics_.get();
+        }
+        requestDispatcher_ =
+            std::make_unique<RequestDispatcher>(this, serviceManager_.get(), &state_, m);
     }
 
     // Recreate tuning manager if destroyed
@@ -295,12 +310,30 @@ Result<void> YamsDaemon::start() {
         socketConfig.maxConnections = static_cast<std::size_t>(cap);
     }
 
+    // Derive proxy socket path: sibling of daemon socket (e.g. proxy.sock alongside daemon.sock)
+    {
+        std::filesystem::path proxyPath;
+        if (const char* env = std::getenv("YAMS_PROXY_SOCKET"); env && *env) {
+            proxyPath = env;
+        } else {
+            proxyPath = socketConfig.socketPath.parent_path() / "proxy.sock";
+        }
+        socketConfig.proxySocketPath = proxyPath;
+    }
+
     socketServer_ = std::make_unique<SocketServer>(
         socketConfig, serviceManager_->getWorkCoordinator(), requestDispatcher_.get(), &state_);
 
     // Provide SocketServer to DaemonMetrics for connection age tracking
-    if (metrics_) {
-        metrics_->setSocketServer(socketServer_.get());
+    {
+        std::shared_ptr<DaemonMetrics> m;
+        {
+            std::lock_guard<std::mutex> lk(metricsMutex_);
+            m = metrics_;
+        }
+        if (m) {
+            m->setSocketServer(socketServer_.get());
+        }
     }
 
     if (auto result = socketServer_->start(); !result) {
@@ -321,6 +354,15 @@ Result<void> YamsDaemon::start() {
             try {
                 if (socketServer_)
                     socketServer_->setWriterBudget(bytes);
+            } catch (...) {
+            }
+        });
+
+        // Wire up dynamic connection slot resizing (PBI-085)
+        tuningManager_->setConnectionSlotsHook([this](std::size_t n) {
+            try {
+                if (socketServer_)
+                    socketServer_->resizeConnectionSlots(n);
             } catch (...) {
             }
         });
@@ -412,8 +454,13 @@ void YamsDaemon::runLoop() {
                     "[InitWaiter] ServiceManager reached Ready state, dispatching HealthyEvent");
                 lifecycleFsm_.dispatch(HealthyEvent{});
                 try {
-                    if (metrics_) {
-                        metrics_->startPolling();
+                    std::shared_ptr<DaemonMetrics> m;
+                    {
+                        std::lock_guard<std::mutex> lk(metricsMutex_);
+                        m = metrics_;
+                    }
+                    if (m) {
+                        m->startPolling();
                         spdlog::info("[InitWaiter] DaemonMetrics background polling started");
                     }
                 } catch (const std::exception& e) {
@@ -495,8 +542,13 @@ void YamsDaemon::runLoop() {
             break;
         }
         try {
-            if (metrics_) {
-                metrics_->refresh();
+            std::shared_ptr<DaemonMetrics> m;
+            {
+                std::lock_guard<std::mutex> lk(metricsMutex_);
+                m = metrics_;
+            }
+            if (m) {
+                m->refresh();
             }
         } catch (const std::exception& e) {
             spdlog::debug("Metrics refresh failed: {}", e.what());
@@ -666,13 +718,18 @@ Result<void> YamsDaemon::stop() {
     }
 
     // Stop metrics (uses WorkCoordinator strand + timers)
-    if (metrics_) {
-        spdlog::debug("Stopping metrics polling...");
-        metrics_->stopPolling();
-        spdlog::debug("Metrics polling stopped");
-        // Destroy metrics (and its strand) while WorkCoordinator is still alive
-        spdlog::debug("Resetting metrics before WorkCoordinator shutdown...");
-        metrics_.reset();
+    // Keep the object alive (RequestDispatcher holds a raw pointer).
+    {
+        std::shared_ptr<DaemonMetrics> m;
+        {
+            std::lock_guard<std::mutex> lk(metricsMutex_);
+            m = metrics_;
+        }
+        if (m) {
+            spdlog::debug("Stopping metrics polling...");
+            m->stopPolling();
+            spdlog::debug("Metrics polling stopped");
+        }
     }
 
     // Stop socket server before ServiceManager tears down the WorkCoordinator
@@ -722,6 +779,12 @@ Result<void> YamsDaemon::stop() {
 
     // Mark lifecycle stopped
     lifecycleFsm_.dispatch(StoppedEvent{});
+
+    // Now that the daemon is fully stopped (no more request handling), release metrics.
+    {
+        std::lock_guard<std::mutex> lk(metricsMutex_);
+        metrics_.reset();
+    }
 
     spdlog::info("YAMS daemon stopped.");
     return Result<void>();

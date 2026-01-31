@@ -5,6 +5,7 @@
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
+#include <yams/app/services/session_inject.h>
 #endif
 #if !defined(YAMS_WASI)
 #include <yams/cli/daemon_helpers.h>
@@ -679,6 +680,12 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         if (auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg); leaseRes) {
             daemon_client_lease_ = leaseRes.value();
             daemon_client_ = &(**daemon_client_lease_);
+            // Initialize service facades sharing the daemon client
+            auto shared_client = std::shared_ptr<yams::daemon::DaemonClient>(
+                daemon_client_, [](yams::daemon::DaemonClient*) {});
+            retrieval_svc_ = std::make_unique<app::services::RetrievalService>(shared_client);
+            ingestion_svc_ =
+                std::make_unique<app::services::DocumentIngestionService>(shared_client);
         } else {
             spdlog::warn("Failed to acquire daemon client for MCP: {}", leaseRes.error().message);
         }
@@ -821,6 +828,15 @@ Result<void> MCPServer::ensureDaemonClient() {
     }
     daemon_client_lease_ = leaseRes.value();
     daemon_client_ = &(**daemon_client_lease_);
+
+    // Initialize service facades sharing the daemon client (non-owning shared_ptr)
+    if (!retrieval_svc_) {
+        auto shared_client = std::shared_ptr<yams::daemon::DaemonClient>(
+            daemon_client_, [](yams::daemon::DaemonClient*) {});
+        retrieval_svc_ = std::make_unique<app::services::RetrievalService>(shared_client);
+        ingestion_svc_ = std::make_unique<app::services::DocumentIngestionService>(shared_client);
+    }
+
     return Result<void>();
 #endif
 }
@@ -1955,7 +1971,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     }
 
     MCPSearchResponse out;
-    // Propagate session to services/daemon via environment for this handler
+    // Propagate session explicitly (avoid env var coupling)
     std::string __session;
     if (!req.sessionName.empty()) {
         __session = req.sessionName;
@@ -1964,8 +1980,9 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         __session = __svc->current().value_or("");
     }
     if (!__session.empty()) {
-        setenv("YAMS_SESSION_CURRENT", __session.c_str(), 1);
         spdlog::debug("[MCP] search: using session '{}'", __session);
+        dreq.useSession = true;
+        dreq.sessionName = __session;
     }
 
     // Optional fast-first strategy: quick keyword preview before full hybrid
@@ -2041,10 +2058,6 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         } else {
             res = Error{ErrorCode::Timeout, "Search timed out"};
         }
-    }
-    // Clear after call
-    if (!__session.empty()) {
-        setenv("YAMS_SESSION_CURRENT", "", 1);
     }
     if (!res) {
         co_return res.error();
@@ -2307,7 +2320,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     }
 
     MCPGrepResponse out;
-    // Propagate session to services/daemon via environment for this handler
+    // Propagate session explicitly (avoid env var coupling)
     std::string __session;
     if (!req.sessionName.empty()) {
         __session = req.sessionName;
@@ -2316,8 +2329,9 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         __session = __svc->current().value_or("");
     }
     if (!__session.empty()) {
-        setenv("YAMS_SESSION_CURRENT", __session.c_str(), 1);
         spdlog::debug("[MCP] grep: using session '{}'", __session);
+        dreq.useSession = true;
+        dreq.sessionName = __session;
     }
     // Use service facade for grep (daemon-first)
     yams::app::services::RetrievalService rsvc;
@@ -2328,10 +2342,6 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     ropts.headerTimeoutMs = 30000;
     ropts.bodyTimeoutMs = 120000;
     auto res = rsvc.grep(dreq, ropts);
-    // Clear after call
-    if (!__session.empty()) {
-        setenv("YAMS_SESSION_CURRENT", "", 1);
-    }
     if (!res)
         co_return res.error();
     const auto& r = res.value();
@@ -3286,7 +3296,6 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
         __session = __svc->current().value_or("");
     }
     if (!__session.empty()) {
-        setenv("YAMS_SESSION_CURRENT", __session.c_str(), 1);
         spdlog::debug("[MCP] list: using session '{}'", __session);
     }
     // Use service facade for list (daemon-first)
@@ -3303,11 +3312,8 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     list_opts.namePattern = daemon_req.namePattern;
     list_opts.sortBy = daemon_req.sortBy;
     list_opts.reverse = daemon_req.reverse;
+    list_opts.sessionId = __session;
     auto dres = rsvc.list(list_opts, ropts);
-    // Clear after call
-    if (!__session.empty()) {
-        setenv("YAMS_SESSION_CURRENT", "", 1);
-    }
     if (!dres)
         co_return dres.error();
     MCPListDocumentsResponse out;
@@ -4433,6 +4439,41 @@ void MCPServer::initializeToolRegistry() {
     ToolAnnotation sessionAnnotation{
         .readOnlyHint = false, .destructiveHint = false, .idempotentHint = false};
 
+    // Non-daemon tool used for protocol feature validation.
+    // This stays fully in-process so unit tests can exercise tool result shaping
+    // (content + structuredContent gating by negotiated protocol version).
+    toolRegistry_->registerRawTool(
+        "mcp.echo",
+        [this](const json& args) mutable -> boost::asio::awaitable<json> {
+            try {
+                std::string text;
+                if (args.is_object() && args.contains("text") && args["text"].is_string()) {
+                    text = args["text"].get<std::string>();
+                }
+
+                json data = json{{"text", text}, {"length", text.size()}};
+
+                std::optional<json> structured;
+                if (negotiatedProtocolVersion_ >= "2024-11-05") {
+                    structured = json{{"type", "tool_result"}, {"data", data}};
+                }
+
+                co_return yams::mcp::wrapToolResultStructured(
+                    json::array({content::text(std::string("echo: ") + text)}), structured,
+                    /*is_error=*/false);
+            } catch (const json::exception& e) {
+                co_return yams::mcp::wrapToolResultStructured(
+                    json::array({content::text(std::string("JSON error: ") + e.what())}),
+                    std::nullopt, true);
+            } catch (const std::exception& e) {
+                co_return yams::mcp::wrapToolResultStructured(
+                    json::array({content::text(std::string("Error: ") + e.what())}), std::nullopt,
+                    true);
+            }
+        },
+        json{{"type", "object"}, {"properties", {{"text", {"type", "string"}}}}},
+        "Echo input for MCP protocol testing", "Echo", readOnlyAnnotation);
+
 #if defined(YAMS_WASI)
     // WASI builds currently don't support the daemon-backed tool surface.
     // Keep the server usable for MCP handshake + tool discovery.
@@ -4449,8 +4490,57 @@ void MCPServer::initializeToolRegistry() {
 #endif
 
     // Always register standard MCP tools
-    toolRegistry_->registerTool<MCPSearchRequest, MCPSearchResponse>(
-        "search", [this](const MCPSearchRequest& req) { return handleSearchDocuments(req); },
+    toolRegistry_->registerRawTool(
+        "search",
+        [this](const json& args) mutable -> boost::asio::awaitable<json> {
+            try {
+                auto req = MCPSearchRequest::fromJson(args);
+                auto result = co_await handleSearchDocuments(req);
+
+                if (!result) {
+                    co_return yams::mcp::wrapToolResultStructured(
+                        json::array(
+                            {content::text(std::string("Error: ") + result.error().message)}),
+                        std::nullopt, true);
+                }
+
+                const auto& out = result.value();
+
+                std::ostringstream summary;
+                summary << "Search";
+                if (!req.query.empty()) {
+                    summary << " for '" << req.query << "'";
+                }
+                if (!req.type.empty()) {
+                    summary << " (type=" << req.type << ")";
+                }
+                summary << ": total=" << out.total;
+                if (!out.paths.empty()) {
+                    summary << ", paths=" << out.paths.size();
+                } else {
+                    summary << ", results=" << out.results.size();
+                }
+                if (out.executionTimeMs > 0) {
+                    summary << ", time=" << out.executionTimeMs << "ms";
+                }
+
+                std::optional<json> structured;
+                if (negotiatedProtocolVersion_ >= "2024-11-05") {
+                    structured = json{{"type", "tool_result"}, {"data", out.toJson()}};
+                }
+                co_return yams::mcp::wrapToolResultStructured(
+                    json::array({content::text(summary.str())}), structured,
+                    /*is_error=*/false);
+            } catch (const json::exception& e) {
+                co_return yams::mcp::wrapToolResultStructured(
+                    json::array({content::text(std::string("JSON error: ") + e.what())}),
+                    std::nullopt, true);
+            } catch (const std::exception& e) {
+                co_return yams::mcp::wrapToolResultStructured(
+                    json::array({content::text(std::string("Error: ") + e.what())}), std::nullopt,
+                    true);
+            }
+        },
         json{
             {"type", "object"},
             {"properties",
@@ -4479,8 +4569,45 @@ void MCPServer::initializeToolRegistry() {
         "Search documents using hybrid search (vector + full-text + knowledge graph)",
         "Search Documents", readOnlyAnnotation);
 
-    toolRegistry_->registerTool<MCPGrepRequest, MCPGrepResponse>(
-        "grep", [this](const MCPGrepRequest& req) { return handleGrepDocuments(req); },
+    toolRegistry_->registerRawTool(
+        "grep",
+        [this](const json& args) mutable -> boost::asio::awaitable<json> {
+            try {
+                auto req = MCPGrepRequest::fromJson(args);
+                auto result = co_await handleGrepDocuments(req);
+
+                if (!result) {
+                    co_return yams::mcp::wrapToolResultStructured(
+                        json::array(
+                            {content::text(std::string("Error: ") + result.error().message)}),
+                        std::nullopt, true);
+                }
+
+                const auto& out = result.value();
+                std::ostringstream summary;
+                summary << "Grep";
+                if (!req.pattern.empty()) {
+                    summary << " for '" << req.pattern << "'";
+                }
+                summary << ": matches=" << out.matchCount << ", files=" << out.fileCount;
+
+                std::optional<json> structured;
+                if (negotiatedProtocolVersion_ >= "2024-11-05") {
+                    structured = json{{"type", "tool_result"}, {"data", out.toJson()}};
+                }
+                co_return yams::mcp::wrapToolResultStructured(
+                    json::array({content::text(summary.str())}), structured,
+                    /*is_error=*/false);
+            } catch (const json::exception& e) {
+                co_return yams::mcp::wrapToolResultStructured(
+                    json::array({content::text(std::string("JSON error: ") + e.what())}),
+                    std::nullopt, true);
+            } catch (const std::exception& e) {
+                co_return yams::mcp::wrapToolResultStructured(
+                    json::array({content::text(std::string("Error: ") + e.what())}), std::nullopt,
+                    true);
+            }
+        },
         json{{"type", "object"},
              {"properties",
               {{"pattern", {{"type", "string"}, {"description", "Regex pattern to search"}}},
@@ -4628,8 +4755,53 @@ void MCPServer::initializeToolRegistry() {
         "Retrieve documents from storage by hash with optional knowledge graph expansion",
         "Get Documents", readOnlyAnnotation);
 
-    toolRegistry_->registerTool<MCPListDocumentsRequest, MCPListDocumentsResponse>(
-        "list", [this](const MCPListDocumentsRequest& req) { return handleListDocuments(req); },
+    toolRegistry_->registerRawTool(
+        "list",
+        [this](const json& args) mutable -> boost::asio::awaitable<json> {
+            try {
+                auto req = MCPListDocumentsRequest::fromJson(args);
+                auto result = co_await handleListDocuments(req);
+
+                if (!result) {
+                    co_return yams::mcp::wrapToolResultStructured(
+                        json::array(
+                            {content::text(std::string("Error: ") + result.error().message)}),
+                        std::nullopt, true);
+                }
+
+                const auto& out = result.value();
+                std::ostringstream summary;
+                summary << "List documents";
+                if (!req.pattern.empty()) {
+                    summary << " (pattern='" << req.pattern << "')";
+                } else if (!req.name.empty()) {
+                    summary << " (name='" << req.name << "')";
+                }
+                summary << ": total=" << out.total << ", returned=" << out.documents.size();
+                if (req.limit > 0) {
+                    summary << ", limit=" << req.limit;
+                }
+                if (req.offset > 0) {
+                    summary << ", offset=" << req.offset;
+                }
+
+                std::optional<json> structured;
+                if (negotiatedProtocolVersion_ >= "2024-11-05") {
+                    structured = json{{"type", "tool_result"}, {"data", out.toJson()}};
+                }
+                co_return yams::mcp::wrapToolResultStructured(
+                    json::array({content::text(summary.str())}), structured,
+                    /*is_error=*/false);
+            } catch (const json::exception& e) {
+                co_return yams::mcp::wrapToolResultStructured(
+                    json::array({content::text(std::string("JSON error: ") + e.what())}),
+                    std::nullopt, true);
+            } catch (const std::exception& e) {
+                co_return yams::mcp::wrapToolResultStructured(
+                    json::array({content::text(std::string("Error: ") + e.what())}), std::nullopt,
+                    true);
+            }
+        },
         json{{"type", "object"},
              {"properties",
               {{"pattern", {{"type", "string"}, {"description", "Name pattern filter"}}},
@@ -5668,7 +5840,9 @@ void MCPServer::initializeToolRegistry() {
         }
 
         json MCPServer::buildServerCapabilities() const {
-            json caps = {{"tools", {{"listChanged", false}}},
+            // Per MCP 2025-06-18 spec: advertise listChanged:true since we support the notification
+            // even though tools are primarily static (registered at startup)
+            json caps = {{"tools", {{"listChanged", true}}},
                          {"prompts", {{"listChanged", false}}},
                          {"resources", {{"subscribe", false}, {"listChanged", false}}},
                          {"logging", json::object()},
@@ -5749,6 +5923,16 @@ void MCPServer::initializeToolRegistry() {
         void MCPServer::endSessionContext() {
             tlsSessionId_.clear();
             httpPublisher_ = nullptr;
+        }
+
+        void MCPServer::notifyToolsListChanged() {
+            // Send notifications/tools/list_changed per MCP spec
+            // This is a server-initiated notification (no params needed)
+            json notification = {{"jsonrpc", "2.0"},
+                                 {"method", "notifications/tools/list_changed"},
+                                 {"params", json::object()}};
+            sendResponse(notification);
+            spdlog::debug("Sent notifications/tools/list_changed");
         }
 
     } // namespace yams::mcp

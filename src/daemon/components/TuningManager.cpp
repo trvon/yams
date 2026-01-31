@@ -46,6 +46,15 @@ void TuningManager::start() {
     } catch (...) {
     }
 
+    // If tick_once early-returned (metadata not ready), seed safe minimums
+    // so PostIngestQueue pollers don't start with zero concurrency.
+    if (TuneAdvisor::postExtractionConcurrent() == 0) {
+        TuneAdvisor::setPostExtractionConcurrent(2);
+    }
+    if (TuneAdvisor::postEmbedConcurrent() == 0) {
+        TuneAdvisor::setPostEmbedConcurrent(1);
+    }
+
     tuningFuture_ = boost::asio::co_spawn(strand_, tuningLoop(), boost::asio::use_future);
 }
 
@@ -511,6 +520,74 @@ void TuningManager::tick_once() {
         } else {
             ioHighTicks = 0;
             ioLowTicks = 0;
+        }
+    } catch (...) {
+    }
+
+    // Dynamic connection slot resizing based on utilization (PBI-085)
+    // Uses same hysteresis pattern as IPC/IO pools for consistency
+    try {
+        if (setConnectionSlots_ && state_) {
+            static uint32_t slotHighTicks = 0;
+            static uint32_t slotLowTicks = 0;
+
+            const size_t activeConns = state_->stats.activeConnections.load();
+            const size_t maxConns = state_->stats.maxConnections.load(std::memory_order_relaxed);
+            const size_t slotsFree =
+                state_->stats.connectionSlotsFree.load(std::memory_order_relaxed);
+
+            if (maxConns > 0) {
+                double util = static_cast<double>(activeConns) / static_cast<double>(maxConns);
+
+                const double highThreshold = 0.80;  // Grow when >80% utilized
+                const double lowThreshold = 0.20;   // Shrink when <20% utilized
+                const uint32_t hysteresisTicks = 3; // Require 3 consecutive ticks
+                const uint32_t scaleStep = TuneAdvisor::connectionSlotsScaleStep();
+                const uint32_t minSlots = TuneAdvisor::connectionSlotsMin();
+                const uint32_t maxSlots = TuneAdvisor::connectionSlotsMax();
+
+                if (util > highThreshold) {
+                    slotHighTicks++;
+                    slotLowTicks = 0;
+                    if (slotHighTicks >= hysteresisTicks) {
+                        uint32_t target = static_cast<uint32_t>(maxConns) + scaleStep;
+                        // Gate through ResourceGovernor
+                        if (TuneAdvisor::enableResourceGovernor() &&
+                            !governor.canScaleUp("conn_slots", scaleStep)) {
+                            target = static_cast<uint32_t>(maxConns); // Don't grow
+                        }
+                        target = std::min(target, maxSlots);
+                        if (target > maxConns) {
+                            setConnectionSlots_(target);
+                            spdlog::debug("TuningManager: connection slots grown from {} to {} "
+                                          "(util={:.1f}%, active={})",
+                                          maxConns, target, util * 100.0, activeConns);
+                        }
+                        slotHighTicks = 0;
+                    }
+                } else if (util < lowThreshold && activeConns > 0) {
+                    // Only shrink if we have some connections (avoid shrinking at idle)
+                    slotLowTicks++;
+                    slotHighTicks = 0;
+                    if (slotLowTicks >= hysteresisTicks) {
+                        uint32_t target = (maxConns > scaleStep)
+                                              ? static_cast<uint32_t>(maxConns - scaleStep)
+                                              : static_cast<uint32_t>(maxConns);
+                        target = std::max(target, minSlots);
+                        if (target < maxConns) {
+                            setConnectionSlots_(target);
+                            spdlog::debug("TuningManager: connection slots shrunk from {} to {} "
+                                          "(util={:.1f}%, active={})",
+                                          maxConns, target, util * 100.0, activeConns);
+                        }
+                        slotLowTicks = 0;
+                    }
+                } else {
+                    // Reset hysteresis when in middle range
+                    slotHighTicks = 0;
+                    slotLowTicks = 0;
+                }
+            }
         }
     } catch (...) {
     }

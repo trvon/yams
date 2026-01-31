@@ -689,9 +689,9 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
 
     started_.store(true);
 
-    // Adaptive backoff for CPU efficiency with governance floor
-    constexpr auto kMinIdleDelay = std::chrono::milliseconds(5);  // Governance floor
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(50); // Idle ceiling
+    // Adaptive backoff for CPU efficiency with responsiveness floor
+    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);  // Responsiveness floor
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10); // Idle ceiling
     auto idleDelay = kMinIdleDelay;
 
     while (!stop_.load()) {
@@ -712,7 +712,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
                 maxConcurrent = 1; // Minimal concurrency
                 break;
             case ResourcePressureLevel::Warning:
-                maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+                maxConcurrent = std::max<std::size_t>(1, (maxConcurrent * 3) / 4);
                 break;
             default:
                 break;
@@ -1224,11 +1224,18 @@ void PostIngestQueue::processMetadataStage(
             auto pr = yams::ingest::persist_content_and_index(*meta_, docId, fileName, *txt,
                                                               mimeType, "post_ingest");
             if (!pr) {
-                spdlog::warn("[PostIngestQueue] persist/index failed for {}: {}", hash,
-                             pr.error().message);
+                std::string errorMsg = "Persist failed: " + pr.error().message;
+                spdlog::warn("[PostIngestQueue] persist/index failed for {}: {}", hash, errorMsg);
                 // Track lock errors for adaptive concurrency scaling
                 if (pr.error().message.find("database is locked") != std::string::npos) {
                     TuneAdvisor::reportDbLockError();
+                }
+                // FIX: Update extraction status to Failed to prevent state inconsistency
+                auto updateRes = meta_->updateDocumentExtractionStatus(
+                    docId, false, metadata::ExtractionStatus::Failed, errorMsg);
+                if (!updateRes) {
+                    spdlog::error("[PostIngestQueue] Failed to update extraction status for {}: {}",
+                                  hash, updateRes.error().message);
                 }
             } else {
                 auto duration = std::chrono::steady_clock::now() - startTime;
@@ -1458,9 +1465,9 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
 
     kgStarted_.store(true);
 
-    // Adaptive backoff for CPU efficiency with governance floor
-    constexpr auto kMinIdleDelay = std::chrono::milliseconds(5);  // Governance floor
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(50); // Idle ceiling
+    // Adaptive backoff for CPU efficiency with responsiveness floor
+    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);  // Responsiveness floor
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10); // Idle ceiling
     auto idleDelay = kMinIdleDelay;
 
     while (!stop_.load()) {
@@ -1478,7 +1485,7 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
                 maxConcurrent = 1; // Minimal concurrency
                 break;
             case ResourcePressureLevel::Warning:
-                maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+                maxConcurrent = std::max<std::size_t>(1, (maxConcurrent * 3) / 4);
                 break;
             default:
                 break;
@@ -1536,9 +1543,9 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     symbolStarted_.store(true);
     spdlog::info("[PostIngestQueue] Symbol extraction poller started");
 
-    // Adaptive backoff for CPU efficiency with governance floor
-    constexpr auto kMinIdleDelay = std::chrono::milliseconds(5);  // Governance floor
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(50); // Idle ceiling
+    // Adaptive backoff for CPU efficiency with responsiveness floor
+    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);  // Responsiveness floor
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10); // Idle ceiling
     auto idleDelay = kMinIdleDelay;
 
     while (!stop_.load()) {
@@ -1556,7 +1563,7 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
                 maxConcurrent = 1; // Minimal concurrency
                 break;
             case ResourcePressureLevel::Warning:
-                maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+                maxConcurrent = std::max<std::size_t>(1, (maxConcurrent * 3) / 4);
                 break;
             default:
                 break;
@@ -1721,9 +1728,9 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
     entityStarted_.store(true);
     spdlog::info("[PostIngestQueue] Entity extraction poller started");
 
-    // Adaptive backoff for CPU efficiency with governance floor
-    constexpr auto kMinIdleDelay = std::chrono::milliseconds(5);  // Governance floor
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(50); // Idle ceiling
+    // Adaptive backoff for CPU efficiency with responsiveness floor
+    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);  // Responsiveness floor
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10); // Idle ceiling
     auto idleDelay = kMinIdleDelay;
 
     while (!stop_.load()) {
@@ -1741,7 +1748,7 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
                 maxConcurrent = 1; // Minimal concurrency
                 break;
             case ResourcePressureLevel::Warning:
-                maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+                maxConcurrent = std::max<std::size_t>(1, (maxConcurrent * 3) / 4);
                 break;
             default:
                 break;
@@ -2101,43 +2108,104 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
     titleStarted_.store(true);
     spdlog::info("[PostIngestQueue] Title extraction poller started");
 
-    // Adaptive backoff for CPU efficiency with governance floor
-    constexpr auto kMinIdleDelay = std::chrono::milliseconds(5);  // Governance floor
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(50); // Idle ceiling
+    // Adaptive backoff for CPU efficiency with responsiveness floor
+    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);  // Responsiveness floor
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10); // Idle ceiling
     auto idleDelay = kMinIdleDelay;
+
+    enum class IdleReason : uint8_t {
+        None = 0,
+        Paused,
+        StageDisabled,
+        NoBudget,
+    };
+
+    IdleReason lastIdleReason = IdleReason::None;
+    auto lastIdleLog = std::chrono::steady_clock::time_point{};
 
     while (!stop_.load()) {
         try {
             bool didWork = false;
             InternalEventBus::TitleExtractionJob job;
+
+            // If the stage is not capable (no extractor), avoid a tight poll loop.
+            // refreshStageAvailability() should also mark the stage inactive, but we guard here
+            // since the poller is spawned unconditionally in start().
+            if (!titleExtractor_) {
+                if (lastIdleReason != IdleReason::StageDisabled) {
+                    spdlog::debug(
+                        "[PostIngestQueue] titlePoller idle (disabled: no titleExtractor)");
+                    lastIdleReason = IdleReason::StageDisabled;
+                }
+                timer.expires_after(std::chrono::milliseconds(250));
+                co_await timer.async_wait(boost::asio::use_awaitable);
+                continue;
+            }
+
             // Dynamic concurrency limit
-            std::size_t maxConcurrent = maxTitleConcurrent();
+            const std::size_t baseMaxConcurrent = maxTitleConcurrent();
+            std::size_t maxConcurrent = baseMaxConcurrent;
+
             // Graduated pressure response for CPU-aware throttling
             auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
+            bool pressureHalted = false;
             switch (pressureLevel) {
                 case ResourcePressureLevel::Emergency:
                     maxConcurrent = 0; // Halt (backstop for pauseAll)
+                    pressureHalted = true;
                     break;
                 case ResourcePressureLevel::Critical:
                     maxConcurrent = 1; // Minimal concurrency
                     break;
                 case ResourcePressureLevel::Warning:
-                    maxConcurrent = std::max<std::size_t>(1, maxConcurrent / 2);
+                    maxConcurrent = std::max<std::size_t>(1, (maxConcurrent * 3) / 4);
                     break;
                 default:
                     break;
             }
-            if (titlePaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
-                // Periodic warning when poller is idle with zero budget
-                if (maxConcurrent == 0) {
-                    spdlog::warn("[PostIngestQueue] titlePoller idle "
-                                 "(maxConcurrent=0, paused={})",
-                                 titlePaused_.load(std::memory_order_relaxed));
+
+            const bool paused = titlePaused_.load(std::memory_order_acquire);
+            if (paused || maxConcurrent == 0) {
+                IdleReason reason = paused ? IdleReason::Paused : IdleReason::NoBudget;
+                auto now = std::chrono::steady_clock::now();
+                const bool shouldLog = (reason != lastIdleReason) ||
+                                       (lastIdleLog.time_since_epoch().count() == 0) ||
+                                       ((now - lastIdleLog) >= std::chrono::seconds(5));
+                if (shouldLog) {
+                    if (paused) {
+                        spdlog::debug("[PostIngestQueue] titlePoller paused");
+                    } else if (pressureHalted) {
+                        spdlog::warn(
+                            "[PostIngestQueue] titlePoller idle (maxConcurrent=0, paused={}, "
+                            "pressure={})",
+                            paused, pressureLevelName(pressureLevel));
+                    } else {
+                        // Not an emergency: this is typically because TuneAdvisor allocated a 0
+                        // budget to Title under a small total post-ingest concurrency budget.
+                        // Keep it at debug to avoid noisy warnings.
+                        spdlog::debug(
+                            "[PostIngestQueue] titlePoller idle (maxConcurrent=0, baseMax={}, "
+                            "paused={}, pressure={})",
+                            baseMaxConcurrent, paused, pressureLevelName(pressureLevel));
+                    }
+                    lastIdleLog = now;
+                    lastIdleReason = reason;
                 }
-                timer.expires_after(kMinIdleDelay); // Always fast when paused
+
+                // Avoid a tight loop when paused/no budget; still react quickly to resume.
+                if (paused) {
+                    timer.expires_after(std::chrono::milliseconds(10));
+                } else if (pressureHalted) {
+                    timer.expires_after(std::chrono::milliseconds(100));
+                } else {
+                    // Budget=0 in normal conditions: no need to poll aggressively.
+                    timer.expires_after(std::chrono::milliseconds(250));
+                }
                 co_await timer.async_wait(boost::asio::use_awaitable);
                 continue;
             }
+
+            lastIdleReason = IdleReason::None;
             while (titleInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
                 didWork = true;
                 wasActive_.store(true, std::memory_order_release);

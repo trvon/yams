@@ -143,6 +143,20 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
             int64_t jobsProcessedDuringStartup = 0;
             constexpr int64_t startupJobThreshold = 100;
 
+            // Rate-limited aggregation to avoid log spam when cleaning large numbers of orphans.
+            //
+            // Important: the consumer can briefly observe the channel as empty between producer
+            // bursts. If we flush on every "idle" observation, we can still spam logs.
+            // Instead we:
+            // - log at most once per interval while busy
+            // - flush only after we've been truly idle for a short hold window
+            size_t pendingOrphansRemoved{0};
+            size_t pendingOrphansSkipped{0};
+            auto lastOrphanInfoLog = std::chrono::steady_clock::time_point{};
+            auto idleSince = std::chrono::steady_clock::time_point{};
+            constexpr auto kOrphanInfoLogInterval = 2s;
+            constexpr auto kOrphanIdleFlushHold = 250ms;
+
             if (startupDelayMs > 0) {
                 timer.expires_after(std::chrono::milliseconds(startupDelayMs));
                 try {
@@ -160,6 +174,7 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
             while (!stopFlag->load(std::memory_order_acquire)) {
                 Bus::Fts5Job job;
                 if (channel && channel->try_pop(job)) {
+                    idleSince = std::chrono::steady_clock::time_point{};
                     const auto [store, meta] =
                         std::tuple{self->getContentStore(), self->getMetadataRepo()};
 
@@ -216,8 +231,17 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
                         }
 
                         if (removed > 0) {
-                            spdlog::info("[Fts5Job] Removed {} orphans ({} skipped)", removed,
-                                         skipped);
+                            pendingOrphansRemoved += removed;
+                            pendingOrphansSkipped += skipped;
+                            auto now = std::chrono::steady_clock::now();
+                            if (lastOrphanInfoLog.time_since_epoch().count() == 0 ||
+                                (now - lastOrphanInfoLog) >= kOrphanInfoLogInterval) {
+                                spdlog::info("[Fts5Job] Removed {} orphans ({} skipped)",
+                                             pendingOrphansRemoved, pendingOrphansSkipped);
+                                pendingOrphansRemoved = 0;
+                                pendingOrphansSkipped = 0;
+                                lastOrphanInfoLog = now;
+                            }
                             Bus::instance().incOrphansRemoved(removed);
                         } else if (skipped > 0) {
                             spdlog::debug(
@@ -238,6 +262,21 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
                     co_await timer.async_wait(boost::asio::use_awaitable);
 
                     continue;
+                }
+
+                // Flush pending orphan log once we've been truly idle for a moment.
+                // This avoids "idle thrash" log spam while still ensuring the final totals
+                // get emitted when a burst completes.
+                auto now = std::chrono::steady_clock::now();
+                if (idleSince.time_since_epoch().count() == 0) {
+                    idleSince = now;
+                }
+                if (pendingOrphansRemoved > 0 && (now - idleSince) >= kOrphanIdleFlushHold) {
+                    spdlog::info("[Fts5Job] Removed {} orphans ({} skipped)", pendingOrphansRemoved,
+                                 pendingOrphansSkipped);
+                    pendingOrphansRemoved = 0;
+                    pendingOrphansSkipped = 0;
+                    lastOrphanInfoLog = now;
                 }
 
                 timer.expires_after(std::chrono::milliseconds(idleThrottleMs()));

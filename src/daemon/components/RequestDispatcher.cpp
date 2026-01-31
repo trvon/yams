@@ -19,8 +19,10 @@
 #ifndef NOMINMAX
 #define NOMINMAX 1
 #endif
+// clang-format off
 #include <Windows.h>
 #include <Psapi.h>
+// clang-format on
 #endif
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -129,6 +131,7 @@ DEFINE_REQUEST_HANDLER(GraphRepairRequest, handleGraphRepairRequest);
 DEFINE_REQUEST_HANDLER(GraphValidateRequest, handleGraphValidateRequest);
 DEFINE_REQUEST_HANDLER(KgIngestRequest, handleKgIngestRequest);
 DEFINE_REQUEST_HANDLER(MetadataValueCountsRequest, handleMetadataValueCountsRequest);
+DEFINE_REQUEST_HANDLER(BatchRequest, handleBatchRequest);
 
 #undef DEFINE_REQUEST_HANDLER
 

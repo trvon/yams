@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -148,9 +149,50 @@ struct GetInitOptions {
     uint32_t chunkSize = 512 * 1024;
 };
 
+struct SearchOptions {
+    std::string query;
+    size_t limit = 20;
+    bool fuzzy = false;
+    bool literalText = false;
+    double similarity = 0.7;
+    std::string searchType = "keyword";
+    bool pathsOnly = false;
+    bool showHash = false;
+    bool verbose = false;
+    bool jsonOutput = false;
+    bool showLineNumbers = false;
+    int afterContext = 0;
+    int beforeContext = 0;
+    int context = 0;
+    std::string hashQuery;
+    std::string pathPattern;
+    std::vector<std::string> pathPatterns;
+    std::vector<std::string> tags;
+    bool matchAllTags = false;
+    std::string extension;
+    std::string mimeType;
+    std::string fileType;
+    bool textOnly = false;
+    bool binaryOnly = false;
+    std::string createdAfter;
+    std::string createdBefore;
+    std::string modifiedAfter;
+    std::string modifiedBefore;
+    std::string indexedAfter;
+    std::string indexedBefore;
+    int vectorStageTimeoutMs = 0;
+    int keywordStageTimeoutMs = 0;
+    int snippetHydrationTimeoutMs = 0;
+    bool useSession = false;
+    std::string sessionName;
+    bool globalSearch = false;
+    bool symbolRank = true;
+};
+
 class RetrievalService {
 public:
     RetrievalService() = default;
+    explicit RetrievalService(std::shared_ptr<yams::daemon::DaemonClient> client);
 
     Result<yams::daemon::GetResponse> get(const GetOptions& req,
                                           const RetrievalOptions& opts) const;
@@ -188,7 +230,22 @@ public:
                                           bool preferLatest, const RetrievalOptions& opts,
                                           std::size_t limit = 32) const;
 
+    // New operations delegating to daemon client
+    Result<yams::daemon::SearchResponse> search(const SearchOptions& req,
+                                                const RetrievalOptions& opts = {}) const;
+    Result<yams::daemon::StatusResponse> status(const RetrievalOptions& opts = {}) const;
+    Result<yams::daemon::CatResponse> cat(const yams::daemon::CatRequest& req,
+                                          const RetrievalOptions& opts = {}) const;
+    Result<yams::daemon::GraphQueryResponse> graphQuery(const yams::daemon::GraphQueryRequest& req,
+                                                        const RetrievalOptions& opts = {}) const;
+    Result<yams::daemon::DownloadResponse> download(const yams::daemon::DownloadRequest& req,
+                                                    const RetrievalOptions& opts = {}) const;
+
 private:
+    std::shared_ptr<yams::daemon::DaemonClient> client_; // optional shared client
+    std::shared_ptr<yams::daemon::DaemonClient>
+    getOrCreateClient(const RetrievalOptions& opts) const;
+
     // Check if FTS5 index is ready for queries (PBI-040, task 040-1)
     bool isFTS5Ready(const RetrievalOptions& opts) const;
 };

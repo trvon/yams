@@ -274,29 +274,28 @@ TEST_CASE("MCP 2024-11-05 - supports structuredContent in tool results",
     auto initResponse = server->handleRequestPublic(initRequest);
     REQUIRE(initResponse.has_value());
 
-    // Call a tool and check if result supports structuredContent
+    // Call a tool and check if tool results can include structuredContent.
+    // Use an in-process tool that doesn't require a live daemon connection.
     json toolRequest = {{"jsonrpc", "2.0"},
-                        {"id", 2},
+                        {"id", 99},
                         {"method", "tools/call"},
-                        {"params", {{"name", "status"}, {"arguments", json::object()}}}};
+                        {"params", {{"name", "mcp.echo"}, {"arguments", {{"text", "hello"}}}}}};
 
     auto toolResponse = server->handleRequestPublic(toolRequest);
     REQUIRE(toolResponse.has_value());
 
     json toolResult = toolResponse.value();
-    // Tool call may return error if daemon is not available, which is acceptable
-    // We just want to verify the protocol structure is correct
-    if (toolResult.contains("error")) {
-        // Error response is valid - just verify it has proper structure
-        CHECK(toolResult["error"].contains("code"));
-        CHECK(toolResult["error"].contains("message"));
-    } else {
-        REQUIRE(toolResult.contains("result"));
-        // structuredContent is optional, but if present should be an object
-        if (toolResult["result"].contains("structuredContent")) {
-            CHECK(toolResult["result"]["structuredContent"].is_object());
-        }
-    }
+    INFO("tools/call response: " << toolResult.dump(2));
+    REQUIRE(toolResult.contains("result"));
+    REQUIRE(toolResult["result"].contains("content"));
+    CHECK(toolResult["result"]["content"].is_array());
+    CHECK_FALSE(toolResult["result"].value("isError", false));
+
+    // New in 2024-11-05: structuredContent field.
+    REQUIRE(toolResult["result"].contains("structuredContent"));
+    REQUIRE(toolResult["result"]["structuredContent"].is_object());
+    CHECK(toolResult["result"]["structuredContent"].value("type", "") == "tool_result");
+    CHECK(toolResult["result"]["structuredContent"].contains("data"));
 }
 
 // ============================================================================
@@ -353,6 +352,43 @@ TEST_CASE("MCP 2024-10-07 - supports tools/list",
     REQUIRE(toolsResult["result"].contains("tools"));
     CHECK(toolsResult["result"]["tools"].is_array());
     CHECK(toolsResult["result"]["tools"].size() > 0);
+}
+
+TEST_CASE("MCP 2024-10-07 - tool results omit structuredContent",
+          "[mcp][protocol][2024-10-07][features][structured-content][catch2]") {
+    auto transport = std::make_unique<NullTransport>();
+    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+
+    // Initialize with pre-structuredContent protocol version
+    json initRequest = {{"jsonrpc", "2.0"},
+                        {"id", 1},
+                        {"method", "initialize"},
+                        {"params",
+                         {{"protocolVersion", "2024-10-07"},
+                          {"clientInfo", {{"name", "test"}, {"version", "1.0"}}},
+                          {"capabilities", json::object()}}}};
+
+    auto initResponse = server->handleRequestPublic(initRequest);
+    REQUIRE(initResponse.has_value());
+    CHECK(initResponse.value()["result"]["protocolVersion"] == "2024-10-07");
+
+    // Call a tool that returns a tool-result shaped payload.
+    // Use an in-process tool that doesn't require a live daemon connection.
+    json toolRequest = {{"jsonrpc", "2.0"},
+                        {"id", 99},
+                        {"method", "tools/call"},
+                        {"params", {{"name", "mcp.echo"}, {"arguments", {{"text", "hello"}}}}}};
+
+    auto toolResponse = server->handleRequestPublic(toolRequest);
+    REQUIRE(toolResponse.has_value());
+
+    json toolResult = toolResponse.value();
+    INFO("tools/call response: " << toolResult.dump(2));
+    REQUIRE(toolResult.contains("result"));
+    REQUIRE(toolResult["result"].contains("content"));
+    CHECK(toolResult["result"]["content"].is_array());
+    CHECK_FALSE(toolResult["result"].value("isError", false));
+    CHECK_FALSE(toolResult["result"].contains("structuredContent"));
 }
 
 TEST_CASE("MCP 2024-10-07 - supports resources/list",

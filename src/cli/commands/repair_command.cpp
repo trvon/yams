@@ -1297,6 +1297,42 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
                      "Failed to enumerate documents: " + docs.error().message};
     }
 
+    // Heal known inconsistency before the bulk rebuild.
+    // If a document is marked Success but has no row in document_content, list/snippet
+    // hydration will show "Content not available". Reset these to Pending so --fts5 can
+    // restore a consistent state.
+    int64_t resetCount = 0;
+    for (const auto& d : docs.value()) {
+        if (d.extractionStatus != metadata::ExtractionStatus::Success)
+            continue;
+
+        auto contentRes = ctx.metadataRepo->getContent(d.id);
+        if (!contentRes) {
+            if (verbose_) {
+                std::cout << "  "
+                          << ui::status_warning("Could not inspect content for " + d.fileName +
+                                                ": " + contentRes.error().message)
+                          << "\n";
+            }
+            continue;
+        }
+
+        if (!contentRes.value().has_value()) {
+            (void)ctx.metadataRepo->updateDocumentExtractionStatus(
+                d.id, false, metadata::ExtractionStatus::Pending,
+                "Missing content row; reset by repair --fts5");
+            ++resetCount;
+        }
+    }
+
+    if (resetCount > 0) {
+        std::cout << "  "
+                  << ui::colorize("Reset " + std::to_string(resetCount) +
+                                      " documents from Success->Pending (missing content)",
+                                  ui::Ansi::DIM)
+                  << "\n";
+    }
+
     // Use batch stats to aggregate errors instead of logging each one
     ui::BatchOperationStats stats;
     stats.total = docs.value().size();
@@ -1325,6 +1361,11 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
             auto extractedOpt = yams::extraction::util::extractDocumentText(
                 ctx.store, d.sha256Hash, d.mimeType, ext, ctx.contentExtractors);
             if (extractedOpt && !extractedOpt->empty()) {
+                // Mark as pending while we attempt to write content + FTS5.
+                // This avoids leaving a misleading Success status if persistence/indexing fails.
+                (void)ctx.metadataRepo->updateDocumentExtractionStatus(
+                    d.id, false, metadata::ExtractionStatus::Pending, "repair --fts5 processing");
+
                 // Store the extracted content so it's available for snippets
                 metadata::DocumentContent content;
                 content.documentId = d.id;
@@ -1337,6 +1378,8 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
                 auto ir = ctx.metadataRepo->indexDocumentContent(d.id, d.fileName, *extractedOpt,
                                                                  d.mimeType);
                 if (ir && contentResult) {
+                    (void)ctx.metadataRepo->updateDocumentExtractionStatus(
+                        d.id, true, metadata::ExtractionStatus::Success);
                     ++stats.succeeded;
                 } else {
                     // Check if this was a transient error (database locked)
@@ -1345,9 +1388,22 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
                         errMsg.find("SQLITE_BUSY") != std::string::npos) {
                         ++stats.transient_retries;
                     }
+
+                    std::string failMsg;
+                    if (!contentResult) {
+                        failMsg = "insertContent failed: " + contentResult.error().message;
+                    } else if (!ir) {
+                        failMsg = "indexDocumentContent failed: " + ir.error().message;
+                    } else {
+                        failMsg = "persist/index failed";
+                    }
+                    (void)ctx.metadataRepo->updateDocumentExtractionStatus(
+                        d.id, false, metadata::ExtractionStatus::Failed, failMsg);
                     ++stats.failed;
                 }
             } else {
+                (void)ctx.metadataRepo->updateDocumentExtractionStatus(
+                    d.id, false, metadata::ExtractionStatus::Skipped, "No extractable text");
                 ++stats.skipped; // No content to index
             }
         } catch (const std::exception& e) {
@@ -1357,6 +1413,8 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
                 errMsg.find("SQLITE_BUSY") != std::string::npos) {
                 ++stats.transient_retries;
             }
+            (void)ctx.metadataRepo->updateDocumentExtractionStatus(
+                d.id, false, metadata::ExtractionStatus::Failed, errMsg);
             ++stats.failed;
             if (verbose_) {
                 std::cout << "  "
@@ -1364,6 +1422,8 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
                           << "\n";
             }
         } catch (...) {
+            (void)ctx.metadataRepo->updateDocumentExtractionStatus(
+                d.id, false, metadata::ExtractionStatus::Failed, "Unknown exception");
             ++stats.failed;
         }
 

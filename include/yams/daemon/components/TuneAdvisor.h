@@ -144,16 +144,52 @@ public:
         cpuHighPct_.store(v, std::memory_order_relaxed);
     }
 
+    // CPU admission control hysteresis.
+    // These time windows help avoid rejecting work on brief CPU spikes.
+    // Envs:
+    // - YAMS_CPU_ADMIT_HIGH_HOLD_MS (0..60000) default 250ms
+    // - YAMS_CPU_ADMIT_LOW_HOLD_MS  (0..60000) default 500ms
+    static uint32_t cpuAdmissionHighHoldMs() {
+        uint32_t def = 250;
+        if (const char* s = std::getenv("YAMS_CPU_ADMIT_HIGH_HOLD_MS")) {
+            try {
+                auto v = static_cast<uint64_t>(std::stoull(s));
+                if (v <= 60000)
+                    return static_cast<uint32_t>(v);
+            } catch (...) {
+            }
+        }
+        return def;
+    }
+    static uint32_t cpuAdmissionLowHoldMs() {
+        uint32_t def = 500;
+        if (const char* s = std::getenv("YAMS_CPU_ADMIT_LOW_HOLD_MS")) {
+            try {
+                auto v = static_cast<uint64_t>(std::stoull(s));
+                if (v <= 60000)
+                    return static_cast<uint32_t>(v);
+            } catch (...) {
+            }
+        }
+        return def;
+    }
+
     /// Compute CPU-aware throttling delay in milliseconds.
-    /// Returns 0 if CPU is below threshold, otherwise 10-100ms based on severity.
-    /// Delay formula: (cpuPct - threshold) * 2ms, clamped to [10, 100]ms
+    /// Returns 0 if CPU is below threshold, otherwise a small delay based on severity.
+    ///
+    /// Notes:
+    /// - Daemon tick is typically very small (see statusTickMs()); large sleeps here can
+    ///   dominate throughput and create a feedback loop where work never catches up.
+    /// - cpuHighThresholdPercent() is defined in 0..100 semantics (percent of total host).
+    ///
+    /// Delay formula: (cpuPct - threshold) * 0.5ms, clamped to [2, 25]ms.
     static int32_t computeCpuThrottleDelayMs(double currentCpuPct) {
         double threshold = cpuHighThresholdPercent();
         if (currentCpuPct < threshold)
             return 0;
         double overage = currentCpuPct - threshold;
-        int32_t delayMs = static_cast<int32_t>(overage * 2.0);
-        return std::clamp(delayMs, 10, 100);
+        int32_t delayMs = static_cast<int32_t>(std::llround(overage * 0.5));
+        return std::clamp(delayMs, 2, 25);
     }
 
     static std::uint64_t muxBacklogHighBytes() {
@@ -1058,6 +1094,99 @@ public:
         poolHighWatermarkPctOverride_.store(v, std::memory_order_relaxed);
     }
 
+    // -------- Connection slot dynamic sizing (PBI-085) --------
+    // Minimum connection slots (floor for dynamic resizing). Default 64.
+    // Environment: YAMS_CONN_SLOTS_MIN (range 1..1024)
+    static uint32_t connectionSlotsMin() {
+        uint32_t ov = connectionSlotsMinOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        uint32_t def = 64;
+        if (const char* s = std::getenv("YAMS_CONN_SLOTS_MIN")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 1024)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return def;
+    }
+    static void setConnectionSlotsMin(uint32_t v) {
+        connectionSlotsMinOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    // Maximum connection slots (ceiling for dynamic resizing). Default 4096.
+    // Environment: YAMS_CONN_SLOTS_MAX (range 64..16384)
+    static uint32_t connectionSlotsMax() {
+        uint32_t ov = connectionSlotsMaxOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        uint32_t def = 4096;
+        if (const char* s = std::getenv("YAMS_CONN_SLOTS_MAX")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 64 && v <= 16384)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return def;
+    }
+    static void setConnectionSlotsMax(uint32_t v) {
+        connectionSlotsMaxOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    // Scale step for connection slot resizing. Default 16.
+    // Environment: YAMS_CONN_SLOTS_STEP (range 1..128)
+    static uint32_t connectionSlotsScaleStep() {
+        uint32_t ov = connectionSlotsScaleStepOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        uint32_t def = 16;
+        if (const char* s = std::getenv("YAMS_CONN_SLOTS_STEP")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 128)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return def;
+    }
+    static void setConnectionSlotsScaleStep(uint32_t v) {
+        connectionSlotsScaleStepOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    // Initial/target connection slots based on hardware and profile.
+    // Formula: recommendedThreads * ioConnPerThread * 4 * (0.5 + profileScale)
+    // With minimum of 256 slots. Profile-scaled: Efficient=lower, Aggressive=higher.
+    static uint32_t connectionSlotsTarget() {
+        uint32_t ov = connectionSlotsTargetOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+
+        uint32_t rec = recommendedThreads();
+        uint32_t per = ioConnPerThread();
+        double scale = 0.5 + profileScale(); // 0.5 (Efficient) to 1.5 (Aggressive)
+
+        uint64_t computed = static_cast<uint64_t>(rec) * static_cast<uint64_t>(per) * 4ull;
+        computed = static_cast<uint64_t>(static_cast<double>(computed) * scale);
+
+        uint32_t minSlots = connectionSlotsMin();
+        if (computed < static_cast<uint64_t>(minSlots))
+            computed = minSlots;
+
+        uint32_t maxSlots = connectionSlotsMax();
+        if (computed > static_cast<uint64_t>(maxSlots))
+            computed = maxSlots;
+
+        return static_cast<uint32_t>(computed);
+    }
+    static void setConnectionSlotsTarget(uint32_t v) {
+        connectionSlotsTargetOverride_.store(v, std::memory_order_relaxed);
+    }
+
     static uint32_t searchConcurrencyLimit() {
         uint32_t ov = searchConcurrencyOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
@@ -1851,6 +1980,31 @@ private:
 
             if (used < totalBudget) {
                 uint32_t remaining = totalBudget - used;
+
+                // Fairness pass: if we have any remaining budget, first ensure each active stage
+                // has at least 1 slot before we start adding extra slots to higher-weight stages.
+                //
+                // This prevents long-lived starvation where (for example) Embed consumes the
+                // remainder due to its higher weight while Title/KG stay at 0.
+                //
+                // Order is chosen to prioritize user-visible enrichment stages.
+                constexpr std::array<std::size_t, 4> kZeroFillOrder{
+                    4, // Title
+                    1, // KnowledgeGraph
+                    2, // Symbol
+                    3  // Entity
+                };
+                for (auto idx : kZeroFillOrder) {
+                    if (remaining == 0)
+                        break;
+                    if (caps[idx] == 0)
+                        continue;
+                    if (alloc[idx] != 0)
+                        continue;
+                    alloc[idx] = 1;
+                    remaining -= 1;
+                }
+
                 std::array<std::size_t, kStageCount> order{};
                 for (std::size_t i = 0; i < kStageCount; ++i) {
                     order[i] = i;
@@ -1991,6 +2145,10 @@ private:
     static inline std::atomic<uint32_t> postIngestQueueMaxOverride_{0};
     static inline std::atomic<uint32_t> postIngestBatchSizeOverride_{0};
     static inline std::atomic<uint32_t> ioConnPerThreadOverride_{0};
+    static inline std::atomic<uint32_t> connectionSlotsMinOverride_{0};
+    static inline std::atomic<uint32_t> connectionSlotsMaxOverride_{0};
+    static inline std::atomic<uint32_t> connectionSlotsScaleStepOverride_{0};
+    static inline std::atomic<uint32_t> connectionSlotsTargetOverride_{0};
     static inline std::atomic<int> enableParallelIngestOverride_{-1};
     static inline std::atomic<uint32_t> maxIngestWorkersOverride_{0};
     static inline std::atomic<uint32_t> storagePoolSizeOverride_{0};

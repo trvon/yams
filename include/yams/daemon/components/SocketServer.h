@@ -41,6 +41,10 @@ public:
         std::chrono::milliseconds connectionTimeout{2000};
         std::chrono::milliseconds acceptBackoffMs{100};
         std::chrono::seconds maxConnectionLifetime{300}; // 5 minutes absolute limit
+
+        // Proxy socket for multiplexed CLI connections (empty = disabled)
+        std::filesystem::path proxySocketPath;
+        size_t proxyMaxConnections = 512;
     };
 
     SocketServer(const Config& config, WorkCoordinator* coordinator, RequestDispatcher* dispatcher,
@@ -65,12 +69,27 @@ public:
     uint64_t totalConnections() const { return totalConnections_.load(); }
     uint64_t connectionToken() const { return connectionToken_.load(); }
 
+    // Proxy metrics
+    size_t proxyActiveConnections() const { return proxyActiveConnections_.load(); }
+    std::filesystem::path proxySocketPath() const { return proxySocketPath_; }
+
     // Compute age of oldest active connection (in seconds); 0 if no connections
     uint64_t oldestConnectionAgeSeconds() const;
 
+    // -------- Dynamic connection slot sizing (PBI-085) --------
+    // Resize the connection slot semaphore. Grows immediately, shrinks gracefully via debt
+    // tracking. Returns true if resize succeeded (or was a no-op), false on error.
+    bool resizeConnectionSlots(size_t newSize);
+
+    // Get current slot limit (approximate, may be slightly stale under high contention)
+    size_t getConnectionSlotLimit() const { return slotLimit_.load(std::memory_order_relaxed); }
+
+    // Check slot utilization: activeConnections / slotLimit (0.0 to 1.0+ if overcommitted)
+    double getSlotUtilization() const;
+
 private:
     // Async operations
-    boost::asio::awaitable<void> accept_loop();
+    boost::asio::awaitable<void> accept_loop(bool isProxy = false);
     struct TrackedSocket {
         std::shared_ptr<boost::asio::local::stream_protocol::socket> socket;
         boost::asio::any_io_executor executor;
@@ -92,7 +111,7 @@ private:
         }
     };
     boost::asio::awaitable<void> handle_connection(std::shared_ptr<TrackedSocket> tracked_socket,
-                                                   uint64_t conn_token);
+                                                   uint64_t conn_token, bool isProxy = false);
 
     // Register active socket for deterministic shutdown (RAII pattern)
     void register_socket(std::shared_ptr<TrackedSocket> tracked_socket);
@@ -107,6 +126,12 @@ private:
     // Boost.ASIO components (use WorkCoordinator's io_context)
     std::unique_ptr<boost::asio::local::stream_protocol::acceptor> acceptor_;
     std::future<void> acceptLoopFuture_;
+
+    // Proxy acceptor (second listen socket for multiplexed CLI connections)
+    std::unique_ptr<boost::asio::local::stream_protocol::acceptor> proxyAcceptor_;
+    std::future<void> proxyAcceptLoopFuture_;
+    std::atomic<size_t> proxyActiveConnections_{0};
+    std::filesystem::path proxySocketPath_;
 
     // Socket tracking
     std::filesystem::path actualSocketPath_;
@@ -135,6 +160,10 @@ private:
     std::vector<std::future<void>> connectionFutures_;
 
     std::unique_ptr<std::counting_semaphore<>> connectionSlots_;
+
+    // Dynamic sizing state (PBI-085)
+    std::atomic<size_t> slotLimit_{0};   // Current slot limit (tracked for resize decisions)
+    std::atomic<int32_t> shrinkDebt_{0}; // Deficit when shrinking below active connections
 
     void prune_completed_futures();
     void execute_on_io_context(std::function<void()> fn);

@@ -228,6 +228,9 @@ template <> struct ProtoBinding<SearchRequest> {
         o->set_vector_stage_timeout_ms(r.vectorStageTimeoutMs);
         o->set_keyword_stage_timeout_ms(r.keywordStageTimeoutMs);
         o->set_snippet_hydration_timeout_ms(r.snippetHydrationTimeoutMs);
+        if (r.useSession && !r.sessionName.empty()) {
+            o->set_session_id(r.sessionName);
+        }
     }
     static SearchRequest get(const Envelope& env) {
         const auto& i = env.search_request();
@@ -266,6 +269,10 @@ template <> struct ProtoBinding<SearchRequest> {
         r.vectorStageTimeoutMs = i.vector_stage_timeout_ms();
         r.keywordStageTimeoutMs = i.keyword_stage_timeout_ms();
         r.snippetHydrationTimeoutMs = i.snippet_hydration_timeout_ms();
+        if (!i.session_id().empty()) {
+            r.useSession = true;
+            r.sessionName = i.session_id();
+        }
         return r;
     }
 };
@@ -405,6 +412,7 @@ template <> struct ProtoBinding<DeleteRequest> {
         o->set_keep_refs(r.keepRefs);
         o->set_recursive(r.recursive);
         o->set_verbose(r.verbose);
+        o->set_session_id(r.sessionId);
     }
     static DeleteRequest get(const Envelope& env) {
         const auto& i = env.delete_request();
@@ -420,6 +428,7 @@ template <> struct ProtoBinding<DeleteRequest> {
         r.keepRefs = i.keep_refs();
         r.recursive = i.recursive();
         r.verbose = i.verbose();
+        r.sessionId = i.session_id();
         return r;
     }
 };
@@ -466,6 +475,9 @@ template <> struct ProtoBinding<ListRequest> {
         // Metadata key-value filters
         to_kv_pairs(r.metadataFilters, o->mutable_metadata_filters());
         o->set_match_all_metadata(r.matchAllMetadata);
+        if (!r.sessionId.empty()) {
+            o->set_session_id(r.sessionId);
+        }
     }
     static ListRequest get(const Envelope& env) {
         const auto& i = env.list_request();
@@ -508,6 +520,7 @@ template <> struct ProtoBinding<ListRequest> {
         // Metadata key-value filters
         r.metadataFilters = from_kv_pairs(i.metadata_filters());
         r.matchAllMetadata = i.match_all_metadata();
+        r.sessionId = i.session_id();
         return r;
     }
 };
@@ -670,6 +683,9 @@ template <> struct ProtoBinding<AddDocumentRequest> {
         o->set_mime_type(r.mimeType);
         o->set_disable_auto_mime(r.disableAutoMime);
         o->set_no_embeddings(r.noEmbeddings);
+        if (!r.sessionId.empty()) {
+            o->set_session_id(r.sessionId);
+        }
     }
     static AddDocumentRequest get(const Envelope& env) {
         const auto& i = env.add_document_request();
@@ -689,6 +705,7 @@ template <> struct ProtoBinding<AddDocumentRequest> {
         r.mimeType = i.mime_type();
         r.disableAutoMime = i.disable_auto_mime();
         r.noEmbeddings = i.no_embeddings();
+        r.sessionId = i.session_id();
         return r;
     }
 };
@@ -723,6 +740,9 @@ template <> struct ProtoBinding<GrepRequest> {
         o->set_before_context(r.beforeContext);
         o->set_after_context(r.afterContext);
         o->set_show_diff(r.showDiff);
+        if (r.useSession && !r.sessionName.empty()) {
+            o->set_session_id(r.sessionName);
+        }
     }
     static GrepRequest get(const Envelope& env) {
         const auto& i = env.grep_request();
@@ -753,6 +773,10 @@ template <> struct ProtoBinding<GrepRequest> {
         r.beforeContext = i.before_context();
         r.afterContext = i.after_context();
         r.showDiff = i.show_diff();
+        if (!i.session_id().empty()) {
+            r.useSession = true;
+            r.sessionName = i.session_id();
+        }
         return r;
     }
 };
@@ -1095,6 +1119,7 @@ template <> struct ProtoBinding<ListResponse> {
             le->set_change_time(e.changeTime);
             le->set_relevance_score(e.relevanceScore);
             le->set_match_reason(e.matchReason);
+            le->set_extraction_status(e.extractionStatus);
         }
         o->set_total_count(static_cast<uint64_t>(r.totalCount));
     }
@@ -1125,6 +1150,7 @@ template <> struct ProtoBinding<ListResponse> {
             e.changeTime = le.change_time();
             e.relevanceScore = le.relevance_score();
             e.matchReason = le.match_reason();
+            e.extractionStatus = le.extraction_status();
             r.items.emplace_back(std::move(e));
         }
         return r;
@@ -2467,6 +2493,241 @@ template <> struct ProtoBinding<MetadataValueCountsResponse> {
     }
 };
 
+// --------------------------- Batch Request/Response (Track B) ---------------------------
+template <> struct ProtoBinding<BatchRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kBatchRequest;
+    static void set(Envelope& env, const BatchRequest& r) {
+        auto* o = env.mutable_batch_request();
+        o->set_continue_on_error(r.continueOnError);
+        o->set_session_id(r.sessionId);
+        for (const auto& item : r.items) {
+            auto* item_pb = o->add_items();
+            item_pb->set_sequence_id(item.sequenceId);
+            std::visit(
+                [&item_pb](const auto& req) {
+                    using T = std::decay_t<decltype(req)>;
+                    Envelope tempEnv;
+                    if constexpr (std::is_same_v<T, SearchRequest>) {
+                        ProtoBinding<SearchRequest>::set(tempEnv, req);
+                        *item_pb->mutable_search_request() = tempEnv.search_request();
+                    } else if constexpr (std::is_same_v<T, GetRequest>) {
+                        ProtoBinding<GetRequest>::set(tempEnv, req);
+                        *item_pb->mutable_get_request() = tempEnv.get_request();
+                    } else if constexpr (std::is_same_v<T, AddDocumentRequest>) {
+                        ProtoBinding<AddDocumentRequest>::set(tempEnv, req);
+                        *item_pb->mutable_add_document_request() = tempEnv.add_document_request();
+                    } else if constexpr (std::is_same_v<T, GrepRequest>) {
+                        ProtoBinding<GrepRequest>::set(tempEnv, req);
+                        *item_pb->mutable_grep_request() = tempEnv.grep_request();
+                    } else if constexpr (std::is_same_v<T, UpdateDocumentRequest>) {
+                        ProtoBinding<UpdateDocumentRequest>::set(tempEnv, req);
+                        *item_pb->mutable_update_document_request() =
+                            tempEnv.update_document_request();
+                    } else if constexpr (std::is_same_v<T, DeleteRequest>) {
+                        ProtoBinding<DeleteRequest>::set(tempEnv, req);
+                        *item_pb->mutable_delete_request() = tempEnv.delete_request();
+                    } else if constexpr (std::is_same_v<T, ListRequest>) {
+                        ProtoBinding<ListRequest>::set(tempEnv, req);
+                        *item_pb->mutable_list_request() = tempEnv.list_request();
+                    } else if constexpr (std::is_same_v<T, GraphQueryRequest>) {
+                        ProtoBinding<GraphQueryRequest>::set(tempEnv, req);
+                        *item_pb->mutable_graph_query_request() = tempEnv.graph_query_request();
+                    }
+                },
+                item.request);
+        }
+    }
+    static BatchRequest get(const Envelope& env) {
+        const auto& i = env.batch_request();
+        BatchRequest r{};
+        r.continueOnError = i.continue_on_error();
+        r.sessionId = i.session_id();
+        for (const auto& item_pb : i.items()) {
+            BatchItem item;
+            item.sequenceId = item_pb.sequence_id();
+            switch (item_pb.request_case()) {
+                case pb::BatchItem::kSearchRequest: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_search_request() = item_pb.search_request();
+                    item.request = ProtoBinding<SearchRequest>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItem::kGetRequest: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_get_request() = item_pb.get_request();
+                    item.request = ProtoBinding<GetRequest>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItem::kAddDocumentRequest: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_add_document_request() = item_pb.add_document_request();
+                    item.request = ProtoBinding<AddDocumentRequest>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItem::kGrepRequest: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_grep_request() = item_pb.grep_request();
+                    item.request = ProtoBinding<GrepRequest>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItem::kUpdateDocumentRequest: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_update_document_request() = item_pb.update_document_request();
+                    item.request = ProtoBinding<UpdateDocumentRequest>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItem::kDeleteRequest: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_delete_request() = item_pb.delete_request();
+                    item.request = ProtoBinding<DeleteRequest>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItem::kListRequest: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_list_request() = item_pb.list_request();
+                    item.request = ProtoBinding<ListRequest>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItem::kGraphQueryRequest: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_graph_query_request() = item_pb.graph_query_request();
+                    item.request = ProtoBinding<GraphQueryRequest>::get(tempEnv);
+                    break;
+                }
+                default:
+                    break;
+            }
+            r.items.push_back(std::move(item));
+        }
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<BatchResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kBatchResponse;
+    static void set(Envelope& env, const BatchResponse& r) {
+        auto* o = env.mutable_batch_response();
+        for (const auto& item : r.items) {
+            auto* item_pb = o->add_items();
+            item_pb->set_sequence_id(item.sequenceId);
+            item_pb->set_success(item.success);
+            std::visit(
+                [&item_pb](const auto& resp) {
+                    using T = std::decay_t<decltype(resp)>;
+                    Envelope tempEnv;
+                    if constexpr (std::is_same_v<T, SearchResponse>) {
+                        ProtoBinding<SearchResponse>::set(tempEnv, resp);
+                        *item_pb->mutable_search_response() = tempEnv.search_response();
+                    } else if constexpr (std::is_same_v<T, GetResponse>) {
+                        ProtoBinding<GetResponse>::set(tempEnv, resp);
+                        *item_pb->mutable_get_response() = tempEnv.get_response();
+                    } else if constexpr (std::is_same_v<T, AddDocumentResponse>) {
+                        ProtoBinding<AddDocumentResponse>::set(tempEnv, resp);
+                        *item_pb->mutable_add_document_response() = tempEnv.add_document_response();
+                    } else if constexpr (std::is_same_v<T, GrepResponse>) {
+                        ProtoBinding<GrepResponse>::set(tempEnv, resp);
+                        *item_pb->mutable_grep_response() = tempEnv.grep_response();
+                    } else if constexpr (std::is_same_v<T, UpdateDocumentResponse>) {
+                        ProtoBinding<UpdateDocumentResponse>::set(tempEnv, resp);
+                        *item_pb->mutable_update_document_response() =
+                            tempEnv.update_document_response();
+                    } else if constexpr (std::is_same_v<T, DeleteResponse>) {
+                        ProtoBinding<DeleteResponse>::set(tempEnv, resp);
+                        *item_pb->mutable_delete_response() = tempEnv.delete_response();
+                    } else if constexpr (std::is_same_v<T, ListResponse>) {
+                        ProtoBinding<ListResponse>::set(tempEnv, resp);
+                        *item_pb->mutable_list_response() = tempEnv.list_response();
+                    } else if constexpr (std::is_same_v<T, GraphQueryResponse>) {
+                        ProtoBinding<GraphQueryResponse>::set(tempEnv, resp);
+                        *item_pb->mutable_graph_query_response() = tempEnv.graph_query_response();
+                    } else if constexpr (std::is_same_v<T, ErrorResponse>) {
+                        ProtoBinding<ErrorResponse>::set(tempEnv, resp);
+                        *item_pb->mutable_error() = tempEnv.error();
+                    }
+                },
+                item.response);
+        }
+        o->set_total_count(r.totalCount);
+        o->set_success_count(r.successCount);
+        o->set_error_count(r.errorCount);
+        o->set_elapsed_ms(static_cast<int64_t>(r.elapsed.count()));
+    }
+    static BatchResponse get(const Envelope& env) {
+        const auto& i = env.batch_response();
+        BatchResponse r{};
+        r.totalCount = i.total_count();
+        r.successCount = i.success_count();
+        r.errorCount = i.error_count();
+        r.elapsed = std::chrono::milliseconds{i.elapsed_ms()};
+        for (const auto& item_pb : i.items()) {
+            BatchItemResponse item;
+            item.sequenceId = item_pb.sequence_id();
+            item.success = item_pb.success();
+            switch (item_pb.response_case()) {
+                case pb::BatchItemResponse::kSearchResponse: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_search_response() = item_pb.search_response();
+                    item.response = ProtoBinding<SearchResponse>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItemResponse::kGetResponse: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_get_response() = item_pb.get_response();
+                    item.response = ProtoBinding<GetResponse>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItemResponse::kAddDocumentResponse: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_add_document_response() = item_pb.add_document_response();
+                    item.response = ProtoBinding<AddDocumentResponse>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItemResponse::kGrepResponse: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_grep_response() = item_pb.grep_response();
+                    item.response = ProtoBinding<GrepResponse>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItemResponse::kUpdateDocumentResponse: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_update_document_response() =
+                        item_pb.update_document_response();
+                    item.response = ProtoBinding<UpdateDocumentResponse>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItemResponse::kDeleteResponse: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_delete_response() = item_pb.delete_response();
+                    item.response = ProtoBinding<DeleteResponse>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItemResponse::kListResponse: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_list_response() = item_pb.list_response();
+                    item.response = ProtoBinding<ListResponse>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItemResponse::kGraphQueryResponse: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_graph_query_response() = item_pb.graph_query_response();
+                    item.response = ProtoBinding<GraphQueryResponse>::get(tempEnv);
+                    break;
+                }
+                case pb::BatchItemResponse::kError: {
+                    Envelope tempEnv;
+                    *tempEnv.mutable_error() = item_pb.error();
+                    item.response = ProtoBinding<ErrorResponse>::get(tempEnv);
+                    break;
+                }
+                default:
+                    break;
+            }
+            r.items.push_back(std::move(item));
+        }
+        return r;
+    }
+};
+
 // Helper to encode Request/Response variants using bindings
 template <typename Variant>
 static Result<void> encode_variant_into(Envelope& env, const Variant& v) {
@@ -2791,6 +3052,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kBatchRequest: {
+            auto v = ProtoBinding<BatchRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
 
         // Additional responses
         case Envelope::kSuccessResponse: {
@@ -2951,6 +3217,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kMetadataValueCountsResponse: {
             auto v = ProtoBinding<MetadataValueCountsResponse>::get(env);
             m.payload = Response{std::in_place_type<MetadataValueCountsResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kBatchResponse: {
+            auto v = ProtoBinding<BatchResponse>::get(env);
+            m.payload = Response{std::in_place_type<BatchResponse>, std::move(v)};
             break;
         }
         case Envelope::kEmbedEvent: {

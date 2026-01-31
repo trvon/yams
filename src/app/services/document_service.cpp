@@ -20,6 +20,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
+#include <yams/ingest/ingest_helpers.h>
 
 #include <algorithm>
 #include <cctype>
@@ -602,11 +603,6 @@ public:
         }
 
         auto storeRes = ctx_.store->store(usePath, md);
-        // Clean up temp file if used
-        if (tmpToRemove) {
-            std::error_code ec;
-            std::filesystem::remove(*tmpToRemove, ec);
-        }
         if (!storeRes) {
             // Preserve upstream error code when meaningful; enrich FileNotFound with guidance.
             auto err = storeRes.error();
@@ -670,15 +666,31 @@ public:
                             info.mimeType = sig.value().mimeType;
                     }
                     if (info.mimeType.empty()) {
-                        info.mimeType = yams::detection::FileTypeDetector::getMimeTypeFromExtension(
-                            p.extension().string());
+                        // Prefer logical file extension (from --name) over temp file extension
+                        const auto& extForMime = info.fileExtension.empty() ? p.extension().string()
+                                                                            : info.fileExtension;
+                        info.mimeType =
+                            yams::detection::FileTypeDetector::getMimeTypeFromExtension(extForMime);
                     }
                 } catch (...) {
                     // fallback below
                 }
             }
-            if (info.mimeType.empty())
-                info.mimeType = "application/octet-stream";
+            if (info.mimeType.empty() || info.mimeType == "application/octet-stream") {
+                // For stdin content with no extension, default to text/plain since
+                // the user explicitly piped text content in.
+                if (!req.content.empty() && info.fileExtension.empty())
+                    info.mimeType = "text/plain";
+                else if (info.mimeType.empty())
+                    info.mimeType = "application/octet-stream";
+            }
+
+            // Clean up temp file after MIME detection (needs the file to exist)
+            if (tmpToRemove) {
+                std::error_code ec;
+                std::filesystem::remove(*tmpToRemove, ec);
+            }
+
             using std::chrono::floor;
             using namespace std::chrono;
             auto now = std::chrono::system_clock::now();
@@ -716,6 +728,15 @@ public:
                     indexDocumentTermsForFuzzySearch(ctx_.metadataRepo, info);
                 } catch (...) {
                     // Non-fatal: fuzzy search indexing is opportunistic
+                }
+
+                // Inline text extraction for stdin/content-based stores so
+                // that `yams list` shows content immediately instead of
+                // "[Content not available]".
+                if (!req.content.empty() && isTextMime(info.mimeType)) {
+                    (void)ingest::persist_content_and_index(*ctx_.metadataRepo, docId,
+                                                            info.fileName, req.content,
+                                                            info.mimeType, "inline_store_sync");
                 }
             }
         }
@@ -1533,6 +1554,7 @@ public:
                 e.created = toEpochSeconds(d.createdTime);
                 e.modified = toEpochSeconds(d.modifiedTime);
                 e.indexed = toEpochSeconds(d.indexedTime);
+                e.extractionStatus = metadata::ExtractionStatusUtils::toString(d.extractionStatus);
                 out.documents.push_back(std::move(e));
             }
             return out;
@@ -1568,6 +1590,7 @@ public:
                 e.created = toEpochSeconds(d.createdTime);
                 e.modified = toEpochSeconds(d.modifiedTime);
                 e.indexed = toEpochSeconds(d.indexedTime);
+                e.extractionStatus = metadata::ExtractionStatusUtils::toString(d.extractionStatus);
                 const auto* cachedMetadata =
                     [&]() -> const std::unordered_map<std::string, metadata::MetadataValue>* {
                     auto it = metadataCache.find(d.id);
@@ -1633,6 +1656,7 @@ public:
                 e.created = toEpochSeconds(d.createdTime);
                 e.modified = toEpochSeconds(d.modifiedTime);
                 e.indexed = toEpochSeconds(d.indexedTime);
+                e.extractionStatus = metadata::ExtractionStatusUtils::toString(d.extractionStatus);
                 const auto* cachedMetadata =
                     [&]() -> const std::unordered_map<std::string, metadata::MetadataValue>* {
                     auto it = metadataCache.find(d.id);

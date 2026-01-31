@@ -18,6 +18,9 @@
 
 namespace yams::app::services {
 
+RetrievalService::RetrievalService(std::shared_ptr<yams::daemon::DaemonClient> client)
+    : client_(std::move(client)) {}
+
 static yams::daemon::ClientConfig makeClientConfig(const RetrievalOptions& opts) {
     yams::daemon::ClientConfig cfg;
     if (opts.socketPath && !opts.socketPath->empty()) {
@@ -35,6 +38,13 @@ static yams::daemon::ClientConfig makeClientConfig(const RetrievalOptions& opts)
     cfg.requestTimeout = std::chrono::milliseconds(opts.requestTimeoutMs);
     cfg.acceptCompressed = opts.acceptCompressed;
     return cfg;
+}
+
+std::shared_ptr<yams::daemon::DaemonClient>
+RetrievalService::getOrCreateClient(const RetrievalOptions& opts) const {
+    if (client_)
+        return client_;
+    return std::make_shared<yams::daemon::DaemonClient>(makeClientConfig(opts));
 }
 
 Result<yams::daemon::GetResponse> RetrievalService::get(const GetOptions& req_opts,
@@ -67,7 +77,7 @@ Result<yams::daemon::GetResponse> RetrievalService::get(const GetOptions& req_op
     req.graphDepth = req_opts.graphDepth;
     req.verbose = req_opts.verbose;
 
-    auto client = std::make_shared<yams::daemon::DaemonClient>(makeClientConfig(opts));
+    auto client = getOrCreateClient(opts);
     std::promise<Result<yams::daemon::GetResponse>> p;
     std::promise<void> done;
     auto f = p.get_future();
@@ -138,7 +148,7 @@ Result<yams::daemon::GrepResponse> RetrievalService::grep(const GrepOptions& req
     req.useSession = req_opts.useSession;
     req.sessionName = req_opts.sessionName;
 
-    auto client = std::make_shared<yams::daemon::DaemonClient>(makeClientConfig(opts));
+    auto client = getOrCreateClient(opts);
     std::promise<Result<yams::daemon::GrepResponse>> p;
     std::promise<void> done;
     auto future = p.get_future();
@@ -221,7 +231,7 @@ Result<yams::daemon::ListResponse> RetrievalService::list(const ListOptions& req
     req.metadataFilters = req_opts.metadataFilters;
     req.matchAllMetadata = req_opts.matchAllMetadata;
 
-    auto client = std::make_shared<yams::daemon::DaemonClient>(makeClientConfig(opts));
+    auto client = getOrCreateClient(opts);
     std::promise<Result<yams::daemon::ListResponse>> p2;
     std::promise<void> done;
     auto f2 = p2.get_future();
@@ -256,7 +266,7 @@ Result<void> RetrievalService::getToStdout(const GetInitOptions& req_opts,
     req.maxBytes = req_opts.maxBytes;
     req.chunkSize = req_opts.chunkSize;
 
-    auto client = std::make_shared<yams::daemon::DaemonClient>(makeClientConfig(opts));
+    auto client = getOrCreateClient(opts);
     std::promise<Result<void>> p2;
     std::promise<void> done;
     auto f2 = p2.get_future();
@@ -292,7 +302,7 @@ Result<void> RetrievalService::getToFile(const GetInitOptions& req_opts,
     req.maxBytes = req_opts.maxBytes;
     req.chunkSize = req_opts.chunkSize;
 
-    auto client = std::make_shared<yams::daemon::DaemonClient>(makeClientConfig(opts));
+    auto client = getOrCreateClient(opts);
     std::promise<Result<void>> p2;
     std::promise<void> done;
     auto f2 = p2.get_future();
@@ -330,7 +340,7 @@ RetrievalService::getChunkedBuffer(const GetInitOptions& req_opts, std::size_t c
 
     // Prefer native chunked protocol; fallback to unary Get on error/timeout
     {
-        auto client = std::make_shared<yams::daemon::DaemonClient>(makeClientConfig(opts));
+        auto client = getOrCreateClient(opts);
         std::promise<Result<ChunkedGetResult>> p2;
         std::promise<void> done;
         auto f2 = p2.get_future();
@@ -444,7 +454,7 @@ Result<std::string> RetrievalService::resolveHashPrefix(const std::string& hashP
     sreq.showHash = true;
     sreq.pathsOnly = false;
 
-    auto client = std::make_shared<yams::daemon::DaemonClient>(makeClientConfig(opts));
+    auto client = getOrCreateClient(opts);
     std::promise<Result<yams::daemon::SearchResponse>> promise;
     std::promise<void> done;
     auto future = promise.get_future();
@@ -758,7 +768,7 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
     }
 
     try {
-        auto client = std::make_shared<yams::daemon::DaemonClient>(makeClientConfig(opts));
+        auto client = getOrCreateClient(opts);
         yams::daemon::SearchRequest sreq;
         sreq.query = name;
         sreq.fuzzy = true;
@@ -818,7 +828,7 @@ Result<yams::daemon::GetResponse> RetrievalService::getByNameSmart(
 // PBI-040, task 040-1: Check if FTS5 index is ready for queries
 bool RetrievalService::isFTS5Ready(const RetrievalOptions& opts) const {
     try {
-        auto client = std::make_shared<yams::daemon::DaemonClient>(makeClientConfig(opts));
+        auto client = getOrCreateClient(opts);
         std::promise<Result<yams::daemon::StatusResponse>> p;
         std::promise<void> done;
         auto f = p.get_future();
@@ -854,6 +864,215 @@ bool RetrievalService::isFTS5Ready(const RetrievalOptions& opts) const {
     } catch (...) {
         return false; // Any error -> assume not ready
     }
+}
+
+Result<yams::daemon::SearchResponse> RetrievalService::search(const SearchOptions& req_opts,
+                                                              const RetrievalOptions& opts) const {
+    yams::daemon::SearchRequest req;
+    req.query = req_opts.query;
+    req.limit = req_opts.limit;
+    req.fuzzy = req_opts.fuzzy;
+    req.literalText = req_opts.literalText;
+    req.similarity = req_opts.similarity;
+    req.searchType = req_opts.searchType;
+    req.pathsOnly = req_opts.pathsOnly;
+    req.showHash = req_opts.showHash;
+    req.verbose = req_opts.verbose;
+    req.jsonOutput = req_opts.jsonOutput;
+    req.showLineNumbers = req_opts.showLineNumbers;
+    req.afterContext = req_opts.afterContext;
+    req.beforeContext = req_opts.beforeContext;
+    req.context = req_opts.context;
+    req.hashQuery = req_opts.hashQuery;
+    req.pathPattern = req_opts.pathPattern;
+    req.pathPatterns = req_opts.pathPatterns;
+    req.tags = req_opts.tags;
+    req.matchAllTags = req_opts.matchAllTags;
+    req.extension = req_opts.extension;
+    req.mimeType = req_opts.mimeType;
+    req.fileType = req_opts.fileType;
+    req.textOnly = req_opts.textOnly;
+    req.binaryOnly = req_opts.binaryOnly;
+    req.createdAfter = req_opts.createdAfter;
+    req.createdBefore = req_opts.createdBefore;
+    req.modifiedAfter = req_opts.modifiedAfter;
+    req.modifiedBefore = req_opts.modifiedBefore;
+    req.indexedAfter = req_opts.indexedAfter;
+    req.indexedBefore = req_opts.indexedBefore;
+    req.vectorStageTimeoutMs = req_opts.vectorStageTimeoutMs;
+    req.keywordStageTimeoutMs = req_opts.keywordStageTimeoutMs;
+    req.snippetHydrationTimeoutMs = req_opts.snippetHydrationTimeoutMs;
+    req.useSession = req_opts.useSession;
+    req.sessionName = req_opts.sessionName;
+    req.globalSearch = req_opts.globalSearch;
+    req.symbolRank = req_opts.symbolRank;
+
+    auto client = getOrCreateClient(opts);
+    std::promise<Result<yams::daemon::SearchResponse>> p;
+    std::promise<void> done;
+    auto f = p.get_future();
+    auto done_f = done.get_future();
+    boost::asio::co_spawn(
+        yams::daemon::GlobalIOContext::global_executor(),
+        [client, req, p = std::move(p),
+         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
+            auto r = co_await client->streamingSearch(req);
+            p.set_value(std::move(r));
+            d.set_value();
+            co_return;
+        },
+        boost::asio::detached);
+
+    try {
+        if (f.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
+            std::future_status::ready) {
+            auto result = f.get();
+            done_f.wait();
+            return result;
+        }
+    } catch (const std::exception& e) {
+        done_f.wait();
+        return Error{ErrorCode::InternalError,
+                     std::string("search failed with exception: ") + e.what()};
+    }
+    done_f.wait();
+    return Error{ErrorCode::Timeout, "search timed out"};
+}
+
+Result<yams::daemon::StatusResponse> RetrievalService::status(const RetrievalOptions& opts) const {
+    auto client = getOrCreateClient(opts);
+    std::promise<Result<yams::daemon::StatusResponse>> p;
+    std::promise<void> done;
+    auto f = p.get_future();
+    auto done_f = done.get_future();
+    boost::asio::co_spawn(
+        yams::daemon::GlobalIOContext::global_executor(),
+        [client, p = std::move(p), d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
+            auto r = co_await client->status();
+            p.set_value(std::move(r));
+            d.set_value();
+            co_return;
+        },
+        boost::asio::detached);
+
+    try {
+        if (f.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
+            std::future_status::ready) {
+            auto result = f.get();
+            done_f.wait();
+            return result;
+        }
+    } catch (const std::exception& e) {
+        done_f.wait();
+        return Error{ErrorCode::InternalError,
+                     std::string("status failed with exception: ") + e.what()};
+    }
+    done_f.wait();
+    return Error{ErrorCode::Timeout, "status timed out"};
+}
+
+Result<yams::daemon::CatResponse> RetrievalService::cat(const yams::daemon::CatRequest& req,
+                                                        const RetrievalOptions& opts) const {
+    auto client = getOrCreateClient(opts);
+    std::promise<Result<yams::daemon::CatResponse>> p;
+    std::promise<void> done;
+    auto f = p.get_future();
+    auto done_f = done.get_future();
+    boost::asio::co_spawn(
+        yams::daemon::GlobalIOContext::global_executor(),
+        [client, req, p = std::move(p),
+         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
+            auto r = co_await client->cat(req);
+            p.set_value(std::move(r));
+            d.set_value();
+            co_return;
+        },
+        boost::asio::detached);
+
+    try {
+        if (f.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
+            std::future_status::ready) {
+            auto result = f.get();
+            done_f.wait();
+            return result;
+        }
+    } catch (const std::exception& e) {
+        done_f.wait();
+        return Error{ErrorCode::InternalError,
+                     std::string("cat failed with exception: ") + e.what()};
+    }
+    done_f.wait();
+    return Error{ErrorCode::Timeout, "cat timed out"};
+}
+
+Result<yams::daemon::GraphQueryResponse>
+RetrievalService::graphQuery(const yams::daemon::GraphQueryRequest& req,
+                             const RetrievalOptions& opts) const {
+    auto client = getOrCreateClient(opts);
+    std::promise<Result<yams::daemon::GraphQueryResponse>> p;
+    std::promise<void> done;
+    auto f = p.get_future();
+    auto done_f = done.get_future();
+    boost::asio::co_spawn(
+        yams::daemon::GlobalIOContext::global_executor(),
+        [client, req, p = std::move(p),
+         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
+            auto r = co_await client->call<yams::daemon::GraphQueryRequest>(req);
+            p.set_value(std::move(r));
+            d.set_value();
+            co_return;
+        },
+        boost::asio::detached);
+
+    try {
+        if (f.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
+            std::future_status::ready) {
+            auto result = f.get();
+            done_f.wait();
+            return result;
+        }
+    } catch (const std::exception& e) {
+        done_f.wait();
+        return Error{ErrorCode::InternalError,
+                     std::string("graphQuery failed with exception: ") + e.what()};
+    }
+    done_f.wait();
+    return Error{ErrorCode::Timeout, "graphQuery timed out"};
+}
+
+Result<yams::daemon::DownloadResponse>
+RetrievalService::download(const yams::daemon::DownloadRequest& req,
+                           const RetrievalOptions& opts) const {
+    auto client = getOrCreateClient(opts);
+    std::promise<Result<yams::daemon::DownloadResponse>> p;
+    std::promise<void> done;
+    auto f = p.get_future();
+    auto done_f = done.get_future();
+    boost::asio::co_spawn(
+        yams::daemon::GlobalIOContext::global_executor(),
+        [client, req, p = std::move(p),
+         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
+            auto r = co_await client->call<yams::daemon::DownloadRequest>(req);
+            p.set_value(std::move(r));
+            d.set_value();
+            co_return;
+        },
+        boost::asio::detached);
+
+    try {
+        if (f.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
+            std::future_status::ready) {
+            auto result = f.get();
+            done_f.wait();
+            return result;
+        }
+    } catch (const std::exception& e) {
+        done_f.wait();
+        return Error{ErrorCode::InternalError,
+                     std::string("download failed with exception: ") + e.what()};
+    }
+    done_f.wait();
+    return Error{ErrorCode::Timeout, "download timed out"};
 }
 
 } // namespace yams::app::services

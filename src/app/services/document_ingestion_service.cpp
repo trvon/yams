@@ -14,6 +14,49 @@
 
 namespace yams::app::services {
 
+DocumentIngestionService::DocumentIngestionService(
+    std::shared_ptr<yams::daemon::DaemonClient> client)
+    : client_(std::move(client)) {}
+
+static yams::daemon::ClientConfig
+makeIngestionClientConfig(const std::optional<std::filesystem::path>& socketPath,
+                          const std::optional<std::filesystem::path>& explicitDataDir,
+                          int timeoutMs) {
+    yams::daemon::ClientConfig cfg;
+    if (socketPath && !socketPath->empty())
+        cfg.socketPath = *socketPath;
+    if (explicitDataDir && !explicitDataDir->empty())
+        cfg.dataDir = *explicitDataDir;
+    cfg.enableChunkedResponses = false;
+    cfg.singleUseConnections = false;
+    cfg.requestTimeout = std::chrono::milliseconds(std::max(1, timeoutMs));
+    return cfg;
+}
+
+std::shared_ptr<yams::daemon::DaemonClient>
+DocumentIngestionService::getOrCreateClient(const AddOptions& opts) const {
+    if (client_)
+        return client_;
+    return std::make_shared<yams::daemon::DaemonClient>(
+        makeIngestionClientConfig(opts.socketPath, opts.explicitDataDir, opts.timeoutMs));
+}
+
+std::shared_ptr<yams::daemon::DaemonClient>
+DocumentIngestionService::getOrCreateClient(const DeleteOptions& opts) const {
+    if (client_)
+        return client_;
+    return std::make_shared<yams::daemon::DaemonClient>(
+        makeIngestionClientConfig(opts.socketPath, opts.explicitDataDir, opts.timeoutMs));
+}
+
+std::shared_ptr<yams::daemon::DaemonClient>
+DocumentIngestionService::getOrCreateClient(const UpdateOptions& opts) const {
+    if (client_)
+        return client_;
+    return std::make_shared<yams::daemon::DaemonClient>(
+        makeIngestionClientConfig(opts.socketPath, opts.explicitDataDir, opts.timeoutMs));
+}
+
 std::string DocumentIngestionService::normalizePath(const std::string& inPath) {
     if (inPath.empty() || inPath == "-")
         return inPath;
@@ -58,6 +101,8 @@ DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
     dreq.excludePatterns = opts.excludePatterns;
     dreq.noGitignore = opts.noGitignore;
     dreq.tags = opts.tags;
+    dreq.waitForProcessing = opts.waitForProcessing;
+    dreq.waitTimeoutSeconds = opts.waitTimeoutSeconds;
     for (const auto& [k, v] : opts.metadata) {
         dreq.metadata[k] = v;
     }
@@ -165,6 +210,94 @@ DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
     }
     return Error{ErrorCode::NetworkError,
                  lastError.empty() ? std::string("daemon add failed") : lastError};
+}
+
+Result<yams::daemon::DeleteResponse>
+DocumentIngestionService::deleteDocument(const DeleteOptions& opts) const {
+    yams::daemon::DeleteRequest dreq;
+    dreq.names = opts.names;
+    dreq.dryRun = opts.dryRun;
+    dreq.force = true; // service layer assumes caller confirmed
+    dreq.sessionId = opts.sessionId;
+    // Set hash from first entry if only hashes provided
+    if (!opts.hashes.empty() && opts.names.empty()) {
+        dreq.hash = opts.hashes.front();
+    }
+
+    auto client = getOrCreateClient(opts);
+    std::promise<Result<yams::daemon::DeleteResponse>> p;
+    std::promise<void> done;
+    auto f = p.get_future();
+    auto done_f = done.get_future();
+    boost::asio::co_spawn(
+        yams::daemon::GlobalIOContext::global_executor(),
+        [client, dreq, p = std::move(p),
+         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
+            auto r = co_await client->remove(dreq);
+            // remove() returns SuccessResponse; wrap into DeleteResponse
+            yams::daemon::DeleteResponse dr;
+            if (r) {
+                dr.successCount = 1;
+            }
+            p.set_value(Result<yams::daemon::DeleteResponse>(std::move(dr)));
+            d.set_value();
+            co_return;
+        },
+        boost::asio::detached);
+
+    try {
+        if (f.wait_for(std::chrono::milliseconds(opts.timeoutMs)) == std::future_status::ready) {
+            auto result = f.get();
+            done_f.wait();
+            return result;
+        }
+    } catch (const std::exception& e) {
+        done_f.wait();
+        return Error{ErrorCode::InternalError,
+                     std::string("delete failed with exception: ") + e.what()};
+    }
+    done_f.wait();
+    return Error{ErrorCode::Timeout, "delete timed out"};
+}
+
+Result<yams::daemon::UpdateDocumentResponse>
+DocumentIngestionService::updateDocument(const UpdateOptions& opts) const {
+    yams::daemon::UpdateDocumentRequest dreq;
+    dreq.hash = opts.hash;
+    dreq.name = opts.name;
+    dreq.addTags = opts.addTags;
+    dreq.removeTags = opts.removeTags;
+    dreq.metadata = opts.setMetadata;
+
+    auto client = getOrCreateClient(opts);
+    std::promise<Result<yams::daemon::UpdateDocumentResponse>> p;
+    std::promise<void> done;
+    auto f = p.get_future();
+    auto done_f = done.get_future();
+    boost::asio::co_spawn(
+        yams::daemon::GlobalIOContext::global_executor(),
+        [client, dreq, p = std::move(p),
+         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
+            auto r = co_await client->updateDocument(dreq);
+            p.set_value(std::move(r));
+            d.set_value();
+            co_return;
+        },
+        boost::asio::detached);
+
+    try {
+        if (f.wait_for(std::chrono::milliseconds(opts.timeoutMs)) == std::future_status::ready) {
+            auto result = f.get();
+            done_f.wait();
+            return result;
+        }
+    } catch (const std::exception& e) {
+        done_f.wait();
+        return Error{ErrorCode::InternalError,
+                     std::string("update failed with exception: ") + e.what()};
+    }
+    done_f.wait();
+    return Error{ErrorCode::Timeout, "update timed out"};
 }
 
 } // namespace yams::app::services

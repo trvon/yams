@@ -24,7 +24,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -40,6 +42,7 @@
 #ifndef _WIN32
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #else
 #ifndef WIN32_LEAN_AND_MEAN
@@ -161,6 +164,85 @@ std::filesystem::path g_cachedDataDir;
 std::filesystem::path resolveDataDirCached() {
     std::call_once(g_dataDirOnce, []() {
         namespace fs = std::filesystem;
+        auto env_overrides_data_dir = []() -> bool {
+            const char* envStorage = std::getenv("YAMS_STORAGE");
+            const char* envData = std::getenv("YAMS_DATA_DIR");
+            const char* envCfg = std::getenv("YAMS_CONFIG");
+            return (envStorage && *envStorage) || (envData && *envData) || (envCfg && *envCfg);
+        };
+
+#ifndef _WIN32
+        auto cache_data_dir_path = []() -> fs::path {
+            fs::path base;
+            if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg) {
+                base = fs::path(xdg);
+            } else if (const char* home = std::getenv("HOME"); home && *home) {
+                base = fs::path(home) / ".cache";
+            } else {
+                base = fs::temp_directory_path();
+            }
+            return base / "yams" / "client_datadir.txt";
+        };
+
+        auto read_cached_data_dir = [&](const fs::path& p) -> std::optional<fs::path> {
+            try {
+                fs::create_directories(p.parent_path());
+                int fd = ::open(p.string().c_str(), O_RDONLY | O_CLOEXEC);
+                if (fd < 0)
+                    return std::nullopt;
+                // Best-effort shared lock to prevent torn reads during writer update.
+                (void)::flock(fd, LOCK_SH);
+                std::string line;
+                {
+                    std::ifstream in(p);
+                    std::getline(in, line);
+                }
+                (void)::flock(fd, LOCK_UN);
+                ::close(fd);
+                // Trim whitespace
+                line.erase(line.begin(),
+                           std::find_if(line.begin(), line.end(),
+                                        [](unsigned char ch) { return !std::isspace(ch); }));
+                line.erase(std::find_if(line.rbegin(), line.rend(),
+                                        [](unsigned char ch) { return !std::isspace(ch); })
+                               .base(),
+                           line.end());
+                if (line.empty())
+                    return std::nullopt;
+                return fs::path(line);
+            } catch (...) {
+                return std::nullopt;
+            }
+        };
+
+        auto write_cached_data_dir = [&](const fs::path& p, const fs::path& value) {
+            try {
+                fs::create_directories(p.parent_path());
+                int fd = ::open(p.string().c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+                if (fd < 0)
+                    return;
+                (void)::flock(fd, LOCK_EX);
+                {
+                    std::ofstream out(p, std::ios::trunc);
+                    if (out)
+                        out << value.string() << "\n";
+                }
+                (void)::flock(fd, LOCK_UN);
+                ::close(fd);
+            } catch (...) {
+            }
+        };
+
+        // Cross-process cache: only use when no env overrides are present.
+        if (!env_overrides_data_dir()) {
+            const auto cachePath = cache_data_dir_path();
+            if (auto cached = read_cached_data_dir(cachePath)) {
+                g_cachedDataDir = *cached;
+                return;
+            }
+        }
+#endif
+
         auto expand_tilde = [](const std::string& p) -> std::string {
             if (!p.empty() && p.front() == '~') {
                 if (const char* home = std::getenv("HOME"))
@@ -246,6 +328,13 @@ std::filesystem::path resolveDataDirCached() {
             } else {
                 g_cachedDataDir = fs::current_path() / "yams_data";
             }
+
+#ifndef _WIN32
+            // Persist cross-process cache for faster CLI startup on subsequent invocations.
+            if (!g_cachedDataDir.empty() && !env_overrides_data_dir()) {
+                write_cached_data_dir(cache_data_dir_path(), g_cachedDataDir);
+            }
+#endif
         } catch (const std::exception& e) {
             spdlog::debug("resolveDataDirCached: resolution failed: {}", e.what());
         } catch (...) {
@@ -259,7 +348,26 @@ std::filesystem::path resolveDataDirCached() {
 // DaemonClient implementation
 DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<Impl>(config)) {
     if (pImpl->config_.socketPath.empty()) {
-        pImpl->config_.socketPath = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
+        // Resolve daemon socket path, then check for proxy socket alongside it.
+        // Priority:
+        //  1) YAMS_PROXY_SOCKET env var (explicit override)
+        //  2) proxy.sock sibling of daemon.sock (auto-discovery)
+        //  3) Fall back to daemon.sock directly
+        auto daemonSock = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
+
+        std::filesystem::path proxyCandidate;
+        if (const char* env = std::getenv("YAMS_PROXY_SOCKET"); env && *env) {
+            proxyCandidate = env;
+        } else {
+            proxyCandidate = daemonSock.parent_path() / "proxy.sock";
+        }
+
+        std::error_code ec;
+        if (!proxyCandidate.empty() && std::filesystem::exists(proxyCandidate, ec)) {
+            pImpl->config_.socketPath = proxyCandidate;
+        } else {
+            pImpl->config_.socketPath = daemonSock;
+        }
     }
     // Use cached data directory resolution for snappier startup
     if (pImpl->config_.dataDir.empty()) {

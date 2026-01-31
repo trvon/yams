@@ -696,6 +696,9 @@ struct ListEntry {
     double relevanceScore = 0.0;
     std::string matchReason; // why this document matched
 
+    // Extraction status: "pending", "success", "failed", "skipped"
+    std::string extractionStatus = "pending";
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -717,6 +720,9 @@ struct ListEntry {
 
         // Display helpers
         ser << relevanceScore << matchReason;
+
+        // Extraction status
+        ser << extractionStatus;
     }
 
     template <typename Deserializer>
@@ -830,6 +836,12 @@ struct ListEntry {
             return mr.error();
         e.matchReason = std::move(mr.value());
 
+        // Extraction status (backward compatible)
+        auto es = deser.readString();
+        if (es) {
+            e.extractionStatus = std::move(es.value());
+        }
+
         return e;
     }
 };
@@ -908,6 +920,9 @@ struct DeleteRequest {
     bool recursive = false; // for directory deletion
     bool verbose = false;
 
+    // Session scoping
+    std::string sessionId;
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -915,6 +930,7 @@ struct DeleteRequest {
         // Extended fields for enhanced protocol
         ser << name << names << pattern << directory;
         ser << force << dryRun << keepRefs << recursive << verbose;
+        ser << sessionId;
     }
 
     template <typename Deserializer>
@@ -968,6 +984,11 @@ struct DeleteRequest {
         auto verboseResult = deser.template read<bool>();
         if (verboseResult)
             req.verbose = verboseResult.value();
+
+        // Session scoping (optional, backward compatible)
+        auto sessionIdResult = deser.readString();
+        if (sessionIdResult)
+            req.sessionId = std::move(sessionIdResult.value());
 
         return req;
     }
@@ -1606,12 +1627,17 @@ struct AddDocumentRequest {
     // Gitignore handling
     bool noGitignore = false; // Ignore .gitignore patterns when adding files
 
+    // Sync extraction wait options
+    bool waitForProcessing = false; // Wait for text extraction to complete before returning
+    int waitTimeoutSeconds = 30;    // Max seconds to wait for extraction (0 = no timeout)
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << path << content << name << tags << metadata << recursive << includeHidden
             << includePatterns << excludePatterns << collection << snapshotId << snapshotLabel
-            << sessionId << mimeType << disableAutoMime << noEmbeddings << noGitignore;
+            << sessionId << mimeType << disableAutoMime << noEmbeddings << noGitignore
+            << waitForProcessing << waitTimeoutSeconds;
     }
 
     template <typename Deserializer>
@@ -1697,6 +1723,17 @@ struct AddDocumentRequest {
         if (!noGit)
             return noGit.error();
         req.noGitignore = noGit.value();
+
+        // Read sync wait options (backward compatible - default if not present)
+        auto waitProc = deser.template read<bool>();
+        if (waitProc) {
+            req.waitForProcessing = waitProc.value();
+        }
+
+        auto waitTimeout = deser.template read<int>();
+        if (waitTimeout) {
+            req.waitTimeoutSeconds = waitTimeout.value();
+        }
 
         return req;
     }
@@ -2975,6 +3012,7 @@ struct UseSessionRequest;
 struct AddPathSelectorRequest;
 struct RemovePathSelectorRequest;
 struct ListTreeDiffRequest;
+struct BatchRequest;
 
 // Variant type for all requests
 using Request = std::variant<
@@ -2988,7 +3026,7 @@ using Request = std::variant<
     RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest, PruneRequest,
     ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest, GraphQueryRequest,
     GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest, KgIngestRequest,
-    MetadataValueCountsRequest>;
+    MetadataValueCountsRequest, BatchRequest>;
 
 // ============================================================================
 // Response Types
@@ -3520,6 +3558,9 @@ struct StatusResponse {
     size_t connectionSlotsFree{0};   // Available connection slots
     uint64_t oldestConnectionAge{0}; // Age of oldest active connection (seconds)
     uint64_t forcedCloseCount{0};    // Connections closed due to lifetime exceeded
+    // Proxy socket metrics
+    size_t proxyActiveConnections{0};
+    std::string proxySocketPath;
     double memoryUsageMb;
     double cpuUsagePercent;
     std::string version;
@@ -3870,6 +3911,9 @@ struct StatusResponse {
         ser << static_cast<uint32_t>(onnxTotalSlots) << static_cast<uint32_t>(onnxUsedSlots)
             << static_cast<uint32_t>(onnxGlinerUsed) << static_cast<uint32_t>(onnxEmbedUsed)
             << static_cast<uint32_t>(onnxRerankerUsed);
+
+        // Proxy socket metrics
+        ser << static_cast<uint64_t>(proxyActiveConnections) << proxySocketPath;
     }
 
     template <typename Deserializer>
@@ -4220,6 +4264,14 @@ struct StatusResponse {
         if (!onnxReranker)
             return onnxReranker.error();
         res.onnxRerankerUsed = onnxReranker.value();
+
+        // Proxy socket metrics (optional — tolerate missing for backward compat)
+        auto proxyConnResult = deser.template read<uint64_t>();
+        if (proxyConnResult)
+            res.proxyActiveConnections = proxyConnResult.value();
+        auto proxyPathResult = deser.template read<std::string>();
+        if (proxyPathResult)
+            res.proxySocketPath = proxyPathResult.value();
 
         return res;
     }
@@ -4870,12 +4922,14 @@ struct AddDocumentResponse {
     size_t size = 0;
     std::string snapshotId;    // Auto-generated timestamp ID for directory operations
     std::string snapshotLabel; // Optional human-friendly label
+    std::string extractionStatus =
+        "pending"; // Text extraction status: pending, success, failed, skipped
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << hash << path << documentsAdded << documentsUpdated << documentsSkipped << message
-            << static_cast<uint64_t>(size) << snapshotId << snapshotLabel;
+            << static_cast<uint64_t>(size) << snapshotId << snapshotLabel << extractionStatus;
     }
 
     template <typename Deserializer>
@@ -4924,6 +4978,13 @@ struct AddDocumentResponse {
         if (!slbl)
             return slbl.error();
         res.snapshotLabel = std::move(slbl.value());
+
+        // Read extraction status (backward compatible - default to pending if not present)
+        auto es = deser.readString();
+        if (es) {
+            res.extractionStatus = std::move(es.value());
+        }
+
         return res;
     }
 };
@@ -6771,6 +6832,9 @@ struct ListTreeDiffResponse {
     }
 };
 
+// Forward declaration for batch response type
+struct BatchResponse;
+
 // Variant type for all responses
 using Response =
     std::variant<SearchResponse, AddResponse, GetResponse, GetInitResponse, GetChunkResponse,
@@ -6783,8 +6847,319 @@ using Response =
                  ListSnapshotsResponse, RestoreCollectionResponse, RestoreSnapshotResponse,
                  GraphQueryResponse, GraphPathHistoryResponse, GraphRepairResponse,
                  GraphValidateResponse, KgIngestResponse, MetadataValueCountsResponse,
+                 // Batch response (Track B)
+                 BatchResponse,
                  // Streaming events (progress/heartbeats)
                  EmbeddingEvent, ModelLoadEvent>;
+
+// ============================================================================
+// Batch Request/Response Types (Track B: Communication Overhead Reduction)
+// ============================================================================
+
+struct BatchItem;
+
+struct BatchItemResponse {
+    uint32_t sequenceId = 0;
+    bool success = false;
+    std::variant<SearchResponse, GetResponse, AddDocumentResponse, GrepResponse,
+                 UpdateDocumentResponse, DeleteResponse, ListResponse, GraphQueryResponse,
+                 ErrorResponse>
+        response;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << sequenceId << success;
+        std::visit(
+            [&ser](const auto& r) {
+                using T = std::decay_t<decltype(r)>;
+                if constexpr (std::is_same_v<T, SearchResponse>)
+                    ser << uint8_t(0);
+                else if constexpr (std::is_same_v<T, GetResponse>)
+                    ser << uint8_t(1);
+                else if constexpr (std::is_same_v<T, AddDocumentResponse>)
+                    ser << uint8_t(2);
+                else if constexpr (std::is_same_v<T, GrepResponse>)
+                    ser << uint8_t(3);
+                else if constexpr (std::is_same_v<T, UpdateDocumentResponse>)
+                    ser << uint8_t(4);
+                else if constexpr (std::is_same_v<T, DeleteResponse>)
+                    ser << uint8_t(5);
+                else if constexpr (std::is_same_v<T, ListResponse>)
+                    ser << uint8_t(6);
+                else if constexpr (std::is_same_v<T, GraphQueryResponse>)
+                    ser << uint8_t(7);
+                else if constexpr (std::is_same_v<T, ErrorResponse>)
+                    ser << uint8_t(8);
+                ser << r;
+            },
+            response);
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<BatchItemResponse> deserialize(Deserializer& deser) {
+        BatchItemResponse resp;
+        auto seq = deser.template read<uint32_t>();
+        if (!seq)
+            return seq.error();
+        resp.sequenceId = seq.value();
+        auto succ = deser.template read<bool>();
+        if (!succ)
+            return succ.error();
+        resp.success = succ.value();
+        auto type = deser.template read<uint8_t>();
+        if (!type)
+            return type.error();
+        switch (type.value()) {
+            case 0: {
+                auto r = SearchResponse::deserialize(deser);
+                if (!r)
+                    return r.error();
+                resp.response = r.value();
+                break;
+            }
+            case 1: {
+                auto r = GetResponse::deserialize(deser);
+                if (!r)
+                    return r.error();
+                resp.response = r.value();
+                break;
+            }
+            case 2: {
+                auto r = AddDocumentResponse::deserialize(deser);
+                if (!r)
+                    return r.error();
+                resp.response = r.value();
+                break;
+            }
+            case 3: {
+                auto r = GrepResponse::deserialize(deser);
+                if (!r)
+                    return r.error();
+                resp.response = r.value();
+                break;
+            }
+            case 4: {
+                auto r = UpdateDocumentResponse::deserialize(deser);
+                if (!r)
+                    return r.error();
+                resp.response = r.value();
+                break;
+            }
+            case 5: {
+                auto r = DeleteResponse::deserialize(deser);
+                if (!r)
+                    return r.error();
+                resp.response = r.value();
+                break;
+            }
+            case 6: {
+                auto r = ListResponse::deserialize(deser);
+                if (!r)
+                    return r.error();
+                resp.response = r.value();
+                break;
+            }
+            case 7: {
+                auto r = GraphQueryResponse::deserialize(deser);
+                if (!r)
+                    return r.error();
+                resp.response = r.value();
+                break;
+            }
+            case 8: {
+                auto r = ErrorResponse::deserialize(deser);
+                if (!r)
+                    return r.error();
+                resp.response = r.value();
+                break;
+            }
+            default:
+                return Error{ErrorCode::InvalidData, "Unknown BatchItemResponse type"};
+        }
+        return resp;
+    }
+};
+
+struct BatchResponse {
+    std::vector<BatchItemResponse> items;
+    uint32_t totalCount = 0;
+    uint32_t successCount = 0;
+    uint32_t errorCount = 0;
+    std::chrono::milliseconds elapsed{0};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << items << totalCount << successCount << errorCount << elapsed;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<BatchResponse> deserialize(Deserializer& deser) {
+        BatchResponse resp;
+        auto items = deser.template readVector<BatchItemResponse>();
+        if (!items)
+            return items.error();
+        resp.items = items.value();
+        auto total = deser.template read<uint32_t>();
+        if (!total)
+            return total.error();
+        resp.totalCount = total.value();
+        auto success = deser.template read<uint32_t>();
+        if (!success)
+            return success.error();
+        resp.successCount = success.value();
+        auto error = deser.template read<uint32_t>();
+        if (!error)
+            return error.error();
+        resp.errorCount = error.value();
+        auto elapsed = deser.template readDuration<std::chrono::milliseconds>();
+        if (elapsed)
+            resp.elapsed = elapsed.value();
+        return resp;
+    }
+};
+
+struct BatchItem {
+    uint32_t sequenceId = 0;
+    std::variant<SearchRequest, GetRequest, AddDocumentRequest, GrepRequest, UpdateDocumentRequest,
+                 DeleteRequest, ListRequest, GraphQueryRequest>
+        request;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << sequenceId;
+        std::visit(
+            [&ser](const auto& r) {
+                using T = std::decay_t<decltype(r)>;
+                if constexpr (std::is_same_v<T, SearchRequest>)
+                    ser << uint8_t(0);
+                else if constexpr (std::is_same_v<T, GetRequest>)
+                    ser << uint8_t(1);
+                else if constexpr (std::is_same_v<T, AddDocumentRequest>)
+                    ser << uint8_t(2);
+                else if constexpr (std::is_same_v<T, GrepRequest>)
+                    ser << uint8_t(3);
+                else if constexpr (std::is_same_v<T, UpdateDocumentRequest>)
+                    ser << uint8_t(4);
+                else if constexpr (std::is_same_v<T, DeleteRequest>)
+                    ser << uint8_t(5);
+                else if constexpr (std::is_same_v<T, ListRequest>)
+                    ser << uint8_t(6);
+                else if constexpr (std::is_same_v<T, GraphQueryRequest>)
+                    ser << uint8_t(7);
+                ser << r;
+            },
+            request);
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<BatchItem> deserialize(Deserializer& deser) {
+        BatchItem item;
+        auto seq = deser.template read<uint32_t>();
+        if (!seq)
+            return seq.error();
+        item.sequenceId = seq.value();
+        auto type = deser.template read<uint8_t>();
+        if (!type)
+            return type.error();
+        switch (type.value()) {
+            case 0: {
+                auto r = SearchRequest::deserialize(deser);
+                if (!r)
+                    return r.error();
+                item.request = r.value();
+                break;
+            }
+            case 1: {
+                auto r = GetRequest::deserialize(deser);
+                if (!r)
+                    return r.error();
+                item.request = r.value();
+                break;
+            }
+            case 2: {
+                auto r = AddDocumentRequest::deserialize(deser);
+                if (!r)
+                    return r.error();
+                item.request = r.value();
+                break;
+            }
+            case 3: {
+                auto r = GrepRequest::deserialize(deser);
+                if (!r)
+                    return r.error();
+                item.request = r.value();
+                break;
+            }
+            case 4: {
+                auto r = UpdateDocumentRequest::deserialize(deser);
+                if (!r)
+                    return r.error();
+                item.request = r.value();
+                break;
+            }
+            case 5: {
+                auto r = DeleteRequest::deserialize(deser);
+                if (!r)
+                    return r.error();
+                item.request = r.value();
+                break;
+            }
+            case 6: {
+                auto r = ListRequest::deserialize(deser);
+                if (!r)
+                    return r.error();
+                item.request = r.value();
+                break;
+            }
+            case 7: {
+                auto r = GraphQueryRequest::deserialize(deser);
+                if (!r)
+                    return r.error();
+                item.request = r.value();
+                break;
+            }
+            default:
+                return Error{ErrorCode::InvalidData, "Unknown BatchItem request type"};
+        }
+        return item;
+    }
+};
+
+struct BatchRequest {
+    std::vector<BatchItem> items;
+    bool continueOnError = false;
+    std::string sessionId;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << items << continueOnError << sessionId;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<BatchRequest> deserialize(Deserializer& deser) {
+        BatchRequest req;
+        auto items = deser.template readVector<BatchItem>();
+        if (!items)
+            return items.error();
+        req.items = items.value();
+        auto cont = deser.template read<bool>();
+        if (!cont)
+            return cont.error();
+        req.continueOnError = cont.value();
+        auto session = deser.readString();
+        if (session)
+            req.sessionId = session.value();
+        return req;
+    }
+};
 
 // ============================================================================
 // Message Envelope
@@ -6921,7 +7296,11 @@ enum class MessageType : uint8_t {
     KgIngestResponse = 168,
     // Generic metadata value counts query (MCP client mode)
     MetadataValueCountsRequest = 71,
+    // Batch request (Track B: Communication Overhead Reduction)
+    BatchRequest = 72,
     MetadataValueCountsResponse = 169,
+    // Batch response (Track B: Communication Overhead Reduction)
+    BatchResponse = 170,
     // Events
     EmbeddingEvent = 149,
     ModelLoadEvent = 150,

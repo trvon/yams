@@ -56,6 +56,7 @@ struct ListEntryMapper {
         if (doc.matchReason) {
             item.matchReason = doc.matchReason.value();
         }
+        item.extractionStatus = doc.extractionStatus;
         return item;
     }
 
