@@ -7,8 +7,8 @@
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/error_hints.h>
-#include <yams/cli/result_helpers.h>
 #include <yams/cli/pipeline_stage_render.h>
+#include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -80,6 +80,27 @@ inline int kill(pid_t pid, int sig) {
 using uid_t = int;
 inline uid_t getuid() {
     return 0;
+}
+
+static std::string describeProcess(pid_t pid) {
+    if (pid <= 0) {
+        return "";
+    }
+    HANDLE hProcess =
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+    if (!hProcess) {
+        return "";
+    }
+    char pathBuf[MAX_PATH];
+    DWORD size = static_cast<DWORD>(sizeof(pathBuf));
+    std::string out;
+    if (QueryFullProcessImageNameA(hProcess, 0, pathBuf, &size) != 0) {
+        out = std::to_string(pid);
+        out.push_back(' ');
+        out.append(pathBuf, pathBuf + size);
+    }
+    CloseHandle(hProcess);
+    return out;
 }
 
 // Windows implementation of setenv
@@ -1035,6 +1056,7 @@ private:
         if (!stopped && daemonRunning) {
             spdlog::debug("Daemon not responding to shutdown, attempting to kill orphaned process");
 
+#ifndef _WIN32
             const auto socketPids = collectDaemonPidsForSocket(effectiveSocket);
             if (!socketPids.empty()) {
                 spdlog::debug("Found {} daemon PID(s) matching socket", socketPids.size());
@@ -1055,6 +1077,7 @@ private:
                     stopped = true;
                 }
             }
+#endif
 
 #ifndef _WIN32
             // Unix: use pkill to find and kill yams-daemon processes with our socket
