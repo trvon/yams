@@ -21,7 +21,13 @@ inline std::string normalizeExtension(const std::string& ext) {
 }
 
 inline bool isTextMime(const std::string& mime) {
-    return !mime.empty() && mime.substr(0, 5) == "text/";
+    if (mime.empty())
+        return false;
+    if (mime.substr(0, 5) == "text/")
+        return true;
+    return mime == "application/json" || mime == "application/xml" ||
+           mime == "application/javascript" || mime == "application/x-yaml" ||
+           mime == "application/yaml" || mime == "application/x-sh";
 }
 
 inline int64_t toEpochSeconds(const std::chrono::system_clock::time_point& tp) {

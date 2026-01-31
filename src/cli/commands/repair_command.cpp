@@ -568,6 +568,10 @@ private:
                     }
                 }
 
+                // For extensionless content, default to text/plain (same as document_service)
+                if (detectedMime.empty() || detectedMime == "application/octet-stream")
+                    detectedMime = "text/plain";
+
                 if (!detectedMime.empty() && detectedMime != "application/octet-stream") {
                     missingMimeCount++;
                     toRepair.push_back({doc.id, detectedMime});
@@ -1357,9 +1361,28 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
         std::string ext = d.fileExtension;
         if (!ext.empty() && ext[0] == '.')
             ext.erase(0, 1);
+
+        // Re-detect MIME for documents with unhelpful MIME types
+        std::string effectiveMime = d.mimeType;
+        if (effectiveMime.empty() || effectiveMime == "application/octet-stream") {
+            if (!ext.empty()) {
+                auto detected = yams::detection::FileTypeDetector::getMimeTypeFromExtension(ext);
+                if (!detected.empty() && detected != "application/octet-stream")
+                    effectiveMime = detected;
+            }
+            // For extensionless content, default to text/plain (same as document_service)
+            if (effectiveMime.empty() || effectiveMime == "application/octet-stream")
+                effectiveMime = "text/plain";
+
+            // Persist corrected MIME so future list/query uses it
+            auto updated = d;
+            updated.mimeType = effectiveMime;
+            (void)ctx.metadataRepo->updateDocument(updated);
+        }
+
         try {
             auto extractedOpt = yams::extraction::util::extractDocumentText(
-                ctx.store, d.sha256Hash, d.mimeType, ext, ctx.contentExtractors);
+                ctx.store, d.sha256Hash, effectiveMime, ext, ctx.contentExtractors);
             if (extractedOpt && !extractedOpt->empty()) {
                 // Mark as pending while we attempt to write content + FTS5.
                 // This avoids leaving a misleading Success status if persistence/indexing fails.
@@ -1376,7 +1399,7 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
 
                 // Index in FTS5
                 auto ir = ctx.metadataRepo->indexDocumentContent(d.id, d.fileName, *extractedOpt,
-                                                                 d.mimeType);
+                                                                 effectiveMime);
                 if (ir && contentResult) {
                     (void)ctx.metadataRepo->updateDocumentExtractionStatus(
                         d.id, true, metadata::ExtractionStatus::Success);

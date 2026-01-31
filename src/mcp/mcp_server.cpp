@@ -5,7 +5,6 @@
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
-#include <yams/app/services/session_inject.h>
 #endif
 #if !defined(YAMS_WASI)
 #include <yams/cli/daemon_helpers.h>
