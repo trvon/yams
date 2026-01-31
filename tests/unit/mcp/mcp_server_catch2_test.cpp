@@ -3,10 +3,18 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
+#include <future>
+#include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <unordered_set>
 #include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include <nlohmann/json.hpp>
 #include <yams/mcp/mcp_server.h>
@@ -29,6 +37,31 @@ public:
         return yams::mcp::TransportState::Disconnected;
     }
 };
+
+#ifdef _WIN32
+static int setenv(const char* name, const char* value, int overwrite) {
+    if (!name || !value) {
+        return -1;
+    }
+
+    if (!overwrite) {
+        DWORD existing = GetEnvironmentVariableA(name, nullptr, 0);
+        if (existing != 0) {
+            return 0;
+        }
+    }
+
+    return SetEnvironmentVariableA(name, value) ? 0 : -1;
+}
+
+static int unsetenv(const char* name) {
+    if (!name) {
+        return -1;
+    }
+
+    return SetEnvironmentVariableA(name, nullptr) ? 0 : -1;
+}
+#endif
 
 } // namespace
 
