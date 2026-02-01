@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Unified async add pipeline with parallel batching**: `yams add` with multiple files now processes up to 4 files concurrently via `addBatch()` instead of sequentially. Single shared `DaemonClient` is reused across all add operations (CLI and MCP), eliminating per-file client construction overhead.
 - **`addViaDaemonAsync` coroutine**: New async entry point for all add operations. Replaces promise/future-per-attempt pattern with direct `co_await`, reducing overhead. MCP `handleStoreDocument`, `handleAddDirectory`, and download post-index all route through this single path.
 - **Batch FTS5 orphan removal**: New `removeFromIndexByHashBatch()` wraps all per-hash SELECT+DELETE operations in a single transaction with cached prepared statements. Replaces N individual autocommit transactions with 1 transaction for N hashes. Eliminates prolonged DB lock contention during orphan scans (~29k orphans previously caused ~58k individual transactions), which blocked CLI requests (`yams stats`, `yams list`) and caused timeouts/segfaults.
+- **`yams update` skip CLI-side name resolution for daemon path**: `yams update --name` no longer resolves names to hashes CLI-side before sending to the daemon. Eliminates ~40s `ensureStorageInitialized()` penalty and 1-4 redundant daemon round-trips. Name resolution now only occurs in the local fallback path.
 
 
 ## [v0.8.1] - January 31, 2026

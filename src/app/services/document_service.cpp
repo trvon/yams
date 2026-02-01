@@ -330,6 +330,14 @@ private:
     }
 
     std::vector<metadata::DocumentInfo> tryPathPatterns(const std::string& name) {
+        // Glob shortcut: if name contains glob chars, use glob-to-SQL conversion
+        if (name.find('*') != std::string::npos || name.find('?') != std::string::npos) {
+            auto res = metadata::queryDocumentsByGlobPatterns(repo_, {name});
+            if (res)
+                return res.value();
+            return {};
+        }
+
         std::vector<std::string> patterns;
         std::filesystem::path inputPath(name);
         std::string basename = inputPath.filename().string();

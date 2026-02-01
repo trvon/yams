@@ -69,15 +69,6 @@ void UpdateCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
 
 Result<void> UpdateCommand::execute() {
     try {
-        // If called by name, resolve to hash first using smart resolver (daemon path later uses
-        // hash)
-        if (hash_.empty() && !name_.empty()) {
-            auto hr = resolveNameToHashSmart(name_);
-            if (!hr)
-                return hr.error();
-            hash_ = hr.value();
-        }
-        // Attempt daemon-first update; fall back to local on failure
         if (cli_) {
             yams::daemon::UpdateDocumentRequest dreq;
             dreq.hash = hash_;
@@ -195,7 +186,12 @@ Result<void> UpdateCommand::execute() {
             }
         }
 
-        // Fall back to local execution if daemon failed
+        if (hash_.empty() && !name_.empty()) {
+            auto hr = resolveNameToHashSmart(name_);
+            if (!hr)
+                return hr.error();
+            hash_ = hr.value();
+        }
         return executeLocal();
 
     } catch (const std::exception& e) {
