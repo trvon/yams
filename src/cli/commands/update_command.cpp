@@ -509,6 +509,41 @@ Result<std::string> UpdateCommand::resolveNameToHashSmart(const std::string& nam
     } catch (...) {
     }
 
+    // Glob shortcut: resolve via glob-to-SQL conversion directly
+    if (nm.find('*') != std::string::npos || nm.find('?') != std::string::npos) {
+        auto metadataRepo = metadataRepo_;
+        if (!metadataRepo && cli_) {
+            auto ensured = cli_->ensureStorageInitialized();
+            if (!ensured)
+                return ensured.error();
+            metadataRepo = cli_->getMetadataRepository();
+        }
+        if (metadataRepo) {
+            std::vector<std::string> globPatterns = {nm};
+            if (!nm.empty() && nm[0] != '/') {
+                globPatterns.push_back("**/" + nm);
+            }
+            auto res = metadata::queryDocumentsByGlobPatterns(*metadataRepo, globPatterns);
+            if (res && !res.value().empty()) {
+                const auto& docs = res.value();
+                if (docs.size() == 1)
+                    return docs[0].sha256Hash;
+                // Multiple matches: pick by latest/oldest or first
+                const metadata::DocumentInfo* chosen = &docs[0];
+                if (latest_ || oldest_) {
+                    for (const auto& d : docs) {
+                        if (oldest_ && d.indexedTime < chosen->indexedTime)
+                            chosen = &d;
+                        else if (latest_ && d.indexedTime > chosen->indexedTime)
+                            chosen = &d;
+                    }
+                }
+                return chosen->sha256Hash;
+            }
+            return Error{ErrorCode::NotFound, "No documents matching glob: " + nm};
+        }
+    }
+
     // Use RetrievalService to resolve by name via daemon when available; fall back to service
     yams::app::services::RetrievalService rsvc;
     yams::app::services::RetrievalOptions ropts;

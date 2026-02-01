@@ -216,13 +216,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetEndRequest(const Ge
 }
 
 boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const ListRequest& req) {
-    spdlog::info("[handleListRequest] START limit={}", req.limit);
+    spdlog::debug("[handleListRequest] START limit={}", req.limit);
     try {
-        spdlog::info("[handleListRequest] Getting appContext");
         auto appContext = serviceManager_->getAppContext();
-        spdlog::info("[handleListRequest] Creating docService");
         auto docService = app::services::makeDocumentService(appContext);
-        spdlog::info("[handleListRequest] Building serviceReq");
 
         app::services::ListDocumentsRequest serviceReq;
 
