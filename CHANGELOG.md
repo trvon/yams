@@ -16,7 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.8.1] - Unreleased
+## [v0.8.2] - Unreleased
+
+### Fixed
+- MCP stdio: Improved OpenCode compatibility during handshake/tool discovery (initialize capabilities schema, strict JSON-RPC batch responses, more robust NDJSON parsing).
+- MCP tools: Fixed `mcp.echo` tool `inputSchema` shape so tool schemas validate correctly.
+
+### Added
+- MCP stdio debug/compat toggles: `YAMS_MCP_HANDSHAKE_TRACE` (trace handshake events) and `YAMS_MCP_MINIMAL_TOOLS` (expose only `mcp.echo` for client compatibility debugging).
+
+
+## [v0.8.1] - January 31, 2026
 
 ### Added
 - `yams list --metadata-values` for showing unique metadata values with counts (useful for PBI discovery).

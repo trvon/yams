@@ -492,9 +492,10 @@ bool StdioTransport::isInputAvailable(int timeoutMs) const {
         }
     }
 
-    // Only return true if there's actual data to read (POLLIN), not on hangup (POLLHUP)
-    // POLLHUP without POLLIN means the client closed the connection without sending data
-    return result > 0 && (fds.revents & POLLIN);
+    // Treat POLLHUP as readable too.
+    // Some stdio clients can close stdin after writing, and C++ iostreams may still have
+    // buffered bytes to consume even if the fd no longer reports POLLIN.
+    return result > 0 && ((fds.revents & POLLIN) || (fds.revents & POLLHUP));
 #endif
 }
 
@@ -503,13 +504,52 @@ MessageResult StdioTransport::receive() {
         return Error{ErrorCode::NetworkError, "Transport not connected"};
     }
     std::streambuf* inputBuffer = std::cin.rdbuf();
-    std::istream in(inputBuffer);
     auto* stringBuffer = dynamic_cast<std::stringbuf*>(inputBuffer);
     constexpr std::size_t kTestingIdleSpinLimit = 200;
     std::size_t idleIterations = 0;
 
+    auto is_ws = [](unsigned char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+    };
+
+    auto sanitizeLine = [&](std::string& line) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+
+        // Some clients may send leading whitespace (or whitespace-only keepalive lines).
+        auto firstNonWs =
+            std::find_if_not(line.begin(), line.end(), [&](unsigned char c) { return is_ws(c); });
+        if (firstNonWs == line.end()) {
+            line.clear();
+        } else if (firstNonWs != line.begin()) {
+            line.erase(line.begin(), firstNonWs);
+        }
+
+        // Tolerate occasional record separators / BOMs that may prefix JSON.
+        if (line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF &&
+            static_cast<unsigned char>(line[1]) == 0xBB &&
+            static_cast<unsigned char>(line[2]) == 0xBF) {
+            line.erase(0, 3);
+        }
+        while (!line.empty()) {
+            unsigned char c = static_cast<unsigned char>(line.front());
+            if (c == '{' || c == '[') {
+                break;
+            }
+            if (is_ws(c) || c == 0x1e || c < 0x20) {
+                line.erase(0, 1);
+                continue;
+            }
+            break;
+        }
+    };
+
     while (state_.load() != TransportState::Closing) {
+        // MCP stdio spec: Read NDJSON (newline-delimited JSON)
+        std::string line;
+
         if (stringBuffer) {
+            // Tests: avoid blocking forever.
             if (stringBuffer->in_avail() <= 0) {
                 if (externalShutdown_ && !*externalShutdown_) {
                     state_.store(TransportState::Closing);
@@ -523,75 +563,42 @@ MessageResult StdioTransport::receive() {
                 continue;
             }
             idleIterations = 0;
+
+            std::istream in(inputBuffer);
+            if (!std::getline(in, line)) {
+                recordError();
+                if (!shouldRetryAfterError()) {
+                    state_.store(TransportState::Disconnected);
+                    return Error{ErrorCode::NetworkError, "No stdin data available"};
+                }
+                std::this_thread::yield();
+                continue;
+            }
         } else {
-            if (!isInputAvailable(recvTimeoutMs_)) {
+            // Real stdio: keep it simple and block on getline.
+            // Using poll() here is fragile due to iostream buffering differences across platforms.
+            if (!std::getline(std::cin, line)) {
                 if (externalShutdown_ && !*externalShutdown_) {
                     state_.store(TransportState::Closing);
                     return Error{ErrorCode::NetworkError, "External shutdown requested"};
                 }
+
+                if (std::cin.eof()) {
+                    spdlog::info("StdioTransport: EOF on stdin; treating as client disconnect");
+                    state_.store(TransportState::Disconnected);
+                    return Error{ErrorCode::NetworkError, "EOF on stdin"};
+                }
+
+                // Transient stream failure; clear and retry.
+                std::cin.clear();
                 continue;
             }
         }
 
-        // MCP stdio spec: Read NDJSON (newline-delimited JSON)
-        std::string line;
-
-        // Read first non-empty line, but avoid blocking forever on empty input buffers (tests)
-        do {
-            if (!std::getline(in, line)) {
-                // Check if this is a real EOF or just no data available yet
-                if (stringBuffer && stringBuffer->in_avail() <= 0) {
-                    // For stringbuf-backed streams (tests), this is expected when no data
-                    // Continue the outer loop to wait for more data
-                    recordError();
-                    if (!shouldRetryAfterError()) {
-                        state_.store(TransportState::Disconnected);
-                        return Error{ErrorCode::NetworkError, "No stdin data available"};
-                    }
-                    // Yield and retry
-                    std::this_thread::yield();
-                    continue;
-                }
-
-                // For real stdin (pipes), EOF might mean no data yet OR actual disconnect
-                // Check if we've successfully read any messages before
-                if (errorCount_.load() == 0) {
-                    // No messages read yet - this is likely just waiting for input
-                    // Break out to outer loop to poll again
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    std::cin.clear(); // Clear EOF flag to allow retry
-                    line.clear();     // Ensure line is empty so outer loop continues
-                    break;            // Break out of do-while to outer while loop
-                }
-
-                // Client closed stdin (EOF) after successful communication
-                spdlog::info("StdioTransport: EOF on stdin; treating as client disconnect");
-                state_.store(TransportState::Disconnected);
-                return Error{ErrorCode::NetworkError, "EOF on stdin"};
-            }
-            if (!line.empty() && line.back() == '\r')
-                line.pop_back();
-
-            if (line.empty()) {
-                // For stringbuf-backed streams (tests/act), detect the "no more buffered data" case
-                // so we can bail out instead of blocking on std::getline forever.
-                if (stringBuffer && stringBuffer->in_avail() <= 0) {
-                    recordError();
-                    if (!shouldRetryAfterError())
-                        state_.store(TransportState::Disconnected);
-                    return Error{ErrorCode::NetworkError, "No stdin data available"};
-                }
-                // For real stdin, fall back to the usual readiness check before looping.
-                if (!stringBuffer && !isInputAvailable(recvTimeoutMs_)) {
-                    if (externalShutdown_ && !*externalShutdown_) {
-                        state_.store(TransportState::Closing);
-                        return Error{ErrorCode::NetworkError, "External shutdown requested"};
-                    }
-                    // Timeout waiting for more data – treat as transient; continue outer loop.
-                    continue;
-                }
-            }
-        } while (line.empty());
+        sanitizeLine(line);
+        if (line.empty()) {
+            continue;
+        }
 
         spdlog::debug("StdioTransport: Read line: '{}'", line);
 
@@ -1058,8 +1065,43 @@ void MCPServer::start() {
 
             if (message.is_array()) {
                 spdlog::debug("MCP server received JSON-RPC batch with {} entries", message.size());
+
+                // JSON-RPC batch requests should be answered with a single JSON array response.
+                // Some MCP clients (including OpenCode) rely on strict batch semantics during
+                // initialization/tool discovery.
+                json batchResponses = json::array();
+
                 for (const auto& entry : message) {
-                    processRequest(entry);
+                    if (!entry.is_object()) {
+                        batchResponses.push_back(createError(json(nullptr),
+                                                             protocol::INVALID_REQUEST,
+                                                             "Batch entries must be JSON objects"));
+                        continue;
+                    }
+
+                    const bool isNotification = !entry.contains("id");
+                    if (isNotification) {
+                        (void)this->handleRequest(entry);
+                        continue;
+                    }
+
+                    auto resp = this->handleRequest(entry);
+                    // handleRequest returns MessageResult; if it errors, map to a JSON-RPC error
+                    // response.
+                    if (resp) {
+                        batchResponses.push_back(resp.value());
+                    } else {
+                        const auto& error = resp.error();
+                        batchResponses.push_back(json{
+                            {"jsonrpc", protocol::JSONRPC_VERSION},
+                            {"error",
+                             {{"code", protocol::INVALID_REQUEST}, {"message", error.message}}},
+                            {"id", entry.value("id", nullptr)}});
+                    }
+                }
+
+                if (!batchResponses.empty()) {
+                    sendResponse(batchResponses);
                 }
             } else {
                 processRequest(message);
@@ -4470,8 +4512,18 @@ void MCPServer::initializeToolRegistry() {
                     true);
             }
         },
-        json{{"type", "object"}, {"properties", {{"text", {"type", "string"}}}}},
+        json{{"type", "object"}, {"properties", {{"text", json{{"type", "string"}}}}}},
         "Echo input for MCP protocol testing", "Echo", readOnlyAnnotation);
+
+    // Debug/compat mode: expose only a minimal tool surface.
+    // Some MCP clients validate tool schemas strictly and will drop the entire tools/list
+    // response if a single tool descriptor is malformed.
+    if (const char* env = std::getenv("YAMS_MCP_MINIMAL_TOOLS")) {
+        if (env && *env && env[0] != '0') {
+            spdlog::warn("YAMS_MCP_MINIMAL_TOOLS enabled: only exposing mcp.echo");
+            return;
+        }
+    }
 
 #if defined(YAMS_WASI)
     // WASI builds currently don't support the daemon-backed tool surface.
@@ -5846,6 +5898,17 @@ void MCPServer::initializeToolRegistry() {
                          {"resources", {{"subscribe", false}, {"listChanged", false}}},
                          {"logging", json::object()},
                          {"experimental", json::object()}};
+
+            // OpenCode validates `capabilities.experimental.*` against a schema.
+            // In practice it expects these entries to be objects (not booleans).
+            // We support cancel + progress (when tokens are supplied), so advertise as empty
+            // objects.
+            if (cancellationSupported_) {
+                caps["experimental"]["cancellation"] = json::object();
+            }
+            if (progressSupported_) {
+                caps["experimental"]["progress"] = json::object();
+            }
 
             // Add MCP Apps extension capability if supported by client
             if (mcpAppsSupported_.load()) {

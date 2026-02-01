@@ -19,8 +19,8 @@ json buildServerCapabilities() {
                  {"resources", json({{"subscribe", false}, {"listChanged", false}})},
                  {"logging", json::object()}};
     caps["experimental"] = json::object();
-    caps["experimental"]["cancellation"] = true;
-    caps["experimental"]["progress"] = true;
+    caps["experimental"]["cancellation"] = json::object();
+    caps["experimental"]["progress"] = json::object();
     return caps;
 }
 

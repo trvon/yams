@@ -158,6 +158,16 @@ public:
                     spdlog::set_level(spdlog::level::critical);
             }
 
+            // When enabled, show handshake trace during integration debugging.
+            // Note: logs go to stderr (safe for MCP stdio framing).
+            if (const char* ht = std::getenv("YAMS_MCP_HANDSHAKE_TRACE")) {
+                if (ht && *ht && ht[0] != '0') {
+                    spdlog::set_level(spdlog::level::trace);
+                    spdlog::flush_on(spdlog::level::trace);
+                    spdlog::info("YAMS_MCP_HANDSHAKE_TRACE enabled");
+                }
+            }
+
             // Signal handlers
 #ifdef _WIN32
             auto handler = [](int sig) {
