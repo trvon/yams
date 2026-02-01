@@ -17,7 +17,7 @@ endif
 
 yams_onnx_resource_dep = dependency('yams_onnx_resource', required: true)
 glint_deps = [spdlog_dep, nlohmann_json_dep, yams_config_dep, yams_onnx_resource_dep]
-glint_cpp_args = ['-std=c++23']
+glint_cpp_args = []
 
 if onnxruntime_dep.found()
   glint_deps += [onnxruntime_dep]
@@ -38,6 +38,7 @@ shared_module(
   include_directories: [include_directories('../../include')],
   dependencies: glint_deps,
   cpp_args: glint_cpp_args,
+  override_options: ['cpp_std=c++23'],
   build_by_default: true,
   install: true,
   install_dir: plugins_dir,

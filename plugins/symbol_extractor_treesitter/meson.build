@@ -37,7 +37,7 @@ shared_module(
   extractor_sources,
   include_directories: [ include_directories('../../include'), include_directories('.') ],
   dependencies: [ts_dep, libdl_dep, tl_expected_dep, spdlog_dep, yams_config_dep],
-  cpp_args: ['-std=c++23', '-fexceptions'],  # C++23 with exceptions for error handling
+  override_options: ['cpp_std=c++23'],
   build_by_default: true,
   install: true,
   install_dir: plugins_dir,

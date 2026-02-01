@@ -14,31 +14,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#endif
 
-#include <nlohmann/json.hpp>
-#include <yams/mcp/mcp_server.h>
-
-using namespace yams::mcp;
-using json = nlohmann::json;
-
-namespace {
-
-// Minimal no-op transport for constructing MCPServer in tests without starting loops.
-class NullTransport : public yams::mcp::ITransport {
-public:
-    void send(const json&) override {}
-    yams::mcp::MessageResult receive() override {
-        return yams::Error{yams::ErrorCode::NotImplemented, "Null transport"};
-    }
-    bool isConnected() const override { return false; }
-    void close() override {}
-    yams::mcp::TransportState getState() const override {
-        return yams::mcp::TransportState::Disconnected;
-    }
-};
-
-#ifdef _WIN32
 static int setenv(const char* name, const char* value, int overwrite) {
     if (!name || !value) {
         return -1;
@@ -62,6 +38,28 @@ static int unsetenv(const char* name) {
     return SetEnvironmentVariableA(name, nullptr) ? 0 : -1;
 }
 #endif
+
+#include <nlohmann/json.hpp>
+#include <yams/mcp/mcp_server.h>
+
+using namespace yams::mcp;
+using json = nlohmann::json;
+
+namespace {
+
+// Minimal no-op transport for constructing MCPServer in tests without starting loops.
+class NullTransport : public yams::mcp::ITransport {
+public:
+    void send(const json&) override {}
+    yams::mcp::MessageResult receive() override {
+        return yams::Error{yams::ErrorCode::NotImplemented, "Null transport"};
+    }
+    bool isConnected() const override { return false; }
+    void close() override {}
+    yams::mcp::TransportState getState() const override {
+        return yams::mcp::TransportState::Disconnected;
+    }
+};
 
 } // namespace
 
