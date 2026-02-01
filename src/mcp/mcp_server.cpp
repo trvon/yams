@@ -2852,8 +2852,20 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         } catch (...) {
             co_return Error{ErrorCode::Unknown, "Unable to fetch daemon status for preflight"};
         }
-        // Call daemon to add/index the downloaded document
-        auto addres = co_await daemon_client_->streamingAddDocument(addReq);
+        // Call daemon to add/index the downloaded document via ingestion service
+        app::services::AddOptions postOpts;
+        postOpts.path = addReq.path;
+        postOpts.name = addReq.name;
+        postOpts.tags = addReq.tags;
+        postOpts.metadata = addReq.metadata;
+        postOpts.collection = addReq.collection;
+        postOpts.snapshotId = addReq.snapshotId;
+        postOpts.snapshotLabel = addReq.snapshotLabel;
+        postOpts.noEmbeddings = addReq.noEmbeddings;
+        postOpts.retries = 2;
+        postOpts.timeoutMs = 30000;
+        postOpts.backoffMs = 250;
+        auto addres = co_await ingestion_svc_->addViaDaemonAsync(postOpts);
         if (!addres) {
             spdlog::error("[MCP] post-index: daemon add failed for path='{}' error='{}'",
                           addReq.path, addres.error().message);
@@ -2862,7 +2874,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             mcp_response.indexed = true;
             const auto& addok = addres.value();
             spdlog::info("[MCP] post-index: indexed path='{}' hash='{}'", addReq.path, addok.hash);
-            mcp_response.hash = addok.hash; // Update with the definitive hash from indexing
+            mcp_response.hash = addok.hash;
         }
     }
 
@@ -2965,14 +2977,14 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     } catch (...) {
         co_return Error{ErrorCode::Unknown, "Unable to fetch daemon status for preflight"};
     }
-    // Convert MCP request to daemon request
-    daemon::AddDocumentRequest daemon_req;
-    // Choose path source: prefer explicit path; else treat name as path if it points to a file
+    // Convert MCP request → AddOptions, then route through ingestion service
+    app::services::AddOptions aopts;
+
+    // Resolve path: prefer explicit path; else treat name as path if it points to a file
     std::string candidatePath = req.path;
+    std::string resolvedName;
     if (candidatePath.empty() && !req.name.empty()) {
-        // Heuristic: if 'name' resolves to an existing file, treat it as path (CLI parity)
         std::string tmp = req.name;
-        // Strip CR/LF and trim
         if (!tmp.empty()) {
             tmp.erase(std::remove_if(tmp.begin(), tmp.end(),
                                      [](unsigned char c) { return c == '\n' || c == '\r'; }),
@@ -2989,7 +3001,6 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             ltrim(tmp);
             rtrim(tmp);
         }
-        // Resolve relative against PWD/current and check existence
         if (!tmp.empty()) {
             namespace fs = std::filesystem;
             std::error_code ec;
@@ -3003,30 +3014,27 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             }
             if (fs::exists(p, ec) && fs::is_regular_file(p, ec)) {
                 candidatePath = p.string();
-                // If 'name' appears to be a path, set document name to basename for UX
                 try {
-                    daemon_req.name = p.filename().string();
+                    resolvedName = p.filename().string();
                 } catch (...) {
                 }
             }
         }
     }
 
-    // Normalize path: expand '~' and make absolute using PWD for relative paths
+    // Normalize path
     {
         std::string _p = candidatePath;
-        // Sanitize control characters (CR/LF/NUL) and trim leading/trailing spaces/tabs
         if (!_p.empty()) {
             std::string cleaned;
             cleaned.reserve(_p.size());
             for (char c : _p) {
                 if (c == '\0')
-                    break; // stop at first NUL just in case
+                    break;
                 if (c == '\r' || c == '\n')
-                    continue; // drop CR/LF which can corrupt path resolution
+                    continue;
                 cleaned.push_back(c);
             }
-            // Trim leading/trailing spaces and tabs (avoid accidental copy/paste whitespace)
             auto start = cleaned.find_first_not_of(" \t");
             if (start == std::string::npos) {
                 cleaned.clear();
@@ -3034,14 +3042,11 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 auto end = cleaned.find_last_not_of(" \t");
                 cleaned = cleaned.substr(start, end - start + 1);
             }
-            // Remove a trailing slash (except for root) to avoid treating intended file paths as
-            // directories
             if (cleaned.size() > 1 && cleaned.back() == '/') {
                 cleaned.pop_back();
             }
             _p = std::move(cleaned);
         }
-        // Strip file:// scheme if present (basic normalization)
         if (_p.rfind("file://", 0) == 0) {
             _p = _p.substr(7);
         }
@@ -3050,14 +3055,12 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 _p = std::string(home) + _p.substr(1);
             }
         }
-        // Resolve relative paths against likely bases: PWD, then current_path()
         if (!_p.empty() && _p.front() != '/') {
             std::vector<std::filesystem::path> bases;
             if (const char* pwd = std::getenv("PWD"); pwd && *pwd) {
                 bases.emplace_back(pwd);
             }
             bases.emplace_back(std::filesystem::current_path());
-
             std::filesystem::path chosen = _p;
             bool resolved = false;
             for (const auto& base : bases) {
@@ -3071,7 +3074,6 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             }
             _p = resolved ? chosen.string() : (_p.rfind("./", 0) == 0 ? _p.substr(2) : _p);
         }
-        // Best-effort canonicalization (only when path is non-empty)
         if (!_p.empty()) {
             std::error_code __canon_ec;
             auto __canon = std::filesystem::weakly_canonical(_p, __canon_ec);
@@ -3079,86 +3081,61 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 _p = __canon.string();
             }
         }
-        daemon_req.path = _p;
+        aopts.path = _p;
     }
-    daemon_req.content = req.content;
-    if (daemon_req.name.empty())
-        daemon_req.name = req.name;
-    daemon_req.mimeType = req.mimeType;
-    daemon_req.disableAutoMime = req.disableAutoMime;
-    // Force noEmbeddings when model provider is not ready (from preflight snapshot)
-    daemon_req.noEmbeddings = req.noEmbeddings || !modelReadyFlag;
-    daemon_req.collection = req.collection;
-    daemon_req.snapshotId = req.snapshotId;
-    daemon_req.snapshotLabel = req.snapshotLabel;
-    daemon_req.recursive = req.recursive;
-    daemon_req.includePatterns = req.includePatterns;
-    daemon_req.excludePatterns = req.excludePatterns;
-    daemon_req.tags = req.tags;
+    aopts.content = req.content;
+    aopts.name = resolvedName.empty() ? req.name : resolvedName;
+    aopts.mimeType = req.mimeType;
+    aopts.disableAutoMime = req.disableAutoMime;
+    aopts.noEmbeddings = req.noEmbeddings || !modelReadyFlag;
+    aopts.collection = req.collection;
+    aopts.snapshotId = req.snapshotId;
+    aopts.snapshotLabel = req.snapshotLabel;
+    aopts.recursive = req.recursive;
+    aopts.includePatterns = req.includePatterns;
+    aopts.excludePatterns = req.excludePatterns;
+    aopts.tags = req.tags;
     for (const auto& [key, value] : req.metadata.items()) {
         if (value.is_string()) {
-            daemon_req.metadata[key] = value.get<std::string>();
+            aopts.metadata[key] = value.get<std::string>();
         } else {
-            daemon_req.metadata[key] = value.dump();
+            aopts.metadata[key] = value.dump();
         }
     }
-    // Validate request before we ever contact the daemon. The dispatcher/ingest pipeline now
-    // expects either a resolved path or (content + name); enforcing it here avoids enqueueing
-    // malformed tasks that previously triggered ingest crashes.
-    if (daemon_req.path.empty()) {
-        if (daemon_req.content.empty()) {
+    aopts.retries = 2; // 3 attempts total
+    aopts.timeoutMs = 30000;
+    aopts.backoffMs = 250;
+
+    // Validate before contacting daemon
+    if (aopts.path.empty()) {
+        if (aopts.content.empty()) {
             co_return Error{ErrorCode::InvalidArgument,
                             "Provide either 'path' or 'content' + 'name'"};
         }
-        if (daemon_req.name.empty()) {
+        if (aopts.name.empty()) {
             co_return Error{ErrorCode::InvalidArgument,
                             "Provide 'name' when sending inline 'content'"};
         }
     }
 
-    // Single-path daemon call with bounded retries; always use streaming path
-    {
-        using namespace std::chrono_literals;
-        auto exec = co_await boost::asio::this_coro::executor;
-        boost::asio::steady_timer timer{exec};
-        const int maxAttempts = 3;
-        bool hasContent = !daemon_req.content.empty();
-        for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
-            // Use streamingAddDocument for parity with CLI and to avoid unary-path edge cases
-            Result<yams::daemon::AddDocumentResponse> addRes =
-                co_await daemon_client_->streamingAddDocument(daemon_req);
-            if (addRes) {
-                MCPStoreDocumentResponse out;
-                // For directory adds, return empty hash to signal multi-file op
-                std::error_code ec;
-                if (!hasContent && !daemon_req.path.empty() && daemon_req.recursive &&
-                    std::filesystem::is_directory(daemon_req.path, ec)) {
-                    co_return out;
-                }
-                out.hash = addRes.value().hash;
-                out.bytesStored = 0;
-                out.bytesDeduped = 0;
-                co_return out;
-            }
-            const auto& err = addRes.error();
-            bool retryable =
-                (err.code == ErrorCode::NotInitialized || err.code == ErrorCode::Timeout ||
-                 err.code == ErrorCode::NetworkError);
-            if (!retryable || attempt == maxAttempts)
-                co_return err;
-            timer.expires_after(std::chrono::milliseconds(250 * attempt));
-            co_await timer.async_wait(boost::asio::use_awaitable);
-        }
+    // Route through the shared ingestion service
+    auto addRes = co_await ingestion_svc_->addViaDaemonAsync(aopts);
+    if (!addRes) {
+        co_return addRes.error();
     }
 
-    // If neither content nor a valid path was provided, fail fast with a clear error
-    if (daemon_req.path.empty() && daemon_req.content.empty()) {
-        co_return Error{ErrorCode::InvalidArgument,
-                        "No content or path provided. Set 'path' to a file or provide 'content'."};
+    MCPStoreDocumentResponse out;
+    // For directory adds, return empty hash to signal multi-file op
+    bool hasContent = !aopts.content.empty();
+    std::error_code ec;
+    if (!hasContent && !aopts.path.empty() && aopts.recursive &&
+        std::filesystem::is_directory(aopts.path, ec)) {
+        co_return out;
     }
-
-    // Should not reach here
-    co_return Error{ErrorCode::Unknown, "Unexpected add failure"};
+    out.hash = addRes.value().hash;
+    out.bytesStored = 0;
+    out.bytesDeduped = 0;
+    co_return out;
 }
 
 boost::asio::awaitable<Result<MCPRetrieveDocumentResponse>>
@@ -3614,34 +3591,26 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
         }
     }
 
-    // Build AddDocumentRequest targeting a directory ingestion (recursive)
-    daemon::AddDocumentRequest dreq;
-    dreq.path = dir_path.string();
-    dreq.content.clear();
-    dreq.name.clear();
-    dreq.tags = req.tags;
-    // metadata
+    // Build AddOptions and route through ingestion service
+    app::services::AddOptions aopts;
+    aopts.path = dir_path.string();
+    aopts.recursive = true;
+    aopts.tags = req.tags;
     for (const auto& [k, v] : req.metadata.items()) {
         if (v.is_string())
-            dreq.metadata[k] = v.get<std::string>();
+            aopts.metadata[k] = v.get<std::string>();
         else
-            dreq.metadata[k] = v.dump();
+            aopts.metadata[k] = v.dump();
     }
-    dreq.recursive = true; // force recursive for directories
-    dreq.includeHidden = false;
-    dreq.includePatterns = req.includePatterns;
-    dreq.excludePatterns = req.excludePatterns;
-    dreq.collection = req.collection;
-    dreq.snapshotId.clear();
-    dreq.snapshotLabel.clear();
-    dreq.mimeType.clear();
-    dreq.disableAutoMime = false;
-    dreq.noEmbeddings = false;
+    aopts.includePatterns = req.includePatterns;
+    aopts.excludePatterns = req.excludePatterns;
+    aopts.collection = req.collection;
+    aopts.retries = 2;
+    aopts.timeoutMs = 30000;
+    aopts.backoffMs = 250;
 
-    // Use streamingAddDocument; dispatcher will return a single AddDocumentResponse when done
-    auto addRes = co_await daemon_client_->streamingAddDocument(dreq);
+    auto addRes = co_await ingestion_svc_->addViaDaemonAsync(aopts);
     if (!addRes) {
-        // Map NotReady/Internal to a clearer message for clients; keep code as-is
         if (addRes.error().code == ErrorCode::NotInitialized) {
             co_return Error{ErrorCode::NotInitialized,
                             "Daemon: content store initializing; please retry shortly"};
@@ -3649,12 +3618,9 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
         co_return addRes.error();
     }
 
-    // We do not have per-file detailed results over AddDocumentResponse; provide a summary
     MCPAddDirectoryResponse out;
     out.directoryPath = req.directoryPath;
     out.collection = req.collection;
-    // Since dispatcher’s directory path produces multiple adds internally, we cannot accurately
-    // report processed/indexed counts without a separate API. Provide a minimal summary.
     out.filesProcessed = 0;
     out.filesIndexed = 0;
     out.filesSkipped = 0;

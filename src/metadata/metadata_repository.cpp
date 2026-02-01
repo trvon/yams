@@ -1780,6 +1780,106 @@ Result<void> MetadataRepository::removeFromIndexByHash(const std::string& hash) 
     return result;
 }
 
+Result<size_t>
+MetadataRepository::removeFromIndexByHashBatch(const std::vector<std::string>& hashes) {
+    if (hashes.empty()) {
+        return Result<size_t>(0);
+    }
+
+    auto result = executeQuery<size_t>([&](Database& db) -> Result<size_t> {
+        // Begin transaction for batch operation
+        auto beginResult = beginTransactionWithRetry(db);
+        if (!beginResult) {
+            return beginResult.error();
+        }
+
+        // Check if FTS5 is available once
+        auto fts5Result = db.hasFTS5();
+        if (!fts5Result) {
+            db.execute("ROLLBACK");
+            return fts5Result.error();
+        }
+        const bool hasFts5 = fts5Result.value();
+
+        if (!hasFts5) {
+            return Result<size_t>(0);
+        }
+
+        // Prepare cached statements for reuse
+        auto selectStmtResult = db.prepareCached("SELECT id FROM documents WHERE sha256_hash = ?");
+        if (!selectStmtResult) {
+            db.execute("ROLLBACK");
+            return selectStmtResult.error();
+        }
+        auto& selectStmt = *selectStmtResult.value();
+
+        auto deleteStmtResult = db.prepareCached("DELETE FROM documents_fts WHERE rowid = ?");
+        if (!deleteStmtResult) {
+            db.execute("ROLLBACK");
+            return deleteStmtResult.error();
+        }
+        auto& deleteStmt = *deleteStmtResult.value();
+
+        size_t removed = 0;
+        for (const auto& hash : hashes) {
+            // Reset and rebind select statement
+            if (auto r = selectStmt.reset(); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            auto bindResult = selectStmt.bind(1, hash);
+            if (!bindResult) {
+                db.execute("ROLLBACK");
+                return bindResult.error();
+            }
+
+            auto stepResult = selectStmt.step();
+            if (!stepResult) {
+                db.execute("ROLLBACK");
+                return stepResult.error();
+            }
+
+            if (!stepResult.value()) {
+                // Document not found - skip
+                continue;
+            }
+
+            int64_t docId = selectStmt.getInt64(0);
+
+            // Reset and rebind delete statement
+            if (auto r = deleteStmt.reset(); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            auto delBindResult = deleteStmt.bind(1, docId);
+            if (!delBindResult) {
+                db.execute("ROLLBACK");
+                return delBindResult.error();
+            }
+
+            auto execResult = deleteStmt.execute();
+            if (!execResult) {
+                db.execute("ROLLBACK");
+                return execResult.error();
+            }
+
+            ++removed;
+        }
+
+        // Commit the transaction
+        auto commitResult = db.execute("COMMIT");
+        if (!commitResult) {
+            return commitResult.error();
+        }
+
+        return Result<size_t>(removed);
+    });
+
+    if (result)
+        invalidateQueryCache();
+    return result;
+}
+
 Result<std::vector<int64_t>> MetadataRepository::getAllFts5IndexedDocumentIds() {
     return executeQuery<std::vector<int64_t>>([&](Database& db) -> Result<std::vector<int64_t>> {
         // First check if FTS5 is available

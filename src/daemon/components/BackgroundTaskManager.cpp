@@ -216,37 +216,30 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
                                           enqueued, skipped);
                         }
                     } else if (job.operation == Bus::Fts5Operation::RemoveOrphans) {
-                        size_t removed{0}, skipped{0};
-                        for (const auto& h : job.hashes) {
-                            auto docRes = meta->getDocumentByHash(h);
-                            if (!docRes || !docRes.value().has_value()) {
-                                if (auto removeRes = meta->removeFromIndexByHash(h); removeRes) {
-                                    ++removed;
-                                } else {
-                                    ++skipped;
-                                }
+                        // Remove orphans directly by document rowid
+                        size_t removed{0};
+                        size_t failed{0};
+                        for (int64_t docId : job.ids) {
+                            if (auto removeRes = meta->removeFromIndex(docId); removeRes) {
+                                ++removed;
                             } else {
-                                ++skipped;
+                                ++failed;
                             }
                         }
 
-                        if (removed > 0) {
+                        if (removed > 0 || failed > 0) {
                             pendingOrphansRemoved += removed;
-                            pendingOrphansSkipped += skipped;
+                            pendingOrphansSkipped += failed;
                             auto now = std::chrono::steady_clock::now();
                             if (lastOrphanInfoLog.time_since_epoch().count() == 0 ||
                                 (now - lastOrphanInfoLog) >= kOrphanInfoLogInterval) {
-                                spdlog::info("[Fts5Job] Removed {} orphans ({} skipped)",
+                                spdlog::info("[Fts5Job] Removed {} orphans ({} failed)",
                                              pendingOrphansRemoved, pendingOrphansSkipped);
                                 pendingOrphansRemoved = 0;
                                 pendingOrphansSkipped = 0;
                                 lastOrphanInfoLog = now;
                             }
                             Bus::instance().incOrphansRemoved(removed);
-                        } else if (skipped > 0) {
-                            spdlog::debug(
-                                "[Fts5Job] No orphans removed ({} skipped - docs still exist)",
-                                skipped);
                         }
                     }
 
@@ -346,37 +339,33 @@ void BackgroundTaskManager::launchOrphanScanTask() {
                                 docIdToHash[doc.id] = doc.sha256Hash;
                             }
 
-                            std::vector<std::string> orphanHashes;
+                            std::vector<int64_t> orphanIds;
                             for (int64_t fts5Id : fts5Ids) {
                                 if (!validDocIds.contains(fts5Id)) {
-                                    auto it = docIdToHash.find(fts5Id);
-                                    orphanHashes.push_back(it != docIdToHash.end()
-                                                               ? it->second
-                                                               : "orphan_id_" +
-                                                                     std::to_string(fts5Id));
+                                    orphanIds.push_back(fts5Id);
                                 }
                             }
 
-                            if (orphanHashes.empty()) {
+                            if (orphanIds.empty()) {
                                 spdlog::debug("[OrphanScan] No orphans ({} entries checked)",
                                               fts5Ids.size());
                             } else {
-                                spdlog::info("[OrphanScan] Detected {} orphans",
-                                             orphanHashes.size());
-                                Bus::instance().incOrphansDetected(orphanHashes.size());
+                                spdlog::info("[OrphanScan] Detected {} orphans", orphanIds.size());
+                                Bus::instance().incOrphansDetected(orphanIds.size());
 
                                 auto fts5Q = Bus::instance().get_or_create_channel<Bus::Fts5Job>(
                                     "fts5_jobs", 512);
                                 constexpr size_t BATCH_SIZE = 50;
 
-                                for (size_t i = 0; i < orphanHashes.size(); i += BATCH_SIZE) {
-                                    size_t batchEnd = std::min(i + BATCH_SIZE, orphanHashes.size());
-                                    std::vector<std::string> batch(orphanHashes.begin() + i,
-                                                                   orphanHashes.begin() + batchEnd);
+                                for (size_t i = 0; i < orphanIds.size(); i += BATCH_SIZE) {
+                                    size_t batchEnd = std::min(i + BATCH_SIZE, orphanIds.size());
+                                    std::vector<int64_t> batch(orphanIds.begin() + i,
+                                                               orphanIds.begin() + batchEnd);
 
-                                    Bus::Fts5Job orphanJob{std::move(batch),
-                                                           static_cast<uint32_t>(BATCH_SIZE),
-                                                           Bus::Fts5Operation::RemoveOrphans};
+                                    Bus::Fts5Job orphanJob;
+                                    orphanJob.ids = std::move(batch);
+                                    orphanJob.batchSize = static_cast<uint32_t>(BATCH_SIZE);
+                                    orphanJob.operation = Bus::Fts5Operation::RemoveOrphans;
 
                                     if (!fts5Q->try_push(std::move(orphanJob))) {
                                         spdlog::warn("[OrphanScan] Queue full, batch dropped");

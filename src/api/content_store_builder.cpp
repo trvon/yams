@@ -150,7 +150,12 @@ struct ContentStoreBuilder::Impl {
         if (!referenceCounter) {
             auto dbPath = config.storagePath / "refs.db";
             storage::ReferenceCounter::Config refConfig{.databasePath = dbPath};
-            referenceCounter = storage::createReferenceCounter(refConfig);
+            try {
+                referenceCounter = storage::createReferenceCounter(refConfig);
+            } catch (const std::exception& e) {
+                spdlog::error("Reference counter initialization failed: {}", e.what());
+                return Result<void>(ErrorCode::DatabaseError);
+            }
             if (!referenceCounter) {
                 return Result<void>(ErrorCode::DatabaseError);
             }

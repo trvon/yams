@@ -721,9 +721,9 @@ jobs:
           export PKG_CONFIG="$(command -v pkg-config)"
           echo "Using pkg-config: $PKG_CONFIG"
           
-          # Pass version to Meson via extra flags
+          # Version is already included in YAMS_EXTRA_MESON_FLAGS above. Keep this
+          # echo for diagnostics, but do not overwrite feature flags.
           VERSION="${{ steps.meta.outputs.version }}"
-          export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${VERSION}"
           echo "Setting version: ${VERSION}"
           
           ./setup.sh Release
@@ -804,9 +804,20 @@ jobs:
             exit 1
           fi
 
-          # Plugins are expected for full releases; warn loudly if absent.
+          # Plugins are expected for full releases; fail loudly if absent/empty.
           if [ ! -d "$STAGE_DIR$PREFIX/lib/yams/plugins" ]; then
             echo "Missing staged plugins dir: $STAGE_DIR$PREFIX/lib/yams/plugins" >&2
+            exit 1
+          fi
+
+          shopt -s nullglob
+          plugin_bins=(
+            "$STAGE_DIR$PREFIX/lib/yams/plugins"/*.so
+            "$STAGE_DIR$PREFIX/lib/yams/plugins"/*.dylib
+          )
+          if [ ${#plugin_bins[@]} -eq 0 ]; then
+            echo "No plugin binaries staged under: $STAGE_DIR$PREFIX/lib/yams/plugins" >&2
+            ls -al "$STAGE_DIR$PREFIX/lib/yams/plugins" >&2 || true
             exit 1
           fi
 

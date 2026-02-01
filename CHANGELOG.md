@@ -21,9 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - MCP stdio: Improved OpenCode compatibility during handshake/tool discovery (initialize capabilities schema, strict JSON-RPC batch responses, more robust NDJSON parsing).
 - MCP tools: Fixed `mcp.echo` tool `inputSchema` shape so tool schemas validate correctly.
+- **FTS5 orphan detection**: Fixed bug where orphan scan used synthetic hashes (e.g., `orphan_id_12345`) that never matched actual documents. Orphans were detected but never removed because the removal query used non-existent hashes. Now passes document rowids directly via `Fts5Job.ids` and calls `removeFromIndex(docId)` which deletes by FTS5 rowid.
 
 ### Added
 - MCP stdio debug/compat toggles: `YAMS_MCP_HANDSHAKE_TRACE` (trace handshake events) and `YAMS_MCP_MINIMAL_TOOLS` (expose only `mcp.echo` for client compatibility debugging).
+
+### Performance
+- **Stdin routed through daemon**: `yams add -` (stdin) now sends content directly to the daemon via inline content support instead of falling back to local service initialization (~40s startup penalty eliminated). Blackboard plugin also drops unnecessary `--sync` flag for further latency reduction.
+- **Adaptive sync polling**: `--sync` extraction polling now uses exponential backoff (5ms → 100ms) instead of fixed 100ms intervals. Small documents that extract via fast-track are detected on the first poll (~5ms) instead of waiting a full 100ms cycle.
+- **Unified async add pipeline with parallel batching**: `yams add` with multiple files now processes up to 4 files concurrently via `addBatch()` instead of sequentially. Single shared `DaemonClient` is reused across all add operations (CLI and MCP), eliminating per-file client construction overhead.
+- **`addViaDaemonAsync` coroutine**: New async entry point for all add operations. Replaces promise/future-per-attempt pattern with direct `co_await`, reducing overhead. MCP `handleStoreDocument`, `handleAddDirectory`, and download post-index all route through this single path.
+- **Batch FTS5 orphan removal**: New `removeFromIndexByHashBatch()` wraps all per-hash SELECT+DELETE operations in a single transaction with cached prepared statements. Replaces N individual autocommit transactions with 1 transaction for N hashes. Eliminates prolonged DB lock contention during orphan scans (~29k orphans previously caused ~58k individual transactions), which blocked CLI requests (`yams stats`, `yams list`) and caused timeouts/segfaults.
 
 
 ## [v0.8.1] - January 31, 2026

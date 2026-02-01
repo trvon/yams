@@ -1235,12 +1235,23 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         (void)init::record_duration(
             "plugins",
             [&]() -> yams::Result<void> {
-                state_.readiness.pluginsReady = true;
+                try {
+                    const auto ps = getPluginHostFsmSnapshot();
+                    state_.readiness.pluginsReady = (ps.state == PluginHostState::Ready);
+                } catch (...) {
+                    // Best-effort legacy flag; plugin readiness is authoritative via PluginHostFsm.
+                    state_.readiness.pluginsReady = true;
+                }
                 return yams::Result<void>();
             },
             state_.initDurationsMs);
     } catch (...) {
-        state_.readiness.pluginsReady = true;
+        try {
+            const auto ps = getPluginHostFsmSnapshot();
+            state_.readiness.pluginsReady = (ps.state == PluginHostState::Ready);
+        } catch (...) {
+            state_.readiness.pluginsReady = true;
+        }
     }
     writeBootstrapStatusFile(config_, state_);
 
@@ -1719,7 +1730,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     spdlog::info("[ServiceManager] Phase: Plugins Autoloaded.");
     // Update pluginsReady flag after actual loading completes
-    state_.readiness.pluginsReady = true;
+    try {
+        const auto ps = getPluginHostFsmSnapshot();
+        state_.readiness.pluginsReady = (ps.state == PluginHostState::Ready);
+    } catch (...) {
+        state_.readiness.pluginsReady = true;
+    }
     refreshPluginStatusSnapshot();
 
     spdlog::info("[ServiceManager] Phase: Vector DB Init (post-plugins, sync).");
@@ -2852,7 +2868,12 @@ ServiceManager::co_initPluginSystem(boost::asio::any_io_executor exec,
         abiHost_ = std::make_unique<AbiPluginHost>(this);
 
         if (true /* simulate success - actual implementation would co_await scan_plugins */) {
-            state_.readiness.pluginsReady.store(true);
+            try {
+                const auto ps = getPluginHostFsmSnapshot();
+                state_.readiness.pluginsReady.store(ps.state == PluginHostState::Ready);
+            } catch (...) {
+                state_.readiness.pluginsReady.store(true);
+            }
         }
 
         spdlog::info("[ServiceManager::co_initPluginSystem] Plugin system initialized");

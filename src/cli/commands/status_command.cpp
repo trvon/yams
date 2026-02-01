@@ -13,7 +13,6 @@
 #endif
 #include <atomic>
 #include <chrono>
-#include <future>
 
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
@@ -71,17 +70,7 @@ public:
     }
 
     Result<void> execute() override {
-        std::promise<Result<void>> prom;
-        auto fut = prom.get_future();
-        boost::asio::co_spawn(
-            getExecutor(),
-            [this, &prom]() -> boost::asio::awaitable<void> {
-                auto r = co_await this->executeAsync();
-                prom.set_value(std::move(r));
-                co_return;
-            },
-            boost::asio::detached);
-        return fut.get();
+        return yams::cli::run_result<void>(this->executeAsync(), std::chrono::milliseconds{10000});
     }
 
     boost::asio::awaitable<Result<void>> executeAsync() override {

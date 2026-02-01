@@ -634,6 +634,9 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                         req.waitTimeoutSeconds > 0 ? req.waitTimeoutSeconds : 30;
                     const auto startTime = std::chrono::steady_clock::now();
                     bool extractionComplete = false;
+                    // Adaptive backoff: start fast (5ms) for small docs that extract
+                    // instantly via fast-track, double up to 100ms ceiling.
+                    auto pollInterval = std::chrono::milliseconds(5);
 
                     // Poll for extraction status
                     while (!extractionComplete) {
@@ -668,8 +671,10 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                                 break;
                             }
 
-                            // Wait a bit before polling again
-                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                            // Adaptive backoff polling
+                            std::this_thread::sleep_for(pollInterval);
+                            pollInterval =
+                                std::min(pollInterval * 2, std::chrono::milliseconds(100));
                         }
                     }
                 }

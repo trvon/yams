@@ -62,6 +62,7 @@ public:
         cmd->add_option("--format", format_, "Output format: table, json, csv, minimal")
             ->default_val("table")
             ->check(CLI::IsMember({"table", "json", "csv", "minimal"}));
+        cmd->add_flag("--json", jsonFlag_, "Output in JSON format (shorthand for --format json)");
 
         cmd->add_option("--sort", sortBy_, "Sort by: name, size, date, hash")
             ->default_val("date")
@@ -200,6 +201,8 @@ public:
 
     Result<void> execute() override {
         try {
+            if (jsonFlag_)
+                format_ = "json";
             updateMetadataFields();
             if (!metadataValuesRaw_.empty()) {
                 return listMetadataValues();
@@ -2107,6 +2110,7 @@ private:
     std::string positionalName_;
     bool namePatternWasNormalized_ = false;
     std::string format_;
+    bool jsonFlag_ = false; // --json shorthand for --format json
     std::string sortBy_;
     bool reverse_ = false;
     int limit_ = 100;

@@ -1007,9 +1007,10 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                          (shutdownState->config.allowDegraded && activeConnFn_ &&
                           activeConnFn_() <= shutdownState->config.maxActiveDuringDegraded);
         if (!missingFts5.empty() && allowFts5) {
-            InternalEventBus::Fts5Job ftsJob{missingFts5,
-                                             static_cast<uint32_t>(shutdownState->config.maxBatch),
-                                             InternalEventBus::Fts5Operation::ExtractAndIndex};
+            InternalEventBus::Fts5Job ftsJob{
+                .hashes = missingFts5,
+                .batchSize = static_cast<uint32_t>(shutdownState->config.maxBatch),
+                .operation = InternalEventBus::Fts5Operation::ExtractAndIndex};
 
             static std::shared_ptr<SpscQueue<InternalEventBus::Fts5Job>> fts5Q =
                 InternalEventBus::instance().get_or_create_channel<InternalEventBus::Fts5Job>(

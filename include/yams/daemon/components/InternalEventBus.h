@@ -205,6 +205,7 @@ public:
 
     struct Fts5Job {
         std::vector<std::string> hashes;
+        std::vector<int64_t> ids; // For RemoveOrphans: document rowids to remove
         uint32_t batchSize{0};
         Fts5Operation operation{Fts5Operation::ExtractAndIndex};
     };

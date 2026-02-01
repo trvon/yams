@@ -75,6 +75,12 @@ struct UpdateOptions {
     int timeoutMs = 30000;
 };
 
+struct BatchAddResult {
+    std::vector<Result<yams::daemon::AddDocumentResponse>> results;
+    size_t succeeded{0};
+    size_t failed{0};
+};
+
 class DocumentIngestionService {
 public:
     DocumentIngestionService() = default;
@@ -84,12 +90,22 @@ public:
     // and calls streamingAddDocument. Caller can implement fallback to local services on error.
     Result<yams::daemon::AddDocumentResponse> addViaDaemon(const AddOptions& opts) const;
 
+    // Async coroutine entry point — single path for all add operations.
+    boost::asio::awaitable<Result<yams::daemon::AddDocumentResponse>>
+    addViaDaemonAsync(const AddOptions& opts) const;
+
+    // Batch add with concurrency control (spawns up to maxConcurrent coroutines).
+    BatchAddResult addBatch(const std::vector<AddOptions>& batch, int maxConcurrent = 4) const;
+
     // New operations
     Result<yams::daemon::DeleteResponse> deleteDocument(const DeleteOptions& opts) const;
     Result<yams::daemon::UpdateDocumentResponse> updateDocument(const UpdateOptions& opts) const;
 
     // Utility: normalize a provided path to absolute/canonical when possible
     static std::string normalizePath(const std::string& inPath);
+
+    // Build an AddDocumentRequest from AddOptions (exposed for MCP reuse)
+    static yams::daemon::AddDocumentRequest buildRequest(const AddOptions& opts);
 
 private:
     std::shared_ptr<yams::daemon::DaemonClient> client_;

@@ -498,9 +498,7 @@ public:
                 size_t successfulRequests = 0;
                 std::vector<std::pair<std::filesystem::path, Error>> daemonFailures;
                 size_t totalAdded = 0, totalUpdated = 0, totalSkipped = 0;
-                bool hasStdin = false;
-                const size_t totalDaemonRequests =
-                    singleFiles.size() + groupedPaths.size() - (groupedPaths.count("-") ? 1 : 0);
+                const size_t totalDaemonRequests = singleFiles.size() + groupedPaths.size();
                 size_t completedRequests = 0;
                 if (daemonSpinner.enabled() && totalDaemonRequests > 0) {
                     daemonSpinner.setShowCount(true);
@@ -550,20 +548,21 @@ public:
                     // local storage initialization (40+ seconds) for no benefit.
                 };
 
-                // Process single files first (these respect --name directly)
-                for (const auto& filePath : singleFiles) {
+                // Create a shared client and ingestion service for all adds
+                auto sharedClientCfg = yams::daemon::ClientConfig{};
+                if (cli_->hasExplicitDataDir()) {
+                    sharedClientCfg.dataDir = cli_->getDataPath();
+                }
+                sharedClientCfg.enableChunkedResponses = false;
+                sharedClientCfg.singleUseConnections = false;
+                sharedClientCfg.requestTimeout =
+                    std::chrono::milliseconds(std::max(1, daemonTimeoutMs_));
+                auto sharedClient = std::make_shared<yams::daemon::DaemonClient>(sharedClientCfg);
+                yams::app::services::DocumentIngestionService ing(sharedClient);
+
+                // Helper to populate common AddOptions fields
+                auto makeBaseOpts = [&]() -> yams::app::services::AddOptions {
                     yams::app::services::AddOptions aopts;
-                    aopts.path = filePath.string();
-                    aopts.recursive = false; // Single file, not recursive
-                    aopts.name = trimCopy(documentName_);
-                    if (aopts.name.size() > kMaxNameLength) {
-                        return Error{ErrorCode::InvalidArgument,
-                                     "Document name exceeds maximum length"};
-                    }
-                    if (hasUnsupportedControlChars(aopts.name)) {
-                        return Error{ErrorCode::InvalidArgument,
-                                     "Document name contains unsupported control characters"};
-                    }
                     aopts.tags = sanitizedTags;
                     aopts.metadata = sanitizedMetadata;
                     aopts.excludePatterns = sanitizedExclude;
@@ -571,105 +570,130 @@ public:
                     aopts.snapshotId = sanitizedSnapshotId;
                     aopts.snapshotLabel = sanitizedSnapshotLabel;
                     aopts.sessionId = activeSessionId;
-                    if (!sanitizedMimeType.empty()) {
+                    if (!sanitizedMimeType.empty())
                         aopts.mimeType = sanitizedMimeType;
-                    }
                     aopts.disableAutoMime = disableAutoMime_;
                     aopts.noEmbeddings = noEmbeddings_;
                     aopts.waitForProcessing = waitForProcessing_;
                     aopts.waitTimeoutSeconds = waitTimeoutSeconds_;
-                    if (cli_->hasExplicitDataDir()) {
+                    if (cli_->hasExplicitDataDir())
                         aopts.explicitDataDir = cli_->getDataPath();
-                    }
                     aopts.timeoutMs = daemonTimeoutMs_;
                     aopts.retries = daemonRetries_;
                     aopts.backoffMs = daemonBackoffMs_;
                     aopts.verify = verify_;
                     aopts.noGitignore = noGitignore_;
+                    return aopts;
+                };
 
-                    yams::app::services::DocumentIngestionService ing;
-                    auto result = ing.addViaDaemon(aopts);
-                    completedRequests++;
-                    if (result) {
-                        totalAdded += result.value().documentsAdded;
-                        totalUpdated += result.value().documentsUpdated;
-                        totalSkipped += result.value().documentsSkipped;
-                        render(result.value(), filePath);
-                        successfulRequests++;
-                    } else {
-                        pauseProgress();
-                        const auto err = result.error();
-                        spdlog::warn("Daemon add failed for file '{}': {}", filePath.string(),
-                                     err.message);
-                        resumeProgress();
-                        daemonFailures.emplace_back(filePath, err);
-                    }
-                    if (daemonSpinner.enabled()) {
-                        daemonSpinner.setCounts(completedRequests, totalDaemonRequests);
+                // Validate document name once
+                std::string sanitizedName = trimCopy(documentName_);
+                if (sanitizedName.size() > kMaxNameLength) {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "Document name exceeds maximum length"};
+                }
+                if (hasUnsupportedControlChars(sanitizedName)) {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "Document name contains unsupported control characters"};
+                }
+
+                // Build batch of AddOptions for single files
+                std::vector<yams::app::services::AddOptions> fileBatch;
+                fileBatch.reserve(singleFiles.size());
+                for (const auto& filePath : singleFiles) {
+                    auto aopts = makeBaseOpts();
+                    aopts.path = filePath.string();
+                    aopts.recursive = false;
+                    aopts.name = sanitizedName;
+                    fileBatch.push_back(std::move(aopts));
+                }
+
+                // Process single files in parallel batch
+                if (!fileBatch.empty()) {
+                    auto batchResult = ing.addBatch(fileBatch, 4);
+                    for (size_t i = 0; i < batchResult.results.size(); ++i) {
+                        completedRequests++;
+                        const auto& result = batchResult.results[i];
+                        if (result) {
+                            totalAdded += result.value().documentsAdded;
+                            totalUpdated += result.value().documentsUpdated;
+                            totalSkipped += result.value().documentsSkipped;
+                            render(result.value(), singleFiles[i]);
+                            successfulRequests++;
+                        } else {
+                            pauseProgress();
+                            const auto err = result.error();
+                            spdlog::warn("Daemon add failed for file '{}': {}",
+                                         singleFiles[i].string(), err.message);
+                            resumeProgress();
+                            daemonFailures.emplace_back(singleFiles[i], err);
+                        }
+                        if (daemonSpinner.enabled()) {
+                            daemonSpinner.setCounts(completedRequests, totalDaemonRequests);
+                        }
                     }
                 }
 
+                // Build batch of AddOptions for directories
+                std::vector<yams::app::services::AddOptions> dirBatch;
+                std::vector<std::filesystem::path> dirPaths;
                 for (const auto& [dir, files] : groupedPaths) {
                     if (dir.string() == "-") {
-                        hasStdin = true;
-                        continue; // Handle stdin via local services later
+                        // Route stdin through daemon instead of falling back to
+                        // expensive local service initialization (~40s).
+                        std::string stdinContent((std::istreambuf_iterator<char>(std::cin)),
+                                                 std::istreambuf_iterator<char>());
+                        if (stdinContent.empty()) {
+                            return Error{ErrorCode::InvalidArgument,
+                                         "No content received from stdin"};
+                        }
+                        auto aopts = makeBaseOpts();
+                        aopts.content = std::move(stdinContent);
+                        aopts.name = sanitizedName.empty() ? "stdin" : sanitizedName;
+                        auto result = ing.addViaDaemon(aopts);
+                        if (result) {
+                            totalAdded += result.value().documentsAdded;
+                            totalUpdated += result.value().documentsUpdated;
+                            totalSkipped += result.value().documentsSkipped;
+                            render(result.value(), std::filesystem::path("-"));
+                            successfulRequests++;
+                        } else {
+                            daemonFailures.emplace_back(std::filesystem::path("-"), result.error());
+                        }
+                        continue;
                     }
-
-                    yams::app::services::AddOptions aopts;
+                    auto aopts = makeBaseOpts();
                     aopts.path = dir.string();
-                    aopts.recursive = true; // A directory is being processed
+                    aopts.recursive = true;
                     aopts.includePatterns = files;
-                    aopts.name = trimCopy(documentName_);
-                    if (aopts.name.size() > kMaxNameLength) {
-                        return Error{ErrorCode::InvalidArgument,
-                                     "Document name exceeds maximum length"};
-                    }
-                    if (hasUnsupportedControlChars(aopts.name)) {
-                        return Error{ErrorCode::InvalidArgument,
-                                     "Document name contains unsupported control characters"};
-                    }
-                    aopts.tags = sanitizedTags;
-                    aopts.metadata = sanitizedMetadata;
-                    aopts.excludePatterns = sanitizedExclude;
-                    aopts.collection = sanitizedCollection;
-                    aopts.snapshotId = sanitizedSnapshotId;
-                    aopts.snapshotLabel = sanitizedSnapshotLabel;
-                    aopts.sessionId = activeSessionId;
-                    if (!sanitizedMimeType.empty()) {
-                        aopts.mimeType = sanitizedMimeType;
-                    }
-                    aopts.disableAutoMime = disableAutoMime_;
-                    aopts.noEmbeddings = noEmbeddings_;
-                    aopts.waitForProcessing = waitForProcessing_;
-                    aopts.waitTimeoutSeconds = waitTimeoutSeconds_;
-                    if (cli_->hasExplicitDataDir()) {
-                        aopts.explicitDataDir = cli_->getDataPath();
-                    }
-                    aopts.timeoutMs = daemonTimeoutMs_;
-                    aopts.retries = daemonRetries_;
-                    aopts.backoffMs = daemonBackoffMs_;
-                    aopts.verify = verify_;
-                    aopts.noGitignore = noGitignore_;
+                    aopts.name = sanitizedName;
+                    dirBatch.push_back(std::move(aopts));
+                    dirPaths.push_back(dir);
+                }
 
-                    yams::app::services::DocumentIngestionService ing;
-                    auto result = ing.addViaDaemon(aopts);
-                    completedRequests++;
-                    if (result) {
-                        totalAdded += result.value().documentsAdded;
-                        totalUpdated += result.value().documentsUpdated;
-                        totalSkipped += result.value().documentsSkipped;
-                        render(result.value(), dir);
-                        successfulRequests++;
-                    } else {
-                        pauseProgress();
-                        const auto err = result.error();
-                        spdlog::warn("Daemon add failed for directory '{}': {}", dir.string(),
-                                     err.message);
-                        resumeProgress();
-                        daemonFailures.emplace_back(dir, err);
-                    }
-                    if (daemonSpinner.enabled()) {
-                        daemonSpinner.setCounts(completedRequests, totalDaemonRequests);
+                // Process directories in parallel batch
+                if (!dirBatch.empty()) {
+                    auto batchResult = ing.addBatch(dirBatch, 4);
+                    for (size_t i = 0; i < batchResult.results.size(); ++i) {
+                        completedRequests++;
+                        const auto& result = batchResult.results[i];
+                        if (result) {
+                            totalAdded += result.value().documentsAdded;
+                            totalUpdated += result.value().documentsUpdated;
+                            totalSkipped += result.value().documentsSkipped;
+                            render(result.value(), dirPaths[i]);
+                            successfulRequests++;
+                        } else {
+                            pauseProgress();
+                            const auto err = result.error();
+                            spdlog::warn("Daemon add failed for directory '{}': {}",
+                                         dirPaths[i].string(), err.message);
+                            resumeProgress();
+                            daemonFailures.emplace_back(dirPaths[i], err);
+                        }
+                        if (daemonSpinner.enabled()) {
+                            daemonSpinner.setCounts(completedRequests, totalDaemonRequests);
+                        }
                     }
                 }
                 daemonSpinner.pause();
@@ -690,16 +714,12 @@ public:
                     return Error{failure.code, oss.str()};
                 }
 
-                // Handle stdin if present
-                if (hasStdin) {
-                    targetPaths_.clear();
-                    targetPaths_.push_back(std::filesystem::path("-"));
-                } else if (daemonRequestsAttempted > 0) {
+                if (daemonRequestsAttempted > 0) {
                     return Result<void>();
                 }
             }
 
-            // Fall back to service-based execution for stdin
+            // Fall back to service-based execution (no stdin — that's handled via daemon above)
             return executeWithServices();
 
         } catch (const std::exception& e) {

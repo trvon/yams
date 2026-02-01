@@ -995,7 +995,12 @@ Result<bool> ReferenceCounter::verifyIntegrity() const {
 
 // Factory function
 std::unique_ptr<IReferenceCounter> createReferenceCounter(ReferenceCounter::Config config) {
-    return std::make_unique<ReferenceCounter>(std::move(config));
+    try {
+        return std::make_unique<ReferenceCounter>(std::move(config));
+    } catch (const std::exception& e) {
+        spdlog::error("createReferenceCounter failed: {}", e.what());
+        return nullptr;
+    }
 }
 
 } // namespace yams::storage

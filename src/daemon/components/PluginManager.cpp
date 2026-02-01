@@ -184,6 +184,10 @@ Result<void> PluginManager::initialize() {
             pluginLoader_->setNamePolicy(AbiPluginLoader::NamePolicy::Relaxed);
     }
 
+    // Treat a host with zero plugins as a valid steady state. Autoload can still
+    // transition Ready -> Scanning/Loading -> Ready when invoked.
+    pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});
+
     return Result<void>{};
 }
 
@@ -291,20 +295,24 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
         auto ps = pluginHostFsm_.snapshot().state;
         if (ps == PluginHostState::ScanningDirectories || ps == PluginHostState::LoadingPlugins) {
             spdlog::warn("[PluginManager] autoload skipped: scan already in progress");
+            pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});
             co_return Result<size_t>(0);
         }
 
         // Check for mock provider or disabled plugins
         if (deps_.config && deps_.config->useMockModelProvider) {
             spdlog::info("[PluginManager] autoload skipped (mock provider in use)");
+            pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});
             co_return Result<size_t>(0);
         }
         if (ConfigResolver::envTruthy(std::getenv("YAMS_USE_MOCK_PROVIDER"))) {
             spdlog::info("[PluginManager] autoload skipped (mock provider via env)");
+            pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});
             co_return Result<size_t>(0);
         }
         if (const char* d = std::getenv("YAMS_DISABLE_ABI_PLUGINS"); d && *d) {
             spdlog::info("[PluginManager] autoload disabled by YAMS_DISABLE_ABI_PLUGINS");
+            pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});
             co_return Result<size_t>(0);
         }
 
