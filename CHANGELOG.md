@@ -16,7 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.8.2] - Unreleased
+## [v0.8.3] - Unreleased
+
+### Fixed
+- **Homebrew plugin directory structure**: Formula now preserves `lib/yams/plugins/` subdirectory instead of flattening all libs into Homebrew's `lib/`. Plugins are correctly discovered by the daemon after `brew install`.
+- **ONNX Runtime dependency**: Homebrew formulas now declare `depends_on "onnxruntime"` and strip the bundled `libonnxruntime*` to avoid conflicts. A `post_install` rpath fixup ensures plugins find Homebrew's copy.
+
+## [v0.8.2] - February 2, 2026
 
 ### Fixed
 - MCP stdio: Improved OpenCode compatibility during handshake/tool discovery (initialize capabilities schema, strict JSON-RPC batch responses, more robust NDJSON parsing).

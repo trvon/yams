@@ -12,6 +12,8 @@ class Yams < Formula
     sha256 "__SHA256_X86_64__"
   end
 
+  depends_on "onnxruntime"
+
   livecheck do
     url "https://github.com/trvon/yams/releases"
     regex(/^v?(\d+(?:\.\d+)+)$/i)
@@ -43,10 +45,29 @@ class Yams < Formula
     (root/"include/spdlog").rmtree if (root/"include/spdlog").exist?
 
     include.install Dir[(root/"include/*").to_s] if (root/"include").exist?
-    lib.install Dir[(root/"lib/*").to_s] if (root/"lib").exist?
+
+    # Install lib contents preserving directory structure (plugins live in lib/yams/plugins/)
+    if (root/"lib").exist?
+      lib.install Dir[(root/"lib/*.{a,dylib,so}").to_s]
+      (lib/"pkgconfig").install Dir[(root/"lib/pkgconfig/*").to_s] if (root/"lib/pkgconfig").exist?
+      if (root/"lib/yams/plugins").exist?
+        (lib/"yams/plugins").mkpath
+        (lib/"yams/plugins").install Dir[(root/"lib/yams/plugins/*").to_s]
+      end
+    end
+
+    # Remove bundled onnxruntime — Homebrew manages this dependency
+    rm_f Dir[lib/"libonnxruntime*"]
 
     # Runtime assets (schemas, etc.)
     share.install Dir[(root/"share/*").to_s] if (root/"share").exist?
+  end
+
+  def post_install
+    # Fix plugin rpaths to find Homebrew-managed onnxruntime
+    Dir[lib/"yams/plugins/*.dylib"].each do |plugin|
+      MachO::Tools.add_rpath(plugin, HOMEBREW_PREFIX/"lib") rescue nil
+    end
   end
 
   service do
