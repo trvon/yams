@@ -148,6 +148,9 @@ public:
     Result<void> removeFromIndexByHash(const std::string&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+    Result<size_t> removeFromIndexByHashBatch(const std::vector<std::string>&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
     Result<std::vector<int64_t>> getAllFts5IndexedDocumentIds() override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
