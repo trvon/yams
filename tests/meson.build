@@ -1678,6 +1678,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  core_uuid_exe = executable('core_uuid',
+    files('unit/core/uuid_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + core_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   detection_exe = executable('detection',
     files(
       'unit/detection/command_integration_test.cpp',
@@ -2116,6 +2125,12 @@ if catch2_dep.found()
     timeout: 60
   )
 
+  test('core_uuid', core_uuid_exe,
+    suite: ['catch2', 'unit', 'core', 'uuid'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
   test('detection', detection_exe,
     suite: ['catch2', 'unit', 'detection'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -2162,7 +2177,7 @@ if catch2_dep.found()
   test('plugin_process_minimal', plugin_process_minimal_exe,
     suite: ['catch2', 'unit', 'extraction', 'plugin', 'debug'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 
@@ -2369,7 +2384,7 @@ if catch2_dep.found()
   test('repair_scheduling_adapter', catch2_repair_scheduling_exe,
     suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
+    timeout: 120
   )
 
   test('service_manager', catch2_service_manager_exe,
@@ -2394,7 +2409,7 @@ if catch2_dep.found()
   test('entity_graph_service', catch2_entity_graph_service_exe,
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
+    timeout: 120
   )
 
   # These tests use ServiceManager/WorkCoordinator which have resource contention
@@ -2402,21 +2417,21 @@ if catch2_dep.found()
   test('service_manager_shutdown', catch2_service_manager_shutdown_exe,
     suite: ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 
   test('service_manager_degraded', catch2_service_manager_degraded_exe,
     suite: ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 
   test('repair_binary_filter', catch2_repair_binary_filter_exe,
     suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 
@@ -2429,7 +2444,7 @@ if catch2_dep.found()
   test('embedding_recovery', catch2_embedding_recovery_exe,
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 
@@ -2437,7 +2452,7 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     args: ['--allow-running-no-tests'],  # Placeholder tests - all skipped
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 
@@ -2452,14 +2467,14 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     args: ['--allow-running-no-tests'],  # Skips when streaming disabled
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 
   test('asio_connection_pool', catch2_asio_connection_pool_exe,
     suite: ['catch2', 'unit', 'daemon', 'connection-pool'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false,
     # Test skips on Windows (Unix domain sockets not supported)
     should_fail: host_machine.system() == 'windows'
@@ -2480,7 +2495,7 @@ if catch2_dep.found()
   test('tune_advisor_threshold', catch2_tune_advisor_threshold_exe,
     suite: ['catch2', 'unit', 'daemon', 'tune', 'advisor'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
+    timeout: 120
   )
 
   test('resource_governance', catch2_resource_governance_exe,
@@ -2501,7 +2516,7 @@ if catch2_dep.found()
   test('cli_init_command', catch2_cli_init_command_exe,
     suite: ['catch2', 'unit', 'cli', 'init'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 

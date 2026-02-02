@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
+#include <yams/core/uuid.h>
 
 namespace yams::app::services {
 
@@ -89,6 +90,7 @@ public:
     void init(const std::string& name, const std::string& desc) override {
         json j;
         j["name"] = name;
+        j["uuid"] = yams::core::generateUUID();
         if (!desc.empty())
             j["desc"] = desc;
         j["selectors"] = json::array();
@@ -441,6 +443,7 @@ public:
 
         json j;
         j["name"] = name;
+        j["uuid"] = yams::core::generateUUID();
         j["description"] = desc;
         j["state"] = "closed";
         j["createdTime"] = now;
@@ -474,6 +477,10 @@ public:
         j["lastOpenedTime"] = std::chrono::duration_cast<std::chrono::seconds>(
                                   std::chrono::system_clock::now().time_since_epoch())
                                   .count();
+        // Record instance that opened this session (set by caller or env)
+        if (const char* instEnv = std::getenv("YAMS_INSTANCE_ID"); instEnv && *instEnv) {
+            j["lastInstanceId"] = std::string(instEnv);
+        }
         save_json(p, j);
         use(name);
     }
@@ -513,6 +520,8 @@ public:
         auto j = load_json(sessions_dir() / (name + ".json"));
         SessionInfo info;
         info.name = name;
+        info.uuid = j.value("uuid", "");
+        info.instanceId = j.value("lastInstanceId", "");
         info.description = j.value("description", j.value("desc", ""));
         info.state = (j.contains("state") && j["state"] == "active") ? SessionState::Active
                                                                      : SessionState::Closed;

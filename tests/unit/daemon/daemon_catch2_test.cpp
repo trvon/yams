@@ -72,7 +72,14 @@ struct DaemonFixture {
         config_.logFile = runtime_root_ / "daemon.log";
         config_.maxMemoryGb = 1.0;
 
-        config_.enableModelProvider = true;
+        // When ABI plugins are disabled, no model provider can be adopted,
+        // so disable the requirement to avoid init failure.
+        if (const char* v = std::getenv("YAMS_DISABLE_ABI_PLUGINS");
+            v && std::string_view(v) == "1") {
+            config_.enableModelProvider = false;
+        } else {
+            config_.enableModelProvider = true;
+        }
         config_.autoLoadPlugins = true;
         config_.modelPoolConfig.lazyLoading = true;
         config_.modelPoolConfig.preloadModels.clear();

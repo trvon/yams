@@ -1,4 +1,5 @@
 #include <yams/app/services/services.hpp>
+#include <yams/core/uuid.h>
 #include <yams/app/services/session_service.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
@@ -62,16 +63,6 @@ static std::string sanitizeName(std::string s) {
     return s;
 }
 
-static std::string shortHash(const std::string& s) {
-    std::uint64_t h = 1469598103934665603ull;
-    for (unsigned char c : s) {
-        h ^= static_cast<std::uint64_t>(c);
-        h *= 1099511628211ull;
-    }
-    std::ostringstream oss;
-    oss << std::hex << std::nouppercase << (h & 0xffffffffull);
-    return oss.str();
-}
 } // namespace
 
 class WatchCommand final : public ICommand {
@@ -151,7 +142,7 @@ public:
             std::string base = root.filename().string();
             if (base.empty())
                 base = "project";
-            targetSession = "proj-" + sanitizeName(base) + "-" + shortHash(rootStr);
+            targetSession = "proj-" + sanitizeName(base) + "-" + yams::core::shortHash(rootStr);
         }
 
         if (!svc->exists(targetSession)) {

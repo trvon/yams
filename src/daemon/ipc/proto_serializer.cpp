@@ -231,6 +231,9 @@ template <> struct ProtoBinding<SearchRequest> {
         if (r.useSession && !r.sessionName.empty()) {
             o->set_session_id(r.sessionName);
         }
+        if (!r.instanceId.empty()) {
+            o->set_instance_id(r.instanceId);
+        }
     }
     static SearchRequest get(const Envelope& env) {
         const auto& i = env.search_request();
@@ -273,6 +276,7 @@ template <> struct ProtoBinding<SearchRequest> {
             r.useSession = true;
             r.sessionName = i.session_id();
         }
+        r.instanceId = i.instance_id();
         return r;
     }
 };
@@ -413,6 +417,9 @@ template <> struct ProtoBinding<DeleteRequest> {
         o->set_recursive(r.recursive);
         o->set_verbose(r.verbose);
         o->set_session_id(r.sessionId);
+        if (!r.instanceId.empty()) {
+            o->set_instance_id(r.instanceId);
+        }
     }
     static DeleteRequest get(const Envelope& env) {
         const auto& i = env.delete_request();
@@ -429,6 +436,7 @@ template <> struct ProtoBinding<DeleteRequest> {
         r.recursive = i.recursive();
         r.verbose = i.verbose();
         r.sessionId = i.session_id();
+        r.instanceId = i.instance_id();
         return r;
     }
 };
@@ -478,6 +486,9 @@ template <> struct ProtoBinding<ListRequest> {
         if (!r.sessionId.empty()) {
             o->set_session_id(r.sessionId);
         }
+        if (!r.instanceId.empty()) {
+            o->set_instance_id(r.instanceId);
+        }
     }
     static ListRequest get(const Envelope& env) {
         const auto& i = env.list_request();
@@ -521,6 +532,7 @@ template <> struct ProtoBinding<ListRequest> {
         r.metadataFilters = from_kv_pairs(i.metadata_filters());
         r.matchAllMetadata = i.match_all_metadata();
         r.sessionId = i.session_id();
+        r.instanceId = i.instance_id();
         return r;
     }
 };
@@ -686,6 +698,9 @@ template <> struct ProtoBinding<AddDocumentRequest> {
         if (!r.sessionId.empty()) {
             o->set_session_id(r.sessionId);
         }
+        if (!r.instanceId.empty()) {
+            o->set_instance_id(r.instanceId);
+        }
     }
     static AddDocumentRequest get(const Envelope& env) {
         const auto& i = env.add_document_request();
@@ -706,6 +721,7 @@ template <> struct ProtoBinding<AddDocumentRequest> {
         r.disableAutoMime = i.disable_auto_mime();
         r.noEmbeddings = i.no_embeddings();
         r.sessionId = i.session_id();
+        r.instanceId = i.instance_id();
         return r;
     }
 };
@@ -743,6 +759,9 @@ template <> struct ProtoBinding<GrepRequest> {
         if (r.useSession && !r.sessionName.empty()) {
             o->set_session_id(r.sessionName);
         }
+        if (!r.instanceId.empty()) {
+            o->set_instance_id(r.instanceId);
+        }
     }
     static GrepRequest get(const Envelope& env) {
         const auto& i = env.grep_request();
@@ -777,6 +796,7 @@ template <> struct ProtoBinding<GrepRequest> {
             r.useSession = true;
             r.sessionName = i.session_id();
         }
+        r.instanceId = i.instance_id();
         return r;
     }
 };
@@ -2500,6 +2520,9 @@ template <> struct ProtoBinding<BatchRequest> {
         auto* o = env.mutable_batch_request();
         o->set_continue_on_error(r.continueOnError);
         o->set_session_id(r.sessionId);
+        if (!r.instanceId.empty()) {
+            o->set_instance_id(r.instanceId);
+        }
         for (const auto& item : r.items) {
             auto* item_pb = o->add_items();
             item_pb->set_sequence_id(item.sequenceId);
@@ -2542,6 +2565,7 @@ template <> struct ProtoBinding<BatchRequest> {
         BatchRequest r{};
         r.continueOnError = i.continue_on_error();
         r.sessionId = i.session_id();
+        r.instanceId = i.instance_id();
         for (const auto& item_pb : i.items()) {
             BatchItem item;
             item.sequenceId = item_pb.sequence_id();

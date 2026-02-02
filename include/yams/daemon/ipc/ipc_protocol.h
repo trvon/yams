@@ -84,6 +84,7 @@ struct SearchRequest {
     std::string sessionName;
     bool globalSearch = false; // Session-isolated memory (PBI-082): bypass session isolation
     bool symbolRank = true;    // Enable automatic symbol ranking boost for code-like queries
+    std::string instanceId;    // Instance-level isolation (UUID of MCP connection)
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -98,7 +99,7 @@ struct SearchRequest {
             << static_cast<int32_t>(vectorStageTimeoutMs)
             << static_cast<int32_t>(keywordStageTimeoutMs)
             << static_cast<int32_t>(snippetHydrationTimeoutMs) << useSession << sessionName
-            << globalSearch << symbolRank;
+            << globalSearch << symbolRank << instanceId;
     }
 
     template <typename Deserializer>
@@ -293,6 +294,9 @@ struct SearchRequest {
         }
         if (auto sr = deser.template read<bool>(); sr) {
             req.symbolRank = sr.value();
+        }
+        if (auto ii = deser.readString(); ii) {
+            req.instanceId = std::move(ii.value());
         }
 
         return req;
@@ -922,6 +926,7 @@ struct DeleteRequest {
 
     // Session scoping
     std::string sessionId;
+    std::string instanceId; // Instance-level isolation
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -930,7 +935,7 @@ struct DeleteRequest {
         // Extended fields for enhanced protocol
         ser << name << names << pattern << directory;
         ser << force << dryRun << keepRefs << recursive << verbose;
-        ser << sessionId;
+        ser << sessionId << instanceId;
     }
 
     template <typename Deserializer>
@@ -989,6 +994,8 @@ struct DeleteRequest {
         auto sessionIdResult = deser.readString();
         if (sessionIdResult)
             req.sessionId = std::move(sessionIdResult.value());
+        if (auto ii = deser.readString(); ii)
+            req.instanceId = std::move(ii.value());
 
         return req;
     }
@@ -1036,7 +1043,8 @@ struct ListRequest {
     std::string namePattern; // glob pattern for file name/path matching
 
     // Session filtering
-    std::string sessionId; // filter by session ID
+    std::string sessionId;  // filter by session ID
+    std::string instanceId; // Instance-level isolation
 
     // 32-bit integral fields
     int offset = 0;
@@ -1086,7 +1094,7 @@ struct ListRequest {
         ser << tags << filterTags << matchAllTags;
 
         // Name pattern and session filtering
-        ser << namePattern << sessionId;
+        ser << namePattern << sessionId << instanceId;
     }
 
     template <typename Deserializer>
@@ -1276,6 +1284,9 @@ struct ListRequest {
         if (!sessionIdResult)
             return sessionIdResult.error();
         req.sessionId = std::move(sessionIdResult.value());
+
+        if (auto ii = deser.readString(); ii)
+            req.instanceId = std::move(ii.value());
 
         return req;
     }
@@ -1618,6 +1629,7 @@ struct AddDocumentRequest {
     std::string snapshotId;    // Unique snapshot identifier
     std::string snapshotLabel; // User-friendly snapshot label
     std::string sessionId;     // Session-isolated memory (PBI-082)
+    std::string instanceId;    // Instance-level isolation
 
     // Content handling options
     std::string mimeType;         // MIME type of the document
@@ -1637,7 +1649,7 @@ struct AddDocumentRequest {
         ser << path << content << name << tags << metadata << recursive << includeHidden
             << includePatterns << excludePatterns << collection << snapshotId << snapshotLabel
             << sessionId << mimeType << disableAutoMime << noEmbeddings << noGitignore
-            << waitForProcessing << waitTimeoutSeconds;
+            << waitForProcessing << waitTimeoutSeconds << instanceId;
     }
 
     template <typename Deserializer>
@@ -1735,6 +1747,9 @@ struct AddDocumentRequest {
             req.waitTimeoutSeconds = waitTimeout.value();
         }
 
+        if (auto ii = deser.readString(); ii)
+            req.instanceId = std::move(ii.value());
+
         return req;
     }
 };
@@ -1772,6 +1787,7 @@ struct GrepRequest {
     // Session scoping (controls hot/cold path behavior)
     bool useSession = false; // if true, allow hot path optimization
     std::string sessionName; // optional explicit session name
+    std::string instanceId;  // Instance-level isolation
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -1782,7 +1798,8 @@ struct GrepRequest {
             << noFilename << countOnly << filesOnly << filesWithoutMatch << pathsOnly << literalText
             << regexOnly << static_cast<uint64_t>(semanticLimit) << filterTags << matchAllTags
             << colorMode << static_cast<int32_t>(beforeContext)
-            << static_cast<int32_t>(afterContext) << showDiff << useSession << sessionName;
+            << static_cast<int32_t>(afterContext) << showDiff << useSession << sessionName
+            << instanceId;
     }
 
     template <typename Deserializer>
@@ -1910,6 +1927,9 @@ struct GrepRequest {
         auto snResult = deser.readString();
         if (snResult) {
             req.sessionName = std::move(snResult.value());
+        }
+        if (auto ii = deser.readString(); ii) {
+            req.instanceId = std::move(ii.value());
         }
 
         return req;
@@ -7135,11 +7155,12 @@ struct BatchRequest {
     std::vector<BatchItem> items;
     bool continueOnError = false;
     std::string sessionId;
+    std::string instanceId; // Instance-level isolation
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << items << continueOnError << sessionId;
+        ser << items << continueOnError << sessionId << instanceId;
     }
 
     template <typename Deserializer>
@@ -7157,6 +7178,8 @@ struct BatchRequest {
         auto session = deser.readString();
         if (session)
             req.sessionId = session.value();
+        if (auto ii = deser.readString(); ii)
+            req.instanceId = std::move(ii.value());
         return req;
     }
 };
@@ -7175,6 +7198,7 @@ struct Message {
 
     // Optional fields
     std::optional<std::string> sessionId;
+    std::optional<std::string> instanceId;
     std::optional<std::string> clientVersion;
 
     // Streaming preference - client indicates if it expects chunked/streaming response

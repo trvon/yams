@@ -514,6 +514,9 @@ private:
         std::string version = YAMS_VERSION_STRING;
     } serverInfo_;
 
+    // Instance ID: unique per MCP connection / server lifetime
+    std::string instanceId_;
+
     // Client info (set during initialize)
     ClientInfo clientInfo_;
 

@@ -31,6 +31,7 @@
 #if !defined(YAMS_WASI)
 #include <yams/downloader/downloader.hpp>
 #endif
+#include <yams/core/uuid.h>
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/mcp_server.h>
 #if !defined(YAMS_WASI)
@@ -157,17 +158,6 @@ static std::string sanitizeName(std::string s) {
         }
     }
     return s;
-}
-
-static std::string shortHash(const std::string& s) {
-    std::uint64_t h = 1469598103934665603ull;
-    for (unsigned char c : s) {
-        h ^= static_cast<std::uint64_t>(c);
-        h *= 1099511628211ull;
-    }
-    std::ostringstream oss;
-    oss << std::hex << std::nouppercase << (h & 0xffffffffull);
-    return oss.str();
 }
 
 // Synchronous pooled_execute is deprecated and returns NotImplemented
@@ -653,6 +643,8 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
       strictProtocol_(false), limitToolResultDup_(false),
       daemonSocketOverride_(std::move(overrideSocket)) {
     (void)executor; // Reserved for future use
+    // Generate unique instance ID for this MCP server connection
+    instanceId_ = yams::core::generateUUID();
     // Ensure logging goes to stderr to keep stdout clean for MCP framing
     if (auto existing = spdlog::get("yams-mcp")) {
         spdlog::set_default_logger(existing);
@@ -1532,7 +1524,8 @@ json MCPServer::initialize(const json& params) {
 
     json result = {{"protocolVersion", negotiated},
                    {"serverInfo", {{"name", serverInfo_.name}, {"version", serverInfo_.version}}},
-                   {"capabilities", caps}};
+                   {"capabilities", caps},
+                   {"_meta", {{"instanceId", instanceId_}}}};
 
     // Debug logging to diagnose empty result issues
     spdlog::debug("MCP initialize() result built:");
@@ -2024,6 +2017,12 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         spdlog::debug("[MCP] search: using session '{}'", __session);
         dreq.useSession = true;
         dreq.sessionName = __session;
+        // Inject instance tag for session-scoped isolation (unless globalSearch)
+        if (!req.tags.empty() || !instanceId_.empty()) {
+            if (!instanceId_.empty() && !dreq.globalSearch) {
+                dreq.tags.push_back("inst:" + instanceId_);
+            }
+        }
     }
 
     // Optional fast-first strategy: quick keyword preview before full hybrid
@@ -2308,6 +2307,12 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         }
     }
     dreq.paths.assign(final_paths.begin(), final_paths.end());
+
+    // Inject instance tag for session-scoped grep
+    if (req.useSession && !instanceId_.empty()) {
+        dreq.filterTags.push_back("inst:" + instanceId_);
+        dreq.matchAllTags = true;
+    }
 
     // Session scoping for grep: if no explicit paths, use session patterns
     if (req.useSession && dreq.paths.empty()) {
@@ -3095,6 +3100,22 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     aopts.includePatterns = req.includePatterns;
     aopts.excludePatterns = req.excludePatterns;
     aopts.tags = req.tags;
+    // Inject instance and session tags for isolation
+    if (!instanceId_.empty()) {
+        aopts.tags.push_back("inst:" + instanceId_);
+    }
+    {
+        auto __svc = app::services::makeSessionService(nullptr);
+        auto __sess = __svc->current().value_or("");
+        if (!__sess.empty()) {
+            aopts.tags.push_back("session:" + __sess);
+            aopts.metadata["session_uuid"] = "";
+            if (auto __info = __svc->getSessionInfo(__sess); __info && !__info->uuid.empty()) {
+                aopts.metadata["session_uuid"] = __info->uuid;
+            }
+            aopts.metadata["instance_id"] = instanceId_;
+        }
+    }
     for (const auto& [key, value] : req.metadata.items()) {
         if (value.is_string()) {
             aopts.metadata[key] = value.get<std::string>();
@@ -3292,6 +3313,11 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
         }
     }
     daemon_req.tags = req.tags;
+    // Inject instance tag for session-scoped list
+    if (req.useSession && !instanceId_.empty()) {
+        daemon_req.tags.push_back("inst:" + instanceId_);
+        daemon_req.matchAllTags = true;
+    }
     daemon_req.fileType = req.type;
     daemon_req.mimeType = req.mime;
     daemon_req.extensions = req.extension;
@@ -4262,7 +4288,7 @@ MCPServer::handleSessionWatch(const MCPSessionWatchRequest& req) {
         std::string base = root.filename().string();
         if (base.empty())
             base = "project";
-        targetSession = "proj-" + sanitizeName(base) + "-" + shortHash(rootStr);
+        targetSession = "proj-" + sanitizeName(base) + "-" + yams::core::shortHash(rootStr);
     }
 
     bool created = false;

@@ -56,6 +56,30 @@ std::optional<std::string> current_session() {
     return std::nullopt;
 }
 
+std::optional<std::string> current_session_uuid() {
+    auto name = current_session();
+    if (!name)
+        return std::nullopt;
+    auto path = sessions_dir() / (*name + ".json");
+    if (!std::filesystem::exists(path))
+        return std::nullopt;
+    try {
+        std::ifstream in(path);
+        if (!in.good())
+            return std::nullopt;
+        json j;
+        in >> j;
+        if (j.contains("uuid") && j["uuid"].is_string()) {
+            auto s = j["uuid"].get<std::string>();
+            if (!s.empty())
+                return s;
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Failed to read session UUID: {}", e.what());
+    }
+    return std::nullopt;
+}
+
 static std::vector<std::string> load_pinned_legacy() {
     // Legacy pinned.json fallback
     auto legacy = state_root() / "pinned.json";

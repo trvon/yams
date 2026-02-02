@@ -1981,30 +1981,7 @@ private:
             if (used < totalBudget) {
                 uint32_t remaining = totalBudget - used;
 
-                // Fairness pass: if we have any remaining budget, first ensure each active stage
-                // has at least 1 slot before we start adding extra slots to higher-weight stages.
-                //
-                // This prevents long-lived starvation where (for example) Embed consumes the
-                // remainder due to its higher weight while Title/KG stay at 0.
-                //
-                // Order is chosen to prioritize user-visible enrichment stages.
-                constexpr std::array<std::size_t, 4> kZeroFillOrder{
-                    4, // Title
-                    1, // KnowledgeGraph
-                    2, // Symbol
-                    3  // Entity
-                };
-                for (auto idx : kZeroFillOrder) {
-                    if (remaining == 0)
-                        break;
-                    if (caps[idx] == 0)
-                        continue;
-                    if (alloc[idx] != 0)
-                        continue;
-                    alloc[idx] = 1;
-                    remaining -= 1;
-                }
-
+                // Weighted sort: distribute remaining budget by weight (higher weight first).
                 std::array<std::size_t, kStageCount> order{};
                 for (std::size_t i = 0; i < kStageCount; ++i) {
                     order[i] = i;
@@ -2027,6 +2004,33 @@ private:
                     }
                     if (!progressed)
                         break;
+                }
+
+                // Fairness correction: if any stage with cap > 0 still has 0 allocation,
+                // steal 1 slot from the lowest-weight stage that has alloc > 1 AND
+                // whose weight does not exceed the needy stage's weight.
+                // This prevents starvation without penalizing higher-weight stages.
+                constexpr std::array<std::size_t, 4> kZeroFillOrder{
+                    4, // Title
+                    1, // KnowledgeGraph
+                    2, // Symbol
+                    3  // Entity
+                };
+                for (auto needIdx : kZeroFillOrder) {
+                    if (caps[needIdx] == 0 || alloc[needIdx] != 0)
+                        continue;
+                    // Find lowest-weight donor with alloc > 1 and weight <= needy stage
+                    std::size_t donor = kStageCount;
+                    for (auto it = order.rbegin(); it != order.rend(); ++it) {
+                        if (*it != needIdx && alloc[*it] > 1 && weights[*it] <= weights[needIdx]) {
+                            donor = *it;
+                            break;
+                        }
+                    }
+                    if (donor < kStageCount) {
+                        alloc[donor] -= 1;
+                        alloc[needIdx] = 1;
+                    }
                 }
             }
 

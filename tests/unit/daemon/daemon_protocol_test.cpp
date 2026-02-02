@@ -451,6 +451,7 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         sr.query = "hello";
         sr.useSession = true;
         sr.sessionName = "feature-auth";
+        sr.instanceId = "inst-abc-123";
 
         auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{sr}, 10));
         REQUIRE(enc);
@@ -463,6 +464,7 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         REQUIRE(got != nullptr);
         REQUIRE(got->useSession);
         REQUIRE(got->sessionName == "feature-auth");
+        REQUIRE(got->instanceId == "inst-abc-123");
     }
 
     SECTION("GrepRequest carries session") {
@@ -470,6 +472,7 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         gr.pattern = "TODO";
         gr.useSession = true;
         gr.sessionName = "feature-auth";
+        gr.instanceId = "inst-grep-456";
 
         auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{gr}, 11));
         REQUIRE(enc);
@@ -482,12 +485,14 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         REQUIRE(got != nullptr);
         REQUIRE(got->useSession);
         REQUIRE(got->sessionName == "feature-auth");
+        REQUIRE(got->instanceId == "inst-grep-456");
     }
 
     SECTION("AddDocumentRequest carries session") {
         AddDocumentRequest ar;
         ar.path = "/tmp/a.txt";
         ar.sessionId = "feature-auth";
+        ar.instanceId = "inst-add-789";
 
         auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{ar}, 12));
         REQUIRE(enc);
@@ -499,12 +504,14 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         auto* got = std::get_if<AddDocumentRequest>(&std::get<Request>(dec.value().payload));
         REQUIRE(got != nullptr);
         REQUIRE(got->sessionId == "feature-auth");
+        REQUIRE(got->instanceId == "inst-add-789");
     }
 
     SECTION("ListRequest carries session") {
         ListRequest lr;
         lr.limit = 5;
         lr.sessionId = "feature-auth";
+        lr.instanceId = "inst-list-012";
 
         auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{lr}, 13));
         REQUIRE(enc);
@@ -516,6 +523,7 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         auto* got = std::get_if<ListRequest>(&std::get<Request>(dec.value().payload));
         REQUIRE(got != nullptr);
         REQUIRE(got->sessionId == "feature-auth");
+        REQUIRE(got->instanceId == "inst-list-012");
     }
 }
 
