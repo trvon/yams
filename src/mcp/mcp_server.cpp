@@ -1954,6 +1954,13 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         dreq.pathPatterns.push_back(pathPattern);
     }
 
+    // CWD scoping: inject glob patterns to restrict results to a directory
+    if (!req.cwd.empty()) {
+        auto cwdPatterns = yams::app::services::utils::buildCwdScopePatterns(req.cwd);
+        dreq.pathPatterns.insert(dreq.pathPatterns.end(), cwdPatterns.begin(), cwdPatterns.end());
+        spdlog::debug("[MCP] Scoping search to CWD: {} ({} patterns)", req.cwd, cwdPatterns.size());
+    }
+
     dreq.tags = req.tags;
     dreq.matchAllTags = req.matchAllTags;
     dreq.limit = req.limit;
@@ -1978,30 +1985,8 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     if (dreq.searchType == "keyword") {
         dreq.similarity = 0.0; // disable vector path
     } else {
-        // Optional: degrade to keyword if provider/index unavailable
-        try {
-            auto st = co_await daemon_client_->status();
-            if (st) {
-                const auto& s = st.value();
-                bool provider_ready = false;
-                for (const auto& p : s.providers) {
-                    if (p.isProvider && p.ready && !p.degraded) {
-                        provider_ready = true;
-                        break;
-                    }
-                }
-                bool vector_ready = true;
-                if (auto it = s.readinessStates.find("vector_index"); it != s.readinessStates.end())
-                    vector_ready = it->second;
-                if (!provider_ready || !vector_ready) {
-                    sendProgress("search", 10.0, "degraded to keyword");
-                    dreq.searchType = "keyword";
-                    dreq.similarity = 0.0;
-                }
-            }
-        } catch (...) {
-            // Best-effort: on status failure keep requested type
-        }
+        // Note: removed pre-flight status check to avoid extra IPC round-trip.
+        // The daemon handles degradation internally; this matches CLI behavior.
     }
 
     MCPSearchResponse out;
@@ -2065,40 +2050,8 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     }
 
     // Streaming-only path for search to match CLI and reduce protocol complexity.
-    // Body timeout may be overridden via env YAMS_MCP_SEARCH_BODY_TIMEOUT_MS (default 60000).
-    Result<yams::daemon::SearchResponse> res(Error{ErrorCode::Unknown, "uninitialized"});
-    {
-        int wait_ms = 60000;
-        if (const char* env = std::getenv("YAMS_MCP_SEARCH_BODY_TIMEOUT_MS")) {
-            try {
-                int v = std::stoi(env);
-                if (v > 100)
-                    wait_ms = v;
-            } catch (...) {
-            }
-        }
-        std::promise<Result<yams::daemon::SearchResponse>> prom;
-        auto fut = prom.get_future();
-        boost::asio::any_io_executor exec;
-#if defined(YAMS_WASI)
-        exec = boost::asio::system_executor();
-#else
-        exec = yams::daemon::GlobalIOContext::instance().get_io_context().get_executor();
-#endif
-        boost::asio::co_spawn(
-            exec,
-            [&, pr = std::move(prom)]() mutable -> boost::asio::awaitable<void> {
-                auto sr = co_await daemon_client_->streamingSearch(dreq);
-                pr.set_value(std::move(sr));
-                co_return;
-            },
-            boost::asio::detached);
-        if (fut.wait_for(std::chrono::milliseconds(wait_ms)) == std::future_status::ready) {
-            res = fut.get();
-        } else {
-            res = Error{ErrorCode::Timeout, "Search timed out"};
-        }
-    }
+    // Direct co_await avoids the blocking promise/future pattern that stalls the IO thread.
+    Result<yams::daemon::SearchResponse> res = co_await daemon_client_->streamingSearch(dreq);
     if (!res) {
         co_return res.error();
     }
@@ -2268,6 +2221,15 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         dreq.recursive = true;
     }
 
+    // CWD scoping: inject glob patterns to restrict results to a directory
+    if (!req.cwd.empty()) {
+        auto cwdPatterns = yams::app::services::utils::buildCwdScopePatterns(req.cwd);
+        dreq.includePatterns.insert(dreq.includePatterns.end(), cwdPatterns.begin(),
+                                    cwdPatterns.end());
+        dreq.recursive = true;
+        spdlog::debug("[MCP] Scoping grep to CWD: {} ({} patterns)", req.cwd, cwdPatterns.size());
+    }
+
     std::vector<std::string> initial_paths = req.paths;
     if (!req.name.empty()) {
         initial_paths.push_back(req.name);
@@ -2307,6 +2269,14 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         }
     }
     dreq.paths.assign(final_paths.begin(), final_paths.end());
+
+    // Pass user-provided tags through to the grep engine
+    if (!req.tags.empty()) {
+        dreq.filterTags.insert(dreq.filterTags.end(), req.tags.begin(), req.tags.end());
+        if (req.matchAllTags) {
+            dreq.matchAllTags = true;
+        }
+    }
 
     // Inject instance tag for session-scoped grep
     if (req.useSession && !instanceId_.empty()) {
@@ -4607,7 +4577,11 @@ void MCPServer::initializeToolRegistry() {
               {"tags",
                {{"type", "array"},
                 {"items", {{"type", "string"}}},
-                {"description", "Filter by tags (YAMS extension)"}}}}},
+                {"description", "Filter by tags (YAMS extension)"}}},
+              {"cwd",
+               {{"type", "string"},
+                {"description",
+                 "Scope search to files under this directory path (absolute or relative)"}}}}},
             {"required", json::array({"query"})}},
         "Search documents using hybrid search (vector + full-text + knowledge graph)",
         "Search Documents", readOnlyAnnotation);
@@ -4679,7 +4653,19 @@ void MCPServer::initializeToolRegistry() {
                {"fast_first",
                 {{"type", "boolean"},
                  {"description", "Return a fast semantic-first burst"},
-                 {"default", false}}}}},
+                 {"default", false}}},
+               {"tags",
+                {{"type", "array"},
+                 {"items", {{"type", "string"}}},
+                 {"description", "Filter by tags"}}},
+               {"match_all_tags",
+                {{"type", "boolean"},
+                 {"description", "Require all tags to match (AND logic)"},
+                 {"default", false}}},
+               {"cwd",
+                {{"type", "string"},
+                 {"description",
+                  "Scope grep to files under this directory path (absolute or relative)"}}}}},
              {"required", json::array({"pattern"})}},
         "Search documents using regular expressions with grep-like functionality", "Grep Search",
         readOnlyAnnotation);

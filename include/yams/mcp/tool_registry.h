@@ -251,6 +251,9 @@ struct MCPSearchRequest {
     // Symbol ranking
     bool symbolRank = true; // Enable automatic symbol ranking boost for code-like queries
 
+    // CWD scoping
+    std::string cwd; // optional: scope search to files under this directory
+
     static MCPSearchRequest fromJson(const json& j);
     json toJson() const;
 };
@@ -308,6 +311,13 @@ struct MCPGrepRequest {
     // Session scoping
     bool useSession = true;
     std::string sessionName;
+
+    // Tag filtering
+    std::vector<std::string> tags;
+    bool matchAllTags = false;
+
+    // CWD scoping
+    std::string cwd; // optional: scope grep to files under this directory
 
     static MCPGrepRequest fromJson(const json& j);
     json toJson() const;

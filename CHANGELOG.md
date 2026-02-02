@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **FTS5 orphan detection**: Fixed bug where orphan scan used synthetic hashes (e.g., `orphan_id_12345`) that never matched actual documents. Orphans were detected but never removed because the removal query used non-existent hashes. Now passes document rowids directly via `Fts5Job.ids` and calls `removeFromIndex(docId)` which deletes by FTS5 rowid.
 
 ### Added
+- **MCP grep tag filtering**: `grep` tool now accepts `tags` and `match_all_tags` parameters, aligning MCP grep with CLI `yams grep --tags` capabilities.
+- **Blackboard search tools**: Three new OpenCode blackboard tools for discovering content:
+  - `bb_search_tasks` — semantic search for tasks (mirrors `bb_search_findings`).
+  - `bb_search` — unified cross-entity semantic search returning both findings and tasks.
+  - `bb_grep` — regex/pattern search across all blackboard content with optional entity filtering.
 - MCP stdio debug/compat toggles: `YAMS_MCP_HANDSHAKE_TRACE` (trace handshake events) and `YAMS_MCP_MINIMAL_TOOLS` (expose only `mcp.echo` for client compatibility debugging).
 
 ### Performance

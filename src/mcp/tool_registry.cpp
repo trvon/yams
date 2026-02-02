@@ -114,6 +114,7 @@ MCPSearchRequest MCPSearchRequest::fromJson(const json& j) {
     req.includeDiff = detail::jsonValueOr(j, "include_diff", false);
     req.useSession = detail::jsonValueOr(j, "use_session", true);
     req.sessionName = j.value("session", std::string{});
+    req.cwd = j.value("cwd", std::string{});
 
     return req;
 }
@@ -136,7 +137,8 @@ json MCPSearchRequest::toJson() const {
                 {"include_patterns", includePatterns},
                 {"tags", tags},
                 {"match_all_tags", matchAllTags},
-                {"include_diff", includeDiff}};
+                {"include_diff", includeDiff},
+                {"cwd", cwd}};
 }
 
 // MCPSearchResponse implementation
@@ -265,6 +267,10 @@ MCPGrepRequest MCPGrepRequest::fromJson(const json& j) {
     req.color = j.value("color", std::string{"auto"});
     req.useSession = j.value("use_session", true);
     req.sessionName = j.value("session", std::string{});
+    req.cwd = j.value("cwd", std::string{});
+
+    detail::readStringArray(j, "tags", req.tags);
+    req.matchAllTags = j.value("match_all_tags", false);
 
     if (j.contains("max_count")) {
         int mc = parse_int_tolerant(j, "max_count", -1);
@@ -294,6 +300,12 @@ json MCPGrepRequest::toJson() const {
     j["color"] = color;
     if (maxCount)
         j["max_count"] = *maxCount;
+    if (!tags.empty())
+        j["tags"] = tags;
+    if (matchAllTags)
+        j["match_all_tags"] = matchAllTags;
+    if (!cwd.empty())
+        j["cwd"] = cwd;
     return j;
 }
 

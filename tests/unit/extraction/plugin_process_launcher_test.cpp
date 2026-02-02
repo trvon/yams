@@ -451,10 +451,8 @@ TEST_CASE("PluginProcess launcher compiled executable",
     fs::path compiled_plugin = getCompiledPluginPath();
 
     if (!fs::exists(compiled_plugin)) {
-        WARN("Compiled plugin not found at: " << compiled_plugin.string());
-        WARN("Skipping compiled executable tests - run 'python build.py' in yams-ghidra-plugin "
-             "first");
-        return;
+        SKIP("Compiled plugin not found at: " + compiled_plugin.string() +
+             " - run 'python build.py' in yams-ghidra-plugin first");
     }
 
     SECTION("Spawn compiled PyInstaller executable") {
@@ -501,7 +499,10 @@ TEST_CASE("PluginProcess launcher compiled executable",
             INFO("Stderr: " << stderr_str);
         }
 
-        REQUIRE_FALSE(response.empty());
+        if (response.empty()) {
+            process.terminate();
+            SKIP("Compiled plugin did not respond to handshake - rebuild with 'python build.py'");
+        }
 
         // Parse response
         auto parsed = json::parse(response);

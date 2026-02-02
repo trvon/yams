@@ -1027,31 +1027,14 @@ public:
             }
 
             // CWD scoping: add current directory as a path prefix filter
-            std::string cwdPrefix;
             if (scopeToCwd_) {
                 std::error_code ec;
-                auto cwd = std::filesystem::current_path(ec);
+                auto cwdDir = std::filesystem::current_path(ec).string();
                 if (!ec) {
-                    cwdPrefix = cwd.string();
-                    // Normalize path separators for Windows
-                    std::replace(cwdPrefix.begin(), cwdPrefix.end(), '\\', '/');
-                    if (!cwdPrefix.empty() && cwdPrefix.back() != '/') {
-                        cwdPrefix += '/';
-                    }
-                    // Add glob patterns to match absolute + repo-relative paths under CWD
-                    includeGlobsExpanded.push_back(cwdPrefix + "**/*");
-                    std::string noLeadingSlash = cwdPrefix;
-                    if (!noLeadingSlash.empty() && noLeadingSlash.front() == '/') {
-                        noLeadingSlash.erase(noLeadingSlash.begin());
-                    }
-                    if (!noLeadingSlash.empty()) {
-                        includeGlobsExpanded.push_back(noLeadingSlash + "**/*");
-                    }
-                    auto baseName = std::filesystem::path(cwdPrefix).filename().string();
-                    if (!baseName.empty()) {
-                        includeGlobsExpanded.push_back(baseName + "/**/*");
-                    }
-                    spdlog::debug("[CLI] Scoping search to CWD: {}", cwdPrefix);
+                    auto cwdPats = yams::app::services::utils::buildCwdScopePatterns(cwdDir);
+                    includeGlobsExpanded.insert(includeGlobsExpanded.end(), cwdPats.begin(),
+                                                cwdPats.end());
+                    spdlog::debug("[CLI] Scoping search to CWD: {}", cwdDir);
                 }
             }
 

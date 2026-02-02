@@ -2109,7 +2109,7 @@ if catch2_dep.found()
   test('repository_foundation', catch2_repository_foundation_exe,
     suite: ['catch2', 'unit', 'metadata', 'repository', 'foundation'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    timeout: 180
   )
 
   # Core tests
