@@ -2513,6 +2513,166 @@ template <> struct ProtoBinding<MetadataValueCountsResponse> {
     }
 };
 
+// --------------------------- Snapshot/Restore Bindings ---------------------------
+template <> struct ProtoBinding<ListSnapshotsRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kListSnapshotsRequest;
+    static void set(Envelope& env, const ListSnapshotsRequest&) {
+        (void)env.mutable_list_snapshots_request();
+    }
+    static ListSnapshotsRequest get(const Envelope&) { return ListSnapshotsRequest{}; }
+};
+
+template <> struct ProtoBinding<ListSnapshotsResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kListSnapshotsResponse;
+    static void set(Envelope& env, const ListSnapshotsResponse& r) {
+        auto* o = env.mutable_list_snapshots_response();
+        for (const auto& s : r.snapshots) {
+            auto* snap = o->add_snapshots();
+            snap->set_id(s.id);
+            snap->set_label(s.label);
+            snap->set_created_at(s.createdAt);
+            snap->set_document_count(s.documentCount);
+        }
+        o->set_total_count(r.totalCount);
+    }
+    static ListSnapshotsResponse get(const Envelope& env) {
+        ListSnapshotsResponse r{};
+        const auto& i = env.list_snapshots_response();
+        for (const auto& s : i.snapshots()) {
+            SnapshotInfo info;
+            info.id = s.id();
+            info.label = s.label();
+            info.createdAt = s.created_at();
+            info.documentCount = s.document_count();
+            r.snapshots.push_back(std::move(info));
+        }
+        r.totalCount = i.total_count();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<RestoreCollectionRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRestoreCollectionRequest;
+    static void set(Envelope& env, const RestoreCollectionRequest& r) {
+        auto* o = env.mutable_restore_collection_request();
+        o->set_collection(r.collection);
+        o->set_output_directory(r.outputDirectory);
+        o->set_layout_template(r.layoutTemplate);
+        set_string_list(r.includePatterns, o->mutable_include_patterns());
+        set_string_list(r.excludePatterns, o->mutable_exclude_patterns());
+        o->set_overwrite(r.overwrite);
+        o->set_create_dirs(r.createDirs);
+        o->set_dry_run(r.dryRun);
+    }
+    static RestoreCollectionRequest get(const Envelope& env) {
+        RestoreCollectionRequest r{};
+        const auto& i = env.restore_collection_request();
+        r.collection = i.collection();
+        r.outputDirectory = i.output_directory();
+        r.layoutTemplate = i.layout_template();
+        r.includePatterns = get_string_list(i.include_patterns());
+        r.excludePatterns = get_string_list(i.exclude_patterns());
+        r.overwrite = i.overwrite();
+        r.createDirs = i.create_dirs();
+        r.dryRun = i.dry_run();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<RestoreCollectionResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRestoreCollectionResponse;
+    static void set(Envelope& env, const RestoreCollectionResponse& r) {
+        auto* o = env.mutable_restore_collection_response();
+        o->set_files_restored(r.filesRestored);
+        o->set_dry_run(r.dryRun);
+        for (const auto& f : r.files) {
+            auto* rf = o->add_files();
+            rf->set_path(f.path);
+            rf->set_hash(f.hash);
+            rf->set_size(f.size);
+            rf->set_skipped(f.skipped);
+            rf->set_skip_reason(f.skipReason);
+        }
+    }
+    static RestoreCollectionResponse get(const Envelope& env) {
+        RestoreCollectionResponse r{};
+        const auto& i = env.restore_collection_response();
+        r.filesRestored = i.files_restored();
+        r.dryRun = i.dry_run();
+        for (const auto& f : i.files()) {
+            RestoredFile rf;
+            rf.path = f.path();
+            rf.hash = f.hash();
+            rf.size = f.size();
+            rf.skipped = f.skipped();
+            rf.skipReason = f.skip_reason();
+            r.files.push_back(std::move(rf));
+        }
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<RestoreSnapshotRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRestoreSnapshotRequest;
+    static void set(Envelope& env, const RestoreSnapshotRequest& r) {
+        auto* o = env.mutable_restore_snapshot_request();
+        o->set_snapshot_id(r.snapshotId);
+        o->set_output_directory(r.outputDirectory);
+        o->set_layout_template(r.layoutTemplate);
+        set_string_list(r.includePatterns, o->mutable_include_patterns());
+        set_string_list(r.excludePatterns, o->mutable_exclude_patterns());
+        o->set_overwrite(r.overwrite);
+        o->set_create_dirs(r.createDirs);
+        o->set_dry_run(r.dryRun);
+    }
+    static RestoreSnapshotRequest get(const Envelope& env) {
+        RestoreSnapshotRequest r{};
+        const auto& i = env.restore_snapshot_request();
+        r.snapshotId = i.snapshot_id();
+        r.outputDirectory = i.output_directory();
+        r.layoutTemplate = i.layout_template();
+        r.includePatterns = get_string_list(i.include_patterns());
+        r.excludePatterns = get_string_list(i.exclude_patterns());
+        r.overwrite = i.overwrite();
+        r.createDirs = i.create_dirs();
+        r.dryRun = i.dry_run();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<RestoreSnapshotResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRestoreSnapshotResponse;
+    static void set(Envelope& env, const RestoreSnapshotResponse& r) {
+        auto* o = env.mutable_restore_snapshot_response();
+        o->set_files_restored(r.filesRestored);
+        o->set_dry_run(r.dryRun);
+        for (const auto& f : r.files) {
+            auto* rf = o->add_files();
+            rf->set_path(f.path);
+            rf->set_hash(f.hash);
+            rf->set_size(f.size);
+            rf->set_skipped(f.skipped);
+            rf->set_skip_reason(f.skipReason);
+        }
+    }
+    static RestoreSnapshotResponse get(const Envelope& env) {
+        RestoreSnapshotResponse r{};
+        const auto& i = env.restore_snapshot_response();
+        r.filesRestored = i.files_restored();
+        r.dryRun = i.dry_run();
+        for (const auto& f : i.files()) {
+            RestoredFile rf;
+            rf.path = f.path();
+            rf.hash = f.hash();
+            rf.size = f.size();
+            rf.skipped = f.skipped();
+            rf.skipReason = f.skip_reason();
+            r.files.push_back(std::move(rf));
+        }
+        return r;
+    }
+};
+
 // --------------------------- Batch Request/Response (Track B) ---------------------------
 template <> struct ProtoBinding<BatchRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kBatchRequest;
@@ -3081,6 +3241,21 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kListSnapshotsRequest: {
+            auto v = ProtoBinding<ListSnapshotsRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kRestoreCollectionRequest: {
+            auto v = ProtoBinding<RestoreCollectionRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kRestoreSnapshotRequest: {
+            auto v = ProtoBinding<RestoreSnapshotRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
 
         // Additional responses
         case Envelope::kSuccessResponse: {
@@ -3246,6 +3421,21 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kBatchResponse: {
             auto v = ProtoBinding<BatchResponse>::get(env);
             m.payload = Response{std::in_place_type<BatchResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kListSnapshotsResponse: {
+            auto v = ProtoBinding<ListSnapshotsResponse>::get(env);
+            m.payload = Response{std::in_place_type<ListSnapshotsResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kRestoreCollectionResponse: {
+            auto v = ProtoBinding<RestoreCollectionResponse>::get(env);
+            m.payload = Response{std::in_place_type<RestoreCollectionResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kRestoreSnapshotResponse: {
+            auto v = ProtoBinding<RestoreSnapshotResponse>::get(env);
+            m.payload = Response{std::in_place_type<RestoreSnapshotResponse>, std::move(v)};
             break;
         }
         case Envelope::kEmbedEvent: {
