@@ -1,6 +1,7 @@
 #  Build directories and CMake artifacts
 .beads
 build/
+builds/
 _deps/
 _build/
 cmake-build-*/

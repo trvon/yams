@@ -122,24 +122,29 @@ TEST(MCPDoctorPositiveSmoke, DoctorReportsReadyWithLiveDaemon) {
     ASSERT_FALSE(res.contains("error")) << res.dump();
     ASSERT_TRUE(res.contains("content")) << res.dump();
 
-    bool sawReady = false, sawSocket = false, sawExists = false, sawConn = false;
+    // ToolWrapper returns a JSON payload encoded as text in content[0].text.
+    // Parse it and validate the structured doctor details.
+    std::string payload;
     for (const auto& part : res["content"]) {
-        if (!part.contains("text"))
-            continue;
-        auto text = part.value("text", std::string{});
-        if (text.find("Daemon ready") != std::string::npos)
-            sawReady = true;
-        if (text.find("socketPath") != std::string::npos)
-            sawSocket = true;
-        if (text.find("socketExists=true") != std::string::npos)
-            sawExists = true;
-        if (text.find("connectable=true") != std::string::npos)
-            sawConn = true;
+        if (part.contains("text") && part["text"].is_string()) {
+            payload = part["text"].get<std::string>();
+            break;
+        }
     }
-    EXPECT_TRUE(sawReady);
-    EXPECT_TRUE(sawSocket);
-    EXPECT_TRUE(sawExists);
-    EXPECT_TRUE(sawConn);
+    ASSERT_FALSE(payload.empty()) << res.dump();
+
+    auto parsed = json::parse(payload, nullptr, false);
+    ASSERT_TRUE(parsed.is_object()) << payload;
+    ASSERT_TRUE(parsed.contains("details")) << parsed.dump();
+
+    const auto& details = parsed["details"];
+    ASSERT_TRUE(details.is_object()) << parsed.dump();
+
+    EXPECT_TRUE(details.value("running", false)) << parsed.dump();
+    EXPECT_TRUE(details.value("ready", false)) << parsed.dump();
+    EXPECT_EQ(details.value("socketPath", std::string{}), socketPath.string()) << parsed.dump();
+    EXPECT_TRUE(details.value("socketExists", false)) << parsed.dump();
+    EXPECT_TRUE(details.value("connectable", false)) << parsed.dump();
 
     // Cleanup
     fs::remove_all(root, ec);

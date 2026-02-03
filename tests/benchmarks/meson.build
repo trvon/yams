@@ -2,10 +2,11 @@
 # tests; CI invokes them directly to generate JSON/MD reports.
 
 # Tracy profiling support (optional)
+enable_profiling = get_option('enable-profiling')
 tracy_dep = dependency('tracy', required: false, static: true)
 tracy_args = []
 tracy_deps = []
-if tracy_dep.found()
+if tracy_dep.found() and enable_profiling
   tracy_args += ['-DTRACY_ENABLE']
   tracy_deps += tracy_dep
   message('Tracy profiling enabled for benchmarks')
@@ -260,4 +261,3 @@ if catch2_with_main_dep.found()
 else
   message('Catch2 not found, skipping symbol_extraction_bench and hnsw_entity_search_bench')
 endif
-

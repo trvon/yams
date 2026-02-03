@@ -152,6 +152,10 @@ public:
         daemon_client_config_.socketPath = p;
         daemon_client_ = nullptr;
         daemon_client_lease_.reset();
+        // Service facades hold a non-owning shared_ptr<DaemonClient>. When the lease is reset
+        // (and/or the CLI pool is reset), those pointers can become dangling; force rebind.
+        retrieval_svc_.reset();
+        ingestion_svc_.reset();
         yams::cli::cli_pool_reset_for_test();
     }
 #endif

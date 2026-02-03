@@ -209,9 +209,11 @@ TEST_CASE("Embedding lane slots are configured correctly",
     auto& registry = OnnxConcurrencyRegistry::instance();
 
     SECTION("Registry is configured with correct total and embedding slots") {
-        // Balanced profile uses 0.5x scale, so 6 * 0.5 = 3
+        // Balanced profile uses 0.5x scale, so 6 * 0.5 = 3.
+        // But totalSlots is clamped to at least the sum of reserved slots.
+        // Defaults: gliner=1, reranker=1; with embed=2 => reserved total = 4.
         INFO("totalSlots=" << registry.totalSlots());
-        CHECK(registry.totalSlots() == 3);
+        CHECK(registry.totalSlots() == 4);
 
         auto embedMetrics = registry.laneMetrics(OnnxLane::Embedding);
         INFO("embedding reserved=" << embedMetrics.reserved);
