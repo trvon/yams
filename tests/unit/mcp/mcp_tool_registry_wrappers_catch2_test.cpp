@@ -102,7 +102,7 @@ TEST_CASE("MCP ToolRegistryWrappers - Propagates handler errors via helper",
 }
 
 TEST_CASE("MCP ToolRegistryWrappers - Reports JSON exceptions consistently",
-          "[mcp][registry][wrappers][catch2]") {
+           "[mcp][registry][wrappers][catch2]") {
     ToolRegistry registry;
     registry.registerTool<DummyRequest, DummyResponse>(
         "dummy-json", [](const DummyRequest& req) -> boost::asio::awaitable<Result<DummyResponse>> {
@@ -115,8 +115,92 @@ TEST_CASE("MCP ToolRegistryWrappers - Reports JSON exceptions consistently",
     CHECK(message.find("JSON error:") != std::string::npos);
 }
 
-TEST_CASE("MCP ToolRegistryWrappers - Unknown tools return helpful error",
+TEST_CASE("MCP ToolRegistryWrappers - Reports std::exception consistently",
           "[mcp][registry][wrappers][catch2]") {
+    ToolRegistry registry;
+    registry.registerTool<DummyRequest, DummyResponse>(
+        "dummy-throw",
+        [](const DummyRequest& req) -> boost::asio::awaitable<Result<DummyResponse>> {
+            if (req.value == 0) {
+                throw std::runtime_error("boom");
+            }
+            co_return DummyResponse{req.value};
+        });
+
+    const auto response = runCall(registry, "dummy-throw", json{{"value", 0}});
+    REQUIRE(response.value("isError", false));
+    const auto message = response["content"][0]["text"].get<std::string>();
+    CHECK(message == "Error: boom");
+}
+
+TEST_CASE("MCP DTO parsing - SessionStartRequest reads defaults and fields",
+          "[mcp][dto][session][catch2]") {
+    using yams::mcp::MCPSessionStartRequest;
+
+    {
+        const auto r = MCPSessionStartRequest::fromJson(json::object());
+        CHECK(r.warm == true);
+        CHECK(r.limit == 200);
+        CHECK(r.snippetLen == 160);
+        CHECK(r.cores == -1);
+        CHECK(r.memoryGb == -1);
+        CHECK(r.timeMs == -1);
+        CHECK(r.aggressive == false);
+    }
+
+    {
+        json j = {
+            {"name", "s"},
+            {"description", "d"},
+            {"warm", false},
+            {"limit", 123},
+            {"snippet_len", 45},
+            {"cores", 2},
+            {"memory_gb", 8},
+            {"time_ms", 9999},
+            {"aggressive", true},
+        };
+        const auto r = MCPSessionStartRequest::fromJson(j);
+        CHECK(r.name == "s");
+        CHECK(r.description == "d");
+        CHECK(r.warm == false);
+        CHECK(r.limit == 123);
+        CHECK(r.snippetLen == 45);
+        CHECK(r.cores == 2);
+        CHECK(r.memoryGb == 8);
+        CHECK(r.timeMs == 9999);
+        CHECK(r.aggressive == true);
+    }
+}
+
+TEST_CASE("MCP DTO parsing - SessionWatchRequest applies aliases and toggles",
+          "[mcp][dto][session][catch2]") {
+    using yams::mcp::MCPSessionWatchRequest;
+
+    json j = {
+        {"session", "sess"},
+        {"root", "."},
+        // Cover alias path: interval_ms default 0, but interval provided.
+        {"interval", 50},
+        // Cover stop/disable/no_selector/no_use overrides.
+        {"enabled", true},
+        {"stop", true},
+        {"no_selector", true},
+        {"no_use", true},
+    };
+
+    const auto r = MCPSessionWatchRequest::fromJson(j);
+    CHECK(r.session == "sess");
+    CHECK(r.root == ".");
+    CHECK(r.intervalMs == 50);
+    CHECK(r.enable == false);
+    CHECK(r.addSelector == false);
+    CHECK(r.setCurrent == false);
+    CHECK(r.allowCreate == true);
+}
+
+TEST_CASE("MCP ToolRegistryWrappers - Unknown tools return helpful error",
+           "[mcp][registry][wrappers][catch2]") {
     ToolRegistry registry;
 
     const auto response = runCall(registry, "not-registered", json::object());
@@ -126,7 +210,7 @@ TEST_CASE("MCP ToolRegistryWrappers - Unknown tools return helpful error",
 }
 
 TEST_CASE("MCP ToolRegistry - Duplicate registration updates annotations",
-          "[mcp][registry][annotations][catch2]") {
+           "[mcp][registry][annotations][catch2]") {
     ToolRegistry registry;
 
     // First registration has no annotations
@@ -168,4 +252,158 @@ TEST_CASE("MCP ToolRegistry - Duplicate registration updates annotations",
     const auto response = runCall(registry, "dummy", json{{"value", 1}});
     CHECK_FALSE(response.value("isError", false));
     CHECK(response["content"][0]["text"].get<std::string>() == R"({"value":2})");
+}
+
+TEST_CASE("MCP ToolRegistry - Duplicate registration updates schema/title",
+          "[mcp][registry][metadata][catch2]") {
+    ToolRegistry registry;
+
+    registry.registerTool<DummyRequest, DummyResponse>(
+        "dummy-meta",
+        [](const DummyRequest& req) -> boost::asio::awaitable<Result<DummyResponse>> {
+            co_return DummyResponse{req.value};
+        },
+        json{}, std::string{"desc1"});
+
+    // Update schema + title + description
+    json schema = {
+        {"type", "object"},
+        {"properties", json{{"value", json{{"type", "integer"}}}}},
+    };
+
+    registry.registerTool<DummyRequest, DummyResponse>(
+        "dummy-meta",
+        [](const DummyRequest& req) -> boost::asio::awaitable<Result<DummyResponse>> {
+            co_return DummyResponse{req.value + 10};
+        },
+        schema, std::string{"desc2"}, std::string{"Title"});
+
+    const auto tools = registry.listTools();
+    REQUIRE(tools.contains("tools"));
+    REQUIRE(tools["tools"].is_array());
+    REQUIRE(tools["tools"].size() == 1);
+
+    const auto& t = tools["tools"][0];
+    REQUIRE(t.is_object());
+    CHECK(t.value("name", "") == "dummy-meta");
+    CHECK(t.value("title", "") == "Title");
+    CHECK(t.value("description", "") == "desc2");
+    REQUIRE(t.contains("inputSchema"));
+    CHECK(t["inputSchema"] == schema);
+
+    const auto response = runCall(registry, "dummy-meta", json{{"value", 1}});
+    CHECK_FALSE(response.value("isError", false));
+    CHECK(response["content"][0]["text"].get<std::string>() == R"({"value":11})");
+}
+
+TEST_CASE("MCP ToolRegistry detail - readStringArray handles missing/null/array/string",
+          "[mcp][registry][detail][catch2]") {
+    using yams::mcp::detail::readStringArray;
+
+    {
+        std::vector<std::string> out = {"keep"};
+        readStringArray(json::object(), "k", out);
+        CHECK(out == std::vector<std::string>{"keep"});
+    }
+
+    {
+        std::vector<std::string> out;
+        readStringArray(json{{"k", nullptr}}, "k", out);
+        CHECK(out.empty());
+    }
+
+    {
+        std::vector<std::string> out;
+        readStringArray(json{{"k", json::array({"a", 1, "b", false, "c"})}}, "k", out);
+        CHECK(out == std::vector<std::string>{"a", "b", "c"});
+    }
+
+    {
+        std::vector<std::string> out;
+        readStringArray(json{{"k", "solo"}}, "k", out);
+        CHECK(out == std::vector<std::string>{"solo"});
+    }
+}
+
+TEST_CASE("MCP ToolRegistry detail - jsonValueOr returns defaults and values",
+          "[mcp][registry][detail][catch2]") {
+    using yams::mcp::detail::jsonValueOr;
+
+    {
+        const json j = json{{"x", 9}};
+        CHECK(jsonValueOr(j, "x", uint64_t{7}) == 9u);
+        CHECK(jsonValueOr(j, "missing", uint64_t{7}) == 7u);
+    }
+
+    {
+        const json j = json{{"f", 2.5}};
+        CHECK(jsonValueOr(j, "f", 1.5) == 2.5);
+        CHECK(jsonValueOr(j, "missing", 1.5) == 1.5);
+        CHECK(jsonValueOr(json{{"f", nullptr}}, "f", 1.5) == 1.5);
+    }
+
+    {
+        const json def = json{{"a", 1}};
+        CHECK(jsonValueOr(json{{"obj", json{{"b", 2}}}}, "obj", def) == json{{"b", 2}});
+        CHECK(jsonValueOr(json::object(), "obj", def) == def);
+        CHECK(jsonValueOr(json{{"obj", nullptr}}, "obj", def) == def);
+    }
+}
+
+TEST_CASE("MCP ToolRegistry - registerRawTool duplicate updates handler and descriptor",
+          "[mcp][registry][raw][catch2]") {
+    ToolRegistry registry;
+
+    registry.registerRawTool(
+        "raw",
+        [](const json&) -> boost::asio::awaitable<json> {
+            co_return json{{"content", json::array({json{{"type", "text"}, {"text", "one"}}})}};
+        },
+        json{}, std::string{"desc1"});
+
+    {
+        const auto tools = registry.listTools();
+        REQUIRE(tools.contains("tools"));
+        REQUIRE(tools["tools"].size() == 1);
+        const auto& t = tools["tools"][0];
+        REQUIRE(t.is_object());
+        CHECK(t.value("name", "") == "raw");
+        CHECK(t.value("description", "") == "desc1");
+        CHECK_FALSE(t.contains("title"));
+        REQUIRE(t.contains("inputSchema"));
+        CHECK(t["inputSchema"] == json{{"type", "object"}});
+        REQUIRE(t.contains("annotations"));
+        CHECK(t["annotations"].is_object());
+    }
+
+    CHECK(runCall(registry, "raw", json::object())["content"][0]["text"].get<std::string>() == "one");
+
+    yams::mcp::ToolAnnotation ann;
+    ann.readOnlyHint = true;
+    json schema = {
+        {"type", "object"},
+        {"properties", json{{"x", json{{"type", "string"}}}}},
+    };
+
+    registry.registerRawTool(
+        "raw",
+        [](const json&) -> boost::asio::awaitable<json> {
+            co_return json{{"content", json::array({json{{"type", "text"}, {"text", "two"}}})}};
+        },
+        schema, std::string{"desc2"}, std::string{"RawTitle"}, ann);
+
+    {
+        const auto tools = registry.listTools();
+        REQUIRE(tools.contains("tools"));
+        REQUIRE(tools["tools"].size() == 1);
+        const auto& t = tools["tools"][0];
+        REQUIRE(t.is_object());
+        CHECK(t.value("name", "") == "raw");
+        CHECK(t.value("description", "") == "desc2");
+        CHECK(t.value("title", "") == "RawTitle");
+        CHECK(t["inputSchema"] == schema);
+        CHECK(t["annotations"].value("readOnlyHint", false) == true);
+    }
+
+    CHECK(runCall(registry, "raw", json::object())["content"][0]["text"].get<std::string>() == "two");
 }

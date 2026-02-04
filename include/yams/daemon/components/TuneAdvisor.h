@@ -1613,9 +1613,23 @@ public:
         }
         uint32_t hw = hardwareConcurrency();
 
-        uint32_t base = std::max(2u, (hw * 20) / 100);
-        uint32_t scaleRange = std::max(1u, (hw * 15) / 100);
+        // Use round-up division to avoid integer truncation starving small systems.
+        // Without rounding: (8*20)/100 = 1, base = max(2,1) = 2, no scaling benefit.
+        // With rounding:    (8*20+99)/100 = 2, base = max(2,2) = 2, scaleRange grows too.
+        uint32_t base = std::max(2u, (hw * 20 + 99) / 100);
+        uint32_t scaleRange = std::max(1u, (hw * 15 + 99) / 100);
         uint32_t total = base + static_cast<uint32_t>(scaleRange * profileScale());
+
+        // Ensure the budget can support at least 1 slot per active stage so no
+        // pipeline stage is starved.  Count active bits from the stage mask.
+        uint32_t mask = postIngestStageActiveMask();
+        uint32_t activeStages = 0;
+        for (uint32_t m = mask; m != 0; m >>= 1) {
+            activeStages += (m & 1u);
+        }
+        if (activeStages > 0) {
+            total = std::max(total, activeStages);
+        }
 
         return std::clamp(total, 2u, hw);
     }
@@ -2450,10 +2464,12 @@ public:
         uint32_t hw = hardwareConcurrency();
         uint32_t reserved = onnxGlinerReserved() + onnxEmbedReserved() + onnxRerankerReserved();
 
-        uint32_t base = std::max(2u, (hw * 10) / 100);
-        uint32_t scaleRange = std::max(1u, (hw * 15) / 100);
+        // Use round-up division to avoid integer truncation on small systems.
+        uint32_t base = std::max(2u, (hw * 10 + 99) / 100);
+        uint32_t scaleRange = std::max(1u, (hw * 15 + 99) / 100);
         uint32_t total = base + static_cast<uint32_t>(scaleRange * profileScale());
-        total = std::max(total, reserved);
+        // Ensure at least 1 shared slot beyond total reserved.
+        total = std::max(total, reserved + 1);
 
         return std::clamp(total, 2u, 12u);
     }

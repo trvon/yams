@@ -158,6 +158,37 @@ public:
                              const Request& request, uint64_t request_id,
                              ConnectionFsm* fsm = nullptr, bool client_expects_streaming = false);
 
+#if defined(YAMS_TESTING)
+    // Test-only hooks for deterministic mux queue/writer repro.
+    // These avoid preprocessor hacks (e.g., redefining private/public) that can break STL headers.
+    struct TestingMuxSnapshot {
+        size_t active{0};
+        size_t queues{0};
+        size_t total_queued_bytes{0};
+        bool writer_running{false};
+    };
+
+    [[nodiscard]] TestingMuxSnapshot testing_mux_snapshot() const {
+        std::lock_guard<std::mutex> lock(rr_mutex_);
+        return TestingMuxSnapshot{
+            .active = rr_active_.size(),
+            .queues = rr_queues_.size(),
+            .total_queued_bytes = total_queued_bytes_,
+            .writer_running = writer_running_,
+        };
+    }
+
+    [[nodiscard]] Result<bool> testing_enqueue_frame_sync(uint64_t request_id,
+                                                          std::vector<uint8_t> frame, bool last) {
+        return enqueue_frame_sync(request_id, std::move(frame), last, nullptr);
+    }
+
+    [[nodiscard]] boost::asio::awaitable<void>
+    testing_writer_drain(boost::asio::local::stream_protocol::socket& socket) {
+        co_await writer_drain(socket, nullptr);
+    }
+#endif
+
 private:
     // Minimal streaming path used before services are ready: emits header then
     // a single final empty chunk for Search/List/Grep without touching dispatcher.

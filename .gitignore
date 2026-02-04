@@ -44,6 +44,7 @@ build_output.log
 # Coverage and profiling
 *.gcda
 *.gcno
+*.gcov
 *.profraw
 coverage/
 

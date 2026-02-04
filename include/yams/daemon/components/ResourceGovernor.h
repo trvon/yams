@@ -215,6 +215,17 @@ public:
     /// Get current scaling caps (thread-safe copy)
     [[nodiscard]] ScalingCaps getScalingCaps() const;
 
+    // ========================================================================
+    // Test Hooks (YAMS_TESTING only)
+    // ========================================================================
+
+#ifdef YAMS_TESTING
+    /// Test hook: expose updateScalingCaps for deterministic unit testing
+    void testing_updateScalingCaps(ResourcePressureLevel level) {
+        updateScalingCaps(level);
+    }
+#endif
+
 private:
     ResourceGovernor();
     ~ResourceGovernor() = default;

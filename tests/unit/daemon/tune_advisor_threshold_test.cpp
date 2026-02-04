@@ -428,11 +428,13 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
+        // With hw=8, all 6 stages active: totalBudget = max(formula, 6) = 6.
+        // Each stage gets exactly 1 slot (budget distributed evenly).
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
     }
 
@@ -442,11 +444,13 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
+        // With hw=8, all 6 stages active: totalBudget = max(3, 6) = 6.
+        // Each stage gets exactly 1 slot.
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
     }
 
@@ -456,13 +460,13 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
-        // With hw=8: base=max(2,(8*20)/100)=2, scaleRange=max(1,(8*15)/100)=1
-        // total=2+1=3, extraction=1, embed=2, others=0
+        // With hw=8, round-up division: base=max(2,2)=2, scaleRange=max(1,2)=2.
+        // total=2+2=4. But 6 active stages, total=max(4,6)=6. Each gets 1.
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
     }
 }

@@ -112,9 +112,10 @@ void TuningManager::configureOnnxConcurrencyRegistry() {
     uint32_t scaledMax = static_cast<uint32_t>(maxConcurrent * scale);
     scaledMax = std::max(scaledMax, 2u); // Minimum 2 slots
 
-    // Ensure scaledMax is at least the sum of reserved slots
+    // Ensure scaledMax exceeds the sum of reserved slots so there is at least
+    // 1 shared slot available for non-reserved operations.
     uint32_t totalReserved = glinerReserved + embedReserved + rerankerReserved;
-    scaledMax = std::max(scaledMax, totalReserved);
+    scaledMax = std::max(scaledMax, totalReserved + 1);
 
     // Configure the registry
     registry.setMaxSlots(scaledMax);

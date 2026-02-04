@@ -501,11 +501,22 @@ summary({
 if get_option('b_coverage')
   gcovr = find_program('gcovr', required: false)
   if gcovr.found()
+    _cpp_compiler = meson.get_compiler('cpp')
+    _gcov_executable = 'gcov'
+    if _cpp_compiler.get_id() == 'clang'
+      _llvm_cov = find_program('llvm-cov', required: false)
+      if _llvm_cov.found()
+        _gcov_executable = 'llvm-cov gcov -p'
+      endif
+    endif
+
     coverage_report_target = custom_target('coverage-report',
       output: 'coverage-report.stamp',
       command: [
         gcovr,
         '--root', meson.project_source_root(),
+        '--gcov-executable', _gcov_executable,
+        '--object-directory', meson.project_build_root(),
         '--filter', join_paths(meson.project_source_root(), 'src'),
         '--filter', join_paths(meson.project_source_root(), 'include'),
         '--exclude', join_paths(meson.project_source_root(), 'src', 'benchmarks'),
@@ -522,6 +533,8 @@ if get_option('b_coverage')
       command: [
         gcovr,
         '--root', meson.project_source_root(),
+        '--gcov-executable', _gcov_executable,
+        '--object-directory', meson.project_build_root(),
         '--filter', join_paths(meson.project_source_root(), 'src'),
         '--filter', join_paths(meson.project_source_root(), 'include'),
         '--exclude', join_paths(meson.project_source_root(), 'src', 'benchmarks'),
@@ -533,7 +546,7 @@ if get_option('b_coverage')
       build_always_stale: true,
     )
 
-    message('Coverage reporting configured. Run tests then: ninja -C builddir coverage-report')
+    message('Coverage reporting configured. Run tests then: ninja -C builddir coverage.txt && ninja -C builddir coverage-report.stamp')
   else
     warning('gcovr not found. Install gcovr to generate coverage reports.')
   endif

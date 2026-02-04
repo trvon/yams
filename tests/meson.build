@@ -1047,6 +1047,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_writer_drain_cleanup_exe = executable('catch2_writer_drain_cleanup',
+    files('unit/daemon/request_handler_writer_drain_cleanup_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_asio_connection_pool_exe = executable('catch2_asio_connection_pool',
     files('unit/daemon/asio_connection_pool_catch2_test.cpp'),
     include_directories: incs,
@@ -1068,6 +1077,15 @@ if catch2_dep.found()
 
   catch2_tune_advisor_threshold_exe = executable('catch2_tune_advisor_threshold',
     files('unit/daemon/tune_advisor_threshold_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_tuning_allocation_exe = executable('catch2_tuning_allocation',
+    files('unit/daemon/tuning_allocation_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -1214,6 +1232,9 @@ if catch2_dep.found()
       'unit/mcp/mcp_apps/capability_negotiation_test.cpp',
       'unit/mcp/mcp_apps/tool_metadata_test.cpp',
       'unit/mcp/mcp_apps/ui_resource_handling_test.cpp',
+      'unit/mcp/mcp_daemon_dto_parsing_catch2_test.cpp',
+      'unit/mcp/mcp_daemon_dto_parsing_more_catch2_test.cpp',
+      'unit/mcp/mcp_error_handling_catch2_test.cpp',
       'unit/mcp/mcp_disconnect_uniform_errors_catch2_test.cpp',
       'unit/mcp/mcp_doctor_flags_catch2_test.cpp',
       'unit/mcp/mcp_jsonrpc_roundtrip_catch2_test.cpp',
@@ -1238,6 +1259,10 @@ if catch2_dep.found()
   # Migrated from GTest as part of yams-3s4 / yams-cli
   catch2_cli_submodule_exe = executable('catch2_cli_submodule',
     files(
+      'unit/common/format_catch2_test.cpp',
+      'unit/common/pattern_utils_catch2_test.cpp',
+      'unit/common/test_utils_catch2_test.cpp',
+      'unit/common/utf8_utils_catch2_test.cpp',
       'unit/cli/add_command_stdin_catch2_test.cpp',
       'unit/cli/cli_option_isolation_catch2_test.cpp',
       'unit/cli/config_command_catch2_test.cpp',
@@ -2463,6 +2488,13 @@ if catch2_dep.found()
     is_parallel: false
   )
 
+  test('writer_drain_cleanup', catch2_writer_drain_cleanup_exe,
+    suite: ['catch2', 'unit', 'daemon', 'ipc', 'mux'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
   test('asio_connection_pool', catch2_asio_connection_pool_exe,
     suite: ['catch2', 'unit', 'daemon', 'connection-pool'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -2500,6 +2532,12 @@ if catch2_dep.found()
 
   test('tune_advisor_threshold', catch2_tune_advisor_threshold_exe,
     suite: ['catch2', 'unit', 'daemon', 'tune', 'advisor'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('tuning_allocation', catch2_tuning_allocation_exe,
+    suite: ['catch2', 'unit', 'daemon', 'tune', 'allocation'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )

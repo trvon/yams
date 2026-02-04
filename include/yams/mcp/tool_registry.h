@@ -1250,9 +1250,15 @@ public:
             return wrapper(args);
         };
 
-        auto [it, inserted] = handlers_.emplace(std::string(name), std::move(handlerFn));
-        if (inserted) {
-            descriptors_.push_back({it->first, std::move(schema), std::move(description),
+        // IMPORTANT: don't move handlerFn into emplace() before we know whether insertion will
+        // happen. unordered_map::emplace may still consume/move arguments even on duplicate keys,
+        // leaving handlerFn moved-from (and thus the stored handler empty).
+        const std::string key(name);
+        auto it = handlers_.find(key);
+        if (it == handlers_.end()) {
+            auto [nit, inserted] = handlers_.emplace(key, std::move(handlerFn));
+            (void)inserted;
+            descriptors_.push_back({nit->first, std::move(schema), std::move(description),
                                     std::move(title), std::move(annotations)});
             return;
         }

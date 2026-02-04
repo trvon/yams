@@ -1944,6 +1944,25 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
             if (ec) {
                 spdlog::warn("[DRAIN] req_id={} write error: {}", rid, ec.message());
                 std::lock_guard<std::mutex> lock(rr_mutex_);
+                // Socket writes failed. This connection is effectively broken, so drop any
+                // remaining queued frames/bytes to avoid stranding rr_queues_ (which can
+                // permanently exhaust caps because future enqueues for non-empty queues do not
+                // re-activate rr_active_).
+                size_t dropped_bytes = 0;
+                for (auto& [qid, q] : rr_queues_) {
+                    for (auto& item : q) {
+                        dropped_bytes += item.data.size();
+                    }
+                }
+                if (dropped_bytes > 0) {
+                    // total_queued_bytes_ should already equal dropped_bytes here, but reset
+                    // defensively and keep metrics consistent.
+                    total_queued_bytes_ = 0;
+                    MuxMetricsRegistry::instance().addQueuedBytes(-static_cast<int64_t>(dropped_bytes));
+                } else {
+                    total_queued_bytes_ = 0;
+                }
+                rr_queues_.clear();
                 rr_active_.clear();
                 writer_running_ = false;
                 co_return;

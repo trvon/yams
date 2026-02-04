@@ -512,26 +512,30 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
             break;
 
         case ResourcePressureLevel::Warning:
-            // Cap at 50% of normal, block model loads
+            // Cap at 50% of normal, block model loads.
+            // Use min(default, ...) to ensure Warning never exceeds Normal allocation.
+            // Without min(): max(2, 1/2) = 2 > 1 when defaults are small (2-core system).
             scalingCaps_ = ScalingCaps{
-                .ingestWorkers = std::max(2u, defaultIngest / 2),
-                .searchConcurrency = std::max(2u, defaultSearch / 2),
-                .extractionConcurrency = std::max(2u, defaultExtract / 2),
-                .kgConcurrency = std::max(2u, defaultKg / 2),
-                .embedConcurrency = std::max(1u, defaultEmbed / 2),
+                .ingestWorkers = std::min(defaultIngest, std::max(1u, defaultIngest / 2)),
+                .searchConcurrency = std::min(defaultSearch, std::max(1u, defaultSearch / 2)),
+                .extractionConcurrency = std::min(defaultExtract, std::max(1u, defaultExtract / 2)),
+                .kgConcurrency = std::min(defaultKg, std::max(1u, defaultKg / 2)),
+                .embedConcurrency = std::min(defaultEmbed, std::max(1u, defaultEmbed / 2)),
                 .allowModelLoads = false,
                 .allowNewIngest = true,
             };
             break;
 
         case ResourcePressureLevel::Critical:
-            // Minimum concurrency, aggressive reduction
+            // Minimum concurrency, aggressive reduction.
+            // Cap each field to never exceed the Normal allocation so that
+            // Critical <= Warning <= Normal holds on small systems.
             scalingCaps_ = ScalingCaps{
-                .ingestWorkers = 2,
-                .searchConcurrency = 2,
-                .extractionConcurrency = 2,
-                .kgConcurrency = 2,
-                .embedConcurrency = 1,
+                .ingestWorkers = std::min(defaultIngest, 2u),
+                .searchConcurrency = std::min(defaultSearch, 2u),
+                .extractionConcurrency = std::min(defaultExtract, 2u),
+                .kgConcurrency = std::min(defaultKg, 2u),
+                .embedConcurrency = std::min(defaultEmbed, 1u),
                 .allowModelLoads = false,
                 .allowNewIngest = true,
             };
