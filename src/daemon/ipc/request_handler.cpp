@@ -15,7 +15,6 @@
 #include <spdlog/spdlog.h>
 #include <array>
 #include <chrono>
-#include <span>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -40,6 +39,12 @@
 namespace yams::daemon {
 
 namespace {
+bool is_client_disconnect(const std::string& msg) {
+    return msg.find("Connection reset by peer") != std::string::npos ||
+           msg.find("Broken pipe") != std::string::npos ||
+           msg.find("EPIPE") != std::string::npos ||
+           msg.find("ECONNRESET") != std::string::npos;
+}
 // CLI priority requests use a dedicated thread pool to ensure responsiveness
 // even when the worker pool is saturated with heavy operations (e.g., ingestion).
 // Includes: retrieval operations, status/ping/shutdown for daemon health checks.
@@ -125,33 +130,6 @@ private:
     RequestDispatcher* dispatcher_;
 };
 
-// RAII guard to signal worker job start/end for metrics tracking.
-// Increments poolActive on construction, decrements on destruction.
-class WorkerJobGuard {
-public:
-    explicit WorkerJobGuard(const std::function<void(bool)>& signal)
-        : signal_(signal), engaged_(signal != nullptr) {
-        if (engaged_) {
-            signal_(true); // Job starting
-        }
-    }
-
-    ~WorkerJobGuard() {
-        if (engaged_) {
-            signal_(false); // Job ending
-        }
-    }
-
-    // Non-copyable, non-movable
-    WorkerJobGuard(const WorkerJobGuard&) = delete;
-    WorkerJobGuard& operator=(const WorkerJobGuard&) = delete;
-    WorkerJobGuard(WorkerJobGuard&&) = delete;
-    WorkerJobGuard& operator=(WorkerJobGuard&&) = delete;
-
-private:
-    const std::function<void(bool)>& signal_;
-    bool engaged_;
-};
 } // anonymous namespace
 
 // ============================================================================
@@ -725,10 +703,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                             // Downgrade common client-initiated close errors to debug to avoid
                             // noisy logs
                             const auto& msg = handle_result.error().message;
-                            if (msg.find("Connection reset by peer") != std::string::npos ||
-                                msg.find("Broken pipe") != std::string::npos ||
-                                msg.find("EPIPE") != std::string::npos ||
-                                msg.find("ECONNRESET") != std::string::npos) {
+                            if (is_client_disconnect(msg)) {
                                 spdlog::debug("Request handling ended by client: {}", msg);
                             } else {
                                 spdlog::error("Request handling failed: {}", msg);
@@ -801,82 +776,6 @@ RequestHandler::handle_request(boost::asio::local::stream_protocol::socket& sock
                                const Request& request, uint64_t request_id) {
     // Always use streaming mode
     co_return co_await handle_streaming_request(socket, request, request_id);
-}
-
-boost::asio::awaitable<Result<Message>>
-RequestHandler::read_message(boost::asio::local::stream_protocol::socket& socket,
-                             FrameReader& reader) {
-    using boost::asio::use_awaitable;
-    const bool stream_trace = stream_trace_enabled_local();
-    // Read until we have a complete frame
-    size_t read_loops = 0;
-    while (!reader.has_frame()) {
-        std::vector<uint8_t> buffer(4096);
-        boost::system::error_code ec;
-
-        size_t bytes_read = co_await boost::asio::async_read(
-            socket, boost::asio::buffer(buffer, buffer.size()), boost::asio::transfer_at_least(1),
-            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-
-        if (ec) {
-            if (ec == boost::asio::error::eof) {
-                co_return Error{ErrorCode::NetworkError, "Connection closed"};
-            }
-            co_return Error{ErrorCode::NetworkError, ec.message()};
-        }
-
-        buffer.resize(bytes_read);
-        if (buffer.empty()) {
-            co_return Error{ErrorCode::NetworkError, "Connection closed"};
-        }
-
-        auto feed_result = reader.feed(buffer.data(), buffer.size());
-        stats_.bytes_received += feed_result.consumed;
-        FsmMetricsRegistry::instance().addBytesReceived(bytes_read);
-
-        if (feed_result.status == FrameReader::FrameStatus::InvalidFrame) {
-            co_return Error{ErrorCode::InvalidArgument, "Invalid frame"};
-        }
-
-        if (feed_result.status == FrameReader::FrameStatus::FrameTooLarge) {
-            co_return Error{ErrorCode::InvalidArgument, "Frame too large"};
-        }
-
-        // Cooperative yield to allow other connections (e.g., status probes) to progress
-        if (++read_loops % 8 == 0) {
-            co_await boost::asio::post(boost::asio::use_awaitable);
-        }
-    }
-
-    auto frame_result = reader.get_frame();
-    if (!frame_result) {
-        co_return frame_result.error();
-    }
-
-    auto frame_data = frame_result.value();
-    auto parsed = framer_.parse_frame(frame_data);
-    if (parsed) {
-        if (stream_trace) {
-            const auto& msg = parsed.value();
-            spdlog::info("stream-trace: RequestHandler::read_message got frame req_id={} "
-                         "streaming={} size={}",
-                         msg.requestId, msg.expectsStreamingResponse, frame_data.size());
-        }
-        FsmMetricsRegistry::instance().incrementHeaderReads(1);
-        const auto& msg = parsed.value();
-        if (std::holds_alternative<Request>(msg.payload)) {
-            const auto& req = std::get<Request>(msg.payload);
-            spdlog::info(
-                "read_message: request req_id={} type={} expects_streaming={} payload_size={}",
-                msg.requestId, static_cast<int>(getMessageType(req)), msg.expectsStreamingResponse,
-                frame_data.size());
-        } else if (std::holds_alternative<Response>(msg.payload)) {
-            const auto& resp = std::get<Response>(msg.payload);
-            spdlog::info("read_message: response req_id={} type={} payload_size={}", msg.requestId,
-                         static_cast<int>(getMessageType(resp)), frame_data.size());
-        }
-    }
-    co_return parsed;
 }
 
 boost::asio::awaitable<Result<void>>
@@ -965,10 +864,7 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
             boost::asio::redirect_error(boost::asio::use_awaitable, ec));
         if (ec) {
             const auto& msg = ec.message();
-            if (msg.find("Connection reset by peer") != std::string::npos ||
-                msg.find("Broken pipe") != std::string::npos ||
-                msg.find("EPIPE") != std::string::npos ||
-                msg.find("ECONNRESET") != std::string::npos) {
+            if (is_client_disconnect(msg)) {
                 spdlog::debug("Client closed during frame write: {}", msg);
             }
             co_return Error{ErrorCode::NetworkError, msg};
@@ -1026,59 +922,6 @@ bool RequestHandler::can_stream_request(const Request& request) const {
     return processor_->supports_streaming(request);
 }
 
-bool RequestHandler::should_stream_request(const Request& request) const {
-    // If force streaming is enabled, always stream
-    if (config_.force_streaming) {
-        return true;
-    }
-
-    // If streaming is disabled, never stream
-    if (!config_.enable_streaming) {
-        return false;
-    }
-
-    // Auto-detect if the request type benefits from streaming
-    if (config_.auto_detect_streaming) {
-        // These request types typically benefit from streaming
-        if (std::holds_alternative<SearchRequest>(request) ||
-            std::holds_alternative<ListRequest>(request) ||
-            std::holds_alternative<GrepRequest>(request) ||
-            // Auto-stream embeddings so clients without explicit streaming still get progress
-            std::holds_alternative<BatchEmbeddingRequest>(request) ||
-            std::holds_alternative<EmbedDocumentsRequest>(request)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-boost::asio::awaitable<std::vector<Response>>
-RequestHandler::collect_limited_chunks(const Request& request, size_t max_chunks) {
-    (void)request;
-    std::vector<Response> chunks;
-    if (!processor_) {
-        co_return chunks;
-    }
-
-    // Collect chunks until we reach the limit or get the last chunk
-    size_t chunk_count = 0;
-    bool last_chunk_received = false;
-
-    while (chunk_count < max_chunks && !last_chunk_received) {
-        auto chunk_result = co_await processor_->next_chunk();
-        chunks.push_back(chunk_result.data);
-        last_chunk_received = chunk_result.is_last_chunk;
-        chunk_count++;
-
-        if (last_chunk_received) {
-            break;
-        }
-    }
-
-    co_return chunks;
-}
-
 boost::asio::awaitable<Result<void>>
 RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::socket& socket,
                                          const Request& request, uint64_t request_id,
@@ -1095,7 +938,15 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         }
 
         // Signal worker job start/end for metrics tracking (poolActive, poolPosted, poolCompleted)
-        WorkerJobGuard job_guard(config_.worker_job_signal);
+        if (config_.worker_job_signal) config_.worker_job_signal(true);
+        auto job_cleanup = [this]() {
+            if (config_.worker_job_signal) config_.worker_job_signal(false);
+        };
+        // Ensure signal(false) fires on all exit paths (co_return, exception)
+        struct JobGuard {
+            std::function<void()> fn;
+            ~JobGuard() { if (fn) fn(); }
+        } job_guard{std::move(job_cleanup)};
 
         // Use the configured processor (server may decorate with streaming support)
         std::shared_ptr<RequestProcessor> proc = processor_;
@@ -1561,9 +1412,7 @@ RequestHandler::write_header_frame(boost::asio::local::stream_protocol::socket& 
     auto& [ec, bytes_written] = std::get<0>(write_or_timeout);
     if (ec) {
         const auto& msg = ec.message();
-        if (msg.find("Connection reset by peer") != std::string::npos ||
-            msg.find("Broken pipe") != std::string::npos ||
-            msg.find("EPIPE") != std::string::npos || msg.find("ECONNRESET") != std::string::npos) {
+        if (is_client_disconnect(msg)) {
             spdlog::debug("Client closed during header frame write: {}", msg);
         }
         co_return Error{ErrorCode::NetworkError, msg};
@@ -1597,9 +1446,7 @@ RequestHandler::write_chunk_frame(boost::asio::local::stream_protocol::socket& s
 
     if (ec) {
         const auto& msg = ec.message();
-        if (msg.find("Connection reset by peer") != std::string::npos ||
-            msg.find("Broken pipe") != std::string::npos ||
-            msg.find("EPIPE") != std::string::npos || msg.find("ECONNRESET") != std::string::npos) {
+        if (is_client_disconnect(msg)) {
             spdlog::debug("Client closed during chunk frame write: {}", msg);
         }
         co_return Error{ErrorCode::NetworkError, msg};
@@ -2308,141 +2155,6 @@ RequestHandler::send_error(boost::asio::local::stream_protocol::socket& socket, 
     error_msg.payload = Response{error};
 
     co_return co_await write_message(socket, error_msg);
-}
-
-// ============================================================================
-// RequestRouter Implementation
-// ============================================================================
-
-boost::asio::awaitable<Response> RequestRouter::process(const Request& request) {
-    auto type_hash = get_request_type_hash(request);
-
-    auto it = handlers_.find(type_hash);
-    if (it == handlers_.end()) {
-        co_return ErrorResponse{ErrorCode::NotImplemented,
-                                "No handler registered for request type"};
-    }
-
-    co_return co_await it->second(request);
-}
-
-size_t RequestRouter::get_request_type_hash(const Request& request) const {
-    return std::visit([](const auto& req) { return typeid(req).hash_code(); }, request);
-}
-
-// ============================================================================
-// MiddlewarePipeline Implementation
-// ============================================================================
-
-boost::asio::awaitable<Response> MiddlewarePipeline::process(const Request& request) {
-    if (middleware_.empty()) {
-        if (final_handler_) {
-            co_return co_await final_handler_(request);
-        }
-        co_return ErrorResponse{ErrorCode::NotImplemented, "No handler configured"};
-    }
-
-    // Build the middleware chain
-    std::function<boost::asio::awaitable<Response>(const Request&)> chain = final_handler_;
-
-    for (auto it = middleware_.rbegin(); it != middleware_.rend(); ++it) {
-        const auto& middleware = *it;
-        auto next = chain;
-        chain = [middleware, next](const Request& req) -> boost::asio::awaitable<Response> {
-            co_return co_await middleware->process(req, next);
-        };
-    }
-
-    co_return co_await chain(request);
-}
-
-// ============================================================================
-// LoggingMiddleware Implementation
-// ============================================================================
-
-boost::asio::awaitable<Response> LoggingMiddleware::process(const Request& request, Next next) {
-    auto start_time = std::chrono::steady_clock::now();
-
-    // Log request
-    spdlog::debug("Processing request type: {}",
-                  std::visit([](const auto& req) { return typeid(req).name(); }, request));
-
-    // Call next handler
-    Response response = co_await next(request);
-
-    // Log response
-    auto duration = std::chrono::steady_clock::now() - start_time;
-    auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
-
-    bool is_error = std::holds_alternative<ErrorResponse>(response);
-    if (is_error) {
-        auto& error = std::get<ErrorResponse>(response);
-        spdlog::warn("Request failed: {} ({}ms)", error.message, duration_ms);
-    } else {
-        spdlog::debug("Request completed successfully ({}ms)", duration_ms);
-    }
-
-    co_return response;
-}
-
-// ============================================================================
-// RateLimitMiddleware Implementation
-// ============================================================================
-
-RateLimitMiddleware::RateLimitMiddleware(Config config)
-    : config_(config), tokens_(config.burst_size), last_refill_(std::chrono::steady_clock::now()) {}
-
-boost::asio::awaitable<Response> RateLimitMiddleware::process(const Request& request, Next next) {
-    // Refill tokens based on time elapsed
-    {
-        std::lock_guard lock(refill_mutex_);
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_refill_).count();
-
-        if (elapsed > 0) {
-            size_t new_tokens = elapsed * config_.requests_per_second;
-            size_t current = tokens_.load();
-            size_t max_tokens = config_.burst_size;
-
-            if (current + new_tokens > max_tokens) {
-                tokens_ = max_tokens;
-            } else {
-                tokens_ += new_tokens;
-            }
-
-            last_refill_ = now;
-        }
-    }
-
-    // Try to consume a token
-    size_t current = tokens_.load();
-    while (current > 0) {
-        if (tokens_.compare_exchange_weak(current, current - 1)) {
-            // Token acquired, process request
-            co_return co_await next(request);
-        }
-        // current was updated by compare_exchange, retry
-    }
-
-    // No tokens available
-    co_return ErrorResponse{ErrorCode::RateLimited, "Rate limit exceeded"};
-}
-
-// ============================================================================
-// AuthMiddleware Implementation
-// ============================================================================
-
-boost::asio::awaitable<Response> AuthMiddleware::process(const Request& request, Next next) {
-    // Extract auth token from request metadata (placeholder)
-    std::string token = ""; // TODO: Extract from request
-
-    bool is_valid = co_await validator_(token);
-
-    if (!is_valid) {
-        co_return ErrorResponse{ErrorCode::Unauthorized, "Authentication failed"};
-    }
-
-    co_return co_await next(request);
 }
 
 } // namespace yams::daemon

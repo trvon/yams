@@ -18,27 +18,6 @@
 namespace {
 using yams::daemon::MessageType;
 
-[[maybe_unused]] inline yams::daemon::EmbeddingEvent
-make_embedding_start_event(const yams::daemon::Request& req) {
-    using namespace yams::daemon;
-    EmbeddingEvent ev{};
-    if (auto* r = std::get_if<BatchEmbeddingRequest>(&req)) {
-        ev.modelName = r->modelName;
-        ev.total = r->texts.size();
-    } else if (auto* r = std::get_if<EmbedDocumentsRequest>(&req)) {
-        ev.modelName = r->modelName;
-        ev.total = r->documentHashes.size();
-    } else if (auto* r = std::get_if<GenerateEmbeddingRequest>(&req)) {
-        ev.modelName = r->modelName;
-        ev.total = 1;
-    } else {
-        ev.total = 1;
-    }
-    ev.phase = "started";
-    ev.message = "embedding started";
-    return ev;
-}
-
 inline std::pair<std::size_t, std::size_t> page_bounds(std::size_t pos, std::size_t total,
                                                        std::size_t page) {
     const auto end = std::min(pos + page, total);

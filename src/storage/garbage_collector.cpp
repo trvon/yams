@@ -70,7 +70,7 @@ Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
     // Check if already collecting
     bool expected = false;
     if (!pImpl->isCollecting.compare_exchange_strong(expected, true)) {
-        spdlog::warn("Garbage collection already in progress");
+        spdlog::debug("Garbage collection already in progress");
         return Result<GCStats>(ErrorCode::OperationInProgress);
     }
 
@@ -83,8 +83,8 @@ Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
     auto startTime = std::chrono::steady_clock::now();
     GCStats stats{};
 
-    spdlog::info("Starting garbage collection (dry_run: {}, max_blocks: {}, min_age: {}s)",
-                 options.dryRun, options.maxBlocksPerRun, options.minAgeSeconds);
+    spdlog::debug("Starting garbage collection (dry_run: {}, max_blocks: {}, min_age: {}s)",
+                  options.dryRun, options.maxBlocksPerRun, options.minAgeSeconds);
 
     try {
         // Get unreferenced blocks
@@ -180,7 +180,7 @@ Result<GCStats> GarbageCollector::collect(const GCOptions& options) {
                                            static_cast<int64_t>(stats.bytesReclaimed));
     }
 
-    spdlog::info(
+    spdlog::debug(
         "Garbage collection completed: {} blocks scanned, {} deleted, {} bytes reclaimed in {}ms",
         stats.blocksScanned, stats.blocksDeleted, stats.bytesReclaimed, stats.duration.count());
 
@@ -202,7 +202,7 @@ void GarbageCollector::scheduleCollection(std::chrono::seconds interval, const G
 
     // Start scheduler thread
     pImpl->schedulerThread = std::thread([this, interval, options]() {
-        spdlog::info("Started scheduled garbage collection (interval: {}s)", interval.count());
+        spdlog::debug("Started scheduled garbage collection (interval: {}s)", interval.count());
 
         while (!pImpl->stopScheduler) {
             // Wait for interval or stop signal
@@ -222,7 +222,7 @@ void GarbageCollector::scheduleCollection(std::chrono::seconds interval, const G
             }
         }
 
-        spdlog::info("Stopped scheduled garbage collection");
+        spdlog::debug("Stopped scheduled garbage collection");
     });
 }
 
@@ -251,7 +251,7 @@ std::unique_ptr<GarbageCollector> createGarbageCollector(ReferenceCounter& refCo
 // Utility function to rebuild reference database
 Result<void> rebuildReferenceDatabase(const std::filesystem::path& dbPath,
                                       const std::filesystem::path& storagePath) {
-    spdlog::info("Starting reference database rebuild from storage at {}", storagePath.string());
+    spdlog::debug("Starting reference database rebuild from storage at {}", storagePath.string());
 
     try {
         // Create new reference counter

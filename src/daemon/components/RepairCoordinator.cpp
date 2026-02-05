@@ -275,7 +275,7 @@ void RepairCoordinator::start() {
             "path_tree_repair_jobs", 32);
     InternalEventBus::PathTreeJob initialPathTreeJob{1, true}; // requestId=1, runOnce=true
     if (!pathTreeQueue->try_push(initialPathTreeJob)) {
-        spdlog::warn("RepairCoordinator: failed to enqueue initial PathTreeRepair job");
+        spdlog::debug("RepairCoordinator: failed to enqueue initial PathTreeRepair job");
     }
 }
 
@@ -294,7 +294,7 @@ void RepairCoordinator::stop() {
             return shutdownState_->finished.load(std::memory_order_relaxed);
         });
         if (!completed) {
-            spdlog::warn("RepairCoordinator::stop() - coroutine did not finish within timeout");
+            spdlog::debug("RepairCoordinator::stop() - coroutine did not finish within timeout");
         } else {
             spdlog::debug("RepairCoordinator::stop() - coroutine finished");
         }
@@ -533,7 +533,7 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                 // We need to refactor this - for now, we can't easily get IStorageEngine from
                 // IContentStore The proper fix is to make ServiceManager expose getStorageEngine()
                 // TODO PBI-062-4: Add getStorageEngine() to ServiceManager
-                spdlog::warn("RepairCoordinator: prune job {} - storage engine access needed",
+                spdlog::debug("RepairCoordinator: prune job {} - storage engine access needed",
                              pruneJob.requestId);
                 spdlog::debug(
                     "RepairCoordinator: prune job {} queued but needs storage engine refactor",
@@ -565,7 +565,7 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                         auto docsResult =
                             metaRepo->queryDocuments(metadata::DocumentQueryOptions{});
                         if (docsResult && !docsResult.value().empty()) {
-                            spdlog::info("RepairCoordinator: PathTreeRepair scanning {} documents",
+                            spdlog::debug("RepairCoordinator: PathTreeRepair scanning {} documents",
                                          docsResult.value().size());
 
                             uint64_t created = 0;
@@ -619,15 +619,15 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                                 co_await timer.async_wait(boost::asio::use_awaitable);
                             }
 
-                            spdlog::info("RepairCoordinator: PathTreeRepair complete (scanned={}, "
-                                         "created={}, errors={})",
-                                         scanned, created, errors);
+                            spdlog::debug("RepairCoordinator: PathTreeRepair complete (scanned={}, "
+                                          "created={}, errors={})",
+                                          scanned, created, errors);
                         } else {
                             spdlog::debug(
                                 "RepairCoordinator: PathTreeRepair - no documents to scan");
                         }
                     } catch (const std::exception& e) {
-                        spdlog::warn("RepairCoordinator: PathTreeRepair exception: {}", e.what());
+                        spdlog::debug("RepairCoordinator: PathTreeRepair exception: {}", e.what());
                     }
                 }
                 pathTreeRepairDone = true;
@@ -654,7 +654,7 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                     if (vectorDb) {
                         auto cleanup = vectorDb->cleanupOrphanRows();
                         if (cleanup) {
-                            spdlog::info(
+                            spdlog::debug(
                                 "RepairCoordinator: cleaned vector orphans (metadata_removed={}, "
                                 "embeddings_removed={}, metadata_backfilled={})",
                                 cleanup.value().metadata_removed,
@@ -903,7 +903,7 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                                             } else {
                                                 ConfigResolver::writeVectorSentinel(
                                                     cfg_.dataDir, modelDim, "vec0", 1);
-                                                spdlog::info(
+                                                spdlog::debug(
                                                     "RepairCoordinator: vector schema rebuilt to "
                                                     "dim {}",
                                                     modelDim);
@@ -919,7 +919,7 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                                 }
                             }
                         } else {
-                            spdlog::warn(
+                            spdlog::debug(
                                 "RepairCoordinator: skipping embedding repair - model dimension "
                                 "({}) differs from DB dimension ({}). Use 'yams repair "
                                 "--rebuild-vectors' to migrate.",
@@ -979,7 +979,7 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                 auto statusRes = meta_repo->batchUpdateDocumentRepairStatuses(
                     missingEmbeddings, yams::metadata::RepairStatus::Processing);
                 if (!statusRes) {
-                    spdlog::warn("RepairCoordinator: failed to set Processing status: {}",
+                    spdlog::debug("RepairCoordinator: failed to set Processing status: {}",
                                  statusRes.error().message);
                 }
             }

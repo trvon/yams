@@ -376,9 +376,6 @@ public:
         return PluginHostSnapshot{};
     }
 
-    // PBI-008-11: FSM hook scaffolds for session preparation lifecycle (no-op for now)
-    void onPrepareSessionRequested() {};
-    void onPrepareSessionCompleted() {};
 
     // Expose resolved daemon configuration for components that need paths
     const DaemonConfig& getConfig() const { return config_; }
@@ -541,10 +538,6 @@ private:
     // Thread pools: declared early so they destruct LAST (after threads that use them)
     // (reverse order), ensuring coroutines are cancelled before executor dies
     // Deprecated legacy pools removed – now using a single io_context with strands.
-    // std::unique_ptr<boost::asio::thread_pool> initPool_; // removed
-    // std::unique_ptr<boost::asio::thread_pool> modelLoadPool_; // removed
-    // std::unique_ptr<boost::asio::thread_pool> pluginLoadPool_; // removed
-    // std::shared_ptr<WorkerPool> workerPool_; // removed
 
     // Legacy members retained for compatibility during transition
     std::unique_ptr<IngestService> ingestService_;

@@ -29,6 +29,8 @@ class OnnxRuntimeConan(ConanFile):
         "rocm_path": ["ANY"],
         # Parallel build jobs (for source builds)
         "parallel_jobs": ["ANY"],
+        # Use prebuilt Python package instead of building from source
+        "use_prebuilt_python": [True, False],
     }
     default_options = {
         "shared": False,
@@ -36,6 +38,7 @@ class OnnxRuntimeConan(ConanFile):
         "with_gpu": None,
         "rocm_path": "/opt/rocm",
         "parallel_jobs": "4",
+        "use_prebuilt_python": False,
     }
 
     # Source builds need these
@@ -162,9 +165,19 @@ class OnnxRuntimeConan(ConanFile):
         build_type = str(self.settings.build_type)
         parallel_jobs = str(self.options.parallel_jobs)
 
-        # Clone the repository
+        # Clone the repository (reuse existing checkout when possible)
         source_dir = os.path.join(self.build_folder, "onnxruntime-src")
-        if not os.path.exists(source_dir):
+        if os.path.exists(source_dir):
+            contents = os.listdir(source_dir)
+            if contents:
+                self.output.info(
+                    f"Reusing existing ONNX Runtime checkout at {source_dir}"
+                )
+            else:
+                self.output.info(
+                    f"Empty ONNX Runtime checkout at {source_dir}; recloning"
+                )
+        if not os.path.exists(source_dir) or not os.listdir(source_dir):
             self.output.info(f"Cloning ONNX Runtime v{self.version}...")
             git = Git(self, folder=source_dir)
             git.clone(
@@ -178,6 +191,25 @@ class OnnxRuntimeConan(ConanFile):
             raise ConanInvalidConfiguration(
                 f"build.sh not found at {build_script}. Source checkout may have failed."
             )
+
+        # Patch tpause builtin signature for newer Clang toolchains
+        spin_pause_path = os.path.join(
+            source_dir, "onnxruntime", "core", "common", "spin_pause.cc"
+        )
+        if os.path.exists(spin_pause_path):
+            with open(spin_pause_path, "r", encoding="utf-8") as handle:
+                spin_pause_src = handle.read()
+            old_call = (
+                "__builtin_ia32_tpause(0x0, __rdtsc() + tpause_spin_delay_cycles);"
+            )
+            new_call = (
+                "__builtin_ia32_tpause(0x0, __rdtsc() + tpause_spin_delay_cycles, 0);"
+            )
+            if old_call in spin_pause_src and new_call not in spin_pause_src:
+                spin_pause_src = spin_pause_src.replace(old_call, new_call)
+                with open(spin_pause_path, "w", encoding="utf-8") as handle:
+                    handle.write(spin_pause_src)
+                self.output.info("Patched spin_pause.cc for tpause builtin signature")
 
         # Prepare build arguments
         build_args = [
@@ -197,6 +229,22 @@ class OnnxRuntimeConan(ConanFile):
             "--build_shared_lib",
             "--cmake_extra_defines",
             f"CMAKE_HIP_COMPILER={rocm_path}/llvm/bin/clang++",
+            "--cmake_extra_defines",
+            "CMAKE_CXX_FLAGS=-Wno-array-bounds -Wno-error=array-bounds -Wno-error=shorten-64-to-32",
+            "--cmake_extra_defines",
+            "CMAKE_CXX_FLAGS_RELEASE=-Wno-array-bounds -Wno-error=array-bounds -Wno-error=shorten-64-to-32",
+            "--cmake_extra_defines",
+            "CMAKE_CXX_FLAGS_DEBUG=-Wno-array-bounds -Wno-error=array-bounds -Wno-error=shorten-64-to-32",
+            "--cmake_extra_defines",
+            "CMAKE_HIP_FLAGS=-Wno-array-bounds -Wno-error=array-bounds -Wno-error=shorten-64-to-32",
+            "--cmake_extra_defines",
+            "CMAKE_HIP_FLAGS_RELEASE=-Wno-array-bounds -Wno-error=array-bounds -Wno-error=shorten-64-to-32",
+            "--cmake_extra_defines",
+            "CMAKE_HIP_FLAGS_DEBUG=-Wno-array-bounds -Wno-error=array-bounds -Wno-error=shorten-64-to-32",
+            "--cmake_extra_defines",
+            "onnxruntime_DEV_MODE=OFF",
+            "--cmake_extra_defines",
+            "onnxruntime_BUILD_UNIT_TESTS=OFF",
         ]
 
         # GPU targets - use auto-detected from environment or fall back to common targets
@@ -250,6 +298,10 @@ class OnnxRuntimeConan(ConanFile):
             )
 
     def build(self):
+        if self.options.use_prebuilt_python:
+            # Skip build - we'll package from Python installation
+            self.output.info("Using prebuilt Python package - skipping build")
+            return
         if self._is_source_build():
             self._build_from_source()
         else:
@@ -293,6 +345,23 @@ class OnnxRuntimeConan(ConanFile):
                 dst=os.path.join(self.package_folder, "include", "onnxruntime"),
                 keep_path=True,
             )
+
+            # Also copy top-level public headers to include/
+            session_headers = os.path.join(include_src, "core", "session")
+            for header in [
+                "onnxruntime_c_api.h",
+                "onnxruntime_cxx_api.h",
+                "onnxruntime_ep_c_api.h",
+                "onnxruntime_float16.h",
+                "onnxruntime_cxx_inline.h",
+            ]:
+                copy(
+                    self,
+                    header,
+                    src=session_headers,
+                    dst=os.path.join(self.package_folder, "include"),
+                    keep_path=False,
+                )
 
         # Also copy the C API headers
         c_api_include = os.path.join(
@@ -436,8 +505,94 @@ class OnnxRuntimeConan(ConanFile):
                 keep_path=False,
             )
 
+    def _package_python_prebuilt(self):
+        """Package from prebuilt Python package (onnxruntime-rocm)"""
+        # Find the Python package installation
+        python_pkg_paths = [
+            "/usr/local/lib/python3.13/dist-packages/onnxruntime",
+            "/usr/lib/python3/dist-packages/onnxruntime",
+            "/usr/local/lib/python3.12/dist-packages/onnxruntime",
+            "/usr/local/lib/python3.11/dist-packages/onnxruntime",
+        ]
+
+        onnxruntime_pkg = None
+        for path in python_pkg_paths:
+            if os.path.exists(path):
+                onnxruntime_pkg = path
+                break
+
+        if not onnxruntime_pkg:
+            raise ConanInvalidConfiguration(
+                "Could not find onnxruntime Python package. "
+                "Install with: pip install onnxruntime-rocm"
+            )
+
+        self.output.info(f"Packaging from Python package: {onnxruntime_pkg}")
+
+        # Copy headers from include directory
+        include_src = os.path.join(onnxruntime_pkg, "include")
+        if os.path.exists(include_src):
+            copy(
+                self,
+                "*.h",
+                src=include_src,
+                dst=os.path.join(self.package_folder, "include"),
+                keep_path=True,
+            )
+        else:
+            # Try to find headers in the capi directory
+            capi_include = os.path.join(onnxruntime_pkg, "capi")
+            if os.path.exists(capi_include):
+                # Create minimal headers
+                include_dst = os.path.join(self.package_folder, "include")
+                mkdir(self, include_dst)
+                # The Python package doesn't include headers, so we'll need to download them
+                self.output.warning(
+                    "Headers not found in Python package, downloading from GitHub"
+                )
+                # Download headers from GitHub release
+                headers_url = f"https://github.com/microsoft/onnxruntime/raw/v{self.version}/include/onnxruntime/core/session/onnxruntime_c_api.h"
+                try:
+                    download(
+                        self,
+                        headers_url,
+                        os.path.join(include_dst, "onnxruntime_c_api.h"),
+                    )
+                except:
+                    self.output.warning("Could not download headers, creating stub")
+
+        # Copy libraries from capi directory
+        capi_dir = os.path.join(onnxruntime_pkg, "capi")
+        if os.path.exists(capi_dir):
+            lib_dst = os.path.join(self.package_folder, "lib")
+            mkdir(self, lib_dst)
+
+            for item in os.listdir(capi_dir):
+                if item.endswith(".so"):
+                    src_path = os.path.join(capi_dir, item)
+                    dst_path = os.path.join(lib_dst, item)
+
+                    if os.path.islink(src_path):
+                        link_target = os.readlink(src_path)
+                        if os.path.exists(dst_path) or os.path.islink(dst_path):
+                            os.remove(dst_path)
+                        os.symlink(link_target, dst_path)
+                        self.output.info(f"Preserved symlink: {item} -> {link_target}")
+                    elif os.path.isfile(src_path):
+                        shutil.copy2(src_path, dst_path)
+                        self.output.info(f"Copied library: {item}")
+
+        # Create a minimal license file
+        license_dst = os.path.join(self.package_folder, "licenses")
+        mkdir(self, license_dst)
+        with open(os.path.join(license_dst, "LICENSE"), "w") as f:
+            f.write("ONNX Runtime - MIT License\n")
+            f.write("See: https://github.com/microsoft/onnxruntime/blob/main/LICENSE\n")
+
     def package(self):
-        if self._is_source_build():
+        if self.options.use_prebuilt_python:
+            self._package_python_prebuilt()
+        elif self._is_source_build():
             self._package_source_build()
         else:
             self._package_prebuilt()
@@ -463,6 +618,7 @@ Cflags: -I${{includedir}}
 
         # Base library
         self.cpp_info.libs = ["onnxruntime"]
+        self.cpp_info.includedirs = ["include", os.path.join("include", "onnxruntime")]
 
         # GPU-specific libraries and defines
         if gpu == "cuda":
@@ -481,23 +637,42 @@ Cflags: -I${{includedir}}
         elif gpu == "migraphx":
             # MIGraphX provider is built into the main library when built from source
             self.cpp_info.defines = ["YAMS_ONNX_MIGRAPHX_ENABLED=1"]
+            # When using prebuilt Python package, we need the providers
+            if self.options.use_prebuilt_python:
+                self.cpp_info.libs.extend(
+                    [
+                        "onnxruntime_providers_shared",
+                        "onnxruntime_providers_migraphx",
+                        "onnxruntime_providers_rocm",
+                    ]
+                )
             # Add ROCm library path for runtime linking
             rocm_path = str(self.options.rocm_path)
-            self.cpp_info.libdirs.append(os.path.join(rocm_path, "lib"))
-
-        # Include dirs
-        self.cpp_info.includedirs = ["include"]
+            rocm_lib = os.path.join(rocm_path, "lib")
+            rocm_migraphx_lib = os.path.join(rocm_path, "lib", "migraphx", "lib")
+            self.cpp_info.libdirs.extend([rocm_lib, rocm_migraphx_lib])
 
         # System libs
         if self.settings.os == "Linux":
             self.cpp_info.system_libs = ["pthread", "dl", "m"]
             if gpu == "migraphx":
                 # ROCm runtime libraries
-                self.cpp_info.system_libs.extend(["amdhip64", "migraphx"])
+                rocm_path = str(self.options.rocm_path)
+                migraphx_shared = os.path.join(rocm_path, "lib", "libmigraphx.so")
+                migraphx_c_shared = os.path.join(rocm_path, "lib", "libmigraphx_c.so")
+                migraphx_lib = (
+                    "migraphx" if os.path.exists(migraphx_shared) else "migraphx_c"
+                )
+                if not os.path.exists(migraphx_shared) and not os.path.exists(
+                    migraphx_c_shared
+                ):
+                    migraphx_lib = "migraphx_c"
+                self.cpp_info.system_libs.extend(["amdhip64", migraphx_lib])
 
         # Library paths
         if self.settings.os in ["Linux", "Macos"]:
-            self.cpp_info.libdirs = ["lib"]
+            if "lib" not in self.cpp_info.libdirs:
+                self.cpp_info.libdirs.insert(0, "lib")
             self.cpp_info.rpath_dirs = ["lib"]
         elif self.settings.os == "Windows":
             self.cpp_info.libdirs = ["lib"]

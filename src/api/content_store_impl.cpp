@@ -770,7 +770,7 @@ public:
 
     // Garbage collection
     Result<void> garbageCollect([[maybe_unused]] ProgressCallback progress) override {
-        spdlog::info("Starting garbage collection");
+        spdlog::debug("Starting garbage collection");
 
         // Cast to concrete types for GarbageCollector access
         auto* concreteRefCounter = dynamic_cast<storage::ReferenceCounter*>(refCounter_.get());
@@ -808,7 +808,7 @@ public:
         }
 
         const auto& stats = result.value();
-        spdlog::info(
+        spdlog::debug(
             "Garbage collection complete: {} blocks scanned, {} deleted, {} bytes reclaimed",
             stats.blocksScanned, stats.blocksDeleted, stats.bytesReclaimed);
 

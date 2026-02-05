@@ -1,10 +1,8 @@
 #include <yams/daemon/ipc/socket_utils.h>
 
-#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <string>
 #include <string_view> // PBI-058 Task 058-16
 
 #ifndef _WIN32
@@ -145,10 +143,10 @@ std::filesystem::path resolve_socket_path_config_first() {
                         if (endq != std::string_view::npos && endq > 0) {
                             std::string_view val = rhs.substr(1, endq - 1);
                             if (!val.empty())
-                                return fs::path(std::string(val));
+                                return fs::path(val);
                         }
                     } else if (!rhs.empty()) {
-                        return fs::path(std::string(rhs));
+                        return fs::path(rhs);
                     }
                 }
             }

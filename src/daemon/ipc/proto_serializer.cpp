@@ -49,8 +49,9 @@ from_kv_pairs(const google::protobuf::RepeatedPtrField<pb::KvPair>& in) {
 static void set_string_list(const std::vector<std::string>& in,
                             google::protobuf::RepeatedPtrField<std::string>* out) {
     out->Clear();
+    out->Reserve(static_cast<int>(in.size()));
     for (const auto& s : in)
-        out->Add(std::string{s});
+        *out->Add() = s;
 }
 
 static std::vector<std::string>

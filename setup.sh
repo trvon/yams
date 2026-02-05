@@ -508,7 +508,7 @@ fi
 CONAN_ARGS+=(--build=missing)
 
 # Use runtime_deploy to copy shared libraries next to executables (mainly for Windows, no-op on Unix with RPATH)
-conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}" --deployer=runtime_deploy --deployer-folder="${BUILD_DIR}"
+conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}" --deployer=runtime_deploy --deployer-folder="${BUILD_DIR}" -c tools.deployer:symlinks=False
 
 # Check for either native or cross file (Conan generates cross file for cross-compilation)
 # Conan 2.x sometimes nests generator output under build-<type>/conan even when -of points at

@@ -160,7 +160,7 @@ yams_daemon_lib = static_library('yams_daemon',
     'ipc/streaming_processor.cpp',
     'ipc/connection_fsm.cpp',
     'ipc/retrieval_session.cpp',
-    'ipc/thread_pool.cpp',
+
     'ipc/socket_utils.cpp',
     'ipc/message_framing.cpp',
     'ipc/proto_serializer.cpp',

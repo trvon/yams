@@ -268,6 +268,20 @@ public:
         bool runOnce{true};    // Run once at startup vs periodic
     };
 
+    // Storage garbage collection job (routed through bus for centralized dispatch)
+    struct StorageGcJob {
+        bool dryRun{false};
+    };
+
+    // Entity graph extraction job (routes through bus instead of direct WorkCoordinator dispatch)
+    struct EntityGraphJob {
+        std::string documentHash;
+        std::string filePath;
+        std::string contentUtf8;
+        std::string language;
+        std::string mimeType;
+    };
+
 private:
     InternalEventBus() = default;
     std::mutex mu_;
@@ -301,6 +315,12 @@ private:
     std::atomic<std::uint64_t> titleQueued_{0};
     std::atomic<std::uint64_t> titleDropped_{0};
     std::atomic<std::uint64_t> titleConsumed_{0};
+    std::atomic<std::uint64_t> gcQueued_{0};
+    std::atomic<std::uint64_t> gcDropped_{0};
+    std::atomic<std::uint64_t> gcConsumed_{0};
+    std::atomic<std::uint64_t> entityGraphQueued_{0};
+    std::atomic<std::uint64_t> entityGraphDropped_{0};
+    std::atomic<std::uint64_t> entityGraphConsumed_{0};
 
 public:
     // Counter helpers
@@ -383,6 +403,20 @@ public:
     std::uint64_t titleQueued() const { return titleQueued_.load(std::memory_order_relaxed); }
     std::uint64_t titleDropped() const { return titleDropped_.load(std::memory_order_relaxed); }
     std::uint64_t titleConsumed() const { return titleConsumed_.load(std::memory_order_relaxed); }
+
+    void incGcQueued() { gcQueued_.fetch_add(1, std::memory_order_relaxed); }
+    void incGcDropped() { gcDropped_.fetch_add(1, std::memory_order_relaxed); }
+    void incGcConsumed() { gcConsumed_.fetch_add(1, std::memory_order_relaxed); }
+    void incEntityGraphQueued() { entityGraphQueued_.fetch_add(1, std::memory_order_relaxed); }
+    void incEntityGraphDropped() { entityGraphDropped_.fetch_add(1, std::memory_order_relaxed); }
+    void incEntityGraphConsumed() { entityGraphConsumed_.fetch_add(1, std::memory_order_relaxed); }
+
+    std::uint64_t gcQueued() const { return gcQueued_.load(std::memory_order_relaxed); }
+    std::uint64_t gcDropped() const { return gcDropped_.load(std::memory_order_relaxed); }
+    std::uint64_t gcConsumed() const { return gcConsumed_.load(std::memory_order_relaxed); }
+    std::uint64_t entityGraphQueued() const { return entityGraphQueued_.load(std::memory_order_relaxed); }
+    std::uint64_t entityGraphDropped() const { return entityGraphDropped_.load(std::memory_order_relaxed); }
+    std::uint64_t entityGraphConsumed() const { return entityGraphConsumed_.load(std::memory_order_relaxed); }
 };
 
 } // namespace yams::daemon

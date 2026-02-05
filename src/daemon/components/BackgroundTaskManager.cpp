@@ -76,7 +76,7 @@ void BackgroundTaskManager::start() {
         launchCheckpointTask();
         launchStorageGcTask();
         launchGraphPruneTask();
-        spdlog::info("[BackgroundTaskManager] Background tasks launched successfully");
+        spdlog::debug("[BackgroundTaskManager] Background tasks launched successfully");
     } catch (const std::exception& e) {
         spdlog::error("[BackgroundTaskManager] Failed to launch background tasks: {}", e.what());
         running_.store(false, std::memory_order_release);
@@ -92,7 +92,7 @@ void BackgroundTaskManager::stop() {
         return;
     }
 
-    spdlog::info("[BackgroundTaskManager] Stopping background tasks");
+    spdlog::debug("[BackgroundTaskManager] Stopping background tasks");
 
     // Signal coroutines to stop
     stopRequested_->store(true, std::memory_order_release);
@@ -233,8 +233,8 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
                             auto now = std::chrono::steady_clock::now();
                             if (lastOrphanInfoLog.time_since_epoch().count() == 0 ||
                                 (now - lastOrphanInfoLog) >= kOrphanInfoLogInterval) {
-                                spdlog::info("[Fts5Job] Removed {} orphans ({} failed)",
-                                             pendingOrphansRemoved, pendingOrphansSkipped);
+                                spdlog::debug("[Fts5Job] Removed {} orphans ({} failed)",
+                                              pendingOrphansRemoved, pendingOrphansSkipped);
                                 pendingOrphansRemoved = 0;
                                 pendingOrphansSkipped = 0;
                                 lastOrphanInfoLog = now;
@@ -265,8 +265,8 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
                     idleSince = now;
                 }
                 if (pendingOrphansRemoved > 0 && (now - idleSince) >= kOrphanIdleFlushHold) {
-                    spdlog::info("[Fts5Job] Removed {} orphans ({} skipped)", pendingOrphansRemoved,
-                                 pendingOrphansSkipped);
+                    spdlog::debug("[Fts5Job] Removed {} orphans ({} skipped)", pendingOrphansRemoved,
+                                  pendingOrphansSkipped);
                     pendingOrphansRemoved = 0;
                     pendingOrphansSkipped = 0;
                     lastOrphanInfoLog = now;
@@ -350,7 +350,7 @@ void BackgroundTaskManager::launchOrphanScanTask() {
                                 spdlog::debug("[OrphanScan] No orphans ({} entries checked)",
                                               fts5Ids.size());
                             } else {
-                                spdlog::info("[OrphanScan] Detected {} orphans", orphanIds.size());
+                                spdlog::debug("[OrphanScan] Detected {} orphans", orphanIds.size());
                                 Bus::instance().incOrphansDetected(orphanIds.size());
 
                                 auto fts5Q = Bus::instance().get_or_create_channel<Bus::Fts5Job>(
@@ -368,7 +368,7 @@ void BackgroundTaskManager::launchOrphanScanTask() {
                                     orphanJob.operation = Bus::Fts5Operation::RemoveOrphans;
 
                                     if (!fts5Q->try_push(std::move(orphanJob))) {
-                                        spdlog::warn("[OrphanScan] Queue full, batch dropped");
+                                        spdlog::debug("[OrphanScan] Queue full, batch dropped");
                                     }
 
                                     // Yield between batches to avoid flooding the queue
@@ -430,13 +430,15 @@ void BackgroundTaskManager::launchStorageGcTask() {
     auto exec = deps_.executor;
     auto stopFlag = stopRequested_;
 
-    spdlog::debug("[BackgroundTaskManager] Launching StorageGC task");
+    spdlog::debug("[BackgroundTaskManager] Launching StorageGC producer + consumer");
+
+    // Producer: periodic timer that enqueues StorageGcJob to the bus
     boost::asio::co_spawn(
         exec,
-        [self, stopFlag]() -> boost::asio::awaitable<void> {
+        [stopFlag]() -> boost::asio::awaitable<void> {
             using namespace std::chrono_literals;
+            using Bus = yams::daemon::InternalEventBus;
 
-            // Create local timer (not a member, no shared state)
             auto executor = co_await boost::asio::this_coro::executor;
             boost::asio::steady_timer timer(executor);
 
@@ -446,39 +448,108 @@ void BackgroundTaskManager::launchStorageGcTask() {
                 co_await timer.async_wait(boost::asio::use_awaitable);
             } catch (const boost::system::system_error& e) {
                 if (e.code() == boost::asio::error::operation_aborted) {
-                    co_return; // Exit if cancelled during initial delay
+                    co_return;
                 }
                 throw;
             }
 
-            while (!stopFlag->load(std::memory_order_acquire)) {
-                if (auto store = self->getContentStore(); store) {
-                    spdlog::debug("[StorageGC] Starting garbage collection");
+            // Adaptive interval: start at 1h, double on no-op (max 4h)
+            auto interval = 1h;
+            constexpr auto kMaxInterval = std::chrono::hours(4);
 
+            constexpr std::size_t kChannelCapacity = 4;
+            auto channel = Bus::instance().get_or_create_channel<Bus::StorageGcJob>(
+                "storage_gc_jobs", kChannelCapacity);
+
+            while (!stopFlag->load(std::memory_order_acquire)) {
+                Bus::StorageGcJob job{};
+                if (channel->try_push(std::move(job))) {
+                    Bus::instance().incGcQueued();
+                    spdlog::debug("[StorageGC] Enqueued GC job");
+                } else {
+                    Bus::instance().incGcDropped();
+                    spdlog::debug("[StorageGC] Channel full, skipping cycle");
+                }
+
+                timer.expires_after(interval);
+                try {
+                    co_await timer.async_wait(boost::asio::use_awaitable);
+                } catch (const boost::system::system_error& e) {
+                    if (e.code() == boost::asio::error::operation_aborted) {
+                        break;
+                    }
+                    throw;
+                }
+
+                // Double interval on idle, cap at kMaxInterval
+                if (interval < kMaxInterval) {
+                    interval = std::min(interval * 2, kMaxInterval);
+                }
+            }
+            spdlog::debug("[StorageGC] Producer stopped");
+            co_return;
+        },
+        boost::asio::detached);
+
+    // Consumer: polls StorageGcJob channel and runs garbageCollect()
+    boost::asio::co_spawn(
+        exec,
+        [self, stopFlag]() -> boost::asio::awaitable<void> {
+            using namespace std::chrono_literals;
+            using Bus = yams::daemon::InternalEventBus;
+
+            auto executor = co_await boost::asio::this_coro::executor;
+            boost::asio::steady_timer timer(executor);
+
+            constexpr std::size_t kChannelCapacity = 4;
+            auto channel = Bus::instance().get_or_create_channel<Bus::StorageGcJob>(
+                "storage_gc_jobs", kChannelCapacity);
+
+            constexpr auto kMinIdleDelay = std::chrono::milliseconds(100);
+            constexpr auto kMaxIdleDelay = std::chrono::milliseconds(5000);
+            auto idleDelay = kMinIdleDelay;
+
+            while (!stopFlag->load(std::memory_order_acquire)) {
+                Bus::StorageGcJob job;
+                if (channel->try_pop(job)) {
+                    idleDelay = kMinIdleDelay; // reset backoff on work
+
+                    auto store = self->getContentStore();
+                    if (!store) {
+                        spdlog::debug("[StorageGC] ContentStore not ready, dropping job");
+                        continue;
+                    }
+
+                    spdlog::debug("[StorageGC] Starting garbage collection");
                     try {
                         auto result = store->garbageCollect(nullptr);
                         if (!result) {
                             spdlog::warn("[StorageGC] Failed: {}", result.error().message);
                         } else {
+                            Bus::instance().incGcConsumed();
                             spdlog::debug("[StorageGC] Collection completed successfully");
                         }
                     } catch (const std::exception& e) {
                         spdlog::warn("[StorageGC] Exception: {}", e.what());
                     }
+                    continue;
                 }
 
-                // Run hourly
-                timer.expires_after(1h);
+                // Idle: adaptive backoff
+                timer.expires_after(idleDelay);
                 try {
                     co_await timer.async_wait(boost::asio::use_awaitable);
                 } catch (const boost::system::system_error& e) {
                     if (e.code() == boost::asio::error::operation_aborted) {
-                        break; // Exit if cancelled
+                        break;
                     }
                     throw;
                 }
+                if (idleDelay < kMaxIdleDelay) {
+                    idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
+                }
             }
-            spdlog::debug("[StorageGC] Task stopped");
+            spdlog::debug("[StorageGC] Consumer stopped");
             co_return;
         },
         boost::asio::detached);
@@ -525,7 +596,7 @@ void BackgroundTaskManager::launchGraphPruneTask() {
                     if (!res) {
                         spdlog::warn("[GraphPrune] prune failed: {}", res.error().message);
                     } else if (res.value() > 0) {
-                        spdlog::info("[GraphPrune] pruned {} version nodes", res.value());
+                        spdlog::debug("[GraphPrune] pruned {} version nodes", res.value());
                     }
                 }
 

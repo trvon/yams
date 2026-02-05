@@ -11,19 +11,7 @@
 #include <yams/daemon/ipc/request_handler.h>
 #include <yams/profiling.h>
 
-#ifdef __linux__
-#include <sys/prctl.h>
-#endif
-
 namespace {
-void set_current_thread_name(const std::string& name) {
-#ifdef __linux__
-    prctl(PR_SET_NAME, name.c_str(), 0, 0, 0);
-#elif __APPLE__
-    pthread_setname_np(name.c_str());
-#endif
-}
-
 bool stream_trace_enabled() {
     static int enabled = [] {
         if (const char* raw = std::getenv("YAMS_STREAM_TRACE")) {
@@ -873,18 +861,6 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         }
         handlerConfig.stream_chunk_timeout = std::chrono::milliseconds(streamChunkTimeoutMs);
         handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
-        if (handlerConfig.writer_budget_bytes_per_turn == 0) {
-            handlerConfig.writer_budget_bytes_per_turn =
-                TuneAdvisor::serverWriterBudgetBytesPerTurn();
-            if (handlerConfig.writer_budget_bytes_per_turn == 0)
-                handlerConfig.writer_budget_bytes_per_turn =
-                    TuneAdvisor::writerBudgetBytesPerTurn();
-            if (handlerConfig.writer_budget_bytes_per_turn == 0)
-                handlerConfig.writer_budget_bytes_per_turn = 256ULL * 1024;
-            if (writerBudget_)
-                writerBudget_->store(handlerConfig.writer_budget_bytes_per_turn,
-                                     std::memory_order_relaxed);
-        }
         MuxMetricsRegistry::instance().setWriterBudget(handlerConfig.writer_budget_bytes_per_turn);
         RequestDispatcher* disp = nullptr;
         {
