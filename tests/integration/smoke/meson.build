@@ -28,7 +28,7 @@ else
 endif
 
 dbg = (get_option('buildtype') == 'debug')
-if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-smoke') or dbg) and integration_smoke_srcs.length() > 0
+if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-smoke') or dbg) and integration_smoke_srcs.length() > 0 and gtest_dep.found()
   integ_exe = executable('yams_integration_smoke_tests', integration_smoke_srcs + files('test_main_smoke.cpp'),
     include_directories: incs,
     dependencies: [gtest_dep, test_deps],
@@ -47,5 +47,9 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     timeout: get_option('integration-smoke-timeout'),
   )
 else
-  message('integration_smoke suite disabled (enable with -Denable-integration-smoke=true).')
+  if not gtest_dep.found()
+    message('integration_smoke suite disabled (GTest not found).')
+  else
+    message('integration_smoke suite disabled (enable with -Denable-integration-smoke=true).')
+  endif
 endif

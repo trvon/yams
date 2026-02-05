@@ -317,13 +317,14 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
-        // Efficient profile scale is 0.0, totalBudget = 2 (base=2, scaleRange=1, 2+floor(1*0.0)=2)
-        // postIngestBatchSize = max(1, floor(8.0 * 0.0)) = 1
+        // Efficient profile scale is 0.0, old totalBudget = 2
+        // With active-stage floor: total = max(2, 6 active stages) = 6
+        // Each stage gets 1 slot; postIngestBatchSize = max(1, floor(8.0 * 0.0)) = 1
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 1u);
     }
@@ -334,13 +335,14 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
-        // Balanced profile scale is 0.5, totalBudget = 2 (base=2, scaleRange=1, 2+floor(1*0.5)=2)
-        // postIngestBatchSize = max(1, floor(8.0 * 0.5)) = 4
+        // Balanced profile scale is 0.5, old totalBudget = 2
+        // With active-stage floor: total = max(2, 6 active stages) = 6
+        // Each stage gets 1 slot; postIngestBatchSize = max(1, floor(8.0 * 0.5)) = 4
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 4u);
     }
@@ -351,15 +353,15 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
-        // Aggressive profile scale is 1.0, totalBudget = 3 (base=2, scaleRange=1, 2+floor(1*1.0)=3)
-        // With totalBudget=3: extraction=1 (locked), embed=2 (weighted sort), others=0
-        // postIngestBatchSize = max(1, floor(8.0 * 1.0)) = 8
+        // Aggressive profile scale is 1.0, old totalBudget = 3
+        // With active-stage floor: total = max(3, 6 active stages) = 6
+        // Each stage gets 1 slot; postIngestBatchSize = max(1, floor(8.0 * 1.0)) = 8
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 8u);
     }
 

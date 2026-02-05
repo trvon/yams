@@ -197,6 +197,10 @@ TEST_CASE("Ghidra plugin - Spawn and handshake", "[integration][ghidra][plugin]"
     auto pluginPath = repoRoot / "plugins" / "yams-ghidra-plugin" / "plugin.py";
     auto sdkPath = repoRoot / "external" / "yams-sdk";
 
+    if (!fs::exists(pluginPath)) {
+        SKIP("Ghidra plugin not found at " + pluginPath.string());
+    }
+
     REQUIRE(fs::exists(pluginPath));
     REQUIRE(fs::exists(sdkPath));
 
@@ -258,6 +262,10 @@ TEST_CASE("Ghidra plugin - Process lifecycle", "[integration][ghidra][plugin]") 
     auto pluginPath = repoRoot / "plugins" / "yams-ghidra-plugin" / "plugin.py";
     auto sdkPath = repoRoot / "external" / "yams-sdk";
 
+    if (!fs::exists(pluginPath)) {
+        SKIP("Ghidra plugin not found at " + pluginPath.string());
+    }
+
     SECTION("Multiple requests on same process") {
         PluginProcess proc;
         REQUIRE(spawnPlugin(proc, pluginPath, sdkPath));
@@ -295,6 +303,10 @@ TEST_CASE("Ghidra plugin - Error handling", "[integration][ghidra][plugin]") {
     auto repoRoot = getRepoRoot();
     auto pluginPath = repoRoot / "plugins" / "yams-ghidra-plugin" / "plugin.py";
     auto sdkPath = repoRoot / "external" / "yams-sdk";
+
+    if (!fs::exists(pluginPath)) {
+        SKIP("Ghidra plugin not found at " + pluginPath.string());
+    }
 
     PluginProcess proc;
     REQUIRE(spawnPlugin(proc, pluginPath, sdkPath));

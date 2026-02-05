@@ -594,6 +594,9 @@ yams::Result<void> ServiceManager::initialize() {
 
         PoolManager::Config ioCfg{};
         ioCfg.min_size = TuneAdvisor::poolMinSizeIpcIo();
+        if (ioCfg.min_size < 2) {
+            ioCfg.min_size = 2;
+        }
         // Bound IO max by both configured max and a dynamic cap from CPU budget
         try {
             auto dynCap = TuneAdvisor::recommendedThreads(0.5 /*backgroundFactor*/);
@@ -725,6 +728,11 @@ void ServiceManager::shutdown() {
     spdlog::info("[ServiceManager] Shutdown initiated");
     auto shutdownStart = std::chrono::steady_clock::now();
 
+    // Hold components that must outlive WorkCoordinator shutdown.
+    // We move these out of member storage during early shutdown phases to prevent
+    // accidental reuse, while keeping the objects alive until we finish draining threads.
+    std::unique_ptr<CheckpointManager> checkpointManagerHold;
+
     // Phase 0: Signal async init coroutine to stop and wait for it to complete
     // This prevents the coroutine from accessing resources we're about to tear down
     spdlog::info("[ServiceManager] Phase 0: Requesting async init stop");
@@ -802,6 +810,14 @@ void ServiceManager::shutdown() {
         } catch (...) {
             spdlog::warn("[ServiceManager] Phase 3.5: CLI request pool stop failed");
         }
+    }
+
+    // Phase 3.6: Stop CheckpointManager before WorkCoordinator
+    spdlog::info("[ServiceManager] Phase 3.6: Stopping CheckpointManager");
+    if (checkpointManager_) {
+        checkpointManager_->stop();
+        checkpointManagerHold = std::move(checkpointManager_);
+        spdlog::info("[ServiceManager] Phase 3.6: CheckpointManager stopped");
     }
 
     // Phase 4: Cancel all asynchronous operations and stop WorkCoordinator io_context
@@ -1120,7 +1136,7 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
                 }
             } catch (...) {
             }
-            int remain_by_pct = std::max(0, exp - (exp * progress) / 100);
+            int remain_by_pct = ServiceManager::computeEtaRemaining(exp, progress);
             int remain_by_elapsed = std::max(0, exp - static_cast<int>(sec_since_start));
             int remain = std::max(remain_by_pct, remain_by_elapsed);
             eta[key] = remain;

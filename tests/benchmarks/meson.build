@@ -182,20 +182,24 @@ ipc_stream_bench = executable('ipc_stream_bench', files('ipc_streaming_bench.cpp
 alias_target('bench_ipc_stream', ipc_stream_bench)
 
 # Socket accept and metrics performance benchmark
-daemon_socket_accept_bench = executable('daemon_socket_accept_bench', files('daemon_socket_accept_bench.cpp'),
-  include_directories: incs,
-  dependencies: [
-    gtest_dep,
-    test_deps,
-    dependency('yams_benchmarks'),
-    dependency('yams_daemon'),
-    dependency('nlohmann_json'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-  install: false,
-)
+if gtest_dep.found()
+  daemon_socket_accept_bench = executable('daemon_socket_accept_bench', files('daemon_socket_accept_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      gtest_dep,
+      test_deps,
+      dependency('yams_benchmarks'),
+      dependency('yams_daemon'),
+      dependency('nlohmann_json'),
+    ] + tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
 
-alias_target('bench_socket_accept', daemon_socket_accept_bench)
+  alias_target('bench_socket_accept', daemon_socket_accept_bench)
+else
+  message('GTest not found; skipping daemon_socket_accept_bench.')
+endif
 
 # PBI-073: Symbol extraction benchmark (Catch2-based)
 # Validates symbol extraction quality (Recall/Precision/F1) and performance

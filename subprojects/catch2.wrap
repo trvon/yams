@@ -1,0 +1,15 @@
+[wrap-file]
+directory = Catch2-3.12.0
+source_url = https://github.com/catchorg/Catch2/archive/v3.12.0.tar.gz
+source_filename = Catch2-3.12.0.tar.gz
+source_hash = e077079f214afc99fee940d91c14cf1a8c1d378212226bb9f50efff75fe07b23
+source_fallback_url = https://wrapdb.mesonbuild.com/v2/catch2_3.12.0-1/get_source/Catch2-3.12.0.tar.gz
+wrapdb_version = 3.12.0-1
+
+# Avoid building Catch2's upstream SelfTest suite in this repo.
+# We only need the library + Catch2WithMain for our unit tests.
+default_options = tests=false
+
+[provide]
+catch2 = catch2_dep
+catch2-with-main = catch2_with_main_dep

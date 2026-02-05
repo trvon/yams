@@ -493,9 +493,9 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
     // Get TuneAdvisor defaults
     const auto defaultIngest = TuneAdvisor::maxIngestWorkers();
     const auto defaultSearch = TuneAdvisor::searchConcurrencyLimit();
-    const auto defaultExtract = TuneAdvisor::postExtractionConcurrent();
-    const auto defaultKg = TuneAdvisor::postKgConcurrent();
-    const auto defaultEmbed = TuneAdvisor::postEmbedConcurrent();
+    const auto defaultExtract = TuneAdvisor::postExtractionDefaultConcurrent();
+    const auto defaultKg = TuneAdvisor::postKgDefaultConcurrent();
+    const auto defaultEmbed = TuneAdvisor::postEmbedDefaultConcurrent();
 
     switch (level) {
         case ResourcePressureLevel::Normal:

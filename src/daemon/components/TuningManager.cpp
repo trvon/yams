@@ -49,10 +49,10 @@ void TuningManager::start() {
     // If tick_once early-returned (metadata not ready), seed safe minimums
     // so PostIngestQueue pollers don't start with zero concurrency.
     if (TuneAdvisor::postExtractionConcurrent() == 0) {
-        TuneAdvisor::setPostExtractionConcurrent(2);
+        TuneAdvisor::setPostExtractionConcurrentDynamicCap(2);
     }
     if (TuneAdvisor::postEmbedConcurrent() == 0) {
-        TuneAdvisor::setPostEmbedConcurrent(1);
+        TuneAdvisor::setPostEmbedConcurrentDynamicCap(1);
     }
 
     tuningFuture_ = boost::asio::co_spawn(strand_, tuningLoop(), boost::asio::use_future);
@@ -373,12 +373,12 @@ void TuningManager::tick_once() {
                 }
             }
 
-            TuneAdvisor::setPostExtractionConcurrent(extractionTarget);
-            TuneAdvisor::setPostKgConcurrent(kgTarget);
-            TuneAdvisor::setPostSymbolConcurrent(symbolTarget);
-            TuneAdvisor::setPostEntityConcurrent(entityTarget);
-            TuneAdvisor::setPostTitleConcurrent(titleTarget);
-            TuneAdvisor::setPostEmbedConcurrent(embedTarget);
+            TuneAdvisor::setPostExtractionConcurrentDynamicCap(extractionTarget);
+            TuneAdvisor::setPostKgConcurrentDynamicCap(kgTarget);
+            TuneAdvisor::setPostSymbolConcurrentDynamicCap(symbolTarget);
+            TuneAdvisor::setPostEntityConcurrentDynamicCap(entityTarget);
+            TuneAdvisor::setPostTitleConcurrentDynamicCap(titleTarget);
+            TuneAdvisor::setPostEmbedConcurrentDynamicCap(embedTarget);
 
 #if defined(TRACY_ENABLE)
             TracyPlot("post.queued", static_cast<double>(queuedItems));

@@ -25,6 +25,7 @@
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -142,8 +143,32 @@ public:
         onnxConfig["preferred_model"] = "all-MiniLM-L6-v2";
         onnxConfig["preload"] = "all-MiniLM-L6-v2";
         onnxConfig["keep_model_hot"] = true;
-        // Point to user's model storage directory (for models like jina-embeddings-v2-base-code)
-        onnxConfig["models_root"] = "/Volumes/picaso/hak/storage/models";
+
+        // Prefer env-configured models root; otherwise try common defaults.
+        // If none exist, omit models_root and let the plugin use its own defaults.
+        {
+            fs::path modelsRoot;
+            if (const char* envModelsRoot = std::getenv("YAMS_MODELS_ROOT"); envModelsRoot && *envModelsRoot) {
+                modelsRoot = envModelsRoot;
+            } else {
+                fs::path macExternal = "/Volumes/picaso/hak/storage/models";
+                if (fs::exists(macExternal)) {
+                    modelsRoot = macExternal;
+                } else if (const char* home = std::getenv("HOME"); home && *home) {
+                    fs::path alt = fs::path(home) / ".yams" / "models";
+                    if (fs::exists(alt)) {
+                        modelsRoot = alt;
+                    }
+                }
+            }
+
+            if (!modelsRoot.empty()) {
+                onnxConfig["models_root"] = modelsRoot.string();
+            } else {
+                spdlog::warn(
+                    "No ONNX models_root found (set YAMS_MODELS_ROOT). Semantic diagnostics will be skipped if embeddings are unavailable.");
+            }
+        }
         opts.pluginConfigs["onnx_plugin"] = onnxConfig.dump();
 
         spdlog::info("Plugin directory: {}", opts.pluginDir->string());
@@ -234,17 +259,17 @@ public:
         for (int i = 0; i < 30; ++i) { // Max 30 seconds
             auto vectorDb = sm->getVectorDatabase();
             if (vectorDb) {
-                size_t vectorCount = vectorDb->getVectorCount();
+                vectorCount_ = vectorDb->getVectorCount();
 
                 if (i % 5 == 0) {
-                    spdlog::info("Vector count: {} (waiting for {})", vectorCount,
+                    spdlog::info("Vector count: {} (waiting for {})", vectorCount_,
                                  TEST_CORPUS.size());
                 }
 
                 // We expect at least one vector per document
-                if (vectorCount >= TEST_CORPUS.size()) {
-                    spdlog::info("Embeddings ready: {} vectors for {} docs", vectorCount,
-                                 TEST_CORPUS.size());
+                if (vectorCount_ >= TEST_CORPUS.size()) {
+                    spdlog::info("Embeddings ready: {} vectors for {} docs", vectorCount_,
+                                  TEST_CORPUS.size());
                     hasEmbeddings_ = true;
                     return;
                 }
@@ -282,6 +307,11 @@ public:
 
     void runDiagnostics() {
         spdlog::info("\n=== Running Search Diagnostics ===\n");
+
+        // Check if embeddings are actually available before testing semantic search.
+        if (!hasEmbeddings_ || vectorCount_ == 0) {
+            SKIP("ONNX models not available - skipping semantic search diagnostic");
+        }
 
         for (const auto& tq : TEST_QUERIES) {
             spdlog::info("Query: \"{}\"", tq.query);
@@ -374,6 +404,7 @@ private:
     std::unique_ptr<test::DaemonHarness> harness_;
     fs::path tempDir_;
     bool hasEmbeddings_ = false;
+    size_t vectorCount_ = 0;
 };
 
 } // namespace

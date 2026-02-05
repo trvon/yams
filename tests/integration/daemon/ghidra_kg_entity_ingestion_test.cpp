@@ -16,6 +16,7 @@
 #include "test_daemon_harness.h"
 
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/metadata/knowledge_graph_store.h>
 
@@ -176,8 +177,22 @@ TEST_CASE("GhidraEntityIngestion: Entity provider infrastructure is ready",
 
         // Verify entity channel configuration
         size_t maxConcurrent = pq->maxEntityConcurrent();
-        spdlog::info("Entity channel configured with max concurrent: {}", maxConcurrent);
-        REQUIRE(maxConcurrent > 0);
+        const uint32_t mask = yams::daemon::TuneAdvisor::postIngestStageActiveMask();
+        const uint32_t entityBit =
+            1u << static_cast<uint8_t>(yams::daemon::TuneAdvisor::PostIngestStage::Entity);
+        const bool entityStageActive = (mask & entityBit) != 0;
+
+        // Entity extraction concurrency is dynamically budgeted based on whether any
+        // ExternalEntityProviderAdapter instances are present. In the default integration-test
+        // harness, plugins are not autoloaded, so no entity providers are adopted and the entity
+        // stage is inactive (max concurrent == 0).
+        spdlog::info("Entity channel configured with max concurrent: {} (active={})", maxConcurrent,
+                     entityStageActive);
+        if (entityStageActive) {
+            REQUIRE(maxConcurrent > 0);
+        } else {
+            REQUIRE(maxConcurrent == 0);
+        }
     }
 
     SECTION("Entity inflight counter is accessible") {

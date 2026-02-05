@@ -68,6 +68,12 @@ void resetPostIngestOverrides() {
     TuneAdvisor::setPostEntityConcurrent(0);
     TuneAdvisor::setPostTitleConcurrent(0);
     TuneAdvisor::setPostEmbedConcurrent(0);
+    TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
+    TuneAdvisor::setPostKgConcurrentDynamicCap(0);
+    TuneAdvisor::setPostSymbolConcurrentDynamicCap(0);
+    TuneAdvisor::setPostEntityConcurrentDynamicCap(0);
+    TuneAdvisor::setPostTitleConcurrentDynamicCap(0);
+    TuneAdvisor::setPostEmbedConcurrentDynamicCap(0);
     TuneAdvisor::setPostIngestTotalConcurrent(0);
 }
 

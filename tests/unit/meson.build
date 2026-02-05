@@ -1,5 +1,10 @@
 # Unit tests object library with explicit sources (no run_command)
 
+# If GTest isn't available, skip compiling the legacy GTest unit object library.
+# Catch2 test executables are defined in tests/meson.build and can still be
+# enabled independently when Catch2 is present.
+yams_unit_objs = []
+
 # Preserve prior exclusions:
 # - Exclude: api/metadata_api_test.cpp
 # - Exclude: compression/{error_handler_test_simple.cpp,error_handler_test.cpp,integrity_validator_test_simple.cpp,integrity_validator_test.cpp}
@@ -289,10 +294,14 @@ unit_srcs += unit_ingest
 unit_srcs += unit_wal
 unit_srcs += unit_plugins
 
-yams_unit_objs = static_library('yams_unit_objs', unit_srcs,
-  include_directories: incs,
-  dependencies: [gtest_compile_dep] + gmock_compile_deps + test_deps,
-  cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-  install: false,
-  pic: true,
-)
+if gtest_dep.found()
+  yams_unit_objs = static_library('yams_unit_objs', unit_srcs,
+    include_directories: incs,
+    dependencies: [gtest_compile_dep] + gmock_compile_deps + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    install: false,
+    pic: true,
+  )
+else
+  message('GTest not found; skipping compilation of yams_unit_objs.')
+endif

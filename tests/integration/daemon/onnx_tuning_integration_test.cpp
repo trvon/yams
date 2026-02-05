@@ -92,9 +92,11 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
         REQUIRE(waitForOnnxRegistryConfiguration(3s));
 
         auto& registry = OnnxConcurrencyRegistry::instance();
-        // Balanced profile uses 0.5x scale, so 6 * 0.5 = 3
+        // Balanced profile uses 0.5x scale, so 6 * 0.5 = 3.
+        // But totalReserved = gliner(1) + embed(1) + reranker(1) = 3, and
+        // scaledMax = max(3, 3+1) = 4 to ensure at least 1 shared slot.
         INFO("totalSlots=" << registry.totalSlots());
-        CHECK(registry.totalSlots() == 3);
+        CHECK(registry.totalSlots() == 4);
 
         harness.stop();
     }
@@ -158,9 +160,10 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
 
         auto& registry = OnnxConcurrencyRegistry::instance();
         // Efficient profile uses 0.0x scale, so 8 * 0.0 = 0
-        // Minimum is 2, so expect max(0, 2) = 2
+        // Minimum is 2, but totalReserved = gliner(1) + embed(1) + reranker(0, efficient) = 2,
+        // so scaledMax = max(2, 2+1) = 3 to ensure at least 1 shared slot.
         INFO("totalSlots=" << registry.totalSlots());
-        CHECK(registry.totalSlots() == 2);
+        CHECK(registry.totalSlots() == 3);
 
         harness.stop();
     }
@@ -210,10 +213,11 @@ TEST_CASE("Embedding lane slots are configured correctly",
 
     SECTION("Registry is configured with correct total and embedding slots") {
         // Balanced profile uses 0.5x scale, so 6 * 0.5 = 3.
-        // But totalSlots is clamped to at least the sum of reserved slots.
+        // But totalSlots is clamped to at least totalReserved + 1 for shared capacity.
         // Defaults: gliner=1, reranker=1; with embed=2 => reserved total = 4.
+        // scaledMax = max(3, 4+1) = 5.
         INFO("totalSlots=" << registry.totalSlots());
-        CHECK(registry.totalSlots() == 4);
+        CHECK(registry.totalSlots() == 5);
 
         auto embedMetrics = registry.laneMetrics(OnnxLane::Embedding);
         INFO("embedding reserved=" << embedMetrics.reserved);
@@ -283,14 +287,16 @@ TEST_CASE("FSM metrics reflect ONNX configuration", "[daemon][onnx][metrics][int
         auto& registry = OnnxConcurrencyRegistry::instance();
         auto snap = registry.snapshot();
 
-        // Balanced profile uses 0.5x scale, so 5 * 0.5 = 2.5 -> 2
+        // Balanced profile uses 0.5x scale, so 5 * 0.5 = 2.5 -> 2.
+        // But totalReserved = gliner(1) + embed(1) + reranker(1) = 3,
+        // so scaledMax = max(2, 3+1) = 4 to ensure shared capacity.
         INFO("snapshot totalSlots=" << snap.totalSlots);
         INFO("snapshot usedSlots=" << snap.usedSlots);
         INFO("snapshot availableSlots=" << snap.availableSlots);
 
-        CHECK(snap.totalSlots == 2);
+        CHECK(snap.totalSlots == 4);
         CHECK(snap.usedSlots == 0);
-        CHECK(snap.availableSlots == 2);
+        CHECK(snap.availableSlots == 4);
     }
 
     SECTION("Status response includes ONNX metrics via client") {
@@ -336,9 +342,10 @@ TEST_CASE("OnnxConcurrencyRegistry state resets on daemon restart",
             REQUIRE(waitForOnnxRegistryConfiguration(3s));
 
             auto& registry = OnnxConcurrencyRegistry::instance();
-            // Balanced profile uses 0.5x scale, so 4 * 0.5 = 2
+            // Balanced profile uses 0.5x scale, so 4 * 0.5 = 2.
+            // But totalReserved = 3, so scaledMax = max(2, 3+1) = 4.
             INFO("first daemon totalSlots=" << registry.totalSlots());
-            CHECK(registry.totalSlots() == 2);
+            CHECK(registry.totalSlots() == 4);
 
             harness.stop();
         }

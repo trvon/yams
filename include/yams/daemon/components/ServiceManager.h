@@ -102,6 +102,17 @@ public:
 
     // IComponent interface
     const char* getName() const override { return "ServiceManager"; }
+
+    /// Compute ETA remaining seconds from expected duration and progress percentage.
+    /// Uses round-up division to avoid integer truncation on small values.
+    /// Extracted as a static helper for testability.
+    static int computeEtaRemaining(int expectedSeconds, int progressPercent) {
+        if (expectedSeconds <= 0)
+            return 0;
+        int completed = (expectedSeconds * progressPercent + 99) / 100;
+        return std::max(0, expectedSeconds - completed);
+    }
+
     /// Synchronous initialization - validates config, creates directories, prepares resources.
     /// Does NOT start async initialization - call startAsyncInit() after main loop is running.
     Result<void> initialize() override;

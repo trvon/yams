@@ -1645,51 +1645,96 @@ public:
     /// Maximum concurrent extraction tasks (profile-scaled, max 64)
     /// Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
     /// Environment: YAMS_POST_EXTRACTION_CONCURRENT
+    static uint32_t postExtractionDefaultConcurrent() {
+        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/false).extraction;
+    }
     static uint32_t postExtractionConcurrent() {
-        return postIngestBudgetedConcurrency().extraction;
+        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).extraction;
     }
     static void setPostExtractionConcurrent(uint32_t v) {
         postExtractionConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
+    }
+    // Runtime (daemon-only) dynamic cap. 0 = unset.
+    static void setPostExtractionConcurrentDynamicCap(uint32_t v) {
+        postExtractionConcurrentDynamicCap_.store(std::min(v, 64u), std::memory_order_relaxed);
     }
 
     /// Maximum concurrent KG ingestion tasks (profile-scaled, max 64)
     /// Profile-scaled: Efficient=4, Balanced=6, Aggressive=8
     /// Environment: YAMS_POST_KG_CONCURRENT
-    static uint32_t postKgConcurrent() { return postIngestBudgetedConcurrency().kg; }
+    static uint32_t postKgDefaultConcurrent() {
+        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/false).kg;
+    }
+    static uint32_t postKgConcurrent() { return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).kg; }
     static void setPostKgConcurrent(uint32_t v) {
         postKgConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
+    }
+    static void setPostKgConcurrentDynamicCap(uint32_t v) {
+        postKgConcurrentDynamicCap_.store(std::min(v, 64u), std::memory_order_relaxed);
     }
 
     /// Maximum concurrent symbol extraction tasks (profile-scaled, max 32)
     /// Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
     /// Environment: YAMS_POST_SYMBOL_CONCURRENT
-    static uint32_t postSymbolConcurrent() { return postIngestBudgetedConcurrency().symbol; }
+    static uint32_t postSymbolDefaultConcurrent() {
+        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/false).symbol;
+    }
+    static uint32_t postSymbolConcurrent() {
+        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).symbol;
+    }
     static void setPostSymbolConcurrent(uint32_t v) {
         postSymbolConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
+    }
+    static void setPostSymbolConcurrentDynamicCap(uint32_t v) {
+        postSymbolConcurrentDynamicCap_.store(std::min(v, 32u), std::memory_order_relaxed);
     }
 
     /// Maximum concurrent entity extraction tasks (profile-scaled, max 16)
     /// Entity extraction is CPU-heavy, so lower defaults
     /// Profile-scaled: Efficient=1, Balanced=2, Aggressive=2
     /// Environment: YAMS_POST_ENTITY_CONCURRENT
-    static uint32_t postEntityConcurrent() { return postIngestBudgetedConcurrency().entity; }
+    static uint32_t postEntityDefaultConcurrent() {
+        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/false).entity;
+    }
+    static uint32_t postEntityConcurrent() {
+        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).entity;
+    }
     static void setPostEntityConcurrent(uint32_t v) {
         postEntityConcurrentOverride_.store(std::min(v, 16u), std::memory_order_relaxed);
+    }
+    static void setPostEntityConcurrentDynamicCap(uint32_t v) {
+        postEntityConcurrentDynamicCap_.store(std::min(v, 16u), std::memory_order_relaxed);
     }
 
     /// Maximum concurrent title extraction tasks (profile-scaled, max 16)
     /// Environment: YAMS_POST_TITLE_CONCURRENT
-    static uint32_t postTitleConcurrent() { return postIngestBudgetedConcurrency().title; }
+    static uint32_t postTitleDefaultConcurrent() {
+        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/false).title;
+    }
+    static uint32_t postTitleConcurrent() {
+        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).title;
+    }
     static void setPostTitleConcurrent(uint32_t v) {
         postTitleConcurrentOverride_.store(std::min(v, 16u), std::memory_order_relaxed);
+    }
+    static void setPostTitleConcurrentDynamicCap(uint32_t v) {
+        postTitleConcurrentDynamicCap_.store(std::min(v, 16u), std::memory_order_relaxed);
     }
 
     // PBI-05b: EmbeddingService concurrency (parallel embedding workers)
     // Embeddings are compute-heavy (ONNX inference) so we need parallelism to keep up with ingest
     // Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
-    static uint32_t postEmbedConcurrent() { return postIngestBudgetedConcurrency().embed; }
+    static uint32_t postEmbedDefaultConcurrent() {
+        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/false).embed;
+    }
+    static uint32_t postEmbedConcurrent() {
+        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).embed;
+    }
     static void setPostEmbedConcurrent(uint32_t v) {
         postEmbedConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
+    }
+    static void setPostEmbedConcurrentDynamicCap(uint32_t v) {
+        postEmbedConcurrentDynamicCap_.store(std::min(v, 32u), std::memory_order_relaxed);
     }
 
     // =========================================================================
@@ -1858,7 +1903,7 @@ private:
         uint32_t embed;
     };
 
-    static PostIngestConcurrencyBudget postIngestBudgetedConcurrency() {
+    static PostIngestConcurrencyBudget postIngestBudgetedConcurrency(bool includeDynamicCaps) {
         constexpr std::size_t kStageCount = 6;
         constexpr std::size_t kExtractionIdx = 0;
         constexpr std::size_t kEmbedIdx = 5;
@@ -2118,7 +2163,24 @@ private:
             clampLocked(5, *v);
         }
 
-        auto alloc = hasOverride ? allocate(desired, caps, weights) : allocDefaults;
+        bool hasDynamicCap = false;
+        if (includeDynamicCaps) {
+            const std::array<uint32_t, kStageCount> dyn{
+                postExtractionConcurrentDynamicCap_.load(std::memory_order_relaxed),
+                postKgConcurrentDynamicCap_.load(std::memory_order_relaxed),
+                postSymbolConcurrentDynamicCap_.load(std::memory_order_relaxed),
+                postEntityConcurrentDynamicCap_.load(std::memory_order_relaxed),
+                postTitleConcurrentDynamicCap_.load(std::memory_order_relaxed),
+                postEmbedConcurrentDynamicCap_.load(std::memory_order_relaxed)};
+            for (std::size_t i = 0; i < kStageCount; ++i) {
+                if (dyn[i] > 0) {
+                    caps[i] = std::min(caps[i], std::min(dyn[i], kMaxCaps[i]));
+                    hasDynamicCap = true;
+                }
+            }
+        }
+
+        auto alloc = (hasOverride || hasDynamicCap) ? allocate(desired, caps, weights) : allocDefaults;
         return PostIngestConcurrencyBudget{alloc[0], alloc[1], alloc[2],
                                            alloc[3], alloc[4], alloc[5]};
     }
@@ -2199,8 +2261,16 @@ private:
     static inline std::atomic<uint32_t> postEntityConcurrentOverride_{0};
     static inline std::atomic<uint32_t> postTitleConcurrentOverride_{0};
 
+    // Runtime (daemon-only) dynamic caps for post-ingest stages (0 = unset)
+    static inline std::atomic<uint32_t> postExtractionConcurrentDynamicCap_{0};
+    static inline std::atomic<uint32_t> postKgConcurrentDynamicCap_{0};
+    static inline std::atomic<uint32_t> postSymbolConcurrentDynamicCap_{0};
+    static inline std::atomic<uint32_t> postEntityConcurrentDynamicCap_{0};
+    static inline std::atomic<uint32_t> postTitleConcurrentDynamicCap_{0};
+
     // PBI-05b: EmbeddingService concurrency overrides
     static inline std::atomic<uint32_t> postEmbedConcurrentOverride_{0};
+    static inline std::atomic<uint32_t> postEmbedConcurrentDynamicCap_{0};
     static inline std::atomic<uint32_t> embedChannelCapacityOverride_{0};
 
     // ONNX Model Pool overrides
