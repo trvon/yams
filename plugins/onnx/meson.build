@@ -48,7 +48,12 @@ if onnx_opt_path != ''
   onnx_cmake_paths += onnx_opt_path
 endif
 
-onnx_dep = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
+# Try pkg-config first to get compile definitions (like YAMS_ONNX_COREML_ENABLED),
+# then fall back to CMake if not found
+onnx_dep = dependency('onnxruntime', method: 'pkg-config', required: false)
+if not onnx_dep.found()
+  onnx_dep = dependency('onnxruntime', method: 'cmake', cmake_module_path: onnx_cmake_paths, required: false)
+endif
 if not onnx_dep.found()
   onnx_dep = dependency('onnxruntime', required: false)
 endif
@@ -127,6 +132,28 @@ yams_onnx_plugin_srcs = [
 plugin_cppargs = []
 if onnx_genai_headers_present
   plugin_cppargs += ['-DYAMS_GENAI_RUNTIME_PRESENT']
+endif
+
+# GPU provider defines - these MUST be passed to the plugin for GPU acceleration to work.
+# Conan sets these in pkg-config Cflags, but CMake method may not propagate them.
+# Check if already present via onnx_dep, otherwise use platform detection.
+onnx_cflags = onnx_dep.get_variable(pkgconfig: 'Cflags', default_value: '')
+if onnx_cflags.contains('YAMS_ONNX_COREML_ENABLED')
+  plugin_cppargs += ['-DYAMS_ONNX_COREML_ENABLED=1']
+  message('ONNX CoreML GPU support enabled (from pkg-config)')
+elif onnx_cflags.contains('YAMS_ONNX_CUDA_ENABLED')
+  plugin_cppargs += ['-DYAMS_ONNX_CUDA_ENABLED=1']
+  message('ONNX CUDA GPU support enabled (from pkg-config)')
+elif onnx_cflags.contains('YAMS_ONNX_DIRECTML_ENABLED')
+  plugin_cppargs += ['-DYAMS_ONNX_DIRECTML_ENABLED=1']
+  message('ONNX DirectML GPU support enabled (from pkg-config)')
+elif onnx_cflags.contains('YAMS_ONNX_MIGRAPHX_ENABLED')
+  plugin_cppargs += ['-DYAMS_ONNX_MIGRAPHX_ENABLED=1']
+  message('ONNX MIGraphX GPU support enabled (from pkg-config)')
+elif host_machine.system() == 'darwin'
+  # Fallback: macOS always has CoreML support in prebuilt ONNX Runtime
+  plugin_cppargs += ['-DYAMS_ONNX_COREML_ENABLED=1']
+  message('ONNX CoreML GPU support enabled (macOS platform detection)')
 endif
 
 yams_onnx_plugin = shared_module('yams_onnx_plugin',
