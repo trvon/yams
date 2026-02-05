@@ -1,10 +1,13 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <functional>
+#include <list>
 #include <mutex>
 #include <optional>
+#include <semaphore>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -39,6 +42,100 @@ class IModelProvider;
 class WorkCoordinator;
 class GraphComponent;
 class KGWriteQueue;
+
+// Simple LRU cache for metadata lookups
+// Template parameters: Key type, Value type
+template<typename K, typename V>
+class LruCache {
+public:
+    explicit LruCache(size_t maxSize = 1000, std::chrono::seconds ttl = std::chrono::seconds(5)) 
+        : maxSize_(maxSize), ttl_(ttl) {}
+
+    std::optional<V> get(const K& key) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = map_.find(key);
+        if (it == map_.end()) {
+            return std::nullopt;
+        }
+        
+        // Check TTL
+        auto now = std::chrono::steady_clock::now();
+        if (now - it->second.timestamp > ttl_) {
+            map_.erase(it);
+            return std::nullopt;
+        }
+        
+        // Move to front (most recently used)
+        touch(it);
+        return it->second.value;
+    }
+
+    void put(const K& key, V value) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            it->second.value = std::move(value);
+            it->second.timestamp = std::chrono::steady_clock::now();
+            touch(it);
+        } else {
+            if (map_.size() >= maxSize_) {
+                evict_lru();
+            }
+            auto now = std::chrono::steady_clock::now();
+            order_.push_front(key);
+            map_.emplace(key, CacheEntry{std::move(value), now, order_.begin()});
+        }
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        map_.clear();
+        order_.clear();
+    }
+
+    size_t size() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return map_.size();
+    }
+
+private:
+    using Timestamp = std::chrono::steady_clock::time_point;
+    using OrderIterator = typename std::list<K>::iterator;
+    
+    struct CacheEntry {
+        V value;
+        Timestamp timestamp;
+        OrderIterator orderIt;
+    };
+    
+    mutable std::mutex mutex_;
+    std::unordered_map<K, CacheEntry> map_;
+    std::list<K> order_;
+    size_t maxSize_;
+    std::chrono::seconds ttl_;
+
+    void touch(typename std::unordered_map<K, CacheEntry>::iterator it) {
+        order_.erase(it->second.orderIt);
+        order_.push_front(it->first);
+        it->second.orderIt = order_.begin();
+    }
+
+    void evict_lru() {
+        if (!order_.empty()) {
+            map_.erase(order_.back());
+            order_.pop_back();
+        }
+    }
+};
+
+// Metadata cache structures
+struct MetadataCache {
+    static constexpr size_t kMaxEntries = 1000;
+    static constexpr std::chrono::seconds kTtl{5};
+    
+    LruCache<std::string, metadata::DocumentInfo> infoCache{kMaxEntries, kTtl};
+    LruCache<int64_t, std::vector<std::string>> tagsCache{kMaxEntries, kTtl};
+};
 
 class PostIngestQueue {
 public:
@@ -220,7 +317,6 @@ public:
     boost::asio::awaitable<void> symbolPoller();
     boost::asio::awaitable<void> entityPoller();
     boost::asio::awaitable<void> titlePoller();
-    void processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks);
     void processTask(const std::string& hash, const std::string& mime);
     void processMetadataStage(
         const std::string& hash, const std::string& mime,
@@ -355,6 +451,38 @@ public:
     /// Try to acquire a slot from a limiter
     bool tryAcquireLimiterSlot(GradientLimiter* limiter, const std::string& jobId,
                                const std::string& stage);
+
+    // =========================================================================
+    // Parallel Processing & Caching (PBI-05a optimizations)
+    // =========================================================================
+
+    /// Process batch with work-stealing parallelization (default)
+    void processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks);
+
+    /// Process a chunk of tasks in parallel (used by processBatch)
+    struct ChunkResult {
+        std::vector<PreparedMetadataEntry> successes;
+        std::vector<ExtractionFailure> failures;
+    };
+    ChunkResult processChunkParallel(
+        const std::vector<InternalEventBus::PostIngestTask>& tasks,
+        const std::unordered_map<std::string, std::string>& symbolExtensionMap,
+        const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders);
+
+    /// Get document info from cache or DB
+    std::optional<metadata::DocumentInfo> getCachedDocumentInfo(const std::string& hash);
+
+    /// Get document tags from cache or DB
+    std::optional<std::vector<std::string>> getCachedDocumentTags(int64_t docId);
+
+    /// Cache for metadata lookups
+    MetadataCache metadataCache_;
+
+    /// Semaphore to limit concurrent text extractions (memory safety)
+    std::unique_ptr<std::counting_semaphore<>> extractionSemaphore_;
+
+    /// Initialize the extraction semaphore based on TuneAdvisor limits
+    void initializeExtractionSemaphore();
 };
 
 } // namespace yams::daemon

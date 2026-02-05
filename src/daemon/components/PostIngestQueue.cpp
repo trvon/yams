@@ -2,6 +2,7 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cctype>
+#include <future>
 #include <string_view>
 #include <thread>
 #include <unordered_set>
@@ -624,226 +625,6 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     }
 
     spdlog::info("[PostIngestQueue] Channel poller exited");
-}
-
-void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks) {
-    if (tasks.empty()) {
-        return;
-    }
-
-    std::unordered_map<std::string, metadata::DocumentInfo> infoMap;
-    std::unordered_map<std::string, std::shared_ptr<std::vector<std::byte>>> contentByHash;
-    std::unordered_map<int64_t, std::vector<std::string>> tagsByDocId;
-    static const std::vector<std::string> kEmptyTags;
-
-    std::unordered_map<std::string, std::string> symbolExtensionMap;
-    {
-        std::lock_guard<std::mutex> lock(extMapMutex_);
-        symbolExtensionMap = symbolExtensionMap_;
-    }
-
-    std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders;
-    {
-        std::lock_guard<std::mutex> lock(entityMutex_);
-        entityProviders = entityProviders_;
-    }
-
-    if (meta_) {
-        std::vector<std::string> hashes;
-        hashes.reserve(tasks.size());
-        std::unordered_set<std::string> seen;
-        seen.reserve(tasks.size());
-        for (const auto& task : tasks) {
-            if (seen.insert(task.hash).second) {
-                hashes.push_back(task.hash);
-            }
-        }
-
-        if (!hashes.empty()) {
-            auto infoRes = meta_->batchGetDocumentsByHash(hashes);
-            if (infoRes) {
-                infoMap = std::move(infoRes).value();
-
-                std::vector<int64_t> docIds;
-                docIds.reserve(infoMap.size());
-                for (const auto& [_, info] : infoMap) {
-                    if (info.id >= 0) {
-                        docIds.push_back(info.id);
-                    }
-                }
-
-                if (!docIds.empty()) {
-                    auto tagsRes = meta_->batchGetDocumentTags(docIds);
-                    if (tagsRes) {
-                        tagsByDocId = std::move(tagsRes).value();
-                    } else {
-                        spdlog::warn("[PostIngestQueue] batchGetDocumentTags failed: {}",
-                                     tagsRes.error().message);
-                    }
-                }
-            } else {
-                spdlog::warn("[PostIngestQueue] batchGetDocumentsByHash failed: {}",
-                             infoRes.error().message);
-            }
-        }
-    }
-
-    // =========================================================================
-    // 4-PHASE BATCHED METADATA PROCESSING
-    // Phase 1: Prepare - extract text for all tasks
-    // Phase 2: Batch DB write - single transaction for all successes
-    // Phase 3: Handle failures - update extraction status
-    // Phase 4: Dispatch - send to channels
-    // =========================================================================
-
-    std::vector<PreparedMetadataEntry> successes;
-    std::vector<ExtractionFailure> failures;
-    std::vector<const InternalEventBus::PostIngestTask*> fallbackTasks; // Tasks without info
-
-    successes.reserve(tasks.size());
-    failures.reserve(tasks.size() / 10); // Expect ~10% failure rate
-
-    // Phase 1: PREPARATION - extract text for all documents
-    for (const auto& task : tasks) {
-        try {
-            auto it = infoMap.find(task.hash);
-            if (it != infoMap.end()) {
-                const auto tagsIt = tagsByDocId.find(it->second.id);
-                const std::vector<std::string>& tags =
-                    (tagsIt != tagsByDocId.end()) ? tagsIt->second : kEmptyTags;
-
-                auto result = prepareMetadataEntry(task.hash, task.mime, it->second, tags,
-                                                   symbolExtensionMap, entityProviders);
-
-                if (auto* prepared = std::get_if<PreparedMetadataEntry>(&result)) {
-                    successes.push_back(std::move(*prepared));
-                } else {
-                    failures.push_back(std::get<ExtractionFailure>(result));
-                }
-            } else {
-                // No DocumentInfo in batch lookup - use fallback path
-                fallbackTasks.push_back(&task);
-            }
-        } catch (const std::exception& e) {
-            spdlog::error("[PostIngestQueue] Preparation failed for {}: {}", task.hash, e.what());
-            failed_++;
-        }
-    }
-
-    // Phase 2: BATCH DB WRITE - single transaction for all successful extractions
-    if (!successes.empty() && meta_) {
-        std::vector<metadata::BatchContentEntry> entries;
-        entries.reserve(successes.size());
-
-        for (const auto& prepared : successes) {
-            metadata::BatchContentEntry entry;
-            entry.documentId = prepared.documentId;
-            entry.title = prepared.title.empty() ? prepared.fileName : prepared.title;
-            entry.contentText = prepared.extractedText;
-            entry.mimeType = prepared.mimeType;
-            entry.extractionMethod = "post_ingest";
-            entry.language = prepared.language;
-            entries.push_back(std::move(entry));
-        }
-
-        auto batchResult = meta_->batchInsertContentAndIndex(entries);
-        if (!batchResult) {
-            spdlog::error("[PostIngestQueue] Batch DB write failed: {}",
-                          batchResult.error().message);
-            if (batchResult.error().message.find("database is locked") != std::string::npos) {
-                TuneAdvisor::reportDbLockError();
-            }
-            // All successes become failures
-            for (const auto& prepared : successes) {
-                failures.push_back(ExtractionFailure{prepared.documentId, prepared.hash,
-                                                     batchResult.error().message});
-            }
-            successes.clear();
-        } else {
-            spdlog::info("[PostIngestQueue] Batch DB write succeeded for {} documents",
-                         entries.size());
-            for (const auto& prepared : successes) {
-                if (!prepared.title.empty()) {
-                    (void)meta_->setMetadata(prepared.documentId, "title",
-                                             metadata::MetadataValue(prepared.title));
-                }
-            }
-        }
-    }
-
-    // Phase 3: HANDLE FAILURES - update extraction status for failed documents
-    for (const auto& failure : failures) {
-        if (failure.documentId >= 0 && meta_) {
-            auto updateRes = meta_->updateDocumentExtractionStatus(
-                failure.documentId, false, metadata::ExtractionStatus::Failed,
-                failure.errorMessage);
-            if (!updateRes) {
-                spdlog::warn("[PostIngestQueue] Failed to mark extraction failed for {}: {}",
-                             failure.hash, updateRes.error().message);
-            }
-        }
-    }
-
-    // Phase 4: DISPATCH - send successful documents to channels
-
-    auto getOrLoadContent =
-        [this, &contentByHash](const std::string& hash) -> std::shared_ptr<std::vector<std::byte>> {
-        if (!store_) {
-            return nullptr;
-        }
-        auto it = contentByHash.find(hash);
-        if (it != contentByHash.end()) {
-            return it->second;
-        }
-        auto contentResult = store_->retrieveBytes(hash);
-        if (!contentResult) {
-            return nullptr;
-        }
-        auto bytes = std::make_shared<std::vector<std::byte>>(std::move(contentResult.value()));
-        contentByHash.emplace(hash, bytes);
-        return bytes;
-    };
-
-    for (const auto& prepared : successes) {
-        std::shared_ptr<std::vector<std::byte>> contentBytes;
-        if (prepared.shouldDispatchKg || prepared.shouldDispatchSymbol ||
-            prepared.shouldDispatchEntity) {
-            contentBytes = getOrLoadContent(prepared.hash);
-        }
-        if (prepared.shouldDispatchKg) {
-            dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.fileName,
-                                std::vector<std::string>(prepared.tags), contentBytes);
-        }
-        if (prepared.shouldDispatchSymbol) {
-            dispatchToSymbolChannel(prepared.hash, prepared.documentId, prepared.fileName,
-                                    prepared.symbolLanguage, contentBytes);
-        }
-        if (prepared.shouldDispatchEntity) {
-            dispatchToEntityChannel(prepared.hash, prepared.documentId, prepared.fileName,
-                                    prepared.extension, contentBytes);
-        }
-        if (prepared.shouldDispatchTitle) {
-            dispatchToTitleChannel(prepared.hash, prepared.documentId, prepared.titleTextSnippet,
-                                   prepared.fileName, prepared.filePath, prepared.language,
-                                   prepared.mimeType);
-        }
-        processed_++;
-        InternalEventBus::instance().incPostConsumed();
-    }
-
-    // Handle fallback tasks (those without DocumentInfo) using legacy path
-    for (const auto* taskPtr : fallbackTasks) {
-        try {
-            processMetadataStage(taskPtr->hash, taskPtr->mime, std::nullopt, &kEmptyTags,
-                                 symbolExtensionMap, entityProviders);
-            processed_++;
-            InternalEventBus::instance().incPostConsumed();
-        } catch (const std::exception& e) {
-            spdlog::error("[PostIngestQueue] Fallback processing failed for {}: {}", taskPtr->hash,
-                          e.what());
-            failed_++;
-        }
-    }
 }
 
 void PostIngestQueue::enqueue(Task t) {
@@ -2378,6 +2159,418 @@ void PostIngestQueue::completeJob(const std::string& jobId, bool success) {
     auto now = std::chrono::steady_clock::now();
     auto latency = now - job.startTime;
     job.limiter->onJobComplete(latency, success);
+}
+
+// =========================================================================
+// Parallel Processing & Caching (PBI-05a optimizations)
+// =========================================================================
+
+void PostIngestQueue::initializeExtractionSemaphore() {
+    const uint32_t maxConcurrent = TuneAdvisor::postExtractionConcurrent();
+    if (maxConcurrent > 0) {
+        extractionSemaphore_ = std::make_unique<std::counting_semaphore<>>(maxConcurrent);
+        spdlog::info("[PostIngestQueue] Extraction semaphore initialized with {} slots", maxConcurrent);
+    }
+}
+
+std::optional<metadata::DocumentInfo> PostIngestQueue::getCachedDocumentInfo(
+    const std::string& hash) {
+    // Try cache first
+    auto cached = metadataCache_.infoCache.get(hash);
+    if (cached) {
+        return *cached;
+    }
+
+    // Cache miss - query DB
+    if (!meta_) {
+        return std::nullopt;
+    }
+
+    auto result = meta_->getDocumentByHash(hash);
+    if (result && result.value().has_value()) {
+        auto info = *result.value();
+        metadataCache_.infoCache.put(hash, info);
+        return info;
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::vector<std::string>> PostIngestQueue::getCachedDocumentTags(int64_t docId) {
+    // Try cache first
+    auto cached = metadataCache_.tagsCache.get(docId);
+    if (cached) {
+        return *cached;
+    }
+
+    // Cache miss - query DB
+    if (!meta_) {
+        return std::nullopt;
+    }
+
+    auto result = meta_->getDocumentTags(docId);
+    if (result) {
+        auto tags = result.value();
+        metadataCache_.tagsCache.put(docId, tags);
+        return tags;
+    }
+
+    return std::nullopt;
+}
+
+void PostIngestQueue::processBatch(
+    std::vector<InternalEventBus::PostIngestTask>&& tasks) {
+    if (tasks.empty()) {
+        return;
+    }
+
+    // Get current concurrency limits from TuneAdvisor
+    const uint32_t maxWorkers = TuneAdvisor::postExtractionConcurrent();
+    if (maxWorkers <= 1 || tasks.size() < 4) {
+        // Not enough concurrency or tasks to justify parallel overhead
+        // Process sequentially using a single chunk
+        std::unordered_map<std::string, std::string> symbolExtensionMap;
+        {
+            std::lock_guard<std::mutex> lock(extMapMutex_);
+            symbolExtensionMap = symbolExtensionMap_;
+        }
+
+        std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders;
+        {
+            std::lock_guard<std::mutex> lock(entityMutex_);
+            entityProviders = entityProviders_;
+        }
+
+        auto result = processChunkParallel(tasks, symbolExtensionMap, entityProviders);
+
+        // Handle results
+        processed_.fetch_add(result.successes.size(), std::memory_order_relaxed);
+        failed_.fetch_add(result.failures.size(), std::memory_order_relaxed);
+
+        // Batch DB write
+        if (!result.successes.empty() && meta_) {
+            std::vector<metadata::BatchContentEntry> entries;
+            entries.reserve(result.successes.size());
+
+            for (const auto& prepared : result.successes) {
+                metadata::BatchContentEntry entry;
+                entry.documentId = prepared.documentId;
+                entry.title = prepared.title.empty() ? prepared.fileName : prepared.title;
+                entry.contentText = prepared.extractedText;
+                entry.mimeType = prepared.mimeType;
+                entry.extractionMethod = "post_ingest";
+                entry.language = prepared.language;
+                entries.push_back(std::move(entry));
+            }
+
+            auto batchResult = meta_->batchInsertContentAndIndex(entries);
+            if (!batchResult) {
+                spdlog::error("[PostIngestQueue] Batch DB write failed: {}",
+                             batchResult.error().message);
+                if (batchResult.error().message.find("database is locked") != std::string::npos) {
+                    TuneAdvisor::reportDbLockError();
+                }
+                for (const auto& prepared : result.successes) {
+                    result.failures.push_back(
+                        ExtractionFailure{prepared.documentId, prepared.hash, batchResult.error().message});
+                }
+                result.successes.clear();
+            } else {
+                spdlog::info("[PostIngestQueue] Batch DB write succeeded for {} documents",
+                            entries.size());
+                for (const auto& prepared : result.successes) {
+                    if (!prepared.title.empty()) {
+                        (void)meta_->setMetadata(prepared.documentId, "title",
+                                                metadata::MetadataValue(prepared.title));
+                    }
+                }
+            }
+        }
+
+        // Handle failures
+        for (const auto& failure : result.failures) {
+            if (failure.documentId >= 0 && meta_) {
+                auto updateRes = meta_->updateDocumentExtractionStatus(
+                    failure.documentId, false, metadata::ExtractionStatus::Failed, failure.errorMessage);
+                if (!updateRes) {
+                    spdlog::warn("[PostIngestQueue] Failed to mark extraction failed for {}: {}",
+                                failure.hash, updateRes.error().message);
+                }
+            }
+        }
+
+        // Dispatch to channels
+        std::unordered_map<std::string, std::shared_ptr<std::vector<std::byte>>> contentByHash;
+
+        auto getOrLoadContent =
+            [this, &contentByHash](const std::string& hash) -> std::shared_ptr<std::vector<std::byte>> {
+            if (!store_) {
+                return nullptr;
+            }
+            auto it = contentByHash.find(hash);
+            if (it != contentByHash.end()) {
+                return it->second;
+            }
+            auto contentResult = store_->retrieveBytes(hash);
+            if (!contentResult) {
+                return nullptr;
+            }
+            auto bytes = std::make_shared<std::vector<std::byte>>(std::move(contentResult.value()));
+            contentByHash.emplace(hash, bytes);
+            return bytes;
+        };
+
+        for (const auto& prepared : result.successes) {
+            std::shared_ptr<std::vector<std::byte>> contentBytes;
+            if (prepared.shouldDispatchKg || prepared.shouldDispatchSymbol ||
+                prepared.shouldDispatchEntity) {
+                contentBytes = getOrLoadContent(prepared.hash);
+            }
+            if (prepared.shouldDispatchKg) {
+                dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.fileName,
+                                   std::vector<std::string>(prepared.tags), contentBytes);
+            }
+            if (prepared.shouldDispatchSymbol) {
+                dispatchToSymbolChannel(prepared.hash, prepared.documentId, prepared.fileName,
+                                       prepared.symbolLanguage, contentBytes);
+            }
+            if (prepared.shouldDispatchEntity) {
+                dispatchToEntityChannel(prepared.hash, prepared.documentId, prepared.fileName,
+                                       prepared.extension, contentBytes);
+            }
+            if (prepared.shouldDispatchTitle) {
+                dispatchToTitleChannel(prepared.hash, prepared.documentId, prepared.titleTextSnippet,
+                                      prepared.fileName, prepared.filePath, prepared.language,
+                                      prepared.mimeType);
+            }
+            InternalEventBus::instance().incPostConsumed();
+        }
+        return;
+    }
+
+    YAMS_ZONE_SCOPED_N("PostIngestQueue::processBatch");
+
+    // Calculate optimal chunk size
+    const size_t numChunks = std::min(static_cast<size_t>(maxWorkers), tasks.size());
+    const size_t chunkSize = (tasks.size() + numChunks - 1) / numChunks; // Ceiling division
+
+    // Copy extension map and entity providers once
+    std::unordered_map<std::string, std::string> symbolExtensionMap;
+    {
+        std::lock_guard<std::mutex> lock(extMapMutex_);
+        symbolExtensionMap = symbolExtensionMap_;
+    }
+
+    std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders;
+    {
+        std::lock_guard<std::mutex> lock(entityMutex_);
+        entityProviders = entityProviders_;
+    }
+
+    // Launch parallel chunks using std::async
+    std::vector<std::future<ChunkResult>> futures;
+    futures.reserve(numChunks);
+
+    for (size_t i = 0; i < tasks.size(); i += chunkSize) {
+        size_t end = std::min(i + chunkSize, tasks.size());
+        std::vector<InternalEventBus::PostIngestTask> chunk(tasks.begin() + i, tasks.begin() + end);
+
+        futures.push_back(std::async(std::launch::async, [this, chunk = std::move(chunk),
+                                                          &symbolExtensionMap, &entityProviders]() {
+            return processChunkParallel(chunk, symbolExtensionMap, entityProviders);
+        }));
+    }
+
+    // Collect results
+    std::vector<PreparedMetadataEntry> allSuccesses;
+    std::vector<ExtractionFailure> allFailures;
+
+    for (auto& future : futures) {
+        try {
+            ChunkResult result = future.get();
+            allSuccesses.insert(allSuccesses.end(), std::make_move_iterator(result.successes.begin()),
+                               std::make_move_iterator(result.successes.end()));
+            allFailures.insert(allFailures.end(), std::make_move_iterator(result.failures.begin()),
+                              std::make_move_iterator(result.failures.end()));
+        } catch (const std::exception& e) {
+            spdlog::error("[PostIngestQueue] Chunk processing failed: {}", e.what());
+        }
+    }
+
+    // Update stats
+    processed_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
+    failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
+
+    // Batch DB write for all successes (single transaction)
+    if (!allSuccesses.empty() && meta_) {
+        std::vector<metadata::BatchContentEntry> entries;
+        entries.reserve(allSuccesses.size());
+
+        for (const auto& prepared : allSuccesses) {
+            metadata::BatchContentEntry entry;
+            entry.documentId = prepared.documentId;
+            entry.title = prepared.title.empty() ? prepared.fileName : prepared.title;
+            entry.contentText = prepared.extractedText;
+            entry.mimeType = prepared.mimeType;
+            entry.extractionMethod = "post_ingest";
+            entry.language = prepared.language;
+            entries.push_back(std::move(entry));
+        }
+
+        auto batchResult = meta_->batchInsertContentAndIndex(entries);
+        if (!batchResult) {
+            spdlog::error("[PostIngestQueue] Parallel batch DB write failed: {}",
+                         batchResult.error().message);
+            if (batchResult.error().message.find("database is locked") != std::string::npos) {
+                TuneAdvisor::reportDbLockError();
+            }
+            // Convert successes to failures
+            for (const auto& prepared : allSuccesses) {
+                allFailures.push_back(
+                    ExtractionFailure{prepared.documentId, prepared.hash, batchResult.error().message});
+            }
+            allSuccesses.clear();
+        } else {
+            spdlog::info("[PostIngestQueue] Parallel batch DB write succeeded for {} documents",
+                        entries.size());
+            // Update titles
+            for (const auto& prepared : allSuccesses) {
+                if (!prepared.title.empty()) {
+                    (void)meta_->setMetadata(prepared.documentId, "title",
+                                            metadata::MetadataValue(prepared.title));
+                }
+            }
+        }
+    }
+
+    // Handle failures
+    for (const auto& failure : allFailures) {
+        if (failure.documentId >= 0 && meta_) {
+            auto updateRes = meta_->updateDocumentExtractionStatus(
+                failure.documentId, false, metadata::ExtractionStatus::Failed, failure.errorMessage);
+            if (!updateRes) {
+                spdlog::warn("[PostIngestQueue] Failed to mark extraction failed for {}: {}",
+                            failure.hash, updateRes.error().message);
+            }
+        }
+    }
+
+    // Dispatch to channels (can be done in parallel too, but keep simple for now)
+    std::unordered_map<std::string, std::shared_ptr<std::vector<std::byte>>> contentByHash;
+
+    auto getOrLoadContent =
+        [this, &contentByHash](const std::string& hash) -> std::shared_ptr<std::vector<std::byte>> {
+        if (!store_) {
+            return nullptr;
+        }
+        auto it = contentByHash.find(hash);
+        if (it != contentByHash.end()) {
+            return it->second;
+        }
+        auto contentResult = store_->retrieveBytes(hash);
+        if (!contentResult) {
+            return nullptr;
+        }
+        auto bytes = std::make_shared<std::vector<std::byte>>(std::move(contentResult.value()));
+        contentByHash.emplace(hash, bytes);
+        return bytes;
+    };
+
+    for (const auto& prepared : allSuccesses) {
+        std::shared_ptr<std::vector<std::byte>> contentBytes;
+        if (prepared.shouldDispatchKg || prepared.shouldDispatchSymbol ||
+            prepared.shouldDispatchEntity) {
+            contentBytes = getOrLoadContent(prepared.hash);
+        }
+        if (prepared.shouldDispatchKg) {
+            dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.fileName,
+                               std::vector<std::string>(prepared.tags), contentBytes);
+        }
+        if (prepared.shouldDispatchSymbol) {
+            dispatchToSymbolChannel(prepared.hash, prepared.documentId, prepared.fileName,
+                                   prepared.symbolLanguage, contentBytes);
+        }
+        if (prepared.shouldDispatchEntity) {
+            dispatchToEntityChannel(prepared.hash, prepared.documentId, prepared.fileName,
+                                   prepared.extension, contentBytes);
+        }
+        if (prepared.shouldDispatchTitle) {
+            dispatchToTitleChannel(prepared.hash, prepared.documentId, prepared.titleTextSnippet,
+                                  prepared.fileName, prepared.filePath, prepared.language,
+                                  prepared.mimeType);
+        }
+        InternalEventBus::instance().incPostConsumed();
+    }
+}
+
+PostIngestQueue::ChunkResult PostIngestQueue::processChunkParallel(
+    const std::vector<InternalEventBus::PostIngestTask>& tasks,
+    const std::unordered_map<std::string, std::string>& symbolExtensionMap,
+    const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders) {
+    ChunkResult result;
+    result.successes.reserve(tasks.size());
+    result.failures.reserve(tasks.size() / 10);
+
+    // Parallel extraction within the chunk
+    std::vector<std::future<std::variant<PreparedMetadataEntry, ExtractionFailure>>> futures;
+    futures.reserve(tasks.size());
+
+    for (const auto& task : tasks) {
+        futures.push_back(std::async(std::launch::async, [this, &task, &symbolExtensionMap,
+                                                          &entityProviders]() {
+            // Acquire semaphore slot for memory-safe extraction
+            if (extractionSemaphore_) {
+                extractionSemaphore_->acquire();
+            }
+
+            // RAII guard to release semaphore
+            struct SemaphoreGuard {
+                std::counting_semaphore<>* sem;
+                explicit SemaphoreGuard(std::counting_semaphore<>* s) : sem(s) {}
+                ~SemaphoreGuard() {
+                    if (sem) {
+                        sem->release();
+                    }
+                }
+                SemaphoreGuard(const SemaphoreGuard&) = delete;
+                SemaphoreGuard& operator=(const SemaphoreGuard&) = delete;
+                SemaphoreGuard(SemaphoreGuard&&) = delete;
+                SemaphoreGuard& operator=(SemaphoreGuard&&) = delete;
+            };
+            SemaphoreGuard guard(extractionSemaphore_.get());
+
+            // Get cached metadata
+            auto infoOpt = getCachedDocumentInfo(task.hash);
+            if (!infoOpt) {
+                return std::variant<PreparedMetadataEntry, ExtractionFailure>(
+                    ExtractionFailure{-1, task.hash, "Metadata not found in cache or DB"});
+            }
+
+            auto tagsOpt = getCachedDocumentTags(infoOpt->id);
+            const std::vector<std::string> emptyTags;
+            const std::vector<std::string>& tags = tagsOpt ? *tagsOpt : emptyTags;
+
+            // Extract and prepare
+            return prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags, symbolExtensionMap,
+                                       entityProviders);
+        }));
+    }
+
+    // Collect results
+    for (auto& future : futures) {
+        try {
+            auto variant = future.get();
+            if (std::holds_alternative<PreparedMetadataEntry>(variant)) {
+                result.successes.push_back(std::get<PreparedMetadataEntry>(std::move(variant)));
+            } else {
+                result.failures.push_back(std::get<ExtractionFailure>(std::move(variant)));
+            }
+        } catch (const std::exception& e) {
+            spdlog::error("[PostIngestQueue] Parallel extraction failed: {}", e.what());
+        }
+    }
+
+    return result;
 }
 
 } // namespace yams::daemon
