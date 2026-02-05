@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Homebrew plugin directory structure**: Formula now preserves `lib/yams/plugins/` subdirectory instead of flattening all libs into Homebrew's `lib/`. Plugins are correctly discovered by the daemon after `brew install`.
 - **ONNX Runtime dependency**: Homebrew formulas now declare `depends_on "onnxruntime"` and strip the bundled `libonnxruntime*` to avoid conflicts. A `post_install` rpath fixup ensures plugins find Homebrew's copy.
+- **GPU acceleration not enabled**: Fixed ONNX plugin not receiving GPU provider defines (`YAMS_ONNX_COREML_ENABLED`, `YAMS_ONNX_CUDA_ENABLED`, etc.) despite `setup.sh` detecting GPU support. The Meson build now tries pkg-config first to get compile definitions, with platform detection fallback for macOS CoreML. Also fixed ROCm (AMD GPU) build logic in setup script.
 
 ## [v0.8.2] - February 2, 2026
 
