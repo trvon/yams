@@ -2492,6 +2492,24 @@ public:
         memoryHysteresisMsOverride_.store(ms, std::memory_order_relaxed);
     }
 
+    static uint32_t cpuLevelHysteresisMs() {
+        uint32_t ov = cpuLevelHysteresisMsOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_CPU_LEVEL_HYSTERESIS_MS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 10 && v <= 10000)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 150;
+    }
+    static void setCpuLevelHysteresisMs(uint32_t ms) {
+        cpuLevelHysteresisMsOverride_.store(ms, std::memory_order_relaxed);
+    }
+
     /// Cooldown period between model evictions to prevent thrashing (ms). Default: 500.
     /// Environment: YAMS_MODEL_EVICTION_COOLDOWN_MS
     static uint32_t modelEvictionCooldownMs() {
@@ -2510,6 +2528,115 @@ public:
     }
     static void setModelEvictionCooldownMs(uint32_t ms) {
         modelEvictionCooldownMsOverride_.store(ms, std::memory_order_relaxed);
+    }
+
+    // =========================================================================
+    // Gradient Limiter Configuration (Netflix Gradient2 Algorithm)
+    // =========================================================================
+
+    /// Enable gradient-based adaptive concurrency limiters.
+    /// When enabled, post-ingest stages automatically tune their concurrency
+    /// based on measured latency feedback (replaces static thresholds).
+    /// Environment: YAMS_ENABLE_GRADIENT_LIMITERS
+    static bool enableGradientLimiters() {
+        int ov = enableGradientLimitersOverride_.load(std::memory_order_relaxed);
+        if (ov >= 0)
+            return ov > 0;
+        if (const char* s = std::getenv("YAMS_ENABLE_GRADIENT_LIMITERS")) {
+            std::string v{s};
+            std::transform(v.begin(), v.end(), v.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (v == "0" || v == "false" || v == "off" || v == "no")
+                return false;
+        }
+        return true; // Enabled by default
+    }
+    static void setEnableGradientLimiters(bool en) {
+        enableGradientLimitersOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
+    }
+
+    /// Gradient limiter EMA smoothing alpha (short window).
+    /// Higher = more responsive to latency changes. Range: 0.0-1.0. Default: 0.2.
+    /// Environment: YAMS_GRADIENT_SMOOTHING_ALPHA
+    static double gradientSmoothingAlpha() {
+        double ov = gradientSmoothingAlphaOverride_.load(std::memory_order_relaxed);
+        if (ov > 0.0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_GRADIENT_SMOOTHING_ALPHA")) {
+            try {
+                double v = std::stod(s);
+                if (v >= 0.01 && v <= 0.99)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 0.2;
+    }
+    static void setGradientSmoothingAlpha(double alpha) {
+        gradientSmoothingAlphaOverride_.store(alpha, std::memory_order_relaxed);
+    }
+
+    /// Gradient limiter long-window EMA alpha (drift correction).
+    /// Lower = slower drift correction, more stable. Range: 0.0-1.0. Default: 0.05.
+    /// Environment: YAMS_GRADIENT_LONG_ALPHA
+    static double gradientLongAlpha() {
+        double ov = gradientLongAlphaOverride_.load(std::memory_order_relaxed);
+        if (ov > 0.0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_GRADIENT_LONG_ALPHA")) {
+            try {
+                double v = std::stod(s);
+                if (v >= 0.01 && v <= 0.5)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 0.05;
+    }
+    static void setGradientLongAlpha(double alpha) {
+        gradientLongAlphaOverride_.store(alpha, std::memory_order_relaxed);
+    }
+
+    /// Gradient limiter warmup samples before adjusting limits.
+    /// Minimum samples collected before limit adjustment begins. Default: 10.
+    /// Environment: YAMS_GRADIENT_WARMUP_SAMPLES
+    static uint32_t gradientWarmupSamples() {
+        uint32_t ov = gradientWarmupSamplesOverride_.load(std::memory_order_relaxed);
+        if (ov > 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_GRADIENT_WARMUP_SAMPLES")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 100)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 10;
+    }
+    static void setGradientWarmupSamples(uint32_t samples) {
+        gradientWarmupSamplesOverride_.store(samples, std::memory_order_relaxed);
+    }
+
+    /// Gradient limiter tolerance multiplier.
+    /// Maximum growth multiplier when RTT is improving. Default: 1.5.
+    /// Environment: YAMS_GRADIENT_TOLERANCE
+    static double gradientTolerance() {
+        double ov = gradientToleranceOverride_.load(std::memory_order_relaxed);
+        if (ov > 0.0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_GRADIENT_TOLERANCE")) {
+            try {
+                double v = std::stod(s);
+                if (v >= 1.0 && v <= 5.0)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 1.5;
+    }
+    static void setGradientTolerance(double tolerance) {
+        gradientToleranceOverride_.store(tolerance, std::memory_order_relaxed);
     }
 
     // =========================================================================
@@ -2817,7 +2944,15 @@ private:
     static inline std::atomic<double> memoryEmergencyPctOverride_{0.0};
     static inline std::atomic<uint32_t> memoryHysteresisTicksOverride_{0};
     static inline std::atomic<uint32_t> memoryHysteresisMsOverride_{0};
+    static inline std::atomic<uint32_t> cpuLevelHysteresisMsOverride_{0};
     static inline std::atomic<uint32_t> modelEvictionCooldownMsOverride_{0};
+
+    // Gradient limiter overrides
+    static inline std::atomic<int> enableGradientLimitersOverride_{-1};
+    static inline std::atomic<double> gradientSmoothingAlphaOverride_{0.0};
+    static inline std::atomic<double> gradientLongAlphaOverride_{0.0};
+    static inline std::atomic<uint32_t> gradientWarmupSamplesOverride_{0};
+    static inline std::atomic<double> gradientToleranceOverride_{0.0};
 
     // ONNX concurrency overrides
     static inline std::atomic<uint32_t> onnxMaxConcurrentOverride_{0};

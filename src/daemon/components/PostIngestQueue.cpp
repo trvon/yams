@@ -2467,4 +2467,80 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
     }
 }
 
+// =========================================================================
+// Gradient-Based Adaptive Concurrency Limiter Integration
+// =========================================================================
+
+void PostIngestQueue::initializeGradientLimiters() {
+    if (!TuneAdvisor::enableGradientLimiters()) {
+        spdlog::info("[PostIngestQueue] Gradient limiters disabled");
+        return;
+    }
+
+    GradientLimiter::Config cfg;
+    cfg.smoothingAlpha = TuneAdvisor::gradientSmoothingAlpha();
+    cfg.longWindowAlpha = TuneAdvisor::gradientLongAlpha();
+    cfg.warmupSamples = TuneAdvisor::gradientWarmupSamples();
+    cfg.tolerance = TuneAdvisor::gradientTolerance();
+
+    // Set max limits based on TuneAdvisor caps
+    cfg.maxLimit = static_cast<double>(TuneAdvisor::postExtractionConcurrent());
+    extractionLimiter_ = std::make_unique<GradientLimiter>("extraction", cfg);
+
+    cfg.maxLimit = static_cast<double>(TuneAdvisor::postKgConcurrent());
+    kgLimiter_ = std::make_unique<GradientLimiter>("kg", cfg);
+
+    cfg.maxLimit = static_cast<double>(TuneAdvisor::postSymbolConcurrent());
+    symbolLimiter_ = std::make_unique<GradientLimiter>("symbol", cfg);
+
+    cfg.maxLimit = static_cast<double>(TuneAdvisor::postEntityConcurrent());
+    entityLimiter_ = std::make_unique<GradientLimiter>("entity", cfg);
+
+    cfg.maxLimit = static_cast<double>(TuneAdvisor::postTitleConcurrent());
+    titleLimiter_ = std::make_unique<GradientLimiter>("title", cfg);
+
+    cfg.maxLimit = static_cast<double>(TuneAdvisor::postEmbedConcurrent());
+    embedLimiter_ = std::make_unique<GradientLimiter>("embed", cfg);
+
+    spdlog::info("[PostIngestQueue] Gradient limiters initialized");
+}
+
+bool PostIngestQueue::tryAcquireLimiterSlot(GradientLimiter* limiter,
+                                            const std::string& jobId,
+                                            const std::string& stage) {
+    if (!limiter) {
+        return true; // No limiter configured, allow
+    }
+
+    if (!limiter->tryAcquire()) {
+        return false; // At limit
+    }
+
+    // Track the job
+    auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(activeJobsMutex_);
+        activeJobs_[jobId] = {now, now, limiter, stage};
+    }
+
+    return true;
+}
+
+void PostIngestQueue::completeJob(const std::string& jobId, bool success) {
+    ActiveJob job;
+    {
+        std::lock_guard<std::mutex> lock(activeJobsMutex_);
+        auto it = activeJobs_.find(jobId);
+        if (it == activeJobs_.end()) {
+            return; // Job not tracked
+        }
+        job = it->second;
+        activeJobs_.erase(it);
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    auto latency = now - job.startTime;
+    job.limiter->onJobComplete(latency, success);
+}
+
 } // namespace yams::daemon

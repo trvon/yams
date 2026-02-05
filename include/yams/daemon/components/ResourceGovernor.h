@@ -116,6 +116,9 @@ struct ScalingCaps {
     std::uint32_t searchConcurrency{0};
     std::uint32_t extractionConcurrency{0};
     std::uint32_t kgConcurrency{0};
+    std::uint32_t symbolConcurrency{0};
+    std::uint32_t entityConcurrency{0};
+    std::uint32_t titleConcurrency{0};
     std::uint32_t embedConcurrency{0};
     bool allowModelLoads{true};
     bool allowNewIngest{true};
@@ -202,6 +205,15 @@ public:
     /// Get maximum allowed KG concurrency under current pressure
     [[nodiscard]] std::uint32_t maxKgConcurrency() const;
 
+    /// Get maximum allowed symbol concurrency under current pressure
+    [[nodiscard]] std::uint32_t maxSymbolConcurrency() const;
+
+    /// Get maximum allowed entity concurrency under current pressure
+    [[nodiscard]] std::uint32_t maxEntityConcurrency() const;
+
+    /// Get maximum allowed title concurrency under current pressure
+    [[nodiscard]] std::uint32_t maxTitleConcurrency() const;
+
     // ========================================================================
     // Observability
     // ========================================================================
@@ -266,6 +278,10 @@ private:
     // CPU utilization sampling state: deltas for calculating process CPU usage
     mutable std::uint64_t lastProcJiffies_{0};
     mutable std::uint64_t lastTotalJiffies_{0};
+
+    double cpuEma_{0.0};
+    bool cpuEmaInitialized_{false};
+    static constexpr double kCpuEmaAlpha = 0.3;
 
     // CPU admission control state (time-based hysteresis)
     std::atomic<bool> cpuAdmissionBlocked_{false};

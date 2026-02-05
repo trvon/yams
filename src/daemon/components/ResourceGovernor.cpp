@@ -33,8 +33,7 @@
 #else
 #include <cstdio>
 #include <cstring>
-#include <fstream>
-#include <sstream>
+#include <ctime>
 #include <unistd.h>
 #endif
 
@@ -168,63 +167,37 @@ double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTo
     return std::clamp(pct, 0.0, 100.0);
 
 #else
-    // Linux: read from /proc/stat and /proc/self/stat
-    std::uint64_t procJiffies = 0;
-    std::uint64_t totalJiffies = 0;
+    // Linux: clock_gettime avoids /proc I/O and jiffy-resolution aliasing at fast tick rates.
+    static const long nproc = std::max(1L, sysconf(_SC_NPROCESSORS_ONLN));
 
-    // Process jiffies from /proc/self/stat (fields 14=utime, 15=stime)
-    std::ifstream procStat("/proc/self/stat");
-    if (procStat.is_open()) {
-        std::string line;
-        if (std::getline(procStat, line)) {
-            // Skip past comm field (which may contain spaces/parens)
-            auto pos = line.rfind(')');
-            if (pos != std::string::npos && pos + 2 < line.size()) {
-                std::istringstream iss(line.substr(pos + 2));
-                std::string field;
-                // Fields after ')': state, ppid, pgrp, session, tty_nr, tpgid, flags,
-                //                   minflt, cminflt, majflt, cmajflt, utime(14), stime(15)
-                for (int i = 0; i < 11 && iss >> field; ++i) {
-                } // Skip fields 3-13
-                std::uint64_t utime = 0, stime = 0;
-                if (iss >> utime >> stime) {
-                    procJiffies = utime + stime;
-                }
-            }
-        }
-    }
+    struct timespec procTs{}, wallTs{};
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &procTs);
+    clock_gettime(CLOCK_MONOTONIC, &wallTs);
 
-    // Total system jiffies from /proc/stat (first "cpu" line)
-    std::ifstream cpuStat("/proc/stat");
-    if (cpuStat.is_open()) {
-        std::string line;
-        while (std::getline(cpuStat, line)) {
-            if (line.rfind("cpu ", 0) == 0) {
-                std::istringstream iss(line.substr(4));
-                std::uint64_t user = 0, nice = 0, system = 0, idle = 0;
-                std::uint64_t iowait = 0, irq = 0, softirq = 0, steal = 0;
-                iss >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal;
-                totalJiffies = user + nice + system + idle + iowait + irq + softirq + steal;
-                break;
-            }
-        }
-    }
+    auto toNs = [](const struct timespec& ts) -> std::uint64_t {
+        return static_cast<std::uint64_t>(ts.tv_sec) * 1'000'000'000ull +
+               static_cast<std::uint64_t>(ts.tv_nsec);
+    };
 
-    if (lastProcJiffies == 0 || lastTotalJiffies == 0 || procJiffies < lastProcJiffies ||
-        totalJiffies < lastTotalJiffies) {
-        lastProcJiffies = procJiffies;
-        lastTotalJiffies = totalJiffies;
+    const std::uint64_t procNs = toNs(procTs);
+    const std::uint64_t wallNs = toNs(wallTs);
+
+    if (lastProcJiffies == 0 || lastTotalJiffies == 0 ||
+        procNs < lastProcJiffies || wallNs < lastTotalJiffies) {
+        lastProcJiffies = procNs;
+        lastTotalJiffies = wallNs;
         return 0.0;
     }
 
-    const std::uint64_t dProc = procJiffies - lastProcJiffies;
-    const std::uint64_t dTotal = totalJiffies - lastTotalJiffies;
-    lastProcJiffies = procJiffies;
-    lastTotalJiffies = totalJiffies;
-    if (dTotal == 0)
+    const std::uint64_t dProc = procNs - lastProcJiffies;
+    const std::uint64_t dWall = wallNs - lastTotalJiffies;
+    lastProcJiffies = procNs;
+    lastTotalJiffies = wallNs;
+    if (dWall == 0)
         return 0.0;
 
-    double pct = (static_cast<double>(dProc) / static_cast<double>(dTotal)) * 100.0;
+    double pct =
+        (static_cast<double>(dProc) / (static_cast<double>(dWall) * nproc)) * 100.0;
     return std::clamp(pct, 0.0, 100.0);
 #endif
 }
@@ -366,16 +339,24 @@ void ResourceGovernor::collectMetrics(ServiceManager* sm, ResourceSnapshot& snap
     snap.rssBytes = readRssBytes();
     snap.memoryBudgetBytes = TuneAdvisor::memoryBudgetBytes();
 
-    // CPU metrics (delta-based, uses mutable state for jiffies tracking)
-    snap.cpuUsagePercent = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
+    const double rawCpu = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
+
+    if (!cpuEmaInitialized_) {
+        cpuEma_ = rawCpu;
+        cpuEmaInitialized_ = true;
+    } else {
+        cpuEma_ = kCpuEmaAlpha * rawCpu + (1.0 - kCpuEmaAlpha) * cpuEma_;
+    }
+    snap.cpuUsagePercent = cpuEma_;
 
     if (snap.memoryBudgetBytes > 0) {
         snap.memoryPressure =
             static_cast<double>(snap.rssBytes) / static_cast<double>(snap.memoryBudgetBytes);
     }
 
-    // Compute scaling headroom (inverse of pressure, clamped 0-1)
-    snap.scalingHeadroom = std::clamp(1.0 - snap.memoryPressure, 0.0, 1.0);
+    const double memHeadroom = std::clamp(1.0 - snap.memoryPressure, 0.0, 1.0);
+    const double cpuHeadroom = std::clamp(1.0 - (snap.cpuUsagePercent / 100.0), 0.0, 1.0);
+    snap.scalingHeadroom = std::min(memHeadroom, cpuHeadroom);
 
     if (!sm) {
         return;
@@ -423,63 +404,42 @@ void ResourceGovernor::collectMetrics(ServiceManager* sm, ResourceSnapshot& snap
 // ============================================================================
 
 ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& snap) {
-    // Determine raw level based on thresholds
-    ResourcePressureLevel rawLevel = ResourcePressureLevel::Normal;
-
-    const double warningThresh = TuneAdvisor::memoryWarningThreshold();
-    const double criticalThresh = TuneAdvisor::memoryCriticalThreshold();
-    const double emergencyThresh = TuneAdvisor::memoryEmergencyThreshold();
-
-    // Memory-based pressure level
-    if (snap.memoryPressure >= emergencyThresh) {
-        rawLevel = ResourcePressureLevel::Emergency;
-    } else if (snap.memoryPressure >= criticalThresh) {
-        rawLevel = ResourcePressureLevel::Critical;
-    } else if (snap.memoryPressure >= warningThresh) {
-        rawLevel = ResourcePressureLevel::Warning;
+    // Simplified: Only detect Emergency conditions as a backstop.
+    // Normal scaling is handled by gradient limiters (latency-based).
+    // This method only triggers Emergency when system is truly at risk.
+    
+    const double memEmergency = TuneAdvisor::memoryEmergencyThreshold();
+    const double cpuEmergency = 95.0;  // Hard ceiling for CPU
+    
+    // Check if we're in emergency territory
+    bool isEmergency = (snap.memoryPressure >= memEmergency) || 
+                       (snap.cpuUsagePercent >= cpuEmergency);
+    
+    if (!isEmergency) {
+        return ResourcePressureLevel::Normal;
     }
-
-    // CPU-based pressure escalation: if CPU is very high, escalate the pressure level
-    // This prevents CPU saturation even when memory is fine
-    const double cpuHighThresh = TuneAdvisor::cpuHighThresholdPercent();
-    const double cpuCriticalThresh = cpuHighThresh + 25.0; // 25% above high
-
-    if (snap.cpuUsagePercent >= cpuCriticalThresh) {
-        // Escalate to at least Critical if CPU is very high
-        rawLevel = std::max(rawLevel, ResourcePressureLevel::Critical);
-    } else if (snap.cpuUsagePercent >= cpuHighThresh) {
-        // Escalate to at least Warning if CPU is high
-        rawLevel = std::max(rawLevel, ResourcePressureLevel::Warning);
-    }
-
-    // Apply hysteresis: require time at a level before transitioning
-    // (decoupled from tick interval for consistent behavior at any tick rate)
-    const auto hysteresisMs = std::chrono::milliseconds(TuneAdvisor::memoryHysteresisMs());
+    
+    // Apply minimal hysteresis for emergency entry only
     auto now = std::chrono::steady_clock::now();
-
-    if (rawLevel != proposedLevel_) {
-        // Level changed - reset timer
-        proposedLevel_ = rawLevel;
+    
+    if (proposedLevel_ != ResourcePressureLevel::Emergency) {
+        proposedLevel_ = ResourcePressureLevel::Emergency;
         proposedLevelSince_ = now;
     }
-
+    
     auto elapsed = now - proposedLevelSince_;
     ResourcePressureLevel currentLvl = currentLevel_.load(std::memory_order_relaxed);
-
-    if (rawLevel > currentLvl) {
-        // Escalating - require hysteresisMs
-        if (elapsed >= hysteresisMs) {
-            return rawLevel;
-        }
-        return currentLvl; // Hold at current level
-    } else if (rawLevel < currentLvl) {
-        // De-escalating - require 2× hysteresisMs for stability
-        if (elapsed >= hysteresisMs * 2) {
-            return rawLevel;
-        }
-        return currentLvl; // Hold at current level
+    
+    // Require 100ms of sustained emergency before triggering
+    if (currentLvl != ResourcePressureLevel::Emergency && elapsed >= std::chrono::milliseconds(100)) {
+        return ResourcePressureLevel::Emergency;
     }
-
+    
+    // Exit emergency immediately when pressure drops
+    if (currentLvl == ResourcePressureLevel::Emergency && !isEmergency) {
+        return ResourcePressureLevel::Normal;
+    }
+    
     return currentLvl;
 }
 
@@ -490,12 +450,18 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
 void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
     std::unique_lock lock(mutex_);
 
-    // Get TuneAdvisor defaults
+    // Get TuneAdvisor defaults for all post-ingest stages
     const auto defaultIngest = TuneAdvisor::maxIngestWorkers();
     const auto defaultSearch = TuneAdvisor::searchConcurrencyLimit();
     const auto defaultExtract = TuneAdvisor::postExtractionDefaultConcurrent();
     const auto defaultKg = TuneAdvisor::postKgDefaultConcurrent();
+    const auto defaultSymbol = TuneAdvisor::postSymbolDefaultConcurrent();
+    const auto defaultEntity = TuneAdvisor::postEntityDefaultConcurrent();
+    const auto defaultTitle = TuneAdvisor::postTitleDefaultConcurrent();
     const auto defaultEmbed = TuneAdvisor::postEmbedDefaultConcurrent();
+
+    // Helper: 50% cap that never exceeds the default (safe on small systems)
+    auto half = [](uint32_t v) -> uint32_t { return std::min(v, std::max(1u, v / 2)); };
 
     switch (level) {
         case ResourcePressureLevel::Normal:
@@ -505,6 +471,9 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
                 .searchConcurrency = defaultSearch,
                 .extractionConcurrency = defaultExtract,
                 .kgConcurrency = defaultKg,
+                .symbolConcurrency = defaultSymbol,
+                .entityConcurrency = defaultEntity,
+                .titleConcurrency = defaultTitle,
                 .embedConcurrency = defaultEmbed,
                 .allowModelLoads = true,
                 .allowNewIngest = true,
@@ -513,14 +482,15 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
 
         case ResourcePressureLevel::Warning:
             // Cap at 50% of normal, block model loads.
-            // Use min(default, ...) to ensure Warning never exceeds Normal allocation.
-            // Without min(): max(2, 1/2) = 2 > 1 when defaults are small (2-core system).
             scalingCaps_ = ScalingCaps{
-                .ingestWorkers = std::min(defaultIngest, std::max(1u, defaultIngest / 2)),
-                .searchConcurrency = std::min(defaultSearch, std::max(1u, defaultSearch / 2)),
-                .extractionConcurrency = std::min(defaultExtract, std::max(1u, defaultExtract / 2)),
-                .kgConcurrency = std::min(defaultKg, std::max(1u, defaultKg / 2)),
-                .embedConcurrency = std::min(defaultEmbed, std::max(1u, defaultEmbed / 2)),
+                .ingestWorkers = half(defaultIngest),
+                .searchConcurrency = half(defaultSearch),
+                .extractionConcurrency = half(defaultExtract),
+                .kgConcurrency = half(defaultKg),
+                .symbolConcurrency = half(defaultSymbol),
+                .entityConcurrency = half(defaultEntity),
+                .titleConcurrency = half(defaultTitle),
+                .embedConcurrency = half(defaultEmbed),
                 .allowModelLoads = false,
                 .allowNewIngest = true,
             };
@@ -535,6 +505,9 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
                 .searchConcurrency = std::min(defaultSearch, 2u),
                 .extractionConcurrency = std::min(defaultExtract, 2u),
                 .kgConcurrency = std::min(defaultKg, 2u),
+                .symbolConcurrency = std::min(defaultSymbol, 1u),
+                .entityConcurrency = std::min(defaultEntity, 1u),
+                .titleConcurrency = std::min(defaultTitle, 1u),
                 .embedConcurrency = std::min(defaultEmbed, 1u),
                 .allowModelLoads = false,
                 .allowNewIngest = true,
@@ -548,6 +521,9 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
                 .searchConcurrency = 1,
                 .extractionConcurrency = 0,
                 .kgConcurrency = 0,
+                .symbolConcurrency = 0,
+                .entityConcurrency = 0,
+                .titleConcurrency = 0,
                 .embedConcurrency = 0,
                 .allowModelLoads = false,
                 .allowNewIngest = false,
@@ -784,6 +760,30 @@ std::uint32_t ResourceGovernor::maxKgConcurrency() const {
     }
     std::shared_lock lock(mutex_);
     return scalingCaps_.kgConcurrency;
+}
+
+std::uint32_t ResourceGovernor::maxSymbolConcurrency() const {
+    if (!TuneAdvisor::enableResourceGovernor()) {
+        return TuneAdvisor::postSymbolConcurrent();
+    }
+    std::shared_lock lock(mutex_);
+    return scalingCaps_.symbolConcurrency;
+}
+
+std::uint32_t ResourceGovernor::maxEntityConcurrency() const {
+    if (!TuneAdvisor::enableResourceGovernor()) {
+        return TuneAdvisor::postEntityConcurrent();
+    }
+    std::shared_lock lock(mutex_);
+    return scalingCaps_.entityConcurrency;
+}
+
+std::uint32_t ResourceGovernor::maxTitleConcurrency() const {
+    if (!TuneAdvisor::enableResourceGovernor()) {
+        return TuneAdvisor::postTitleConcurrent();
+    }
+    std::shared_lock lock(mutex_);
+    return scalingCaps_.titleConcurrency;
 }
 
 // ============================================================================

@@ -293,6 +293,28 @@ void TuningManager::tick_once() {
             uint32_t titleTarget = TuneAdvisor::postTitleConcurrent();
             uint32_t embedTarget = TuneAdvisor::postEmbedConcurrent();
 
+            // Override with gradient limiter values if enabled
+            if (TuneAdvisor::enableGradientLimiters()) {
+                if (auto* extractionLimiter = pq->extractionLimiter()) {
+                    extractionTarget = extractionLimiter->effectiveLimit();
+                }
+                if (auto* kgLimiter = pq->kgLimiter()) {
+                    kgTarget = kgLimiter->effectiveLimit();
+                }
+                if (auto* symbolLimiter = pq->symbolLimiter()) {
+                    symbolTarget = symbolLimiter->effectiveLimit();
+                }
+                if (auto* entityLimiter = pq->entityLimiter()) {
+                    entityTarget = entityLimiter->effectiveLimit();
+                }
+                if (auto* titleLimiter = pq->titleLimiter()) {
+                    titleTarget = titleLimiter->effectiveLimit();
+                }
+                if (auto* embedLimiter = pq->embedLimiter()) {
+                    embedTarget = embedLimiter->effectiveLimit();
+                }
+            }
+
             if (dbLockErrors > lockThreshold * 2) {
                 kgTarget = std::min<uint32_t>(kgTarget, 2);
                 embedTarget = std::min<uint32_t>(embedTarget, 1);
@@ -308,6 +330,9 @@ void TuningManager::tick_once() {
             if (TuneAdvisor::enableResourceGovernor()) {
                 extractionTarget = std::min(extractionTarget, governor.maxExtractionConcurrency());
                 kgTarget = std::min(kgTarget, governor.maxKgConcurrency());
+                symbolTarget = std::min(symbolTarget, governor.maxSymbolConcurrency());
+                entityTarget = std::min(entityTarget, governor.maxEntityConcurrency());
+                titleTarget = std::min(titleTarget, governor.maxTitleConcurrency());
                 embedTarget = std::min(embedTarget, governor.maxEmbedConcurrency());
             }
 

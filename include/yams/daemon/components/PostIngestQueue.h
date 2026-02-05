@@ -13,6 +13,7 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/GradientLimiter.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/search/query_concept_extractor.h>
@@ -149,6 +150,14 @@ public:
     static std::size_t maxSymbolConcurrent();
     static std::size_t maxEntityConcurrent();
     static std::size_t maxTitleConcurrent();
+
+    // Gradient-based adaptive limiter accessors (for TuningManager)
+    GradientLimiter* extractionLimiter() const { return extractionLimiter_.get(); }
+    GradientLimiter* kgLimiter() const { return kgLimiter_.get(); }
+    GradientLimiter* symbolLimiter() const { return symbolLimiter_.get(); }
+    GradientLimiter* entityLimiter() const { return entityLimiter_.get(); }
+    GradientLimiter* titleLimiter() const { return titleLimiter_.get(); }
+    GradientLimiter* embedLimiter() const { return embedLimiter_.get(); }
 
     void setCapacity(std::size_t cap) { capacity_ = cap > 0 ? cap : capacity_; }
 
@@ -337,6 +346,35 @@ private:
 
     search::EntityExtractionFunc titleExtractor_;
     KGWriteQueue* kgWriteQueue_{nullptr};
+
+    // Gradient-based adaptive concurrency limiters (Netflix Gradient2 algorithm)
+    std::unique_ptr<GradientLimiter> extractionLimiter_;
+    std::unique_ptr<GradientLimiter> kgLimiter_;
+    std::unique_ptr<GradientLimiter> symbolLimiter_;
+    std::unique_ptr<GradientLimiter> entityLimiter_;
+    std::unique_ptr<GradientLimiter> titleLimiter_;
+    std::unique_ptr<GradientLimiter> embedLimiter_;
+
+    // Job tracking for latency measurement
+    struct ActiveJob {
+        std::chrono::steady_clock::time_point startTime;
+        std::chrono::steady_clock::time_point enqueueTime;
+        GradientLimiter* limiter;
+        std::string stage;
+    };
+    std::unordered_map<std::string, ActiveJob> activeJobs_;
+    mutable std::mutex activeJobsMutex_;
+    std::atomic<uint64_t> nextJobId_{0};
+
+    /// Initialize gradient limiters
+    void initializeGradientLimiters();
+
+    /// Complete a tracked job and report latency to its limiter
+    void completeJob(const std::string& jobId, bool success);
+
+    /// Try to acquire a slot from a limiter
+    bool tryAcquireLimiterSlot(GradientLimiter* limiter, const std::string& jobId,
+                               const std::string& stage);
 };
 
 } // namespace yams::daemon
