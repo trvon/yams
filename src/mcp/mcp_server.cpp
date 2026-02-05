@@ -3669,8 +3669,6 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
     MCPDoctorResponse out;
     std::vector<std::string> issues;
     json details;
-    details["running"] = haveStatus ? s.running : false;
-    details["ready"] = haveStatus ? s.ready : false;
     details["overallStatus"] = haveStatus ? s.overallStatus : std::string("unknown");
     details["lifecycleState"] = haveStatus ? s.lifecycleState : std::string("unknown");
     details["lastError"] = haveStatus ? s.lastError : std::string("unreachable");
@@ -4505,16 +4503,6 @@ void MCPServer::initializeToolRegistry() {
 #endif
 
     // Always register standard MCP tools
-    toolRegistry_->registerTool<MCPDoctorRequest, MCPDoctorResponse>(
-        "doctor", [this](const MCPDoctorRequest& req) { return handleDoctor(req); },
-        json{{"type", "object"},
-             {"properties",
-              {{"verbose",
-                {{"type", "boolean"},
-                 {"description", "Include verbose diagnostics"},
-                 {"default", true}}}}}},
-        "Get daemon diagnostics and readiness probes", "Doctor", readOnlyAnnotation);
-
     toolRegistry_->registerRawTool(
         "search",
         [this](const json& args) mutable -> boost::asio::awaitable<json> {

@@ -470,7 +470,15 @@ _test_env_ld_library_path = ':'.join(_test_ld_library_path)
   endif
 
   if get_option('enable-daemon-long-tests')
-    message('enable-daemon-long-tests is set, but GTest daemon suites have been migrated; daemon-long coverage is registered in the Catch2 section when Catch2 is available.')
+  test('unit_isolated_daemon', unit_exe,
+    suite: ['daemon-long'],
+    args: ['--gtest_filter=DaemonTest.*'],
+    env: {
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'GTEST_BRIEF': '1',
+    },
+    timeout: bench_timeout,
+  )
   endif
 
   if gtest_dep.found() and get_option('enable-bench-tests')
@@ -2535,20 +2543,6 @@ if catch2_dep.found()
     # Test skips on Windows (Unix domain sockets not supported)
     should_fail: host_machine.system() == 'windows'
   )
-
-  # Legacy daemon-long gate: run daemon coverage via Catch2 when requested.
-  # This replaces the old GTest DaemonTest.* suite (now migrated).
-  if get_option('enable-daemon-long-tests')
-    test('unit_isolated_daemon', catch2_daemon_exe,
-      suite: ['daemon-long'],
-      env: {
-        'LD_LIBRARY_PATH': _test_env_ld_library_path,
-        'YAMS_DISABLE_ABI_PLUGINS': '1',
-      },
-      timeout: bench_timeout,
-      is_parallel: false
-    )
-  endif
 
   test('tune_advisor_threshold', catch2_tune_advisor_threshold_exe,
     suite: ['catch2', 'unit', 'daemon', 'tune', 'advisor'],
