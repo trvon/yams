@@ -90,8 +90,10 @@ class OnnxRuntimeConan(ConanFile):
                     f"ROCm not found at {rocm_path}. Install ROCm or set "
                     f"-o onnxruntime/*:rocm_path=/path/to/rocm"
                 )
+            # Check for MIGraphX library (ROCm 7.x uses libmigraphx_c.so)
             migraphx_lib = os.path.join(rocm_path, "lib", "libmigraphx.so")
-            if not os.path.exists(migraphx_lib):
+            migraphx_c_lib = os.path.join(rocm_path, "lib", "libmigraphx_c.so")
+            if not os.path.exists(migraphx_lib) and not os.path.exists(migraphx_c_lib):
                 raise ConanInvalidConfiguration(
                     f"MIGraphX not found at {rocm_path}. Ensure MIGraphX is installed "
                     f"(typically part of ROCm or install separately)."
@@ -168,7 +170,7 @@ class OnnxRuntimeConan(ConanFile):
             git.clone(
                 url="https://github.com/microsoft/onnxruntime.git",
                 target=".",
-                args=["--depth", "1", "--branch", f"v{self.version}", "--recursive"]
+                args=["--depth", "1", "--branch", f"v{self.version}", "--recursive"],
             )
 
         build_script = os.path.join(source_dir, "build.sh")
@@ -180,15 +182,21 @@ class OnnxRuntimeConan(ConanFile):
         # Prepare build arguments
         build_args = [
             build_script,
-            "--config", build_type,
-            "--build_dir", self.build_folder,
+            "--config",
+            build_type,
+            "--build_dir",
+            self.build_folder,
             "--use_migraphx",
-            "--migraphx_home", rocm_path,
-            "--rocm_home", rocm_path,
-            "--parallel", parallel_jobs,
+            "--migraphx_home",
+            rocm_path,
+            "--rocm_home",
+            rocm_path,
+            "--parallel",
+            parallel_jobs,
             "--skip_tests",
             "--build_shared_lib",
-            "--cmake_extra_defines", f"CMAKE_HIP_COMPILER={rocm_path}/llvm/bin/clang++",
+            "--cmake_extra_defines",
+            f"CMAKE_HIP_COMPILER={rocm_path}/llvm/bin/clang++",
         ]
 
         # GPU targets - use auto-detected from environment or fall back to common targets
@@ -203,11 +211,16 @@ class OnnxRuntimeConan(ConanFile):
         gpu_targets = os.environ.get("YAMS_ROCM_GPU_TARGETS", "")
         if gpu_targets:
             self.output.info(f"Using GPU targets from environment: {gpu_targets}")
-            build_args.extend([
-                "--cmake_extra_defines", f"GPU_TARGETS={gpu_targets}",
-            ])
+            build_args.extend(
+                [
+                    "--cmake_extra_defines",
+                    f"GPU_TARGETS={gpu_targets}",
+                ]
+            )
         else:
-            self.output.info("No GPU targets specified, ONNX Runtime will use its defaults")
+            self.output.info(
+                "No GPU targets specified, ONNX Runtime will use its defaults"
+            )
 
         self.output.info(f"Building ONNX Runtime with MIGraphX support...")
         self.output.info(f"ROCm path: {rocm_path}")
@@ -257,7 +270,11 @@ class OnnxRuntimeConan(ConanFile):
             # Or try to find it
             for item in os.listdir(self.build_folder):
                 candidate = os.path.join(self.build_folder, item)
-                if os.path.isdir(candidate) and item in ["Release", "Debug", "RelWithDebInfo"]:
+                if os.path.isdir(candidate) and item in [
+                    "Release",
+                    "Debug",
+                    "RelWithDebInfo",
+                ]:
                     build_output = candidate
                     break
 
@@ -269,18 +286,28 @@ class OnnxRuntimeConan(ConanFile):
 
         # Copy main headers
         if os.path.exists(include_src):
-            copy(self, "*.h",
-                 src=include_src,
-                 dst=os.path.join(self.package_folder, "include", "onnxruntime"),
-                 keep_path=True)
+            copy(
+                self,
+                "*.h",
+                src=include_src,
+                dst=os.path.join(self.package_folder, "include", "onnxruntime"),
+                keep_path=True,
+            )
 
         # Also copy the C API headers
-        c_api_include = os.path.join(source_dir, "include", "onnxruntime", "core", "session")
+        c_api_include = os.path.join(
+            source_dir, "include", "onnxruntime", "core", "session"
+        )
         if os.path.exists(c_api_include):
-            copy(self, "*.h",
-                 src=c_api_include,
-                 dst=os.path.join(self.package_folder, "include", "onnxruntime", "core", "session"),
-                 keep_path=True)
+            copy(
+                self,
+                "*.h",
+                src=c_api_include,
+                dst=os.path.join(
+                    self.package_folder, "include", "onnxruntime", "core", "session"
+                ),
+                keep_path=True,
+            )
 
         # Copy built libraries
         lib_dst = os.path.join(self.package_folder, "lib")
@@ -302,7 +329,7 @@ class OnnxRuntimeConan(ConanFile):
                 if not os.path.isfile(src_path) and not os.path.islink(src_path):
                     continue
                 # Copy library files
-                if item.endswith(('.so', '.a')) or '.so.' in item:
+                if item.endswith((".so", ".a")) or ".so." in item:
                     dst_path = os.path.join(lib_dst, item)
                     if os.path.islink(src_path):
                         link_target = os.readlink(src_path)
@@ -317,10 +344,13 @@ class OnnxRuntimeConan(ConanFile):
         # Copy license
         license_path = os.path.join(source_dir, "LICENSE")
         if os.path.exists(license_path):
-            copy(self, "LICENSE",
-                 src=source_dir,
-                 dst=os.path.join(self.package_folder, "licenses"),
-                 keep_path=False)
+            copy(
+                self,
+                "LICENSE",
+                src=source_dir,
+                dst=os.path.join(self.package_folder, "licenses"),
+                keep_path=False,
+            )
 
     def _package_prebuilt(self):
         """Package prebuilt binaries"""
@@ -348,15 +378,21 @@ class OnnxRuntimeConan(ConanFile):
             )
 
         # Copy headers
-        copy(self, "*.h",
-             src=include_src,
-             dst=os.path.join(self.package_folder, "include"),
-             keep_path=True)
+        copy(
+            self,
+            "*.h",
+            src=include_src,
+            dst=os.path.join(self.package_folder, "include"),
+            keep_path=True,
+        )
 
-        copy(self, "*.hpp",
-             src=include_src,
-             dst=os.path.join(self.package_folder, "include"),
-             keep_path=True)
+        copy(
+            self,
+            "*.hpp",
+            src=include_src,
+            dst=os.path.join(self.package_folder, "include"),
+            keep_path=True,
+        )
 
         # Copy libraries, preserving symlinks
         lib_src = os.path.join(extracted_dir, "lib")
@@ -367,10 +403,14 @@ class OnnxRuntimeConan(ConanFile):
         for item in os.listdir(lib_src):
             src_path = os.path.join(lib_src, item)
 
-            if item.endswith('.dll'):
+            if item.endswith(".dll"):
                 mkdir(self, bin_dst)
                 dst_path = os.path.join(bin_dst, item)
-            elif item.endswith(('.so', '.a', '.dylib', '.lib')) or '.so.' in item or '.dylib.' in item:
+            elif (
+                item.endswith((".so", ".a", ".dylib", ".lib"))
+                or ".so." in item
+                or ".dylib." in item
+            ):
                 dst_path = os.path.join(lib_dst, item)
             else:
                 continue
@@ -388,10 +428,13 @@ class OnnxRuntimeConan(ConanFile):
         # Copy license
         license_path = os.path.join(extracted_dir, "LICENSE")
         if os.path.exists(license_path):
-            copy(self, "LICENSE",
-                 src=extracted_dir,
-                 dst=os.path.join(self.package_folder, "licenses"),
-                 keep_path=False)
+            copy(
+                self,
+                "LICENSE",
+                src=extracted_dir,
+                dst=os.path.join(self.package_folder, "licenses"),
+                keep_path=False,
+            )
 
     def package(self):
         if self._is_source_build():
@@ -423,10 +466,12 @@ Cflags: -I${{includedir}}
 
         # GPU-specific libraries and defines
         if gpu == "cuda":
-            self.cpp_info.libs.extend([
-                "onnxruntime_providers_shared",
-                "onnxruntime_providers_cuda",
-            ])
+            self.cpp_info.libs.extend(
+                [
+                    "onnxruntime_providers_shared",
+                    "onnxruntime_providers_cuda",
+                ]
+            )
             self.cpp_info.defines = ["YAMS_ONNX_CUDA_ENABLED=1"]
         elif gpu == "directml":
             self.cpp_info.libs.append("onnxruntime_providers_dml")

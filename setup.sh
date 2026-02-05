@@ -440,18 +440,21 @@ else
       elif command -v rocm-smi >/dev/null 2>&1; then
         ROCM_PATH="$(dirname "$(dirname "$(command -v rocm-smi)")")"
       fi
-      # Check if MIGraphX is installed
-      if [[ -f "${ROCM_PATH}/lib/libmigraphx.so" ]]; then
+      # Check if MIGraphX is installed (ROCm 7.x uses lib/migraphx/lib/)
+      if [[ -f "${ROCM_PATH}/lib/libmigraphx.so" ]] || [[ -f "${ROCM_PATH}/lib/migraphx/lib/libmigraphx.so" ]] || [[ -f "${ROCM_PATH}/lib/libmigraphx_c.so" ]]; then
         ONNX_GPU="migraphx"
         echo "ROCm + MIGraphX detected at ${ROCM_PATH}: enabling AMD GPU acceleration"
         echo "  Note: ONNX Runtime will be built from source (takes ~20-30 minutes)"
 
-        # Auto-detect GPU architecture using rocminfo
+        # Auto-detect GPU architecture using rocminfo (with timeout in case of permission issues)
         if [[ -z "${YAMS_ROCM_GPU_TARGETS:-}" ]] && command -v rocminfo >/dev/null 2>&1; then
-          DETECTED_TARGETS=$(rocminfo 2>/dev/null | grep -oP 'gfx[0-9a-z]+' | sort -u | tr '\n' ';' | sed 's/;$//')
+          DETECTED_TARGETS=$(timeout 5 rocminfo 2>/dev/null | grep -oP 'gfx[0-9a-z]+' | sort -u | tr '\n' ';' | sed 's/;$//' || true)
           if [[ -n "${DETECTED_TARGETS}" ]]; then
             export YAMS_ROCM_GPU_TARGETS="${DETECTED_TARGETS}"
             echo "  Auto-detected GPU target(s): ${DETECTED_TARGETS}"
+          else
+            echo "  Could not auto-detect GPU targets (rocminfo failed or no permission)"
+            echo "  Set YAMS_ROCM_GPU_TARGETS manually if needed (e.g., gfx1100 for RX 7900)"
           fi
         fi
       else
