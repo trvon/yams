@@ -495,6 +495,9 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
     const auto defaultSearch = TuneAdvisor::searchConcurrencyLimit();
     const auto defaultExtract = TuneAdvisor::postExtractionDefaultConcurrent();
     const auto defaultKg = TuneAdvisor::postKgDefaultConcurrent();
+    const auto defaultSymbol = TuneAdvisor::postSymbolDefaultConcurrent();
+    const auto defaultEntity = TuneAdvisor::postEntityDefaultConcurrent();
+    const auto defaultTitle = TuneAdvisor::postTitleDefaultConcurrent();
     const auto defaultEmbed = TuneAdvisor::postEmbedDefaultConcurrent();
 
     switch (level) {
@@ -505,6 +508,9 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
                 .searchConcurrency = defaultSearch,
                 .extractionConcurrency = defaultExtract,
                 .kgConcurrency = defaultKg,
+                .symbolConcurrency = defaultSymbol,
+                .entityConcurrency = defaultEntity,
+                .titleConcurrency = defaultTitle,
                 .embedConcurrency = defaultEmbed,
                 .allowModelLoads = true,
                 .allowNewIngest = true,
@@ -520,6 +526,9 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
                 .searchConcurrency = std::min(defaultSearch, std::max(1u, defaultSearch / 2)),
                 .extractionConcurrency = std::min(defaultExtract, std::max(1u, defaultExtract / 2)),
                 .kgConcurrency = std::min(defaultKg, std::max(1u, defaultKg / 2)),
+                .symbolConcurrency = std::min(defaultSymbol, std::max(1u, defaultSymbol / 2)),
+                .entityConcurrency = std::min(defaultEntity, std::max(1u, defaultEntity / 2)),
+                .titleConcurrency = std::min(defaultTitle, std::max(1u, defaultTitle / 2)),
                 .embedConcurrency = std::min(defaultEmbed, std::max(1u, defaultEmbed / 2)),
                 .allowModelLoads = false,
                 .allowNewIngest = true,
@@ -535,6 +544,9 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
                 .searchConcurrency = std::min(defaultSearch, 2u),
                 .extractionConcurrency = std::min(defaultExtract, 2u),
                 .kgConcurrency = std::min(defaultKg, 2u),
+                .symbolConcurrency = std::min(defaultSymbol, 2u),
+                .entityConcurrency = std::min(defaultEntity, 1u),
+                .titleConcurrency = std::min(defaultTitle, 2u),
                 .embedConcurrency = std::min(defaultEmbed, 1u),
                 .allowModelLoads = false,
                 .allowNewIngest = true,
@@ -548,6 +560,9 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
                 .searchConcurrency = 1,
                 .extractionConcurrency = 0,
                 .kgConcurrency = 0,
+                .symbolConcurrency = 0,
+                .entityConcurrency = 0,
+                .titleConcurrency = 0,
                 .embedConcurrency = 0,
                 .allowModelLoads = false,
                 .allowNewIngest = false,
@@ -784,6 +799,30 @@ std::uint32_t ResourceGovernor::maxKgConcurrency() const {
     }
     std::shared_lock lock(mutex_);
     return scalingCaps_.kgConcurrency;
+}
+
+std::uint32_t ResourceGovernor::maxSymbolConcurrency() const {
+    if (!TuneAdvisor::enableResourceGovernor()) {
+        return TuneAdvisor::postSymbolConcurrent();
+    }
+    std::shared_lock lock(mutex_);
+    return scalingCaps_.symbolConcurrency;
+}
+
+std::uint32_t ResourceGovernor::maxEntityConcurrency() const {
+    if (!TuneAdvisor::enableResourceGovernor()) {
+        return TuneAdvisor::postEntityConcurrent();
+    }
+    std::shared_lock lock(mutex_);
+    return scalingCaps_.entityConcurrency;
+}
+
+std::uint32_t ResourceGovernor::maxTitleConcurrency() const {
+    if (!TuneAdvisor::enableResourceGovernor()) {
+        return TuneAdvisor::postTitleConcurrent();
+    }
+    std::shared_lock lock(mutex_);
+    return scalingCaps_.titleConcurrency;
 }
 
 // ============================================================================

@@ -100,33 +100,28 @@ void TuningManager::configureOnnxConcurrencyRegistry() {
     // This should only be called once during initialization
     auto& registry = OnnxConcurrencyRegistry::instance();
 
-    // Get profile-aware settings from TuneAdvisor
-    uint32_t maxConcurrent = TuneAdvisor::onnxMaxConcurrent();
-    uint32_t glinerReserved = TuneAdvisor::onnxGlinerReserved();
-    uint32_t embedReserved = TuneAdvisor::onnxEmbedReserved();
-    uint32_t rerankerReserved = TuneAdvisor::onnxRerankerReserved();
+    // Get profile-aware settings from TuneAdvisor (already scaled for profile)
+    const uint32_t maxConcurrent = TuneAdvisor::onnxMaxConcurrent();
+    const uint32_t glinerReserved = TuneAdvisor::onnxGlinerReserved();
+    const uint32_t embedReserved = TuneAdvisor::onnxEmbedReserved();
+    const uint32_t rerankerReserved = TuneAdvisor::onnxRerankerReserved();
 
-    // Apply profile scaling to slot limits
-    // Efficient = 0.0, Balanced = 0.5, Aggressive = 1.0
-    double scale = TuneAdvisor::profileScale();
-    uint32_t scaledMax = static_cast<uint32_t>(maxConcurrent * scale);
-    scaledMax = std::max(scaledMax, 2u); // Minimum 2 slots
-
-    // Ensure scaledMax exceeds the sum of reserved slots so there is at least
-    // 1 shared slot available for non-reserved operations.
-    uint32_t totalReserved = glinerReserved + embedReserved + rerankerReserved;
-    scaledMax = std::max(scaledMax, totalReserved + 1);
+    // Ensure at least 1 shared slot beyond reserved and a hard minimum of 2.
+    const uint32_t totalReserved = glinerReserved + embedReserved + rerankerReserved;
+    const uint32_t maxSlots = std::max<uint32_t>(std::max<uint32_t>(maxConcurrent, 2u),
+                                                 totalReserved + 1);
 
     // Configure the registry
-    registry.setMaxSlots(scaledMax);
+    registry.setMaxSlots(maxSlots);
     registry.setReservedSlots(OnnxLane::Gliner, glinerReserved);
     registry.setReservedSlots(OnnxLane::Embedding, embedReserved);
     registry.setReservedSlots(OnnxLane::Reranker, rerankerReserved);
     registry.setReservedSlots(OnnxLane::Other, 0);
 
-    spdlog::info("[TuningManager] Configured OnnxConcurrencyRegistry: maxSlots={} (profile "
-                 "scale={:.1f}), reserved=[gliner={}, embed={}, reranker={}]",
-                 scaledMax, scale, glinerReserved, embedReserved, rerankerReserved);
+    spdlog::info(
+        "[TuningManager] Configured OnnxConcurrencyRegistry: maxSlots={}, reserved=[gliner={}, "
+        "embed={}, reranker={}]",
+        maxSlots, glinerReserved, embedReserved, rerankerReserved);
 }
 
 void TuningManager::tick_once() {

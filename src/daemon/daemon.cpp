@@ -589,15 +589,6 @@ void YamsDaemon::runLoop() {
                         repairCoordinator_ = std::make_unique<RepairCoordinator>(
                             serviceManager_.get(), &state_, activeFn, rcfg);
                         repairCoordinator_->start();
-                        if (serviceManager_) {
-                            serviceManager_->setPostIngestEmbedFailureCallback(
-                                [this](const std::vector<std::string>& hashes) {
-                                    std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
-                                    if (repairCoordinator_) {
-                                        repairCoordinator_->enqueueEmbeddingRepair(hashes);
-                                    }
-                                });
-                        }
                     } catch (const std::exception& e) {
                         spdlog::warn("Failed to start RepairCoordinator: {}", e.what());
                     }

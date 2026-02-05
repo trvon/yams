@@ -163,11 +163,6 @@ public:
     // Resize the worker pool to a target size; creates pool on demand.
     bool resizeWorkerPool(std::size_t target);
     PostIngestQueue* getPostIngestQueue() const { return postIngest_.get(); }
-    void setPostIngestEmbedFailureCallback(PostIngestQueue::EmbedFailureCallback callback) {
-        if (postIngest_) {
-            postIngest_->setEmbedFailureCallback(std::move(callback));
-        }
-    }
     struct SearchLoadMetrics {
         std::uint32_t active{0};
         std::uint32_t queued{0};

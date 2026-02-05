@@ -94,10 +94,6 @@ public:
     bool tryEnqueue(const Task& t);
     bool tryEnqueue(Task&& t);
 
-    /// Dispatch an embedding job for already-extracted documents (e.g. fast-track).
-    bool dispatchEmbedJobWithRetry(const std::vector<std::string>& hashes, bool recordOnFailure,
-                                   bool notifyOnFailure);
-
     std::size_t size() const;
     std::size_t processed() const { return processed_.load(); }
     std::size_t failed() const { return failed_.load(); }
@@ -218,14 +214,7 @@ public:
         drainCallback_ = std::move(callback);
     }
 
-    // Callback for embedding dispatch failures (e.g., to trigger repair coordinator)
-    using EmbedFailureCallback = std::function<void(const std::vector<std::string>&)>;
-    void setEmbedFailureCallback(EmbedFailureCallback callback) {
-        std::lock_guard<std::mutex> lock(embedFailureCallbackMutex_);
-        embedFailureCallback_ = std::move(callback);
-    }
-
-private:
+    private:
     boost::asio::awaitable<void> channelPoller();
     boost::asio::awaitable<void> kgPoller();
     boost::asio::awaitable<void> symbolPoller();
@@ -255,7 +244,6 @@ private:
     void processSymbolExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& language,
                                       std::shared_ptr<std::vector<std::byte>> contentBytes);
-    void processEmbeddingBatch(const std::vector<std::string>& hashes);
     void dispatchToKgChannel(const std::string& hash, int64_t docId, const std::string& filePath,
                              std::vector<std::string> tags,
                              std::shared_ptr<std::vector<std::byte>> contentBytes);
@@ -280,9 +268,6 @@ private:
     void checkDrainAndSignal(); // Check if drained and signal corpus stats stale
     std::string deriveTitle(const std::string& text, const std::string& fileName,
                             const std::string& mimeType, const std::string& extension) const;
-    void recordEmbedRetry(const std::vector<std::string>& hashes);
-    void flushEmbedRetriesOnDrain();
-    void notifyEmbedFailure(const std::vector<std::string>& hashes);
     void refreshStageAvailability();
     void logStageAvailabilitySnapshot() const;
 
@@ -338,11 +323,6 @@ private:
 
     mutable std::mutex drainCallbackMutex_;
     DrainCallback drainCallback_;
-
-    mutable std::mutex embedFailureCallbackMutex_;
-    EmbedFailureCallback embedFailureCallback_;
-    mutable std::mutex embedRetryMutex_;
-    std::deque<std::string> embedRetryHashes_;
 
     search::EntityExtractionFunc titleExtractor_;
     KGWriteQueue* kgWriteQueue_{nullptr};

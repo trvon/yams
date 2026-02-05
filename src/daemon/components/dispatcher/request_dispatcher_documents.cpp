@@ -605,11 +605,6 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                                 response.message = "Document stored and extracted (fast-track).";
                                 response.extractionStatus = "success";
 
-                                // Dispatch embed job so fast-tracked docs get embeddings
-                                if (serviceManager_ && serviceManager_->getPostIngestQueue()) {
-                                    serviceManager_->getPostIngestQueue()
-                                        ->dispatchEmbedJobWithRetry({serviceResp.hash}, true, true);
-                                }
                             }
                         }
                     }

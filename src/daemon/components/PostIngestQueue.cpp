@@ -270,9 +270,6 @@ PostIngestQueue::~PostIngestQueue() {
     for (int i = 0; i < maxWaitMs && totalInFlight() > 0; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    // Workers may still be executing post-processing (e.g., flushEmbedRetriesOnDrain)
-    // after decrementing in-flight counters. Acquire mutex to synchronize with them.
-    std::lock_guard<std::mutex> lock(embedRetryMutex_);
 }
 
 void PostIngestQueue::start() {
@@ -537,142 +534,9 @@ void PostIngestQueue::checkDrainAndSignal() {
                 cb();
             }
 
-            flushEmbedRetriesOnDrain();
-
             spdlog::debug(
                 "[PostIngestQueue] Queue drained, signaled corpus stats and drain callback");
         }
-    }
-}
-
-void PostIngestQueue::recordEmbedRetry(const std::vector<std::string>& hashes) {
-    if (hashes.empty()) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(embedRetryMutex_);
-    for (const auto& h : hashes) {
-        embedRetryHashes_.push_back(h);
-    }
-}
-
-void PostIngestQueue::notifyEmbedFailure(const std::vector<std::string>& hashes) {
-    if (hashes.empty()) {
-        return;
-    }
-    EmbedFailureCallback cb;
-    {
-        std::lock_guard<std::mutex> lock(embedFailureCallbackMutex_);
-        cb = embedFailureCallback_;
-    }
-    if (cb) {
-        cb(hashes);
-    }
-}
-
-bool PostIngestQueue::dispatchEmbedJobWithRetry(const std::vector<std::string>& hashes,
-                                                bool recordOnFailure, bool notifyOnFailure) {
-    if (hashes.empty()) {
-        return true;
-    }
-
-    try {
-        const std::size_t capacity = TuneAdvisor::embedChannelCapacity();
-        auto embedChannel =
-            InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-                "embed_jobs", capacity);
-
-        if (!embedChannel) {
-            if (recordOnFailure) {
-                recordEmbedRetry(hashes);
-            }
-            if (notifyOnFailure) {
-                notifyEmbedFailure(hashes);
-            }
-            for (std::size_t i = 0; i < hashes.size(); ++i) {
-                InternalEventBus::instance().incEmbedDropped();
-            }
-            spdlog::warn("[PostIngestQueue] Embed channel unavailable for batch of {} hashes",
-                         hashes.size());
-            return false;
-        }
-
-        InternalEventBus::EmbedJob job;
-        job.hashes = hashes;
-        job.batchSize = static_cast<uint32_t>(hashes.size());
-        job.skipExisting = true;
-        job.modelName = "";
-
-        constexpr int maxRetries = 5;
-        constexpr auto kEmbedPushTimeout = std::chrono::milliseconds(100);
-        auto backoff = std::chrono::milliseconds(50);
-        constexpr auto maxBackoff = std::chrono::milliseconds(1000);
-
-        bool queued = false;
-        for (int attempt = 0; attempt <= maxRetries; ++attempt) {
-            if (embedChannel->push_wait(job, kEmbedPushTimeout)) {
-                queued = true;
-                break;
-            }
-            if (attempt < maxRetries) {
-                std::this_thread::sleep_for(backoff);
-                backoff = std::min(backoff * 2, maxBackoff);
-            }
-        }
-
-        if (queued) {
-            for (std::size_t i = 0; i < hashes.size(); ++i) {
-                InternalEventBus::instance().incEmbedQueued();
-            }
-            spdlog::debug("[PostIngestQueue] Dispatched embedding job for {} hashes",
-                          hashes.size());
-            return true;
-        }
-
-        if (recordOnFailure) {
-            recordEmbedRetry(hashes);
-        }
-        if (notifyOnFailure) {
-            notifyEmbedFailure(hashes);
-        }
-        for (std::size_t i = 0; i < hashes.size(); ++i) {
-            InternalEventBus::instance().incEmbedDropped();
-        }
-        spdlog::warn("[PostIngestQueue] Embed channel full after retries, dropping batch of {} "
-                     "hashes",
-                     hashes.size());
-        return false;
-    } catch (const std::exception& e) {
-        spdlog::error("[PostIngestQueue] Embedding batch dispatch failed: {}", e.what());
-        return false;
-    }
-}
-
-void PostIngestQueue::flushEmbedRetriesOnDrain() {
-    std::vector<std::string> pending;
-    {
-        std::lock_guard<std::mutex> lock(embedRetryMutex_);
-        if (embedRetryHashes_.empty()) {
-            return;
-        }
-        pending.assign(embedRetryHashes_.begin(), embedRetryHashes_.end());
-        embedRetryHashes_.clear();
-    }
-
-    const std::size_t batchSize = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
-    std::vector<std::string> batch;
-    batch.reserve(batchSize);
-
-    for (const auto& hash : pending) {
-        batch.push_back(hash);
-        if (batch.size() >= batchSize) {
-            if (!dispatchEmbedJobWithRetry(batch, true, true)) {
-                // If dispatch fails again, keep the hashes queued for repair.
-            }
-            batch.clear();
-        }
-    }
-    if (!batch.empty()) {
-        (void)dispatchEmbedJobWithRetry(batch, true, true);
     }
 }
 
@@ -921,9 +785,6 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     }
 
     // Phase 4: DISPATCH - send successful documents to channels
-    const std::size_t embedBatchThreshold = TuneAdvisor::postIngestBatchSize();
-    std::vector<std::string> embeddingHashes;
-    embeddingHashes.reserve(successes.size() + fallbackTasks.size());
 
     auto getOrLoadContent =
         [this, &contentByHash](const std::string& hash) -> std::shared_ptr<std::vector<std::byte>> {
@@ -966,11 +827,6 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
                                    prepared.fileName, prepared.filePath, prepared.language,
                                    prepared.mimeType);
         }
-        embeddingHashes.push_back(prepared.hash);
-        if (embeddingHashes.size() >= embedBatchThreshold) {
-            processEmbeddingBatch(embeddingHashes);
-            embeddingHashes.clear();
-        }
         processed_++;
         InternalEventBus::instance().incPostConsumed();
     }
@@ -980,11 +836,6 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         try {
             processMetadataStage(taskPtr->hash, taskPtr->mime, std::nullopt, &kEmptyTags,
                                  symbolExtensionMap, entityProviders);
-            embeddingHashes.push_back(taskPtr->hash);
-            if (embeddingHashes.size() >= embedBatchThreshold) {
-                processEmbeddingBatch(embeddingHashes);
-                embeddingHashes.clear();
-            }
             processed_++;
             InternalEventBus::instance().incPostConsumed();
         } catch (const std::exception& e) {
@@ -992,11 +843,6 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
                           e.what());
             failed_++;
         }
-    }
-
-    // Dispatch any remaining embedding hashes
-    if (!embeddingHashes.empty()) {
-        processEmbeddingBatch(embeddingHashes);
     }
 }
 
@@ -1141,7 +987,6 @@ void PostIngestQueue::processTask(const std::string& hash, const std::string& mi
         // If metadata lookup didn't find a document, still skip per-doc tag query.
         static const std::vector<std::string> kEmptyTags;
         processMetadataStage(hash, mime, info, info ? &tags : &kEmptyTags, {}, {});
-        processEmbeddingBatch(std::vector<std::string>{hash});
         processed_++;
         InternalEventBus::instance().incPostConsumed();
     } catch (const std::exception& e) {
@@ -1421,14 +1266,6 @@ void PostIngestQueue::processKnowledgeGraphStage(
     } catch (const std::exception& e) {
         spdlog::error("[PostIngestQueue] KG stage failed for {}: {}", hash, e.what());
     }
-}
-
-void PostIngestQueue::processEmbeddingBatch(const std::vector<std::string>& hashes) {
-    if (hashes.empty()) {
-        return;
-    }
-
-    (void)dispatchEmbedJobWithRetry(hashes, true, true);
 }
 
 void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId,

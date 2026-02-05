@@ -988,9 +988,10 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                                            static_cast<uint32_t>(shutdownState->config.maxBatch),
                                            true, std::string{}};
 
+            const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
             static std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedQ =
                 InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-                    "embed_jobs", 1024);
+                    "embed_jobs", embedCap);
 
             // Queue with backoff (goal: healthy DB, not speed)
             bool queued = co_await queueWithBackoff(embedQ, std::move(job), timer, running_,

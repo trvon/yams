@@ -29,11 +29,33 @@ using namespace yams::test;
 
 namespace {
 
+struct BenchConfig {
+    bool embeddingsEnabled{false};
+    std::string tuningProfile; // empty => use default
+    bool operator==(const BenchConfig& other) const {
+        return embeddingsEnabled == other.embeddingsEnabled && tuningProfile == other.tuningProfile;
+    }
+};
+
 // Global daemon harness for benchmark suite (setup once, reused across benchmarks)
 std::unique_ptr<DaemonHarness> g_harness;
 std::unique_ptr<daemon::DaemonClient> g_client;
 std::vector<std::string> g_test_docs;      // Hashes of test documents
 std::vector<std::string> g_test_doc_names; // Names used for by-name retrieval
+BenchConfig g_activeConfig;
+
+std::size_t benchDocCount() {
+    if (const char* env = std::getenv("YAMS_BENCH_DOC_COUNT")) {
+        try {
+            auto val = std::stoul(env);
+            if (val > 0) {
+                return val;
+            }
+        } catch (...) {
+        }
+    }
+    return 500; // Default larger dataset for benchmarks
+}
 
 bool waitForSearchEngineReady(std::chrono::milliseconds timeout) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -104,12 +126,94 @@ bool waitForEmbeddingDrain(std::size_t minDocCount, std::chrono::milliseconds ti
     return false;
 }
 
+struct DrainMetrics {
+    uint64_t maxEmbedQueued{0};
+    uint64_t maxEmbedInflight{0};
+    uint64_t maxPostQueued{0};
+    uint64_t maxPostInflight{0};
+};
+
+bool waitForEmbeddingDrainWithMetrics(std::size_t minDocCount, std::chrono::milliseconds timeout,
+                                      DrainMetrics& metrics) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    uint64_t lastVectorCount = 0;
+    int stableCount = 0;
+    constexpr int stableRequired = 10;
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
+        if (!status) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+
+        const auto& st = status.value();
+        uint64_t vectorCount = 0;
+        uint64_t embedQueued = 0;
+        uint64_t embedInFlight = 0;
+        uint64_t postQueued = 0;
+        uint64_t postInFlight = 0;
+
+        if (auto it = st.requestCounts.find("vector_count"); it != st.requestCounts.end()) {
+            vectorCount = it->second;
+        }
+        if (auto it = st.requestCounts.find("embed_svc_queued"); it != st.requestCounts.end()) {
+            embedQueued = it->second;
+        }
+        if (auto it = st.requestCounts.find("embed_in_flight"); it != st.requestCounts.end()) {
+            embedInFlight = it->second;
+        }
+        if (auto it = st.requestCounts.find("post_ingest_queued"); it != st.requestCounts.end()) {
+            postQueued = it->second;
+        }
+        if (auto it = st.requestCounts.find("post_ingest_inflight"); it != st.requestCounts.end()) {
+            postInFlight = it->second;
+        }
+
+        metrics.maxEmbedQueued = std::max(metrics.maxEmbedQueued, embedQueued);
+        metrics.maxEmbedInflight = std::max(metrics.maxEmbedInflight, embedInFlight);
+        metrics.maxPostQueued = std::max(metrics.maxPostQueued, postQueued);
+        metrics.maxPostInflight = std::max(metrics.maxPostInflight, postInFlight);
+
+        const bool embedDrained = (embedQueued == 0 && embedInFlight == 0);
+        const bool postDrained = (postQueued == 0 && postInFlight == 0);
+        if (vectorCount != lastVectorCount || !embedDrained || !postDrained) {
+            stableCount = 0;
+            lastVectorCount = vectorCount;
+        } else {
+            ++stableCount;
+        }
+
+        if (st.vectorDbReady && embedDrained && postDrained && stableCount >= stableRequired) {
+            return vectorCount > 0 || minDocCount == 0;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    return false;
+}
+
 // Setup: Start daemon and add test documents
-void SetupBenchmarkSuite() {
-    if (g_harness)
-        return; // Already initialized
+void SetupBenchmarkSuite(const BenchConfig& config = {}) {
+    if (g_harness && g_activeConfig == config)
+        return; // Already initialized with same config
+
+    g_client.reset();
+    g_harness.reset();
+    g_test_docs.clear();
+    g_test_doc_names.clear();
+    g_activeConfig = config;
 
     std::cout << "\n=== Setting up benchmark environment ===\n";
+
+    // Apply tuning profile/env knobs before daemon start
+    if (!config.tuningProfile.empty()) {
+        ::setenv("YAMS_TUNING_PROFILE", config.tuningProfile.c_str(), 1);
+        std::cout << "Using tuning profile: " << config.tuningProfile << "\n";
+    } else {
+        ::unsetenv("YAMS_TUNING_PROFILE");
+    }
+    ::setenv("YAMS_BENCH_ENABLE_EMBEDDINGS", config.embeddingsEnabled ? "1" : "0", 1);
 
     // Start daemon
     g_harness = std::make_unique<DaemonHarness>();
@@ -132,14 +236,19 @@ void SetupBenchmarkSuite() {
     }();
 
     // Add test documents (small set for benchmarking)
-    std::cout << "Adding test documents...\n";
-    for (int i = 0; i < 50; ++i) {
+    const auto docCount = static_cast<int>(benchDocCount());
+    std::cout << "Adding test documents (" << docCount << ")...\n";
+    for (int i = 0; i < docCount; ++i) {
         const std::string docName = "test_doc_" + std::to_string(i) + ".txt";
         auto path = g_harness->dataDir() / docName;
         std::ofstream ofs(path);
         ofs << "Test document " << i << "\n";
         ofs << "This is sample content for performance benchmarking.\n";
         ofs << "Document ID: " << i << "\n";
+        // Add some variability to increase corpus size
+        ofs << "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\n";
+        ofs << "Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.\n";
+        ofs << "Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.\n";
         ofs.close();
 
         // Add via daemon
@@ -172,9 +281,14 @@ void SetupBenchmarkSuite() {
             timeout = std::chrono::milliseconds(
                 static_cast<std::chrono::milliseconds::rep>(std::stoll(env)));
         }
-        if (!waitForEmbeddingDrain(g_test_docs.size(), timeout)) {
+        DrainMetrics metrics;
+        if (!waitForEmbeddingDrainWithMetrics(g_test_docs.size(), timeout, metrics)) {
             std::cerr << "WARNING: Embedding drain timeout; proceeding anyway.\n";
         }
+        std::cout << "Embedding drain observed peaks: embedQueued=" << metrics.maxEmbedQueued
+                  << " embedInflight=" << metrics.maxEmbedInflight
+                  << " postQueued=" << metrics.maxPostQueued
+                  << " postInflight=" << metrics.maxPostInflight << "\n";
     }
 
     std::cout << "Setup complete: " << g_test_docs.size() << " documents added\n\n";
@@ -183,6 +297,11 @@ void SetupBenchmarkSuite() {
 void TeardownBenchmarkSuite() {
     g_client.reset();
     g_harness.reset();
+    g_test_docs.clear();
+    g_test_doc_names.clear();
+    g_activeConfig = {};
+    ::unsetenv("YAMS_TUNING_PROFILE");
+    ::unsetenv("YAMS_BENCH_ENABLE_EMBEDDINGS");
 }
 
 } // anonymous namespace
@@ -369,6 +488,86 @@ static void BM_RetrievalService_Search_Keyword(benchmark::State& state) {
                   << "ms exceeds 500ms target\n";
     }
 }
+
+// Benchmark: Exercise post-ingest queue under configured concurrency limits
+// This benchmark ingests a batch of documents while tracking peak queue/inflight
+// counts reported by the daemon. It surfaces whether tuning caps throttle
+// progress (e.g., when profiles change or caps are too low).
+static void BM_PostIngest_Throughput(benchmark::State& state) {
+#ifdef TRACY_ENABLE
+    ZoneScopedN("BM_PostIngest_Throughput");
+#endif
+
+    // Configure harness per-iteration (profile & embeddings)
+    BenchConfig cfg;
+    cfg.embeddingsEnabled = state.range(1) != 0;
+    switch (state.range(2)) {
+    case 1: cfg.tuningProfile = "Efficient"; break;
+    case 2: cfg.tuningProfile = "Balanced"; break;
+    case 3: cfg.tuningProfile = "Aggressive"; break;
+    default: cfg.tuningProfile.clear(); break; // default profile
+    }
+    SetupBenchmarkSuite(cfg);
+
+    // Small batch per iteration to keep runtime reasonable
+    const int batchSize = static_cast<int>(state.range(0));
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        // Create fresh files for this iteration
+        std::vector<std::filesystem::path> paths;
+        paths.reserve(batchSize);
+        for (int i = 0; i < batchSize; ++i) {
+            const std::string docName = "bench_pi_" + std::to_string(i) + "_" +
+                std::to_string(state.iterations()) + ".txt";
+            auto path = g_harness->dataDir() / docName;
+            std::ofstream ofs(path);
+            ofs << "Post-ingest bench doc " << i << " iteration " << state.iterations() << "\n";
+            ofs << std::string(1024, 'x') << "\n";
+            ofs.close();
+            paths.push_back(path);
+        }
+
+        app::services::DocumentIngestionService docSvc;
+        app::services::AddOptions opts;
+        opts.socketPath = g_harness->socketPath().string();
+        opts.explicitDataDir = g_harness->dataDir().string();
+        opts.noEmbeddings = true; // Focus on post-ingest stages
+
+        DrainMetrics metrics;
+        state.ResumeTiming();
+        // Fire the batch
+        for (auto& path : paths) {
+            opts.path = path.string();
+            auto result = docSvc.addViaDaemon(opts);
+            benchmark::DoNotOptimize(result);
+        }
+
+        // Wait for post-ingest queue to drain to capture peak queue sizes
+        state.PauseTiming();
+        auto timeout = std::chrono::milliseconds(120000);
+        waitForEmbeddingDrainWithMetrics(0, timeout, metrics);
+
+        state.counters["max_embed_queued"] = static_cast<double>(metrics.maxEmbedQueued);
+        state.counters["max_embed_inflight"] = static_cast<double>(metrics.maxEmbedInflight);
+        state.counters["max_post_queued"] = static_cast<double>(metrics.maxPostQueued);
+        state.counters["max_post_inflight"] = static_cast<double>(metrics.maxPostInflight);
+    }
+}
+// Args: batchSize, embeddings(0/1), profile(0=default,1=Efficient,2=Balanced,3=Aggressive)
+BENCHMARK(BM_PostIngest_Throughput)
+    ->Args({10, 0, 0})
+    ->Args({10, 0, 1})
+    ->Args({10, 0, 2})
+    ->Args({10, 0, 3})
+    ->Args({25, 0, 0})
+    ->Args({25, 0, 2})
+    ->Args({25, 0, 3})
+    ->Args({50, 0, 0})
+    ->Args({50, 0, 2})
+    ->Args({50, 1, 2})
+    ->Args({25, 1, 2})
+    ->Args({25, 1, 3});
 
 // Benchmark: Search with fuzzy enabled (tests SymSpell expansion + FTS5)
 static void BM_RetrievalService_Search_Fuzzy(benchmark::State& state) {
