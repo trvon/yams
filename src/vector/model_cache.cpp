@@ -42,6 +42,7 @@ public:
         std::unique_lock lock(mutex_);
         cache_.clear();
         lru_list_.clear();
+        lru_positions_.clear();
         initialized_ = false;
     }
 
@@ -97,8 +98,12 @@ public:
         memory_manager_.deallocate(model_id);
         cache_.erase(it);
 
-        // Remove from LRU list
-        lru_list_.erase(std::remove(lru_list_.begin(), lru_list_.end(), model_id), lru_list_.end());
+        // Remove from LRU list via position map (O(1))
+        auto pos_it = lru_positions_.find(model_id);
+        if (pos_it != lru_positions_.end()) {
+            lru_list_.erase(pos_it->second);
+            lru_positions_.erase(pos_it);
+        }
 
         spdlog::info("Unloaded model: {}", model_id);
         return Result<void>();
@@ -217,6 +222,7 @@ private:
         std::unique_lock lock(mutex_);
         cache_[model_id] = cached;
         lru_list_.push_front(model_id);
+        lru_positions_[model_id] = lru_list_.begin();
 
         // Update stats
         stats_.total_models_loaded++;
@@ -238,6 +244,7 @@ private:
 
         // Get LRU model
         std::string model_id = lru_list_.back();
+        lru_positions_.erase(model_id);
         lru_list_.pop_back();
 
         // Remove from cache
@@ -254,9 +261,10 @@ private:
     }
 
     void updateLRU(const std::string& model_id) {
-        // Move to front of LRU list
-        lru_list_.erase(std::remove(lru_list_.begin(), lru_list_.end(), model_id), lru_list_.end());
-        lru_list_.push_front(model_id);
+        auto pos_it = lru_positions_.find(model_id);
+        if (pos_it != lru_positions_.end()) {
+            lru_list_.splice(lru_list_.begin(), lru_list_, pos_it->second);
+        }
     }
 
     size_t estimateModelMemory(const std::string& model_id) {
@@ -278,6 +286,7 @@ private:
     mutable std::shared_mutex mutex_;
     std::unordered_map<std::string, std::shared_ptr<CachedModel>> cache_;
     std::list<std::string> lru_list_;
+    std::unordered_map<std::string, std::list<std::string>::iterator> lru_positions_;
 
     mutable CacheStats stats_;
     std::atomic<bool> initialized_{false};

@@ -777,12 +777,12 @@ public:
     const VectorDatabaseConfig& getConfig() const { return config_; }
 
     std::string getLastError() const {
-        std::unique_lock<std::shared_mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
         return last_error_;
     }
 
     bool hasError() const {
-        std::unique_lock<std::shared_mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
         return has_error_;
     }
 

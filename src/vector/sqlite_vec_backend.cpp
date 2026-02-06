@@ -222,6 +222,8 @@ constexpr const char* kGetRowidsByDocumentHash =
     "SELECT rowid FROM vectors WHERE document_hash = ?";
 constexpr const char* kCountVectors = "SELECT COUNT(*) FROM vectors";
 constexpr const char* kHasEmbedding = "SELECT 1 FROM vectors WHERE document_hash = ? LIMIT 1";
+constexpr const char* kSelectFilterByRowid =
+    "SELECT document_hash, metadata FROM vectors WHERE rowid = ?";
 constexpr const char* kTableExists =
     "SELECT name FROM sqlite_master WHERE type='table' AND name='vectors'";
 
@@ -370,6 +372,8 @@ public:
         sqlite3_exec(db_, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "PRAGMA synchronous=NORMAL", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "PRAGMA cache_size=-64000", nullptr, nullptr, nullptr); // 64MB cache
+        sqlite3_exec(db_, "PRAGMA temp_store=MEMORY", nullptr, nullptr, nullptr);
+        sqlite3_exec(db_, "PRAGMA mmap_size=268435456", nullptr, nullptr, nullptr); // 256MB
 
         // Register all sqlite-vec functions: vec0 module (for V1 migration), distance functions
         // (l2, l1, cosine, hamming), utility functions (vec_length, vec_type, vec_f32, etc.),
@@ -955,6 +959,15 @@ public:
                 }
             }
 
+            // Prune edges to deleted nodes for better search quality
+            for (size_t dim : affected_dims) {
+                if (auto* hnsw = getHnswForDim(dim)) {
+                    if (hnsw->deleted_count() > 0) {
+                        hnsw->isolate_deleted();
+                    }
+                }
+            }
+
             // Check compaction for affected indices
             for (size_t dim : affected_dims) {
                 if (auto* hnsw = getHnswForDim(dim)) {
@@ -1018,28 +1031,28 @@ public:
         HNSWIndex::FilterFn filter = nullptr;
         if (document_hash || !candidate_hashes.empty() || !metadata_filters.empty()) {
             filter = [&](size_t node_id) {
-                // Look up the record
-                auto record_opt = getVectorByRowidUnlocked(static_cast<int64_t>(node_id));
-                if (!record_opt)
+                // Use lightweight lookup (only document_hash + metadata, no embedding blob)
+                auto filter_opt = getFilterDataByRowidUnlocked(static_cast<int64_t>(node_id));
+                if (!filter_opt)
                     return false;
 
-                const auto& record = *record_opt;
+                const auto& data = *filter_opt;
 
                 // Check candidate_hashes filter (tiered search narrowing)
                 if (!candidate_hashes.empty() &&
-                    candidate_hashes.find(record.document_hash) == candidate_hashes.end()) {
+                    candidate_hashes.find(data.document_hash) == candidate_hashes.end()) {
                     return false;
                 }
 
                 // Check document_hash filter (single doc)
-                if (document_hash && record.document_hash != *document_hash) {
+                if (document_hash && data.document_hash != *document_hash) {
                     return false;
                 }
 
                 // Check metadata filters
                 for (const auto& [key, value] : metadata_filters) {
-                    auto it = record.metadata.find(key);
-                    if (it == record.metadata.end() || it->second != value) {
+                    auto it = data.metadata.find(key);
+                    if (it == data.metadata.end() || it->second != value) {
                         return false;
                     }
                 }
@@ -2063,6 +2076,32 @@ private:
         return std::nullopt;
     }
 
+    // Lightweight filter data for HNSW search (avoids full record deserialization)
+    struct FilterData {
+        std::string document_hash;
+        std::map<std::string, std::string> metadata;
+    };
+
+    std::optional<FilterData> getFilterDataByRowidUnlocked(int64_t rowid) const {
+        if (!stmt_filter_by_rowid_) {
+            return std::nullopt;
+        }
+
+        sqlite3_reset(stmt_filter_by_rowid_);
+        sqlite3_bind_int64(stmt_filter_by_rowid_, 1, rowid);
+
+        if (sqlite3_step(stmt_filter_by_rowid_) == SQLITE_ROW) {
+            FilterData data;
+            data.document_hash = safeColumnText(stmt_filter_by_rowid_, 0);
+            const char* metadata_json =
+                reinterpret_cast<const char*>(sqlite3_column_text(stmt_filter_by_rowid_, 1));
+            data.metadata = deserializeMetadata(metadata_json ? metadata_json : "");
+            return data;
+        }
+
+        return std::nullopt;
+    }
+
     // Build VectorRecord from statement (current row)
     VectorRecord recordFromStatement(sqlite3_stmt* stmt) const {
         VectorRecord record;
@@ -2132,6 +2171,7 @@ private:
         sqlite3_prepare_v2(db_, kGetRowidsByDocumentHash, -1, &stmt_get_rowids_by_doc_, nullptr);
         sqlite3_prepare_v2(db_, kCountVectors, -1, &stmt_count_, nullptr);
         sqlite3_prepare_v2(db_, kHasEmbedding, -1, &stmt_has_embedding_, nullptr);
+        sqlite3_prepare_v2(db_, kSelectFilterByRowid, -1, &stmt_filter_by_rowid_, nullptr);
     }
 
     // Finalize all statements
@@ -2156,6 +2196,8 @@ private:
             sqlite3_finalize(stmt_count_);
         if (stmt_has_embedding_)
             sqlite3_finalize(stmt_has_embedding_);
+        if (stmt_filter_by_rowid_)
+            sqlite3_finalize(stmt_filter_by_rowid_);
 
         stmt_insert_ = nullptr;
         stmt_select_by_chunk_id_ = nullptr;
@@ -2167,6 +2209,7 @@ private:
         stmt_get_rowids_by_doc_ = nullptr;
         stmt_count_ = nullptr;
         stmt_has_embedding_ = nullptr;
+        stmt_filter_by_rowid_ = nullptr;
     }
 
     // Ensure HNSW indices are loaded (lazy loading)
@@ -2543,6 +2586,7 @@ private:
     sqlite3_stmt* stmt_get_rowids_by_doc_ = nullptr;
     sqlite3_stmt* stmt_count_ = nullptr;
     sqlite3_stmt* stmt_has_embedding_ = nullptr;
+    sqlite3_stmt* stmt_filter_by_rowid_ = nullptr;
 
     // Thread safety
     mutable std::shared_mutex mutex_;
