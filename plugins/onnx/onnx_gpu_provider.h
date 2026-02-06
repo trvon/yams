@@ -30,7 +30,7 @@ inline void appendGpuProvider(Ort::SessionOptions& opts) {
     if (has("CoreMLExecutionProvider")) {
         try {
             std::unordered_map<std::string, std::string> coreml_opts;
-            coreml_opts["MLComputeUnits"] = "All";
+            coreml_opts["MLComputeUnits"] = "ALL";
             opts.AppendExecutionProvider("CoreML", coreml_opts);
             static std::atomic<bool> logged_coreml{false};
             if (!logged_coreml.exchange(true)) {

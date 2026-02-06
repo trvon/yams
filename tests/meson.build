@@ -916,6 +916,15 @@ if catch2_dep.found()
       build_rpath: ':'.join(_test_rpaths),
       install: false,
     )
+
+    catch2_gpu_provider_exe = executable('catch2_gpu_provider',
+      files('unit/daemon/onnx_gpu_provider_catch2_test.cpp'),
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep] + test_deps + [onnx_dep],
+      cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+      build_rpath: ':'.join(_test_rpaths),
+      install: false,
+    )
   endif
 
   catch2_plugin_infrastructure_exe = executable('catch2_plugin_infrastructure',
@@ -2443,6 +2452,15 @@ if catch2_dep.found()
         'YAMS_TEST_MODE': '1',
       },
       timeout: 60,
+      is_parallel: true
+    )
+
+    test('gpu_provider_coreml', catch2_gpu_provider_exe,
+      suite: ['catch2', 'unit', 'daemon', 'gpu'],
+      env: {
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      },
+      timeout: 30,
       is_parallel: true
     )
   endif

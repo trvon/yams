@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/resource/gpu_info.h>
 
 #include <cmath>
 #include <cstdlib>
@@ -457,6 +458,85 @@ TEST_CASE("gpuAwareBatchSize returns sensible values", "[daemon][tune][advisor][
         CHECK(TuneAdvisor::gpuAwareBatchSize(0, 768) == 42);
     }
 }
+
+// =============================================================================
+// GPU Detection Tests (Apple Silicon sysctl path)
+// =============================================================================
+
+TEST_CASE("detectGpu returns consistent cached result", "[daemon][gpu][catch2]") {
+    using namespace yams::daemon::resource;
+
+    const auto& first = detectGpu();
+    const auto& second = detectGpu();
+
+    // std::call_once caching: same static object returned each time
+    CHECK(&first == &second);
+
+    // Basic structural sanity: fields are default-initialized or populated
+    CHECK(first.detected == second.detected);
+    CHECK(first.name == second.name);
+    CHECK(first.vramBytes == second.vramBytes);
+    CHECK(first.provider == second.provider);
+}
+
+#if defined(__APPLE__) && defined(__aarch64__)
+TEST_CASE("detectAppleSiliconGpu populates all fields", "[daemon][gpu][catch2]") {
+    using namespace yams::daemon::resource;
+
+    GpuInfo info;
+    bool result = detail::detectAppleSiliconGpu(info);
+
+    CHECK(result == true);
+    CHECK(info.detected == true);
+    CHECK(info.provider == "coreml");
+
+    // Brand string should contain "Apple" (e.g. "Apple M3 Max")
+    CHECK(info.name.find("Apple") != std::string::npos);
+
+    // VRAM should be populated
+    CHECK(info.vramBytes > 0);
+
+    // Cross-check: read hw.memsize via sysctl, verify vramBytes ≈ 75% of memsize
+    uint64_t memsize = 0;
+    size_t len = sizeof(memsize);
+    REQUIRE(detail::sysctlbyname("hw.memsize", &memsize, &len, nullptr, 0) == 0);
+    REQUIRE(memsize > 0);
+
+    uint64_t expected = static_cast<uint64_t>(static_cast<double>(memsize) * 0.75);
+    double ratio = static_cast<double>(info.vramBytes) / static_cast<double>(expected);
+    CHECK(ratio == Catch::Approx(1.0).margin(0.01));
+
+    // Sanity bounds: > 1 GB and < 1 TB
+    constexpr uint64_t oneGB = 1024ULL * 1024ULL * 1024ULL;
+    constexpr uint64_t oneTB = 1024ULL * oneGB;
+    CHECK(info.vramBytes > oneGB);
+    CHECK(info.vramBytes < oneTB);
+}
+#endif // __APPLE__ && __aarch64__
+
+#if defined(__APPLE__)
+TEST_CASE("sysctlString returns values for valid keys", "[daemon][gpu][catch2]") {
+    using namespace yams::daemon::resource::detail;
+
+    CHECK_FALSE(sysctlString("hw.machine").empty());
+    CHECK_FALSE(sysctlString("machdep.cpu.brand_string").empty());
+
+    // Invalid key should return empty gracefully (no crash)
+    CHECK(sysctlString("totally.invalid.key.xyz").empty());
+}
+#endif // __APPLE__
+
+#if defined(__APPLE__) && !defined(__aarch64__)
+TEST_CASE("detectAppleSiliconGpu returns false on non-ARM64", "[daemon][gpu][catch2]") {
+    using namespace yams::daemon::resource;
+
+    GpuInfo info;
+    bool result = detail::detectAppleSiliconGpu(info);
+
+    CHECK(result == false);
+    CHECK(info.detected == false);
+}
+#endif // __APPLE__ && !__aarch64__
 
 // =============================================================================
 // PostIngestQueue Profile-Aware Concurrency Tests

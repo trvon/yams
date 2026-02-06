@@ -98,11 +98,15 @@ inline void detectLinuxGpu(GpuInfo& info) {
                     fs::path devicePath = entry.path() / "device" / "device";
                     if (fs::exists(vendorPath)) {
                         std::ifstream vf2(vendorPath);
-                        if (vf2) { std::getline(vf2, vendor); }
+                        if (vf2) {
+                            std::getline(vf2, vendor);
+                        }
                     }
                     if (fs::exists(devicePath)) {
                         std::ifstream df(devicePath);
-                        if (df) { std::getline(df, device); }
+                        if (df) {
+                            std::getline(df, device);
+                        }
                     }
                     if (!vendor.empty() || !device.empty()) {
                         auto strip0x = [](std::string& s) {
@@ -158,7 +162,9 @@ inline void detectLinuxGpu(GpuInfo& info) {
     // NVIDIA VRAM: nvidia-smi (proc information file does NOT contain memory info)
     if (info.detected && info.vramBytes == 0) {
         try {
-            FILE* pipe = popen("nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null", "r");
+            FILE* pipe = popen(
+                "nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null",
+                "r");
             if (pipe) {
                 char buf[128];
                 if (fgets(buf, sizeof(buf), pipe)) {
@@ -166,88 +172,126 @@ inline void detectLinuxGpu(GpuInfo& info) {
                         uint64_t mib = std::stoull(buf);
                         if (mib > 0)
                             info.vramBytes = mib * 1024ULL * 1024ULL;
-                    } catch (...) {}
+                    } catch (...) {
+                    }
                 }
                 pclose(pipe);
             }
-        } catch (...) {}
+        } catch (...) {
+        }
     }
 }
 #endif // __linux__
 
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
+
+// Helper: read a sysctl string value by name. Returns empty on failure.
+inline std::string sysctlString(const char* name) {
+    size_t len = 0;
+    if (sysctlbyname(name, nullptr, &len, nullptr, 0) != 0 || len == 0)
+        return {};
+    std::string val(len, '\0');
+    if (sysctlbyname(name, &val[0], &len, nullptr, 0) != 0)
+        return {};
+    // Strip trailing NUL (sysctl includes it in len)
+    while (!val.empty() && val.back() == '\0')
+        val.pop_back();
+    return val;
+}
+
+// Tier 1: Pure sysctl detection for Apple Silicon (~0ms, no subprocess).
+// Returns true if Apple Silicon was detected (caller can skip slower paths).
+inline bool detectAppleSiliconGpu(GpuInfo& info) {
+    // Check for ARM64 (Apple Silicon)
+    int64_t arm64 = 0;
+    size_t len = sizeof(arm64);
+    if (sysctlbyname("hw.optional.arm64", &arm64, &len, nullptr, 0) != 0 || arm64 == 0)
+        return false;
+
+    // Chip name: e.g. "Apple M3 Max"
+    info.name = sysctlString("machdep.cpu.brand_string");
+    if (info.name.empty())
+        info.name = "Apple Silicon GPU";
+
+    // Total system memory → estimate 75% as GPU-accessible (unified memory).
+    // Matches Metal's recommendedMaxWorkingSetSize heuristic.
+    uint64_t memsize = 0;
+    len = sizeof(memsize);
+    if (sysctlbyname("hw.memsize", &memsize, &len, nullptr, 0) == 0 && memsize > 0) {
+        info.vramBytes = static_cast<uint64_t>(static_cast<double>(memsize) * 0.75);
+    }
+
+    info.provider = "coreml";
+    info.detected = true;
+    return true;
+}
+
 inline void detectMacGpu(GpuInfo& info) {
-    // macOS: Use system_profiler to get GPU info
-    // We avoid linking Metal framework directly to keep this header-only
-    // system_profiler SPDisplaysDataType outputs human-readable text
-    // Parse VRAM from lines like: "VRAM (Total):  16 GB"
+    // Tier 1: Apple Silicon via sysctl (instant, works in sandboxed envs)
+    if (detectAppleSiliconGpu(info))
+        return;
+
+    // Tier 2: Intel Macs — use system_profiler for discrete GPU VRAM
     try {
-        // Use popen for simplicity (runs once at startup)
         FILE* pipe = popen("system_profiler SPDisplaysDataType 2>/dev/null", "r");
-        if (!pipe)
-            return;
-
-        char buf[512];
-        std::string output;
-        while (fgets(buf, sizeof(buf), pipe)) {
-            output += buf;
-        }
-        pclose(pipe);
-
-        // Parse chipset/model name
-        auto chipPos = output.find("Chipset Model:");
-        if (chipPos == std::string::npos)
-            chipPos = output.find("Chip:");
-        if (chipPos != std::string::npos) {
-            auto lineEnd = output.find('\n', chipPos);
-            auto colonPos = output.find(':', chipPos);
-            if (colonPos != std::string::npos && lineEnd != std::string::npos) {
-                auto nameStart = output.find_first_not_of(" \t", colonPos + 1);
-                if (nameStart < lineEnd)
-                    info.name = output.substr(nameStart, lineEnd - nameStart);
+        if (pipe) {
+            char buf[512];
+            std::string output;
+            while (fgets(buf, sizeof(buf), pipe)) {
+                output += buf;
             }
-        }
+            pclose(pipe);
 
-        // Parse VRAM
-        auto vramPos = output.find("VRAM");
-        if (vramPos != std::string::npos) {
-            auto lineEnd = output.find('\n', vramPos);
-            std::string vramLine = output.substr(vramPos, lineEnd - vramPos);
-            // Find number and unit
-            auto numPos = vramLine.find_first_of("0123456789");
-            if (numPos != std::string::npos) {
-                try {
-                    uint64_t val = std::stoull(vramLine.substr(numPos));
-                    // Check unit (GB vs MB)
-                    if (vramLine.find("GB") != std::string::npos)
-                        val *= 1024ULL * 1024ULL * 1024ULL;
-                    else if (vramLine.find("MB") != std::string::npos)
-                        val *= 1024ULL * 1024ULL;
-                    info.vramBytes = val;
-                    info.detected = true;
-                    info.provider = "coreml";
-                } catch (...) {
+            // Parse chipset/model name
+            auto chipPos = output.find("Chipset Model:");
+            if (chipPos == std::string::npos)
+                chipPos = output.find("Chip:");
+            if (chipPos != std::string::npos) {
+                auto lineEnd = output.find('\n', chipPos);
+                auto colonPos = output.find(':', chipPos);
+                if (colonPos != std::string::npos && lineEnd != std::string::npos) {
+                    auto nameStart = output.find_first_not_of(" \t", colonPos + 1);
+                    if (nameStart < lineEnd)
+                        info.name = output.substr(nameStart, lineEnd - nameStart);
                 }
             }
-        }
 
-        // Apple Silicon unified memory
-        if (!info.detected && output.find("Apple") != std::string::npos) {
-            info.detected = true;
-            info.provider = "coreml";
-            if (info.name.empty())
-                info.name = "Apple Silicon GPU";
-
-            // Estimate GPU memory budget: ~75% of system RAM
-            // (matches Metal's recommendedMaxWorkingSetSize heuristic)
-            uint64_t memsize = 0;
-            size_t len = sizeof(memsize);
-            if (sysctlbyname("hw.memsize", &memsize, &len, nullptr, 0) == 0 && memsize > 0) {
-                info.vramBytes = static_cast<uint64_t>(static_cast<double>(memsize) * 0.75);
+            // Parse VRAM
+            auto vramPos = output.find("VRAM");
+            if (vramPos != std::string::npos) {
+                auto lineEnd = output.find('\n', vramPos);
+                std::string vramLine = output.substr(vramPos, lineEnd - vramPos);
+                auto numPos = vramLine.find_first_of("0123456789");
+                if (numPos != std::string::npos) {
+                    try {
+                        uint64_t val = std::stoull(vramLine.substr(numPos));
+                        if (vramLine.find("GB") != std::string::npos)
+                            val *= 1024ULL * 1024ULL * 1024ULL;
+                        else if (vramLine.find("MB") != std::string::npos)
+                            val *= 1024ULL * 1024ULL;
+                        info.vramBytes = val;
+                        info.detected = true;
+                        info.provider = "coreml";
+                    } catch (...) {
+                    }
+                }
             }
+
+            if (info.detected)
+                return;
         }
     } catch (...) {
+    }
+
+    // Tier 3: Intel fallback — estimate from CPU brand when system_profiler fails
+    std::string cpuBrand = sysctlString("machdep.cpu.brand_string");
+    if (!cpuBrand.empty() && cpuBrand.find("Intel") != std::string::npos) {
+        info.name = "Intel Integrated Graphics";
+        // Conservative estimate for Intel Iris/UHD shared VRAM
+        info.vramBytes = 1536ULL * 1024ULL * 1024ULL; // 1.5 GB
+        info.provider = "coreml";
+        info.detected = true;
     }
 }
 #endif // __APPLE__
