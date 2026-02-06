@@ -278,6 +278,7 @@ void PostIngestQueue::start() {
     if (!stop_.load()) {
         refreshStageAvailability();
         logStageAvailabilitySnapshot();
+        initializeGradientLimiters();
         spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
         boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
         spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
@@ -589,6 +590,10 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         }
         while (inFlight_.load() < maxConcurrent && batch.size() < batchSize &&
                channel->try_pop(task)) {
+            if (!tryAcquireLimiterSlot(extractionLimiter_.get(), task.hash, "extraction")) {
+                channel->try_push(std::move(task));
+                break;
+            }
             didWork = true;
             inFlight_.fetch_add(1);
             batch.push_back(std::move(task));
@@ -597,12 +602,25 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         if (didWork && !batch.empty()) {
             wasActive_.store(true, std::memory_order_release);
             const std::size_t batchCount = batch.size();
-            boost::asio::post(coordinator_->getExecutor(),
-                              [this, batch = std::move(batch), batchCount]() mutable {
-                                  processBatch(std::move(batch));
-                                  inFlight_.fetch_sub(batchCount);
-                                  checkDrainAndSignal();
-                              });
+            // Collect hashes for limiter completion tracking
+            std::vector<std::string> batchHashes;
+            if (extractionLimiter_) {
+                batchHashes.reserve(batchCount);
+                for (const auto& t : batch) {
+                    batchHashes.push_back(t.hash);
+                }
+            }
+            boost::asio::post(
+                coordinator_->getExecutor(),
+                [this, batch = std::move(batch), batchCount,
+                 hashes = std::move(batchHashes)]() mutable {
+                    processBatch(std::move(batch));
+                    for (const auto& h : hashes) {
+                        completeJob(h, true);
+                    }
+                    inFlight_.fetch_sub(batchCount);
+                    checkDrainAndSignal();
+                });
         }
 
         if (didWork) {
@@ -1114,15 +1132,20 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
             continue;
         }
         while (kgInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
+            if (!tryAcquireLimiterSlot(kgLimiter_.get(), job.hash, "kg")) {
+                channel->try_push(std::move(job));
+                break;
+            }
             didWork = true;
             wasActive_.store(true, std::memory_order_release);
             kgInFlight_.fetch_add(1);
             boost::asio::post(coordinator_->getExecutor(),
-                              [this, hash = std::move(job.hash), docId = job.documentId,
+                              [this, hash = job.hash, docId = job.documentId,
                                filePath = std::move(job.filePath), tags = std::move(job.tags),
                                contentBytes = std::move(job.contentBytes)]() mutable {
                                   processKnowledgeGraphStage(hash, docId, filePath, tags,
                                                              std::move(contentBytes));
+                                  completeJob(hash, true);
                                   kgInFlight_.fetch_sub(1);
                                   checkDrainAndSignal();
                               });
@@ -1192,16 +1215,21 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
             continue;
         }
         while (symbolInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
+            if (!tryAcquireLimiterSlot(symbolLimiter_.get(), job.hash, "symbol")) {
+                channel->try_push(std::move(job));
+                break;
+            }
             didWork = true;
             wasActive_.store(true, std::memory_order_release);
             symbolInFlight_.fetch_add(1);
             boost::asio::post(coordinator_->getExecutor(),
-                              [this, hash = std::move(job.hash), docId = job.documentId,
+                              [this, hash = job.hash, docId = job.documentId,
                                filePath = std::move(job.filePath),
                                language = std::move(job.language),
                                contentBytes = std::move(job.contentBytes)]() mutable {
                                   processSymbolExtractionStage(hash, docId, filePath, language,
                                                                std::move(contentBytes));
+                                  completeJob(hash, true);
                                   symbolInFlight_.fetch_sub(1);
                                   checkDrainAndSignal();
                               });
@@ -1377,17 +1405,22 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
             continue;
         }
         while (entityInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
+            if (!tryAcquireLimiterSlot(entityLimiter_.get(), job.hash, "entity")) {
+                channel->try_push(std::move(job));
+                break;
+            }
             didWork = true;
             wasActive_.store(true, std::memory_order_release);
             entityInFlight_.fetch_add(1);
             auto entityExec = entityCoordinator_ ? entityCoordinator_->getExecutor()
                                                  : coordinator_->getExecutor();
-            boost::asio::post(entityExec, [this, hash = std::move(job.hash), docId = job.documentId,
+            boost::asio::post(entityExec, [this, hash = job.hash, docId = job.documentId,
                                            filePath = std::move(job.filePath),
                                            extension = std::move(job.extension),
                                            contentBytes = std::move(job.contentBytes)]() mutable {
                 processEntityExtractionStage(hash, docId, filePath, extension,
                                              std::move(contentBytes));
+                completeJob(hash, true);
                 entityInFlight_.fetch_sub(1);
                 checkDrainAndSignal();
             });
@@ -1825,18 +1858,23 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
 
             lastIdleReason = IdleReason::None;
             while (titleInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
+                if (!tryAcquireLimiterSlot(titleLimiter_.get(), job.hash, "title")) {
+                    channel->try_push(std::move(job));
+                    break;
+                }
                 didWork = true;
                 wasActive_.store(true, std::memory_order_release);
                 titleInFlight_.fetch_add(1);
                 boost::asio::post(
                     coordinator_->getExecutor(),
-                    [this, hash = std::move(job.hash), docId = job.documentId,
+                    [this, hash = job.hash, docId = job.documentId,
                      textSnippet = std::move(job.textSnippet),
                      fallbackTitle = std::move(job.fallbackTitle),
                      filePath = std::move(job.filePath), language = std::move(job.language),
                      mimeType = std::move(job.mimeType)]() {
                         processTitleExtractionStage(hash, docId, textSnippet, fallbackTitle,
                                                     filePath, language, mimeType);
+                        completeJob(hash, true);
                         titleInFlight_.fetch_sub(1);
                         checkDrainAndSignal();
                     });

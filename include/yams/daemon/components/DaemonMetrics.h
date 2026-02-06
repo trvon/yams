@@ -61,6 +61,9 @@ struct MetricsSnapshot {
     uint64_t fsmPayloadWrites{0};
     uint64_t fsmBytesSent{0};
     uint64_t fsmBytesReceived{0};
+    uint64_t fsmTimeouts{0};
+    uint64_t fsmRetries{0};
+    uint64_t fsmErrors{0};
     uint64_t muxActiveHandlers{0};
     int64_t muxQueuedBytes{0};
     uint64_t muxWriterBudgetBytes{0};
@@ -85,10 +88,6 @@ struct MetricsSnapshot {
     std::size_t postIngestQueued{0};
     std::size_t postIngestInflight{0};
     std::size_t postIngestCapacity{0};
-    // Optional per-queue sizes (for diagnostics only)
-    std::size_t postIngestQMeta{0};
-    std::size_t postIngestQKg{0};
-    std::size_t postIngestQEmb{0};
     std::size_t postIngestProcessed{0};
     std::size_t postIngestFailed{0};
     // File/directory add tracking

@@ -45,14 +45,6 @@ public:
         return s;
     }
 
-    inline void reset() noexcept {
-        totalStreams_.store(0, std::memory_order_release);
-        batchesEmitted_.store(0, std::memory_order_release);
-        keepalives_.store(0, std::memory_order_release);
-        ttfbCount_.store(0, std::memory_order_release);
-        ttfbSumMs_.store(0, std::memory_order_release);
-    }
-
 private:
     std::atomic<uint64_t> totalStreams_{0};
     std::atomic<uint64_t> batchesEmitted_{0};

@@ -2,7 +2,6 @@
 #include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/fsm_helpers.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
-#include <yams/daemon/ipc/latency_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/proto_serializer.h>
 #include <yams/daemon/ipc/request_context_registry.h>
@@ -507,6 +506,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
             while (feed_remaining > 0 && !feed_error && !should_exit) {
                 auto feed_result = reader.feed(buf.data() + feed_offset, feed_remaining);
                 stats_.bytes_received += feed_result.consumed;
+                FsmMetricsRegistry::instance().addBytesReceived(feed_result.consumed);
                 spdlog::debug("Frame reader consumed {} bytes, status={}", feed_result.consumed,
                               static_cast<int>(feed_result.status));
 

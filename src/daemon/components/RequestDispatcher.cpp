@@ -43,7 +43,6 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
-#include <yams/daemon/ipc/latency_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/request_context_registry.h>
 #include <yams/daemon/ipc/retrieval_session.h>

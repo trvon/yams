@@ -15,6 +15,8 @@
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/MetricsSnapshotRegistry.h>
+#include <yams/daemon/components/ResourceGovernor.h>
+#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -783,7 +785,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     } catch (...) {
     }
 
-    // FSM/MUX metrics (best-effort)
+    // FSM transport metrics (best-effort)
     try {
         auto fsnap = FsmMetricsRegistry::instance().snapshot();
         out.fsmTransitions = fsnap.transitions;
@@ -792,23 +794,33 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.fsmPayloadWrites = fsnap.payloadWrites;
         out.fsmBytesSent = fsnap.bytesSent;
         out.fsmBytesReceived = fsnap.bytesReceived;
-        // Tuning pool sizes
-        try {
-            out.ipcPoolSize = fsnap.ipcPoolSize;
-            out.ioPoolSize = fsnap.ioPoolSize;
-        } catch (...) {
-        }
-        // ResourceGovernor metrics
-        out.governorRssBytes = fsnap.governorRssBytes;
-        out.governorBudgetBytes = fsnap.governorBudgetBytes;
-        out.governorPressureLevel = fsnap.governorPressureLevel;
-        out.governorHeadroomPct = fsnap.governorHeadroomPct;
-        // ONNX concurrency metrics
-        out.onnxTotalSlots = fsnap.onnxTotalSlots;
-        out.onnxUsedSlots = fsnap.onnxUsedSlots;
-        out.onnxGlinerUsed = fsnap.onnxGlinerUsed;
-        out.onnxEmbedUsed = fsnap.onnxEmbedUsed;
-        out.onnxRerankerUsed = fsnap.onnxRerankerUsed;
+        out.fsmTimeouts = fsnap.timeouts;
+        out.fsmRetries = fsnap.retries;
+        out.fsmErrors = fsnap.errors;
+        out.ipcPoolSize = fsnap.ipcPoolSize;
+        out.ioPoolSize = fsnap.ioPoolSize;
+    } catch (...) {
+    }
+
+    // ResourceGovernor metrics (direct query)
+    try {
+        auto govSnap = ResourceGovernor::instance().getSnapshot();
+        out.governorRssBytes = govSnap.rssBytes;
+        out.governorBudgetBytes = govSnap.memoryBudgetBytes;
+        out.governorPressureLevel = static_cast<uint8_t>(govSnap.level);
+        out.governorHeadroomPct =
+            static_cast<uint8_t>(govSnap.scalingHeadroom * 100.0);
+    } catch (...) {
+    }
+
+    // ONNX concurrency metrics (direct query)
+    try {
+        auto onnxSnap = OnnxConcurrencyRegistry::instance().snapshot();
+        out.onnxTotalSlots = onnxSnap.totalSlots;
+        out.onnxUsedSlots = onnxSnap.usedSlots;
+        out.onnxGlinerUsed = onnxSnap.lanes[static_cast<size_t>(OnnxLane::Gliner)].used;
+        out.onnxEmbedUsed = onnxSnap.lanes[static_cast<size_t>(OnnxLane::Embedding)].used;
+        out.onnxRerankerUsed = onnxSnap.lanes[static_cast<size_t>(OnnxLane::Reranker)].used;
     } catch (...) {
     }
 

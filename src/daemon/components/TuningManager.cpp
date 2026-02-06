@@ -255,7 +255,7 @@ void TuningManager::tick_once() {
         auto* pq = sm_->getPostIngestQueue();
         if (pq) {
             const std::size_t queuedItems = pq->size();
-            (void)pq->totalInFlight();
+            [[maybe_unused]] const std::size_t currentInFlight = pq->totalInFlight();
 
             auto& bus = InternalEventBus::instance();
             const std::size_t embedQueued = bus.embedQueued();
@@ -622,23 +622,6 @@ void TuningManager::tick_once() {
         FsmMetricsRegistry::instance().setIpcPoolSize(ipcStats.current_size);
         FsmMetricsRegistry::instance().setIoPoolSize(ioStats.current_size);
         FsmMetricsRegistry::instance().setWriterBudgetBytes(writerBudget);
-        // ResourceGovernor metrics
-        FsmMetricsRegistry::instance().setGovernorRssBytes(govSnap.rssBytes);
-        FsmMetricsRegistry::instance().setGovernorBudgetBytes(govSnap.memoryBudgetBytes);
-        FsmMetricsRegistry::instance().setGovernorPressureLevel(
-            static_cast<uint8_t>(govSnap.level));
-        FsmMetricsRegistry::instance().setGovernorHeadroomPct(
-            static_cast<uint8_t>(govSnap.scalingHeadroom * 100.0));
-        // ONNX concurrency metrics
-        auto onnxSnap = OnnxConcurrencyRegistry::instance().snapshot();
-        FsmMetricsRegistry::instance().setOnnxTotalSlots(onnxSnap.totalSlots);
-        FsmMetricsRegistry::instance().setOnnxUsedSlots(onnxSnap.usedSlots);
-        FsmMetricsRegistry::instance().setOnnxGlinerUsed(
-            onnxSnap.lanes[static_cast<size_t>(OnnxLane::Gliner)].used);
-        FsmMetricsRegistry::instance().setOnnxEmbedUsed(
-            onnxSnap.lanes[static_cast<size_t>(OnnxLane::Embedding)].used);
-        FsmMetricsRegistry::instance().setOnnxRerankerUsed(
-            onnxSnap.lanes[static_cast<size_t>(OnnxLane::Reranker)].used);
 #if defined(TRACY_ENABLE)
         TracyPlot("pool.ipc.size", static_cast<double>(ipcStats.current_size));
         TracyPlot("pool.io.size", static_cast<double>(ioStats.current_size));

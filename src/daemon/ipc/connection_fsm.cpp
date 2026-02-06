@@ -474,6 +474,9 @@ void ConnectionFsm::on_readable(std::size_t) {
         impl->last_event = "readable";
         impl->metrics.header_reads_started +=
             (state_ == State::Connected || state_ == State::ReadingHeader) ? 1 : 0;
+        if (state_ == State::Connected || state_ == State::ReadingHeader) {
+            FsmMetricsRegistry::instance().incrementHeaderReads(1);
+        }
         if (impl->cfg.enable_metrics) {
             YAMS_PLOT("daemon_fsm_header_reads",
                       static_cast<int64_t>(impl->metrics.header_reads_started));
@@ -564,6 +567,7 @@ void ConnectionFsm::on_timeout([[maybe_unused]] Operation op) {
         impl->last_event = "timeout";
     if (auto* impl = impl_.get()) {
         impl->metrics.timeouts_total++;
+        FsmMetricsRegistry::instance().incrementTimeouts(1);
         if (impl->cfg.enable_metrics) {
             YAMS_PLOT("daemon_fsm_timeouts_total",
                       static_cast<int64_t>(impl->metrics.timeouts_total));
@@ -581,6 +585,7 @@ void ConnectionFsm::on_timeout([[maybe_unused]] Operation op) {
         if (impl->op_armed && impl->retries < static_cast<int>(impl->cfg.max_retries)) {
             impl->retries++;
             impl->metrics.retries_total++;
+            FsmMetricsRegistry::instance().incrementRetries(1);
             if (impl->cfg.enable_metrics) {
                 YAMS_PLOT("daemon_fsm_retries_total",
                           static_cast<int64_t>(impl->metrics.retries_total));
@@ -607,6 +612,7 @@ void ConnectionFsm::on_error(int err, const char* where) {
         impl->last_event = "error";
     if (auto* impl = impl_.get()) {
         impl->metrics.errors_total++;
+        FsmMetricsRegistry::instance().incrementErrors(1);
         impl->last_errno = err;
         if (impl->cfg.enable_metrics) {
             YAMS_PLOT("daemon_fsm_errors_total", static_cast<int64_t>(impl->metrics.errors_total));
