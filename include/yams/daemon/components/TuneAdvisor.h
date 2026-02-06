@@ -1874,6 +1874,17 @@ public:
         embedChannelCapacityOverride_.store(std::clamp(v, 256u, 65536u), std::memory_order_relaxed);
     }
 
+    // Ingest channel capacity (store_document_tasks). Clamp to post-ingest queue max to avoid
+    // unbounded buffering of document payloads under governor backpressure.
+    static uint32_t storeDocumentChannelCapacity() {
+        uint32_t base = 4096;
+        uint32_t cap = postIngestQueueMax();
+        if (cap == 0)
+            cap = base;
+        uint32_t bounded = std::min<uint32_t>(base, cap);
+        return std::max<uint32_t>(64u, bounded);
+    }
+
     // =========================================================================
     // DB Contention Management (adaptive concurrency based on lock errors)
     // =========================================================================

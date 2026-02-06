@@ -445,7 +445,9 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 // Queue for deferred processing instead of rejecting outright
                 auto channel = InternalEventBus::instance()
                                    .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
-                                       "store_document_tasks", 4096);
+                                       "store_document_tasks",
+                                       static_cast<std::size_t>(
+                                           TuneAdvisor::storeDocumentChannelCapacity()));
                 InternalEventBus::StoreDocumentTask task{req};
                 if (channel->try_push(std::move(task))) {
                     AddDocumentResponse response;
@@ -500,7 +502,9 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             if (isDir || req.recursive || !daemonReady) {
                 auto channel = InternalEventBus::instance()
                                    .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
-                                       "store_document_tasks", 4096);
+                                       "store_document_tasks",
+                                       static_cast<std::size_t>(
+                                           TuneAdvisor::storeDocumentChannelCapacity()));
                 InternalEventBus::StoreDocumentTask task{req};
                 if (channel->try_push(std::move(task))) {
                     AddDocumentResponse response;

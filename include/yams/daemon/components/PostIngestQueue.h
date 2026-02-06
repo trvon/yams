@@ -368,6 +368,7 @@ private:
                                      const std::string& fallbackTitle, const std::string& filePath,
                                      const std::string& language, const std::string& mimeType);
     std::size_t resolveChannelCapacity() const;
+    std::size_t boundedStageChannelCapacity(std::size_t defaultCap) const;
     void checkDrainAndSignal(); // Check if drained and signal corpus stats stale
     std::string deriveTitle(const std::string& text, const std::string& fileName,
                             const std::string& mimeType, const std::string& extension) const;

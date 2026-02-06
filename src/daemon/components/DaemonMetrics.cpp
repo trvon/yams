@@ -907,7 +907,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         // Deferred ingestion queue depth
         try {
             auto ch = bus.get_or_create_channel<InternalEventBus::StoreDocumentTask>(
-                "store_document_tasks", 4096);
+                "store_document_tasks",
+                static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity()));
             out.deferredQueueDepth = ch->size_approx();
         } catch (...) {
         }

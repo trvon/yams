@@ -450,6 +450,13 @@ std::size_t PostIngestQueue::resolveChannelCapacity() const {
     return cap;
 }
 
+std::size_t PostIngestQueue::boundedStageChannelCapacity(std::size_t defaultCap) const {
+    auto tuned = static_cast<std::size_t>(TuneAdvisor::postIngestQueueMax());
+    if (tuned == 0)
+        tuned = defaultCap;
+    return std::max<std::size_t>(1u, std::min(defaultCap, tuned));
+}
+
 void PostIngestQueue::checkDrainAndSignal() {
     // Check if queue is now drained (all stages idle)
     if (totalInFlight() == 0) {
@@ -589,14 +596,14 @@ std::size_t PostIngestQueue::size() const {
 }
 
 std::size_t PostIngestQueue::kgQueueDepth() const {
-    constexpr std::size_t kgChannelCapacity = 16384;
+    const std::size_t kgChannelCapacity = boundedStageChannelCapacity(16384);
     auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::KgJob>(
         "kg_jobs", kgChannelCapacity);
     return channel ? channel->size_approx() : 0;
 }
 
 std::size_t PostIngestQueue::symbolQueueDepth() const {
-    constexpr std::size_t symbolChannelCapacity = 16384;
+    const std::size_t symbolChannelCapacity = boundedStageChannelCapacity(16384);
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
             "symbol_extraction", symbolChannelCapacity);
@@ -604,7 +611,7 @@ std::size_t PostIngestQueue::symbolQueueDepth() const {
 }
 
 std::size_t PostIngestQueue::entityQueueDepth() const {
-    constexpr std::size_t entityChannelCapacity = 4096;
+    const std::size_t entityChannelCapacity = boundedStageChannelCapacity(4096);
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityExtractionJob>(
             "entity_extraction", entityChannelCapacity);
@@ -612,7 +619,7 @@ std::size_t PostIngestQueue::entityQueueDepth() const {
 }
 
 std::size_t PostIngestQueue::titleQueueDepth() const {
-    constexpr std::size_t titleChannelCapacity = 4096;
+    const std::size_t titleChannelCapacity = boundedStageChannelCapacity(4096);
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::TitleExtractionJob>(
             "title_extraction", titleChannelCapacity);
@@ -940,7 +947,7 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
                                           const std::string& filePath,
                                           std::vector<std::string> tags,
                                           std::shared_ptr<std::vector<std::byte>> contentBytes) {
-    constexpr std::size_t kgChannelCapacity = 16384;
+    const std::size_t kgChannelCapacity = boundedStageChannelCapacity(16384);
     auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::KgJob>(
         "kg_jobs", kgChannelCapacity);
 
@@ -962,7 +969,7 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
 }
 
 boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
-    constexpr std::size_t kgChannelCapacity = 16384;
+    const std::size_t kgChannelCapacity = boundedStageChannelCapacity(16384);
     auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::KgJob>(
         "kg_jobs", kgChannelCapacity);
 
@@ -991,7 +998,7 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
 }
 
 boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
-    constexpr std::size_t symbolChannelCapacity = 16384;
+    const std::size_t symbolChannelCapacity = boundedStageChannelCapacity(16384);
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
             "symbol_extraction", symbolChannelCapacity);
@@ -1025,7 +1032,7 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
 void PostIngestQueue::dispatchToSymbolChannel(
     const std::string& hash, int64_t docId, const std::string& filePath,
     const std::string& language, std::shared_ptr<std::vector<std::byte>> contentBytes) {
-    constexpr std::size_t symbolChannelCapacity = 16384;
+    const std::size_t symbolChannelCapacity = boundedStageChannelCapacity(16384);
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
             "symbol_extraction", symbolChannelCapacity);
@@ -1106,7 +1113,7 @@ void PostIngestQueue::processSymbolExtractionStage(
 void PostIngestQueue::dispatchToEntityChannel(
     const std::string& hash, int64_t docId, const std::string& filePath,
     const std::string& extension, std::shared_ptr<std::vector<std::byte>> contentBytes) {
-    constexpr std::size_t entityChannelCapacity = 4096;
+    const std::size_t entityChannelCapacity = boundedStageChannelCapacity(4096);
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityExtractionJob>(
             "entity_extraction", entityChannelCapacity);
@@ -1129,7 +1136,7 @@ void PostIngestQueue::dispatchToEntityChannel(
 }
 
 boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
-    constexpr std::size_t entityChannelCapacity = 4096;
+    const std::size_t entityChannelCapacity = boundedStageChannelCapacity(4096);
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityExtractionJob>(
             "entity_extraction", entityChannelCapacity);
@@ -1436,7 +1443,7 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
                                              const std::string& filePath,
                                              const std::string& language,
                                              const std::string& mimeType) {
-    constexpr std::size_t titleChannelCapacity = 4096;
+    const std::size_t titleChannelCapacity = boundedStageChannelCapacity(4096);
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::TitleExtractionJob>(
             "title_extraction", titleChannelCapacity);
@@ -1462,7 +1469,7 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
 }
 
 boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
-    constexpr std::size_t titleChannelCapacity = 4096;
+    const std::size_t titleChannelCapacity = boundedStageChannelCapacity(4096);
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::TitleExtractionJob>(
             "title_extraction", titleChannelCapacity);

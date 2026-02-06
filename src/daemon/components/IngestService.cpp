@@ -36,9 +36,11 @@ void IngestService::stop() {
 }
 
 boost::asio::awaitable<void> IngestService::channelPoller() {
+    const std::size_t channelCapacity =
+        static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::StoreDocumentTask>(
-            "store_document_tasks", 4096);
+            "store_document_tasks", channelCapacity);
 
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 

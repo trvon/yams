@@ -1,5 +1,6 @@
 #include <yams/daemon/ipc/socket_utils.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>

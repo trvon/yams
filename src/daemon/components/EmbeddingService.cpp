@@ -36,7 +36,12 @@ EmbeddingService::~EmbeddingService() {
 
 Result<void> EmbeddingService::initialize() {
     // Use configurable channel capacity from TuneAdvisor
-    const std::size_t capacity = TuneAdvisor::embedChannelCapacity();
+    std::size_t capacity = static_cast<std::size_t>(TuneAdvisor::embedChannelCapacity());
+    std::size_t postIngestCap = static_cast<std::size_t>(TuneAdvisor::postIngestQueueMax());
+    if (postIngestCap > 0) {
+        capacity = std::min(capacity, postIngestCap);
+    }
+    capacity = std::max<std::size_t>(256u, capacity);
     embedChannel_ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
         "embed_jobs", capacity);
 
