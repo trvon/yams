@@ -310,8 +310,8 @@ std::optional<PdfMetadata> extractMetadata(std::span<const uint8_t> data) {
 
     // Find /Info reference in trailer
     const auto* p = trailer;
-    const auto* infoRef = findBytes(p, static_cast<size_t>(end - p),
-                                    reinterpret_cast<const uint8_t*>("/Info"), 5);
+    const auto* infoRef =
+        findBytes(p, static_cast<size_t>(end - p), reinterpret_cast<const uint8_t*>("/Info"), 5);
 
     if (!infoRef) {
         return std::nullopt;

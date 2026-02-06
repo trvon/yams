@@ -10,28 +10,26 @@
 namespace yams::daemon {
 
 GradientLimiter::GradientLimiter(std::string name)
-    : name_(std::move(name))
-    , config_(Config{})  // Default config
-    , limit_(config_.initialLimit) {}
+    : name_(std::move(name)), config_(Config{}) // Default config
+      ,
+      limit_(config_.initialLimit) {}
 
 GradientLimiter::GradientLimiter(std::string name, Config config)
-    : name_(std::move(name))
-    , config_(config)
-    , limit_(config_.initialLimit) {}
+    : name_(std::move(name)), config_(config), limit_(config_.initialLimit) {}
 
 bool GradientLimiter::tryAcquire() {
     const uint32_t currentLimit = static_cast<uint32_t>(limit_.load(std::memory_order_relaxed));
     uint32_t currentInFlight = inFlight_.load(std::memory_order_relaxed);
-    
+
     // Attempt to increment in-flight
     if (currentInFlight < currentLimit) {
         if (inFlight_.compare_exchange_weak(currentInFlight, currentInFlight + 1,
-                                           std::memory_order_relaxed)) {
+                                            std::memory_order_relaxed)) {
             acquireCount_.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
     }
-    
+
     rejectCount_.fetch_add(1, std::memory_order_relaxed);
     return false;
 }
@@ -48,19 +46,19 @@ void GradientLimiter::onJobEnd() {
 void GradientLimiter::onJobComplete(std::chrono::nanoseconds rtt, bool success) {
     // Decrement in-flight
     inFlight_.fetch_sub(1, std::memory_order_relaxed);
-    
+
     if (!success) {
         // On failure, reduce limit aggressively (like TCP loss)
         double current = limit_.load(std::memory_order_relaxed);
         double newLimit = std::max(config_.minLimit, current * 0.9);
         limit_.store(newLimit, std::memory_order_relaxed);
-        
-        #ifdef TRACY_ENABLE
+
+#ifdef TRACY_ENABLE
         TracyPlot((name_ + ".limit").c_str(), newLimit);
-        #endif
+#endif
         return;
     }
-    
+
     double rttNanos = static_cast<double>(rtt.count());
     updateLimit(rttNanos);
 }
@@ -68,45 +66,44 @@ void GradientLimiter::onJobComplete(std::chrono::nanoseconds rtt, bool success) 
 void GradientLimiter::updateLimit(double rttNanos) {
     // Update sample count and check warmup
     uint64_t samples = sampleCount_.fetch_add(1, std::memory_order_relaxed) + 1;
-    
+
     if (samples >= config_.warmupSamples && inWarmup_.load(std::memory_order_relaxed)) {
         inWarmup_.store(false, std::memory_order_relaxed);
     }
-    
+
     // Update min RTT (baseline)
     double currentMin = minRtt_.load(std::memory_order_relaxed);
     if (currentMin == 0.0 || rttNanos < currentMin) {
         minRtt_.store(rttNanos, std::memory_order_relaxed);
         currentMin = rttNanos;
     }
-    
+
     // Update short-window EMA (fast response to changes)
     double prevSmoothed = smoothedRtt_.load(std::memory_order_relaxed);
     double newSmoothed;
     if (prevSmoothed == 0.0) {
         newSmoothed = rttNanos;
     } else {
-        newSmoothed = config_.smoothingAlpha * rttNanos + 
-                     (1.0 - config_.smoothingAlpha) * prevSmoothed;
+        newSmoothed =
+            config_.smoothingAlpha * rttNanos + (1.0 - config_.smoothingAlpha) * prevSmoothed;
     }
     smoothedRtt_.store(newSmoothed, std::memory_order_relaxed);
-    
+
     // Update long-window EMA (drift correction)
     double prevLong = longRtt_.load(std::memory_order_relaxed);
     double newLong;
     if (prevLong == 0.0) {
         newLong = rttNanos;
     } else {
-        newLong = config_.longWindowAlpha * rttNanos + 
-                 (1.0 - config_.longWindowAlpha) * prevLong;
+        newLong = config_.longWindowAlpha * rttNanos + (1.0 - config_.longWindowAlpha) * prevLong;
     }
     longRtt_.store(newLong, std::memory_order_relaxed);
-    
+
     // Skip adjustment during warmup
     if (inWarmup_.load(std::memory_order_relaxed)) {
         return;
     }
-    
+
     // Compute gradient: ratio of short-term to long-term RTT
     // gradient > 1.0 means short-term RTT improved (less queuing)
     // gradient < 1.0 means short-term RTT degraded (more queuing)
@@ -117,14 +114,14 @@ void GradientLimiter::updateLimit(double rttNanos) {
         gradient = 1.0;
     }
     gradient_.store(gradient, std::memory_order_relaxed);
-    
+
     // Netflix Gradient2 formula:
     // newLimit = currentLimit * gradient + queueAllowance
     // where queueAllowance = sqrt(currentLimit) for stability
     double currentLimit = limit_.load(std::memory_order_relaxed);
     double queueAllowance = std::sqrt(currentLimit);
     double newLimit = currentLimit * gradient + queueAllowance;
-    
+
     // Apply tolerance bounds
     if (gradient >= 1.0 && config_.enableProbing) {
         // RTT improving or stable - allow growth
@@ -132,19 +129,19 @@ void GradientLimiter::updateLimit(double rttNanos) {
         double maxGrowth = currentLimit * config_.tolerance;
         newLimit = std::min(newLimit, maxGrowth);
     }
-    
+
     // Clamp to bounds
     newLimit = std::clamp(newLimit, config_.minLimit, config_.maxLimit);
-    
+
     limit_.store(newLimit, std::memory_order_relaxed);
-    
-    #ifdef TRACY_ENABLE
+
+#ifdef TRACY_ENABLE
     TracyPlot((name_ + ".limit").c_str(), newLimit);
     TracyPlot((name_ + ".gradient").c_str(), gradient);
     TracyPlot((name_ + ".minRtt").c_str(), currentMin);
     TracyPlot((name_ + ".smoothedRtt").c_str(), newSmoothed);
     TracyPlot((name_ + ".longRtt").c_str(), newLong);
-    #endif
+#endif
 }
 
 GradientLimiter::Metrics GradientLimiter::metrics() const {

@@ -233,9 +233,7 @@ public:
 
 #ifdef YAMS_TESTING
     /// Test hook: expose updateScalingCaps for deterministic unit testing
-    void testing_updateScalingCaps(ResourcePressureLevel level) {
-        updateScalingCaps(level);
-    }
+    void testing_updateScalingCaps(ResourcePressureLevel level) { updateScalingCaps(level); }
 #endif
 
 private:
@@ -274,6 +272,11 @@ private:
 
     // Eviction cooldown
     std::chrono::steady_clock::time_point lastEvictionTime_{};
+
+    // /proc read cache (avoid excessive filesystem I/O when tick interval is low)
+    std::chrono::steady_clock::time_point lastProcReadTime_{};
+    std::uint64_t cachedRssBytes_{0};
+    double cachedCpuPercent_{0.0};
 
     // CPU utilization sampling state: deltas for calculating process CPU usage
     mutable std::uint64_t lastProcJiffies_{0};

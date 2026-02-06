@@ -162,7 +162,7 @@ public:
             // Surface the effective data directory so operators can verify the storage path
             try {
                 auto dd = cli_->getDataPath();
-                std::cout << "Using data directory: " << dd.string() << "\n\n";
+                std::cout << "  " << ui::key_value("Data directory", dd.string()) << "\n\n";
             } catch (...) {
                 // non-fatal
             }
@@ -181,7 +181,7 @@ public:
             }
 
             if (dryRun_) {
-                std::cout << "[DRY RUN MODE] No changes will be made\n\n";
+                std::cout << ui::status_info("[DRY RUN MODE] No changes will be made") << "\n\n";
             }
 
             bool anyRepairs = false;
@@ -281,7 +281,8 @@ public:
             if (!anyRepairs) {
                 std::cout << "No repair operations selected.\n";
             } else if (!dryRun_) {
-                std::cout << "\n✓ Repair operations completed successfully\n";
+                std::cout << "\n"
+                          << ui::status_ok("Repair operations completed successfully") << "\n";
             }
 
             std::cout << ui::horizontal_rule(60, '=') << "\n";
@@ -329,7 +330,7 @@ private:
     Result<void>
     cleanOrphanedMetadata(std::shared_ptr<api::IContentStore> store,
                           std::shared_ptr<metadata::IMetadataRepository> metadataRepo) {
-        std::cout << "Cleaning orphaned metadata entries...\n";
+        std::cout << ui::status_pending("Cleaning orphaned metadata entries...") << "\n";
 
         // Get all documents from metadata
         auto documentsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%");
@@ -371,7 +372,7 @@ private:
         progress.stop();
 
         if (orphanedCount == 0) {
-            std::cout << "  ✓ No orphaned metadata entries found\n";
+            std::cout << "  " << ui::status_ok("No orphaned metadata entries found") << "\n";
             return Result<void>();
         }
 
@@ -413,7 +414,10 @@ private:
 
             deleteProgress.stop();
 
-            std::cout << "  ✓ Cleaned " << cleanedCount << " orphaned metadata entries\n";
+            std::cout << "  "
+                      << ui::status_ok("Cleaned " + std::to_string(cleanedCount) +
+                                       " orphaned metadata entries")
+                      << "\n";
         } else {
             std::cout << "  [DRY RUN] Would clean " << orphanedCount << " orphaned entries\n";
         }
@@ -422,7 +426,9 @@ private:
     }
 
     Result<void> repairDownloads(std::shared_ptr<metadata::IMetadataRepository> metadataRepo) {
-        std::cout << "Repairing downloaded documents (tags/metadata/filenames)...\n";
+        std::cout << ui::status_pending(
+                         "Repairing downloaded documents (tags/metadata/filenames)...")
+                  << "\n";
 
         // Fetch all docs
         auto docsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%");
@@ -458,7 +464,15 @@ private:
         };
 
         size_t updated = 0;
+        ProgressIndicator dlProgress(ProgressIndicator::Style::Percentage);
+        if (docsResult.value().size() > 50) {
+            dlProgress.start("Scanning downloads");
+        }
+
+        size_t dlCurrent = 0;
+        const size_t dlTotal = docsResult.value().size();
         for (auto doc : docsResult.value()) {
+            ++dlCurrent;
             const std::string originalPath = doc.filePath;
 
             // Determine a candidate source URL
@@ -513,15 +527,23 @@ private:
                 spdlog::warn("Repair(downloads): tagging failed for id={} path='{}': {}", doc.id,
                              originalPath, e.what());
             }
+
+            if (dlTotal > 50 && dlCurrent % 10 == 0) {
+                dlProgress.update(dlCurrent, dlTotal);
+            }
         }
 
-        std::cout << "✓ Downloads repair updated " << updated << " document(s)\n";
+        dlProgress.stop();
+
+        std::cout << ui::status_ok("Downloads repair updated " + std::to_string(updated) +
+                                   " document(s)")
+                  << "\n";
         return Result<void>();
     }
 
     Result<void> repairMimeTypes(std::shared_ptr<api::IContentStore> /*store*/,
                                  std::shared_ptr<metadata::IMetadataRepository> metadataRepo) {
-        std::cout << "\nRepairing missing MIME types...\n";
+        std::cout << "\n" << ui::status_pending("Repairing missing MIME types...") << "\n";
 
         // Initialize file type detector
         detection::FileTypeDetectorConfig config;
@@ -592,7 +614,7 @@ private:
         progress.stop();
 
         if (missingMimeCount == 0) {
-            std::cout << "  ✓ All documents have valid MIME types\n";
+            std::cout << "  " << ui::status_ok("All documents have valid MIME types") << "\n";
             return Result<void>();
         }
 
@@ -632,7 +654,10 @@ private:
 
             repairProgress.stop();
 
-            std::cout << "  ✓ Repaired MIME types for " << repairedCount << " documents\n";
+            std::cout << "  "
+                      << ui::status_ok("Repaired MIME types for " + std::to_string(repairedCount) +
+                                       " documents")
+                      << "\n";
         } else {
             std::cout << "  [DRY RUN] Would repair " << missingMimeCount << " MIME types\n";
         }
@@ -641,14 +666,14 @@ private:
     }
 
     Result<void> cleanOrphanedChunks(std::shared_ptr<api::IContentStore> /*store*/) {
-        std::cout << "\nCleaning orphaned chunks...\n";
+        std::cout << "\n" << ui::status_pending("Cleaning orphaned chunks...") << "\n";
 
         namespace fs = std::filesystem;
 
         // Open refs database
         fs::path refsDbPath = cli_->getDataPath() / "storage" / "refs.db";
         if (!fs::exists(refsDbPath)) {
-            std::cout << "  No reference database found\n";
+            std::cout << "  " << ui::status_warning("No reference database found") << "\n";
             return Result<void>();
         }
 
@@ -835,7 +860,7 @@ private:
         }
 
         if (orphanedChunks.empty()) {
-            std::cout << "  ✓ No orphaned chunks found\n";
+            std::cout << "  " << ui::status_ok("No orphaned chunks found") << "\n";
             sqlite3_close(db);
             return Result<void>();
         }
@@ -913,12 +938,15 @@ private:
                 // Don't fail if we can't clean DB, we already deleted files
                 std::cout << "  Warning: Could not clean database: " << error << "\n";
             } else {
-                std::cout << "  ✓ Cleaned database entries\n";
+                std::cout << "  " << ui::status_ok("Cleaned database entries") << "\n";
             }
 
             if (deleted > 0) {
-                std::cout << "  ✓ Deleted " << deleted << " chunk files\n";
-                std::cout << "  ✓ Reclaimed " << ui::format_bytes(bytesReclaimed) << "\n";
+                std::cout << "  "
+                          << ui::status_ok("Deleted " + std::to_string(deleted) + " chunk files")
+                          << "\n";
+                std::cout << "  " << ui::status_ok("Reclaimed " + ui::format_bytes(bytesReclaimed))
+                          << "\n";
             }
 
         } else {
@@ -931,13 +959,13 @@ private:
     }
 
     Result<void> optimizeDatabase() {
-        std::cout << "\nOptimizing database...\n";
+        std::cout << "\n" << ui::status_pending("Optimizing database...") << "\n";
 
         namespace fs = std::filesystem;
         fs::path dbPath = cli_->getDataPath() / "yams.db";
 
         if (!fs::exists(dbPath)) {
-            std::cout << "  Database not found\n";
+            std::cout << "  " << ui::status_warning("Database not found") << "\n";
             return Result<void>();
         }
 
@@ -951,7 +979,8 @@ private:
                              "Failed to open database: " + std::string(sqlite3_errmsg(db))};
             }
 
-            std::cout << "  Running VACUUM (this may take a moment)...\n";
+            ui::SpinnerRunner vacuumSpinner;
+            vacuumSpinner.start("Running VACUUM...");
 
             char* errMsg = nullptr;
             // VACUUM reclaims space from deleted rows
@@ -959,18 +988,20 @@ private:
                 // Also run ANALYZE to update statistics
                 sqlite3_exec(db, "ANALYZE", nullptr, nullptr, nullptr);
 
+                vacuumSpinner.stop();
                 sqlite3_close(db);
 
                 // Check new size after vacuum
                 uint64_t newSize = fs::file_size(dbPath);
                 uint64_t saved = oldSize > newSize ? oldSize - newSize : 0;
 
-                std::cout << "  ✓ Database optimized\n";
+                std::cout << "  " << ui::status_ok("Database optimized") << "\n";
                 std::cout << "  New size: " << ui::format_bytes(newSize) << "\n";
                 if (saved > 0) {
                     std::cout << "  Space reclaimed: " << ui::format_bytes(saved) << "\n";
                 }
             } else {
+                vacuumSpinner.stop();
                 std::string error = errMsg ? errMsg : "Unknown error";
                 sqlite3_free(errMsg);
                 sqlite3_close(db);
@@ -1006,7 +1037,10 @@ private:
             } catch (...) {
             }
             if (!be.initialize(dbPath.string())) {
-                std::cout << "  ⚠ Vector DB open failed; proceeding without schema alignment\n";
+                std::cout << "  "
+                          << ui::status_warning(
+                                 "Vector DB open failed; proceeding without schema alignment")
+                          << "\n";
             } else {
                 (void)be.ensureVecLoaded();
                 auto stored = be.getStoredEmbeddingDimension();
@@ -1030,12 +1064,15 @@ private:
                                         std::to_string(targetDim) + ")? [y/N]: ")) {
                             auto cr = be.createTables(targetDim);
                             if (cr) {
-                                std::cout << "  ✓ Created vector tables (dim=" << targetDim
-                                          << ")\n";
+                                std::cout << "  "
+                                          << ui::status_ok("Created vector tables (dim=" +
+                                                           std::to_string(targetDim) + ")")
+                                          << "\n";
                             } else {
-                                std::cout
-                                    << "  ⚠ Create vector tables failed: " << cr.error().message
-                                    << "\n";
+                                std::cout << "  "
+                                          << ui::status_warning("Create vector tables failed: " +
+                                                                cr.error().message)
+                                          << "\n";
                             }
                         } else {
                             std::cout << "  Skipped creating vector tables\n";
@@ -1045,23 +1082,32 @@ private:
                                   << ")\n";
                     }
                 } else if (needRecreate) {
-                    std::cout << "  ⚠ Vector schema dimension mismatch (stored="
-                              << (stored ? std::to_string(*stored) : std::string("unknown"))
-                              << ", target=" << targetDim << ")\n";
+                    std::cout << "  "
+                              << ui::status_warning(
+                                     "Vector schema dimension mismatch (stored=" +
+                                     (stored ? std::to_string(*stored) : std::string("unknown")) +
+                                     ", target=" + std::to_string(targetDim) + ")")
+                              << "\n";
                     if (!dryRun_) {
                         if (promptYesNo(std::string("Drop and recreate vector tables to dim ") +
                                         std::to_string(targetDim) + "? [y/N]: ")) {
                             auto dr = be.dropTables();
                             if (!dr) {
-                                std::cout << "  ✗ Drop tables failed: " << dr.error().message
-                                          << "\n";
+                                std::cout
+                                    << "  "
+                                    << ui::status_error("Drop tables failed: " + dr.error().message)
+                                    << "\n";
                             } else {
                                 auto cr = be.createTables(targetDim);
                                 if (cr) {
-                                    std::cout << "  ✓ Recreated vector tables (dim=" << targetDim
-                                              << ")\n";
+                                    std::cout << "  "
+                                              << ui::status_ok("Recreated vector tables (dim=" +
+                                                               std::to_string(targetDim) + ")")
+                                              << "\n";
                                 } else {
-                                    std::cout << "  ✗ Create tables failed: " << cr.error().message
+                                    std::cout << "  "
+                                              << ui::status_error("Create tables failed: " +
+                                                                  cr.error().message)
                                               << "\n";
                                 }
                             }
@@ -1073,14 +1119,20 @@ private:
                                   << targetDim << ")\n";
                     }
                 } else {
-                    std::cout << "  ✓ Vector schema aligned (dim="
-                              << (stored ? std::to_string(*stored) : std::to_string(targetDim))
-                              << ")\n";
+                    std::cout << "  "
+                              << ui::status_ok("Vector schema aligned (dim=" +
+                                               (stored ? std::to_string(*stored)
+                                                       : std::to_string(targetDim)) +
+                                               ")")
+                              << "\n";
                 }
                 be.close();
             }
         } catch (const std::exception& e) {
-            std::cout << "  ⚠ Vector DB schema alignment skipped: " << e.what() << "\n";
+            std::cout << "  "
+                      << ui::status_warning("Vector DB schema alignment skipped: " +
+                                            std::string(e.what()))
+                      << "\n";
         }
 
         // Check for available ONNX models
@@ -1100,14 +1152,16 @@ private:
         }
 
         if (availableModels.empty()) {
-            std::cout
-                << "  ⚠ No local embedding models found. Will attempt to use daemon default.\n";
+            std::cout << "  "
+                      << ui::status_warning(
+                             "No local embedding models found. Will attempt to use daemon default.")
+                      << "\n";
             // Do not fail here - let the daemon decide if it can handle the request
         }
 
         std::cout << "  Available models:\n";
         for (const auto& model : availableModels) {
-            std::cout << "    - " << model << "\n";
+            std::cout << "    " << ui::bullet(model) << "\n";
         }
 
         if (!dryRun_) {
@@ -1157,14 +1211,16 @@ private:
                 return std::string("all-MiniLM-L6-v2"); // Default fallback
             };
             const std::string chosenModel = pickPreferred();
-            std::cout << "    Using model: " << chosenModel << "\n";
+            std::cout << "    " << ui::key_value("Using model", chosenModel) << "\n";
 
             // Stream embeddings via daemon and show progress (preferred path)
             try {
                 // Query all documents from metadata
                 auto allDocs = metadata::queryDocumentsByPattern(*metadataRepo, "%");
                 if (!allDocs) {
-                    std::cout << "  ✗ Failed to query documents: " << allDocs.error().message
+                    std::cout << "  "
+                              << ui::status_error("Failed to query documents: " +
+                                                  allDocs.error().message)
                               << "\n";
                     return Error{allDocs.error()};
                 }
@@ -1206,15 +1262,15 @@ private:
                     return Result<void>();
                 }
 
-                // Configure batch size (placeholder; used by daemon request builder below)
-                [[maybe_unused]] size_t batchSize = 32; // safe default
+                // Configure batch size (GPU-aware with env override)
+                size_t batchSize = 32; // safe default
                 if (const char* envBatch = std::getenv("YAMS_EMBED_BATCH")) {
                     try {
                         unsigned long v = std::stoul(std::string(envBatch));
                         if (v < 4UL)
                             v = 4UL;
-                        if (v > 128UL)
-                            v = 128UL;
+                        if (v > 256UL)
+                            v = 256UL;
                         batchSize = static_cast<size_t>(v);
                     } catch (...) {
                     }
@@ -1234,7 +1290,7 @@ private:
                 yams::daemon::EmbedDocumentsRequest ereq{};
                 ereq.modelName = chosenModel;
                 ereq.normalize = true;
-                ereq.batchSize = static_cast<std::size_t>(0); // let server dynamic batcher decide
+                ereq.batchSize = batchSize;
                 ereq.skipExisting = true;
                 ereq.documentHashes = hashes; // stream a single request with all docs
                 Result<std::vector<yams::daemon::EmbeddingEvent>> evres = Error{ErrorCode::Unknown};
@@ -1247,40 +1303,60 @@ private:
                     if (!evres)
                         evres = Error{ErrorCode::Timeout, "embedding timeout"};
                     if (attempt < std::max(1, embedRetries_)) {
-                        std::cout << "  ⚠ Embed RPC retry " << attempt << "/" << embedRetries_
-                                  << " after backoff\n";
+                        std::cout << "  "
+                                  << ui::status_warning(
+                                         "Embed RPC retry " + std::to_string(attempt) + "/" +
+                                         std::to_string(embedRetries_) + " after backoff")
+                                  << "\n";
                         std::this_thread::sleep_for(std::chrono::milliseconds(500 * attempt));
                     }
                 }
                 if (!evres) {
                     auto err = evres.error();
-                    std::cout << "  [FAIL] Embedding failed: " << err.message << "\n";
+                    std::cout << "  " << ui::status_error("Embedding failed: " + err.message)
+                              << "\n";
                     return err;
                 }
                 const auto& events = evres.value();
                 // Print compact progress based on collected events
                 for (const auto& e : events) {
-                    std::cout << "[embed] model=" << e.modelName << " " << e.processed << "/"
-                              << e.total << " success=" << e.success << " failure=" << e.failure
-                              << " inserted=" << e.inserted << " phase=" << e.phase
-                              << (e.message.empty() ? "" : (" " + e.message)) << "\n";
+                    std::cout << "  "
+                              << ui::key_value("embed",
+                                               e.modelName + " " + std::to_string(e.processed) +
+                                                   "/" + std::to_string(e.total) +
+                                                   " success=" + std::to_string(e.success) +
+                                                   " fail=" + std::to_string(e.failure) +
+                                                   " inserted=" + std::to_string(e.inserted) +
+                                                   " phase=" + e.phase +
+                                                   (e.message.empty() ? "" : (" " + e.message)))
+                              << "\n";
                 }
                 // Derive final stats from last event when available
                 if (!events.empty()) {
                     const auto& last = events.back();
-                    std::cout << "  ✓ Embedding generation complete\n";
-                    std::cout << "    Requested:  " << last.total << "\n";
-                    std::cout << "    Embedded:   " << last.success << "\n";
-                    std::cout << "    Skipped:    " << 0 << "\n";
-                    std::cout << "    Failed:     " << last.failure << "\n\n";
+                    std::cout << "  " << ui::status_ok("Embedding generation complete") << "\n";
+                    std::vector<ui::Row> rows = {
+                        {"Requested", std::to_string(last.total), ""},
+                        {"Embedded", std::to_string(last.success), ""},
+                        {"Skipped", "0", ""},
+                        {"Failed",
+                         last.failure > 0
+                             ? ui::colorize(std::to_string(last.failure), ui::Ansi::RED)
+                             : "0",
+                         ""},
+                    };
+                    ui::render_rows(std::cout, rows);
+                    std::cout << "\n";
                 }
                 return Result<void>();
             } catch (const std::exception& ex) {
-                std::cout << "  [FAIL] Embedding exception: " << ex.what() << "\n";
+                std::cout << "  "
+                          << ui::status_error("Embedding exception: " + std::string(ex.what()))
+                          << "\n";
                 return Error{ErrorCode::InternalError,
                              std::string("embedding exception: ") + ex.what()};
             } catch (...) {
-                std::cout << "  [FAIL] Unknown embedding exception\n";
+                std::cout << "  " << ui::status_error("Unknown embedding exception") << "\n";
                 return Error{ErrorCode::InternalError, "unknown embedding exception"};
             }
 
@@ -1485,7 +1561,7 @@ Result<void> RepairCommand::rebuildFts5Index(const app::services::AppContext& ct
 
 Result<void>
 RepairCommand::rebuildPathTree(std::shared_ptr<metadata::IMetadataRepository> metadataRepo) {
-    std::cout << "Rebuilding path tree index...\n";
+    std::cout << ui::status_pending("Rebuilding path tree index...") << "\n";
 
     if (!metadataRepo) {
         return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
@@ -1524,6 +1600,11 @@ RepairCommand::rebuildPathTree(std::shared_ptr<metadata::IMetadataRepository> me
     }
 
     // Run the actual repair
+    ui::SpinnerRunner pathSpinner;
+    if (!verbose_) {
+        pathSpinner.start("Rebuilding path tree...");
+    }
+
     auto progressFn = [this](uint64_t current, uint64_t total) {
         if (verbose_ && current % 100 == 0) {
             std::cout << "  Progress: " << current << "/" << total << "\n";
@@ -1531,21 +1612,28 @@ RepairCommand::rebuildPathTree(std::shared_ptr<metadata::IMetadataRepository> me
     };
 
     auto result = repairMgr.repairPathTree(progressFn);
+    if (!verbose_) {
+        pathSpinner.stop();
+    }
     if (!result) {
         return result.error();
     }
 
     const auto& stats = result.value();
-    std::cout << "  ✓ Path tree rebuild complete\n";
-    std::cout << "    Documents scanned: " << stats.documentsScanned << "\n";
-    std::cout << "    Nodes created:     " << stats.nodesCreated << "\n";
-    std::cout << "    Errors:            " << stats.errors << "\n";
+    std::cout << "  " << ui::status_ok("Path tree rebuild complete") << "\n";
+    std::vector<ui::Row> ptRows = {
+        {"Documents scanned", std::to_string(stats.documentsScanned), ""},
+        {"Nodes created", std::to_string(stats.nodesCreated), ""},
+        {"Errors",
+         stats.errors > 0 ? ui::colorize(std::to_string(stats.errors), ui::Ansi::RED) : "0", ""},
+    };
+    ui::render_rows(std::cout, ptRows);
 
     return Result<void>();
 }
 
 Result<void> RepairCommand::repairBlockReferences() {
-    std::cout << "Repairing block references (sizes from CAS files)...\n";
+    std::cout << ui::status_pending("Repairing block references (sizes from CAS files)...") << "\n";
 
     namespace fs = std::filesystem;
 
@@ -1563,8 +1651,8 @@ Result<void> RepairCommand::repairBlockReferences() {
         return Result<void>();
     }
 
-    std::cout << "  Objects: " << objectsPath.string() << "\n";
-    std::cout << "  RefsDB:  " << refsDbPath.string() << "\n";
+    std::cout << "  " << ui::key_value("Objects", objectsPath.string(), ui::Ansi::CYAN, 10) << "\n";
+    std::cout << "  " << ui::key_value("RefsDB", refsDbPath.string(), ui::Ansi::CYAN, 10) << "\n";
 
     // Progress indicator for scanning
     ui::SpinnerRunner scanSpinner;
@@ -1588,23 +1676,26 @@ Result<void> RepairCommand::repairBlockReferences() {
     if (dryRun_) {
         std::cout << "  [DRY RUN] Would update " << stats.blocksUpdated << " block references\n";
     } else {
-        std::cout << "  ✓ Block references repair complete\n";
+        std::cout << "  " << ui::status_ok("Block references repair complete") << "\n";
     }
-    std::cout << "    Blocks scanned:       " << stats.blocksScanned << "\n";
-    std::cout << "    Blocks updated:       " << stats.blocksUpdated << "\n";
-    std::cout << "    Blocks skipped:       " << stats.blocksSkipped << "\n";
-    std::cout << "    Compressed blocks:    " << stats.compressedBlocks << "\n";
-    std::cout << "    Uncompressed blocks:  " << stats.uncompressedBlocks << "\n";
-    std::cout << "    Total disk bytes:     " << ui::format_bytes(stats.totalDiskBytes) << "\n";
-    std::cout << "    Total uncompressed:   " << ui::format_bytes(stats.totalUncompressedBytes)
-              << "\n";
+    std::vector<ui::Row> brRows = {
+        {"Blocks scanned", std::to_string(stats.blocksScanned), ""},
+        {"Blocks updated", std::to_string(stats.blocksUpdated), ""},
+        {"Blocks skipped", std::to_string(stats.blocksSkipped), ""},
+        {"Compressed blocks", std::to_string(stats.compressedBlocks), ""},
+        {"Uncompressed blocks", std::to_string(stats.uncompressedBlocks), ""},
+        {"Total disk bytes", ui::format_bytes(stats.totalDiskBytes), ""},
+        {"Total uncompressed", ui::format_bytes(stats.totalUncompressedBytes), ""},
+    };
     if (stats.totalUncompressedBytes > stats.totalDiskBytes) {
-        std::cout << "    Compression savings:  "
-                  << ui::format_bytes(stats.totalUncompressedBytes - stats.totalDiskBytes) << "\n";
+        brRows.push_back({"Compression savings",
+                          ui::format_bytes(stats.totalUncompressedBytes - stats.totalDiskBytes),
+                          ""});
     }
     if (stats.errors > 0) {
-        std::cout << "    Errors:               " << stats.errors << "\n";
+        brRows.push_back({"Errors", ui::colorize(std::to_string(stats.errors), ui::Ansi::RED), ""});
     }
+    ui::render_rows(std::cout, brRows);
 
     return Result<void>();
 }

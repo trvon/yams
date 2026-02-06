@@ -10,14 +10,14 @@ namespace yams::daemon {
 
 /// Configuration for GradientLimiter
 struct GradientLimiterConfig {
-    double initialLimit = 4.0;       ///< Starting concurrency
-    double minLimit = 1.0;           ///< Floor - never below this
-    double maxLimit = 32.0;          ///< Ceiling - never above this
-    double smoothingAlpha = 0.2;     ///< Short-window EMA alpha
-    double longWindowAlpha = 0.05;   ///< Long-window EMA alpha (drift correction)
-    double tolerance = 1.5;          ///< Queue tolerance multiplier
-    uint32_t warmupSamples = 10;     ///< Samples before adjusting limits
-    bool enableProbing = true;       ///< Enable limit increase probing
+    double initialLimit = 4.0;     ///< Starting concurrency
+    double minLimit = 1.0;         ///< Floor - never below this
+    double maxLimit = 32.0;        ///< Ceiling - never above this
+    double smoothingAlpha = 0.2;   ///< Short-window EMA alpha
+    double longWindowAlpha = 0.05; ///< Long-window EMA alpha (drift correction)
+    double tolerance = 1.5;        ///< Queue tolerance multiplier
+    uint32_t warmupSamples = 10;   ///< Samples before adjusting limits
+    bool enableProbing = true;     ///< Enable limit increase probing
 };
 
 /// Netflix Gradient2-style adaptive concurrency limiter
@@ -62,9 +62,7 @@ public:
     }
 
     /// Get current in-flight count
-    uint32_t inFlight() const {
-        return inFlight_.load(std::memory_order_relaxed);
-    }
+    uint32_t inFlight() const { return inFlight_.load(std::memory_order_relaxed); }
 
     /// Get metrics snapshot
     Metrics metrics() const;
@@ -89,10 +87,10 @@ private:
     std::atomic<uint32_t> inFlight_{0};
 
     // RTT tracking
-    std::atomic<double> minRtt_{0.0};       ///< Baseline RTT (no queuing)
-    std::atomic<double> smoothedRtt_{0.0};  ///< Short-window EMA
-    std::atomic<double> longRtt_{0.0};      ///< Long-window EMA (drift correction)
-    std::atomic<double> gradient_{1.0};     ///< Current gradient value
+    std::atomic<double> minRtt_{0.0};      ///< Baseline RTT (no queuing)
+    std::atomic<double> smoothedRtt_{0.0}; ///< Short-window EMA
+    std::atomic<double> longRtt_{0.0};     ///< Long-window EMA (drift correction)
+    std::atomic<double> gradient_{1.0};    ///< Current gradient value
 
     // Sample tracking
     std::atomic<uint64_t> sampleCount_{0};

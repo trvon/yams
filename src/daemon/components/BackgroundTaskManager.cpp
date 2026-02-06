@@ -265,8 +265,8 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
                     idleSince = now;
                 }
                 if (pendingOrphansRemoved > 0 && (now - idleSince) >= kOrphanIdleFlushHold) {
-                    spdlog::debug("[Fts5Job] Removed {} orphans ({} skipped)", pendingOrphansRemoved,
-                                  pendingOrphansSkipped);
+                    spdlog::debug("[Fts5Job] Removed {} orphans ({} skipped)",
+                                  pendingOrphansRemoved, pendingOrphansSkipped);
                     pendingOrphansRemoved = 0;
                     pendingOrphansSkipped = 0;
                     lastOrphanInfoLog = now;

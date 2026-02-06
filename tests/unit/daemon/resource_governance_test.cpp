@@ -547,3 +547,154 @@ TEST_CASE("Memory thresholds maintain ordering invariant", "[daemon][governance]
               TuneAdvisor::modelEvictEmergencyThreshold());
     }
 }
+
+// =============================================================================
+// Scaling Caps Pressure Level Tests (testing_updateScalingCaps)
+// =============================================================================
+
+TEST_CASE("ResourceGovernor scaling caps change at Warning level", "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    // Record caps at Normal
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    auto normalCaps = governor.getScalingCaps();
+
+    // Update to Warning
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Warning);
+    auto warningCaps = governor.getScalingCaps();
+
+    // Warning should have equal or lower caps
+    CHECK(warningCaps.ingestWorkers <= normalCaps.ingestWorkers);
+    CHECK(warningCaps.searchConcurrency <= normalCaps.searchConcurrency);
+    CHECK(warningCaps.extractionConcurrency <= normalCaps.extractionConcurrency);
+    CHECK(warningCaps.kgConcurrency <= normalCaps.kgConcurrency);
+    CHECK(warningCaps.embedConcurrency <= normalCaps.embedConcurrency);
+    // Warning blocks model loads but still allows ingest
+    CHECK_FALSE(warningCaps.allowModelLoads);
+    CHECK(warningCaps.allowNewIngest);
+
+    // Restore Normal
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+}
+
+TEST_CASE("ResourceGovernor scaling caps at Critical level", "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    // Record Normal caps for comparison
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    auto normalCaps = governor.getScalingCaps();
+
+    // Update to Critical
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Critical);
+    auto criticalCaps = governor.getScalingCaps();
+
+    // Critical should have even lower caps than Warning
+    CHECK(criticalCaps.ingestWorkers <= normalCaps.ingestWorkers);
+    CHECK(criticalCaps.searchConcurrency <= normalCaps.searchConcurrency);
+    // Critical blocks model loads
+    CHECK_FALSE(criticalCaps.allowModelLoads);
+    // Critical still allows ingest (only Emergency blocks it)
+    CHECK(criticalCaps.allowNewIngest);
+
+    // Restore Normal
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+}
+
+TEST_CASE("ResourceGovernor scaling caps at Emergency level", "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    // Update to Emergency
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+    auto emergencyCaps = governor.getScalingCaps();
+
+    // Emergency should halt new ingest
+    CHECK_FALSE(emergencyCaps.allowNewIngest);
+    CHECK_FALSE(emergencyCaps.allowModelLoads);
+    // Embed concurrency should be 0
+    CHECK(emergencyCaps.embedConcurrency == 0);
+    // Extraction concurrency should be 0
+    CHECK(emergencyCaps.extractionConcurrency == 0);
+
+    // Restore Normal
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+}
+
+TEST_CASE("ResourceGovernor caps restore to full after returning to Normal",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    // Record Normal caps
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    auto normalCaps = governor.getScalingCaps();
+
+    // Go through Emergency and back to Normal
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    auto restoredCaps = governor.getScalingCaps();
+
+    // Should be back to full values
+    CHECK(restoredCaps.ingestWorkers == normalCaps.ingestWorkers);
+    CHECK(restoredCaps.searchConcurrency == normalCaps.searchConcurrency);
+    CHECK(restoredCaps.extractionConcurrency == normalCaps.extractionConcurrency);
+    CHECK(restoredCaps.kgConcurrency == normalCaps.kgConcurrency);
+    CHECK(restoredCaps.embedConcurrency == normalCaps.embedConcurrency);
+    CHECK(restoredCaps.allowModelLoads);
+    CHECK(restoredCaps.allowNewIngest);
+}
+
+TEST_CASE("ResourceGovernor caps ordering: Normal >= Emergency (endpoints)",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    auto normal = governor.getScalingCaps();
+
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+    auto emergency = governor.getScalingCaps();
+
+    // Normal should always be >= Emergency across all dimensions
+    CHECK(normal.ingestWorkers >= emergency.ingestWorkers);
+    CHECK(normal.embedConcurrency >= emergency.embedConcurrency);
+    CHECK(normal.extractionConcurrency >= emergency.extractionConcurrency);
+    CHECK(normal.searchConcurrency >= emergency.searchConcurrency);
+    CHECK(normal.kgConcurrency >= emergency.kgConcurrency);
+
+    // Normal allows everything, Emergency blocks
+    CHECK(normal.allowModelLoads);
+    CHECK(normal.allowNewIngest);
+    CHECK_FALSE(emergency.allowModelLoads);
+    CHECK_FALSE(emergency.allowNewIngest);
+
+    // Restore Normal
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+}
+
+// =============================================================================
+// ResourceGovernor Tick and Admission Control Tests
+// =============================================================================
+
+TEST_CASE("ResourceGovernor tick is callable without ServiceManager",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+    // tick(nullptr) should not crash — it just skips SM metric collection
+    auto snap = governor.tick(nullptr);
+    CHECK(snap.timestamp.time_since_epoch().count() > 0);
+    // RSS should be readable (we're a running process)
+    CHECK(snap.rssBytes > 0);
+}
+
+TEST_CASE("ResourceGovernor canAdmitWork blocked at Emergency",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    // At Normal, work should be admitted
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    CHECK(governor.getScalingCaps().allowNewIngest);
+
+    // At Emergency, allowNewIngest is false
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+    CHECK_FALSE(governor.getScalingCaps().allowNewIngest);
+
+    // Restore
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+}

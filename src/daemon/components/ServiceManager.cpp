@@ -267,11 +267,12 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
     spdlog::debug("[ServiceManager] Creating WorkCoordinator...");
     try {
         workCoordinator_ = std::make_unique<WorkCoordinator>();
-        auto threadCount = yams::daemon::TuneAdvisor::recommendedThreads();
+        auto threadCount = yams::daemon::TuneAdvisor::workCoordinatorThreads();
         workCoordinator_->start(threadCount);
-        spdlog::info("[ServiceManager] WorkCoordinator created with {} worker threads (budget {}%)",
-                     workCoordinator_->getWorkerCount(),
-                     yams::daemon::TuneAdvisor::cpuBudgetPercent());
+        spdlog::info(
+            "[ServiceManager] WorkCoordinator created with {} worker threads (budget {}%, override={})",
+            workCoordinator_->getWorkerCount(), yams::daemon::TuneAdvisor::cpuBudgetPercent(),
+            threadCount);
 
         // Initialize strands for logical separation
         spdlog::debug("[ServiceManager] Creating strands...");

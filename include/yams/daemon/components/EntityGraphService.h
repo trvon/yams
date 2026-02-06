@@ -73,7 +73,6 @@ public:
      */
     yams::Result<void> submitExtraction(Job job);
 
-
     /**
      * Stats snapshot for diagnostics.
      */
@@ -83,7 +82,6 @@ public:
         std::uint64_t failed{0};
     };
     Stats getStats() const;
-
 
 private:
     bool process(Job& job);

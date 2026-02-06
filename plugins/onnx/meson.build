@@ -62,6 +62,10 @@ json_dep = dependency('nlohmann_json', required: false)
 yams_core = dependency('yams_core', required: false)
 yams_vector = dependency('yams_vector', required: false)
 yams_onnx_resource = dependency('yams_onnx_resource', required: false)
+boost_dep = dependency('boost', modules: ['asio'], required: false)
+if not boost_dep.found()
+  boost_dep = dependency('boost', required: false)
+endif
 
 onnx_opt = get_option('enable-onnx')
 onnx_feature_requested = not onnx_opt.disabled()
@@ -159,7 +163,7 @@ endif
 yams_onnx_plugin = shared_module('yams_onnx_plugin',
   yams_onnx_plugin_srcs,
   include_directories: [ include_directories('../../include') ],
-  dependencies: [onnx_dep, spdlog_dep, json_dep, yams_core, yams_vector, yams_onnx_resource, dependency('yams_daemon_client')],
+  dependencies: [onnx_dep, spdlog_dep, json_dep, yams_core, yams_vector, yams_onnx_resource, dependency('yams_daemon_client'), boost_dep],
   cpp_args: plugin_cppargs,
   install: true,
   install_dir: plugins_dir,

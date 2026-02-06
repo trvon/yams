@@ -46,10 +46,9 @@ class KGWriteQueue;
 
 // Simple LRU cache for metadata lookups
 // Template parameters: Key type, Value type
-template<typename K, typename V>
-class LruCache {
+template <typename K, typename V> class LruCache {
 public:
-    explicit LruCache(size_t maxSize = 1000, std::chrono::seconds ttl = std::chrono::seconds(5)) 
+    explicit LruCache(size_t maxSize = 1000, std::chrono::seconds ttl = std::chrono::seconds(5))
         : maxSize_(maxSize), ttl_(ttl) {}
 
     std::optional<V> get(const K& key) {
@@ -58,14 +57,14 @@ public:
         if (it == map_.end()) {
             return std::nullopt;
         }
-        
+
         // Check TTL
         auto now = std::chrono::steady_clock::now();
         if (now - it->second.timestamp > ttl_) {
             map_.erase(it);
             return std::nullopt;
         }
-        
+
         // Move to front (most recently used)
         touch(it);
         return it->second.value;
@@ -102,13 +101,13 @@ public:
 private:
     using Timestamp = std::chrono::steady_clock::time_point;
     using OrderIterator = typename std::list<K>::iterator;
-    
+
     struct CacheEntry {
         V value;
         Timestamp timestamp;
         OrderIterator orderIt;
     };
-    
+
     mutable std::mutex mutex_;
     std::unordered_map<K, CacheEntry> map_;
     std::list<K> order_;
@@ -133,7 +132,7 @@ private:
 struct MetadataCache {
     static constexpr size_t kMaxEntries = 1000;
     static constexpr std::chrono::seconds kTtl{5};
-    
+
     LruCache<std::string, metadata::DocumentInfo> infoCache{kMaxEntries, kTtl};
     LruCache<int64_t, std::vector<std::string>> tagsCache{kMaxEntries, kTtl};
 };
@@ -319,7 +318,7 @@ public:
         drainCallback_ = std::move(callback);
     }
 
-    private:
+private:
     boost::asio::awaitable<void> channelPoller();
     boost::asio::awaitable<void> kgPoller();
     boost::asio::awaitable<void> symbolPoller();

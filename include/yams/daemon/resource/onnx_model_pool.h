@@ -4,9 +4,11 @@
 #include <yams/daemon/resource/resource_pool.h>
 #include <yams/vector/embedding_generator.h>
 
+#include <boost/asio/thread_pool.hpp>
 #include <atomic>
 #include <condition_variable>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -112,6 +114,8 @@ struct ModelPoolConfig {
     // Performance
     bool enableGPU = false;
     int numThreads = 4;
+    bool asyncLoading = false;           // When true, schedule loads on a worker pool
+    size_t loadWorkerThreads = 2;        // Worker threads for async loading
 };
 
 // ============================================================================
@@ -155,7 +159,7 @@ public:
     // ========================================================================
 
     // Load a model into the pool
-    Result<void> loadModel(const std::string& modelName);
+    Result<void> loadModel(const std::string& modelName, bool wait = true);
 
     // Unload a model from the pool
     Result<void> unloadModel(const std::string& modelName);
@@ -202,6 +206,7 @@ public:
 
     // Get the configured models root directory
     const std::string& getModelsRoot() const { return config_.modelsRoot; }
+    bool isAsyncLoadingEnabled() const { return config_.asyncLoading; }
 
 private:
     // Model registry entry
@@ -219,6 +224,8 @@ private:
 
     // Create a new model session
     Result<ModelSessionPtr> createModelSession(const std::string& modelName);
+    Result<void> loadModelSync(const std::string& modelName);
+    Result<void> scheduleLoad(const std::string& modelName);
 
     // Update access statistics
     void updateAccessStats(const std::string& modelName);
@@ -253,6 +260,8 @@ private:
 
     // Background preload thread (must be joined before destruction)
     std::thread preloadThread_;
+    std::unique_ptr<boost::asio::thread_pool> loadPool_;
+    std::unordered_map<std::string, std::shared_future<Result<void>>> loadingFutures_;
 };
 
 } // namespace yams::daemon

@@ -73,7 +73,7 @@ public:
         bool enable_streaming = true; // Use streaming response model
         bool enable_multiplexing =
             true; // Default: allow multiple concurrent requests per connection
-        size_t chunk_size = 512 * 1024;   // Default chunk size (512KB, increased)
+        size_t chunk_size = 512 * 1024;         // Default chunk size (512KB, increased)
         std::chrono::seconds write_timeout{30}; // Timeout for write operations
         std::chrono::seconds read_timeout{30};  // Timeout for read operations
         std::chrono::milliseconds stream_chunk_timeout{

@@ -97,8 +97,8 @@ Result<ExternalEntityProviderAdapter::EntityResult> ExternalEntityProviderAdapte
 
 Result<ExternalEntityProviderAdapter::EntityResult>
 ExternalEntityProviderAdapter::extractEntitiesWithBase64(const std::string& base64,
-                                                         const std::string& filePath, size_t offset,
-                                                         size_t limit) {
+                                                         const std::string& /*filePath*/,
+                                                         size_t offset, size_t limit) {
     if (!host_) {
         return Error{ErrorCode::InvalidState, "No external plugin host"};
     }

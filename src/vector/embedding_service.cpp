@@ -36,6 +36,7 @@
 #endif
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/resource/gpu_info.h>
 #include <yams/integrity/repair_utils.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/vector/dim_resolver.h>
@@ -731,6 +732,21 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
             if (capTa > 0)
                 bcfg.advisoryDocCap = capTa;
         }
+        // GPU-aware token budget scaling
+        {
+            const auto& gpu = yams::daemon::resource::detectGpu();
+            if (gpu.detected && gpu.vramBytes > 0) {
+                // Scale max tokens based on VRAM (larger VRAM -> larger batches)
+                // Base: 262144 tokens for 8GB VRAM, scale linearly
+                double vramScale = static_cast<double>(gpu.vramBytes) / (8.0 * 1024 * 1024 * 1024);
+                bcfg.maxTokens = static_cast<size_t>(262144.0 * std::clamp(vramScale, 0.25, 4.0));
+                spdlog::info("[Embedding] GPU detected: {} ({:.1f} GB VRAM), maxTokens={}",
+                             gpu.name,
+                             static_cast<double>(gpu.vramBytes) / (1024.0 * 1024.0 * 1024.0),
+                             bcfg.maxTokens);
+            }
+        }
+
         DynamicBatcher batcher{bcfg};
 
         size_t processed = 0;
@@ -807,9 +823,10 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                     batcher.onFailure();
                     consecutiveFailures++;
                     if (consecutiveFailures >= kMaxConsecutiveFailures) {
-                        spdlog::error("[EmbeddingService] circuit breaker: {} consecutive failures, "
-                                      "aborting repair batch (processed={} failed={})",
-                                      consecutiveFailures, processed, failed);
+                        spdlog::error(
+                            "[EmbeddingService] circuit breaker: {} consecutive failures, "
+                            "aborting repair batch (processed={} failed={})",
+                            consecutiveFailures, processed, failed);
                         circuitBroken = true;
                     }
                     // Check overall failure rate after sufficient attempts

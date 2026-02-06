@@ -40,8 +40,7 @@ namespace yams::daemon {
 namespace {
 bool is_client_disconnect(const std::string& msg) {
     return msg.find("Connection reset by peer") != std::string::npos ||
-           msg.find("Broken pipe") != std::string::npos ||
-           msg.find("EPIPE") != std::string::npos ||
+           msg.find("Broken pipe") != std::string::npos || msg.find("EPIPE") != std::string::npos ||
            msg.find("ECONNRESET") != std::string::npos;
 }
 // CLI priority requests use a dedicated thread pool to ensure responsiveness
@@ -938,14 +937,19 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         }
 
         // Signal worker job start/end for metrics tracking (poolActive, poolPosted, poolCompleted)
-        if (config_.worker_job_signal) config_.worker_job_signal(true);
+        if (config_.worker_job_signal)
+            config_.worker_job_signal(true);
         auto job_cleanup = [this]() {
-            if (config_.worker_job_signal) config_.worker_job_signal(false);
+            if (config_.worker_job_signal)
+                config_.worker_job_signal(false);
         };
         // Ensure signal(false) fires on all exit paths (co_return, exception)
         struct JobGuard {
             std::function<void()> fn;
-            ~JobGuard() { if (fn) fn(); }
+            ~JobGuard() {
+                if (fn)
+                    fn();
+            }
         } job_guard{std::move(job_cleanup)};
 
         // Use the configured processor (server may decorate with streaming support)
@@ -1816,7 +1820,8 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
                     // total_queued_bytes_ should already equal dropped_bytes here, but reset
                     // defensively and keep metrics consistent.
                     total_queued_bytes_ = 0;
-                    MuxMetricsRegistry::instance().addQueuedBytes(-static_cast<int64_t>(dropped_bytes));
+                    MuxMetricsRegistry::instance().addQueuedBytes(
+                        -static_cast<int64_t>(dropped_bytes));
                 } else {
                     total_queued_bytes_ = 0;
                 }

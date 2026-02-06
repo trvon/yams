@@ -756,8 +756,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                         if (!lim)
                             return {};
                         auto m = lim->metrics();
-                        return {m.limit,     m.smoothedRtt, m.gradient,
-                                m.inFlight,  m.acquireCount, m.rejectCount};
+                        return {m.limit,    m.smoothedRtt,  m.gradient,
+                                m.inFlight, m.acquireCount, m.rejectCount};
                     };
                     out.glExtraction = readLimiter(pq->extractionLimiter());
                     out.glKg = readLimiter(pq->kgLimiter());
@@ -835,8 +835,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.governorRssBytes = govSnap.rssBytes;
         out.governorBudgetBytes = govSnap.memoryBudgetBytes;
         out.governorPressureLevel = static_cast<uint8_t>(govSnap.level);
-        out.governorHeadroomPct =
-            static_cast<uint8_t>(govSnap.scalingHeadroom * 100.0);
+        out.governorHeadroomPct = static_cast<uint8_t>(govSnap.scalingHeadroom * 100.0);
     } catch (...) {
     }
 

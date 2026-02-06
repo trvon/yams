@@ -237,10 +237,8 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
                 result = Error{ErrorCode::ResourceExhausted,
                                "Repair embedding concurrency limit reached; retry later"};
             } else {
-                auto semaphoreGuard =
-                    std::unique_ptr<void, std::function<void(void*)>>(
-                        reinterpret_cast<void*>(1),
-                        [](void*) { repairEmbedSemaphore.release(); });
+                auto semaphoreGuard = std::unique_ptr<void, std::function<void(void*)>>(
+                    reinterpret_cast<void*>(1), [](void*) { repairEmbedSemaphore.release(); });
                 yams::repair::EmbeddingRepairConfig repairConfig;
                 repairConfig.batchSize = req.batchSize;
                 repairConfig.skipExisting = req.skipExisting;

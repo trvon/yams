@@ -3,6 +3,11 @@
 #include <yams/daemon/resource/onnx_model_pool.h>
 #include <yams/vector/embedding_generator.h>
 
+#include "onnx_gpu_provider.h"
+#include <yams/daemon/resource/gpu_info.h>
+
+#include <boost/asio/post.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <nlohmann/json.hpp>
 #include <onnxruntime_cxx_api.h>
 #include <spdlog/spdlog.h>
@@ -34,7 +39,7 @@ static Ort::Env& get_global_ort_env() {
         spdlog::info("[ONNX] Initializing global Ort::Env (thread-safe, single instance)");
 
         OrtThreadingOptions* threading_options = nullptr;
-        Ort::GetApi().CreateThreadingOptions(&threading_options);
+        (void)Ort::GetApi().CreateThreadingOptions(&threading_options);
         if (threading_options) {
             unsigned hw_threads = std::thread::hardware_concurrency();
             if (hw_threads == 0)
@@ -51,9 +56,9 @@ static Ort::Env& get_global_ort_env() {
             spdlog::info("[ONNX] Using multi-threaded global Ort::Env (intra={}, inter={})",
                          intra_threads, inter_threads);
 #endif
-            Ort::GetApi().SetGlobalIntraOpNumThreads(threading_options, intra_threads);
-            Ort::GetApi().SetGlobalInterOpNumThreads(threading_options, inter_threads);
-            Ort::GetApi().SetGlobalSpinControl(threading_options, 0);
+            (void)Ort::GetApi().SetGlobalIntraOpNumThreads(threading_options, intra_threads);
+            (void)Ort::GetApi().SetGlobalInterOpNumThreads(threading_options, inter_threads);
+            (void)Ort::GetApi().SetGlobalSpinControl(threading_options, 0);
 
             g_onnx_env = new Ort::Env(threading_options, ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
             Ort::GetApi().ReleaseThreadingOptions(threading_options);
@@ -596,73 +601,7 @@ public:
     size_t getMaxSequenceLength() const { return maxSequenceLength_; }
 
 private:
-    // Append GPU execution provider to session options based on build configuration
-    // Uses the ONNX Runtime C API which is available in prebuilt binaries
-    void appendGpuExecutionProvider() {
-#if defined(YAMS_ONNX_CUDA_ENABLED)
-        // CUDA execution provider (NVIDIA GPUs)
-        // Use the C API function available in prebuilt binaries
-        try {
-            OrtCUDAProviderOptions cuda_options{};
-            cuda_options.device_id = 0;
-            cuda_options.arena_extend_strategy = 0; // kNextPowerOfTwo
-            cuda_options.gpu_mem_limit = SIZE_MAX;  // Use all available GPU memory
-            cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
-            cuda_options.do_copy_in_default_stream = 1;
-
-            sessionOptions_->AppendExecutionProvider_CUDA(cuda_options);
-            spdlog::info("[ONNX] CUDA execution provider enabled (device_id=0)");
-        } catch (const Ort::Exception& e) {
-            spdlog::warn("[ONNX] Failed to enable CUDA provider: {}. Falling back to CPU.",
-                         e.what());
-        }
-#elif defined(YAMS_ONNX_DIRECTML_ENABLED)
-        // DirectML execution provider (Windows, any DX12 GPU)
-        try {
-            // Use generic AppendExecutionProvider for DML
-            sessionOptions_->AppendExecutionProvider("DML");
-            spdlog::info("[ONNX] DirectML execution provider enabled");
-        } catch (const Ort::Exception& e) {
-            spdlog::warn("[ONNX] Failed to enable DirectML provider: {}. Falling back to CPU.",
-                         e.what());
-        }
-#elif defined(YAMS_ONNX_COREML_ENABLED)
-        // CoreML execution provider (macOS, Apple Silicon + Neural Engine)
-        // The prebuilt macOS ONNX Runtime binaries include CoreML support
-        try {
-            // CoreML provider options (empty map uses defaults: GPU + Neural Engine)
-            // Available options: "MLComputeUnits" = "CPUAndGPU" | "CPUOnly" | "CPUAndNeuralEngine"
-            // | "All"
-            std::unordered_map<std::string, std::string> coreml_options;
-            coreml_options["MLComputeUnits"] = "All"; // Use CPU, GPU, and Neural Engine
-
-            sessionOptions_->AppendExecutionProvider("CoreML", coreml_options);
-            spdlog::info("[ONNX] CoreML execution provider enabled (Neural Engine + GPU)");
-        } catch (const Ort::Exception& e) {
-            spdlog::warn("[ONNX] Failed to enable CoreML provider: {}. Falling back to CPU.",
-                         e.what());
-        } catch (const std::exception& e) {
-            spdlog::warn("[ONNX] Failed to enable CoreML provider: {}. Falling back to CPU.",
-                         e.what());
-        }
-#elif defined(YAMS_ONNX_MIGRAPHX_ENABLED)
-        // MIGraphX execution provider (Linux, AMD GPUs via ROCm)
-        try {
-            OrtMIGraphXProviderOptions migraphx_options{};
-            migraphx_options.device_id = 0;
-
-            sessionOptions_->AppendExecutionProvider_MIGraphX(migraphx_options);
-            spdlog::info("[ONNX] MIGraphX execution provider enabled (AMD GPU via ROCm)");
-        } catch (const Ort::Exception& e) {
-            spdlog::warn("[ONNX] Failed to enable MIGraphX provider: {}. Falling back to CPU.",
-                         e.what());
-        }
-#else
-        // No GPU provider compiled in
-        spdlog::warn("[ONNX] GPU requested but no GPU provider compiled. "
-                     "Rebuild with -Dwith_gpu=cuda|directml|coreml|migraphx");
-#endif
-    }
+    void appendGpuExecutionProvider() { onnx_util::appendGpuProvider(*sessionOptions_); }
 
     // GenAI adapter (optional)
 #ifdef YAMS_ENABLE_ONNX_GENAI
@@ -1208,6 +1147,12 @@ OnnxModelPool::OnnxModelPool(const ModelPoolConfig& config) : config_(config) {
         return;
     }
 
+    if (config_.asyncLoading) {
+        size_t threads = config_.loadWorkerThreads > 0 ? config_.loadWorkerThreads : 1;
+        loadPool_ = std::make_unique<boost::asio::thread_pool>(threads);
+        spdlog::info("[ONNX] Async model loading enabled (threads={})", threads);
+    }
+
     // NOTE: We do NOT create a separate Ort::Env here.
     // Instead, OnnxModelSession::Impl uses the global get_global_ort_env() function.
     // Creating multiple Ort::Env instances causes thread pool conflicts that lead to
@@ -1222,8 +1167,15 @@ OnnxModelPool::OnnxModelPool(const ModelPoolConfig& config) : config_(config) {
             "[ONNX] Pool: Using shared global Ort::Env (sessions use single-threaded execution)");
 
         if (config.enableGPU) {
-            // TODO: Add GPU provider configuration
-            spdlog::info("GPU support requested but not yet implemented");
+            const auto& gpu = yams::daemon::resource::detectGpu();
+            if (gpu.detected) {
+                spdlog::info("[ONNX] GPU enabled: {} ({:.1f} GB VRAM, provider={})",
+                             gpu.name,
+                             static_cast<double>(gpu.vramBytes) / (1024.0 * 1024.0 * 1024.0),
+                             gpu.provider);
+            } else {
+                spdlog::info("[ONNX] GPU requested but no GPU detected (will use CPU)");
+            }
         }
     } catch (const std::exception& e) {
         // Do not crash the daemon if runtime init fails; log and continue.
@@ -1279,31 +1231,51 @@ Result<void> OnnxModelPool::initialize() {
         // Launch preloading in background thread to avoid blocking
         // Store the thread so we can join it during shutdown
         preloadThread_ = std::thread([this]() {
-            spdlog::info("Starting background model preloading");
-            // Check shutdown flag periodically during preload
-            for (const auto& modelName : config_.preloadModels) {
-                if (shutdown_.load(std::memory_order_acquire)) {
-                    spdlog::info("Background preloading interrupted by shutdown");
-                    return;
-                }
-                auto result = loadModel(modelName);
-                if (!result) {
-                    spdlog::warn("Failed to preload model {}: {}", modelName,
-                                 result.error().message);
-                } else {
-                    // Warm up the model to trigger lazy loading
-                    // This ensures the first real inference request is fast
-                    spdlog::info("Warming up preloaded model: {}", modelName);
-                    auto warmupResult = warmupModel(modelName);
-                    if (!warmupResult) {
-                        spdlog::warn("Failed to warm up model {}: {}", modelName,
-                                     warmupResult.error().message);
+            try {
+                spdlog::info("Starting background model preloading");
+                // Check shutdown flag periodically during preload
+                for (const auto& modelName : config_.preloadModels) {
+                    if (shutdown_.load(std::memory_order_acquire)) {
+                        spdlog::info("Background preloading interrupted by shutdown");
+                        return;
+                    }
+                    auto result = loadModel(modelName);
+                    if (!result) {
+                        spdlog::warn("Failed to preload model {}: {}", modelName,
+                                     result.error().message);
+                    } else {
+                        // Warm up the model to trigger lazy loading
+                        // This ensures the first real inference request is fast
+                        spdlog::info("Warming up preloaded model: {}", modelName);
+                        auto warmupResult = warmupModel(modelName);
+                        if (!warmupResult) {
+                            spdlog::warn("Failed to warm up model {}: {}", modelName,
+                                         warmupResult.error().message);
+                        }
                     }
                 }
+                // Clear startup mode - normal pool sizing now applies to new models
+                TuneAdvisor::setOnnxStartupMode(false);
+                spdlog::info("Background model preloading completed");
+            } catch (const std::exception& e) {
+                try {
+                    spdlog::error("[ONNX] Background preload crashed: {}", e.what());
+                } catch (...) {
+                }
+                try {
+                    TuneAdvisor::setOnnxStartupMode(false);
+                } catch (...) {
+                }
+            } catch (...) {
+                try {
+                    spdlog::error("[ONNX] Background preload crashed with unknown exception");
+                } catch (...) {
+                }
+                try {
+                    TuneAdvisor::setOnnxStartupMode(false);
+                } catch (...) {
+                }
             }
-            // Clear startup mode - normal pool sizing now applies to new models
-            TuneAdvisor::setOnnxStartupMode(false);
-            spdlog::info("Background model preloading completed");
         });
     } else {
         // No preload configured - clear startup mode immediately
@@ -1339,6 +1311,11 @@ void OnnxModelPool::shutdown() {
         }
     }
 
+    if (loadPool_) {
+        loadPool_->join();
+        loadPool_.reset();
+    }
+
     try {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -1346,6 +1323,8 @@ void OnnxModelPool::shutdown() {
             spdlog::info("Shutting down ONNX model pool");
         } catch (...) {
         }
+
+        loadingFutures_.clear();
 
         for (auto& [name, entry] : models_) {
             if (entry.pool) {
@@ -1409,8 +1388,28 @@ Result<OnnxModelPool::ModelHandle> OnnxModelPool::acquireModel(const std::string
     cacheMisses_++;
 
     // Model not loaded, need to load it
-    if (auto result = loadModel(modelName); !result) {
-        return result.error();
+    if (config_.asyncLoading) {
+        if (auto result = loadModel(modelName, /*wait=*/false); !result) {
+            return result.error();
+        }
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            auto it = loadingFutures_.find(modelName);
+            if (it != loadingFutures_.end()) {
+                if (it->second.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+                    return Error{ErrorCode::OperationInProgress, "Model loading in background"};
+                }
+                auto res = it->second.get();
+                loadingFutures_.erase(it);
+                if (!res) {
+                    return res.error();
+                }
+            }
+        }
+    } else {
+        if (auto result = loadModel(modelName); !result) {
+            return result.error();
+        }
     }
 
     // Try again after loading - get pool pointer while holding lock
@@ -1429,6 +1428,41 @@ Result<OnnxModelPool::ModelHandle> OnnxModelPool::acquireModel(const std::string
     }
 
     return Error{ErrorCode::NotFound, "Failed to load model: " + modelName};
+}
+
+Result<void> OnnxModelPool::loadModel(const std::string& modelName, bool wait) {
+    if (!config_.asyncLoading || wait) {
+        return loadModelSync(modelName);
+    }
+    return scheduleLoad(modelName);
+}
+
+Result<void> OnnxModelPool::scheduleLoad(const std::string& modelName) {
+    if (!loadPool_) {
+        return loadModelSync(modelName);
+    }
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = models_.find(modelName);
+        if (it != models_.end() && it->second.pool) {
+            return Result<void>();
+        }
+        if (loadingFutures_.count(modelName) > 0) {
+            return Result<void>();
+        }
+
+        auto prom = std::make_shared<std::promise<Result<void>>>();
+        auto fut = prom->get_future().share();
+        loadingFutures_[modelName] = fut;
+
+        boost::asio::post(*loadPool_, [this, modelName, prom]() {
+            auto res = loadModelSync(modelName);
+            prom->set_value(res);
+        });
+    }
+
+    return Result<void>();
 }
 
 bool OnnxModelPool::isModelLoaded(const std::string& modelName) const {
@@ -1450,7 +1484,7 @@ std::vector<std::string> OnnxModelPool::getLoadedModels() const {
     return loaded;
 }
 
-Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
+Result<void> OnnxModelPool::loadModelSync(const std::string& modelName) {
     spdlog::info("[ONNX Plugin] loadModel() called for: {}", modelName);
 
     // In test environments, avoid heavy model loading entirely
@@ -1730,12 +1764,6 @@ Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
 
     auto handle = std::move(handleResult.value());
 
-    // Check if session is valid
-    if (!handle->isValid()) {
-        spdlog::error("[ONNX Plugin] Session invalid during warmup for model: {}", modelName);
-        return Error{ErrorCode::InvalidState, "Session invalid during warmup"};
-    }
-
     // Do a dummy inference to trigger lazy loading
     // Use a short text that will produce embeddings quickly
     const std::string warmupText = "warmup";
@@ -1750,6 +1778,27 @@ Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
     spdlog::info("[ONNX Plugin] Model '{}' warmed up in {}ms (embedding dim={})", modelName, ms,
                  embedResult.value().size());
+
+    // Pre-warm additional sessions for GPU mode to avoid repeated provider init.
+    // The initial handle is still held; additional sessions are acquired and immediately
+    // released back to the pool so they are pre-initialized for future use.
+    if (config_.enableGPU) {
+        size_t targetWarm =
+            std::min(static_cast<size_t>(TuneAdvisor::onnxSessionsPerModel(true)), size_t{3});
+        for (size_t i = 1; i < targetWarm; ++i) {
+            auto extra = acquireModel(modelName, std::chrono::seconds(60));
+            if (!extra) {
+                spdlog::debug("[ONNX Plugin] GPU pre-warm: could not acquire session {} for {}",
+                              i + 1, modelName);
+                break;
+            }
+            // Session returned to pool when extra goes out of scope
+        }
+        if (targetWarm > 1) {
+            spdlog::info("[ONNX Plugin] Pre-warmed {} GPU sessions for '{}'", targetWarm,
+                         modelName);
+        }
+    }
 
     return Result<void>();
 }

@@ -264,6 +264,7 @@ Result<void> GraphComponent::submitEntityExtraction(EntityExtractionJob job) {
         .filePath = std::move(job.filePath),
         .contentUtf8 = std::move(job.contentUtf8),
         .language = std::move(job.language),
+        .mimeType = {},
     };
 
     return entityService_->submitExtraction(std::move(entityJob));

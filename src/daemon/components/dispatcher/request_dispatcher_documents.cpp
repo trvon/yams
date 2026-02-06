@@ -604,7 +604,6 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                                 fastTracked = true;
                                 response.message = "Document stored and extracted (fast-track).";
                                 response.extractionStatus = "success";
-
                             }
                         }
                     }

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <thread>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -138,8 +139,10 @@ struct ProviderCtx {
         // Defaults: prefer lazy loading to avoid blocking startup
         // Models will be loaded on first use, not during plugin initialization
         cfg.lazyLoading = true;
-        cfg.enableGPU = false;
+        cfg.enableGPU = true; // runtime detection in appendGpuExecutionProvider()
         cfg.numThreads = std::max(1u, std::thread::hardware_concurrency());
+        cfg.loadWorkerThreads = std::max<size_t>(1u, cfg.numThreads / 2);
+        cfg.asyncLoading = false;
 
         // Variables for config (both file-based and JSON-based)
         std::string dataDir;
@@ -205,17 +208,15 @@ struct ProviderCtx {
                     } catch (...) {
                     }
                 };
-                auto apply_enable_gpu = [&](const std::string& value) {
+                auto apply_async_loading = [&](const std::string& value) {
                     std::string v = value;
                     for (auto& c : v)
                         c = static_cast<char>(std::tolower(c));
-                    if (v == "true" || v == "1" || v == "yes" || v == "on") {
-                        cfg.enableGPU = true;
-                    } else if (v == "false" || v == "0" || v == "no" || v == "off") {
-                        cfg.enableGPU = false;
-                    }
+                    if (v == "1" || v == "true" || v == "yes" || v == "on")
+                        cfg.asyncLoading = true;
+                    if (v == "0" || v == "false" || v == "no" || v == "off")
+                        cfg.asyncLoading = false;
                 };
-
                 while (std::getline(file, line)) {
                     if (line.empty() || line[0] == '#')
                         continue;
@@ -251,8 +252,6 @@ struct ProviderCtx {
                     if (section == "embeddings") {
                         if (key == "preferred_model" && preferredModel.empty())
                             preferredModel = value;
-                        else if (key == "enable_gpu")
-                            apply_enable_gpu(value);
                         else if (key == "num_threads")
                             apply_num_threads(value);
                         else if (key == "keep_model_hot") {
@@ -263,9 +262,7 @@ struct ProviderCtx {
                         }
                     }
                     if (section == "daemon.models") {
-                        if (key == "enable_gpu")
-                            apply_enable_gpu(value);
-                        else if (key == "num_threads")
+                        if (key == "num_threads")
                             apply_num_threads(value);
                         else if (key == "max_loaded_models")
                             apply_max_loaded_models(value);
@@ -304,6 +301,8 @@ struct ProviderCtx {
                         apply_max_loaded_models(value);
                     if (section == "plugins.onnx" && key == "hot_pool_size")
                         apply_hot_pool_size(value);
+                    if (section == "plugins.onnx" && key == "async_load")
+                        apply_async_loading(value);
                     if (section == "plugins.onnx" && key == "reranker_model")
                         rerankerModel = value;
                     if (section == "plugins.onnx" && key == "reranker_model_path")
@@ -349,6 +348,32 @@ struct ProviderCtx {
             }
         } catch (const std::exception&) {
             // ignore config parse errors
+        }
+
+        // Env overrides for async loading
+        auto parse_bool_env = [](const char* name) -> std::optional<bool> {
+            if (const char* s = std::getenv(name)) {
+                std::string v(s);
+                for (auto& c : v)
+                    c = static_cast<char>(std::tolower(c));
+                if (v == "1" || v == "true" || v == "yes" || v == "on")
+                    return true;
+                if (v == "0" || v == "false" || v == "no" || v == "off")
+                    return false;
+            }
+            return std::nullopt;
+        };
+        if (auto val = parse_bool_env("YAMS_ONNX_ASYNC_LOAD")) {
+            cfg.asyncLoading = *val;
+        }
+        if (const char* w = std::getenv("YAMS_ONNX_LOAD_WORKERS")) {
+            try {
+                size_t threads = static_cast<size_t>(std::stoul(w));
+                if (threads > 0 && threads <= 32) {
+                    cfg.loadWorkerThreads = threads;
+                }
+            } catch (...) {
+            }
         }
 
         // Parse JSON config from plugin init (overrides file-based config)
@@ -398,11 +423,6 @@ struct ProviderCtx {
                         keepModelHot = j["keep_model_hot"].get<bool>();
                         spdlog::info("[ONNX-Plugin] JSON config: keep_model_hot={}", keepModelHot);
                     }
-                    // enable_gpu
-                    if (j.contains("enable_gpu") && j["enable_gpu"].is_boolean()) {
-                        cfg.enableGPU = j["enable_gpu"].get<bool>();
-                        spdlog::info("[ONNX-Plugin] JSON config: enable_gpu={}", cfg.enableGPU);
-                    }
                     // num_threads
                     if (j.contains("num_threads") && j["num_threads"].is_number_integer()) {
                         int v = j["num_threads"].get<int>();
@@ -427,6 +447,19 @@ struct ProviderCtx {
                             cfg.hotPoolSize = v;
                             spdlog::info("[ONNX-Plugin] JSON config: hot_pool_size={}",
                                          cfg.hotPoolSize);
+                        }
+                    }
+                    if (j.contains("async_load") && j["async_load"].is_boolean()) {
+                        cfg.asyncLoading = j["async_load"].get<bool>();
+                        spdlog::info("[ONNX-Plugin] JSON config: async_load={}", cfg.asyncLoading);
+                    }
+                    if (j.contains("load_worker_threads") &&
+                        j["load_worker_threads"].is_number_integer()) {
+                        auto v = static_cast<std::size_t>(j["load_worker_threads"].get<int>());
+                        if (v >= 1 && v <= 32) {
+                            cfg.loadWorkerThreads = v;
+                            spdlog::info("[ONNX-Plugin] JSON config: load_worker_threads={}",
+                                         cfg.loadWorkerThreads);
                         }
                     }
                     // models_root - override the models directory
@@ -465,8 +498,9 @@ struct ProviderCtx {
         if (!rerankerModelPath.empty()) {
             this->rerankerModelPath = rerankerModelPath;
         }
-        spdlog::info("[ONNX-Plugin] Creating OnnxModelPool with modelsRoot={}, gpuEnabled={}",
-                     cfg.modelsRoot, gpuEnabled);
+        spdlog::info("[ONNX-Plugin] Creating OnnxModelPool with modelsRoot={}, gpuEnabled={}, "
+                     "async_load={}",
+                     cfg.modelsRoot, gpuEnabled, cfg.asyncLoading);
         pool = std::make_unique<yams::daemon::OnnxModelPool>(cfg);
         spdlog::info("[ONNX-Plugin] OnnxModelPool created, calling initialize()...");
         try {

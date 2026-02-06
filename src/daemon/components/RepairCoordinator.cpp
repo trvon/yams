@@ -462,8 +462,7 @@ void RepairCoordinator::onDocumentRemoved(const DocumentRemovedEvent& event) {
 // Extracted helpers for runAsync readability
 // ---------------------------------------------------------------------------
 
-boost::asio::awaitable<void>
-RepairCoordinator::processPathTreeRepair() {
+boost::asio::awaitable<void> RepairCoordinator::processPathTreeRepair() {
     using namespace std::chrono_literals;
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
@@ -483,7 +482,7 @@ RepairCoordinator::processPathTreeRepair() {
         }
 
         spdlog::debug("RepairCoordinator: PathTreeRepair scanning {} documents",
-                       docsResult.value().size());
+                      docsResult.value().size());
 
         uint64_t created = 0;
         uint64_t errors = 0;
@@ -522,8 +521,8 @@ RepairCoordinator::processPathTreeRepair() {
                 ++scanned;
 
                 if (scanned % 500 == 0) {
-                    spdlog::debug("RepairCoordinator: PathTreeRepair progress: {}/{}",
-                                  scanned, docsResult.value().size());
+                    spdlog::debug("RepairCoordinator: PathTreeRepair progress: {}/{}", scanned,
+                                  docsResult.value().size());
                 }
             }
 
@@ -532,8 +531,9 @@ RepairCoordinator::processPathTreeRepair() {
             co_await timer.async_wait(boost::asio::use_awaitable);
         }
 
-        spdlog::debug("RepairCoordinator: PathTreeRepair complete (scanned={}, created={}, errors={})",
-                       scanned, created, errors);
+        spdlog::debug(
+            "RepairCoordinator: PathTreeRepair complete (scanned={}, created={}, errors={})",
+            scanned, created, errors);
     } catch (const std::exception& e) {
         spdlog::debug("RepairCoordinator: PathTreeRepair exception: {}", e.what());
     }
@@ -550,11 +550,10 @@ void RepairCoordinator::performVectorCleanup() {
         if (vectorDb) {
             auto cleanup = vectorDb->cleanupOrphanRows();
             if (cleanup) {
-                spdlog::debug(
-                    "RepairCoordinator: cleaned vector orphans (metadata_removed={}, "
-                    "embeddings_removed={}, metadata_backfilled={})",
-                    cleanup.value().metadata_removed, cleanup.value().embeddings_removed,
-                    cleanup.value().metadata_backfilled);
+                spdlog::debug("RepairCoordinator: cleaned vector orphans (metadata_removed={}, "
+                              "embeddings_removed={}, metadata_backfilled={})",
+                              cleanup.value().metadata_removed, cleanup.value().embeddings_removed,
+                              cleanup.value().metadata_backfilled);
             } else {
                 spdlog::warn("RepairCoordinator: vector orphan cleanup failed: {}",
                              cleanup.error().message);
@@ -634,8 +633,9 @@ boost::asio::awaitable<void> RepairCoordinator::spawnInitialScan() {
         if (totalEnqueued > 0) {
             totalBacklog_.store(totalEnqueued, std::memory_order_relaxed);
             processed_.store(0, std::memory_order_relaxed);
-            spdlog::debug("RepairCoordinator: async scan complete, queued {} documents from {} total",
-                          totalEnqueued, offset);
+            spdlog::debug(
+                "RepairCoordinator: async scan complete, queued {} documents from {} total",
+                totalEnqueued, offset);
         } else {
             spdlog::debug(
                 "RepairCoordinator: async scan complete, no documents need repair (scanned {})",
@@ -687,8 +687,7 @@ RepairCoordinator::detectMissingWork(const std::vector<std::string>& batch) {
                 }
 
                 if (modelDim > 0 && storedDim > 0 && modelDim != storedDim) {
-                    if (cfg_.autoRebuildOnDimMismatch &&
-                        !dimMismatchRebuildDone_.exchange(true)) {
+                    if (cfg_.autoRebuildOnDimMismatch && !dimMismatchRebuildDone_.exchange(true)) {
                         spdlog::warn(
                             "RepairCoordinator: rebuilding vectors (model dim {} != db dim {})",
                             modelDim, storedDim);
@@ -712,11 +711,11 @@ RepairCoordinator::detectMissingWork(const std::vector<std::string>& batch) {
                                                 "RepairCoordinator: createTables failed: {}",
                                                 createRes.error().message);
                                         } else {
-                                            ConfigResolver::writeVectorSentinel(cfg_.dataDir,
-                                                                                modelDim, "vec0", 1);
-                                            spdlog::debug(
-                                                "RepairCoordinator: vector schema rebuilt to dim {}",
-                                                modelDim);
+                                            ConfigResolver::writeVectorSentinel(
+                                                cfg_.dataDir, modelDim, "vec0", 1);
+                                            spdlog::debug("RepairCoordinator: vector schema "
+                                                          "rebuilt to dim {}",
+                                                          modelDim);
                                         }
                                     }
                                 }
@@ -747,9 +746,9 @@ RepairCoordinator::detectMissingWork(const std::vector<std::string>& batch) {
     // Detect documents missing FTS5 content
     auto meta = services_ ? services_->getMetadataRepo() : nullptr;
     if (meta) {
-        auto customExtractors =
-            services_ ? services_->getContentExtractors()
-                      : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
+        auto customExtractors = services_
+                                    ? services_->getContentExtractors()
+                                    : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
 
         for (const auto& hash : batch) {
             auto docRes = meta->getDocumentByHash(hash);
@@ -761,8 +760,8 @@ RepairCoordinator::detectMissingWork(const std::vector<std::string>& batch) {
                 }
                 if (!d.contentExtracted ||
                     d.extractionStatus != yams::metadata::ExtractionStatus::Success) {
-                    if (canExtractDocument(d.mimeType, d.fileExtension, customExtractors,
-                                            content, hash)) {
+                    if (canExtractDocument(d.mimeType, d.fileExtension, customExtractors, content,
+                                           hash)) {
                         result.missingFts5.push_back(hash);
                     }
                 }
@@ -849,7 +848,7 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                 // IContentStore The proper fix is to make ServiceManager expose getStorageEngine()
                 // TODO PBI-062-4: Add getStorageEngine() to ServiceManager
                 spdlog::debug("RepairCoordinator: prune job {} - storage engine access needed",
-                             pruneJob.requestId);
+                              pruneJob.requestId);
                 spdlog::debug(
                     "RepairCoordinator: prune job {} queued but needs storage engine refactor",
                     pruneJob.requestId);
@@ -900,10 +899,9 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                 spdlog::debug(
                     "RepairCoordinator: starting async initial scan (batched, non-blocking)");
                 auto scanExec = RepairThreadPool::instance().get_executor();
-                boost::asio::co_spawn(scanExec,
-                    [this]() -> boost::asio::awaitable<void> {
-                        co_await spawnInitialScan();
-                    },
+                boost::asio::co_spawn(
+                    scanExec,
+                    [this]() -> boost::asio::awaitable<void> { co_await spawnInitialScan(); },
                     boost::asio::detached);
                 initialScanEnqueued = true;
             }
@@ -961,7 +959,7 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                     missingEmbeddings, yams::metadata::RepairStatus::Processing);
                 if (!statusRes) {
                     spdlog::debug("RepairCoordinator: failed to set Processing status: {}",
-                                 statusRes.error().message);
+                                  statusRes.error().message);
                 }
             }
 

@@ -376,7 +376,6 @@ public:
         return PluginHostSnapshot{};
     }
 
-
     // Expose resolved daemon configuration for components that need paths
     const DaemonConfig& getConfig() const { return config_; }
     // Resolved data directory used for storage (may derive from env/config)

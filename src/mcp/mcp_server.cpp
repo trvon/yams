@@ -4431,16 +4431,26 @@ void MCPServer::initializeToolRegistry() {
     toolRegistry_ = std::make_unique<ToolRegistry>();
 
     // Define annotation presets for different tool categories (MCP 2024-11-05)
-    ToolAnnotation readOnlyAnnotation{
-        .readOnlyHint = true, .destructiveHint = false, .idempotentHint = true};
-    ToolAnnotation addAnnotation{
-        .readOnlyHint = false, .destructiveHint = false, .idempotentHint = false};
-    ToolAnnotation deleteAnnotation{
-        .readOnlyHint = false, .destructiveHint = true, .idempotentHint = false};
-    ToolAnnotation updateAnnotation{
-        .readOnlyHint = false, .destructiveHint = true, .idempotentHint = true};
-    ToolAnnotation sessionAnnotation{
-        .readOnlyHint = false, .destructiveHint = false, .idempotentHint = false};
+    ToolAnnotation readOnlyAnnotation{.readOnlyHint = true,
+                                      .destructiveHint = false,
+                                      .idempotentHint = true,
+                                      .openWorldHint = false};
+    ToolAnnotation addAnnotation{.readOnlyHint = false,
+                                 .destructiveHint = false,
+                                 .idempotentHint = false,
+                                 .openWorldHint = false};
+    ToolAnnotation deleteAnnotation{.readOnlyHint = false,
+                                    .destructiveHint = true,
+                                    .idempotentHint = false,
+                                    .openWorldHint = false};
+    ToolAnnotation updateAnnotation{.readOnlyHint = false,
+                                    .destructiveHint = true,
+                                    .idempotentHint = true,
+                                    .openWorldHint = false};
+    ToolAnnotation sessionAnnotation{.readOnlyHint = false,
+                                     .destructiveHint = false,
+                                     .idempotentHint = false,
+                                     .openWorldHint = false};
 
     // Non-daemon tool used for protocol feature validation.
     // This stays fully in-process so unit tests can exercise tool result shaping

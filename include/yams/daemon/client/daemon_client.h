@@ -275,8 +275,8 @@ public:
     // Streaming search with progressive output
     class StreamingSearchHandler : public ChunkedResponseHandler {
     public:
-        explicit StreamingSearchHandler(bool pathsOnly = false, size_t limit = 0)
-            : pathsOnly_(pathsOnly), limit_(limit), count_(0) {}
+        explicit StreamingSearchHandler(bool /*pathsOnly*/ = false, size_t limit = 0)
+            : limit_(limit), count_(0) {}
 
         void onHeaderReceived(const Response& headerResponse) override;
         bool onChunkReceived(const Response& chunkResponse, bool isLastChunk) override;
@@ -287,7 +287,6 @@ public:
         Result<SearchResponse> getResults() const;
 
     private:
-        bool pathsOnly_ = false;
         size_t limit_ = 0;
         size_t count_ = 0;
         std::vector<SearchResult> results_;

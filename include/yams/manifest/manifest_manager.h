@@ -197,7 +197,9 @@ public:
                           .originalName = fileInfo.originalName,
                           .mimeType = fileInfo.mimeType,
                           .createdAt = fileInfo.createdAt,
-                          .modifiedAt = std::chrono::system_clock::now()};
+                          .modifiedAt = std::chrono::system_clock::now(),
+                          .chunks = {},
+                          .metadata = {}};
 
         // Transform chunks to references using ranges
         namespace rv = std::ranges::views;

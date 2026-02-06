@@ -108,8 +108,8 @@ void TuningManager::configureOnnxConcurrencyRegistry() {
 
     // Ensure at least 1 shared slot beyond reserved and a hard minimum of 2.
     const uint32_t totalReserved = glinerReserved + embedReserved + rerankerReserved;
-    const uint32_t maxSlots = std::max<uint32_t>(std::max<uint32_t>(maxConcurrent, 2u),
-                                                 totalReserved + 1);
+    const uint32_t maxSlots =
+        std::max<uint32_t>(std::max<uint32_t>(maxConcurrent, 2u), totalReserved + 1);
 
     // Configure the registry
     registry.setMaxSlots(maxSlots);
@@ -145,6 +145,60 @@ void TuningManager::tick_once() {
     // =========================================================================
     auto& governor = ResourceGovernor::instance();
     ResourceSnapshot govSnap = governor.tick(sm_);
+
+    // Dynamically clamp ONNX concurrency to governor caps (keeps global pools aligned)
+    try {
+        auto& registry = OnnxConcurrencyRegistry::instance();
+        uint32_t desiredMax = std::max<uint32_t>(2u, TuneAdvisor::onnxMaxConcurrent());
+        uint32_t glinerReserved = TuneAdvisor::onnxGlinerReserved();
+        uint32_t embedReserved = TuneAdvisor::onnxEmbedReserved();
+        uint32_t rerankerReserved = TuneAdvisor::onnxRerankerReserved();
+
+        if (TuneAdvisor::enableResourceGovernor()) {
+            desiredMax = std::min<uint32_t>(desiredMax, governor.maxEmbedConcurrency());
+        }
+
+        desiredMax = std::max<uint32_t>(desiredMax, 1u);
+        if (desiredMax > 64u) { // counting_semaphore<64> limit in registry
+            desiredMax = 64u;
+        }
+
+        uint32_t remaining = desiredMax;
+        auto consume = [&remaining](uint32_t v) {
+            if (remaining == 0)
+                return 0u;
+            uint32_t take = std::min(v, remaining);
+            remaining -= take;
+            return take;
+        };
+        uint32_t effGliner = consume(glinerReserved);
+        uint32_t effEmbed = consume(embedReserved);
+        uint32_t effReranker = consume(rerankerReserved);
+
+        if (remaining == 0 && desiredMax > (effGliner + effEmbed + effReranker)) {
+            remaining = 1;
+        }
+
+        static uint32_t lastMax = 0, lastG = 0, lastE = 0, lastR = 0;
+        if (lastMax != desiredMax) {
+            registry.setMaxSlots(desiredMax);
+            lastMax = desiredMax;
+            spdlog::info("[TuningManager] ONNX slots set to {}", desiredMax);
+        }
+        if (lastG != effGliner) {
+            registry.setReservedSlots(OnnxLane::Gliner, effGliner);
+            lastG = effGliner;
+        }
+        if (lastE != effEmbed) {
+            registry.setReservedSlots(OnnxLane::Embedding, effEmbed);
+            lastE = effEmbed;
+        }
+        if (lastR != effReranker) {
+            registry.setReservedSlots(OnnxLane::Reranker, effReranker);
+            lastR = effReranker;
+        }
+    } catch (...) {
+    }
 
 #if defined(TRACY_ENABLE)
     TracyPlot("governor.rss_mb", static_cast<double>(govSnap.rssBytes) / (1024.0 * 1024.0));
@@ -291,8 +345,7 @@ void TuningManager::tick_once() {
             // Override with gradient limiter values if enabled
             if (TuneAdvisor::enableGradientLimiters()) {
                 // Propagate governor pressure to limiters before reading
-                const auto pressureLevel =
-                    static_cast<uint8_t>(govSnap.level);
+                const auto pressureLevel = static_cast<uint8_t>(govSnap.level);
                 auto applyPressureToLimiter = [pressureLevel](GradientLimiter* lim) {
                     if (lim)
                         lim->applyPressure(pressureLevel);
@@ -413,6 +466,18 @@ void TuningManager::tick_once() {
             TuneAdvisor::setPostEntityConcurrentDynamicCap(entityTarget);
             TuneAdvisor::setPostTitleConcurrentDynamicCap(titleTarget);
             TuneAdvisor::setPostEmbedConcurrentDynamicCap(embedTarget);
+
+            // Align EmbeddingGenerator global gate with governor caps
+            uint32_t baseEmbedGuard = TuneAdvisor::embedMaxConcurrencyBase();
+            uint32_t desiredEmbedGuard = baseEmbedGuard;
+            if (TuneAdvisor::enableResourceGovernor()) {
+                desiredEmbedGuard = std::min(desiredEmbedGuard, governor.maxEmbedConcurrency());
+            }
+            if (desiredEmbedGuard < baseEmbedGuard) {
+                TuneAdvisor::setEmbedMaxConcurrencyDynamicCap(desiredEmbedGuard);
+            } else {
+                TuneAdvisor::setEmbedMaxConcurrencyDynamicCap(0);
+            }
 
 #if defined(TRACY_ENABLE)
             TracyPlot("post.queued", static_cast<double>(queuedItems));
@@ -568,9 +633,6 @@ void TuningManager::tick_once() {
 
             const size_t activeConns = state_->stats.activeConnections.load();
             const size_t maxConns = state_->stats.maxConnections.load(std::memory_order_relaxed);
-            const size_t slotsFree =
-                state_->stats.connectionSlotsFree.load(std::memory_order_relaxed);
-
             if (maxConns > 0) {
                 double util = static_cast<double>(activeConns) / static_cast<double>(maxConns);
 

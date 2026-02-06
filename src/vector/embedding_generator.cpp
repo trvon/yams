@@ -1990,36 +1990,41 @@ private:
     struct ConcurrencyGuard final {
         ConcurrencyGuard() { lock(); }
         ~ConcurrencyGuard() { unlock(); }
+        static int resolve_cap() {
+            int cap = 0;
+            try {
+                cap = static_cast<int>(yams::daemon::TuneAdvisor::getEmbedMaxConcurrency());
+            } catch (...) {
+            }
+            if (cap <= 0) {
+                cap = std::max(1u, std::thread::hardware_concurrency());
+            }
+            return std::max(1, cap);
+        }
         static void init_from_env_once() {
             static std::once_flag once;
             std::call_once(once, []() {
-                int cap = 0;
-                // Prefer centralized TuneAdvisor when available
-                try {
-                    cap = static_cast<int>(yams::daemon::TuneAdvisor::getEmbedMaxConcurrency());
-                } catch (...) {
-                }
-                if (cap <= 0) {
-                    int def = std::max(2u, std::thread::hardware_concurrency());
-                    cap = def;
-                    try {
-                        if (const char* s = std::getenv("YAMS_EMBED_MAX_CONCURRENCY")) {
-                            int v = std::stoi(s);
-                            if (v > 0 && v < 1024)
-                                cap = v;
-                        }
-                    } catch (...) {
-                    }
-                }
+                const int cap = resolve_cap();
                 g_max_concurrency_.store(cap, std::memory_order_relaxed);
                 spdlog::info("EmbeddingGenerator: max concurrency set to {}", cap);
             });
         }
+        static int refresh_cap_locked() {
+            const int desired = resolve_cap();
+            const int current = g_max_concurrency_.load(std::memory_order_relaxed);
+            if (desired != current) {
+                g_max_concurrency_.store(desired, std::memory_order_relaxed);
+                g_cv_.notify_all();
+                return desired;
+            }
+            return current;
+        }
         static void lock() {
             std::unique_lock<std::mutex> lk(g_mtx_);
-            const int cap = g_max_concurrency_.load(std::memory_order_relaxed);
+            int cap = refresh_cap_locked();
             while (g_active_ >= cap) {
                 g_cv_.wait(lk);
+                cap = refresh_cap_locked();
             }
             ++g_active_;
         }

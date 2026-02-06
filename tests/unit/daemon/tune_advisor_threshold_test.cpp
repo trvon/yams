@@ -412,6 +412,53 @@ TEST_CASE("Worker poll cadence overrides", "[daemon][tune][advisor][catch2]") {
 }
 
 // =============================================================================
+// GPU-Aware Batch Size Tests
+// =============================================================================
+
+TEST_CASE("gpuAwareBatchSize returns sensible values", "[daemon][tune][advisor][catch2]") {
+    SECTION("CPU fallback (0 VRAM) returns 32") {
+        CHECK(TuneAdvisor::gpuAwareBatchSize(0, 768) == 32);
+        CHECK(TuneAdvisor::gpuAwareBatchSize(0, 384) == 32);
+    }
+
+    SECTION("Small VRAM (4 GB) with typical embedding dim") {
+        auto batch = TuneAdvisor::gpuAwareBatchSize(4ULL * 1024 * 1024 * 1024, 768);
+        CHECK(batch >= 8);
+        CHECK(batch <= 256);
+    }
+
+    SECTION("Medium VRAM (8 GB) with small embedding dim") {
+        auto batch = TuneAdvisor::gpuAwareBatchSize(8ULL * 1024 * 1024 * 1024, 384);
+        CHECK(batch >= 8);
+        CHECK(batch <= 256);
+    }
+
+    SECTION("Large VRAM (24 GB) with typical embedding dim") {
+        auto batch = TuneAdvisor::gpuAwareBatchSize(24ULL * 1024 * 1024 * 1024, 768);
+        CHECK(batch >= 8);
+        CHECK(batch <= 256);
+    }
+
+    SECTION("More VRAM produces equal or larger batch for same dim") {
+        auto batchSmall = TuneAdvisor::gpuAwareBatchSize(4ULL * 1024 * 1024 * 1024, 768);
+        auto batchLarge = TuneAdvisor::gpuAwareBatchSize(24ULL * 1024 * 1024 * 1024, 768);
+        CHECK(batchLarge >= batchSmall);
+    }
+
+    SECTION("Larger embedding dim produces equal or smaller batch for same VRAM") {
+        auto batchSmallDim = TuneAdvisor::gpuAwareBatchSize(8ULL * 1024 * 1024 * 1024, 384);
+        auto batchLargeDim = TuneAdvisor::gpuAwareBatchSize(8ULL * 1024 * 1024 * 1024, 1536);
+        CHECK(batchSmallDim >= batchLargeDim);
+    }
+
+    SECTION("Env override YAMS_GPU_BATCH_SIZE takes precedence") {
+        EnvGuard envGuard("YAMS_GPU_BATCH_SIZE", "42");
+        CHECK(TuneAdvisor::gpuAwareBatchSize(8ULL * 1024 * 1024 * 1024, 768) == 42);
+        CHECK(TuneAdvisor::gpuAwareBatchSize(0, 768) == 42);
+    }
+}
+
+// =============================================================================
 // PostIngestQueue Profile-Aware Concurrency Tests
 // =============================================================================
 
@@ -469,4 +516,60 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
     }
+}
+
+// =============================================================================
+// statusTickMs Default and Override Tests
+// =============================================================================
+
+TEST_CASE("statusTickMs defaults to 5", "[daemon][governance][catch2]") {
+    // Ensure no env override is active
+    EnvGuard envGuard("YAMS_STATUS_TICK_MS", "0"); // 0 fails validation, falls through to default
+    // Actually 0 is rejected by the > 0 check, so we need to unset it
+    unsetenv("YAMS_STATUS_TICK_MS");
+    CHECK(TuneAdvisor::statusTickMs() == 5);
+}
+
+TEST_CASE("statusTickMs env var override", "[daemon][governance][catch2]") {
+    SECTION("Valid override is respected") {
+        EnvGuard envGuard("YAMS_STATUS_TICK_MS", "100");
+        CHECK(TuneAdvisor::statusTickMs() == 100);
+    }
+
+    SECTION("Zero is rejected, falls back to default") {
+        EnvGuard envGuard("YAMS_STATUS_TICK_MS", "0");
+        CHECK(TuneAdvisor::statusTickMs() == 5);
+    }
+
+    SECTION("10000 or above is rejected") {
+        EnvGuard envGuard("YAMS_STATUS_TICK_MS", "10000");
+        CHECK(TuneAdvisor::statusTickMs() == 5);
+    }
+}
+
+// =============================================================================
+// computeCpuThrottleDelayMs Tests
+// =============================================================================
+
+TEST_CASE("computeCpuThrottleDelayMs returns 0 below threshold", "[daemon][governance][catch2]") {
+    ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+    // Balanced threshold = 50 + 0.5*35 = 67.5%
+    CHECK(TuneAdvisor::computeCpuThrottleDelayMs(60.0) == 0);
+    CHECK(TuneAdvisor::computeCpuThrottleDelayMs(0.0) == 0);
+}
+
+TEST_CASE("computeCpuThrottleDelayMs returns clamped delay above threshold",
+          "[daemon][governance][catch2]") {
+    ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+    // Aggressive threshold = 50 + 1.0*35 = 85%
+    double threshold = TuneAdvisor::cpuHighThresholdPercent();
+    int32_t delay = TuneAdvisor::computeCpuThrottleDelayMs(threshold + 10.0);
+    CHECK(delay >= 2);
+    CHECK(delay <= 25);
+}
+
+TEST_CASE("computeCpuThrottleDelayMs clamps to max 25ms", "[daemon][governance][catch2]") {
+    // Even at 100% CPU, delay should not exceed 25ms
+    int32_t delay = TuneAdvisor::computeCpuThrottleDelayMs(100.0);
+    CHECK(delay <= 25);
 }

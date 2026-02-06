@@ -200,7 +200,7 @@ yams_daemon_lib = static_library('yams_daemon',
     nlohmann_json_dep,
     protobuf_dep,
   ] + tracy_deps,
-  cpp_args: tracy_args,
+  cpp_args: tracy_args + ['-Wno-unused-parameter'],
   include_directories: [
     include_directories('../../include'),
     include_directories('.'),

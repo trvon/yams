@@ -850,7 +850,7 @@ SymbolExtractor::Result SymbolExtractor::extractClasses(const ExtractionContext&
     return result;
 }
 
-SymbolExtractor::Result SymbolExtractor::extractStructs(const ExtractionContext& ctx) {
+SymbolExtractor::Result SymbolExtractor::extractStructs(const ExtractionContext& /*ctx*/) {
     // For C, structs are extracted in the class extraction phase
     // This provides a separate hook for languages where structs are distinct
     return ExtractionResult{};
@@ -1240,8 +1240,6 @@ SymbolExtractor::extractInheritance(const ExtractionContext& ctx,
                         uint32_t base_count = ts_node_child_count(child);
                         for (uint32_t j = 0; j < base_count; ++j) {
                             TSNode base_spec = ts_node_child(child, j);
-                            const char* base_type = ts_node_type(base_spec);
-
                             // Look for type_identifier in the base specifier
                             std::function<std::string(TSNode)> find_base_type;
                             find_base_type = [&ctx, &find_base_type](TSNode n) -> std::string {

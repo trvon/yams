@@ -40,7 +40,8 @@ inline bool applyPressureToLimit(std::size_t& maxConcurrent) {
 }
 
 inline bool applyCpuThrottlingForPoller(boost::asio::steady_timer& timer) {
-    if (!TuneAdvisor::enableResourceGovernor()) return false;
+    if (!TuneAdvisor::enableResourceGovernor())
+        return false;
     auto snap = ResourceGovernor::instance().getSnapshot();
     int32_t delayMs = TuneAdvisor::computeCpuThrottleDelayMs(snap.cpuUsagePercent);
     if (delayMs > 0) {
@@ -54,8 +55,7 @@ inline bool applyCpuThrottlingForPoller(boost::asio::steady_timer& timer) {
 
 /// Configuration for a pressure-limited poller coroutine.
 /// Template parameter Task is the channel job type.
-template <typename Task>
-struct PressureLimitedPollerConfig {
+template <typename Task> struct PressureLimitedPollerConfig {
     std::string stageName;
     std::atomic<bool>* stopFlag = nullptr;
     std::atomic<bool>* startedFlag = nullptr;
@@ -87,10 +87,8 @@ struct PressureLimitedPollerConfig {
 /// Generic pressure-limited poller coroutine.
 /// Replaces channelPoller, kgPoller, symbolPoller, entityPoller, titlePoller.
 template <typename Task>
-boost::asio::awaitable<void> pressureLimitedPoll(
-    std::shared_ptr<SpscQueue<Task>> channel,
-    PressureLimitedPollerConfig<Task> cfg) {
-
+boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>> channel,
+                                                 PressureLimitedPollerConfig<Task> cfg) {
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
     cfg.startedFlag->store(true);
@@ -122,14 +120,13 @@ boost::asio::awaitable<void> pressureLimitedPoll(
 
             if (cfg.batchMode) {
                 // Batch collection (channelPoller)
-                const std::size_t batchSize = cfg.batchSizeFn ? cfg.batchSizeFn()
-                                                              : std::size_t(1);
+                const std::size_t batchSize = cfg.batchSizeFn ? cfg.batchSizeFn() : std::size_t(1);
                 std::vector<Task> batch;
                 batch.reserve(batchSize);
                 Task task;
 
-                while (cfg.inFlightCounter->load() < maxConcurrent &&
-                       batch.size() < batchSize && channel->try_pop(task)) {
+                while (cfg.inFlightCounter->load() < maxConcurrent && batch.size() < batchSize &&
+                       channel->try_pop(task)) {
                     GradientLimiter* lim = cfg.getLimiterFn ? cfg.getLimiterFn() : nullptr;
                     if (!cfg.tryAcquireFn(lim, cfg.getHashFn(task), cfg.stageName)) {
                         channel->try_push(std::move(task));
@@ -151,17 +148,15 @@ boost::asio::awaitable<void> pressureLimitedPoll(
                             hashes.push_back(cfg.getHashFn(t));
                         }
                     }
-                    boost::asio::post(
-                        cfg.executor,
-                        [cfg, batch = std::move(batch), batchCount,
-                         hashes = std::move(hashes)]() mutable {
-                            cfg.batchProcessFn(std::move(batch));
-                            for (const auto& h : hashes) {
-                                cfg.completeJobFn(h, true);
-                            }
-                            cfg.inFlightCounter->fetch_sub(batchCount);
-                            cfg.checkDrainFn();
-                        });
+                    boost::asio::post(cfg.executor, [cfg, batch = std::move(batch), batchCount,
+                                                     hashes = std::move(hashes)]() mutable {
+                        cfg.batchProcessFn(std::move(batch));
+                        for (const auto& h : hashes) {
+                            cfg.completeJobFn(h, true);
+                        }
+                        cfg.inFlightCounter->fetch_sub(batchCount);
+                        cfg.checkDrainFn();
+                    });
                 }
             } else {
                 // Single-item processing (kg, symbol, entity, title pollers)
@@ -176,14 +171,13 @@ boost::asio::awaitable<void> pressureLimitedPoll(
                     didWork = true;
                     cfg.wasActiveFlag->store(true, std::memory_order_release);
                     cfg.inFlightCounter->fetch_add(1);
-                    boost::asio::post(
-                        cfg.executor,
-                        [cfg, job = std::move(job), hash = std::move(hash)]() mutable {
-                            cfg.processFn(job);
-                            cfg.completeJobFn(hash, true);
-                            cfg.inFlightCounter->fetch_sub(1);
-                            cfg.checkDrainFn();
-                        });
+                    boost::asio::post(cfg.executor, [cfg, job = std::move(job),
+                                                     hash = std::move(hash)]() mutable {
+                        cfg.processFn(job);
+                        cfg.completeJobFn(hash, true);
+                        cfg.inFlightCounter->fetch_sub(1);
+                        cfg.checkDrainFn();
+                    });
                 }
             }
 

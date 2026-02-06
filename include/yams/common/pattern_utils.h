@@ -123,12 +123,12 @@ inline void brace_expand_impl(std::string_view pat, std::vector<std::string>& ou
 
                     if (atEnd || (ch == ',' && innerLevel == 0)) {
                         std::string_view tok = inner.substr(start, pos - start);
-                    std::string merged;
-                    merged.reserve(prefix.size() + tok.size() + suffix.size());
-                    merged.append(prefix);
-                    merged.append(tok);
-                    merged.append(suffix);
-                    brace_expand_impl(merged, out);
+                        std::string merged;
+                        merged.reserve(prefix.size() + tok.size() + suffix.size());
+                        merged.append(prefix);
+                        merged.append(tok);
+                        merged.append(suffix);
+                        brace_expand_impl(merged, out);
                         start = pos + 1;
                     }
                 }
@@ -259,9 +259,9 @@ inline void brace_expand_impl(std::string_view pat, std::vector<std::string>& ou
         // DP-style match with '**'
         size_t i = 0, j = 0; // i: tseg, j: pseg
         size_t starI = std::string_view::npos, starJ = std::string_view::npos;
-        // If anchored, pattern must match from beginning; else allow leading skip via implicit '**'.
-        // Insert an implicit leading '**' so the matcher can backtrack across multiple possible
-        // starting positions (e.g., matching "b/c" against "a/b/x/b/c").
+        // If anchored, pattern must match from beginning; else allow leading skip via implicit
+        // '**'. Insert an implicit leading '**' so the matcher can backtrack across multiple
+        // possible starting positions (e.g., matching "b/c" against "a/b/x/b/c").
         static constexpr std::string_view kStarStar = "**";
         if (!anchored && (pseg.empty() || pseg[0] != kStarStar)) {
             pseg.insert(pseg.begin(), kStarStar);

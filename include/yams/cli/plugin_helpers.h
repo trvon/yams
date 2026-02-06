@@ -94,7 +94,7 @@ inline std::map<std::string, std::string> parse_plugins_json_types(const std::st
 }
 
 inline void print_interfaces(const std::vector<std::string>& interfaces,
-                             const char* prefix = "  ") {
+                             const char* /*prefix*/ = "  ") {
     for (size_t i = 0; i < interfaces.size(); ++i) {
         if (i)
             std::cout << ", ";

@@ -414,9 +414,15 @@ public:
     std::uint64_t gcQueued() const { return gcQueued_.load(std::memory_order_relaxed); }
     std::uint64_t gcDropped() const { return gcDropped_.load(std::memory_order_relaxed); }
     std::uint64_t gcConsumed() const { return gcConsumed_.load(std::memory_order_relaxed); }
-    std::uint64_t entityGraphQueued() const { return entityGraphQueued_.load(std::memory_order_relaxed); }
-    std::uint64_t entityGraphDropped() const { return entityGraphDropped_.load(std::memory_order_relaxed); }
-    std::uint64_t entityGraphConsumed() const { return entityGraphConsumed_.load(std::memory_order_relaxed); }
+    std::uint64_t entityGraphQueued() const {
+        return entityGraphQueued_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t entityGraphDropped() const {
+        return entityGraphDropped_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t entityGraphConsumed() const {
+        return entityGraphConsumed_.load(std::memory_order_relaxed);
+    }
 };
 
 } // namespace yams::daemon

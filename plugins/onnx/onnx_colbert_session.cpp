@@ -1,6 +1,8 @@
 #include <yams/daemon/resource/onnx_colbert_session.h>
 #include <yams/vector/embedding_generator.h>
 
+#include "onnx_gpu_provider.h"
+
 #include <nlohmann/json.hpp>
 #include <onnxruntime_cxx_api.h>
 #include <spdlog/spdlog.h>
@@ -26,11 +28,11 @@ static Ort::Env& get_colbert_ort_env() {
     std::lock_guard<std::recursive_mutex> lock(*g_colbert_onnx_mutex);
     if (!g_colbert_onnx_env_initialized) {
         OrtThreadingOptions* threading_options = nullptr;
-        Ort::GetApi().CreateThreadingOptions(&threading_options);
+        (void)Ort::GetApi().CreateThreadingOptions(&threading_options);
         if (threading_options) {
-            Ort::GetApi().SetGlobalIntraOpNumThreads(threading_options, 1);
-            Ort::GetApi().SetGlobalInterOpNumThreads(threading_options, 1);
-            Ort::GetApi().SetGlobalSpinControl(threading_options, 0);
+            (void)Ort::GetApi().SetGlobalIntraOpNumThreads(threading_options, 1);
+            (void)Ort::GetApi().SetGlobalInterOpNumThreads(threading_options, 1);
+            (void)Ort::GetApi().SetGlobalSpinControl(threading_options, 0);
             g_colbert_onnx_env =
                 new Ort::Env(threading_options, ORT_LOGGING_LEVEL_WARNING, "YamsColbert");
             Ort::GetApi().ReleaseThreadingOptions(threading_options);
@@ -74,6 +76,8 @@ public:
         sessionOptions_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_BASIC);
         sessionOptions_->EnableMemPattern();
         sessionOptions_->EnableCpuMemArena();
+
+        onnx_util::appendGpuProvider(*sessionOptions_);
     }
 
     Result<void> loadModel() {

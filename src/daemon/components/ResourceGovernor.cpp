@@ -362,12 +362,21 @@ void ResourceGovernor::updateCpuAdmissionControl(const ResourceSnapshot& snap) {
 void ResourceGovernor::collectMetrics(ServiceManager* sm, ResourceSnapshot& snap) {
     YAMS_ZONE_SCOPED_N("ResourceGovernor::collectMetrics");
 
-    // Memory metrics
-    snap.rssBytes = readRssBytes();
-    snap.memoryBudgetBytes = TuneAdvisor::memoryBudgetBytes();
+    // Cache /proc reads with a minimum interval to avoid excessive filesystem I/O.
+    // Even at 250ms default tick, env-var overrides could lower it; this guarantees
+    // at most ~10 /proc opens/sec regardless of tick cadence.
+    auto now = std::chrono::steady_clock::now();
+    constexpr auto kMinProcInterval = std::chrono::milliseconds(100);
 
-    // CPU metrics (delta-based, uses mutable state for jiffies tracking)
-    snap.cpuUsagePercent = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
+    if (now - lastProcReadTime_ >= kMinProcInterval) {
+        cachedRssBytes_ = readRssBytes();
+        cachedCpuPercent_ = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
+        lastProcReadTime_ = now;
+    }
+
+    snap.rssBytes = cachedRssBytes_;
+    snap.memoryBudgetBytes = TuneAdvisor::memoryBudgetBytes();
+    snap.cpuUsagePercent = cachedCpuPercent_;
 
     if (snap.memoryBudgetBytes > 0) {
         snap.memoryPressure =
@@ -442,13 +451,16 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
     // CPU-based pressure escalation: if CPU is very high, escalate the pressure level
     // This prevents CPU saturation even when memory is fine
     const double cpuHighThresh = TuneAdvisor::cpuHighThresholdPercent();
-    const double cpuCriticalThresh = cpuHighThresh + 25.0; // 25% above high
+    const double cpuCriticalGap = TuneAdvisor::cpuCriticalGapPercent();
+    const double cpuCriticalThresh = cpuHighThresh + cpuCriticalGap;
 
     if (snap.cpuUsagePercent >= cpuCriticalThresh) {
-        // Escalate to at least Critical if CPU is very high
-        rawLevel = std::max(rawLevel, ResourcePressureLevel::Critical);
+        if (snap.embedQueued > 0 && snap.memoryPressure < criticalThresh) {
+            rawLevel = std::max(rawLevel, ResourcePressureLevel::Warning);
+        } else {
+            rawLevel = std::max(rawLevel, ResourcePressureLevel::Critical);
+        }
     } else if (snap.cpuUsagePercent >= cpuHighThresh) {
-        // Escalate to at least Warning if CPU is high
         rawLevel = std::max(rawLevel, ResourcePressureLevel::Warning);
     }
 
@@ -708,21 +720,24 @@ void ResourceGovernor::onCriticalLevel(ServiceManager* sm) {
         }
     }
 
-    // Trigger model eviction if enabled
     if (TuneAdvisor::enableProactiveEviction() && sm && canEvict()) {
-        if (auto provider = sm->getModelProvider()) {
-            std::shared_lock lock(mutex_);
-            const double pressure = lastSnapshot_.memoryPressure;
-            lock.unlock();
+        std::shared_lock lock(mutex_);
+        const double pressure = lastSnapshot_.memoryPressure;
+        lock.unlock();
 
-            // evictUnderPressure is defined in IModelProvider but may not be
-            // implemented by all providers. We'll add it to the interface.
-            // For now, use releaseUnusedResources as a fallback.
-            provider->releaseUnusedResources();
-            recordEviction();
-
-            spdlog::info("[ResourceGovernor] Released unused model resources (pressure={:.1f}%)",
-                         pressure * 100);
+        const bool memoryDriven = pressure >= TuneAdvisor::memoryCriticalThreshold();
+        if (memoryDriven) {
+            if (auto provider = sm->getModelProvider()) {
+                provider->releaseUnusedResources();
+                recordEviction();
+                spdlog::info(
+                    "[ResourceGovernor] Released unused model resources (pressure={:.1f}%)",
+                    pressure * 100);
+            }
+        } else {
+            spdlog::debug(
+                "[ResourceGovernor] Skipping model eviction (CPU-driven critical, mem={:.1f}%)",
+                pressure * 100);
         }
     }
 

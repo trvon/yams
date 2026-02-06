@@ -144,6 +144,21 @@ public:
         cpuHighPct_.store(v, std::memory_order_relaxed);
     }
 
+    /// Gap between CPU high and CPU critical thresholds (%).
+    /// Default 40% (up from 25%) to avoid false Critical during ONNX inference.
+    /// Environment: YAMS_CPU_CRITICAL_GAP_PCT (10-50)
+    static double cpuCriticalGapPercent() {
+        if (const char* s = std::getenv("YAMS_CPU_CRITICAL_GAP_PCT")) {
+            try {
+                double v = std::stod(s);
+                if (v >= 10.0 && v <= 50.0)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 40.0;
+    }
+
     // CPU admission control hysteresis.
     // These time windows help avoid rejecting work on brief CPU spikes.
     // Envs:
@@ -375,8 +390,8 @@ public:
     }
 
     // Status/metrics tick cadence for daemon main loop. Default 5 ms.
-    // Reduced from 250ms -> 50ms -> 5ms for real-time governor metrics.
-    // Timing behaviors (hysteresis, startup) are now decoupled via ms-based constants.
+    // ResourceGovernor /proc caching (100ms min interval) prevents excessive
+    // filesystem I/O even at 200 ticks/sec.
     static uint32_t statusTickMs() {
         uint32_t def = 5;
         if (const char* s = std::getenv("YAMS_STATUS_TICK_MS")) {
@@ -600,6 +615,18 @@ public:
         return 0;
     }
 
+    // WorkCoordinator threads (override or derived). Default to 50% of budgeted threads.
+    static uint32_t workCoordinatorThreads() {
+        uint32_t ov = workCoordinatorThreadsOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        return recommendedThreads(0.5);
+    }
+    static void setWorkCoordinatorThreads(uint32_t n) {
+        workCoordinatorThreadsOverride_.store(std::clamp<uint32_t>(n, 1u, 512u),
+                                              std::memory_order_relaxed);
+    }
+
     // Recommended thread count based on CPU budget. backgroundFactor in (0,1].
     static uint32_t recommendedThreads(double backgroundFactor = 1.0, uint32_t hardMax = 0) {
         unsigned hw = hardwareConcurrency();
@@ -637,7 +664,7 @@ public:
     }
 
     // Embedding max concurrency (global). Env YAMS_EMBED_MAX_CONCURRENCY wins; else budgeted 25%.
-    static uint32_t embedMaxConcurrency() {
+    static uint32_t embedMaxConcurrencyBase() {
         if (const char* s = std::getenv("YAMS_EMBED_MAX_CONCURRENCY")) {
             try {
                 int v = std::stoi(s);
@@ -649,6 +676,21 @@ public:
         // Use a conservative fraction (25% of budgeted threads) for embeddings
         uint32_t rec = recommendedThreads(0.25);
         return std::max(1u, rec);
+    }
+    static uint32_t embedMaxConcurrency() {
+        uint32_t dyn = embedMaxConcurrencyOverride_.load(std::memory_order_relaxed);
+        if (dyn > 0)
+            return dyn;
+        return embedMaxConcurrencyBase();
+    }
+    // Runtime (daemon-only) dynamic cap. 0 = unset (use base/env).
+    static void setEmbedMaxConcurrencyDynamicCap(uint32_t v) {
+        if (v == 0) {
+            embedMaxConcurrencyOverride_.store(0u, std::memory_order_relaxed);
+            return;
+        }
+        embedMaxConcurrencyOverride_.store(std::clamp<uint32_t>(v, 1u, 1024u),
+                                           std::memory_order_relaxed);
     }
 
     // -------- Code-controlled worker sizing (no env steering) --------
@@ -1665,7 +1707,9 @@ public:
     static uint32_t postKgDefaultConcurrent() {
         return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/false).kg;
     }
-    static uint32_t postKgConcurrent() { return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).kg; }
+    static uint32_t postKgConcurrent() {
+        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).kg;
+    }
     static void setPostKgConcurrent(uint32_t v) {
         postKgConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
     }
@@ -1771,6 +1815,39 @@ public:
     }
     static void setOnnxSessionsPerModel(uint32_t v) {
         onnxSessionsPerModelOverride_.store(std::clamp(v, 1u, 32u), std::memory_order_relaxed);
+    }
+
+    /// GPU-aware batch size for embedding operations.
+    /// Estimates how many documents can fit in a GPU batch based on available VRAM.
+    /// Environment: YAMS_GPU_BATCH_SIZE (takes precedence)
+    /// @param vramBytes  Total VRAM in bytes (0 = CPU-only fallback)
+    /// @param embeddingDim  Embedding dimension (e.g. 384, 768)
+    /// @return Batch size clamped to [8, 256]
+    static uint32_t gpuAwareBatchSize(uint64_t vramBytes, size_t embeddingDim) {
+        // Environment override takes precedence
+        if (const char* s = std::getenv("YAMS_GPU_BATCH_SIZE")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 512)
+                    return v;
+            } catch (...) {
+            }
+        }
+
+        if (vramBytes == 0)
+            return 32; // CPU fallback
+
+        // Estimate per-doc GPU memory: embedding_dim * 4 bytes * safety_factor
+        // Plus model overhead (~500MB for typical embedding model)
+        constexpr uint64_t modelOverhead = 512ULL * 1024 * 1024;
+        uint64_t availableForBatching =
+            (vramBytes > modelOverhead) ? vramBytes - modelOverhead : vramBytes / 2;
+
+        // Each doc in batch: ~embeddingDim * sizeof(float) * sequence_len_factor
+        uint64_t perDocBytes = static_cast<uint64_t>(embeddingDim) * 4 * 512; // conservative
+        uint64_t maxDocs = (perDocBytes > 0) ? availableForBatching / perDocBytes : 32;
+
+        return static_cast<uint32_t>(std::clamp(maxDocs, uint64_t{8}, uint64_t{256}));
     }
 
     /// Whether ONNX pool is currently in startup mode (reduced resources during warmup).
@@ -2180,7 +2257,8 @@ private:
             }
         }
 
-        auto alloc = (hasOverride || hasDynamicCap) ? allocate(desired, caps, weights) : allocDefaults;
+        auto alloc =
+            (hasOverride || hasDynamicCap) ? allocate(desired, caps, weights) : allocDefaults;
         return PostIngestConcurrencyBudget{alloc[0], alloc[1], alloc[2],
                                            alloc[3], alloc[4], alloc[5]};
     }
@@ -2233,6 +2311,7 @@ private:
     static inline std::atomic<uint32_t> maxIngestWorkersOverride_{0};
     static inline std::atomic<uint32_t> storagePoolSizeOverride_{0};
     static inline std::atomic<uint32_t> ingestBacklogPerWorkerOverride_{0};
+    static inline std::atomic<uint32_t> workCoordinatorThreadsOverride_{0};
     // Defaults: prefer internal event bus by default; config/env can override
     static inline std::atomic<bool> useInternalBusRepair_{true};
     static inline std::atomic<bool> useInternalBusPostIngest_{true};
@@ -2269,6 +2348,7 @@ private:
     static inline std::atomic<uint32_t> postTitleConcurrentDynamicCap_{0};
 
     // PBI-05b: EmbeddingService concurrency overrides
+    static inline std::atomic<uint32_t> embedMaxConcurrencyOverride_{0};
     static inline std::atomic<uint32_t> postEmbedConcurrentOverride_{0};
     static inline std::atomic<uint32_t> postEmbedConcurrentDynamicCap_{0};
     static inline std::atomic<uint32_t> embedChannelCapacityOverride_{0};

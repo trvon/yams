@@ -844,6 +844,26 @@ if catch2_dep.found()
     install: false,
   )
 
+  # WorkCoordinator tests (async work coordination)
+  catch2_work_coordinator_exe = executable('catch2_work_coordinator',
+    files('unit/daemon/work_coordinator_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # PostIngestQueue unit tests (LruCache template + stage constants)
+  catch2_post_ingest_queue_unit_exe = executable('catch2_post_ingest_queue_unit',
+    files('unit/daemon/components/post_ingest_queue_unit_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Add plugin path for plugin harness tests
   plugin_test_cpp_args = test_cpp_noerror_args + ['-DYAMS_TESTING=1']
   if get_option('plugin-onnx')
@@ -2381,6 +2401,18 @@ if catch2_dep.found()
 
   test('gradient_limiter', catch2_gradient_limiter_exe,
     suite: ['catch2', 'unit', 'daemon', 'gradient'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('work_coordinator', catch2_work_coordinator_exe,
+    suite: ['catch2', 'unit', 'daemon', 'work-coordinator'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('post_ingest_queue_unit', catch2_post_ingest_queue_unit_exe,
+    suite: ['catch2', 'unit', 'daemon', 'post-ingest'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )

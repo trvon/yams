@@ -355,3 +355,35 @@ TEST_CASE("Concurrent tryAcquire/onJobComplete does not corrupt state",
     REQUIRE(m.limit >= cfg.minLimit);
     REQUIRE(m.limit <= cfg.maxLimit);
 }
+
+// ============================================================================
+// EMA Smoothed RTT Convergence
+// ============================================================================
+
+TEST_CASE("EMA smoothed RTT converges toward actual RTT", "[daemon][gradient][catch2]") {
+    GradientLimiter::Config cfg;
+    cfg.initialLimit = 8.0;
+    cfg.warmupSamples = 3;
+    cfg.smoothingAlpha = 0.5;
+    GradientLimiter lim("ema_test", cfg);
+
+    // Pass warmup with varying RTT
+    for (int i = 0; i < 5; ++i) {
+        REQUIRE(lim.tryAcquire());
+        lim.onJobComplete(std::chrono::milliseconds(100), true);
+    }
+
+    // Feed consistent 50ms RTT for many samples
+    for (int i = 0; i < 50; ++i) {
+        if (lim.tryAcquire()) {
+            lim.onJobComplete(std::chrono::milliseconds(50), true);
+        }
+    }
+
+    auto m = lim.metrics();
+    // smoothedRtt is in nanoseconds internally: 50ms = 50,000,000 ns
+    constexpr double target_ns = 50'000'000.0;
+    // Smoothed RTT should converge close to 50ms (within 20%)
+    CHECK(m.smoothedRtt > target_ns * 0.8);
+    CHECK(m.smoothedRtt < target_ns * 1.2);
+}

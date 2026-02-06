@@ -49,9 +49,9 @@ void EntityGraphService::stop() {
 
 boost::asio::awaitable<void> EntityGraphService::channelPoller() {
     constexpr std::size_t kChannelCapacity = 4096;
-    auto channel = InternalEventBus::instance()
-                       .get_or_create_channel<InternalEventBus::EntityGraphJob>(
-                           "entity_graph_jobs", kChannelCapacity);
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityGraphJob>(
+            "entity_graph_jobs", kChannelCapacity);
 
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
@@ -124,8 +124,8 @@ Result<void> EntityGraphService::submitExtraction(Job job) {
     busJob.mimeType = std::move(job.mimeType);
 
     constexpr std::size_t kChannelCapacity = 4096;
-    auto channel = bus.get_or_create_channel<InternalEventBus::EntityGraphJob>(
-        "entity_graph_jobs", kChannelCapacity);
+    auto channel = bus.get_or_create_channel<InternalEventBus::EntityGraphJob>("entity_graph_jobs",
+                                                                               kChannelCapacity);
 
     if (channel->try_push(std::move(busJob))) {
         bus.incEntityGraphQueued();
@@ -199,8 +199,8 @@ bool EntityGraphService::process(Job& job) {
         return false;
     }
 
-    spdlog::debug("EntityGraphService: extracted {} symbols from {} (lang={})", result->symbol_count,
-                  job.filePath, job.language);
+    spdlog::debug("EntityGraphService: extracted {} symbols from {} (lang={})",
+                  result->symbol_count, job.filePath, job.language);
 
     // Populate KG with rich symbol relationships
     bool success = populateKnowledgeGraph(kg, job, result);

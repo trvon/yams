@@ -283,9 +283,13 @@ void PostIngestQueue::start() {
         for (int i = 0; i < maxWaitMs; ++i) {
             bool allStarted = true;
             for (std::size_t s = 0; s < kStageCount; ++s) {
-                if (!stageStarted_[s].load()) { allStarted = false; break; }
+                if (!stageStarted_[s].load()) {
+                    allStarted = false;
+                    break;
+                }
             }
-            if (allStarted) break;
+            if (allStarted)
+                break;
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
@@ -314,10 +318,8 @@ void PostIngestQueue::stop() {
 
 namespace {
 constexpr TuneAdvisor::PostIngestStage kTuneAdvisorStages[] = {
-    TuneAdvisor::PostIngestStage::Extraction,
-    TuneAdvisor::PostIngestStage::KnowledgeGraph,
-    TuneAdvisor::PostIngestStage::Symbol,
-    TuneAdvisor::PostIngestStage::Entity,
+    TuneAdvisor::PostIngestStage::Extraction, TuneAdvisor::PostIngestStage::KnowledgeGraph,
+    TuneAdvisor::PostIngestStage::Symbol,     TuneAdvisor::PostIngestStage::Entity,
     TuneAdvisor::PostIngestStage::Title,
 };
 } // namespace
@@ -383,7 +385,8 @@ void PostIngestQueue::refreshStageAvailability() {
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction,
                                           extractionActive);
 
-    const bool kgActive = graphComponent_ != nullptr && !stagePaused_[1].load(std::memory_order_acquire);
+    const bool kgActive =
+        graphComponent_ != nullptr && !stagePaused_[1].load(std::memory_order_acquire);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, kgActive);
 
     bool symbolCapable = false;
@@ -429,10 +432,11 @@ void PostIngestQueue::logStageAvailabilitySnapshot() const {
         entityCapable && !stagePaused_[3].load(std::memory_order_acquire),
         titleExtractor_ != nullptr && !stagePaused_[4].load(std::memory_order_acquire),
         stagePaused_[0].load(std::memory_order_acquire),
-        stagePaused_[1].load(std::memory_order_acquire), stagePaused_[2].load(std::memory_order_acquire),
-        stagePaused_[3].load(std::memory_order_acquire), stagePaused_[4].load(std::memory_order_acquire),
-        maxExtractionConcurrent(), maxKgConcurrent(), maxSymbolConcurrent(), maxEntityConcurrent(),
-        maxTitleConcurrent());
+        stagePaused_[1].load(std::memory_order_acquire),
+        stagePaused_[2].load(std::memory_order_acquire),
+        stagePaused_[3].load(std::memory_order_acquire),
+        stagePaused_[4].load(std::memory_order_acquire), maxExtractionConcurrent(),
+        maxKgConcurrent(), maxSymbolConcurrent(), maxEntityConcurrent(), maxTitleConcurrent());
 }
 
 std::size_t PostIngestQueue::resolveChannelCapacity() const {
@@ -910,6 +914,8 @@ void PostIngestQueue::processKnowledgeGraphStage(
 
         GraphComponent::DocumentGraphContext ctx{.documentHash = hash,
                                                  .filePath = filePath,
+                                                 .snapshotId = std::nullopt,
+                                                 .rootTreeHash = std::nullopt,
                                                  .tags = tags,
                                                  .documentDbId = docId,
                                                  .contentBytes = std::move(contentBytes),
@@ -1005,7 +1011,9 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
     cfg.executor = coordinator_->getExecutor();
-    cfg.getHashFn = [](const InternalEventBus::SymbolExtractionJob& j) -> std::string { return j.hash; };
+    cfg.getHashFn = [](const InternalEventBus::SymbolExtractionJob& j) -> std::string {
+        return j.hash;
+    };
     cfg.processFn = [this](InternalEventBus::SymbolExtractionJob& j) {
         processSymbolExtractionStage(j.hash, j.documentId, j.filePath, j.language,
                                      std::move(j.contentBytes));
@@ -1140,9 +1148,11 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
     };
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
-    cfg.executor = entityCoordinator_ ? entityCoordinator_->getExecutor()
-                                      : coordinator_->getExecutor();
-    cfg.getHashFn = [](const InternalEventBus::EntityExtractionJob& j) -> std::string { return j.hash; };
+    cfg.executor =
+        entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor();
+    cfg.getHashFn = [](const InternalEventBus::EntityExtractionJob& j) -> std::string {
+        return j.hash;
+    };
     cfg.processFn = [this](InternalEventBus::EntityExtractionJob& j) {
         processEntityExtractionStage(j.hash, j.documentId, j.filePath, j.extension,
                                      std::move(j.contentBytes));
@@ -1472,7 +1482,9 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
     cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
     cfg.executor = coordinator_->getExecutor();
-    cfg.getHashFn = [](const InternalEventBus::TitleExtractionJob& j) -> std::string { return j.hash; };
+    cfg.getHashFn = [](const InternalEventBus::TitleExtractionJob& j) -> std::string {
+        return j.hash;
+    };
     cfg.isCapableFn = [this]() -> bool { return titleExtractor_ != nullptr; };
     cfg.processFn = [this](InternalEventBus::TitleExtractionJob& j) {
         processTitleExtractionStage(j.hash, j.documentId, j.textSnippet, j.fallbackTitle,
@@ -1487,7 +1499,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                                                   const std::string& fallbackTitle,
                                                   const std::string& filePath,
                                                   const std::string& language,
-                                                  const std::string& mimeType) {
+                                                  const std::string& /*mimeType*/) {
     if (!titleExtractor_) {
         spdlog::debug("[PostIngestQueue] Title+NL extraction skipped for {} - no titleExtractor",
                       hash);
@@ -1719,8 +1731,8 @@ void PostIngestQueue::initializeGradientLimiters() {
     // Per-stage maxLimit is the smaller of the global gradient max and the stage cap
     const double globalMax = TuneAdvisor::gradientMaxLimit();
 
-    static constexpr const char* kLimiterNames[] = {
-        "extraction", "kg", "symbol", "entity", "title", "embed"};
+    static constexpr const char* kLimiterNames[] = {"extraction", "kg",    "symbol",
+                                                    "entity",     "title", "embed"};
     using ConcurrentFn = uint32_t (*)();
     static constexpr ConcurrentFn kConcurrentFns[] = {
         &TuneAdvisor::postExtractionConcurrent, &TuneAdvisor::postKgConcurrent,
@@ -1735,8 +1747,7 @@ void PostIngestQueue::initializeGradientLimiters() {
     spdlog::info("[PostIngestQueue] Gradient limiters initialized");
 }
 
-bool PostIngestQueue::tryAcquireLimiterSlot(GradientLimiter* limiter,
-                                            const std::string& jobId,
+bool PostIngestQueue::tryAcquireLimiterSlot(GradientLimiter* limiter, const std::string& jobId,
                                             const std::string& stage) {
     if (!limiter) {
         return true; // No limiter configured, allow
@@ -1781,12 +1792,13 @@ void PostIngestQueue::initializeExtractionSemaphore() {
     const uint32_t maxConcurrent = TuneAdvisor::postExtractionConcurrent();
     if (maxConcurrent > 0) {
         extractionSemaphore_ = std::make_unique<std::counting_semaphore<>>(maxConcurrent);
-        spdlog::info("[PostIngestQueue] Extraction semaphore initialized with {} slots", maxConcurrent);
+        spdlog::info("[PostIngestQueue] Extraction semaphore initialized with {} slots",
+                     maxConcurrent);
     }
 }
 
-std::optional<metadata::DocumentInfo> PostIngestQueue::getCachedDocumentInfo(
-    const std::string& hash) {
+std::optional<metadata::DocumentInfo>
+PostIngestQueue::getCachedDocumentInfo(const std::string& hash) {
     // Try cache first
     auto cached = metadataCache_.infoCache.get(hash);
     if (cached) {
@@ -1863,22 +1875,22 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         auto batchResult = meta_->batchInsertContentAndIndex(entries);
         if (!batchResult) {
             spdlog::error("[PostIngestQueue] Batch DB write failed: {}",
-                         batchResult.error().message);
+                          batchResult.error().message);
             if (batchResult.error().message.find("database is locked") != std::string::npos) {
                 TuneAdvisor::reportDbLockError();
             }
             for (const auto& prepared : successes) {
-                failures.push_back(
-                    ExtractionFailure{prepared.documentId, prepared.hash, batchResult.error().message});
+                failures.push_back(ExtractionFailure{prepared.documentId, prepared.hash,
+                                                     batchResult.error().message});
             }
             successes.clear();
         } else {
             spdlog::info("[PostIngestQueue] Batch DB write succeeded for {} documents",
-                        entries.size());
+                         entries.size());
             for (const auto& prepared : successes) {
                 if (!prepared.title.empty()) {
                     (void)meta_->setMetadata(prepared.documentId, "title",
-                                            metadata::MetadataValue(prepared.title));
+                                             metadata::MetadataValue(prepared.title));
                 }
             }
         }
@@ -1887,10 +1899,11 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
     for (const auto& failure : failures) {
         if (failure.documentId >= 0 && meta_) {
             auto updateRes = meta_->updateDocumentExtractionStatus(
-                failure.documentId, false, metadata::ExtractionStatus::Failed, failure.errorMessage);
+                failure.documentId, false, metadata::ExtractionStatus::Failed,
+                failure.errorMessage);
             if (!updateRes) {
                 spdlog::warn("[PostIngestQueue] Failed to mark extraction failed for {}: {}",
-                            failure.hash, updateRes.error().message);
+                             failure.hash, updateRes.error().message);
             }
         }
     }
@@ -1925,27 +1938,26 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         }
         if (prepared.shouldDispatchKg) {
             dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.fileName,
-                               std::vector<std::string>(prepared.tags), contentBytes);
+                                std::vector<std::string>(prepared.tags), contentBytes);
         }
         if (prepared.shouldDispatchSymbol) {
             dispatchToSymbolChannel(prepared.hash, prepared.documentId, prepared.fileName,
-                                   prepared.symbolLanguage, contentBytes);
+                                    prepared.symbolLanguage, contentBytes);
         }
         if (prepared.shouldDispatchEntity) {
             dispatchToEntityChannel(prepared.hash, prepared.documentId, prepared.fileName,
-                                   prepared.extension, contentBytes);
+                                    prepared.extension, contentBytes);
         }
         if (prepared.shouldDispatchTitle) {
             dispatchToTitleChannel(prepared.hash, prepared.documentId, prepared.titleTextSnippet,
-                                  prepared.fileName, prepared.filePath, prepared.language,
-                                  prepared.mimeType);
+                                   prepared.fileName, prepared.filePath, prepared.language,
+                                   prepared.mimeType);
         }
         InternalEventBus::instance().incPostConsumed();
     }
 }
 
-void PostIngestQueue::processBatch(
-    std::vector<InternalEventBus::PostIngestTask>&& tasks) {
+void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks) {
     if (tasks.empty()) {
         return;
     }
@@ -1956,8 +1968,8 @@ void PostIngestQueue::processBatch(
     const uint32_t maxWorkers = TuneAdvisor::postExtractionConcurrent();
     if (maxWorkers <= 1 || tasks.size() < 4) {
         // Sequential: single chunk
-        auto result = processChunkParallel(tasks, stageCfg.symbolExtensionMap,
-                                           stageCfg.entityProviders);
+        auto result =
+            processChunkParallel(tasks, stageCfg.symbolExtensionMap, stageCfg.entityProviders);
         processed_.fetch_add(result.successes.size(), std::memory_order_relaxed);
         failed_.fetch_add(result.failures.size(), std::memory_order_relaxed);
         commitBatchResults(result.successes, result.failures);
@@ -1979,8 +1991,8 @@ void PostIngestQueue::processBatch(
         size_t end = std::min(i + chunkSize, tasks.size());
         std::vector<InternalEventBus::PostIngestTask> chunk(tasks.begin() + i, tasks.begin() + end);
 
-        futures.push_back(std::async(std::launch::async,
-            [this, chunk = std::move(chunk), &stageCfg]() {
+        futures.push_back(
+            std::async(std::launch::async, [this, chunk = std::move(chunk), &stageCfg]() {
                 return processChunkParallel(chunk, stageCfg.symbolExtensionMap,
                                             stageCfg.entityProviders);
             }));
@@ -1993,10 +2005,11 @@ void PostIngestQueue::processBatch(
     for (auto& future : futures) {
         try {
             ChunkResult result = future.get();
-            allSuccesses.insert(allSuccesses.end(), std::make_move_iterator(result.successes.begin()),
-                               std::make_move_iterator(result.successes.end()));
+            allSuccesses.insert(allSuccesses.end(),
+                                std::make_move_iterator(result.successes.begin()),
+                                std::make_move_iterator(result.successes.end()));
             allFailures.insert(allFailures.end(), std::make_move_iterator(result.failures.begin()),
-                              std::make_move_iterator(result.failures.end()));
+                               std::make_move_iterator(result.failures.end()));
         } catch (const std::exception& e) {
             spdlog::error("[PostIngestQueue] Chunk processing failed: {}", e.what());
         }
@@ -2021,44 +2034,44 @@ PostIngestQueue::ChunkResult PostIngestQueue::processChunkParallel(
     futures.reserve(tasks.size());
 
     for (const auto& task : tasks) {
-        futures.push_back(std::async(std::launch::async, [this, &task, &symbolExtensionMap,
-                                                          &entityProviders]() {
-            // Acquire semaphore slot for memory-safe extraction
-            if (extractionSemaphore_) {
-                extractionSemaphore_->acquire();
-            }
-
-            // RAII guard to release semaphore
-            struct SemaphoreGuard {
-                std::counting_semaphore<>* sem;
-                explicit SemaphoreGuard(std::counting_semaphore<>* s) : sem(s) {}
-                ~SemaphoreGuard() {
-                    if (sem) {
-                        sem->release();
-                    }
+        futures.push_back(
+            std::async(std::launch::async, [this, &task, &symbolExtensionMap, &entityProviders]() {
+                // Acquire semaphore slot for memory-safe extraction
+                if (extractionSemaphore_) {
+                    extractionSemaphore_->acquire();
                 }
-                SemaphoreGuard(const SemaphoreGuard&) = delete;
-                SemaphoreGuard& operator=(const SemaphoreGuard&) = delete;
-                SemaphoreGuard(SemaphoreGuard&&) = delete;
-                SemaphoreGuard& operator=(SemaphoreGuard&&) = delete;
-            };
-            SemaphoreGuard guard(extractionSemaphore_.get());
 
-            // Get cached metadata
-            auto infoOpt = getCachedDocumentInfo(task.hash);
-            if (!infoOpt) {
-                return std::variant<PreparedMetadataEntry, ExtractionFailure>(
-                    ExtractionFailure{-1, task.hash, "Metadata not found in cache or DB"});
-            }
+                // RAII guard to release semaphore
+                struct SemaphoreGuard {
+                    std::counting_semaphore<>* sem;
+                    explicit SemaphoreGuard(std::counting_semaphore<>* s) : sem(s) {}
+                    ~SemaphoreGuard() {
+                        if (sem) {
+                            sem->release();
+                        }
+                    }
+                    SemaphoreGuard(const SemaphoreGuard&) = delete;
+                    SemaphoreGuard& operator=(const SemaphoreGuard&) = delete;
+                    SemaphoreGuard(SemaphoreGuard&&) = delete;
+                    SemaphoreGuard& operator=(SemaphoreGuard&&) = delete;
+                };
+                SemaphoreGuard guard(extractionSemaphore_.get());
 
-            auto tagsOpt = getCachedDocumentTags(infoOpt->id);
-            const std::vector<std::string> emptyTags;
-            const std::vector<std::string>& tags = tagsOpt ? *tagsOpt : emptyTags;
+                // Get cached metadata
+                auto infoOpt = getCachedDocumentInfo(task.hash);
+                if (!infoOpt) {
+                    return std::variant<PreparedMetadataEntry, ExtractionFailure>(
+                        ExtractionFailure{-1, task.hash, "Metadata not found in cache or DB"});
+                }
 
-            // Extract and prepare
-            return prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags, symbolExtensionMap,
-                                       entityProviders);
-        }));
+                auto tagsOpt = getCachedDocumentTags(infoOpt->id);
+                const std::vector<std::string> emptyTags;
+                const std::vector<std::string>& tags = tagsOpt ? *tagsOpt : emptyTags;
+
+                // Extract and prepare
+                return prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
+                                            symbolExtensionMap, entityProviders);
+            }));
     }
 
     // Collect results
