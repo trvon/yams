@@ -194,6 +194,11 @@ public:
     virtual Result<std::optional<DocumentInfo>> getDocumentByHash(const std::string& hash) = 0;
     virtual Result<void> updateDocument(const DocumentInfo& info) = 0;
     virtual Result<void> deleteDocument(int64_t id) = 0;
+    /// Batch delete multiple documents by ID in a single transaction (repair optimization)
+    virtual Result<size_t> deleteDocumentsBatch(const std::vector<int64_t>& ids) = 0;
+    /// Batch update MIME types for multiple documents in a single transaction (repair optimization)
+    virtual Result<size_t>
+    updateDocumentsMimeBatch(const std::vector<std::pair<int64_t, std::string>>& idMimePairs) = 0;
 
     // Content operations
     virtual Result<void> insertContent(const DocumentContent& content) = 0;
@@ -407,6 +412,9 @@ public:
     Result<std::optional<DocumentInfo>> getDocumentByHash(const std::string& hash) override;
     Result<void> updateDocument(const DocumentInfo& info) override;
     Result<void> deleteDocument(int64_t id) override;
+    Result<size_t> deleteDocumentsBatch(const std::vector<int64_t>& ids) override;
+    Result<size_t> updateDocumentsMimeBatch(
+        const std::vector<std::pair<int64_t, std::string>>& idMimePairs) override;
 
     // Content operations
     Result<void> insertContent(const DocumentContent& content) override;

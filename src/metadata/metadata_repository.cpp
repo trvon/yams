@@ -680,6 +680,161 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
     return result;
 }
 
+Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_t>& ids) {
+    if (ids.empty()) {
+        return size_t{0};
+    }
+
+    auto result = executeQuery<size_t>([&](Database& db) -> Result<size_t> {
+        // Begin transaction for batch operation
+        auto beginResult = beginTransactionWithRetry(db);
+        if (!beginResult) {
+            return beginResult.error();
+        }
+
+        size_t deletedCount = 0;
+
+        // Prepare statement for checking document flags
+        auto checkStmtResult = db.prepareCached(R"(
+            SELECT d.id, d.content_extracted, COALESCE(des.has_embedding, 0)
+            FROM documents d
+            LEFT JOIN document_embeddings_status des ON d.id = des.document_id
+            WHERE d.id = ?
+        )");
+        if (!checkStmtResult) {
+            db.execute("ROLLBACK");
+            return checkStmtResult.error();
+        }
+        auto& checkStmt = *checkStmtResult.value();
+
+        // Prepare statement for deletion
+        auto deleteStmtResult = db.prepareCached("DELETE FROM documents WHERE id = ?");
+        if (!deleteStmtResult) {
+            db.execute("ROLLBACK");
+            return deleteStmtResult.error();
+        }
+        auto& deleteStmt = *deleteStmtResult.value();
+
+        // Process each document
+        for (int64_t id : ids) {
+            // Check flags before deletion
+            bool wasExtracted = false;
+            bool wasIndexed = false;
+
+            if (auto r = checkStmt.reset(); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = checkStmt.bind(1, id); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto stepRes = checkStmt.step(); stepRes && stepRes.value()) {
+                wasExtracted = checkStmt.getInt(1) != 0;
+                wasIndexed = checkStmt.getInt(2) != 0;
+            }
+
+            // Delete document
+            if (auto r = deleteStmt.reset(); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = deleteStmt.bind(1, id); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto execRes = deleteStmt.execute(); !execRes) {
+                db.execute("ROLLBACK");
+                return execRes.error();
+            }
+
+            // Update metrics
+            if (db.changes() > 0) {
+                deletedCount++;
+                core::saturating_sub(cachedDocumentCount_, uint64_t{1});
+                if (wasExtracted) {
+                    core::saturating_sub(cachedExtractedCount_, uint64_t{1});
+                }
+                if (wasIndexed) {
+                    core::saturating_sub(cachedIndexedCount_, uint64_t{1});
+                }
+            }
+        }
+
+        // Commit transaction
+        auto commitResult = db.execute("COMMIT");
+        if (!commitResult) {
+            db.execute("ROLLBACK");
+            return commitResult.error();
+        }
+
+        return deletedCount;
+    });
+
+    if (result) {
+        // Signal enumeration cache invalidation
+        metadataChangeCounter_.fetch_add(1, std::memory_order_release);
+    }
+    return result;
+}
+
+Result<size_t> MetadataRepository::updateDocumentsMimeBatch(
+    const std::vector<std::pair<int64_t, std::string>>& idMimePairs) {
+    if (idMimePairs.empty()) {
+        return size_t{0};
+    }
+
+    return executeQuery<size_t>([&](Database& db) -> Result<size_t> {
+        // Begin transaction for batch operation
+        auto beginResult = beginTransactionWithRetry(db);
+        if (!beginResult) {
+            return beginResult.error();
+        }
+
+        // Prepare cached statement for updates
+        auto updateStmtResult = db.prepareCached("UPDATE documents SET mime_type = ? WHERE id = ?");
+        if (!updateStmtResult) {
+            db.execute("ROLLBACK");
+            return updateStmtResult.error();
+        }
+        auto& updateStmt = *updateStmtResult.value();
+
+        size_t updatedCount = 0;
+
+        for (const auto& [id, mimeType] : idMimePairs) {
+            if (auto r = updateStmt.reset(); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = updateStmt.bind(1, mimeType); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = updateStmt.bind(2, id); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto execRes = updateStmt.execute(); !execRes) {
+                db.execute("ROLLBACK");
+                return execRes.error();
+            }
+
+            if (db.changes() > 0) {
+                updatedCount++;
+            }
+        }
+
+        // Commit transaction
+        auto commitResult = db.execute("COMMIT");
+        if (!commitResult) {
+            db.execute("ROLLBACK");
+            return commitResult.error();
+        }
+
+        return updatedCount;
+    });
+}
+
 // Content operations
 Result<void> MetadataRepository::insertContent(const DocumentContent& content) {
     return executeQuery<void>([&](Database& db) -> Result<void> {

@@ -105,6 +105,13 @@ public:
 
     Result<void> execute() override {
         try {
+            // Immediate loading feedback with specific operation
+            std::optional<ui::SpinnerRunner> initSpinner;
+            if (!dryRun_ && !verbose_) {
+                initSpinner.emplace();
+                initSpinner->start("Initializing repair operations...");
+            }
+
             if (stopDaemon_) {
                 // Best-effort stop daemon like doctor command
                 try {
@@ -122,16 +129,22 @@ public:
 
             auto ensured = cli_->ensureStorageInitialized();
             if (!ensured) {
+                if (initSpinner)
+                    initSpinner->stop();
                 return ensured;
             }
 
             auto store = cli_->getContentStore();
             if (!store) {
+                if (initSpinner)
+                    initSpinner->stop();
                 return Error{ErrorCode::NotInitialized, "Content store not initialized"};
             }
 
             auto metadataRepo = cli_->getMetadataRepository();
             if (!metadataRepo) {
+                if (initSpinner)
+                    initSpinner->stop();
                 return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
             }
 
@@ -156,6 +169,10 @@ public:
                 // verifyChecksums_ = true;  // Not implemented yet
                 // mergeDuplicates_ = true;  // Not implemented yet
             }
+
+            // Stop initialization spinner before UI output
+            if (initSpinner)
+                initSpinner->stop();
 
             std::cout << ui::title_banner("YAMS Storage Repair") << "\n\n";
 
@@ -184,13 +201,26 @@ public:
                 std::cout << ui::status_info("[DRY RUN MODE] No changes will be made") << "\n\n";
             }
 
+            // Track repair results for summary
+            std::vector<std::string> repairErrors;
             bool anyRepairs = false;
+
+            // ======================================================================
+            // SECTION 1: Metadata Repair Operations
+            // ======================================================================
+            if (repairOrphans_ || repairMime_ || repairDownloads_ || repairPathTree_) {
+                std::cout << ui::section_header("Metadata Repair") << "\n";
+            }
 
             // Clean orphaned metadata
             if (repairOrphans_) {
                 auto result = cleanOrphanedMetadata(store, metadataRepo);
                 if (!result) {
-                    return result;
+                    if (repairAll_) {
+                        repairErrors.push_back("orphan cleanup: " + result.error().message);
+                    } else {
+                        return result;
+                    }
                 }
                 anyRepairs = true;
             }
@@ -199,25 +229,90 @@ public:
             if (repairMime_) {
                 auto result = repairMimeTypes(store, metadataRepo);
                 if (!result) {
-                    return result;
+                    if (repairAll_) {
+                        repairErrors.push_back("MIME type repair: " + result.error().message);
+                    } else {
+                        return result;
+                    }
                 }
                 anyRepairs = true;
+            }
+
+            // Repair download metadata
+            if (repairDownloads_) {
+                auto result = repairDownloads(metadataRepo);
+                if (!result) {
+                    if (repairAll_) {
+                        repairErrors.push_back("download repair: " + result.error().message);
+                    } else {
+                        return result;
+                    }
+                }
+                anyRepairs = true;
+            }
+
+            // Rebuild path tree index
+            if (repairPathTree_) {
+                auto result = rebuildPathTree(metadataRepo);
+                if (!result) {
+                    if (repairAll_) {
+                        repairErrors.push_back("path tree rebuild: " + result.error().message);
+                    } else {
+                        return result;
+                    }
+                }
+                anyRepairs = true;
+            }
+
+            // ======================================================================
+            // SECTION 2: Storage & Chunk Operations
+            // ======================================================================
+            if (repairChunks_ || repairBlockRefs_) {
+                std::cout << ui::section_header("Storage Repair") << "\n";
             }
 
             // Clean orphaned chunks
             if (repairChunks_) {
                 auto result = cleanOrphanedChunks(store);
                 if (!result) {
-                    return result;
+                    if (repairAll_) {
+                        repairErrors.push_back("chunk cleanup: " + result.error().message);
+                    } else {
+                        return result;
+                    }
                 }
                 anyRepairs = true;
+            }
+
+            // Repair block references
+            if (repairBlockRefs_) {
+                auto result = repairBlockReferences();
+                if (!result) {
+                    if (repairAll_) {
+                        repairErrors.push_back("block reference repair: " + result.error().message);
+                    } else {
+                        return result;
+                    }
+                }
+                anyRepairs = true;
+            }
+
+            // ======================================================================
+            // SECTION 3: Search & Index Operations
+            // ======================================================================
+            if (repairEmbeddings_ || repairFts5_) {
+                std::cout << ui::section_header("Search Index Repair") << "\n";
             }
 
             // Generate missing embeddings
             if (repairEmbeddings_) {
                 auto result = generateMissingEmbeddings(store, metadataRepo);
                 if (!result) {
-                    return result;
+                    if (repairAll_) {
+                        repairErrors.push_back("embedding generation: " + result.error().message);
+                    } else {
+                        return result;
+                    }
                 }
                 anyRepairs = true;
             }
@@ -226,66 +321,75 @@ public:
             if (repairFts5_) {
                 auto appCtx = cli_->getAppContext();
                 if (!appCtx) {
-                    return Error{ErrorCode::NotInitialized,
-                                 "AppContext not available for FTS5 rebuild"};
-                }
-                auto result = rebuildFts5Index(*appCtx);
-                if (!result) {
-                    return result;
+                    auto err = Error{ErrorCode::NotInitialized,
+                                     "AppContext not available for FTS5 rebuild"};
+                    if (repairAll_) {
+                        repairErrors.push_back("FTS5 rebuild: " + err.message);
+                    } else {
+                        return err;
+                    }
+                } else {
+                    auto result = rebuildFts5Index(*appCtx);
+                    if (!result) {
+                        if (repairAll_) {
+                            repairErrors.push_back("FTS5 rebuild: " + result.error().message);
+                        } else {
+                            return result;
+                        }
+                    }
                 }
                 anyRepairs = true;
+            }
+
+            // ======================================================================
+            // SECTION 4: Database Maintenance
+            // ======================================================================
+            if (optimizeDb_ || verifyChecksums_ || mergeDuplicates_) {
+                std::cout << ui::section_header("Database Maintenance") << "\n";
             }
 
             // Optimize database
             if (optimizeDb_) {
                 auto result = optimizeDatabase();
                 if (!result) {
-                    return result;
+                    if (repairAll_) {
+                        repairErrors.push_back("database optimization: " + result.error().message);
+                    } else {
+                        return result;
+                    }
                 }
-                anyRepairs = true;
-            }
-
-            if (repairDownloads_) {
-                auto result = repairDownloads(metadataRepo);
-                if (!result)
-                    return result;
-                anyRepairs = true;
-            }
-
-            // Rebuild path tree index
-            if (repairPathTree_) {
-                auto result = rebuildPathTree(metadataRepo);
-                if (!result)
-                    return result;
-                anyRepairs = true;
-            }
-
-            // Repair block references
-            if (repairBlockRefs_) {
-                auto result = repairBlockReferences();
-                if (!result)
-                    return result;
                 anyRepairs = true;
             }
 
             // Verify checksums (not implemented yet)
             if (verifyChecksums_) {
-                std::cout << "Checksum verification: Not implemented yet\n";
+                std::cout << "  Checksum verification: Not implemented yet\n";
+                anyRepairs = true;
             }
 
             // Merge duplicates (not implemented yet)
             if (mergeDuplicates_) {
-                std::cout << "Duplicate merging: Not implemented yet\n";
+                std::cout << "  Duplicate merging: Not implemented yet\n";
+                anyRepairs = true;
             }
+
+            // Display summary
+            std::cout << ui::horizontal_rule(60, '=') << "\n";
 
             if (!anyRepairs) {
                 std::cout << "No repair operations selected.\n";
+            } else if (!repairErrors.empty()) {
+                // Some repairs failed in --all mode
+                std::cout << ui::status_warning("Some repair operations failed:") << "\n";
+                for (const auto& error : repairErrors) {
+                    std::cout << "  - " << error << "\n";
+                }
+                if (!dryRun_) {
+                    std::cout << "\n" << ui::status_info("Partial repairs completed") << "\n";
+                }
             } else if (!dryRun_) {
-                std::cout << "\n"
-                          << ui::status_ok("Repair operations completed successfully") << "\n";
+                std::cout << ui::status_ok("All repair operations completed successfully") << "\n";
             }
-
-            std::cout << ui::horizontal_rule(60, '=') << "\n";
 
             return Result<void>();
 
@@ -390,29 +494,35 @@ private:
                 }
             }
 
-            // Delete orphaned entries
+            // Delete orphaned entries using batch operation
             ProgressIndicator deleteProgress(ProgressIndicator::Style::Percentage);
             if (orphanedIds.size() > 100) {
                 deleteProgress.start("Cleaning orphans");
             }
 
-            current = 0;
-            for (int64_t id : orphanedIds) {
-                current++;
-                auto deleteResult = metadataRepo->deleteDocument(id);
-                if (deleteResult) {
-                    cleanedCount++;
-                } else if (verbose_) {
-                    std::cout << "  Failed to delete metadata id " << id << ": "
-                              << deleteResult.error().message << "\n";
-                }
-
-                if (orphanedIds.size() > 100 && current % 10 == 0) {
-                    deleteProgress.update(current, orphanedIds.size());
+            // Use batch delete for better performance
+            auto batchResult = metadataRepo->deleteDocumentsBatch(orphanedIds);
+            if (batchResult) {
+                cleanedCount = static_cast<int>(batchResult.value());
+            } else if (verbose_) {
+                std::cout << "  Batch delete failed: " << batchResult.error().message
+                          << "\n  Falling back to individual deletes...\n";
+                // Fallback to individual deletes
+                for (int64_t id : orphanedIds) {
+                    auto deleteResult = metadataRepo->deleteDocument(id);
+                    if (deleteResult) {
+                        cleanedCount++;
+                    } else if (verbose_) {
+                        std::cout << "  Failed to delete metadata id " << id << ": "
+                                  << deleteResult.error().message << "\n";
+                    }
                 }
             }
 
-            deleteProgress.stop();
+            if (orphanedIds.size() > 100) {
+                deleteProgress.update(orphanedIds.size(), orphanedIds.size());
+                deleteProgress.stop();
+            }
 
             std::cout << "  "
                       << ui::status_ok("Cleaned " + std::to_string(cleanedCount) +
@@ -621,38 +731,41 @@ private:
         std::cout << "  Found " << missingMimeCount << " documents with missing MIME types\n";
 
         if (!dryRun_) {
-            // Repair MIME types
+            // Repair MIME types using batch update
             ProgressIndicator repairProgress(ProgressIndicator::Style::Percentage);
             if (toRepair.size() > 100) {
                 repairProgress.start("Repairing MIME types");
             }
 
-            current = 0;
-            for (const auto& [id, mimeType] : toRepair) {
-                current++;
+            // Use batch update for better performance
+            auto batchResult = metadataRepo->updateDocumentsMimeBatch(toRepair);
+            if (batchResult) {
+                repairedCount = static_cast<int>(batchResult.value());
+            } else if (verbose_) {
+                std::cout << "  Batch MIME update failed: " << batchResult.error().message
+                          << "\n  Falling back to individual updates...\n";
+                // Fallback to individual updates
+                for (const auto& [id, mimeType] : toRepair) {
+                    auto docResult = metadataRepo->getDocument(id);
+                    if (docResult && docResult.value()) {
+                        auto doc = *docResult.value();
+                        doc.mimeType = mimeType;
 
-                // Get the document
-                auto docResult = metadataRepo->getDocument(id);
-                if (docResult && docResult.value()) {
-                    auto doc = *docResult.value();
-                    doc.mimeType = mimeType;
-
-                    // Update the document
-                    auto updateResult = metadataRepo->updateDocument(doc);
-                    if (updateResult) {
-                        repairedCount++;
-                    } else if (verbose_) {
-                        std::cout << "  Failed to update document id " << id << ": "
-                                  << updateResult.error().message << "\n";
+                        auto updateResult = metadataRepo->updateDocument(doc);
+                        if (updateResult) {
+                            repairedCount++;
+                        } else {
+                            std::cout << "  Failed to update document id " << id << ": "
+                                      << updateResult.error().message << "\n";
+                        }
                     }
-                }
-
-                if (toRepair.size() > 100 && current % 10 == 0) {
-                    repairProgress.update(current, toRepair.size());
                 }
             }
 
-            repairProgress.stop();
+            if (toRepair.size() > 100) {
+                repairProgress.update(toRepair.size(), toRepair.size());
+                repairProgress.stop();
+            }
 
             std::cout << "  "
                       << ui::status_ok("Repaired MIME types for " + std::to_string(repairedCount) +
