@@ -69,6 +69,14 @@ public:
     /// Get metrics snapshot
     Metrics metrics() const;
 
+    /// Apply back-pressure from ResourceGovernor.
+    /// Warning  → clamp limit to 75% of maxLimit
+    /// Critical → force limit to minLimit
+    /// Emergency→ force limit to 0 (full stop)
+    /// Normal   → no-op (limit recovers organically via gradient)
+    /// @param level 0=Normal, 1=Warning, 2=Critical, 3=Emergency
+    void applyPressure(uint8_t level);
+
     /// Reset limiter state (for testing)
     void reset();
 

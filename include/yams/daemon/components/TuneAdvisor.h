@@ -2639,6 +2639,69 @@ public:
         gradientToleranceOverride_.store(tolerance, std::memory_order_relaxed);
     }
 
+    /// Gradient limiter initial concurrency limit.
+    /// Starting concurrency per stage before gradient algorithm adjusts. Default: 4.0.
+    /// Environment: YAMS_GRADIENT_INITIAL_LIMIT
+    static double gradientInitialLimit() {
+        double ov = gradientInitialLimitOverride_.load(std::memory_order_relaxed);
+        if (ov > 0.0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_GRADIENT_INITIAL_LIMIT")) {
+            try {
+                double v = std::stod(s);
+                if (v >= 1.0 && v <= 128.0)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 4.0;
+    }
+    static void setGradientInitialLimit(double limit) {
+        gradientInitialLimitOverride_.store(limit, std::memory_order_relaxed);
+    }
+
+    /// Gradient limiter minimum concurrency limit (floor).
+    /// Limit will never drop below this value. Default: 1.0.
+    /// Environment: YAMS_GRADIENT_MIN_LIMIT
+    static double gradientMinLimit() {
+        double ov = gradientMinLimitOverride_.load(std::memory_order_relaxed);
+        if (ov > 0.0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_GRADIENT_MIN_LIMIT")) {
+            try {
+                double v = std::stod(s);
+                if (v >= 0.0 && v <= 64.0)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 1.0;
+    }
+    static void setGradientMinLimit(double limit) {
+        gradientMinLimitOverride_.store(limit, std::memory_order_relaxed);
+    }
+
+    /// Gradient limiter maximum concurrency limit (ceiling).
+    /// Limit will never exceed this value (per stage; overridden by stage cap). Default: 32.0.
+    /// Environment: YAMS_GRADIENT_MAX_LIMIT
+    static double gradientMaxLimit() {
+        double ov = gradientMaxLimitOverride_.load(std::memory_order_relaxed);
+        if (ov > 0.0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_GRADIENT_MAX_LIMIT")) {
+            try {
+                double v = std::stod(s);
+                if (v >= 1.0 && v <= 256.0)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 32.0;
+    }
+    static void setGradientMaxLimit(double limit) {
+        gradientMaxLimitOverride_.store(limit, std::memory_order_relaxed);
+    }
+
     // =========================================================================
     // ONNX Concurrency Configuration (Global Slot Coordination)
     // =========================================================================
@@ -2953,6 +3016,9 @@ private:
     static inline std::atomic<double> gradientLongAlphaOverride_{0.0};
     static inline std::atomic<uint32_t> gradientWarmupSamplesOverride_{0};
     static inline std::atomic<double> gradientToleranceOverride_{0.0};
+    static inline std::atomic<double> gradientInitialLimitOverride_{0.0};
+    static inline std::atomic<double> gradientMinLimitOverride_{0.0};
+    static inline std::atomic<double> gradientMaxLimitOverride_{0.0};
 
     // ONNX concurrency overrides
     static inline std::atomic<uint32_t> onnxMaxConcurrentOverride_{0};

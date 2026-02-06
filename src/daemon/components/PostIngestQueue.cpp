@@ -14,6 +14,7 @@
 #include <yams/api/content_store.h>
 #include <yams/common/utf8_utils.h>
 #include <yams/daemon/async_batcher.h>
+#include <yams/daemon/pressure_limited_poller.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/KGWriteQueue.h>
@@ -38,20 +39,6 @@ namespace {
 constexpr size_t kMaxTitleLen = 120;
 constexpr size_t kMaxGlinerChars = 2000;
 constexpr float kMinTitleConfidence = 0.55f;
-
-bool applyCpuThrottling(boost::asio::steady_timer& timer) {
-    auto snap = ResourceGovernor::instance().getSnapshot();
-    int32_t delayMs = TuneAdvisor::computeCpuThrottleDelayMs(snap.cpuUsagePercent);
-
-    if (delayMs > 0) {
-        spdlog::debug("[PostIngestQueue] CPU throttling: {:.1f}% > {:.0f}% threshold, adding {}ms",
-                      snap.cpuUsagePercent, TuneAdvisor::cpuHighThresholdPercent(), delayMs);
-        timer.expires_after(std::chrono::milliseconds(delayMs));
-        return true;
-    }
-
-    return false;
-}
 
 // Check if GLiNER title extraction is disabled via environment variable
 // Set YAMS_DISABLE_GLINER_TITLES=1 for faster ingestion at the cost of title quality
@@ -293,17 +280,19 @@ void PostIngestQueue::start() {
         boost::asio::co_spawn(coordinator_->getExecutor(), titlePoller(), boost::asio::detached);
 
         constexpr int maxWaitMs = 100;
-        for (int i = 0;
-             i < maxWaitMs && (!started_.load() || !kgStarted_.load() || !symbolStarted_.load() ||
-                               !entityStarted_.load() || !titleStarted_.load());
-             ++i) {
+        for (int i = 0; i < maxWaitMs; ++i) {
+            bool allStarted = true;
+            for (std::size_t s = 0; s < kStageCount; ++s) {
+                if (!stageStarted_[s].load()) { allStarted = false; break; }
+            }
+            if (allStarted) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
         spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={}, "
                      "entity={}, title={})",
-                     started_.load(), kgStarted_.load(), symbolStarted_.load(),
-                     entityStarted_.load(), titleStarted_.load());
+                     stageStarted_[0].load(), stageStarted_[1].load(), stageStarted_[2].load(),
+                     stageStarted_[3].load(), stageStarted_[4].load());
     } else {
         spdlog::warn("[PostIngestQueue] start() skipped because stop_=true");
     }
@@ -323,104 +312,46 @@ void PostIngestQueue::stop() {
 // Pause/Resume Support (for ResourceGovernor pressure response)
 // ============================================================================
 
+namespace {
+constexpr TuneAdvisor::PostIngestStage kTuneAdvisorStages[] = {
+    TuneAdvisor::PostIngestStage::Extraction,
+    TuneAdvisor::PostIngestStage::KnowledgeGraph,
+    TuneAdvisor::PostIngestStage::Symbol,
+    TuneAdvisor::PostIngestStage::Entity,
+    TuneAdvisor::PostIngestStage::Title,
+};
+} // namespace
+
 void PostIngestQueue::pauseStage(Stage stage) {
-    switch (stage) {
-        case Stage::Extraction:
-            extractionPaused_.store(true, std::memory_order_release);
-            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, false);
-            spdlog::info("[PostIngestQueue] Paused Extraction stage");
-            break;
-        case Stage::KnowledgeGraph:
-            kgPaused_.store(true, std::memory_order_release);
-            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph,
-                                                  false);
-            spdlog::info("[PostIngestQueue] Paused KnowledgeGraph stage");
-            break;
-        case Stage::Symbol:
-            symbolPaused_.store(true, std::memory_order_release);
-            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, false);
-            spdlog::info("[PostIngestQueue] Paused Symbol stage");
-            break;
-        case Stage::Entity:
-            entityPaused_.store(true, std::memory_order_release);
-            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, false);
-            spdlog::info("[PostIngestQueue] Paused Entity stage");
-            break;
-        case Stage::Title:
-            titlePaused_.store(true, std::memory_order_release);
-            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, false);
-            spdlog::info("[PostIngestQueue] Paused Title stage");
-            break;
-    }
+    const auto idx = static_cast<std::size_t>(stage);
+    stagePaused_[idx].store(true, std::memory_order_release);
+    TuneAdvisor::setPostIngestStageActive(kTuneAdvisorStages[idx], false);
+    spdlog::info("[PostIngestQueue] Paused {} stage", kStageNames[idx]);
 }
 
 void PostIngestQueue::resumeStage(Stage stage) {
-    switch (stage) {
-        case Stage::Extraction:
-            extractionPaused_.store(false, std::memory_order_release);
-            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, true);
-            spdlog::info("[PostIngestQueue] Resumed Extraction stage");
-            break;
-        case Stage::KnowledgeGraph:
-            kgPaused_.store(false, std::memory_order_release);
-            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph,
-                                                  true);
-            spdlog::info("[PostIngestQueue] Resumed KnowledgeGraph stage");
-            break;
-        case Stage::Symbol:
-            symbolPaused_.store(false, std::memory_order_release);
-            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, true);
-            spdlog::info("[PostIngestQueue] Resumed Symbol stage");
-            break;
-        case Stage::Entity:
-            entityPaused_.store(false, std::memory_order_release);
-            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, true);
-            spdlog::info("[PostIngestQueue] Resumed Entity stage");
-            break;
-        case Stage::Title:
-            titlePaused_.store(false, std::memory_order_release);
-            TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, true);
-            spdlog::info("[PostIngestQueue] Resumed Title stage");
-            break;
-    }
+    const auto idx = static_cast<std::size_t>(stage);
+    stagePaused_[idx].store(false, std::memory_order_release);
+    TuneAdvisor::setPostIngestStageActive(kTuneAdvisorStages[idx], true);
+    spdlog::info("[PostIngestQueue] Resumed {} stage", kStageNames[idx]);
 }
 
 bool PostIngestQueue::isStagePaused(Stage stage) const {
-    switch (stage) {
-        case Stage::Extraction:
-            return extractionPaused_.load(std::memory_order_acquire);
-        case Stage::KnowledgeGraph:
-            return kgPaused_.load(std::memory_order_acquire);
-        case Stage::Symbol:
-            return symbolPaused_.load(std::memory_order_acquire);
-        case Stage::Entity:
-            return entityPaused_.load(std::memory_order_acquire);
-        case Stage::Title:
-            return titlePaused_.load(std::memory_order_acquire);
-    }
-    return false;
+    return stagePaused_[static_cast<std::size_t>(stage)].load(std::memory_order_acquire);
 }
 
 void PostIngestQueue::pauseAll() {
-    extractionPaused_.store(true, std::memory_order_release);
-    kgPaused_.store(true, std::memory_order_release);
-    symbolPaused_.store(true, std::memory_order_release);
-    entityPaused_.store(true, std::memory_order_release);
-    titlePaused_.store(true, std::memory_order_release);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, false);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, false);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, false);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, false);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, false);
+    for (std::size_t i = 0; i < kStageCount; ++i) {
+        stagePaused_[i].store(true, std::memory_order_release);
+        TuneAdvisor::setPostIngestStageActive(kTuneAdvisorStages[i], false);
+    }
     spdlog::warn("[PostIngestQueue] All stages paused (emergency mode)");
 }
 
 void PostIngestQueue::resumeAll() {
-    extractionPaused_.store(false, std::memory_order_release);
-    kgPaused_.store(false, std::memory_order_release);
-    symbolPaused_.store(false, std::memory_order_release);
-    entityPaused_.store(false, std::memory_order_release);
-    titlePaused_.store(false, std::memory_order_release);
+    for (std::size_t i = 0; i < kStageCount; ++i) {
+        stagePaused_[i].store(false, std::memory_order_release);
+    }
     refreshStageAvailability();
     spdlog::info("[PostIngestQueue] All stages resumed (normal operation)");
 }
@@ -448,11 +379,11 @@ void PostIngestQueue::setTitleExtractor(search::EntityExtractionFunc extractor) 
 }
 
 void PostIngestQueue::refreshStageAvailability() {
-    const bool extractionActive = !extractionPaused_.load(std::memory_order_acquire);
+    const bool extractionActive = !stagePaused_[0].load(std::memory_order_acquire);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction,
                                           extractionActive);
 
-    const bool kgActive = graphComponent_ != nullptr && !kgPaused_.load(std::memory_order_acquire);
+    const bool kgActive = graphComponent_ != nullptr && !stagePaused_[1].load(std::memory_order_acquire);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, kgActive);
 
     bool symbolCapable = false;
@@ -460,7 +391,7 @@ void PostIngestQueue::refreshStageAvailability() {
         std::lock_guard<std::mutex> lock(extMapMutex_);
         symbolCapable = !symbolExtensionMap_.empty();
     }
-    const bool symbolActive = symbolCapable && !symbolPaused_.load(std::memory_order_acquire);
+    const bool symbolActive = symbolCapable && !stagePaused_[2].load(std::memory_order_acquire);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, symbolActive);
 
     bool entityCapable = false;
@@ -468,11 +399,11 @@ void PostIngestQueue::refreshStageAvailability() {
         std::lock_guard<std::mutex> lock(entityMutex_);
         entityCapable = !entityProviders_.empty();
     }
-    const bool entityActive = entityCapable && !entityPaused_.load(std::memory_order_acquire);
+    const bool entityActive = entityCapable && !stagePaused_[3].load(std::memory_order_acquire);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, entityActive);
 
     const bool titleActive =
-        (titleExtractor_ != nullptr) && !titlePaused_.load(std::memory_order_acquire);
+        (titleExtractor_ != nullptr) && !stagePaused_[4].load(std::memory_order_acquire);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, titleActive);
 }
 
@@ -492,14 +423,14 @@ void PostIngestQueue::logStageAvailabilitySnapshot() const {
         "[PostIngestQueue] Stage snapshot: active={{extraction={}, kg={}, symbol={}, entity={}, "
         "title={}}} paused={{extraction={}, kg={}, symbol={}, entity={}, title={}}} limits={{"
         "extraction={}, kg={}, symbol={}, entity={}, title={}}}",
-        !extractionPaused_.load(std::memory_order_acquire),
-        graphComponent_ != nullptr && !kgPaused_.load(std::memory_order_acquire),
-        symbolCapable && !symbolPaused_.load(std::memory_order_acquire),
-        entityCapable && !entityPaused_.load(std::memory_order_acquire),
-        titleExtractor_ != nullptr && !titlePaused_.load(std::memory_order_acquire),
-        extractionPaused_.load(std::memory_order_acquire),
-        kgPaused_.load(std::memory_order_acquire), symbolPaused_.load(std::memory_order_acquire),
-        entityPaused_.load(std::memory_order_acquire), titlePaused_.load(std::memory_order_acquire),
+        !stagePaused_[0].load(std::memory_order_acquire),
+        graphComponent_ != nullptr && !stagePaused_[1].load(std::memory_order_acquire),
+        symbolCapable && !stagePaused_[2].load(std::memory_order_acquire),
+        entityCapable && !stagePaused_[3].load(std::memory_order_acquire),
+        titleExtractor_ != nullptr && !stagePaused_[4].load(std::memory_order_acquire),
+        stagePaused_[0].load(std::memory_order_acquire),
+        stagePaused_[1].load(std::memory_order_acquire), stagePaused_[2].load(std::memory_order_acquire),
+        stagePaused_[3].load(std::memory_order_acquire), stagePaused_[4].load(std::memory_order_acquire),
         maxExtractionConcurrent(), maxKgConcurrent(), maxSymbolConcurrent(), maxEntityConcurrent(),
         maxTitleConcurrent());
 }
@@ -550,99 +481,31 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
             "post_ingest", channelCapacity);
     spdlog::info("[PostIngestQueue] channelPoller got channel (cap={})", channelCapacity);
 
-    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-    spdlog::info("[PostIngestQueue] channelPoller got timer");
+    PressureLimitedPollerConfig<InternalEventBus::PostIngestTask> cfg;
+    cfg.stageName = "extraction";
+    cfg.stopFlag = &stop_;
+    cfg.startedFlag = &stageStarted_[0];
+    cfg.pauseFlag = &stagePaused_[0];
+    cfg.wasActiveFlag = &wasActive_;
+    cfg.inFlightCounter = &stageInFlight_[0];
+    cfg.getLimiterFn = [this]() { return limiters_[0].get(); };
+    cfg.maxConcurrentFn = &maxExtractionConcurrent;
+    cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
+        return tryAcquireLimiterSlot(l, id, s);
+    };
+    cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
+    cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
+    cfg.executor = coordinator_->getExecutor();
+    cfg.getHashFn = [](const InternalEventBus::PostIngestTask& t) -> std::string { return t.hash; };
+    cfg.batchMode = true;
+    cfg.batchSizeFn = []() -> std::size_t {
+        return std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
+    };
+    cfg.batchProcessFn = [this](std::vector<InternalEventBus::PostIngestTask>&& tasks) {
+        processBatch(std::move(tasks));
+    };
 
-    started_.store(true);
-
-    // Adaptive backoff for CPU efficiency with responsiveness floor
-    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);  // Responsiveness floor
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10); // Idle ceiling
-    auto idleDelay = kMinIdleDelay;
-
-    while (!stop_.load()) {
-        bool didWork = false;
-        InternalEventBus::PostIngestTask task;
-        const std::size_t batchSize = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
-        std::vector<InternalEventBus::PostIngestTask> batch;
-        batch.reserve(batchSize);
-        // Dynamic concurrency limit from TuneAdvisor
-        std::size_t maxConcurrent = maxExtractionConcurrent();
-        // Graduated pressure response for CPU-aware throttling
-        auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
-        switch (pressureLevel) {
-            case ResourcePressureLevel::Emergency:
-                maxConcurrent = 0; // Halt (backstop for pauseAll)
-                break;
-            case ResourcePressureLevel::Critical:
-                maxConcurrent = 1; // Minimal concurrency
-                break;
-            case ResourcePressureLevel::Warning:
-                maxConcurrent = std::max<std::size_t>(1, (maxConcurrent * 3) / 4);
-                break;
-            default:
-                break;
-        }
-        if (extractionPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
-            timer.expires_after(kMinIdleDelay); // Always fast when paused
-            co_await timer.async_wait(boost::asio::use_awaitable);
-            continue;
-        }
-        while (inFlight_.load() < maxConcurrent && batch.size() < batchSize &&
-               channel->try_pop(task)) {
-            if (!tryAcquireLimiterSlot(extractionLimiter_.get(), task.hash, "extraction")) {
-                channel->try_push(std::move(task));
-                break;
-            }
-            didWork = true;
-            inFlight_.fetch_add(1);
-            batch.push_back(std::move(task));
-        }
-
-        if (didWork && !batch.empty()) {
-            wasActive_.store(true, std::memory_order_release);
-            const std::size_t batchCount = batch.size();
-            // Collect hashes for limiter completion tracking
-            std::vector<std::string> batchHashes;
-            if (extractionLimiter_) {
-                batchHashes.reserve(batchCount);
-                for (const auto& t : batch) {
-                    batchHashes.push_back(t.hash);
-                }
-            }
-            boost::asio::post(
-                coordinator_->getExecutor(),
-                [this, batch = std::move(batch), batchCount,
-                 hashes = std::move(batchHashes)]() mutable {
-                    processBatch(std::move(batch));
-                    for (const auto& h : hashes) {
-                        completeJob(h, true);
-                    }
-                    inFlight_.fetch_sub(batchCount);
-                    checkDrainAndSignal();
-                });
-        }
-
-        if (didWork) {
-            if (TuneAdvisor::enableResourceGovernor()) {
-                if (applyCpuThrottling(timer)) {
-                    co_await timer.async_wait(boost::asio::use_awaitable);
-                }
-            }
-
-            idleDelay = kMinIdleDelay; // Reset on work
-            continue;
-        }
-
-        // Adaptive backoff when idle
-        timer.expires_after(idleDelay);
-        co_await timer.async_wait(boost::asio::use_awaitable);
-        if (idleDelay < kMaxIdleDelay) {
-            idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
-        }
-    }
-
-    spdlog::info("[PostIngestQueue] Channel poller exited");
+    co_await pressureLimitedPoll(channel, std::move(cfg));
 }
 
 void PostIngestQueue::enqueue(Task t) {
@@ -1097,80 +960,28 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::KgJob>(
         "kg_jobs", kgChannelCapacity);
 
-    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+    PressureLimitedPollerConfig<InternalEventBus::KgJob> cfg;
+    cfg.stageName = "KG";
+    cfg.stopFlag = &stop_;
+    cfg.startedFlag = &stageStarted_[1];
+    cfg.pauseFlag = &stagePaused_[1];
+    cfg.wasActiveFlag = &wasActive_;
+    cfg.inFlightCounter = &stageInFlight_[1];
+    cfg.getLimiterFn = [this]() { return limiters_[1].get(); };
+    cfg.maxConcurrentFn = &maxKgConcurrent;
+    cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
+        return tryAcquireLimiterSlot(l, id, s);
+    };
+    cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
+    cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
+    cfg.executor = coordinator_->getExecutor();
+    cfg.getHashFn = [](const InternalEventBus::KgJob& j) -> std::string { return j.hash; };
+    cfg.processFn = [this](InternalEventBus::KgJob& j) {
+        processKnowledgeGraphStage(j.hash, j.documentId, j.filePath, j.tags,
+                                   std::move(j.contentBytes));
+    };
 
-    kgStarted_.store(true);
-
-    // Adaptive backoff for CPU efficiency with responsiveness floor
-    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);  // Responsiveness floor
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10); // Idle ceiling
-    auto idleDelay = kMinIdleDelay;
-
-    while (!stop_.load()) {
-        bool didWork = false;
-        InternalEventBus::KgJob job;
-        // Dynamic concurrency limit from TuneAdvisor
-        std::size_t maxConcurrent = maxKgConcurrent();
-        // Graduated pressure response for CPU-aware throttling
-        auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
-        switch (pressureLevel) {
-            case ResourcePressureLevel::Emergency:
-                maxConcurrent = 0; // Halt (backstop for pauseAll)
-                break;
-            case ResourcePressureLevel::Critical:
-                maxConcurrent = 1; // Minimal concurrency
-                break;
-            case ResourcePressureLevel::Warning:
-                maxConcurrent = std::max<std::size_t>(1, (maxConcurrent * 3) / 4);
-                break;
-            default:
-                break;
-        }
-        if (kgPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
-            timer.expires_after(kMinIdleDelay); // Always fast when paused
-            co_await timer.async_wait(boost::asio::use_awaitable);
-            continue;
-        }
-        while (kgInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
-            if (!tryAcquireLimiterSlot(kgLimiter_.get(), job.hash, "kg")) {
-                channel->try_push(std::move(job));
-                break;
-            }
-            didWork = true;
-            wasActive_.store(true, std::memory_order_release);
-            kgInFlight_.fetch_add(1);
-            boost::asio::post(coordinator_->getExecutor(),
-                              [this, hash = job.hash, docId = job.documentId,
-                               filePath = std::move(job.filePath), tags = std::move(job.tags),
-                               contentBytes = std::move(job.contentBytes)]() mutable {
-                                  processKnowledgeGraphStage(hash, docId, filePath, tags,
-                                                             std::move(contentBytes));
-                                  completeJob(hash, true);
-                                  kgInFlight_.fetch_sub(1);
-                                  checkDrainAndSignal();
-                              });
-        }
-
-        if (didWork) {
-            if (TuneAdvisor::enableResourceGovernor()) {
-                if (applyCpuThrottling(timer)) {
-                    co_await timer.async_wait(boost::asio::use_awaitable);
-                }
-            }
-
-            idleDelay = kMinIdleDelay; // Reset on work
-            continue;
-        }
-
-        // Adaptive backoff when idle
-        timer.expires_after(idleDelay);
-        co_await timer.async_wait(boost::asio::use_awaitable);
-        if (idleDelay < kMaxIdleDelay) {
-            idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
-        }
-    }
-
-    spdlog::info("[PostIngestQueue] KG poller exited");
+    co_await pressureLimitedPoll(channel, std::move(cfg));
 }
 
 boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
@@ -1179,82 +990,28 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
             "symbol_extraction", symbolChannelCapacity);
 
-    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+    PressureLimitedPollerConfig<InternalEventBus::SymbolExtractionJob> cfg;
+    cfg.stageName = "symbol";
+    cfg.stopFlag = &stop_;
+    cfg.startedFlag = &stageStarted_[2];
+    cfg.pauseFlag = &stagePaused_[2];
+    cfg.wasActiveFlag = &wasActive_;
+    cfg.inFlightCounter = &stageInFlight_[2];
+    cfg.getLimiterFn = [this]() { return limiters_[2].get(); };
+    cfg.maxConcurrentFn = &maxSymbolConcurrent;
+    cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
+        return tryAcquireLimiterSlot(l, id, s);
+    };
+    cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
+    cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
+    cfg.executor = coordinator_->getExecutor();
+    cfg.getHashFn = [](const InternalEventBus::SymbolExtractionJob& j) -> std::string { return j.hash; };
+    cfg.processFn = [this](InternalEventBus::SymbolExtractionJob& j) {
+        processSymbolExtractionStage(j.hash, j.documentId, j.filePath, j.language,
+                                     std::move(j.contentBytes));
+    };
 
-    symbolStarted_.store(true);
-    spdlog::info("[PostIngestQueue] Symbol extraction poller started");
-
-    // Adaptive backoff for CPU efficiency with responsiveness floor
-    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);  // Responsiveness floor
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10); // Idle ceiling
-    auto idleDelay = kMinIdleDelay;
-
-    while (!stop_.load()) {
-        bool didWork = false;
-        InternalEventBus::SymbolExtractionJob job;
-        // Dynamic concurrency limit from TuneAdvisor
-        std::size_t maxConcurrent = maxSymbolConcurrent();
-        // Graduated pressure response for CPU-aware throttling
-        auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
-        switch (pressureLevel) {
-            case ResourcePressureLevel::Emergency:
-                maxConcurrent = 0; // Halt (backstop for pauseAll)
-                break;
-            case ResourcePressureLevel::Critical:
-                maxConcurrent = 1; // Minimal concurrency
-                break;
-            case ResourcePressureLevel::Warning:
-                maxConcurrent = std::max<std::size_t>(1, (maxConcurrent * 3) / 4);
-                break;
-            default:
-                break;
-        }
-        if (symbolPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
-            timer.expires_after(kMinIdleDelay); // Always fast when paused
-            co_await timer.async_wait(boost::asio::use_awaitable);
-            continue;
-        }
-        while (symbolInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
-            if (!tryAcquireLimiterSlot(symbolLimiter_.get(), job.hash, "symbol")) {
-                channel->try_push(std::move(job));
-                break;
-            }
-            didWork = true;
-            wasActive_.store(true, std::memory_order_release);
-            symbolInFlight_.fetch_add(1);
-            boost::asio::post(coordinator_->getExecutor(),
-                              [this, hash = job.hash, docId = job.documentId,
-                               filePath = std::move(job.filePath),
-                               language = std::move(job.language),
-                               contentBytes = std::move(job.contentBytes)]() mutable {
-                                  processSymbolExtractionStage(hash, docId, filePath, language,
-                                                               std::move(contentBytes));
-                                  completeJob(hash, true);
-                                  symbolInFlight_.fetch_sub(1);
-                                  checkDrainAndSignal();
-                              });
-        }
-
-        if (didWork) {
-            if (TuneAdvisor::enableResourceGovernor()) {
-                if (applyCpuThrottling(timer)) {
-                    co_await timer.async_wait(boost::asio::use_awaitable);
-                }
-            }
-
-            idleDelay = kMinIdleDelay; // Reset on work
-            continue;
-        }
-
-        // Adaptive backoff when idle
-        timer.expires_after(idleDelay);
-        co_await timer.async_wait(boost::asio::use_awaitable);
-        if (idleDelay < kMaxIdleDelay) {
-            idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
-        }
-    }
-
-    spdlog::info("[PostIngestQueue] Symbol extraction poller exited");
+    co_await pressureLimitedPoll(channel, std::move(cfg));
 }
 
 void PostIngestQueue::dispatchToSymbolChannel(
@@ -1369,83 +1126,29 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityExtractionJob>(
             "entity_extraction", entityChannelCapacity);
 
-    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+    PressureLimitedPollerConfig<InternalEventBus::EntityExtractionJob> cfg;
+    cfg.stageName = "entity";
+    cfg.stopFlag = &stop_;
+    cfg.startedFlag = &stageStarted_[3];
+    cfg.pauseFlag = &stagePaused_[3];
+    cfg.wasActiveFlag = &wasActive_;
+    cfg.inFlightCounter = &stageInFlight_[3];
+    cfg.getLimiterFn = [this]() { return limiters_[3].get(); };
+    cfg.maxConcurrentFn = &maxEntityConcurrent;
+    cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
+        return tryAcquireLimiterSlot(l, id, s);
+    };
+    cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
+    cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
+    cfg.executor = entityCoordinator_ ? entityCoordinator_->getExecutor()
+                                      : coordinator_->getExecutor();
+    cfg.getHashFn = [](const InternalEventBus::EntityExtractionJob& j) -> std::string { return j.hash; };
+    cfg.processFn = [this](InternalEventBus::EntityExtractionJob& j) {
+        processEntityExtractionStage(j.hash, j.documentId, j.filePath, j.extension,
+                                     std::move(j.contentBytes));
+    };
 
-    entityStarted_.store(true);
-    spdlog::info("[PostIngestQueue] Entity extraction poller started");
-
-    // Adaptive backoff for CPU efficiency with responsiveness floor
-    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);  // Responsiveness floor
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10); // Idle ceiling
-    auto idleDelay = kMinIdleDelay;
-
-    while (!stop_.load()) {
-        bool didWork = false;
-        InternalEventBus::EntityExtractionJob job;
-        // Dynamic concurrency limit from TuneAdvisor
-        std::size_t maxConcurrent = maxEntityConcurrent();
-        // Graduated pressure response for CPU-aware throttling
-        auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
-        switch (pressureLevel) {
-            case ResourcePressureLevel::Emergency:
-                maxConcurrent = 0; // Halt (backstop for pauseAll)
-                break;
-            case ResourcePressureLevel::Critical:
-                maxConcurrent = 1; // Minimal concurrency
-                break;
-            case ResourcePressureLevel::Warning:
-                maxConcurrent = std::max<std::size_t>(1, (maxConcurrent * 3) / 4);
-                break;
-            default:
-                break;
-        }
-        if (entityPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
-            timer.expires_after(kMinIdleDelay); // Always fast when paused
-            co_await timer.async_wait(boost::asio::use_awaitable);
-            continue;
-        }
-        while (entityInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
-            if (!tryAcquireLimiterSlot(entityLimiter_.get(), job.hash, "entity")) {
-                channel->try_push(std::move(job));
-                break;
-            }
-            didWork = true;
-            wasActive_.store(true, std::memory_order_release);
-            entityInFlight_.fetch_add(1);
-            auto entityExec = entityCoordinator_ ? entityCoordinator_->getExecutor()
-                                                 : coordinator_->getExecutor();
-            boost::asio::post(entityExec, [this, hash = job.hash, docId = job.documentId,
-                                           filePath = std::move(job.filePath),
-                                           extension = std::move(job.extension),
-                                           contentBytes = std::move(job.contentBytes)]() mutable {
-                processEntityExtractionStage(hash, docId, filePath, extension,
-                                             std::move(contentBytes));
-                completeJob(hash, true);
-                entityInFlight_.fetch_sub(1);
-                checkDrainAndSignal();
-            });
-        }
-
-        if (didWork) {
-            if (TuneAdvisor::enableResourceGovernor()) {
-                if (applyCpuThrottling(timer)) {
-                    co_await timer.async_wait(boost::asio::use_awaitable);
-                }
-            }
-
-            idleDelay = kMinIdleDelay; // Reset on work
-            continue;
-        }
-
-        // Adaptive backoff when idle
-        timer.expires_after(idleDelay);
-        co_await timer.async_wait(boost::asio::use_awaitable);
-        if (idleDelay < kMaxIdleDelay) {
-            idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
-        }
-    }
-
-    spdlog::info("[PostIngestQueue] Entity extraction poller exited");
+    co_await pressureLimitedPoll(channel, std::move(cfg));
 }
 
 void PostIngestQueue::processEntityExtractionStage(
@@ -1754,157 +1457,29 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::TitleExtractionJob>(
             "title_extraction", titleChannelCapacity);
 
-    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-
-    titleStarted_.store(true);
-    spdlog::info("[PostIngestQueue] Title extraction poller started");
-
-    // Adaptive backoff for CPU efficiency with responsiveness floor
-    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);  // Responsiveness floor
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10); // Idle ceiling
-    auto idleDelay = kMinIdleDelay;
-
-    enum class IdleReason : uint8_t {
-        None = 0,
-        Paused,
-        StageDisabled,
-        NoBudget,
+    PressureLimitedPollerConfig<InternalEventBus::TitleExtractionJob> cfg;
+    cfg.stageName = "title";
+    cfg.stopFlag = &stop_;
+    cfg.startedFlag = &stageStarted_[4];
+    cfg.pauseFlag = &stagePaused_[4];
+    cfg.wasActiveFlag = &wasActive_;
+    cfg.inFlightCounter = &stageInFlight_[4];
+    cfg.getLimiterFn = [this]() { return limiters_[4].get(); };
+    cfg.maxConcurrentFn = &maxTitleConcurrent;
+    cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
+        return tryAcquireLimiterSlot(l, id, s);
+    };
+    cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
+    cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
+    cfg.executor = coordinator_->getExecutor();
+    cfg.getHashFn = [](const InternalEventBus::TitleExtractionJob& j) -> std::string { return j.hash; };
+    cfg.isCapableFn = [this]() -> bool { return titleExtractor_ != nullptr; };
+    cfg.processFn = [this](InternalEventBus::TitleExtractionJob& j) {
+        processTitleExtractionStage(j.hash, j.documentId, j.textSnippet, j.fallbackTitle,
+                                    j.filePath, j.language, j.mimeType);
     };
 
-    IdleReason lastIdleReason = IdleReason::None;
-    auto lastIdleLog = std::chrono::steady_clock::time_point{};
-
-    while (!stop_.load()) {
-        try {
-            bool didWork = false;
-            InternalEventBus::TitleExtractionJob job;
-
-            // If the stage is not capable (no extractor), avoid a tight poll loop.
-            // refreshStageAvailability() should also mark the stage inactive, but we guard here
-            // since the poller is spawned unconditionally in start().
-            if (!titleExtractor_) {
-                if (lastIdleReason != IdleReason::StageDisabled) {
-                    spdlog::debug(
-                        "[PostIngestQueue] titlePoller idle (disabled: no titleExtractor)");
-                    lastIdleReason = IdleReason::StageDisabled;
-                }
-                timer.expires_after(std::chrono::milliseconds(250));
-                co_await timer.async_wait(boost::asio::use_awaitable);
-                continue;
-            }
-
-            // Dynamic concurrency limit
-            const std::size_t baseMaxConcurrent = maxTitleConcurrent();
-            std::size_t maxConcurrent = baseMaxConcurrent;
-
-            // Graduated pressure response for CPU-aware throttling
-            auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
-            bool pressureHalted = false;
-            switch (pressureLevel) {
-                case ResourcePressureLevel::Emergency:
-                    maxConcurrent = 0; // Halt (backstop for pauseAll)
-                    pressureHalted = true;
-                    break;
-                case ResourcePressureLevel::Critical:
-                    maxConcurrent = 1; // Minimal concurrency
-                    break;
-                case ResourcePressureLevel::Warning:
-                    maxConcurrent = std::max<std::size_t>(1, (maxConcurrent * 3) / 4);
-                    break;
-                default:
-                    break;
-            }
-
-            const bool paused = titlePaused_.load(std::memory_order_acquire);
-            if (paused || maxConcurrent == 0) {
-                IdleReason reason = paused ? IdleReason::Paused : IdleReason::NoBudget;
-                auto now = std::chrono::steady_clock::now();
-                const bool shouldLog = (reason != lastIdleReason) ||
-                                       (lastIdleLog.time_since_epoch().count() == 0) ||
-                                       ((now - lastIdleLog) >= std::chrono::seconds(5));
-                if (shouldLog) {
-                    if (paused) {
-                        spdlog::debug("[PostIngestQueue] titlePoller paused");
-                    } else if (pressureHalted) {
-                        spdlog::warn(
-                            "[PostIngestQueue] titlePoller idle (maxConcurrent=0, paused={}, "
-                            "pressure={})",
-                            paused, pressureLevelName(pressureLevel));
-                    } else {
-                        // Not an emergency: this is typically because TuneAdvisor allocated a 0
-                        // budget to Title under a small total post-ingest concurrency budget.
-                        // Keep it at debug to avoid noisy warnings.
-                        spdlog::debug(
-                            "[PostIngestQueue] titlePoller idle (maxConcurrent=0, baseMax={}, "
-                            "paused={}, pressure={})",
-                            baseMaxConcurrent, paused, pressureLevelName(pressureLevel));
-                    }
-                    lastIdleLog = now;
-                    lastIdleReason = reason;
-                }
-
-                // Avoid a tight loop when paused/no budget; still react quickly to resume.
-                if (paused) {
-                    timer.expires_after(std::chrono::milliseconds(10));
-                } else if (pressureHalted) {
-                    timer.expires_after(std::chrono::milliseconds(100));
-                } else {
-                    // Budget=0 in normal conditions: no need to poll aggressively.
-                    timer.expires_after(std::chrono::milliseconds(250));
-                }
-                co_await timer.async_wait(boost::asio::use_awaitable);
-                continue;
-            }
-
-            lastIdleReason = IdleReason::None;
-            while (titleInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
-                if (!tryAcquireLimiterSlot(titleLimiter_.get(), job.hash, "title")) {
-                    channel->try_push(std::move(job));
-                    break;
-                }
-                didWork = true;
-                wasActive_.store(true, std::memory_order_release);
-                titleInFlight_.fetch_add(1);
-                boost::asio::post(
-                    coordinator_->getExecutor(),
-                    [this, hash = job.hash, docId = job.documentId,
-                     textSnippet = std::move(job.textSnippet),
-                     fallbackTitle = std::move(job.fallbackTitle),
-                     filePath = std::move(job.filePath), language = std::move(job.language),
-                     mimeType = std::move(job.mimeType)]() {
-                        processTitleExtractionStage(hash, docId, textSnippet, fallbackTitle,
-                                                    filePath, language, mimeType);
-                        completeJob(hash, true);
-                        titleInFlight_.fetch_sub(1);
-                        checkDrainAndSignal();
-                    });
-            }
-
-            if (didWork) {
-                if (TuneAdvisor::enableResourceGovernor()) {
-                    if (applyCpuThrottling(timer)) {
-                        co_await timer.async_wait(boost::asio::use_awaitable);
-                    }
-                }
-
-                idleDelay = kMinIdleDelay; // Reset on work
-                continue;
-            }
-
-            // Adaptive backoff when idle
-            timer.expires_after(idleDelay);
-            co_await timer.async_wait(boost::asio::use_awaitable);
-            if (idleDelay < kMaxIdleDelay) {
-                idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
-            }
-        } catch (const std::exception& e) {
-            spdlog::error("[PostIngestQueue] titlePoller exception: {}", e.what());
-            // Set recovery delay (co_await not allowed in catch handler)
-            idleDelay = std::chrono::milliseconds(100);
-        }
-    }
-
-    spdlog::info("[PostIngestQueue] Title extraction poller exited");
+    co_await pressureLimitedPoll(channel, std::move(cfg));
 }
 
 void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64_t docId,
@@ -2138,25 +1713,24 @@ void PostIngestQueue::initializeGradientLimiters() {
     cfg.longWindowAlpha = TuneAdvisor::gradientLongAlpha();
     cfg.warmupSamples = TuneAdvisor::gradientWarmupSamples();
     cfg.tolerance = TuneAdvisor::gradientTolerance();
+    cfg.initialLimit = TuneAdvisor::gradientInitialLimit();
+    cfg.minLimit = TuneAdvisor::gradientMinLimit();
 
-    // Set max limits based on TuneAdvisor caps
-    cfg.maxLimit = static_cast<double>(TuneAdvisor::postExtractionConcurrent());
-    extractionLimiter_ = std::make_unique<GradientLimiter>("extraction", cfg);
+    // Per-stage maxLimit is the smaller of the global gradient max and the stage cap
+    const double globalMax = TuneAdvisor::gradientMaxLimit();
 
-    cfg.maxLimit = static_cast<double>(TuneAdvisor::postKgConcurrent());
-    kgLimiter_ = std::make_unique<GradientLimiter>("kg", cfg);
+    static constexpr const char* kLimiterNames[] = {
+        "extraction", "kg", "symbol", "entity", "title", "embed"};
+    using ConcurrentFn = uint32_t (*)();
+    static constexpr ConcurrentFn kConcurrentFns[] = {
+        &TuneAdvisor::postExtractionConcurrent, &TuneAdvisor::postKgConcurrent,
+        &TuneAdvisor::postSymbolConcurrent,     &TuneAdvisor::postEntityConcurrent,
+        &TuneAdvisor::postTitleConcurrent,      &TuneAdvisor::postEmbedConcurrent};
 
-    cfg.maxLimit = static_cast<double>(TuneAdvisor::postSymbolConcurrent());
-    symbolLimiter_ = std::make_unique<GradientLimiter>("symbol", cfg);
-
-    cfg.maxLimit = static_cast<double>(TuneAdvisor::postEntityConcurrent());
-    entityLimiter_ = std::make_unique<GradientLimiter>("entity", cfg);
-
-    cfg.maxLimit = static_cast<double>(TuneAdvisor::postTitleConcurrent());
-    titleLimiter_ = std::make_unique<GradientLimiter>("title", cfg);
-
-    cfg.maxLimit = static_cast<double>(TuneAdvisor::postEmbedConcurrent());
-    embedLimiter_ = std::make_unique<GradientLimiter>("embed", cfg);
+    for (std::size_t i = 0; i < kLimiterCount; ++i) {
+        cfg.maxLimit = std::min(globalMax, static_cast<double>(kConcurrentFns[i]()));
+        limiters_[i] = std::make_unique<GradientLimiter>(kLimiterNames[i], cfg);
+    }
 
     spdlog::info("[PostIngestQueue] Gradient limiters initialized");
 }
@@ -2256,195 +1830,26 @@ std::optional<std::vector<std::string>> PostIngestQueue::getCachedDocumentTags(i
     return std::nullopt;
 }
 
-void PostIngestQueue::processBatch(
-    std::vector<InternalEventBus::PostIngestTask>&& tasks) {
-    if (tasks.empty()) {
-        return;
-    }
-
-    // Get current concurrency limits from TuneAdvisor
-    const uint32_t maxWorkers = TuneAdvisor::postExtractionConcurrent();
-    if (maxWorkers <= 1 || tasks.size() < 4) {
-        // Not enough concurrency or tasks to justify parallel overhead
-        // Process sequentially using a single chunk
-        std::unordered_map<std::string, std::string> symbolExtensionMap;
-        {
-            std::lock_guard<std::mutex> lock(extMapMutex_);
-            symbolExtensionMap = symbolExtensionMap_;
-        }
-
-        std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders;
-        {
-            std::lock_guard<std::mutex> lock(entityMutex_);
-            entityProviders = entityProviders_;
-        }
-
-        auto result = processChunkParallel(tasks, symbolExtensionMap, entityProviders);
-
-        // Handle results
-        processed_.fetch_add(result.successes.size(), std::memory_order_relaxed);
-        failed_.fetch_add(result.failures.size(), std::memory_order_relaxed);
-
-        // Batch DB write
-        if (!result.successes.empty() && meta_) {
-            std::vector<metadata::BatchContentEntry> entries;
-            entries.reserve(result.successes.size());
-
-            for (const auto& prepared : result.successes) {
-                metadata::BatchContentEntry entry;
-                entry.documentId = prepared.documentId;
-                entry.title = prepared.title.empty() ? prepared.fileName : prepared.title;
-                entry.contentText = prepared.extractedText;
-                entry.mimeType = prepared.mimeType;
-                entry.extractionMethod = "post_ingest";
-                entry.language = prepared.language;
-                entries.push_back(std::move(entry));
-            }
-
-            auto batchResult = meta_->batchInsertContentAndIndex(entries);
-            if (!batchResult) {
-                spdlog::error("[PostIngestQueue] Batch DB write failed: {}",
-                             batchResult.error().message);
-                if (batchResult.error().message.find("database is locked") != std::string::npos) {
-                    TuneAdvisor::reportDbLockError();
-                }
-                for (const auto& prepared : result.successes) {
-                    result.failures.push_back(
-                        ExtractionFailure{prepared.documentId, prepared.hash, batchResult.error().message});
-                }
-                result.successes.clear();
-            } else {
-                spdlog::info("[PostIngestQueue] Batch DB write succeeded for {} documents",
-                            entries.size());
-                for (const auto& prepared : result.successes) {
-                    if (!prepared.title.empty()) {
-                        (void)meta_->setMetadata(prepared.documentId, "title",
-                                                metadata::MetadataValue(prepared.title));
-                    }
-                }
-            }
-        }
-
-        // Handle failures
-        for (const auto& failure : result.failures) {
-            if (failure.documentId >= 0 && meta_) {
-                auto updateRes = meta_->updateDocumentExtractionStatus(
-                    failure.documentId, false, metadata::ExtractionStatus::Failed, failure.errorMessage);
-                if (!updateRes) {
-                    spdlog::warn("[PostIngestQueue] Failed to mark extraction failed for {}: {}",
-                                failure.hash, updateRes.error().message);
-                }
-            }
-        }
-
-        // Dispatch to channels
-        std::unordered_map<std::string, std::shared_ptr<std::vector<std::byte>>> contentByHash;
-
-        auto getOrLoadContent =
-            [this, &contentByHash](const std::string& hash) -> std::shared_ptr<std::vector<std::byte>> {
-            if (!store_) {
-                return nullptr;
-            }
-            auto it = contentByHash.find(hash);
-            if (it != contentByHash.end()) {
-                return it->second;
-            }
-            auto contentResult = store_->retrieveBytes(hash);
-            if (!contentResult) {
-                return nullptr;
-            }
-            auto bytes = std::make_shared<std::vector<std::byte>>(std::move(contentResult.value()));
-            contentByHash.emplace(hash, bytes);
-            return bytes;
-        };
-
-        for (const auto& prepared : result.successes) {
-            std::shared_ptr<std::vector<std::byte>> contentBytes;
-            if (prepared.shouldDispatchKg || prepared.shouldDispatchSymbol ||
-                prepared.shouldDispatchEntity) {
-                contentBytes = getOrLoadContent(prepared.hash);
-            }
-            if (prepared.shouldDispatchKg) {
-                dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.fileName,
-                                   std::vector<std::string>(prepared.tags), contentBytes);
-            }
-            if (prepared.shouldDispatchSymbol) {
-                dispatchToSymbolChannel(prepared.hash, prepared.documentId, prepared.fileName,
-                                       prepared.symbolLanguage, contentBytes);
-            }
-            if (prepared.shouldDispatchEntity) {
-                dispatchToEntityChannel(prepared.hash, prepared.documentId, prepared.fileName,
-                                       prepared.extension, contentBytes);
-            }
-            if (prepared.shouldDispatchTitle) {
-                dispatchToTitleChannel(prepared.hash, prepared.documentId, prepared.titleTextSnippet,
-                                      prepared.fileName, prepared.filePath, prepared.language,
-                                      prepared.mimeType);
-            }
-            InternalEventBus::instance().incPostConsumed();
-        }
-        return;
-    }
-
-    YAMS_ZONE_SCOPED_N("PostIngestQueue::processBatch");
-
-    // Calculate optimal chunk size
-    const size_t numChunks = std::min(static_cast<size_t>(maxWorkers), tasks.size());
-    const size_t chunkSize = (tasks.size() + numChunks - 1) / numChunks; // Ceiling division
-
-    // Copy extension map and entity providers once
-    std::unordered_map<std::string, std::string> symbolExtensionMap;
+PostIngestQueue::StageConfigSnapshot PostIngestQueue::snapshotStageConfig() {
+    StageConfigSnapshot snap;
     {
         std::lock_guard<std::mutex> lock(extMapMutex_);
-        symbolExtensionMap = symbolExtensionMap_;
+        snap.symbolExtensionMap = symbolExtensionMap_;
     }
-
-    std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders;
     {
         std::lock_guard<std::mutex> lock(entityMutex_);
-        entityProviders = entityProviders_;
+        snap.entityProviders = entityProviders_;
     }
+    return snap;
+}
 
-    // Launch parallel chunks using std::async
-    std::vector<std::future<ChunkResult>> futures;
-    futures.reserve(numChunks);
-
-    for (size_t i = 0; i < tasks.size(); i += chunkSize) {
-        size_t end = std::min(i + chunkSize, tasks.size());
-        std::vector<InternalEventBus::PostIngestTask> chunk(tasks.begin() + i, tasks.begin() + end);
-
-        futures.push_back(std::async(std::launch::async, [this, chunk = std::move(chunk),
-                                                          &symbolExtensionMap, &entityProviders]() {
-            return processChunkParallel(chunk, symbolExtensionMap, entityProviders);
-        }));
-    }
-
-    // Collect results
-    std::vector<PreparedMetadataEntry> allSuccesses;
-    std::vector<ExtractionFailure> allFailures;
-
-    for (auto& future : futures) {
-        try {
-            ChunkResult result = future.get();
-            allSuccesses.insert(allSuccesses.end(), std::make_move_iterator(result.successes.begin()),
-                               std::make_move_iterator(result.successes.end()));
-            allFailures.insert(allFailures.end(), std::make_move_iterator(result.failures.begin()),
-                              std::make_move_iterator(result.failures.end()));
-        } catch (const std::exception& e) {
-            spdlog::error("[PostIngestQueue] Chunk processing failed: {}", e.what());
-        }
-    }
-
-    // Update stats
-    processed_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
-    failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
-
-    // Batch DB write for all successes (single transaction)
-    if (!allSuccesses.empty() && meta_) {
+void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& successes,
+                                         std::vector<ExtractionFailure>& failures) {
+    if (!successes.empty() && meta_) {
         std::vector<metadata::BatchContentEntry> entries;
-        entries.reserve(allSuccesses.size());
+        entries.reserve(successes.size());
 
-        for (const auto& prepared : allSuccesses) {
+        for (const auto& prepared : successes) {
             metadata::BatchContentEntry entry;
             entry.documentId = prepared.documentId;
             entry.title = prepared.title.empty() ? prepared.fileName : prepared.title;
@@ -2457,22 +1862,20 @@ void PostIngestQueue::processBatch(
 
         auto batchResult = meta_->batchInsertContentAndIndex(entries);
         if (!batchResult) {
-            spdlog::error("[PostIngestQueue] Parallel batch DB write failed: {}",
+            spdlog::error("[PostIngestQueue] Batch DB write failed: {}",
                          batchResult.error().message);
             if (batchResult.error().message.find("database is locked") != std::string::npos) {
                 TuneAdvisor::reportDbLockError();
             }
-            // Convert successes to failures
-            for (const auto& prepared : allSuccesses) {
-                allFailures.push_back(
+            for (const auto& prepared : successes) {
+                failures.push_back(
                     ExtractionFailure{prepared.documentId, prepared.hash, batchResult.error().message});
             }
-            allSuccesses.clear();
+            successes.clear();
         } else {
-            spdlog::info("[PostIngestQueue] Parallel batch DB write succeeded for {} documents",
+            spdlog::info("[PostIngestQueue] Batch DB write succeeded for {} documents",
                         entries.size());
-            // Update titles
-            for (const auto& prepared : allSuccesses) {
+            for (const auto& prepared : successes) {
                 if (!prepared.title.empty()) {
                     (void)meta_->setMetadata(prepared.documentId, "title",
                                             metadata::MetadataValue(prepared.title));
@@ -2481,8 +1884,7 @@ void PostIngestQueue::processBatch(
         }
     }
 
-    // Handle failures
-    for (const auto& failure : allFailures) {
+    for (const auto& failure : failures) {
         if (failure.documentId >= 0 && meta_) {
             auto updateRes = meta_->updateDocumentExtractionStatus(
                 failure.documentId, false, metadata::ExtractionStatus::Failed, failure.errorMessage);
@@ -2492,8 +1894,9 @@ void PostIngestQueue::processBatch(
             }
         }
     }
+}
 
-    // Dispatch to channels (can be done in parallel too, but keep simple for now)
+void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>& successes) {
     std::unordered_map<std::string, std::shared_ptr<std::vector<std::byte>>> contentByHash;
 
     auto getOrLoadContent =
@@ -2514,7 +1917,7 @@ void PostIngestQueue::processBatch(
         return bytes;
     };
 
-    for (const auto& prepared : allSuccesses) {
+    for (const auto& prepared : successes) {
         std::shared_ptr<std::vector<std::byte>> contentBytes;
         if (prepared.shouldDispatchKg || prepared.shouldDispatchSymbol ||
             prepared.shouldDispatchEntity) {
@@ -2539,6 +1942,70 @@ void PostIngestQueue::processBatch(
         }
         InternalEventBus::instance().incPostConsumed();
     }
+}
+
+void PostIngestQueue::processBatch(
+    std::vector<InternalEventBus::PostIngestTask>&& tasks) {
+    if (tasks.empty()) {
+        return;
+    }
+
+    auto stageCfg = snapshotStageConfig();
+
+    // Get current concurrency limits from TuneAdvisor
+    const uint32_t maxWorkers = TuneAdvisor::postExtractionConcurrent();
+    if (maxWorkers <= 1 || tasks.size() < 4) {
+        // Sequential: single chunk
+        auto result = processChunkParallel(tasks, stageCfg.symbolExtensionMap,
+                                           stageCfg.entityProviders);
+        processed_.fetch_add(result.successes.size(), std::memory_order_relaxed);
+        failed_.fetch_add(result.failures.size(), std::memory_order_relaxed);
+        commitBatchResults(result.successes, result.failures);
+        dispatchSuccesses(result.successes);
+        return;
+    }
+
+    YAMS_ZONE_SCOPED_N("PostIngestQueue::processBatch");
+
+    // Calculate optimal chunk size
+    const size_t numChunks = std::min(static_cast<size_t>(maxWorkers), tasks.size());
+    const size_t chunkSize = (tasks.size() + numChunks - 1) / numChunks;
+
+    // Launch parallel chunks using std::async
+    std::vector<std::future<ChunkResult>> futures;
+    futures.reserve(numChunks);
+
+    for (size_t i = 0; i < tasks.size(); i += chunkSize) {
+        size_t end = std::min(i + chunkSize, tasks.size());
+        std::vector<InternalEventBus::PostIngestTask> chunk(tasks.begin() + i, tasks.begin() + end);
+
+        futures.push_back(std::async(std::launch::async,
+            [this, chunk = std::move(chunk), &stageCfg]() {
+                return processChunkParallel(chunk, stageCfg.symbolExtensionMap,
+                                            stageCfg.entityProviders);
+            }));
+    }
+
+    // Collect results
+    std::vector<PreparedMetadataEntry> allSuccesses;
+    std::vector<ExtractionFailure> allFailures;
+
+    for (auto& future : futures) {
+        try {
+            ChunkResult result = future.get();
+            allSuccesses.insert(allSuccesses.end(), std::make_move_iterator(result.successes.begin()),
+                               std::make_move_iterator(result.successes.end()));
+            allFailures.insert(allFailures.end(), std::make_move_iterator(result.failures.begin()),
+                              std::make_move_iterator(result.failures.end()));
+        } catch (const std::exception& e) {
+            spdlog::error("[PostIngestQueue] Chunk processing failed: {}", e.what());
+        }
+    }
+
+    processed_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
+    failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
+    commitBatchResults(allSuccesses, allFailures);
+    dispatchSuccesses(allSuccesses);
 }
 
 PostIngestQueue::ChunkResult PostIngestQueue::processChunkParallel(

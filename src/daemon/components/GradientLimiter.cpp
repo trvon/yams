@@ -161,6 +161,32 @@ GradientLimiter::Metrics GradientLimiter::metrics() const {
     return m;
 }
 
+void GradientLimiter::applyPressure(uint8_t level) {
+    // 0=Normal: no-op, let gradient algorithm recover organically
+    // 1=Warning: clamp to 75% of maxLimit
+    // 2=Critical: force to minLimit
+    // 3+=Emergency: force to 0 (full stop)
+    switch (level) {
+        case 0:
+            return; // Normal — no intervention
+        case 1: {
+            double cap = config_.maxLimit * 0.75;
+            double current = limit_.load(std::memory_order_relaxed);
+            if (current > cap) {
+                limit_.store(cap, std::memory_order_relaxed);
+            }
+            break;
+        }
+        case 2:
+            limit_.store(config_.minLimit, std::memory_order_relaxed);
+            break;
+        default:
+            // Emergency or unknown — full stop
+            limit_.store(0.0, std::memory_order_relaxed);
+            break;
+    }
+}
+
 void GradientLimiter::reset() {
     limit_.store(config_.initialLimit, std::memory_order_relaxed);
     inFlight_.store(0, std::memory_order_relaxed);

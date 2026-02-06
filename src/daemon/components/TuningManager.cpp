@@ -290,6 +290,20 @@ void TuningManager::tick_once() {
 
             // Override with gradient limiter values if enabled
             if (TuneAdvisor::enableGradientLimiters()) {
+                // Propagate governor pressure to limiters before reading
+                const auto pressureLevel =
+                    static_cast<uint8_t>(govSnap.level);
+                auto applyPressureToLimiter = [pressureLevel](GradientLimiter* lim) {
+                    if (lim)
+                        lim->applyPressure(pressureLevel);
+                };
+                applyPressureToLimiter(pq->extractionLimiter());
+                applyPressureToLimiter(pq->kgLimiter());
+                applyPressureToLimiter(pq->symbolLimiter());
+                applyPressureToLimiter(pq->entityLimiter());
+                applyPressureToLimiter(pq->titleLimiter());
+                applyPressureToLimiter(pq->embedLimiter());
+
                 if (auto* extractionLimiter = pq->extractionLimiter()) {
                     extractionTarget = extractionLimiter->effectiveLimit();
                 }

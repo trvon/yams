@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <mutex>
 #include <random>
+#include <shared_mutex>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -33,7 +34,7 @@ public:
     }
 
     bool initialize() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (initialized_) {
             return true;
@@ -215,12 +216,12 @@ public:
     }
 
     bool isInitialized() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
         return initialized_;
     }
 
     void close() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         if (backend_) {
             backend_->close();
         }
@@ -237,7 +238,7 @@ public:
     bool tableExists() const { return backend_->tablesExist(); }
 
     void dropTable() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         // Note: We don't actually drop tables, just clear them
         // This preserves the schema but removes all data
         if (backend_->isInitialized()) {
@@ -257,7 +258,7 @@ public:
         }
 
         // Query actual count from DB once at startup
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         if (auto result = backend_->getVectorCount(); result) {
             cachedVectorCount_.store(result.value(), std::memory_order_release);
             spdlog::info("VectorDatabase: initialized counter - total_vectors={}", result.value());
@@ -265,7 +266,7 @@ public:
     }
 
     bool insertVector(const VectorRecord& record) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             setError("Database not initialized");
@@ -305,7 +306,7 @@ public:
 
         // Only hold mutex for validation and state check
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::shared_mutex> lock(mutex_);
 
             if (!initialized_) {
                 setError("Database not initialized");
@@ -368,7 +369,7 @@ public:
             // Don't hold our mutex while calling backend to avoid potential deadlock
             auto result = backend_->insertVectorsBatch(records);
             if (!result) {
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::unique_lock<std::shared_mutex> lock(mutex_);
                 setError("Batch insert failed: " + result.error().message);
                 return false;
             }
@@ -376,19 +377,19 @@ public:
             // Update component-owned metrics
             cachedVectorCount_.fetch_add(records.size(), std::memory_order_relaxed);
 
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::shared_mutex> lock(mutex_);
             has_error_ = false;
             return true;
 
         } catch (const std::exception& e) {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::shared_mutex> lock(mutex_);
             setError("Batch insert failed: " + std::string(e.what()));
             return false;
         }
     }
 
     bool updateVector(const std::string& chunk_id, const VectorRecord& record) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             setError("Database not initialized");
@@ -417,7 +418,7 @@ public:
     }
 
     bool deleteVector(const std::string& chunk_id) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             setError("Database not initialized");
@@ -444,7 +445,7 @@ public:
     }
 
     bool deleteVectorsByDocument(const std::string& document_hash) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             setError("Database not initialized");
@@ -480,7 +481,7 @@ public:
 
     std::vector<VectorRecord> searchSimilar(const std::vector<float>& query_embedding,
                                             const VectorSearchParams& params) const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             return {};
@@ -508,7 +509,7 @@ public:
     }
 
     std::optional<VectorRecord> getVector(const std::string& chunk_id) const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
 
         auto result = backend_->getVector(chunk_id);
         if (!result) {
@@ -520,7 +521,7 @@ public:
 
     std::map<std::string, VectorRecord>
     getVectorsBatch(const std::vector<std::string>& chunk_ids) const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             return {};
@@ -535,7 +536,7 @@ public:
     }
 
     std::vector<VectorRecord> getVectorsByDocument(const std::string& document_hash) const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
 
         auto result = backend_->getVectorsByDocument(document_hash);
         if (!result) {
@@ -546,13 +547,13 @@ public:
     }
 
     bool hasEmbedding(const std::string& document_hash) const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
         auto result = backend_->hasEmbedding(document_hash);
         return result && result.value();
     }
 
     Result<VectorDatabase::OrphanCleanupStats> cleanupOrphanRows() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
@@ -581,7 +582,7 @@ public:
     // =========================================================================
 
     Result<void> insertEntityVector(const EntityVectorRecord& record) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
@@ -595,7 +596,7 @@ public:
             return Result<void>{};
         }
 
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
@@ -607,7 +608,7 @@ public:
     Result<void> updateEntityVector(const std::string& node_key, EntityEmbeddingType type,
                                     const EntityVectorRecord& record) {
         (void)type;
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
@@ -625,7 +626,7 @@ public:
     }
 
     Result<void> deleteEntityVectorsByNode(const std::string& node_key) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
@@ -635,7 +636,7 @@ public:
     }
 
     Result<void> deleteEntityVectorsByDocument(const std::string& document_hash) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
@@ -646,7 +647,7 @@ public:
 
     std::vector<EntityVectorRecord> searchEntities(const std::vector<float>& query_embedding,
                                                    const EntitySearchParams& params) const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             return {};
@@ -656,7 +657,7 @@ public:
     }
 
     std::vector<EntityVectorRecord> getEntityVectorsByNode(const std::string& node_key) const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             return {};
@@ -667,7 +668,7 @@ public:
 
     std::vector<EntityVectorRecord>
     getEntityVectorsByDocument(const std::string& document_hash) const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             return {};
@@ -677,7 +678,7 @@ public:
     }
 
     bool hasEntityEmbedding(const std::string& node_key) const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             return false;
@@ -687,7 +688,7 @@ public:
     }
 
     size_t getEntityVectorCount() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             return 0;
@@ -697,7 +698,7 @@ public:
     }
 
     Result<void> markEntityAsStale(const std::string& node_key) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
@@ -707,7 +708,7 @@ public:
     }
 
     bool buildIndex() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             setError("Database not initialized");
@@ -726,7 +727,7 @@ public:
     }
 
     bool optimizeIndex() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
 
         if (!initialized_) {
             setError("Database not initialized");
@@ -776,12 +777,12 @@ public:
     const VectorDatabaseConfig& getConfig() const { return config_; }
 
     std::string getLastError() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         return last_error_;
     }
 
     bool hasError() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         return has_error_;
     }
 
@@ -821,7 +822,7 @@ private:
     bool initialized_;
     mutable bool has_error_;
     mutable std::string last_error_;
-    mutable std::mutex mutex_;
+    mutable std::shared_mutex mutex_;
 
     // Component-owned metrics (updated on insert/delete, read by DaemonMetrics)
     mutable std::atomic<size_t> cachedVectorCount_{0};

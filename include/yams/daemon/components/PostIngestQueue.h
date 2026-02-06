@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -218,17 +219,20 @@ public:
 
     /// Returns true once the channel poller coroutine has started.
     /// Tests should wait for this before enqueueing to avoid race conditions.
-    bool started() const { return started_.load(); }
+    bool started() const { return stageStarted_[0].load(); }
 
     // Per-stage inflight counts
-    std::size_t extractionInFlight() const { return inFlight_.load(); }
-    std::size_t kgInFlight() const { return kgInFlight_.load(); }
-    std::size_t symbolInFlight() const { return symbolInFlight_.load(); }
-    std::size_t entityInFlight() const { return entityInFlight_.load(); }
-    std::size_t titleInFlight() const { return titleInFlight_.load(); }
+    std::size_t extractionInFlight() const { return stageInFlight_[0].load(); }
+    std::size_t kgInFlight() const { return stageInFlight_[1].load(); }
+    std::size_t symbolInFlight() const { return stageInFlight_[2].load(); }
+    std::size_t entityInFlight() const { return stageInFlight_[3].load(); }
+    std::size_t titleInFlight() const { return stageInFlight_[4].load(); }
     std::size_t totalInFlight() const {
-        return inFlight_.load() + kgInFlight_.load() + symbolInFlight_.load() +
-               entityInFlight_.load() + titleInFlight_.load();
+        std::size_t total = 0;
+        for (std::size_t i = 0; i < kStageCount; ++i) {
+            total += stageInFlight_[i].load();
+        }
+        return total;
     }
 
     // Per-stage queue depths (approximate, from channel sizes)
@@ -245,12 +249,12 @@ public:
     static std::size_t maxTitleConcurrent();
 
     // Gradient-based adaptive limiter accessors (for TuningManager)
-    GradientLimiter* extractionLimiter() const { return extractionLimiter_.get(); }
-    GradientLimiter* kgLimiter() const { return kgLimiter_.get(); }
-    GradientLimiter* symbolLimiter() const { return symbolLimiter_.get(); }
-    GradientLimiter* entityLimiter() const { return entityLimiter_.get(); }
-    GradientLimiter* titleLimiter() const { return titleLimiter_.get(); }
-    GradientLimiter* embedLimiter() const { return embedLimiter_.get(); }
+    GradientLimiter* extractionLimiter() const { return limiters_[0].get(); }
+    GradientLimiter* kgLimiter() const { return limiters_[1].get(); }
+    GradientLimiter* symbolLimiter() const { return limiters_[2].get(); }
+    GradientLimiter* entityLimiter() const { return limiters_[3].get(); }
+    GradientLimiter* titleLimiter() const { return limiters_[4].get(); }
+    GradientLimiter* embedLimiter() const { return limiters_[5].get(); }
 
     void setCapacity(std::size_t cap) { capacity_ = cap > 0 ? cap : capacity_; }
 
@@ -266,6 +270,10 @@ public:
         Entity,         // Entity extraction (binary analysis)
         Title           // Title extraction (GLiNER)
     };
+    static constexpr std::size_t kStageCount = 5;
+    static constexpr std::size_t kLimiterCount = 6; // 5 stages + embed
+    static constexpr std::array<const char*, kStageCount> kStageNames = {
+        "Extraction", "KnowledgeGraph", "Symbol", "Entity", "Title"};
 
     /// Pause a specific processing stage
     /// @param stage The stage to pause
@@ -376,18 +384,12 @@ public:
     WorkCoordinator* entityCoordinator_;
 
     std::atomic<bool> stop_{false};
-    std::atomic<bool> started_{false};
-    std::atomic<bool> kgStarted_{false};
-    std::atomic<bool> symbolStarted_{false};
-    std::atomic<bool> entityStarted_{false};
-    std::atomic<bool> titleStarted_{false};
 
-    // Pause flags for ResourceGovernor pressure response
-    std::atomic<bool> extractionPaused_{false};
-    std::atomic<bool> kgPaused_{false};
-    std::atomic<bool> symbolPaused_{false};
-    std::atomic<bool> entityPaused_{false};
-    std::atomic<bool> titlePaused_{false};
+    // Per-stage arrays indexed by Stage enum (0..4)
+    std::array<std::atomic<bool>, kStageCount> stageStarted_{};
+    std::array<std::atomic<bool>, kStageCount> stagePaused_{};
+    std::array<std::atomic<std::size_t>, kStageCount> stageInFlight_{};
+
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};
     // File/directory add tracking
@@ -395,11 +397,6 @@ public:
     std::atomic<std::uint64_t> directoriesAdded_{0};
     std::atomic<std::uint64_t> filesProcessed_{0};
     std::atomic<std::uint64_t> directoriesProcessed_{0};
-    std::atomic<std::size_t> inFlight_{0};
-    std::atomic<std::size_t> kgInFlight_{0};
-    std::atomic<std::size_t> symbolInFlight_{0};
-    std::atomic<std::size_t> entityInFlight_{0};
-    std::atomic<std::size_t> titleInFlight_{0};
     std::atomic<double> latencyMsEma_{0.0};
     std::atomic<double> ratePerSecEma_{0.0};
     std::size_t capacity_{1000};
@@ -424,12 +421,8 @@ public:
     KGWriteQueue* kgWriteQueue_{nullptr};
 
     // Gradient-based adaptive concurrency limiters (Netflix Gradient2 algorithm)
-    std::unique_ptr<GradientLimiter> extractionLimiter_;
-    std::unique_ptr<GradientLimiter> kgLimiter_;
-    std::unique_ptr<GradientLimiter> symbolLimiter_;
-    std::unique_ptr<GradientLimiter> entityLimiter_;
-    std::unique_ptr<GradientLimiter> titleLimiter_;
-    std::unique_ptr<GradientLimiter> embedLimiter_;
+    // Index 0-4 = stages (Extraction..Title), index 5 = Embed
+    std::array<std::unique_ptr<GradientLimiter>, kLimiterCount> limiters_;
 
     // Job tracking for latency measurement
     struct ActiveJob {
@@ -458,6 +451,20 @@ public:
 
     /// Process batch with work-stealing parallelization (default)
     void processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks);
+
+    /// Snapshot stage config under locks (symbol extension map + entity providers)
+    struct StageConfigSnapshot {
+        std::unordered_map<std::string, std::string> symbolExtensionMap;
+        std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders;
+    };
+    StageConfigSnapshot snapshotStageConfig();
+
+    /// Commit batch results: DB write, failure status updates
+    void commitBatchResults(std::vector<PreparedMetadataEntry>& successes,
+                            std::vector<ExtractionFailure>& failures);
+
+    /// Dispatch successes to downstream channels (KG, symbol, entity, title)
+    void dispatchSuccesses(const std::vector<PreparedMetadataEntry>& successes);
 
     /// Process a chunk of tasks in parallel (used by processBatch)
     struct ChunkResult {

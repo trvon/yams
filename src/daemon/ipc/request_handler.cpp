@@ -1673,6 +1673,15 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
     using boost::asio::use_awaitable;
     YAMS_ZONE_SCOPED_N("RequestHandler::writer_drain");
 
+    // Guard: if connection is already closing, don't attempt writes on a dead socket.
+    // This prevents the SIGSEGV when a concurrent request coroutine restarts drain
+    // after a previous drain cleared queues on write failure.
+    if (connection_closing_.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lock(rr_mutex_);
+        writer_running_ = false;
+        co_return;
+    }
+
     while (true) {
         uint64_t rid;
         std::vector<FrameItem> frames_to_write;
@@ -1790,6 +1799,8 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
 
             if (ec) {
                 spdlog::warn("[DRAIN] req_id={} write error: {}", rid, ec.message());
+                // Mark connection as broken to prevent new drain cycles on dead socket
+                connection_closing_.store(true, std::memory_order_release);
                 std::lock_guard<std::mutex> lock(rr_mutex_);
                 // Socket writes failed. This connection is effectively broken, so drop any
                 // remaining queued frames/bytes to avoid stranding rr_queues_ (which can

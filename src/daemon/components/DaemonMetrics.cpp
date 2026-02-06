@@ -747,6 +747,25 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.postKgLimit = TuneAdvisor::postKgConcurrent();
                 out.postSymbolLimit = TuneAdvisor::postSymbolConcurrent();
                 out.postEntityLimit = TuneAdvisor::postEntityConcurrent();
+
+                // Gradient limiter per-stage metrics
+                out.gradientLimitersEnabled = TuneAdvisor::enableGradientLimiters();
+                if (out.gradientLimitersEnabled) {
+                    auto readLimiter =
+                        [](GradientLimiter* lim) -> MetricsSnapshot::GradientLimiterMetrics {
+                        if (!lim)
+                            return {};
+                        auto m = lim->metrics();
+                        return {m.limit,     m.smoothedRtt, m.gradient,
+                                m.inFlight,  m.acquireCount, m.rejectCount};
+                    };
+                    out.glExtraction = readLimiter(pq->extractionLimiter());
+                    out.glKg = readLimiter(pq->kgLimiter());
+                    out.glSymbol = readLimiter(pq->symbolLimiter());
+                    out.glEntity = readLimiter(pq->entityLimiter());
+                    out.glTitle = readLimiter(pq->titleLimiter());
+                    out.glEmbed = readLimiter(pq->embedLimiter());
+                }
             }
             auto& bus = InternalEventBus::instance();
             out.kgQueued = bus.kgQueued();
@@ -756,6 +775,14 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             out.entityQueued = bus.entityQueued();
             out.entityDropped = bus.entityDropped();
             out.entityConsumed = bus.entityConsumed();
+            // GC pipeline metrics (from InternalEventBus)
+            out.gcQueued = bus.gcQueued();
+            out.gcDropped = bus.gcDropped();
+            out.gcConsumed = bus.gcConsumed();
+            // Entity graph pipeline metrics (from InternalEventBus)
+            out.entityGraphQueued = bus.entityGraphQueued();
+            out.entityGraphDropped = bus.entityGraphDropped();
+            out.entityGraphConsumed = bus.entityGraphConsumed();
         } else {
             out.workerThreads = std::max(1u, std::thread::hardware_concurrency());
         }

@@ -1577,10 +1577,14 @@ public:
                 spdlog::warn(
                     "[Embedding][Daemon] Batch embeddings failed (code={}, msg='{}') on attempt {}",
                     static_cast<int>(lastError.code), lastError.message, attempt);
-                // Retry only on transient/network/timeout-like failures
+                // Retry on transient/network/timeout-like failures AND plugin/resource errors
+                // InternalError (code=17): transient plugin failures (e.g. ONNX model busy)
+                // ResourceExhausted: ONNX slot contention under concurrent load
                 const bool canRetry = lastError.code == ErrorCode::Timeout ||
                                       lastError.code == ErrorCode::NetworkError ||
-                                      lastError.code == ErrorCode::InvalidState;
+                                      lastError.code == ErrorCode::InvalidState ||
+                                      lastError.code == ErrorCode::InternalError ||
+                                      lastError.code == ErrorCode::ResourceExhausted;
                 if (!canRetry)
                     break;
                 // Exponential backoff: 100ms, 200ms, 400ms, 800ms

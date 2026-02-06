@@ -257,6 +257,33 @@ struct MetricsSnapshot {
     uint64_t symbolDropped{0};
     uint64_t symbolConsumed{0};
 
+    // GC pipeline metrics (from InternalEventBus)
+    uint64_t gcQueued{0};
+    uint64_t gcDropped{0};
+    uint64_t gcConsumed{0};
+
+    // Entity graph pipeline metrics (from InternalEventBus)
+    uint64_t entityGraphQueued{0};
+    uint64_t entityGraphDropped{0};
+    uint64_t entityGraphConsumed{0};
+
+    // Gradient limiter per-stage metrics (from PostIngestQueue)
+    struct GradientLimiterMetrics {
+        double limit{0.0};
+        double smoothedRtt{0.0};
+        double gradient{0.0};
+        uint32_t inFlight{0};
+        uint64_t acquireCount{0};
+        uint64_t rejectCount{0};
+    };
+    GradientLimiterMetrics glExtraction;
+    GradientLimiterMetrics glKg;
+    GradientLimiterMetrics glSymbol;
+    GradientLimiterMetrics glEntity;
+    GradientLimiterMetrics glTitle;
+    GradientLimiterMetrics glEmbed;
+    bool gradientLimitersEnabled{false};
+
     // Deferred ingestion queue depth (store_document_tasks channel)
     std::size_t deferredQueueDepth{0};
 };

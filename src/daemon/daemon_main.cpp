@@ -667,6 +667,58 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            // Apply [gradient_limiter] overrides to TuneAdvisor if present
+            if (tomlConfig.find("gradient_limiter") != tomlConfig.end()) {
+                const auto& gl = tomlConfig.at("gradient_limiter");
+                auto gl_dbl = [&](const char* k) -> std::optional<double> {
+                    auto it = gl.find(k);
+                    if (it == gl.end())
+                        return std::nullopt;
+                    try {
+                        return std::stod(it->second);
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse gradient_limiter.{} as double: {}", k,
+                                     e.what());
+                        return std::nullopt;
+                    }
+                };
+                auto gl_int = [&](const char* k) -> std::optional<uint32_t> {
+                    auto it = gl.find(k);
+                    if (it == gl.end())
+                        return std::nullopt;
+                    try {
+                        return static_cast<uint32_t>(std::stoul(it->second));
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse gradient_limiter.{} as int: {}", k,
+                                     e.what());
+                        return std::nullopt;
+                    }
+                };
+
+                // enable (bool)
+                if (auto it = gl.find("enable"); it != gl.end()) {
+                    std::string v = it->second;
+                    for (auto& c : v)
+                        c = static_cast<char>(std::tolower(c));
+                    bool en = (v == "1" || v == "true" || v == "on" || v == "yes");
+                    yams::daemon::TuneAdvisor::setEnableGradientLimiters(en);
+                }
+                if (auto v = gl_dbl("smoothing_alpha"))
+                    yams::daemon::TuneAdvisor::setGradientSmoothingAlpha(*v);
+                if (auto v = gl_dbl("long_window_alpha"))
+                    yams::daemon::TuneAdvisor::setGradientLongAlpha(*v);
+                if (auto v = gl_int("warmup_samples"))
+                    yams::daemon::TuneAdvisor::setGradientWarmupSamples(*v);
+                if (auto v = gl_dbl("tolerance"))
+                    yams::daemon::TuneAdvisor::setGradientTolerance(*v);
+                if (auto v = gl_dbl("initial_limit"))
+                    yams::daemon::TuneAdvisor::setGradientInitialLimit(*v);
+                if (auto v = gl_dbl("min_limit"))
+                    yams::daemon::TuneAdvisor::setGradientMinLimit(*v);
+                if (auto v = gl_dbl("max_limit"))
+                    yams::daemon::TuneAdvisor::setGradientMaxLimit(*v);
+            }
+
             // Honor [embeddings].enable=false: hard-disable model provider regardless of [daemon]
             // This prevents startup from waiting on embedding services when embeddings are
             // disabled.

@@ -737,10 +737,17 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
         size_t skipped = 0;
         size_t failed = 0;
 
+        // Circuit breaker: abort after too many consecutive or total failures
+        constexpr size_t kMaxConsecutiveFailures = 10;
+        constexpr double kMaxFailureRate = 0.80;
+        constexpr size_t kMinAttemptsForRate = 50;
+        size_t consecutiveFailures = 0;
+        bool circuitBroken = false;
+
         // Allow configurable pause between batches to reduce sustained CPU pressure
         unsigned pause_ms = yams::daemon::TuneAdvisor::getEmbedPauseMs();
 
-        for (size_t i = 0; i < documentHashes.size();) {
+        for (size_t i = 0; i < documentHashes.size() && !circuitBroken;) {
             std::vector<std::string> texts;
             std::vector<std::string> hashes;
 
@@ -798,8 +805,30 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                 if (embeddings.empty()) {
                     failed += texts.size();
                     batcher.onFailure();
+                    consecutiveFailures++;
+                    if (consecutiveFailures >= kMaxConsecutiveFailures) {
+                        spdlog::error("[EmbeddingService] circuit breaker: {} consecutive failures, "
+                                      "aborting repair batch (processed={} failed={})",
+                                      consecutiveFailures, processed, failed);
+                        circuitBroken = true;
+                    }
+                    // Check overall failure rate after sufficient attempts
+                    if (!circuitBroken) {
+                        size_t totalAttempted = processed + failed;
+                        if (totalAttempted >= kMinAttemptsForRate) {
+                            double failRate =
+                                static_cast<double>(failed) / static_cast<double>(totalAttempted);
+                            if (failRate > kMaxFailureRate) {
+                                spdlog::error("[EmbeddingService] circuit breaker: {:.0f}% failure "
+                                              "rate exceeds 80% threshold (processed={} failed={})",
+                                              failRate * 100.0, processed, failed);
+                                circuitBroken = true;
+                            }
+                        }
+                    }
                     continue;
                 }
+                consecutiveFailures = 0; // reset on success
 
                 // Store embeddings in vector database using batch insert for fewer transactions
                 std::vector<vector::VectorRecord> records;
@@ -810,9 +839,10 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
 
                     vector::VectorRecord record;
                     record.document_hash = hashes[k];
-                    record.chunk_id = vector::utils::generateChunkId(hashes[k], 0);
+                    record.chunk_id = vector::utils::generateChunkId(hashes[k], 999999);
                     record.embedding = embeddings[k];
                     record.content = texts[k].substr(0, 1000); // Store snippet
+                    record.level = vector::EmbeddingLevel::DOCUMENT;
 
                     // Add metadata if document exists
                     if (docResult && docResult.value()) {

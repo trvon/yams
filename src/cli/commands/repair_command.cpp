@@ -1275,8 +1275,13 @@ private:
                     std::cout << "    Failed:     " << last.failure << "\n\n";
                 }
                 return Result<void>();
+            } catch (const std::exception& ex) {
+                std::cout << "  [FAIL] Embedding exception: " << ex.what() << "\n";
+                return Error{ErrorCode::InternalError,
+                             std::string("embedding exception: ") + ex.what()};
             } catch (...) {
-                // Swallow exceptions during embeddings generation in repair flow
+                std::cout << "  [FAIL] Unknown embedding exception\n";
+                return Error{ErrorCode::InternalError, "unknown embedding exception"};
             }
 
         } else {

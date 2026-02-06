@@ -834,6 +834,16 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Gradient limiter tests (Netflix Gradient2 adaptive concurrency)
+  catch2_gradient_limiter_exe = executable('catch2_gradient_limiter',
+    files('unit/daemon/components/gradient_limiter_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Add plugin path for plugin harness tests
   plugin_test_cpp_args = test_cpp_noerror_args + ['-DYAMS_TESTING=1']
   if get_option('plugin-onnx')
@@ -2367,6 +2377,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'components', 'yams-zns'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
+  )
+
+  test('gradient_limiter', catch2_gradient_limiter_exe,
+    suite: ['catch2', 'unit', 'daemon', 'gradient'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   test('daemon_plugin_harness', catch2_daemon_plugin_exe,
