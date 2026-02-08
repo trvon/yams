@@ -323,6 +323,16 @@ int main(int argc, char* argv[]) {
                 if (daemonSection.find("auto_load_plugins") != daemonSection.end()) {
                     config.autoLoadPlugins = (daemonSection.at("auto_load_plugins") == "true");
                 }
+
+                // Auto repair (RepairService)
+                if (daemonSection.find("auto_repair") != daemonSection.end()) {
+                    std::string v = daemonSection.at("auto_repair");
+                    for (auto& c : v) {
+                        c = static_cast<char>(std::tolower(c));
+                    }
+                    config.enableAutoRepair =
+                        !(v == "0" || v == "false" || v == "off" || v == "no");
+                }
                 if (daemonSection.find("plugin_name_policy") != daemonSection.end()) {
                     config.pluginNamePolicy = daemonSection.at("plugin_name_policy");
                 }

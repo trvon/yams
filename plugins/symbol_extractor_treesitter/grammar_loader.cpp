@@ -2,12 +2,13 @@
 
 #include <cstdio>
 #include <expected>
-#include <format>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
+
+#include <fmt/format.h>
 
 #include <yams/compat/dlfcn.h>
 #include <yams/config/config_helpers.h>
@@ -174,14 +175,15 @@ GrammarLoader::loadGrammar(std::string_view language) {
     const auto* spec = findSpec(language);
     if (!spec) {
         return tl::unexpected(GrammarLoadError{
-            GrammarLoadError::NOT_FOUND, std::format("Language '{}' not supported", language)});
+            GrammarLoadError::NOT_FOUND,
+            fmt::format("Language '{}' not supported", language)});
     }
 
     auto candidates = getLibraryCandidates(language);
     if (candidates.empty()) {
         return tl::unexpected(
             GrammarLoadError{GrammarLoadError::NOT_FOUND,
-                             std::format("No library candidates for language '{}'", language)});
+                             fmt::format("No library candidates for language '{}'", language)});
     }
 
     // Try each candidate
@@ -219,7 +221,7 @@ GrammarLoader::loadGrammar(std::string_view language) {
     }
     return tl::unexpected(GrammarLoadError{
         GrammarLoadError::LOAD_FAILED,
-        std::format("Failed to load grammar for '{}'. Tried: {}", language, tried_join)});
+        fmt::format("Failed to load grammar for '{}'. Tried: {}", language, tried_join)});
 }
 
 bool GrammarLoader::grammarExists(std::string_view language) const {

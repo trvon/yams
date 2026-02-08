@@ -580,6 +580,35 @@ Result<GraphComponent::GraphHealthReport> GraphComponent::validateGraph() {
     }
 
     GraphHealthReport report;
+    // Populate basic stats so CLI can show meaningful totals.
+    // If these queries fail, validation still succeeds but reports the reason.
+    {
+        auto typeCounts = kgStore_->getNodeTypeCounts();
+        if (typeCounts) {
+            uint64_t total = 0;
+            for (const auto& [type, count] : typeCounts.value()) {
+                (void)type;
+                total += static_cast<uint64_t>(count);
+            }
+            report.totalNodes = total;
+        } else {
+            report.issues.push_back("node type counts unavailable: " + typeCounts.error().message);
+        }
+    }
+    {
+        auto relCounts = kgStore_->getRelationTypeCounts();
+        if (relCounts) {
+            uint64_t total = 0;
+            for (const auto& [relation, count] : relCounts.value()) {
+                (void)relation;
+                total += static_cast<uint64_t>(count);
+            }
+            report.totalEdges = total;
+        } else {
+            report.issues.push_back("relation type counts unavailable: " +
+                                    relCounts.error().message);
+        }
+    }
     return report;
 }
 
