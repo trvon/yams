@@ -25,9 +25,9 @@ public:
     }
 };
 
-std::unique_ptr<yams::mcp::MCPServer> makeServer() {
+std::shared_ptr<yams::mcp::MCPServer> makeServer() {
     auto t = std::make_unique<NullTransport>();
-    return std::make_unique<yams::mcp::MCPServer>(std::move(t));
+    return std::make_shared<yams::mcp::MCPServer>(std::move(t));
 }
 
 } // namespace

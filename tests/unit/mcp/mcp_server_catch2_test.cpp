@@ -86,7 +86,7 @@ TEST_CASE("MCP Types - Basic type availability", "[mcp][types][catch2]") {
 TEST_CASE("MCP Server - Tool registry is initialized and listTools returns tools",
           "[mcp][server][tools][registry][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Call testListTools which directly invokes listTools()
     json result = server->testListTools();
@@ -106,7 +106,7 @@ TEST_CASE("MCP Server - Tool registry is initialized and listTools returns tools
 TEST_CASE("MCP Server - listTools returns valid tool structure",
           "[mcp][server][tools][structure][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json result = server->testListTools();
 
@@ -134,7 +134,7 @@ TEST_CASE("MCP Server - listTools returns valid tool structure",
 
 TEST_CASE("MCP Server - Core tools are registered", "[mcp][server][tools][core][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json result = server->testListTools();
 
@@ -166,7 +166,7 @@ TEST_CASE("MCP Server - Core tools are registered", "[mcp][server][tools][core][
 TEST_CASE("MCP Server - tools/list response matches MCP spec format",
           "[mcp][server][tools][opencodcompat][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Simulate what OpenCode sends: {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
     json request = {
@@ -196,7 +196,7 @@ TEST_CASE("MCP Server - tools/list response matches MCP spec format",
 TEST_CASE("MCP Server - tools/list handles pagination cursor",
           "[mcp][server][tools][pagination][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Test with cursor parameter (as per MCP spec)
     json request = {{"jsonrpc", "2.0"},
@@ -218,7 +218,7 @@ TEST_CASE("MCP Server - tools/list handles pagination cursor",
 TEST_CASE("MCP Server - tool schema has all required MCP fields",
           "[mcp][server][tools][schema][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json result = server->testListTools();
 
@@ -260,7 +260,7 @@ TEST_CASE("MCP Server - tool schema has all required MCP fields",
 TEST_CASE("MCP Server - handles tools/list without params field",
           "[mcp][server][tools][edgecase][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Some clients might not send params at all
     json request = {
@@ -281,7 +281,7 @@ TEST_CASE("MCP Server - handles tools/list without params field",
 
 TEST_CASE("MCP Server - debug print tools/list response", "[mcp][server][tools][debug][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json request = {
         {"jsonrpc", "2.0"}, {"id", 99}, {"method", "tools/list"}, {"params", json::object()}};
@@ -304,7 +304,7 @@ TEST_CASE("MCP Server - debug print tools/list response", "[mcp][server][tools][
 TEST_CASE("MCP Server - tools/list response has no null fields",
           "[mcp][server][tools][nullcheck][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json request = {
         {"jsonrpc", "2.0"}, {"id", 100}, {"method", "tools/list"}, {"params", json::object()}};
@@ -323,7 +323,7 @@ TEST_CASE("MCP Server - tools/list response has no null fields",
 TEST_CASE("MCP Server - tools/list response is valid JSON-RPC 2.0",
           "[mcp][server][tools][jsonrpc][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json request = {
         {"jsonrpc", "2.0"}, {"id", 101}, {"method", "tools/list"}, {"params", json::object()}};
@@ -400,7 +400,7 @@ TEST_CASE("MCP Server - verify tools available immediately after construction",
     auto transport = std::make_unique<NullTransport>();
 
     // Construct server
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Immediately query tools - should work without calling start() or any other method
     json result = server->testListTools();
@@ -421,7 +421,7 @@ TEST_CASE("MCP Server - tools/list before initialize should still work",
     // This should still work per MCP spec
 
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Query tools without initializing
     json request = {
@@ -448,7 +448,7 @@ TEST_CASE("MCP Server - tools/list before initialize should still work",
 TEST_CASE("MCP Server - full OpenCode handshake sequence",
           "[mcp][server][handshake][opencodcompat][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Step 1: OpenCode sends initialize
     json initRequest = {{"jsonrpc", "2.0"},
@@ -489,7 +489,7 @@ TEST_CASE("MCP Server - tools/list without prior initialize",
           "[mcp][server][handshake][nopreinit][catch2]") {
     // Some clients might query tools before initialize (though not spec-compliant)
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Send tools/list without initialize
     json toolsRequest = {
@@ -507,7 +507,7 @@ TEST_CASE("MCP Server - tools/list without prior initialize",
 TEST_CASE("MCP Server - rapid sequential tools/list requests",
           "[mcp][server][tools][rapid][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Send multiple tools/list requests rapidly
     for (int i = 0; i < 10; ++i) {
@@ -533,7 +533,7 @@ TEST_CASE("MCP Server - responds quickly to tools/list after construction",
     // We need to ensure the response is sent quickly
 
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Simulate the exact sequence OpenCode uses
     json request = {
@@ -556,7 +556,7 @@ TEST_CASE("MCP Server - handles concurrent tools/list requests",
           "[mcp][server][tools][concurrent][catch2]") {
     // OpenCode might query tools multiple times or concurrently
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     std::vector<std::future<MessageResult>> futures;
 
@@ -565,7 +565,7 @@ TEST_CASE("MCP Server - handles concurrent tools/list requests",
         json request = {
             {"jsonrpc", "2.0"}, {"id", i}, {"method", "tools/list"}, {"params", json::object()}};
 
-        futures.push_back(std::async(std::launch::async, [&server, request]() {
+        futures.push_back(std::async(std::launch::async, [server, request]() {
             return server->handleRequestPublic(request);
         }));
     }
@@ -586,7 +586,7 @@ TEST_CASE("MCP Server - tools/list works without daemon client",
     // The tools are registered in the constructor, not dependent on daemon
 
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Force daemon client to be null by resetting it
     server->testShutdown();
@@ -607,7 +607,7 @@ TEST_CASE("MCP Server - stderr logging doesn't block stdout",
     // OpenCode captures stderr separately, so heavy logging shouldn't block
 
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // The server constructor logs to stderr - verify we can still get tools
     json result = server->testListTools();
@@ -624,7 +624,7 @@ TEST_CASE("MCP Server - stderr logging doesn't block stdout",
 TEST_CASE("MCP Server - supports protocol version 2025-11-25",
           "[mcp][server][protocol][version][2025-11-25][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -649,7 +649,7 @@ TEST_CASE("MCP Server - supports protocol version 2025-11-25",
 TEST_CASE("MCP Server - supports protocol version 2025-06-18",
           "[mcp][server][protocol][version][2025-06-18][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -669,7 +669,7 @@ TEST_CASE("MCP Server - supports protocol version 2025-06-18",
 TEST_CASE("MCP Server - supports protocol version 2025-03-26",
           "[mcp][server][protocol][version][2025-03-26][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -689,7 +689,7 @@ TEST_CASE("MCP Server - supports protocol version 2025-03-26",
 TEST_CASE("MCP Server - supports protocol version 2024-11-05",
           "[mcp][server][protocol][version][2024-11-05][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -709,7 +709,7 @@ TEST_CASE("MCP Server - supports protocol version 2024-11-05",
 TEST_CASE("MCP Server - supports protocol version 2024-10-07",
           "[mcp][server][protocol][version][2024-10-07][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -729,7 +729,7 @@ TEST_CASE("MCP Server - supports protocol version 2024-10-07",
 TEST_CASE("MCP Server - falls back to latest for unsupported protocol version",
           "[mcp][server][protocol][version][fallback][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -750,13 +750,13 @@ TEST_CASE("MCP Server - falls back to latest for unsupported protocol version",
 TEST_CASE("MCP Server - strict protocol mode rejects unsupported version",
           "[mcp][server][protocol][version][strict][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Enable strict protocol mode via environment variable
     setenv("YAMS_MCP_STRICT_PROTOCOL", "1", 1);
 
     // Create a new server with strict mode enabled
-    auto strictServer = std::make_unique<yams::mcp::MCPServer>(std::make_unique<NullTransport>());
+    auto strictServer = std::make_shared<yams::mcp::MCPServer>(std::make_unique<NullTransport>());
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -781,7 +781,7 @@ TEST_CASE("MCP Server - strict protocol mode rejects unsupported version",
 TEST_CASE("MCP Server - uses latest version when protocolVersion not specified",
           "[mcp][server][protocol][version][default][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},

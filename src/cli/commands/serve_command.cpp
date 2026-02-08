@@ -226,7 +226,7 @@ private:
 
         auto transport = std::make_unique<mcp::StdioTransport>();
         auto server =
-            std::make_unique<mcp::MCPServer>(std::move(transport), &g_running, daemonSocket_);
+            std::make_shared<mcp::MCPServer>(std::move(transport), &g_running, daemonSocket_);
         server->start();
         spdlog::info("MCP stdio server stopped");
         return {};

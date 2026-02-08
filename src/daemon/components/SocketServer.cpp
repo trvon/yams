@@ -160,7 +160,10 @@ Result<void> SocketServer::start() {
                                                    std::filesystem::perms::group_write);
 #endif
 
-        actualSocketPath_ = sockPath;
+        {
+            std::lock_guard<std::mutex> lk(socketPathsMutex_);
+            actualSocketPath_ = sockPath;
+        }
 
         // Determine initial connection slots: use config if specified, otherwise compute from
         // hardware/profile
@@ -274,7 +277,10 @@ Result<void> SocketServer::start() {
                                                  std::filesystem::perms::group_write);
 #endif
 
-                proxySocketPath_ = proxySockPath;
+                {
+                    std::lock_guard<std::mutex> lk(socketPathsMutex_);
+                    proxySocketPath_ = proxySockPath;
+                }
 
                 proxyAcceptLoopFuture_ = co_spawn(
                     coordinator_->getExecutor(),
@@ -443,16 +449,23 @@ Result<void> SocketServer::stop() {
             state_->readiness.ipcServerReady.store(false);
         }
 
-        // Cleanup socket files
-        if (!actualSocketPath_.empty()) {
-            std::error_code ec;
-            std::filesystem::remove(actualSocketPath_, ec);
+        // Cleanup socket files (paths are read by other threads; copy+clear under lock)
+        std::filesystem::path actualPath;
+        std::filesystem::path proxyPath;
+        {
+            std::lock_guard<std::mutex> lk(socketPathsMutex_);
+            actualPath = actualSocketPath_;
+            proxyPath = proxySocketPath_;
             actualSocketPath_.clear();
-        }
-        if (!proxySocketPath_.empty()) {
-            std::error_code ec;
-            std::filesystem::remove(proxySocketPath_, ec);
             proxySocketPath_.clear();
+        }
+        if (!actualPath.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(actualPath, ec);
+        }
+        if (!proxyPath.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(proxyPath, ec);
         }
 
         spdlog::info("Socket server stopped (total_conn={} active_conn={})",
@@ -501,11 +514,19 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
         }
     }
     if (trace) {
+        std::string sockStr;
+        if (isProxy) {
+            sockStr = proxySocketPath().string();
+        } else {
+            std::filesystem::path p;
+            {
+                std::lock_guard<std::mutex> lk(socketPathsMutex_);
+                p = actualSocketPath_;
+            }
+            sockStr = p.empty() ? config_.socketPath.string() : p.string();
+        }
         spdlog::info("stream-trace: accept_loop starting ({}, max_conn={} socket={})", loopLabel,
-                     isProxy ? config_.proxyMaxConnections : config_.maxConnections,
-                     isProxy ? proxySocketPath_.string()
-                             : (actualSocketPath_.empty() ? config_.socketPath.string()
-                                                          : actualSocketPath_.string()));
+                     isProxy ? config_.proxyMaxConnections : config_.maxConnections, sockStr);
     }
 
     if (!activeAcceptor) {
@@ -590,10 +611,18 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                             boost::system::error_code rebuild_ec;
                             if (activeAcceptor)
                                 activeAcceptor->close(rebuild_ec);
-                            auto rebuildPath =
-                                isProxy ? proxySocketPath_
-                                        : (actualSocketPath_.empty() ? config_.socketPath
-                                                                     : actualSocketPath_);
+                            std::filesystem::path rebuildPath;
+                            if (isProxy) {
+                                rebuildPath = proxySocketPath();
+                            } else {
+                                {
+                                    std::lock_guard<std::mutex> lk(socketPathsMutex_);
+                                    rebuildPath = actualSocketPath_;
+                                }
+                                if (rebuildPath.empty()) {
+                                    rebuildPath = config_.socketPath;
+                                }
+                            }
                             std::filesystem::remove(rebuildPath, rebuild_ec);
                             auto rebuilt =
                                 std::make_unique<local::acceptor>(*coordinator_->getIOContext());
@@ -604,11 +633,17 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                             if (isProxy) {
                                 proxyAcceptor_ = std::move(rebuilt);
                                 activeAcceptor = proxyAcceptor_.get();
-                                proxySocketPath_ = rebuildPath;
+                                {
+                                    std::lock_guard<std::mutex> lk(socketPathsMutex_);
+                                    proxySocketPath_ = rebuildPath;
+                                }
                             } else {
                                 acceptor_ = std::move(rebuilt);
                                 activeAcceptor = acceptor_.get();
-                                actualSocketPath_ = rebuildPath;
+                                {
+                                    std::lock_guard<std::mutex> lk(socketPathsMutex_);
+                                    actualSocketPath_ = rebuildPath;
+                                }
                             }
                             static std::atomic<bool> s_warned_once{false};
                             static const bool s_quiet = []() {

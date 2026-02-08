@@ -34,7 +34,7 @@ TEST_CASE("MCP Apps Capability - Extension Discovery",
     // Test implementation - verifying MCP Apps capability negotiation
 
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -64,7 +64,7 @@ TEST_CASE("MCP Apps Capability - Extension Discovery",
 TEST_CASE("MCP Apps Capability - Extension Not Advertised When Disabled",
           "[mcp][apps][capability][mcp-apps-cap-02][phase1]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -90,7 +90,7 @@ TEST_CASE("MCP Apps Capability - Extension Not Advertised When Disabled",
 TEST_CASE("MCP Apps Capability - Mime Type Validation Supported",
           "[mcp][apps][capability][mcp-apps-cap-03][phase1]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -116,7 +116,7 @@ TEST_CASE("MCP Apps Capability - Mime Type Validation Supported",
 TEST_CASE("MCP Apps Capability - Mime Type Validation Unsupported",
           "[mcp][apps][capability][mcp-apps-cap-04][phase1]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -147,7 +147,7 @@ TEST_CASE("MCP Apps Capability - Mime Type Validation Unsupported",
 TEST_CASE("MCP Apps Capability - Graceful Fallback",
           "[mcp][apps][capability][mcp-apps-cap-05][phase1]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Initialize without UI support
     json initRequest = {{"jsonrpc", "2.0"},

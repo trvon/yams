@@ -128,7 +128,7 @@ private:
 /**
  * MCP Server implementation
  */
-class MCPServer {
+class MCPServer : public std::enable_shared_from_this<MCPServer> {
 public:
     MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown = nullptr,
               std::filesystem::path overrideSocket = {},
@@ -140,6 +140,11 @@ public:
     boost::asio::awaitable<void> startAsync();
     void stop();
     bool isRunning() const { return running_.load(); }
+
+    // Shared ownership is required because MCPServer spawns detached coroutines
+    // that capture a shared_ptr to keep the server alive while work is in flight.
+    MCPServer(const MCPServer&) = delete;
+    MCPServer& operator=(const MCPServer&) = delete;
 
 #if defined(YAMS_TESTING) && !defined(YAMS_WASI)
     // Testing hooks: allow unit tests to intercept daemon client creation and

@@ -977,37 +977,43 @@ void MCPServer::start() {
                     }
                     this->sendProgress("tool", 0.0, std::string("calling ") + toolName,
                                        progressToken);
+
+                    // Keep the server alive while the detached coroutine runs.
+                    // Without this, a fast shutdown (or scope exit) can destroy MCPServer
+                    // while a tool is still executing, leading to use-after-free.
+                    auto self = this->shared_from_this();
+
                     boost::asio::co_spawn(
 #if defined(YAMS_WASI)
                         boost::asio::system_executor(),
 #else
                         yams::daemon::GlobalIOContext::global_executor(),
 #endif
-                        [this, toolName, toolArgs, id_copy,
+                        [self, toolName, toolArgs, id_copy,
                          progressToken]() -> boost::asio::awaitable<void> {
                             if (progressToken)
                                 MCPServer::tlsProgressToken_ = *progressToken;
                             try {
-                                json raw = co_await this->callToolAsync(toolName, toolArgs);
+                                json raw = co_await self->callToolAsync(toolName, toolArgs);
                                 if (raw.is_object() && raw.contains("error")) {
                                     json err = raw["error"];
-                                    this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                    self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
                                                         {"error", err},
                                                         {"id", id_copy}});
                                 } else {
-                                    this->sendResponse(this->createResponse(id_copy, raw));
+                                    self->sendResponse(self->createResponse(id_copy, raw));
                                 }
-                                this->sendProgress("tool", 100.0,
+                                self->sendProgress("tool", 100.0,
                                                    std::string("completed ") + toolName,
                                                    progressToken);
                             } catch (const std::exception& e) {
                                 json err = {{"code", -32603}, {"message", e.what()}};
-                                this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
                                                     {"error", err},
                                                     {"id", id_copy}});
                             } catch (...) {
                                 json err = {{"code", -32603}, {"message", "Tool call failed"}};
-                                this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
                                                     {"error", err},
                                                     {"id", id_copy}});
                             }
@@ -1035,12 +1041,15 @@ void MCPServer::start() {
                 }
 #else
                 // Non-WASI: Use async coroutines
+                // Keep the server alive while the detached coroutine runs.
+                auto self = this->shared_from_this();
+
                 boost::asio::co_spawn(
                     yams::daemon::GlobalIOContext::global_executor(),
-                    [this, req = request]() -> boost::asio::awaitable<void> {
-                        auto response = co_await this->handleRequestAsync(req);
+                    [self, req = request]() -> boost::asio::awaitable<void> {
+                        auto response = co_await self->handleRequestAsync(req);
                         if (response) {
-                            this->sendResponse(response.value());
+                            self->sendResponse(response.value());
                         } else {
                             const auto& error = response.error();
                             json errorResponse = {
@@ -1048,7 +1057,7 @@ void MCPServer::start() {
                                 {"error",
                                  {{"code", protocol::INVALID_REQUEST}, {"message", error.message}}},
                                 {"id", req.value("id", nullptr)}};
-                            this->sendResponse(errorResponse);
+                            self->sendResponse(errorResponse);
                         }
                     },
                     boost::asio::detached);

@@ -71,7 +71,10 @@ public:
 
     // Proxy metrics
     size_t proxyActiveConnections() const { return proxyActiveConnections_.load(); }
-    std::filesystem::path proxySocketPath() const { return proxySocketPath_; }
+    std::filesystem::path proxySocketPath() const {
+        std::lock_guard<std::mutex> lk(socketPathsMutex_);
+        return proxySocketPath_;
+    }
 
     // Compute age of oldest active connection (in seconds); 0 if no connections
     uint64_t oldestConnectionAgeSeconds() const;
@@ -135,6 +138,10 @@ private:
 
     // Socket tracking
     std::filesystem::path actualSocketPath_;
+
+    // actualSocketPath_ and proxySocketPath_ are read from other threads (e.g. DaemonMetrics)
+    // while being mutated during start/stop/rebuild.
+    mutable std::mutex socketPathsMutex_;
 
     // Connection metrics
     std::atomic<size_t> activeConnections_{0};

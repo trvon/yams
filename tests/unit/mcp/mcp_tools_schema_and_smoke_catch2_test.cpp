@@ -35,9 +35,9 @@ public:
 
 struct ServerUnderTest {
     // Construct MCPServer with null dependencies that aren't needed for listTools schema checks
-    static std::unique_ptr<yams::mcp::MCPServer> make() {
+    static std::shared_ptr<yams::mcp::MCPServer> make() {
         auto transport = std::make_unique<NullTransport>();
-        return std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+        return std::make_shared<yams::mcp::MCPServer>(std::move(transport));
     }
 };
 

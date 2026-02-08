@@ -34,7 +34,7 @@ TEST_CASE("MCP Apps Resource - Declaration With UI Support",
     SKIP("Pending MCP Apps implementation");
 
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -78,7 +78,7 @@ TEST_CASE("MCP Apps Resource - Content Retrieval Text",
     SKIP("Pending MCP Apps implementation");
 
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
