@@ -74,6 +74,7 @@
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 
+#include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
@@ -269,10 +270,10 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         workCoordinator_ = std::make_unique<WorkCoordinator>();
         auto threadCount = yams::daemon::TuneAdvisor::workCoordinatorThreads();
         workCoordinator_->start(threadCount);
-        spdlog::info(
-            "[ServiceManager] WorkCoordinator created with {} worker threads (budget {}%, override={})",
-            workCoordinator_->getWorkerCount(), yams::daemon::TuneAdvisor::cpuBudgetPercent(),
-            threadCount);
+        spdlog::info("[ServiceManager] WorkCoordinator created with {} worker threads (budget {}%, "
+                     "override={})",
+                     workCoordinator_->getWorkerCount(),
+                     yams::daemon::TuneAdvisor::cpuBudgetPercent(), threadCount);
 
         // Initialize strands for logical separation
         spdlog::debug("[ServiceManager] Creating strands...");
@@ -849,6 +850,18 @@ void ServiceManager::shutdown() {
 
     // Phase 6: Stop services in reverse dependency order
     spdlog::info("[ServiceManager] Phase 6: Shutting down daemon services");
+
+    spdlog::info("[ServiceManager] Phase 6.0.5: Stopping repair service");
+    if (repairService_) {
+        try {
+            repairService_->stop();
+            repairService_.reset();
+            spdlog::info("[ServiceManager] Phase 6.0.5: Repair service stopped");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 6.0.5: RepairService shutdown failed: {}",
+                         e.what());
+        }
+    }
 
     spdlog::info("[ServiceManager] Phase 6.1: Stopping ingest service");
     if (ingestService_) {
@@ -2977,6 +2990,30 @@ void ServiceManager::enqueuePostIngest(const std::string& hash, const std::strin
                                std::chrono::steady_clock::now(),
                                PostIngestQueue::Task::Stage::Metadata};
     postIngest_->tryEnqueue(std::move(task));
+}
+
+void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {
+    if (repairService_) {
+        spdlog::debug("[ServiceManager] RepairService already started");
+        return;
+    }
+    RepairService::Config rcfg;
+    rcfg.enable = true;
+    rcfg.dataDir = resolvedDataDir_;
+    rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
+    rcfg.autoRebuildOnDimMismatch = config_.autoRebuildOnDimMismatch;
+
+    repairService_ = std::make_unique<RepairService>(this, &state_, std::move(activeConnFn), rcfg);
+    repairService_->start();
+    spdlog::info("[ServiceManager] RepairService started");
+}
+
+void ServiceManager::stopRepairService() {
+    if (repairService_) {
+        repairService_->stop();
+        repairService_.reset();
+        spdlog::info("[ServiceManager] RepairService stopped");
+    }
 }
 
 } // namespace yams::daemon

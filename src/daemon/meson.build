@@ -1,3 +1,4 @@
+fs = import('fs')
 yams_daemon_client_dep = dependency('yams_daemon_client')
 protobuf_dep = dependency('protobuf')
 
@@ -7,12 +8,47 @@ yams_onnx_resource_dep = dependency('yams_onnx_resource')
 
 # Tracy profiling support (optional, controlled by -Denable-profiling=true)
 enable_profiling = get_option('enable-profiling')
+enable_rocprofiler_tracy = get_option('enable-rocprofiler-tracy')
 tracy_dep = dependency('tracy', required: enable_profiling, static: true)
 tracy_args = []
 tracy_deps = []
-if tracy_dep.found() and enable_profiling
+tracy_enabled = tracy_dep.found() and enable_profiling
+if tracy_enabled
   tracy_args += ['-DTRACY_ENABLE']
   tracy_deps += tracy_dep
+  rocm_hint = '/opt/rocm'
+  rocm_present = fs.exists(rocm_hint)
+  want_rocprofiler = (not enable_rocprofiler_tracy.disabled()) and (enable_rocprofiler_tracy.enabled() or (enable_rocprofiler_tracy.auto() and rocm_present))
+  if want_rocprofiler
+    rocprofiler_dep = dependency(
+      'rocprofiler-sdk',
+      method: 'cmake',
+      cmake_module_path: [join_paths(rocm_hint, 'lib', 'cmake'), join_paths(rocm_hint, 'lib64', 'cmake')],
+      required: enable_rocprofiler_tracy.enabled(),
+    )
+    if rocprofiler_dep.found()
+      tracy_deps += rocprofiler_dep
+    elif enable_rocprofiler_tracy.enabled()
+      error('enable-rocprofiler-tracy=enabled but rocprofiler-sdk was not found')
+    else
+      warning('Tracy present but rocprofiler-sdk missing; disabling Tracy ROCm hooks to avoid link errors')
+      tracy_enabled = false
+      tracy_deps = []
+      tracy_args = []
+    endif
+  endif
+endif
+if tracy_enabled and tracy_deps.length() > 0
+  cpp = meson.get_compiler('cpp')
+  tracy_link_ok = cpp.links('int main(){ return 0; }', dependencies: tracy_deps, name: 'tracy-link-check', required: false)
+  if not tracy_link_ok
+    warning('Tracy dependency failed to link (likely missing rocprofiler-sdk); disabling Tracy for this build')
+    tracy_enabled = false
+    tracy_deps = []
+    tracy_args = []
+  endif
+endif
+if tracy_enabled
   message('Tracy profiling enabled for daemon')
 endif
 # pb_includedir = protobuf_dep.get_variable(pkgconfig: 'includedir', default_value: '')
@@ -43,7 +79,6 @@ nlohmann_json_dep = dependency('nlohmann_json')
 # Resolve CLI11 similarly to src/cli/meson.build (pkg-config first, then CMake
 # via Conan generator paths when available), to avoid environment-specific
 # inconsistencies.
-fs = import('fs')
 cli11_dep = dependency('cli11', required: false)
 if not cli11_dep.found()
   conan_gen_opt = get_option('conan-generators-dir')
@@ -123,6 +158,7 @@ yams_daemon_lib = static_library('yams_daemon',
     'components/dispatcher/request_dispatcher_collections.cpp',
     'components/dispatcher/request_dispatcher_graph.cpp',
     'components/dispatcher/request_dispatcher_graph_maintenance.cpp',
+    'components/dispatcher/request_dispatcher_repair.cpp',
     'components/LifecycleComponent.cpp',
     'components/WorkCoordinator.cpp',
     'components/ServiceManager.cpp',
@@ -139,7 +175,7 @@ yams_daemon_lib = static_library('yams_daemon',
     'components/TuneAdvisor.cpp',
     'components/GradientLimiter.cpp',
     'components/ResourceGovernor.cpp',
-    'components/RepairCoordinator.cpp',
+    'components/RepairService.cpp',
     'components/EntityGraphService.cpp',
     'components/gliner_query_extractor.cpp',
     'components/SocketServer.cpp',
@@ -200,7 +236,7 @@ yams_daemon_lib = static_library('yams_daemon',
     nlohmann_json_dep,
     protobuf_dep,
   ] + tracy_deps,
-  cpp_args: tracy_args + ['-Wno-unused-parameter'],
+  cpp_args: tracy_args + (cpp.get_id() == 'msvc' ? ['/wd4100'] : ['-Wno-unused-parameter']),
   include_directories: [
     include_directories('../../include'),
     include_directories('.'),
@@ -256,4 +292,3 @@ if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
     fs.copyfile(dll_src, dll_name, install: true, install_dir: get_option('bindir'))
   endforeach
 endif
-

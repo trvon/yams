@@ -1,15 +1,47 @@
 # Build standalone benchmark executables. These are not registered as Meson
 # tests; CI invokes them directly to generate JSON/MD reports.
 
+fs = import('fs')
 # Tracy profiling support (optional, off unless enable-profiling is set)
 enable_profiling = get_option('enable-profiling')
+enable_rocprofiler_tracy = get_option('enable-rocprofiler-tracy')
 tracy_dep = dependency('tracy', required: enable_profiling, static: true)
 tracy_args = []
 tracy_deps = []
 if enable_profiling and tracy_dep.found()
   tracy_args += ['-DTRACY_ENABLE']
   tracy_deps += tracy_dep
-  message('Tracy profiling enabled for benchmarks')
+  rocm_hint = '/opt/rocm'
+  rocm_present = fs.exists(rocm_hint)
+  want_rocprofiler = (not enable_rocprofiler_tracy.disabled()) and (enable_rocprofiler_tracy.enabled() or (enable_rocprofiler_tracy.auto() and rocm_present))
+  if want_rocprofiler
+    rocprofiler_dep = dependency(
+      'rocprofiler-sdk',
+      method: 'cmake',
+      cmake_module_path: [join_paths(rocm_hint, 'lib', 'cmake'), join_paths(rocm_hint, 'lib64', 'cmake')],
+      required: enable_rocprofiler_tracy.enabled(),
+    )
+    if rocprofiler_dep.found()
+      tracy_deps += rocprofiler_dep
+    elif enable_rocprofiler_tracy.enabled()
+      error('enable-rocprofiler-tracy=enabled but rocprofiler-sdk was not found')
+    else
+      warning('Tracy present but rocprofiler-sdk missing; disabling Tracy ROCm hooks for benchmarks')
+      tracy_deps = []
+      tracy_args = []
+    endif
+  endif
+  if tracy_deps.length() > 0
+    cpp = meson.get_compiler('cpp')
+    tracy_link_ok = cpp.links('int main(){ return 0; }', dependencies: tracy_deps, name: 'tracy-bench-link-check', required: false)
+    if tracy_link_ok
+      message('Tracy profiling enabled for benchmarks')
+    else
+      warning('Tracy dependency failed to link; disabling Tracy for benchmarks')
+      tracy_deps = []
+      tracy_args = []
+    endif
+  endif
 endif
 
 # Google Benchmark dependency

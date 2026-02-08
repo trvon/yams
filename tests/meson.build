@@ -956,14 +956,15 @@ if catch2_dep.found()
 
   # Daemon repair and service manager tests (Catch2)
   # Migrated from GTest as part of yams-3s4
-  catch2_repair_coordinator_exe = executable('catch2_repair_coordinator',
-    files('unit/daemon/repair_coordinator_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  # RepairCoordinator tests disabled — replaced by RepairService (port pending)
+  # catch2_repair_coordinator_exe = executable('catch2_repair_coordinator',
+  #   files('unit/daemon/repair_coordinator_catch2_test.cpp'),
+  #   include_directories: incs,
+  #   dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+  #   cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+  #   build_rpath: ':'.join(_test_rpaths),
+  #   install: false,
+  # )
 
   catch2_repair_scheduling_exe = executable('catch2_repair_scheduling',
     files('unit/daemon/repair_scheduling_adapter_catch2_test.cpp'),
@@ -1148,6 +1149,15 @@ if catch2_dep.found()
 
   catch2_resource_governance_exe = executable('catch2_resource_governance',
     files('unit/daemon/resource_governance_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_timing_audit_exe = executable('catch2_timing_audit',
+    files('unit/daemon/timing_audit_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -2485,12 +2495,12 @@ if catch2_dep.found()
     timeout: 60
   )
 
-  test('repair_coordinator', catch2_repair_coordinator_exe,
-    suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
+  # test('repair_coordinator', catch2_repair_coordinator_exe,
+  #   suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
+  #   env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+  #   timeout: 60,
+  #   is_parallel: false
+  # )
 
   test('repair_scheduling_adapter', catch2_repair_scheduling_exe,
     suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
@@ -2638,6 +2648,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'governance'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('timing_audit', catch2_timing_audit_exe,
+    suite: ['catch2', 'unit', 'daemon', 'timing-audit'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
   )
 
   # NOTE: onnx_model_pool test registration skipped - see comment above

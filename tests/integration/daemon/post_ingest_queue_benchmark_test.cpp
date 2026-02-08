@@ -89,14 +89,14 @@ TEST_CASE("PostIngestQueue: Real-world ingestion benchmark", "[daemon][benchmark
 
     for (const auto& filePath : filesToIngest) {
         auto fileStart = std::chrono::steady_clock::now();
-        
+
         opts.path = filePath.string();
         auto result = docSvc.addViaDaemon(opts);
-        
+
         auto fileEnd = std::chrono::steady_clock::now();
         double fileMs = std::chrono::duration<double, std::milli>(fileEnd - fileStart).count();
         individualTimes.push_back(fileMs);
-        
+
         if (result && !result.value().hash.empty()) {
             ingested++;
         } else {
@@ -108,7 +108,7 @@ TEST_CASE("PostIngestQueue: Real-world ingestion benchmark", "[daemon][benchmark
             auto elapsed = std::chrono::steady_clock::now() - ingestStart;
             double elapsedSec = std::chrono::duration<double>(elapsed).count();
             double rate = elapsedSec > 0 ? ingested / elapsedSec : 0;
-            
+
             // Calculate recent throughput from last 50 files
             double recentTime = 0;
             size_t startIdx = individualTimes.size() > 50 ? individualTimes.size() - 50 : 0;
@@ -116,9 +116,10 @@ TEST_CASE("PostIngestQueue: Real-world ingestion benchmark", "[daemon][benchmark
                 recentTime += individualTimes[i];
             }
             double recentRate = recentTime > 0 ? 50.0 / (recentTime / 1000.0) : 0;
-            
-            spdlog::info("Progress: {}/{} ingested ({:.1f} docs/sec overall, {:.1f} docs/sec recent)", 
-                        ingested, filesToIngest.size(), rate, recentRate);
+
+            spdlog::info(
+                "Progress: {}/{} ingested ({:.1f} docs/sec overall, {:.1f} docs/sec recent)",
+                ingested, filesToIngest.size(), rate, recentRate);
         }
     }
 
@@ -127,13 +128,14 @@ TEST_CASE("PostIngestQueue: Real-world ingestion benchmark", "[daemon][benchmark
     double ingestSeconds = std::chrono::duration<double>(ingestDuration).count();
 
     spdlog::info("Ingestion complete: {} succeeded, {} failed in {:.2f}s", ingested, failed,
-               ingestSeconds);
+                 ingestSeconds);
 
     // Calculate ingestion statistics
     std::sort(individualTimes.begin(), individualTimes.end());
     double p50 = individualTimes[individualTimes.size() / 2];
     double p95 = individualTimes[static_cast<size_t>(individualTimes.size() * 0.95)];
-    double avg = std::accumulate(individualTimes.begin(), individualTimes.end(), 0.0) / individualTimes.size();
+    double avg = std::accumulate(individualTimes.begin(), individualTimes.end(), 0.0) /
+                 individualTimes.size();
 
     // Wait for post-ingest processing to complete
     spdlog::info("Waiting for post-ingest processing...");
@@ -148,7 +150,7 @@ TEST_CASE("PostIngestQueue: Real-world ingestion benchmark", "[daemon][benchmark
         size_t currentProcessed = 0;
         size_t currentQueued = 0;
         size_t currentInflight = 0;
-        
+
         if (auto* daemon = harness.daemon()) {
             if (auto* sm = daemon->getServiceManager()) {
                 if (auto* pq = sm->getPostIngestQueue()) {
@@ -185,8 +187,8 @@ TEST_CASE("PostIngestQueue: Real-world ingestion benchmark", "[daemon][benchmark
         if (now - lastLog > std::chrono::seconds(1)) {
             double elapsedSec = std::chrono::duration<double>(now - processingStart).count();
             throughputSamples.push_back({elapsedSec, currentProcessed});
-            spdlog::info("Post-ingest: {} processed, {} queued, {} in-flight", 
-                        currentProcessed, currentQueued, currentInflight);
+            spdlog::info("Post-ingest: {} processed, {} queued, {} in-flight", currentProcessed,
+                         currentQueued, currentInflight);
             lastLog = now;
         }
     }
@@ -209,7 +211,7 @@ TEST_CASE("PostIngestQueue: Real-world ingestion benchmark", "[daemon][benchmark
 
     double totalTime = ingestSeconds + processingSeconds;
     double throughput = totalTime > 0 ? finalProcessed / totalTime : 0;
-    
+
     // Calculate processing throughput (excluding ingestion time)
     double processingThroughput = processingSeconds > 0 ? finalProcessed / processingSeconds : 0;
 
@@ -235,11 +237,15 @@ TEST_CASE("PostIngestQueue: Real-world ingestion benchmark", "[daemon][benchmark
 
     // Performance assertions - adjust thresholds based on hardware
     // These are reasonable minimums for modern hardware
-    CHECK(throughput >= 1.0);  // At least 1 doc/sec overall
-    CHECK(processingThroughput >= 2.0);  // At least 2 docs/sec processing
+    CHECK(throughput >= 1.0);           // At least 1 doc/sec overall
+    CHECK(processingThroughput >= 2.0); // At least 2 docs/sec processing
 
-    BENCHMARK("PostIngestQueue end-to-end throughput") { return throughput; };
-    BENCHMARK("PostIngestQueue processing throughput") { return processingThroughput; };
+    BENCHMARK("PostIngestQueue end-to-end throughput") {
+        return throughput;
+    };
+    BENCHMARK("PostIngestQueue processing throughput") {
+        return processingThroughput;
+    };
 }
 
 TEST_CASE("PostIngestQueue: Parallel processing stress test", "[daemon][benchmark][stress]") {
@@ -261,7 +267,8 @@ TEST_CASE("PostIngestQueue: Parallel processing stress test", "[daemon][benchmar
 
     spdlog::info("========================================");
     spdlog::info("PostIngestQueue Parallel Stress Test");
-    spdlog::info("Batches: {}, Files per batch: {}, Total: {}", numBatches, filesPerBatch, totalFiles);
+    spdlog::info("Batches: {}, Files per batch: {}, Total: {}", numBatches, filesPerBatch,
+                 totalFiles);
     spdlog::info("========================================");
 
     // Setup ingestion service
@@ -277,10 +284,11 @@ TEST_CASE("PostIngestQueue: Parallel processing stress test", "[daemon][benchmar
 
     for (int batch = 0; batch < numBatches; ++batch) {
         spdlog::info("Ingesting batch {}/{}...", batch + 1, numBatches);
-        
+
         for (int i = 0; i < filesPerBatch; ++i) {
             // Create test file
-            std::string docName = "stress_batch" + std::to_string(batch) + "_file" + std::to_string(i) + ".txt";
+            std::string docName =
+                "stress_batch" + std::to_string(batch) + "_file" + std::to_string(i) + ".txt";
             auto path = harness.dataDir() / docName;
             std::ofstream ofs(path);
             ofs << "Batch " << batch << " File " << i << " content\n";
@@ -289,7 +297,7 @@ TEST_CASE("PostIngestQueue: Parallel processing stress test", "[daemon][benchmar
 
             opts.path = path.string();
             auto result = docSvc.addViaDaemon(opts);
-            
+
             if (result && !result.value().hash.empty()) {
                 ingested++;
             }
@@ -297,16 +305,15 @@ TEST_CASE("PostIngestQueue: Parallel processing stress test", "[daemon][benchmar
 
         auto elapsed = std::chrono::steady_clock::now() - startTime;
         double elapsedSec = std::chrono::duration<double>(elapsed).count();
-        spdlog::info("Batch {}/{} complete. Total ingested: {}/{} ({:.1f} docs/sec)",
-                    batch + 1, numBatches, ingested, totalFiles, 
-                    elapsedSec > 0 ? ingested / elapsedSec : 0);
+        spdlog::info("Batch {}/{} complete. Total ingested: {}/{} ({:.1f} docs/sec)", batch + 1,
+                     numBatches, ingested, totalFiles, elapsedSec > 0 ? ingested / elapsedSec : 0);
     }
 
     // Wait for all post-ingest processing
     spdlog::info("Waiting for post-ingest processing to complete...");
     auto waitStart = std::chrono::steady_clock::now();
     auto deadline = waitStart + std::chrono::minutes(5);
-    
+
     size_t lastProcessed = 0;
     int stableCount = 0;
     std::vector<std::pair<int, size_t>> progressHistory;
@@ -315,7 +322,7 @@ TEST_CASE("PostIngestQueue: Parallel processing stress test", "[daemon][benchmar
         size_t currentProcessed = 0;
         size_t currentQueued = 0;
         size_t currentInflight = 0;
-        
+
         if (auto* daemon = harness.daemon()) {
             if (auto* sm = daemon->getServiceManager()) {
                 if (auto* pq = sm->getPostIngestQueue()) {
@@ -375,8 +382,10 @@ TEST_CASE("PostIngestQueue: Parallel processing stress test", "[daemon][benchmar
     spdlog::info("========================================");
 
     REQUIRE(ingested == totalFiles);
-    REQUIRE(finalProcessed >= ingested * 0.95);  // Allow 5% failure rate
-    REQUIRE(throughput >= 5.0);  // Expect at least 5 docs/sec under stress
+    REQUIRE(finalProcessed >= ingested * 0.95); // Allow 5% failure rate
+    REQUIRE(throughput >= 5.0);                 // Expect at least 5 docs/sec under stress
 
-    BENCHMARK("Parallel stress throughput") { return throughput; };
+    BENCHMARK("Parallel stress throughput") {
+        return throughput;
+    };
 }

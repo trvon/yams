@@ -136,7 +136,8 @@ TEST_CASE("WALEntry serialize/deserialize round-trip with empty payload", "[wal]
     CHECK(out->verifyChecksum());
 }
 
-TEST_CASE("WALEntry serialize/deserialize round-trip with 128-byte payload", "[wal][serde][catch2]") {
+TEST_CASE("WALEntry serialize/deserialize round-trip with 128-byte payload",
+          "[wal][serde][catch2]") {
     std::vector<std::byte> payload;
     payload.resize(128);
     for (size_t i = 0; i < payload.size(); ++i) {
@@ -217,7 +218,8 @@ TEST_CASE("WALEntry updateChecksum then verify after mutation", "[wal][checksum]
     CHECK(e.verifyChecksum());
 }
 
-TEST_CASE("WALEntry::deserialize rejects buffer smaller than header", "[wal][serde][error][catch2]") {
+TEST_CASE("WALEntry::deserialize rejects buffer smaller than header",
+          "[wal][serde][error][catch2]") {
     std::vector<std::byte> buf;
     buf.resize(WALEntry::Header::size() - 1);
     auto out = WALEntry::deserialize(std::span<const std::byte>(buf.data(), buf.size()));
@@ -314,7 +316,8 @@ TEST_CASE("StoreBlockData decode rejects too-small buffer", "[wal][store][catch2
 TEST_CASE("DeleteBlockData encode/decode round-trip", "[wal][delete][catch2]") {
     const std::string hash = "0123456789abcdef0123456789abcdef";
     auto enc = WALEntry::DeleteBlockData::encode(hash);
-    auto dec = WALEntry::DeleteBlockData::decode(std::span<const std::byte>(enc.data(), enc.size()));
+    auto dec =
+        WALEntry::DeleteBlockData::decode(std::span<const std::byte>(enc.data(), enc.size()));
     REQUIRE(dec.has_value());
     CHECK(std::memcmp(dec->hash, hash.data(), yams::HASH_SIZE) == 0);
 }
@@ -322,23 +325,28 @@ TEST_CASE("DeleteBlockData encode/decode round-trip", "[wal][delete][catch2]") {
 TEST_CASE("DeleteBlockData decode rejects too-small buffer", "[wal][delete][catch2]") {
     std::vector<std::byte> buf;
     buf.resize(sizeof(WALEntry::DeleteBlockData) - 1);
-    auto dec = WALEntry::DeleteBlockData::decode(std::span<const std::byte>(buf.data(), buf.size()));
+    auto dec =
+        WALEntry::DeleteBlockData::decode(std::span<const std::byte>(buf.data(), buf.size()));
     CHECK_FALSE(dec.has_value());
 }
 
-TEST_CASE("UpdateReferenceData encode/decode round-trip with positive delta", "[wal][ref][catch2]") {
+TEST_CASE("UpdateReferenceData encode/decode round-trip with positive delta",
+          "[wal][ref][catch2]") {
     const std::string hash = "0123456789abcdef0123456789abcdef";
     auto enc = WALEntry::UpdateReferenceData::encode(hash, 5);
-    auto dec = WALEntry::UpdateReferenceData::decode(std::span<const std::byte>(enc.data(), enc.size()));
+    auto dec =
+        WALEntry::UpdateReferenceData::decode(std::span<const std::byte>(enc.data(), enc.size()));
     REQUIRE(dec.has_value());
     CHECK(std::memcmp(dec->hash, hash.data(), yams::HASH_SIZE) == 0);
     CHECK(dec->delta == 5);
 }
 
-TEST_CASE("UpdateReferenceData encode/decode round-trip with negative delta", "[wal][ref][catch2]") {
+TEST_CASE("UpdateReferenceData encode/decode round-trip with negative delta",
+          "[wal][ref][catch2]") {
     const std::string hash = "0123456789abcdef0123456789abcdef";
     auto enc = WALEntry::UpdateReferenceData::encode(hash, -3);
-    auto dec = WALEntry::UpdateReferenceData::decode(std::span<const std::byte>(enc.data(), enc.size()));
+    auto dec =
+        WALEntry::UpdateReferenceData::decode(std::span<const std::byte>(enc.data(), enc.size()));
     REQUIRE(dec.has_value());
     CHECK(std::memcmp(dec->hash, hash.data(), yams::HASH_SIZE) == 0);
     CHECK(dec->delta == -3);
@@ -347,17 +355,20 @@ TEST_CASE("UpdateReferenceData encode/decode round-trip with negative delta", "[
 TEST_CASE("UpdateReferenceData decode rejects too-small buffer", "[wal][ref][catch2]") {
     std::vector<std::byte> buf;
     buf.resize(sizeof(WALEntry::UpdateReferenceData) - 1);
-    auto dec = WALEntry::UpdateReferenceData::decode(std::span<const std::byte>(buf.data(), buf.size()));
+    auto dec =
+        WALEntry::UpdateReferenceData::decode(std::span<const std::byte>(buf.data(), buf.size()));
     CHECK_FALSE(dec.has_value());
 }
 
-TEST_CASE("UpdateMetadataData encode/decode round-trip with key/value sizes", "[wal][meta][catch2]") {
+TEST_CASE("UpdateMetadataData encode/decode round-trip with key/value sizes",
+          "[wal][meta][catch2]") {
     const std::string hash = "0123456789abcdef0123456789abcdef";
     const std::string key = "author";
     const std::string value = "alice";
 
     auto enc = WALEntry::UpdateMetadataData::encode(hash, key, value);
-    auto dec = WALEntry::UpdateMetadataData::decode(std::span<const std::byte>(enc.data(), enc.size()));
+    auto dec =
+        WALEntry::UpdateMetadataData::decode(std::span<const std::byte>(enc.data(), enc.size()));
     REQUIRE(dec.has_value());
 
     CHECK(std::memcmp(dec->hash, hash.data(), yams::HASH_SIZE) == 0);
@@ -380,20 +391,23 @@ TEST_CASE("UpdateMetadataData decode rejects truncated key/value region", "[wal]
     REQUIRE(enc.size() > sizeof(WALEntry::UpdateMetadataData));
     enc.resize(enc.size() - 1);
 
-    auto dec = WALEntry::UpdateMetadataData::decode(std::span<const std::byte>(enc.data(), enc.size()));
+    auto dec =
+        WALEntry::UpdateMetadataData::decode(std::span<const std::byte>(enc.data(), enc.size()));
     CHECK_FALSE(dec.has_value());
 }
 
 TEST_CASE("UpdateMetadataData decode rejects too-small buffer", "[wal][meta][catch2]") {
     std::vector<std::byte> buf;
     buf.resize(sizeof(WALEntry::UpdateMetadataData) - 1);
-    auto dec = WALEntry::UpdateMetadataData::decode(std::span<const std::byte>(buf.data(), buf.size()));
+    auto dec =
+        WALEntry::UpdateMetadataData::decode(std::span<const std::byte>(buf.data(), buf.size()));
     CHECK_FALSE(dec.has_value());
 }
 
 TEST_CASE("TransactionData encode/decode round-trip", "[wal][txn][catch2]") {
     auto enc = WALEntry::TransactionData::encode(12345, 10);
-    auto dec = WALEntry::TransactionData::decode(std::span<const std::byte>(enc.data(), enc.size()));
+    auto dec =
+        WALEntry::TransactionData::decode(std::span<const std::byte>(enc.data(), enc.size()));
     REQUIRE(dec.has_value());
     CHECK(dec->transactionId == 12345);
     CHECK(dec->participantCount == 10);
@@ -401,7 +415,8 @@ TEST_CASE("TransactionData encode/decode round-trip", "[wal][txn][catch2]") {
 
 TEST_CASE("TransactionData default count is 0", "[wal][txn][catch2]") {
     auto enc = WALEntry::TransactionData::encode(12345);
-    auto dec = WALEntry::TransactionData::decode(std::span<const std::byte>(enc.data(), enc.size()));
+    auto dec =
+        WALEntry::TransactionData::decode(std::span<const std::byte>(enc.data(), enc.size()));
     REQUIRE(dec.has_value());
     CHECK(dec->transactionId == 12345);
     CHECK(dec->participantCount == 0);
@@ -410,7 +425,8 @@ TEST_CASE("TransactionData default count is 0", "[wal][txn][catch2]") {
 TEST_CASE("TransactionData decode rejects too-small buffer", "[wal][txn][catch2]") {
     std::vector<std::byte> buf;
     buf.resize(sizeof(WALEntry::TransactionData) - 1);
-    auto dec = WALEntry::TransactionData::decode(std::span<const std::byte>(buf.data(), buf.size()));
+    auto dec =
+        WALEntry::TransactionData::decode(std::span<const std::byte>(buf.data(), buf.size()));
     CHECK_FALSE(dec.has_value());
 }
 

@@ -443,11 +443,11 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             // Check admission control before accepting new work
             if (!ResourceGovernor::instance().canAdmitWork()) {
                 // Queue for deferred processing instead of rejecting outright
-                auto channel = InternalEventBus::instance()
-                                   .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
-                                       "store_document_tasks",
-                                       static_cast<std::size_t>(
-                                           TuneAdvisor::storeDocumentChannelCapacity()));
+                auto channel =
+                    InternalEventBus::instance()
+                        .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+                            "store_document_tasks",
+                            static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity()));
                 InternalEventBus::StoreDocumentTask task{req};
                 if (channel->try_push(std::move(task))) {
                     AddDocumentResponse response;
@@ -500,11 +500,11 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
 
             // For directories or if daemon not ready, use async queue
             if (isDir || req.recursive || !daemonReady) {
-                auto channel = InternalEventBus::instance()
-                                   .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
-                                       "store_document_tasks",
-                                       static_cast<std::size_t>(
-                                           TuneAdvisor::storeDocumentChannelCapacity()));
+                auto channel =
+                    InternalEventBus::instance()
+                        .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+                            "store_document_tasks",
+                            static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity()));
                 InternalEventBus::StoreDocumentTask task{req};
                 if (channel->try_push(std::move(task))) {
                     AddDocumentResponse response;

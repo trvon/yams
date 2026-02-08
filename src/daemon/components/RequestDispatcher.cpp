@@ -131,6 +131,7 @@ DEFINE_REQUEST_HANDLER(GraphValidateRequest, handleGraphValidateRequest);
 DEFINE_REQUEST_HANDLER(KgIngestRequest, handleKgIngestRequest);
 DEFINE_REQUEST_HANDLER(MetadataValueCountsRequest, handleMetadataValueCountsRequest);
 DEFINE_REQUEST_HANDLER(BatchRequest, handleBatchRequest);
+DEFINE_REQUEST_HANDLER(RepairRequest, handleRepairRequest);
 
 #undef DEFINE_REQUEST_HANDLER
 

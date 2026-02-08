@@ -103,9 +103,7 @@ uint32_t sumAllStages() {
 // Group A: Post-ingest budget reconciliation and distribution correctness
 // =============================================================================
 
-TEST_CASE("Post-ingest budget distribution correctness",
-          "[daemon][tune][reconciliation][catch2]") {
-
+TEST_CASE("Post-ingest budget distribution correctness", "[daemon][tune][reconciliation][catch2]") {
     SECTION("All active stages get >= 1 when budget allows") {
         // With 6 active stages and budget >= 6, every stage should get at least 1.
         resetPostIngestOverrides();
@@ -133,8 +131,8 @@ TEST_CASE("Post-ingest budget distribution correctness",
 
                 INFO("hw=" << hw << " profile=" << static_cast<int>(profile)
                            << " budget=" << budget);
-                INFO("ext=" << ext << " kg=" << kg << " sym=" << sym
-                            << " ent=" << ent << " tit=" << tit << " emb=" << emb);
+                INFO("ext=" << ext << " kg=" << kg << " sym=" << sym << " ent=" << ent
+                            << " tit=" << tit << " emb=" << emb);
 
                 CHECK(ext >= 1);
                 CHECK(kg >= 1);
@@ -162,8 +160,8 @@ TEST_CASE("Post-ingest budget distribution correctness",
                 uint32_t budget = TuneAdvisor::postIngestTotalConcurrent();
                 uint32_t sum = sumAllStages();
 
-                INFO("hw=" << hw << " profile=" << static_cast<int>(profile)
-                           << " budget=" << budget << " sum=" << sum);
+                INFO("hw=" << hw << " profile=" << static_cast<int>(profile) << " budget=" << budget
+                           << " sum=" << sum);
                 CHECK(sum <= budget);
             }
         }
@@ -226,7 +224,6 @@ TEST_CASE("Post-ingest budget distribution correctness",
 
 TEST_CASE("Post-ingest active mask filters stages correctly",
           "[daemon][tune][reconciliation][catch2]") {
-
     SECTION("Disabled stages get 0 allocation") {
         resetPostIngestOverrides();
         EnvGuard envPostIngest("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
@@ -286,7 +283,8 @@ TEST_CASE("Post-ingest active mask filters stages correctly",
         // but per-stage getters still return their computed values (the active
         // mask only affects the total budget, not individual allocations).
         uint32_t budgetNoneActive = TuneAdvisor::postIngestTotalConcurrent();
-        INFO("budget(all active)=" << budgetAllActive << " budget(none active)=" << budgetNoneActive);
+        INFO("budget(all active)=" << budgetAllActive
+                                   << " budget(none active)=" << budgetNoneActive);
         CHECK(budgetNoneActive <= budgetAllActive);
 
         // Restore for subsequent tests
@@ -300,7 +298,6 @@ TEST_CASE("Post-ingest active mask filters stages correctly",
 
 TEST_CASE("Per-stage overrides are respected and clamped",
           "[daemon][tune][reconciliation][catch2]") {
-
     SECTION("Override takes precedence over computed allocation") {
         resetPostIngestOverrides();
         setAllPostIngestStagesActive();
@@ -353,7 +350,7 @@ TEST_CASE("Per-stage overrides are respected and clamped",
         uint32_t sum = sumAllStages();
         INFO("budget=" << budget << " sum=" << sum);
         // Sum CAN exceed budget — that's by design; TuningManager reconciles at runtime
-        CHECK(sum >= 9);  // at least the 3 overridden stages
+        CHECK(sum >= 9); // at least the 3 overridden stages
 
         resetPostIngestOverrides();
     }
@@ -365,7 +362,6 @@ TEST_CASE("Per-stage overrides are respected and clamped",
 
 TEST_CASE("Pool configuration defaults are reasonable",
           "[daemon][tune][reconciliation][pool][catch2]") {
-
     SECTION("poolMinSizeIpc defaults to at least 1") {
         uint32_t minIpc = TuneAdvisor::poolMinSizeIpc();
         INFO("poolMinSizeIpc default=" << minIpc);
@@ -424,7 +420,6 @@ TEST_CASE("Pool configuration defaults are reasonable",
 
 TEST_CASE("ETA remaining calculation handles integer truncation",
           "[daemon][tune][reconciliation][eta][catch2]") {
-
     // Test the ETA formula: remain = max(0, exp - (exp * progress + 99) / 100)
     // The old formula was: remain = max(0, exp - (exp * progress) / 100)
     // which suffers from integer truncation for small exp values.
@@ -467,8 +462,8 @@ TEST_CASE("ETA remaining calculation handles integer truncation",
             int prev = exp;
             for (int progress = 0; progress <= 100; progress += 10) {
                 int remain = computeEtaRemaining(exp, progress);
-                INFO("exp=" << exp << " progress=" << progress
-                            << " remain=" << remain << " prev=" << prev);
+                INFO("exp=" << exp << " progress=" << progress << " remain=" << remain
+                            << " prev=" << prev);
                 CHECK(remain <= prev);
                 CHECK(remain >= 0);
                 prev = remain;

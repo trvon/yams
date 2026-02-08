@@ -14,8 +14,7 @@ std::chrono::system_clock::time_point tpFromTimeT(std::time_t t) {
     return std::chrono::system_clock::from_time_t(t);
 }
 
-SearchResultItem makeItem(std::string title,
-                          float relevance,
+SearchResultItem makeItem(std::string title, float relevance,
                           std::chrono::system_clock::time_point lastModified,
                           DocumentId id = DocumentId{0}) {
     SearchResultItem item;
@@ -72,8 +71,7 @@ TEST_CASE("SearchResults::sortByRelevance keeps already-sorted order",
     REQUIRE(items[2].title == "c");
 }
 
-TEST_CASE("SearchResults::sortByDate sorts newest first",
-          "[search][results][catch2]") {
+TEST_CASE("SearchResults::sortByDate sorts newest first", "[search][results][catch2]") {
     SearchResults results;
     results.addItem(makeItem("old", 0.0f, tpFromTimeT(1000)));
     results.addItem(makeItem("new", 0.0f, tpFromTimeT(3000)));
@@ -90,8 +88,7 @@ TEST_CASE("SearchResults::sortByDate sorts newest first",
     REQUIRE(items[1].lastModified >= items[2].lastModified);
 }
 
-TEST_CASE("SearchResults::sortByDate leaves single item unchanged",
-          "[search][results][catch2]") {
+TEST_CASE("SearchResults::sortByDate leaves single item unchanged", "[search][results][catch2]") {
     SearchResults results;
     results.addItem(makeItem("only", 0.0f, tpFromTimeT(1234), DocumentId{42}));
 
@@ -104,8 +101,7 @@ TEST_CASE("SearchResults::sortByDate leaves single item unchanged",
     REQUIRE(items[0].lastModified == tpFromTimeT(1234));
 }
 
-TEST_CASE("SearchResults::sortByTitle sorts ascending by title",
-          "[search][results][catch2]") {
+TEST_CASE("SearchResults::sortByTitle sorts ascending by title", "[search][results][catch2]") {
     SearchResults results;
     results.addItem(makeItem("banana", 0.0f, tpFromTimeT(1000)));
     results.addItem(makeItem("apple", 0.0f, tpFromTimeT(1000)));
@@ -120,8 +116,7 @@ TEST_CASE("SearchResults::sortByTitle sorts ascending by title",
     REQUIRE(items[2].title == "carrot");
 }
 
-TEST_CASE("SearchResults::sortByTitle is case-sensitive",
-          "[search][results][catch2]") {
+TEST_CASE("SearchResults::sortByTitle is case-sensitive", "[search][results][catch2]") {
     SearchResults results;
     results.addItem(makeItem("alpha", 0.0f, tpFromTimeT(1000)));
     results.addItem(makeItem("Alpha", 0.0f, tpFromTimeT(1000)));
@@ -136,8 +131,7 @@ TEST_CASE("SearchResults::sortByTitle is case-sensitive",
     REQUIRE(items[2].title == "alpha");
 }
 
-TEST_CASE("SearchResults::paginate(0,2) on 5 items returns 2 items",
-          "[search][results][catch2]") {
+TEST_CASE("SearchResults::paginate(0,2) on 5 items returns 2 items", "[search][results][catch2]") {
     auto results = makeFiveItems();
 
     results.paginate(0, 2);
@@ -160,8 +154,7 @@ TEST_CASE("SearchResults::paginate(2,2) on 5 items returns offset 2 and 3",
     REQUIRE(items[1].title == "t3");
 }
 
-TEST_CASE("SearchResults::paginate(10,2) on 5 items returns empty",
-          "[search][results][catch2]") {
+TEST_CASE("SearchResults::paginate(10,2) on 5 items returns empty", "[search][results][catch2]") {
     auto results = makeFiveItems();
 
     results.paginate(10, 2);
@@ -171,8 +164,7 @@ TEST_CASE("SearchResults::paginate(10,2) on 5 items returns empty",
     REQUIRE(results.isEmpty());
 }
 
-TEST_CASE("SearchResults::paginate(0,100) on 5 items returns all",
-          "[search][results][catch2]") {
+TEST_CASE("SearchResults::paginate(0,100) on 5 items returns all", "[search][results][catch2]") {
     auto results = makeFiveItems();
 
     results.paginate(0, 100);
@@ -199,8 +191,7 @@ TEST_CASE("SearchResults empty results: sort and paginate do not crash",
     REQUIRE(results.getItems().empty());
 }
 
-TEST_CASE("SearchResults single item: all operations work",
-          "[search][results][catch2]") {
+TEST_CASE("SearchResults single item: all operations work", "[search][results][catch2]") {
     SearchResults results;
     results.addItem(makeItem("only", 0.25f, tpFromTimeT(999), DocumentId{7}));
 

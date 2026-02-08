@@ -4,6 +4,17 @@
 
 spdlog_dep = dependency('spdlog', required: true)
 
+onnx_resource_deps = [spdlog_dep]
+
+# Ensure TSAN runtime is linked for this shared library when sanitizer is enabled
+if get_option('enable-tsan') and host_machine.system() == 'linux'
+  cpp_compiler = meson.get_compiler('cpp')
+  tsan_dep = cpp_compiler.find_library('tsan', required: false)
+  if tsan_dep.found()
+    onnx_resource_deps += tsan_dep
+  endif
+endif
+
 onnx_resource_sources = [
   'OnnxConcurrencyRegistry.cpp',
 ]
@@ -17,7 +28,7 @@ endif
 yams_onnx_resource_lib = shared_library('yams_onnx_resource',
   onnx_resource_sources,
   include_directories: include_directories('../../../include'),
-  dependencies: [spdlog_dep],
+  dependencies: onnx_resource_deps,
   cpp_args: onnx_resource_args,
   install: true,
   install_dir: get_option('libdir'),

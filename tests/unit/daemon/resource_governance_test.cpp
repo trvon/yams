@@ -683,8 +683,7 @@ TEST_CASE("ResourceGovernor tick is callable without ServiceManager",
     CHECK(snap.rssBytes > 0);
 }
 
-TEST_CASE("ResourceGovernor canAdmitWork blocked at Emergency",
-          "[daemon][governance][catch2]") {
+TEST_CASE("ResourceGovernor canAdmitWork blocked at Emergency", "[daemon][governance][catch2]") {
     auto& governor = ResourceGovernor::instance();
 
     // At Normal, work should be admitted

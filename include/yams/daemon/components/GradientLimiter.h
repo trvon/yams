@@ -2,9 +2,9 @@
 
 #include <atomic>
 #include <chrono>
-#include <string>
 #include <mutex>
 #include <optional>
+#include <string>
 
 namespace yams::daemon {
 
@@ -18,6 +18,11 @@ struct GradientLimiterConfig {
     double tolerance = 1.5;        ///< Queue tolerance multiplier
     uint32_t warmupSamples = 10;   ///< Samples before adjusting limits
     bool enableProbing = true;     ///< Enable limit increase probing
+    double limitSmoothing = 0.2;   ///< Smoothing factor for limit updates (Netflix smoothing)
+    double longRttRecoveryThreshold = 2.0; ///< Decay longRtt when longRtt/shortRtt exceeds this
+    double longRttDecayFactor = 0.95;      ///< Decay multiplier for long RTT recovery
+    double appLimitedRatio = 0.5;          ///< Skip adjustment when inFlight/limit < this ratio
+    uint32_t windowSize = 10;              ///< Samples per update window (rate-limits growth/decay)
 };
 
 /// Netflix Gradient2-style adaptive concurrency limiter
@@ -70,7 +75,7 @@ public:
     /// Apply back-pressure from ResourceGovernor.
     /// Warning  → clamp limit to 75% of maxLimit
     /// Critical → force limit to minLimit
-    /// Emergency→ force limit to 0 (full stop)
+    /// Emergency→ force limit to minLimit (minimum progress guarantee)
     /// Normal   → no-op (limit recovers organically via gradient)
     /// @param level 0=Normal, 1=Warning, 2=Critical, 3=Emergency
     void applyPressure(uint8_t level);
@@ -96,12 +101,15 @@ private:
     std::atomic<uint64_t> sampleCount_{0};
     std::atomic<bool> inWarmup_{true};
 
+    // Pressure state
+    std::atomic<uint8_t> pressureLevel_{0}; ///< 0=Normal, 1=Warning, 2=Critical, 3=Emergency
+
     // Metrics
     mutable std::mutex metricsMutex_;
     std::atomic<uint64_t> acquireCount_{0};
     std::atomic<uint64_t> rejectCount_{0};
 
-    void updateLimit(double rttNanos);
+    void updateLimit(double rttNanos, uint32_t inFlightSnapshot);
     void enterCooldown();
 };
 

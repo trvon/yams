@@ -1781,6 +1781,44 @@ public:
         postEmbedConcurrentDynamicCap_.store(std::min(v, 32u), std::memory_order_relaxed);
     }
 
+    // Seqlock helpers for DynamicCap batch writes.
+    // Writer must call beginDynamicCapWrite() before and endDynamicCapWrite() after
+    // storing all 6 DynamicCap atomics to prevent torn reads on the reader side.
+    static void beginDynamicCapWrite() {
+        // Increment to odd — signals "write in progress"
+        dynamicCapSeq_.fetch_add(1, std::memory_order_release);
+    }
+    static void endDynamicCapWrite() {
+        // Increment to even — signals "write complete"
+        dynamicCapSeq_.fetch_add(1, std::memory_order_release);
+    }
+
+    // Read all 6 DynamicCap values atomically w.r.t. the seqlock.
+    // Returns a consistent snapshot of all DynamicCap values.
+    static std::array<uint32_t, 6> readDynamicCapsConsistent() {
+        std::array<uint32_t, 6> vals{};
+        for (int attempt = 0; attempt < 64; ++attempt) {
+            uint64_t seq1 = dynamicCapSeq_.load(std::memory_order_acquire);
+            if (seq1 & 1u) {
+                // Write in progress, spin briefly
+                continue;
+            }
+            vals[0] = postExtractionConcurrentDynamicCap_.load(std::memory_order_relaxed);
+            vals[1] = postKgConcurrentDynamicCap_.load(std::memory_order_relaxed);
+            vals[2] = postSymbolConcurrentDynamicCap_.load(std::memory_order_relaxed);
+            vals[3] = postEntityConcurrentDynamicCap_.load(std::memory_order_relaxed);
+            vals[4] = postTitleConcurrentDynamicCap_.load(std::memory_order_relaxed);
+            vals[5] = postEmbedConcurrentDynamicCap_.load(std::memory_order_relaxed);
+            uint64_t seq2 = dynamicCapSeq_.load(std::memory_order_acquire);
+            if (seq1 == seq2) {
+                return vals; // Consistent read
+            }
+            // Sequence changed mid-read, retry
+        }
+        // Fallback after too many retries: return whatever we got (best-effort)
+        return vals;
+    }
+
     // =========================================================================
     // ONNX Model Pool Sizing (GPU-aware)
     // =========================================================================
@@ -1980,6 +2018,47 @@ public:
 
     /// Get current DB lock error count (for monitoring)
     static uint64_t dbLockErrorCount() { return dbLockErrorCount_.load(std::memory_order_relaxed); }
+
+    /// Bulk result struct for postIngestBudgetAll() — avoids 6x redundant computation.
+    struct PostIngestBudget {
+        uint32_t extraction;
+        uint32_t kg;
+        uint32_t symbol;
+        uint32_t entity;
+        uint32_t title;
+        uint32_t embed;
+    };
+
+    /// Compute the full post-ingest concurrency budget in a single call.
+    /// Each individual getter (postExtractionConcurrent(), etc.) internally calls
+    /// postIngestBudgetedConcurrency(), which is expensive. When you need all 6
+    /// values in the same tick, use this method instead.
+    static PostIngestBudget postIngestBudgetAll(bool includeDynamicCaps) {
+        auto b = postIngestBudgetedConcurrency(includeDynamicCaps);
+        return PostIngestBudget{b.extraction, b.kg, b.symbol, b.entity, b.title, b.embed};
+    }
+
+#ifdef YAMS_TESTING
+    // ========================================================================
+    // Test Hooks
+    // ========================================================================
+
+    /// Expose PostIngestConcurrencyBudget for deterministic unit testing
+    struct TestBudget {
+        uint32_t extraction;
+        uint32_t kg;
+        uint32_t symbol;
+        uint32_t entity;
+        uint32_t title;
+        uint32_t embed;
+    };
+
+    /// Compute post-ingest budget in a single call (avoids 6x redundant computation)
+    static TestBudget testing_postIngestBudget(bool includeDynamicCaps) {
+        auto b = postIngestBudgetedConcurrency(includeDynamicCaps);
+        return TestBudget{b.extraction, b.kg, b.symbol, b.entity, b.title, b.embed};
+    }
+#endif
 
 private:
     struct PostIngestConcurrencyBudget {
@@ -2253,13 +2332,8 @@ private:
 
         bool hasDynamicCap = false;
         if (includeDynamicCaps) {
-            const std::array<uint32_t, kStageCount> dyn{
-                postExtractionConcurrentDynamicCap_.load(std::memory_order_relaxed),
-                postKgConcurrentDynamicCap_.load(std::memory_order_relaxed),
-                postSymbolConcurrentDynamicCap_.load(std::memory_order_relaxed),
-                postEntityConcurrentDynamicCap_.load(std::memory_order_relaxed),
-                postTitleConcurrentDynamicCap_.load(std::memory_order_relaxed),
-                postEmbedConcurrentDynamicCap_.load(std::memory_order_relaxed)};
+            // Use seqlock-protected consistent read to avoid torn values
+            const auto dyn = readDynamicCapsConsistent();
             for (std::size_t i = 0; i < kStageCount; ++i) {
                 if (dyn[i] > 0) {
                     caps[i] = std::min(caps[i], std::min(dyn[i], kMaxCaps[i]));
@@ -2362,6 +2436,11 @@ private:
     static inline std::atomic<uint32_t> embedMaxConcurrencyOverride_{0};
     static inline std::atomic<uint32_t> postEmbedConcurrentOverride_{0};
     static inline std::atomic<uint32_t> postEmbedConcurrentDynamicCap_{0};
+
+    // Seqlock counter for DynamicCap batch writes.
+    // Writer increments to odd before stores, even after. Reader retries if odd or changed.
+    // Prevents torn reads when 6 DynamicCap atomics are updated individually.
+    static inline std::atomic<uint64_t> dynamicCapSeq_{0};
     static inline std::atomic<uint32_t> embedChannelCapacityOverride_{0};
 
     // ONNX Model Pool overrides

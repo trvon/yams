@@ -38,10 +38,10 @@ TEST_CASE("MCP DTO parsing - SearchRequest accepts string/array/null for include
     }
 
     {
-        const auto r = MCPSearchRequest::fromJson(json{{"query", "q"},
-                                                      {"include_patterns",
-                                                       json::array({"a.*", 1, true, "b.*", nullptr})},
-                                                      {"tags", json::array({"t1", 2, false, "t2"})}});
+        const auto r = MCPSearchRequest::fromJson(
+            json{{"query", "q"},
+                 {"include_patterns", json::array({"a.*", 1, true, "b.*", nullptr})},
+                 {"tags", json::array({"t1", 2, false, "t2"})}});
         CHECK(r.includePatterns == std::vector<std::string>{"a.*", "b.*"});
         CHECK(r.tags == std::vector<std::string>{"t1", "t2"});
     }
@@ -53,13 +53,8 @@ TEST_CASE("MCP DTO parsing - SearchRequest tolerant numeric parsing and context 
 
     // normalize_query + tolerant parsing for limit/similarity and context override semantics.
     json j = {
-        {"query", "  hi\nthere  "},
-        {"limit", "5"},
-        {"similarity", "0.5"},
-        {"context", "3"},
-        {"before_context", 111},
-        {"after_context", 222},
-        {"path", "src"},
+        {"query", "  hi\nthere  "}, {"limit", "5"},         {"similarity", "0.5"}, {"context", "3"},
+        {"before_context", 111},    {"after_context", 222}, {"path", "src"},
     };
 
     const auto r = MCPSearchRequest::fromJson(j);
@@ -98,10 +93,11 @@ TEST_CASE("MCP DTO parsing - GrepRequest accepts string/array for paths/include_
     }
 
     {
-        const auto r = MCPGrepRequest::fromJson(json{{"pattern", "re"},
-                                                     {"paths", json::array({"a", 1, "b", false})},
-                                                     {"include_patterns", json::array({"*.cpp", {"x", 1}, "*.hpp"})},
-                                                     {"tags", json::array({"t1", 0, "t2"})}});
+        const auto r = MCPGrepRequest::fromJson(
+            json{{"pattern", "re"},
+                 {"paths", json::array({"a", 1, "b", false})},
+                 {"include_patterns", json::array({"*.cpp", {"x", 1}, "*.hpp"})},
+                 {"tags", json::array({"t1", 0, "t2"})}});
         CHECK(r.paths == std::vector<std::string>{"a", "b"});
         CHECK(r.includePatterns == std::vector<std::string>{"*.cpp", "*.hpp"});
         CHECK(r.tags == std::vector<std::string>{"t1", "t2"});
@@ -148,9 +144,10 @@ TEST_CASE("MCP DTO parsing - DownloadRequest accepts string/array for headers/ta
     }
 
     {
-        const auto r = MCPDownloadRequest::fromJson(json{{"url", "https://e"},
-                                                         {"headers", json::array({"A: 1", 2, false, "B: 2"})},
-                                                         {"tags", json::array({"t1", json::object(), nullptr, "t2"})}});
+        const auto r = MCPDownloadRequest::fromJson(
+            json{{"url", "https://e"},
+                 {"headers", json::array({"A: 1", 2, false, "B: 2"})},
+                 {"tags", json::array({"t1", json::object(), nullptr, "t2"})}});
         CHECK(r.headers == std::vector<std::string>{"A: 1", "B: 2"});
         CHECK(r.tags == std::vector<std::string>{"t1", "t2"});
     }
@@ -162,14 +159,13 @@ TEST_CASE("MCP DTO parsing - DownloadRequest metadata stringifies values",
 
     json j = {
         {"url", "https://e"},
-        {"metadata",
-         json{{"s", "x"},
-              {"i", -12},
-              {"u", 12},
-              {"b", true},
-              {"f", 1.5},
-              {"arr", json::array({1, 2})},
-              {"obj", json{{"k", 1}}}}},
+        {"metadata", json{{"s", "x"},
+                          {"i", -12},
+                          {"u", 12},
+                          {"b", true},
+                          {"f", 1.5},
+                          {"arr", json::array({1, 2})},
+                          {"obj", json{{"k", 1}}}}},
     };
 
     const auto r = MCPDownloadRequest::fromJson(j);
@@ -192,7 +188,8 @@ TEST_CASE("MCP DTO parsing - ListDocumentsRequest accepts string/array for tags"
     }
 
     {
-        const auto r = MCPListDocumentsRequest::fromJson(json{{"pattern", "*.md"}, {"tags", "pinned"}});
+        const auto r =
+            MCPListDocumentsRequest::fromJson(json{{"pattern", "*.md"}, {"tags", "pinned"}});
         CHECK(r.tags == std::vector<std::string>{"pinned"});
     }
 
@@ -223,10 +220,11 @@ TEST_CASE("MCP DTO parsing - UpdateMetadataRequest accepts string/array for name
     }
 
     {
-        const auto r = MCPUpdateMetadataRequest::fromJson(json{{"hash", "h"},
-                                                               {"names", json::array({"n1", 2, "n2"})},
-                                                               {"tags", json::array({"t1", false, "t2"})},
-                                                               {"remove_tags", json::array({nullptr, "rt1", json::object(), "rt2"})}});
+        const auto r = MCPUpdateMetadataRequest::fromJson(
+            json{{"hash", "h"},
+                 {"names", json::array({"n1", 2, "n2"})},
+                 {"tags", json::array({"t1", false, "t2"})},
+                 {"remove_tags", json::array({nullptr, "rt1", json::object(), "rt2"})}});
         CHECK(r.names == std::vector<std::string>{"n1", "n2"});
         CHECK(r.tags == std::vector<std::string>{"t1", "t2"});
         CHECK(r.removeTags == std::vector<std::string>{"rt1", "rt2"});
@@ -243,7 +241,8 @@ TEST_CASE("MCP DTO parsing - DeleteByNameRequest accepts string/array for names"
     }
 
     {
-        const auto r = MCPDeleteByNameRequest::fromJson(json{{"names", json::array({"a", 1, "b", false})}});
+        const auto r =
+            MCPDeleteByNameRequest::fromJson(json{{"names", json::array({"a", 1, "b", false})}});
         CHECK(r.names == std::vector<std::string>{"a", "b"});
     }
 }

@@ -246,9 +246,12 @@ void SetupBenchmarkSuite(const BenchConfig& config = {}) {
         ofs << "This is sample content for performance benchmarking.\n";
         ofs << "Document ID: " << i << "\n";
         // Add some variability to increase corpus size
-        ofs << "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\n";
-        ofs << "Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.\n";
-        ofs << "Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.\n";
+        ofs << "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor "
+               "incididunt ut labore et dolore magna aliqua.\n";
+        ofs << "Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip "
+               "ex ea commodo consequat.\n";
+        ofs << "Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu "
+               "fugiat nulla pariatur.\n";
         ofs.close();
 
         // Add via daemon
@@ -502,10 +505,18 @@ static void BM_PostIngest_Throughput(benchmark::State& state) {
     BenchConfig cfg;
     cfg.embeddingsEnabled = state.range(1) != 0;
     switch (state.range(2)) {
-    case 1: cfg.tuningProfile = "Efficient"; break;
-    case 2: cfg.tuningProfile = "Balanced"; break;
-    case 3: cfg.tuningProfile = "Aggressive"; break;
-    default: cfg.tuningProfile.clear(); break; // default profile
+        case 1:
+            cfg.tuningProfile = "Efficient";
+            break;
+        case 2:
+            cfg.tuningProfile = "Balanced";
+            break;
+        case 3:
+            cfg.tuningProfile = "Aggressive";
+            break;
+        default:
+            cfg.tuningProfile.clear();
+            break; // default profile
     }
     SetupBenchmarkSuite(cfg);
 
@@ -518,8 +529,8 @@ static void BM_PostIngest_Throughput(benchmark::State& state) {
         std::vector<std::filesystem::path> paths;
         paths.reserve(batchSize);
         for (int i = 0; i < batchSize; ++i) {
-            const std::string docName = "bench_pi_" + std::to_string(i) + "_" +
-                std::to_string(state.iterations()) + ".txt";
+            const std::string docName =
+                "bench_pi_" + std::to_string(i) + "_" + std::to_string(state.iterations()) + ".txt";
             auto path = g_harness->dataDir() / docName;
             std::ofstream ofs(path);
             ofs << "Post-ingest bench doc " << i << " iteration " << state.iterations() << "\n";

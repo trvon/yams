@@ -108,8 +108,8 @@ TEST_CASE("postIngestTotalConcurrent scaling across core counts",
                 HwGuard hwGuard(hw);
                 uint32_t budget = TuneAdvisor::postIngestTotalConcurrent();
 
-                INFO("profile=" << static_cast<int>(profile) << " hw=" << hw
-                                << " budget=" << budget << " prev=" << prev);
+                INFO("profile=" << static_cast<int>(profile) << " hw=" << hw << " budget=" << budget
+                                << " prev=" << prev);
                 if (prev != 0) {
                     CHECK(budget >= prev);
                 }
@@ -217,9 +217,8 @@ TEST_CASE("postIngestBudgetedConcurrency stage starvation",
         uint32_t embed = TuneAdvisor::postEmbedConcurrent();
 
         INFO("hw=8 profile=Balanced totalBudget=" << totalBudget);
-        INFO("alloc extraction=" << extraction << " kg=" << kg << " symbol=" << symbol
-                                 << " entity=" << entity << " title=" << title
-                                 << " embed=" << embed);
+        INFO("alloc extraction=" << extraction << " kg=" << kg << " symbol=" << symbol << " entity="
+                                 << entity << " title=" << title << " embed=" << embed);
 
         // Currently totalBudget=2, only extraction=1 embed=1, rest=0. All should be >=1.
         CHECK(extraction >= 1);
@@ -460,9 +459,9 @@ TEST_CASE("ONNX shared capacity", "[daemon][tune][allocation][onnx][catch2]") {
                 scaledMax = std::max(scaledMax, 2u);
                 scaledMax = std::max(scaledMax, reserved + 1);
 
-                INFO("profile=" << static_cast<int>(profile) << " hw=" << hw
-                                << " scale=" << scale << " maxConc=" << maxConc
-                                << " reserved=" << reserved << " scaledMax=" << scaledMax);
+                INFO("profile=" << static_cast<int>(profile) << " hw=" << hw << " scale=" << scale
+                                << " maxConc=" << maxConc << " reserved=" << reserved
+                                << " scaledMax=" << scaledMax);
 
                 // Must have at least 1 shared slot beyond reserved
                 CHECK(scaledMax > reserved);

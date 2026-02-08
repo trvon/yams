@@ -3025,6 +3025,289 @@ struct MetadataValueCountsRequest {
     }
 };
 
+// ============================================================================
+// Repair Service Request/Response/Event Types
+// ============================================================================
+
+/**
+ * @brief Request to run one or more repair operations via the daemon.
+ *
+ * The daemon's RepairService owns all repair logic.  The CLI builds a
+ * RepairRequest from its flags and streams RepairEvent progress back.
+ */
+struct RepairRequest {
+    // Operation flags
+    bool repairOrphans{false};
+    bool repairMime{false};
+    bool repairDownloads{false};
+    bool repairPathTree{false};
+    bool repairChunks{false};
+    bool repairBlockRefs{false};
+    bool repairFts5{false};
+    bool repairEmbeddings{false};
+    bool repairStuckDocs{false};
+    bool optimizeDb{false};
+    bool repairAll{false};
+
+    // Options
+    bool dryRun{false};
+    bool verbose{false};
+    bool force{false};
+    bool foreground{false};
+    std::string embeddingModel;
+    std::vector<std::string> includeMime;
+    int32_t maxRetries{3};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << repairOrphans << repairMime << repairDownloads << repairPathTree << repairChunks
+            << repairBlockRefs << repairFts5 << repairEmbeddings << repairStuckDocs << optimizeDb
+            << repairAll << dryRun << verbose << force << foreground << embeddingModel
+            << includeMime << maxRetries;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<RepairRequest> deserialize(Deserializer& deser) {
+        RepairRequest req;
+        auto readBool = [&](bool& v) -> bool {
+            if (auto r = deser.template read<bool>(); r) {
+                v = r.value();
+                return true;
+            }
+            return false;
+        };
+        if (!readBool(req.repairOrphans))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.repairMime))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.repairDownloads))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.repairPathTree))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.repairChunks))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.repairBlockRefs))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.repairFts5))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.repairEmbeddings))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.repairStuckDocs))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.optimizeDb))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.repairAll))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.dryRun))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.verbose))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.force))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.foreground))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (auto r = deser.readString(); r)
+            req.embeddingModel = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.readStringVector(); r)
+            req.includeMime = std::move(r.value());
+        else
+            return r.error();
+        if (auto r = deser.template read<int32_t>(); r)
+            req.maxRetries = r.value();
+        else
+            return r.error();
+        return req;
+    }
+};
+
+/**
+ * @brief Per-operation result embedded in the final RepairResponse.
+ */
+struct RepairOperationResult {
+    std::string operation;
+    uint64_t processed{0};
+    uint64_t succeeded{0};
+    uint64_t failed{0};
+    uint64_t skipped{0};
+    std::string message;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << operation << processed << succeeded << failed << skipped << message;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<RepairOperationResult> deserialize(Deserializer& deser) {
+        RepairOperationResult r;
+        if (auto v = deser.readString(); v)
+            r.operation = std::move(v.value());
+        else
+            return v.error();
+        if (auto v = deser.template read<uint64_t>(); v)
+            r.processed = v.value();
+        else
+            return v.error();
+        if (auto v = deser.template read<uint64_t>(); v)
+            r.succeeded = v.value();
+        else
+            return v.error();
+        if (auto v = deser.template read<uint64_t>(); v)
+            r.failed = v.value();
+        else
+            return v.error();
+        if (auto v = deser.template read<uint64_t>(); v)
+            r.skipped = v.value();
+        else
+            return v.error();
+        if (auto v = deser.readString(); v)
+            r.message = std::move(v.value());
+        else
+            return v.error();
+        return r;
+    }
+};
+
+/**
+ * @brief Streaming progress event emitted during repair.
+ */
+struct RepairEvent {
+    std::string phase;     // scanning | repairing | completed | error
+    std::string operation; // orphans | mime | fts5 | embeddings | stuck_docs | ...
+    uint64_t processed{0};
+    uint64_t total{0};
+    uint64_t succeeded{0};
+    uint64_t failed{0};
+    uint64_t skipped{0};
+    std::string message;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << phase << operation << processed << total << succeeded << failed << skipped
+            << message;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<RepairEvent> deserialize(Deserializer& deser) {
+        RepairEvent ev;
+        if (auto v = deser.readString(); v)
+            ev.phase = std::move(v.value());
+        else
+            return v.error();
+        if (auto v = deser.readString(); v)
+            ev.operation = std::move(v.value());
+        else
+            return v.error();
+        if (auto v = deser.template read<uint64_t>(); v)
+            ev.processed = v.value();
+        else
+            return v.error();
+        if (auto v = deser.template read<uint64_t>(); v)
+            ev.total = v.value();
+        else
+            return v.error();
+        if (auto v = deser.template read<uint64_t>(); v)
+            ev.succeeded = v.value();
+        else
+            return v.error();
+        if (auto v = deser.template read<uint64_t>(); v)
+            ev.failed = v.value();
+        else
+            return v.error();
+        if (auto v = deser.template read<uint64_t>(); v)
+            ev.skipped = v.value();
+        else
+            return v.error();
+        if (auto v = deser.readString(); v)
+            ev.message = std::move(v.value());
+        else
+            return v.error();
+        return ev;
+    }
+};
+
+/**
+ * @brief Final response after all requested repair operations complete.
+ */
+struct RepairResponse {
+    bool success{false};
+    uint64_t totalOperations{0};
+    uint64_t totalSucceeded{0};
+    uint64_t totalFailed{0};
+    uint64_t totalSkipped{0};
+    std::vector<std::string> errors;
+    std::vector<RepairOperationResult> operationResults;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << success << totalOperations << totalSucceeded << totalFailed << totalSkipped;
+        ser << static_cast<uint32_t>(errors.size());
+        for (const auto& e : errors)
+            ser << e;
+        ser << static_cast<uint32_t>(operationResults.size());
+        for (const auto& r : operationResults)
+            r.serialize(ser);
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<RepairResponse> deserialize(Deserializer& deser) {
+        RepairResponse resp;
+        if (auto v = deser.template read<bool>(); v)
+            resp.success = v.value();
+        else
+            return v.error();
+        if (auto v = deser.template read<uint64_t>(); v)
+            resp.totalOperations = v.value();
+        else
+            return v.error();
+        if (auto v = deser.template read<uint64_t>(); v)
+            resp.totalSucceeded = v.value();
+        else
+            return v.error();
+        if (auto v = deser.template read<uint64_t>(); v)
+            resp.totalFailed = v.value();
+        else
+            return v.error();
+        if (auto v = deser.template read<uint64_t>(); v)
+            resp.totalSkipped = v.value();
+        else
+            return v.error();
+
+        if (auto n = deser.template read<uint32_t>(); n) {
+            for (uint32_t i = 0; i < n.value(); ++i) {
+                if (auto s = deser.readString(); s)
+                    resp.errors.push_back(std::move(s.value()));
+                else
+                    return s.error();
+            }
+        } else {
+            return n.error();
+        }
+
+        if (auto n = deser.template read<uint32_t>(); n) {
+            for (uint32_t i = 0; i < n.value(); ++i) {
+                auto r = RepairOperationResult::deserialize(deser);
+                if (!r)
+                    return r.error();
+                resp.operationResults.push_back(std::move(r.value()));
+            }
+        } else {
+            return n.error();
+        }
+
+        return resp;
+    }
+};
+
 // Forward declarations for late-defined request types used in the Request variant
 struct CatRequest;
 struct ListSessionsRequest;
@@ -3046,7 +3329,7 @@ using Request = std::variant<
     RemovePathSelectorRequest, ListTreeDiffRequest, FileHistoryRequest, PruneRequest,
     ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest, GraphQueryRequest,
     GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest, KgIngestRequest,
-    MetadataValueCountsRequest, BatchRequest>;
+    MetadataValueCountsRequest, BatchRequest, RepairRequest>;
 
 // ============================================================================
 // Response Types
@@ -6870,7 +7153,9 @@ using Response =
                  // Batch response (Track B)
                  BatchResponse,
                  // Streaming events (progress/heartbeats)
-                 EmbeddingEvent, ModelLoadEvent>;
+                 EmbeddingEvent, ModelLoadEvent,
+                 // Repair service responses
+                 RepairResponse, RepairEvent>;
 
 // ============================================================================
 // Batch Request/Response Types (Track B: Communication Overhead Reduction)
@@ -7325,6 +7610,10 @@ enum class MessageType : uint8_t {
     MetadataValueCountsResponse = 169,
     // Batch response (Track B: Communication Overhead Reduction)
     BatchResponse = 170,
+    // Repair service
+    RepairRequest_MsgType = 73,
+    RepairResponse_MsgType = 171,
+    RepairEvent_MsgType = 172,
     // Events
     EmbeddingEvent = 149,
     ModelLoadEvent = 150,

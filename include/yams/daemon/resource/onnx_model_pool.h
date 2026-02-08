@@ -114,8 +114,8 @@ struct ModelPoolConfig {
     // Performance
     bool enableGPU = false;
     int numThreads = 4;
-    bool asyncLoading = false;           // When true, schedule loads on a worker pool
-    size_t loadWorkerThreads = 2;        // Worker threads for async loading
+    bool asyncLoading = false;    // When true, schedule loads on a worker pool
+    size_t loadWorkerThreads = 2; // Worker threads for async loading
 };
 
 // ============================================================================

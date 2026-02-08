@@ -36,6 +36,12 @@ void TuningManager::start() {
     if (running_.exchange(true))
         return;
 
+    // Issue 3 fix: reset all hysteresis counters on start()
+    lastOnnxMax_ = lastOnnxGliner_ = lastOnnxEmbed_ = lastOnnxReranker_ = 0;
+    ipcHighTicks_ = ipcLowTicks_ = ioHighTicks_ = ioLowTicks_ = 0;
+    slotHighTicks_ = slotLowTicks_ = 0;
+    previousPressureLevel_ = 0;
+
     // Seed FsmMetricsRegistry with initial ResourceGovernor data immediately
     // so status requests have valid data before the first async tick completes.
     // This prevents CLI tools from seeing 0 values for governorBudgetBytes.
@@ -175,27 +181,24 @@ void TuningManager::tick_once() {
         uint32_t effEmbed = consume(embedReserved);
         uint32_t effReranker = consume(rerankerReserved);
 
-        if (remaining == 0 && desiredMax > (effGliner + effEmbed + effReranker)) {
-            remaining = 1;
-        }
+        static_cast<void>(remaining);
 
-        static uint32_t lastMax = 0, lastG = 0, lastE = 0, lastR = 0;
-        if (lastMax != desiredMax) {
+        if (lastOnnxMax_ != desiredMax) {
             registry.setMaxSlots(desiredMax);
-            lastMax = desiredMax;
+            lastOnnxMax_ = desiredMax;
             spdlog::info("[TuningManager] ONNX slots set to {}", desiredMax);
         }
-        if (lastG != effGliner) {
+        if (lastOnnxGliner_ != effGliner) {
             registry.setReservedSlots(OnnxLane::Gliner, effGliner);
-            lastG = effGliner;
+            lastOnnxGliner_ = effGliner;
         }
-        if (lastE != effEmbed) {
+        if (lastOnnxEmbed_ != effEmbed) {
             registry.setReservedSlots(OnnxLane::Embedding, effEmbed);
-            lastE = effEmbed;
+            lastOnnxEmbed_ = effEmbed;
         }
-        if (lastR != effReranker) {
+        if (lastOnnxReranker_ != effReranker) {
             registry.setReservedSlots(OnnxLane::Reranker, effReranker);
-            lastR = effReranker;
+            lastOnnxReranker_ = effReranker;
         }
     } catch (...) {
     }
@@ -335,12 +338,17 @@ void TuningManager::tick_once() {
             const uint64_t dbLockErrors = TuneAdvisor::getAndResetDbLockErrors();
             const uint32_t lockThreshold = TuneAdvisor::dbLockErrorThreshold();
 
-            uint32_t extractionTarget = TuneAdvisor::postExtractionConcurrent();
-            uint32_t kgTarget = TuneAdvisor::postKgConcurrent();
-            uint32_t symbolTarget = TuneAdvisor::postSymbolConcurrent();
-            uint32_t entityTarget = TuneAdvisor::postEntityConcurrent();
-            uint32_t titleTarget = TuneAdvisor::postTitleConcurrent();
-            uint32_t embedTarget = TuneAdvisor::postEmbedConcurrent();
+            // Fix Issue 7 (timing audit): compute the full post-ingest budget once
+            // instead of 6 individual getter calls (each of which independently calls
+            // postIngestBudgetedConcurrency). This ensures a consistent budget snapshot
+            // and avoids redundant computation.
+            auto budget = TuneAdvisor::postIngestBudgetAll(/*includeDynamicCaps=*/true);
+            uint32_t extractionTarget = budget.extraction;
+            uint32_t kgTarget = budget.kg;
+            uint32_t symbolTarget = budget.symbol;
+            uint32_t entityTarget = budget.entity;
+            uint32_t titleTarget = budget.title;
+            uint32_t embedTarget = budget.embed;
 
             // Override with gradient limiter values if enabled
             if (TuneAdvisor::enableGradientLimiters()) {
@@ -460,12 +468,32 @@ void TuningManager::tick_once() {
                 }
             }
 
+            // Fix Issue 6 (timing audit): detect pressure de-escalation and clear
+            // DynamicCaps so the base budget is immediately restored. Without this,
+            // stale (reduced) caps from the previous higher-pressure tick persist for
+            // one extra tick, delaying recovery.
+            const auto currentPressure = static_cast<uint8_t>(govSnap.level);
+            if (currentPressure < previousPressureLevel_) {
+                // Pressure dropped — clear all DynamicCaps to let base budget through
+                TuneAdvisor::beginDynamicCapWrite();
+                TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
+                TuneAdvisor::setPostKgConcurrentDynamicCap(0);
+                TuneAdvisor::setPostSymbolConcurrentDynamicCap(0);
+                TuneAdvisor::setPostEntityConcurrentDynamicCap(0);
+                TuneAdvisor::setPostTitleConcurrentDynamicCap(0);
+                TuneAdvisor::setPostEmbedConcurrentDynamicCap(0);
+                TuneAdvisor::endDynamicCapWrite();
+            }
+            previousPressureLevel_ = currentPressure;
+
+            TuneAdvisor::beginDynamicCapWrite();
             TuneAdvisor::setPostExtractionConcurrentDynamicCap(extractionTarget);
             TuneAdvisor::setPostKgConcurrentDynamicCap(kgTarget);
             TuneAdvisor::setPostSymbolConcurrentDynamicCap(symbolTarget);
             TuneAdvisor::setPostEntityConcurrentDynamicCap(entityTarget);
             TuneAdvisor::setPostTitleConcurrentDynamicCap(titleTarget);
             TuneAdvisor::setPostEmbedConcurrentDynamicCap(embedTarget);
+            TuneAdvisor::endDynamicCapWrite();
 
             // Align EmbeddingGenerator global gate with governor caps
             uint32_t baseEmbedGuard = TuneAdvisor::embedMaxConcurrencyBase();
@@ -523,10 +551,8 @@ void TuningManager::tick_once() {
                             : 0.0;
 
         // Hysteresis: only resize if utilization has been high/low for multiple ticks
-        static uint32_t ipcHighTicks = 0;
-        static uint32_t ipcLowTicks = 0;
-        static uint32_t ioHighTicks = 0;
-        static uint32_t ioLowTicks = 0;
+        // NOTE: These are member variables (not static locals) so they reset on stop/start.
+        // See ipcHighTicks_, ipcLowTicks_, ioHighTicks_, ioLowTicks_ in TuningManager.h
 
         const double highThreshold = 0.80;  // Grow when >80% utilized
         const double lowThreshold = 0.20;   // Shrink when <20% utilized
@@ -535,9 +561,9 @@ void TuningManager::tick_once() {
 
         // IPC pool sizing
         if (ipcUtil > highThreshold) {
-            ipcHighTicks++;
-            ipcLowTicks = 0;
-            if (ipcHighTicks >= hysteresisTicks) {
+            ipcHighTicks_++;
+            ipcLowTicks_ = 0;
+            if (ipcHighTicks_ >= hysteresisTicks) {
                 // Grow pool
                 int32_t target = static_cast<int32_t>(ipcStats.current_size) + scaleStep;
                 int32_t maxSize = static_cast<int32_t>(TuneAdvisor::poolMaxSizeIpc());
@@ -554,12 +580,12 @@ void TuningManager::tick_once() {
                     spdlog::debug("TuningManager: IPC pool grown by {} (util={:.1f}%)", delta,
                                   ipcUtil * 100.0);
                 }
-                ipcHighTicks = 0;
+                ipcHighTicks_ = 0;
             }
         } else if (ipcUtil < lowThreshold) {
-            ipcLowTicks++;
-            ipcHighTicks = 0;
-            if (ipcLowTicks >= hysteresisTicks) {
+            ipcLowTicks_++;
+            ipcHighTicks_ = 0;
+            if (ipcLowTicks_ >= hysteresisTicks) {
                 // Shrink pool
                 int32_t target = static_cast<int32_t>(ipcStats.current_size) - scaleStep;
                 int32_t minSize = static_cast<int32_t>(TuneAdvisor::poolMinSizeIpc());
@@ -571,19 +597,19 @@ void TuningManager::tick_once() {
                     spdlog::debug("TuningManager: IPC pool shrunk by {} (util={:.1f}%)", -delta,
                                   ipcUtil * 100.0);
                 }
-                ipcLowTicks = 0;
+                ipcLowTicks_ = 0;
             }
         } else {
             // Reset hysteresis counters when in middle range
-            ipcHighTicks = 0;
-            ipcLowTicks = 0;
+            ipcHighTicks_ = 0;
+            ipcLowTicks_ = 0;
         }
 
         // IO pool sizing (similar logic)
         if (ioUtil > highThreshold) {
-            ioHighTicks++;
-            ioLowTicks = 0;
-            if (ioHighTicks >= hysteresisTicks) {
+            ioHighTicks_++;
+            ioLowTicks_ = 0;
+            if (ioHighTicks_ >= hysteresisTicks) {
                 int32_t target = static_cast<int32_t>(ioStats.current_size) + scaleStep;
                 int32_t maxSize = static_cast<int32_t>(TuneAdvisor::poolMaxSizeIpcIo());
                 // Check with ResourceGovernor if scaling is allowed
@@ -599,12 +625,12 @@ void TuningManager::tick_once() {
                     spdlog::debug("TuningManager: IO pool grown by {} (util={:.1f}%)", delta,
                                   ioUtil * 100.0);
                 }
-                ioHighTicks = 0;
+                ioHighTicks_ = 0;
             }
         } else if (ioUtil < lowThreshold) {
-            ioLowTicks++;
-            ioHighTicks = 0;
-            if (ioLowTicks >= hysteresisTicks) {
+            ioLowTicks_++;
+            ioHighTicks_ = 0;
+            if (ioLowTicks_ >= hysteresisTicks) {
                 int32_t target = static_cast<int32_t>(ioStats.current_size) - scaleStep;
                 int32_t minSize = static_cast<int32_t>(TuneAdvisor::poolMinSizeIpcIo());
                 target = std::max(target, minSize);
@@ -615,11 +641,11 @@ void TuningManager::tick_once() {
                     spdlog::debug("TuningManager: IO pool shrunk by {} (util={:.1f}%)", -delta,
                                   ioUtil * 100.0);
                 }
-                ioLowTicks = 0;
+                ioLowTicks_ = 0;
             }
         } else {
-            ioHighTicks = 0;
-            ioLowTicks = 0;
+            ioHighTicks_ = 0;
+            ioLowTicks_ = 0;
         }
     } catch (...) {
     }
@@ -628,8 +654,8 @@ void TuningManager::tick_once() {
     // Uses same hysteresis pattern as IPC/IO pools for consistency
     try {
         if (setConnectionSlots_ && state_) {
-            static uint32_t slotHighTicks = 0;
-            static uint32_t slotLowTicks = 0;
+            // NOTE: slotHighTicks_/slotLowTicks_ are member variables (not static locals)
+            // so they reset on stop/start. See TuningManager.h
 
             const size_t activeConns = state_->stats.activeConnections.load();
             const size_t maxConns = state_->stats.maxConnections.load(std::memory_order_relaxed);
@@ -644,9 +670,9 @@ void TuningManager::tick_once() {
                 const uint32_t maxSlots = TuneAdvisor::connectionSlotsMax();
 
                 if (util > highThreshold) {
-                    slotHighTicks++;
-                    slotLowTicks = 0;
-                    if (slotHighTicks >= hysteresisTicks) {
+                    slotHighTicks_++;
+                    slotLowTicks_ = 0;
+                    if (slotHighTicks_ >= hysteresisTicks) {
                         uint32_t target = static_cast<uint32_t>(maxConns) + scaleStep;
                         // Gate through ResourceGovernor
                         if (TuneAdvisor::enableResourceGovernor() &&
@@ -660,13 +686,13 @@ void TuningManager::tick_once() {
                                           "(util={:.1f}%, active={})",
                                           maxConns, target, util * 100.0, activeConns);
                         }
-                        slotHighTicks = 0;
+                        slotHighTicks_ = 0;
                     }
                 } else if (util < lowThreshold && activeConns > 0) {
                     // Only shrink if we have some connections (avoid shrinking at idle)
-                    slotLowTicks++;
-                    slotHighTicks = 0;
-                    if (slotLowTicks >= hysteresisTicks) {
+                    slotLowTicks_++;
+                    slotHighTicks_ = 0;
+                    if (slotLowTicks_ >= hysteresisTicks) {
                         uint32_t target = (maxConns > scaleStep)
                                               ? static_cast<uint32_t>(maxConns - scaleStep)
                                               : static_cast<uint32_t>(maxConns);
@@ -677,12 +703,12 @@ void TuningManager::tick_once() {
                                           "(util={:.1f}%, active={})",
                                           maxConns, target, util * 100.0, activeConns);
                         }
-                        slotLowTicks = 0;
+                        slotLowTicks_ = 0;
                     }
                 } else {
                     // Reset hysteresis when in middle range
-                    slotHighTicks = 0;
-                    slotLowTicks = 0;
+                    slotHighTicks_ = 0;
+                    slotLowTicks_ = 0;
                 }
             }
         }

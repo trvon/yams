@@ -282,8 +282,11 @@ ResourceSnapshot ResourceGovernor::tick(ServiceManager* sm) {
                      snap.memoryBudgetBytes / (1024ull * 1024ull), snap.memoryPressure * 100.0,
                      snap.cpuUsagePercent);
 
-        currentLevel_.store(newLevel, std::memory_order_relaxed);
+        // Fix Issue 1 (timing audit): update scaling caps BEFORE publishing
+        // the new level so concurrent readers never observe the new level with
+        // stale (old-level) caps.
         updateScalingCaps(newLevel);
+        currentLevel_.store(newLevel, std::memory_order_release);
 
         // Trigger level-specific responses
         switch (newLevel) {
@@ -467,7 +470,9 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
     // Apply hysteresis: require time at a level before transitioning
     // (decoupled from tick interval for consistent behavior at any tick rate)
     const auto hysteresisMs = std::chrono::milliseconds(TuneAdvisor::memoryHysteresisMs());
-    auto now = std::chrono::steady_clock::now();
+    // Fix Issue 5 (timing audit): use snap.timestamp instead of calling now() again
+    // to avoid drift between the snapshot time and the hysteresis comparison.
+    auto now = snap.timestamp;
 
     if (rawLevel != proposedLevel_) {
         // Level changed - reset timer
@@ -850,7 +855,7 @@ ResourceSnapshot ResourceGovernor::getSnapshot() const {
 }
 
 ResourcePressureLevel ResourceGovernor::getPressureLevel() const noexcept {
-    auto level = currentLevel_.load(std::memory_order_relaxed);
+    auto level = currentLevel_.load(std::memory_order_acquire);
     // During startup grace period, cap at Warning to prevent false Emergency
     // from stalling pollers before metrics are populated.
     if (startupGraceActive() && level > ResourcePressureLevel::Warning) {

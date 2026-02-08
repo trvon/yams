@@ -22,7 +22,8 @@ TEST_CASE("MCP JsonUtils - parse_json handles empty input", "[mcp][json][error_h
     CHECK(r.error().message.find("Empty input") != std::string::npos);
 }
 
-TEST_CASE("MCP JsonUtils - parse_json reports parse errors", "[mcp][json][error_handling][catch2]") {
+TEST_CASE("MCP JsonUtils - parse_json reports parse errors",
+          "[mcp][json][error_handling][catch2]") {
     const auto r = yams::mcp::json_utils::parse_json("{");
     REQUIRE_FALSE(r);
     CHECK(r.error().code == ErrorCode::InvalidData);
@@ -47,7 +48,7 @@ TEST_CASE("MCP JsonUtils - validate_jsonrpc_message rejects invalid envelopes",
     }
 
     {
-        json msg = { {"jsonrpc", 2} };
+        json msg = {{"jsonrpc", 2}};
         const auto r = yams::mcp::json_utils::validate_jsonrpc_message(msg);
         REQUIRE_FALSE(r);
         CHECK(r.error().code == ErrorCode::InvalidData);
@@ -55,7 +56,7 @@ TEST_CASE("MCP JsonUtils - validate_jsonrpc_message rejects invalid envelopes",
     }
 
     {
-        json msg = { {"jsonrpc", "1.0"} };
+        json msg = {{"jsonrpc", "1.0"}};
         const auto r = yams::mcp::json_utils::validate_jsonrpc_message(msg);
         REQUIRE_FALSE(r);
         CHECK(r.error().code == ErrorCode::InvalidData);
@@ -63,7 +64,7 @@ TEST_CASE("MCP JsonUtils - validate_jsonrpc_message rejects invalid envelopes",
     }
 
     {
-        json msg = { {"jsonrpc", "2.0"} };
+        json msg = {{"jsonrpc", "2.0"}};
         const auto r = yams::mcp::json_utils::validate_jsonrpc_message(msg);
         REQUIRE(r);
         CHECK(r.value().at("jsonrpc").get<std::string>() == "2.0");
@@ -73,7 +74,7 @@ TEST_CASE("MCP JsonUtils - validate_jsonrpc_message rejects invalid envelopes",
 TEST_CASE("MCP JsonUtils - get_field reports missing/wrong type",
           "[mcp][json][error_handling][catch2]") {
     {
-        json obj = { {"x", 5} };
+        json obj = {{"x", 5}};
         const auto r = yams::mcp::json_utils::get_field<int>(obj, "x");
         REQUIRE(r);
         CHECK(r.value() == 5);
@@ -88,7 +89,7 @@ TEST_CASE("MCP JsonUtils - get_field reports missing/wrong type",
     }
 
     {
-        json obj = { {"x", "not-an-int"} };
+        json obj = {{"x", "not-an-int"}};
         const auto r = yams::mcp::json_utils::get_field<int>(obj, "x");
         REQUIRE_FALSE(r);
         CHECK(r.error().code == ErrorCode::InvalidData);

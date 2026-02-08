@@ -989,10 +989,10 @@ int main(int argc, char* argv[]) {
     }
 
     // Configure logging (default to file to preserve logs after daemonizing)
+    const size_t max_size = 10ULL * 1024 * 1024; // 10MB per file
+    const size_t max_files = 5;                  // Keep 5 rotated files
     try {
         // Use rotating file sink to preserve logs across crashes
-        const size_t max_size = 10ULL * 1024 * 1024; // 10MB per file
-        const size_t max_files = 5;                  // Keep 5 rotated files
         auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
             config.logFile.string(), max_size, max_files);
         auto logger = std::make_shared<spdlog::logger>("yams-daemon", rotating_sink);
@@ -1003,8 +1003,22 @@ int main(int argc, char* argv[]) {
         spdlog::info("Log rotation enabled: {} (max {}MB x {} files)", config.logFile.string(),
                      max_size / (1024ULL * 1024), max_files);
     } catch (const std::exception& e) {
-        // Fallback silently to default logger - can't log the error yet
         std::cerr << "Warning: log file setup failed, using default logger: " << e.what() << "\n";
+        try {
+            auto fallback = yams::daemon::YamsDaemon::resolveSystemPath(
+                yams::daemon::YamsDaemon::PathType::LogFile);
+            std::error_code ec;
+            std::filesystem::create_directories(fallback.parent_path(), ec);
+            auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+                fallback.string(), max_size, max_files);
+            auto logger = std::make_shared<spdlog::logger>("yams-daemon", rotating_sink);
+            spdlog::set_default_logger(logger);
+            spdlog::flush_on(spdlog::level::info);
+            spdlog::warn("Primary log path '{}' unusable ({}); using fallback '{}'",
+                         config.logFile.string(), e.what(), fallback.string());
+        } catch (const std::exception& e2) {
+            std::cerr << "Warning: fallback log file setup failed: " << e2.what() << "\n";
+        }
     }
 
     if (config.logLevel == "trace") {

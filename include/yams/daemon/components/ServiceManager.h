@@ -93,6 +93,7 @@ namespace yams::daemon {
 
 class IngestService;
 class GraphComponent;
+class RepairService;
 
 class ServiceManager : public IComponent, public std::enable_shared_from_this<ServiceManager> {
 public:
@@ -295,6 +296,12 @@ public:
     std::shared_ptr<yams::integrity::RepairManager> getRepairManager() const {
         return repairManager_;
     }
+
+    // RepairService lifecycle (replaces RepairCoordinator)
+    RepairService* getRepairService() const { return repairService_.get(); }
+    void startRepairService(std::function<size_t()> activeConnFn);
+    void stopRepairService();
+
     void attachWalManager(std::shared_ptr<yams::wal::WALManager> wal) {
         if (!walMetricsProvider_)
             walMetricsProvider_ = std::make_shared<WalMetricsProvider>();
@@ -596,6 +603,7 @@ private:
     std::unique_ptr<PostIngestQueue> postIngest_;
     std::unique_ptr<EmbeddingService> embeddingService_;
     std::unique_ptr<KGWriteQueue> kgWriteQueue_;
+    std::unique_ptr<RepairService> repairService_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
     bool embeddingsAutoOnAdd_{false};

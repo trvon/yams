@@ -1169,8 +1169,7 @@ OnnxModelPool::OnnxModelPool(const ModelPoolConfig& config) : config_(config) {
         if (config.enableGPU) {
             const auto& gpu = yams::daemon::resource::detectGpu();
             if (gpu.detected) {
-                spdlog::info("[ONNX] GPU enabled: {} ({:.1f} GB VRAM, provider={})",
-                             gpu.name,
+                spdlog::info("[ONNX] GPU enabled: {} ({:.1f} GB VRAM, provider={})", gpu.name,
                              static_cast<double>(gpu.vramBytes) / (1024.0 * 1024.0 * 1024.0),
                              gpu.provider);
             } else {

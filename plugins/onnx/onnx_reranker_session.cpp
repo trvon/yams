@@ -2,6 +2,7 @@
 #include <yams/vector/embedding_generator.h>
 
 #include "onnx_gpu_provider.h"
+#include <yams/daemon/resource/gpu_info.h>
 
 #include <nlohmann/json.hpp>
 #include <onnxruntime_cxx_api.h>
@@ -95,7 +96,15 @@ public:
         sessionOptions_->EnableMemPattern();
         sessionOptions_->EnableCpuMemArena();
 
-        onnx_util::appendGpuProvider(*sessionOptions_);
+        // Attach GPU provider only if GPU is detected
+        const auto& gpuInfo = resource::detectGpu();
+        if (gpuInfo.detected) {
+            onnx_util::appendGpuProvider(*sessionOptions_);
+            spdlog::info("[Reranker] GPU detected ({}), using {} provider", gpuInfo.name,
+                         gpuInfo.provider);
+        } else {
+            spdlog::debug("[Reranker] No GPU detected, using CPU execution provider");
+        }
 
         spdlog::info("[Reranker] SessionOptions configured: intra-op={}", intra);
     }

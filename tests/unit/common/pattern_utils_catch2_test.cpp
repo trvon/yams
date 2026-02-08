@@ -8,12 +8,12 @@
 
 using yams::common::brace_expand;
 using yams::common::glob_match_path;
+using yams::common::glob_to_sql_like;
+using yams::common::has_wildcards;
 using yams::common::match_segment;
 using yams::common::normalize_path;
-using yams::common::wildcard_match;
-using yams::common::has_wildcards;
-using yams::common::glob_to_sql_like;
 using yams::common::split_patterns;
+using yams::common::wildcard_match;
 
 TEST_CASE("common::wildcard_match basics", "[common][pattern][wildcard][catch2]") {
     CHECK(wildcard_match("", ""));
@@ -124,8 +124,7 @@ TEST_CASE("common::glob_match_path supports **, anchors, and brace alternatives"
     CHECK_FALSE(glob_match_path("a/b/c.txt", "^"));
 }
 
-TEST_CASE("common::split_patterns trims and skips empties",
-          "[common][pattern][split][catch2]") {
+TEST_CASE("common::split_patterns trims and skips empties", "[common][pattern][split][catch2]") {
     {
         const auto out = split_patterns("");
         CHECK(out.empty());

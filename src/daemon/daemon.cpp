@@ -16,7 +16,7 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/LifecycleComponent.h>
-#include <yams/daemon/components/RepairCoordinator.h>
+#include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>
@@ -84,10 +84,9 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
         spdlog::debug("TuningManager constructed early in YamsDaemon");
         tuningManager_->setRepairControlHook([this](uint32_t tokens, uint32_t batch) {
             try {
-                std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
-                if (repairCoordinator_) {
-                    repairCoordinator_->setMaintenanceTokens(tokens);
-                    repairCoordinator_->setMaxBatch(batch);
+                if (auto* rs = serviceManager_->getRepairService()) {
+                    rs->setMaintenanceTokens(tokens);
+                    rs->setMaxBatch(batch);
                 }
             } catch (...) {
             }
@@ -232,10 +231,9 @@ Result<void> YamsDaemon::start() {
                                                              serviceManager_->getWorkCoordinator());
             tuningManager_->setRepairControlHook([this](uint32_t tokens, uint32_t batch) {
                 try {
-                    std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
-                    if (repairCoordinator_) {
-                        repairCoordinator_->setMaintenanceTokens(tokens);
-                        repairCoordinator_->setMaxBatch(batch);
+                    if (auto* rs = serviceManager_->getRepairService()) {
+                        rs->setMaintenanceTokens(tokens);
+                        rs->setMaxBatch(batch);
                     }
                 } catch (...) {
                 }
@@ -403,7 +401,7 @@ Result<void> YamsDaemon::start() {
         spdlog::warn("Failed to start background tasks: {}", e.what());
     }
 
-    // Defer RepairCoordinator start until lifecycle is Healthy/Ready to avoid competing with init
+    // Defer RepairService start until lifecycle is Healthy/Ready to avoid competing with init
 
     // Bootstrapped event already dispatched before service initialization to prevent race.
 
@@ -563,34 +561,23 @@ void YamsDaemon::runLoop() {
             reloadRequested_.store(false, std::memory_order_relaxed);
         }
         // Deferred background tasks: require FSM Ready
-        // Note: RepairCoordinator triggers lazy-loading of embeddings/vector DB,
+        // Note: RepairService triggers lazy-loading of embeddings/vector DB,
         // so we start it when FSM is Ready rather than waiting for searchEngineReady.
-        // This breaks the circular dependency where search engine waits for embeddings
-        // which wait for RepairCoordinator which waits for search engine.
         auto snap = lifecycleFsm_.snapshot();
         {
-            std::lock_guard<std::mutex> lk(repairCoordinatorMutex_);
-            spdlog::debug(
-                "[DaemonLoop] FSM state={}, enableAutoRepair={}, repairCoordinator_exists={}",
-                static_cast<int>(snap.state), config_.enableAutoRepair,
-                (repairCoordinator_ != nullptr));
+            auto* rs = serviceManager_->getRepairService();
+            spdlog::debug("[DaemonLoop] FSM state={}, enableAutoRepair={}, repairService_exists={}",
+                          static_cast<int>(snap.state), config_.enableAutoRepair, (rs != nullptr));
             if (snap.state == LifecycleState::Ready) {
-                if (config_.enableAutoRepair && !repairCoordinator_) {
-                    spdlog::info("[DaemonLoop] Starting RepairCoordinator...");
+                if (config_.enableAutoRepair && !rs) {
+                    spdlog::info("[DaemonLoop] Starting RepairService...");
                     try {
-                        RepairCoordinator::Config rcfg;
-                        rcfg.enable = true;
-                        rcfg.dataDir = config_.dataDir;
-                        rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
-                        rcfg.autoRebuildOnDimMismatch = config_.autoRebuildOnDimMismatch;
                         auto activeFn = [this]() -> size_t {
                             return static_cast<size_t>(state_.stats.activeConnections.load());
                         };
-                        repairCoordinator_ = std::make_unique<RepairCoordinator>(
-                            serviceManager_.get(), &state_, activeFn, rcfg);
-                        repairCoordinator_->start();
+                        serviceManager_->startRepairService(std::move(activeFn));
                     } catch (const std::exception& e) {
-                        spdlog::warn("Failed to start RepairCoordinator: {}", e.what());
+                        spdlog::warn("Failed to start RepairService: {}", e.what());
                     }
                 }
 
@@ -602,8 +589,8 @@ void YamsDaemon::runLoop() {
             }
         }
         {
-            std::lock_guard<std::mutex> lk(repairCoordinatorMutex_);
-            if (repairCoordinator_) {
+            auto* rs = serviceManager_->getRepairService();
+            if (rs) {
                 size_t active = static_cast<size_t>(state_.stats.activeConnections.load());
                 uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();
                 auto now = std::chrono::steady_clock::now();
@@ -742,13 +729,7 @@ Result<void> YamsDaemon::stop() {
 
     // Note: Main loop runs on caller's thread via runLoop(), no daemon thread to join
 
-    {
-        std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
-        if (repairCoordinator_) {
-            repairCoordinator_->stop();
-            repairCoordinator_.reset();
-        }
-    }
+    // RepairService is now owned by ServiceManager; stopped during its Phase 6.0.5
 
     // Metrics already stopped earlier (before ServiceManager)
 
@@ -784,18 +765,16 @@ Result<void> YamsDaemon::stop() {
 // run() method removed; loop is inlined in start()
 
 void YamsDaemon::onDocumentAdded(const std::string& hash, const std::string& path) {
-    std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
-    if (repairCoordinator_) {
-        RepairCoordinator::DocumentAddedEvent event{hash, path};
-        repairCoordinator_->onDocumentAdded(event);
+    if (auto* rs = serviceManager_->getRepairService()) {
+        RepairService::DocumentAddedEvent event{hash, path};
+        rs->onDocumentAdded(event);
     }
 }
 
 void YamsDaemon::onDocumentRemoved(const std::string& hash) {
-    std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
-    if (repairCoordinator_) {
-        RepairCoordinator::DocumentRemovedEvent event{hash};
-        repairCoordinator_->onDocumentRemoved(event);
+    if (auto* rs = serviceManager_->getRepairService()) {
+        RepairService::DocumentRemovedEvent event{hash};
+        rs->onDocumentRemoved(event);
     }
 }
 

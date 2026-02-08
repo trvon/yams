@@ -164,6 +164,9 @@ private:
     // Batch request handler (Track B: Communication Overhead Reduction)
     boost::asio::awaitable<Response> handleBatchRequest(const BatchRequest& req);
 
+    // Document repair handler (RepairService)
+    boost::asio::awaitable<Response> handleRepairRequest(const RepairRequest& req);
+
     // Legacy helper declarations removed after dispatcher split
 
 private:

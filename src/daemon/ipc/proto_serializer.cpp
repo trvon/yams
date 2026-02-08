@@ -2913,6 +2913,126 @@ template <> struct ProtoBinding<BatchResponse> {
     }
 };
 
+// --------------------------- Repair Service Bindings ---------------------------
+template <> struct ProtoBinding<RepairRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRepairRequest;
+    static void set(Envelope& env, const RepairRequest& r) {
+        auto* o = env.mutable_repair_request();
+        o->set_repair_orphans(r.repairOrphans);
+        o->set_repair_mime(r.repairMime);
+        o->set_repair_downloads(r.repairDownloads);
+        o->set_repair_path_tree(r.repairPathTree);
+        o->set_repair_chunks(r.repairChunks);
+        o->set_repair_block_refs(r.repairBlockRefs);
+        o->set_repair_fts5(r.repairFts5);
+        o->set_repair_embeddings(r.repairEmbeddings);
+        o->set_repair_stuck_docs(r.repairStuckDocs);
+        o->set_optimize_db(r.optimizeDb);
+        o->set_repair_all(r.repairAll);
+        o->set_dry_run(r.dryRun);
+        o->set_verbose(r.verbose);
+        o->set_force(r.force);
+        o->set_foreground(r.foreground);
+        o->set_embedding_model(r.embeddingModel);
+        set_string_list(r.includeMime, o->mutable_include_mime());
+        o->set_max_retries(r.maxRetries);
+    }
+    static RepairRequest get(const Envelope& env) {
+        const auto& i = env.repair_request();
+        RepairRequest r{};
+        r.repairOrphans = i.repair_orphans();
+        r.repairMime = i.repair_mime();
+        r.repairDownloads = i.repair_downloads();
+        r.repairPathTree = i.repair_path_tree();
+        r.repairChunks = i.repair_chunks();
+        r.repairBlockRefs = i.repair_block_refs();
+        r.repairFts5 = i.repair_fts5();
+        r.repairEmbeddings = i.repair_embeddings();
+        r.repairStuckDocs = i.repair_stuck_docs();
+        r.optimizeDb = i.optimize_db();
+        r.repairAll = i.repair_all();
+        r.dryRun = i.dry_run();
+        r.verbose = i.verbose();
+        r.force = i.force();
+        r.foreground = i.foreground();
+        r.embeddingModel = i.embedding_model();
+        r.includeMime = get_string_list(i.include_mime());
+        r.maxRetries = i.max_retries();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<RepairEvent> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRepairEvent;
+    static void set(Envelope& env, const RepairEvent& r) {
+        auto* o = env.mutable_repair_event();
+        o->set_phase(r.phase);
+        o->set_operation(r.operation);
+        o->set_processed(r.processed);
+        o->set_total(r.total);
+        o->set_succeeded(r.succeeded);
+        o->set_failed(r.failed);
+        o->set_skipped(r.skipped);
+        o->set_message(r.message);
+    }
+    static RepairEvent get(const Envelope& env) {
+        const auto& i = env.repair_event();
+        RepairEvent r{};
+        r.phase = i.phase();
+        r.operation = i.operation();
+        r.processed = i.processed();
+        r.total = i.total();
+        r.succeeded = i.succeeded();
+        r.failed = i.failed();
+        r.skipped = i.skipped();
+        r.message = i.message();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<RepairResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRepairResponse;
+    static void set(Envelope& env, const RepairResponse& r) {
+        auto* o = env.mutable_repair_response();
+        o->set_success(r.success);
+        o->set_total_operations(r.totalOperations);
+        o->set_total_succeeded(r.totalSucceeded);
+        o->set_total_failed(r.totalFailed);
+        o->set_total_skipped(r.totalSkipped);
+        set_string_list(r.errors, o->mutable_errors());
+        for (const auto& op : r.operationResults) {
+            auto* op_pb = o->add_operation_results();
+            op_pb->set_operation(op.operation);
+            op_pb->set_processed(op.processed);
+            op_pb->set_succeeded(op.succeeded);
+            op_pb->set_failed(op.failed);
+            op_pb->set_skipped(op.skipped);
+            op_pb->set_message(op.message);
+        }
+    }
+    static RepairResponse get(const Envelope& env) {
+        const auto& i = env.repair_response();
+        RepairResponse r{};
+        r.success = i.success();
+        r.totalOperations = i.total_operations();
+        r.totalSucceeded = i.total_succeeded();
+        r.totalFailed = i.total_failed();
+        r.totalSkipped = i.total_skipped();
+        r.errors = get_string_list(i.errors());
+        for (const auto& op_pb : i.operation_results()) {
+            RepairOperationResult op{};
+            op.operation = op_pb.operation();
+            op.processed = op_pb.processed();
+            op.succeeded = op_pb.succeeded();
+            op.failed = op_pb.failed();
+            op.skipped = op_pb.skipped();
+            op.message = op_pb.message();
+            r.operationResults.push_back(std::move(op));
+        }
+        return r;
+    }
+};
+
 // Helper to encode Request/Response variants using bindings
 template <typename Variant>
 static Result<void> encode_variant_into(Envelope& env, const Variant& v) {
@@ -3257,6 +3377,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kRepairRequest: {
+            auto v = ProtoBinding<RepairRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
 
         // Additional responses
         case Envelope::kSuccessResponse: {
@@ -3447,6 +3572,16 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kModelLoadEvent: {
             auto v = ProtoBinding<ModelLoadEvent>::get(env);
             m.payload = Response{std::in_place_type<ModelLoadEvent>, std::move(v)};
+            break;
+        }
+        case Envelope::kRepairResponse: {
+            auto v = ProtoBinding<RepairResponse>::get(env);
+            m.payload = Response{std::in_place_type<RepairResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kRepairEvent: {
+            auto v = ProtoBinding<RepairEvent>::get(env);
+            m.payload = Response{std::in_place_type<RepairEvent>, std::move(v)};
             break;
         }
         case Envelope::PAYLOAD_NOT_SET:

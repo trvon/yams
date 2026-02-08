@@ -67,6 +67,28 @@ private:
     // ONNX concurrency registry configuration tracking
     std::atomic<bool> onnxRegistryConfigured_{false};
     void configureOnnxConcurrencyRegistry();
+
+    // Issue 3 fix: hysteresis counters as members instead of static locals
+    // so they reset across start/stop cycles and pressure transitions.
+
+    // ONNX lane tracking (configureOnnxConcurrencyRegistry)
+    uint32_t lastOnnxMax_{0};
+    uint32_t lastOnnxGliner_{0};
+    uint32_t lastOnnxEmbed_{0};
+    uint32_t lastOnnxReranker_{0};
+
+    // Pool resizing hysteresis (tick_once pool section)
+    uint32_t ipcHighTicks_{0};
+    uint32_t ipcLowTicks_{0};
+    uint32_t ioHighTicks_{0};
+    uint32_t ioLowTicks_{0};
+
+    // Connection slot resizing hysteresis (PBI-085)
+    uint32_t slotHighTicks_{0};
+    uint32_t slotLowTicks_{0};
+
+    // Issue 6 fix: track previous pressure level for de-escalation detection
+    uint8_t previousPressureLevel_{0};
 };
 
 } // namespace yams::daemon

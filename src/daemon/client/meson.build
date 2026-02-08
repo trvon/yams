@@ -51,7 +51,7 @@ yams_daemon_client_lib = static_library('yams_daemon_client',
     tl_expected_dep,
     nlohmann_json_dep,
   ],
-  cpp_args: ['-Wno-unused-parameter'],
+  cpp_args: cpp.get_id() == 'msvc' ? ['/wd4100'] : ['-Wno-unused-parameter'],
   include_directories: include_directories('../../../include'),
   install: true,
 )

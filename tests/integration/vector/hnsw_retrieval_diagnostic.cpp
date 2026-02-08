@@ -148,7 +148,8 @@ public:
         // If none exist, omit models_root and let the plugin use its own defaults.
         {
             fs::path modelsRoot;
-            if (const char* envModelsRoot = std::getenv("YAMS_MODELS_ROOT"); envModelsRoot && *envModelsRoot) {
+            if (const char* envModelsRoot = std::getenv("YAMS_MODELS_ROOT");
+                envModelsRoot && *envModelsRoot) {
                 modelsRoot = envModelsRoot;
             } else {
                 fs::path macExternal = "/Volumes/picaso/hak/storage/models";
@@ -165,8 +166,8 @@ public:
             if (!modelsRoot.empty()) {
                 onnxConfig["models_root"] = modelsRoot.string();
             } else {
-                spdlog::warn(
-                    "No ONNX models_root found (set YAMS_MODELS_ROOT). Semantic diagnostics will be skipped if embeddings are unavailable.");
+                spdlog::warn("No ONNX models_root found (set YAMS_MODELS_ROOT). Semantic "
+                             "diagnostics will be skipped if embeddings are unavailable.");
             }
         }
         opts.pluginConfigs["onnx_plugin"] = onnxConfig.dump();
@@ -269,7 +270,7 @@ public:
                 // We expect at least one vector per document
                 if (vectorCount_ >= TEST_CORPUS.size()) {
                     spdlog::info("Embeddings ready: {} vectors for {} docs", vectorCount_,
-                                  TEST_CORPUS.size());
+                                 TEST_CORPUS.size());
                     hasEmbeddings_ = true;
                     return;
                 }

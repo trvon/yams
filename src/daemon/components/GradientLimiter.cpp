@@ -44,11 +44,9 @@ void GradientLimiter::onJobEnd() {
 }
 
 void GradientLimiter::onJobComplete(std::chrono::nanoseconds rtt, bool success) {
-    // Decrement in-flight
-    inFlight_.fetch_sub(1, std::memory_order_relaxed);
+    uint32_t prevInFlight = inFlight_.fetch_sub(1, std::memory_order_relaxed);
 
     if (!success) {
-        // On failure, reduce limit aggressively (like TCP loss)
         double current = limit_.load(std::memory_order_relaxed);
         double newLimit = std::max(config_.minLimit, current * 0.9);
         limit_.store(newLimit, std::memory_order_relaxed);
@@ -60,25 +58,23 @@ void GradientLimiter::onJobComplete(std::chrono::nanoseconds rtt, bool success) 
     }
 
     double rttNanos = static_cast<double>(rtt.count());
-    updateLimit(rttNanos);
+    updateLimit(rttNanos, prevInFlight);
 }
 
-void GradientLimiter::updateLimit(double rttNanos) {
-    // Update sample count and check warmup
+void GradientLimiter::updateLimit(double rttNanos, uint32_t inFlightSnapshot) {
     uint64_t samples = sampleCount_.fetch_add(1, std::memory_order_relaxed) + 1;
 
     if (samples >= config_.warmupSamples && inWarmup_.load(std::memory_order_relaxed)) {
         inWarmup_.store(false, std::memory_order_relaxed);
     }
 
-    // Update min RTT (baseline)
     double currentMin = minRtt_.load(std::memory_order_relaxed);
     if (currentMin == 0.0 || rttNanos < currentMin) {
         minRtt_.store(rttNanos, std::memory_order_relaxed);
         currentMin = rttNanos;
     }
 
-    // Update short-window EMA (fast response to changes)
+    // Short-window EMA
     double prevSmoothed = smoothedRtt_.load(std::memory_order_relaxed);
     double newSmoothed;
     if (prevSmoothed == 0.0) {
@@ -89,7 +85,7 @@ void GradientLimiter::updateLimit(double rttNanos) {
     }
     smoothedRtt_.store(newSmoothed, std::memory_order_relaxed);
 
-    // Update long-window EMA (drift correction)
+    // Long-window EMA
     double prevLong = longRtt_.load(std::memory_order_relaxed);
     double newLong;
     if (prevLong == 0.0) {
@@ -97,41 +93,68 @@ void GradientLimiter::updateLimit(double rttNanos) {
     } else {
         newLong = config_.longWindowAlpha * rttNanos + (1.0 - config_.longWindowAlpha) * prevLong;
     }
+
+    // Long RTT recovery: decay pessimistic long EMA when system has recovered
+    if (newSmoothed > 0.0 && newLong / newSmoothed > config_.longRttRecoveryThreshold) {
+        newLong *= config_.longRttDecayFactor;
+    }
+
     longRtt_.store(newLong, std::memory_order_relaxed);
 
-    // Skip adjustment during warmup
     if (inWarmup_.load(std::memory_order_relaxed)) {
         return;
     }
 
-    // Compute gradient: ratio of short-term to long-term RTT
-    // gradient > 1.0 means short-term RTT improved (less queuing)
-    // gradient < 1.0 means short-term RTT degraded (more queuing)
+    // Window gate: only recompute the limit once per windowSize samples
+    if (config_.windowSize > 1) {
+        uint64_t postWarmup = samples - config_.warmupSamples;
+        if (postWarmup % config_.windowSize != 0)
+            return;
+    }
+
+    double currentLimit = limit_.load(std::memory_order_relaxed);
+
+    // App-limited guard: skip adjustment when under-utilized
+    if (inFlightSnapshot < static_cast<uint32_t>(currentLimit * config_.appLimitedRatio)) {
+        return;
+    }
+
+    // Dual gradient: relative (long/short) + absolute congestion (min/short)
     double gradient;
-    if (newLong > 0.0) {
-        gradient = newSmoothed / newLong;
+    if (newSmoothed > 0.0) {
+        double gradientLong = config_.tolerance * newLong / newSmoothed;
+        double gradientMin = config_.tolerance * currentMin / newSmoothed;
+        gradient = std::clamp(std::min(gradientLong, gradientMin), 0.5, 1.0);
     } else {
         gradient = 1.0;
     }
     gradient_.store(gradient, std::memory_order_relaxed);
 
-    // Netflix Gradient2 formula:
-    // newLimit = currentLimit * gradient + queueAllowance
-    // where queueAllowance = sqrt(currentLimit) for stability
-    double currentLimit = limit_.load(std::memory_order_relaxed);
-    double queueAllowance = std::sqrt(currentLimit);
+    double queueAllowance = config_.enableProbing ? std::sqrt(currentLimit) : 0.0;
     double newLimit = currentLimit * gradient + queueAllowance;
 
-    // Apply tolerance bounds
-    if (gradient >= 1.0 && config_.enableProbing) {
-        // RTT improving or stable - allow growth
-        // But cap the growth to prevent runaway
-        double maxGrowth = currentLimit * config_.tolerance;
-        newLimit = std::min(newLimit, maxGrowth);
-    }
+    // Limit smoothing
+    newLimit = currentLimit * (1.0 - config_.limitSmoothing) + newLimit * config_.limitSmoothing;
 
-    // Clamp to bounds
     newLimit = std::clamp(newLimit, config_.minLimit, config_.maxLimit);
+
+    // Pressure ceiling
+    uint8_t pressure = pressureLevel_.load(std::memory_order_relaxed);
+    switch (pressure) {
+        case 1: {
+            double warningCap = config_.maxLimit * 0.75;
+            newLimit = std::min(newLimit, warningCap);
+            break;
+        }
+        case 2:
+            newLimit = std::min(newLimit, config_.minLimit);
+            break;
+        case 3:
+            newLimit = std::min(newLimit, config_.minLimit);
+            break;
+        default:
+            break;
+    }
 
     limit_.store(newLimit, std::memory_order_relaxed);
 
@@ -159,13 +182,11 @@ GradientLimiter::Metrics GradientLimiter::metrics() const {
 }
 
 void GradientLimiter::applyPressure(uint8_t level) {
-    // 0=Normal: no-op, let gradient algorithm recover organically
-    // 1=Warning: clamp to 75% of maxLimit
-    // 2=Critical: force to minLimit
-    // 3+=Emergency: force to 0 (full stop)
+    pressureLevel_.store(level, std::memory_order_relaxed);
+
     switch (level) {
         case 0:
-            return; // Normal — no intervention
+            return;
         case 1: {
             double cap = config_.maxLimit * 0.75;
             double current = limit_.load(std::memory_order_relaxed);
@@ -178,8 +199,7 @@ void GradientLimiter::applyPressure(uint8_t level) {
             limit_.store(config_.minLimit, std::memory_order_relaxed);
             break;
         default:
-            // Emergency or unknown — full stop
-            limit_.store(0.0, std::memory_order_relaxed);
+            limit_.store(config_.minLimit, std::memory_order_relaxed);
             break;
     }
 }
@@ -193,6 +213,7 @@ void GradientLimiter::reset() {
     gradient_.store(1.0, std::memory_order_relaxed);
     sampleCount_.store(0, std::memory_order_relaxed);
     inWarmup_.store(true, std::memory_order_relaxed);
+    pressureLevel_.store(0, std::memory_order_relaxed);
     acquireCount_.store(0, std::memory_order_relaxed);
     rejectCount_.store(0, std::memory_order_relaxed);
 }

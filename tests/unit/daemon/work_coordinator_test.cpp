@@ -125,8 +125,8 @@ TEST_CASE("WorkCoordinator work execution", "[daemon][work_coordinator][executio
         }
 
         // Wait for work to complete with timeout
-        bool completed = wait_for_condition(
-            1000ms, 10ms, [&counter]() { return counter.load() == 10; });
+        bool completed =
+            wait_for_condition(1000ms, 10ms, [&counter]() { return counter.load() == 10; });
 
         REQUIRE(completed);
         REQUIRE(counter.load() == 10);
@@ -149,8 +149,8 @@ TEST_CASE("WorkCoordinator work execution", "[daemon][work_coordinator][executio
         });
 
         // Wait for work with timeout
-        bool completed = wait_for_condition(
-            1000ms, 10ms, [&work_executed]() { return work_executed.load(); });
+        bool completed =
+            wait_for_condition(1000ms, 10ms, [&work_executed]() { return work_executed.load(); });
 
         REQUIRE(completed);
         REQUIRE(work_executed);
@@ -168,9 +168,8 @@ TEST_CASE("WorkCoordinator work execution", "[daemon][work_coordinator][executio
         constexpr int total_work = 100;
 
         for (int i = 0; i < total_work; ++i) {
-            boost::asio::post(coordinator.getExecutor(), [&completed]() {
-                completed.fetch_add(1);
-            });
+            boost::asio::post(coordinator.getExecutor(),
+                              [&completed]() { completed.fetch_add(1); });
         }
 
         // Wait for all posted work to complete before stopping
@@ -202,8 +201,8 @@ TEST_CASE("WorkCoordinator async operations", "[daemon][work_coordinator][async]
         boost::asio::co_spawn(coordinator.getExecutor(), coro(), boost::asio::detached);
 
         // Wait for coroutine to complete with timeout
-        bool completed = wait_for_condition(
-            1000ms, 10ms, [&result]() { return result.load() == 42; });
+        bool completed =
+            wait_for_condition(1000ms, 10ms, [&result]() { return result.load() == 42; });
 
         REQUIRE(completed);
         REQUIRE(result.load() == 42);
@@ -418,8 +417,8 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
         boost::asio::co_spawn(coordinator.getExecutor(), long_running(), boost::asio::detached);
 
         // Wait for work to start with timeout
-        bool started = wait_for_condition(
-            2000ms, 5ms, [&work_started]() { return work_started.load(); });
+        bool started =
+            wait_for_condition(2000ms, 5ms, [&work_started]() { return work_started.load(); });
 
         REQUIRE(started);
         coordinator.stop();
@@ -443,8 +442,8 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
         }
 
         // Wait for all work to finish before stopping
-        bool all_done = wait_for_condition(
-            5000ms, 10ms, [&completed]() { return completed.load() == 10; });
+        bool all_done =
+            wait_for_condition(5000ms, 10ms, [&completed]() { return completed.load() == 10; });
 
         auto duration = std::chrono::steady_clock::now() - start;
 

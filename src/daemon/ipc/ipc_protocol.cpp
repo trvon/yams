@@ -195,6 +195,10 @@ template <> struct MessageTypeTraits<BatchRequest> {
     static constexpr MessageType value = MessageType::BatchRequest;
     static constexpr const char* name = "Batch";
 };
+template <> struct MessageTypeTraits<RepairRequest> {
+    static constexpr MessageType value = MessageType::RepairRequest_MsgType;
+    static constexpr const char* name = "Repair";
+};
 
 // Response type mappings
 template <> struct MessageTypeTraits<SearchResponse> {
@@ -323,6 +327,12 @@ template <> struct MessageTypeTraits<MetadataValueCountsResponse> {
 };
 template <> struct MessageTypeTraits<BatchResponse> {
     static constexpr MessageType value = MessageType::BatchResponse;
+};
+template <> struct MessageTypeTraits<RepairResponse> {
+    static constexpr MessageType value = MessageType::RepairResponse_MsgType;
+};
+template <> struct MessageTypeTraits<RepairEvent> {
+    static constexpr MessageType value = MessageType::RepairEvent_MsgType;
 };
 
 MessageType getMessageType(const Request& req) {

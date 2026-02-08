@@ -113,7 +113,7 @@ TEST_CASE("LruCache access refreshes position", "[daemon][post-ingest][cache][ca
     // Add "d" — should evict "b" (now the LRU), not "a"
     cache.put("d", 4);
 
-    CHECK(cache.get("a").has_value());    // refreshed, should survive
+    CHECK(cache.get("a").has_value());       // refreshed, should survive
     CHECK_FALSE(cache.get("b").has_value()); // LRU, should be evicted
     CHECK(cache.get("c").has_value());
     CHECK(cache.get("d").has_value());

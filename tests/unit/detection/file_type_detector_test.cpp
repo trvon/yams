@@ -148,9 +148,9 @@ TEST_CASE_METHOD(DetectorFixture, "File detection falls back to extension when c
     REQUIRE(detector.initialize(config));
 
     // Use bytes that won't match common magic numbers.
-    auto path = dir.createBinaryFile(
-        "mismatch.pdf",
-        std::array<std::byte, 4>{std::byte{0x13}, std::byte{0x37}, std::byte{0xC0}, std::byte{0xDE}});
+    auto path = dir.createBinaryFile("mismatch.pdf",
+                                     std::array<std::byte, 4>{std::byte{0x13}, std::byte{0x37},
+                                                              std::byte{0xC0}, std::byte{0xDE}});
 
     auto result = detector.detectFromFile(path);
     REQUIRE(result);
@@ -235,7 +235,8 @@ TEST_CASE_METHOD(DetectorFixture, "Cache can be cleared", "[detection][cache]") 
     CHECK(statsAfter.entries == 0);
 }
 
-TEST_CASE_METHOD(DetectorFixture, "Cache evicts entries when max size reached", "[detection][cache]") {
+TEST_CASE_METHOD(DetectorFixture, "Cache evicts entries when max size reached",
+                 "[detection][cache]") {
     auto config = configWithCustomPatterns();
     config.cacheResults = true;
     config.cacheSize = 1;

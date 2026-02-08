@@ -102,7 +102,7 @@ TEST_CASE("MCP ToolRegistryWrappers - Propagates handler errors via helper",
 }
 
 TEST_CASE("MCP ToolRegistryWrappers - Reports JSON exceptions consistently",
-           "[mcp][registry][wrappers][catch2]") {
+          "[mcp][registry][wrappers][catch2]") {
     ToolRegistry registry;
     registry.registerTool<DummyRequest, DummyResponse>(
         "dummy-json", [](const DummyRequest& req) -> boost::asio::awaitable<Result<DummyResponse>> {
@@ -150,15 +150,9 @@ TEST_CASE("MCP DTO parsing - SessionStartRequest reads defaults and fields",
 
     {
         json j = {
-            {"name", "s"},
-            {"description", "d"},
-            {"warm", false},
-            {"limit", 123},
-            {"snippet_len", 45},
-            {"cores", 2},
-            {"memory_gb", 8},
-            {"time_ms", 9999},
-            {"aggressive", true},
+            {"name", "s"},    {"description", "d"}, {"warm", false},
+            {"limit", 123},   {"snippet_len", 45},  {"cores", 2},
+            {"memory_gb", 8}, {"time_ms", 9999},    {"aggressive", true},
         };
         const auto r = MCPSessionStartRequest::fromJson(j);
         CHECK(r.name == "s");
@@ -200,7 +194,7 @@ TEST_CASE("MCP DTO parsing - SessionWatchRequest applies aliases and toggles",
 }
 
 TEST_CASE("MCP ToolRegistryWrappers - Unknown tools return helpful error",
-           "[mcp][registry][wrappers][catch2]") {
+          "[mcp][registry][wrappers][catch2]") {
     ToolRegistry registry;
 
     const auto response = runCall(registry, "not-registered", json::object());
@@ -210,7 +204,7 @@ TEST_CASE("MCP ToolRegistryWrappers - Unknown tools return helpful error",
 }
 
 TEST_CASE("MCP ToolRegistry - Duplicate registration updates annotations",
-           "[mcp][registry][annotations][catch2]") {
+          "[mcp][registry][annotations][catch2]") {
     ToolRegistry registry;
 
     // First registration has no annotations
@@ -376,7 +370,8 @@ TEST_CASE("MCP ToolRegistry - registerRawTool duplicate updates handler and desc
         CHECK(t["annotations"].is_object());
     }
 
-    CHECK(runCall(registry, "raw", json::object())["content"][0]["text"].get<std::string>() == "one");
+    CHECK(runCall(registry, "raw", json::object())["content"][0]["text"].get<std::string>() ==
+          "one");
 
     yams::mcp::ToolAnnotation ann;
     ann.readOnlyHint = true;
@@ -405,5 +400,6 @@ TEST_CASE("MCP ToolRegistry - registerRawTool duplicate updates handler and desc
         CHECK(t["annotations"].value("readOnlyHint", false) == true);
     }
 
-    CHECK(runCall(registry, "raw", json::object())["content"][0]["text"].get<std::string>() == "two");
+    CHECK(runCall(registry, "raw", json::object())["content"][0]["text"].get<std::string>() ==
+          "two");
 }

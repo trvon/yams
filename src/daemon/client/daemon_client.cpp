@@ -1606,6 +1606,53 @@ DaemonClient::callEvents(const EmbedDocumentsRequest& req) {
     co_return handler->events;
 }
 
+boost::asio::awaitable<Result<RepairResponse>>
+DaemonClient::callRepair(const RepairRequest& req,
+                         std::function<void(const RepairEvent&)> onEvent) {
+    struct Handler : public ChunkedResponseHandler {
+        explicit Handler(std::function<void(const RepairEvent&)> cb) : onEvent_(std::move(cb)) {}
+        void onHeaderReceived(const Response& headerResponse) override {
+            if (auto* err = std::get_if<ErrorResponse>(&headerResponse)) {
+                error = Error{err->code, err->message};
+            }
+        }
+        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
+            if (auto* ev = std::get_if<RepairEvent>(&r)) {
+                if (onEvent_)
+                    onEvent_(*ev);
+                return true;
+            }
+            if (auto* fin = std::get_if<RepairResponse>(&r)) {
+                finalResponse = *fin;
+                return true;
+            }
+            if (auto* err = std::get_if<ErrorResponse>(&r)) {
+                error = Error{err->code, err->message};
+                return false;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        void onComplete() override {}
+        std::function<void(const RepairEvent&)> onEvent_;
+        std::optional<Error> error;
+        std::optional<RepairResponse> finalResponse;
+    };
+
+    auto handler = std::make_shared<Handler>(std::move(onEvent));
+    auto result = co_await sendRequestStreaming(req, handler);
+    if (!result)
+        co_return result.error();
+    if (handler->error.has_value())
+        co_return *handler->error;
+    if (handler->finalResponse.has_value())
+        co_return *handler->finalResponse;
+    // If no final response was captured, synthesize an empty one
+    RepairResponse empty;
+    empty.success = true;
+    co_return empty;
+}
+
 boost::asio::awaitable<Result<ModelLoadResponse>>
 DaemonClient::loadModel(const LoadModelRequest& req) {
     struct Handler : public ChunkedResponseHandler {

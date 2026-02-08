@@ -69,8 +69,7 @@ TEST_CASE("DateRangeFilter matches returns false when date is after to",
     REQUIRE_FALSE(f.matches(now + std::chrono::seconds(1)));
 }
 
-TEST_CASE("DateRangeFilter matches returns true when no bounds set",
-          "[search][filters][catch2]") {
+TEST_CASE("DateRangeFilter matches returns true when no bounds set", "[search][filters][catch2]") {
     const auto now = Clock::now();
     DateRangeFilter f;
     REQUIRE(f.matches(now - std::chrono::hours(24)));
@@ -295,9 +294,8 @@ TEST_CASE("SearchFilters composite custom filter lambda works", "[search][filter
     const auto base = makeDefaultItem(now, "src/a.cpp");
 
     SearchFilters filters;
-    filters.addCustomFilter([](const SearchResultItem& item) {
-        return item.title.find("ok") != std::string::npos;
-    });
+    filters.addCustomFilter(
+        [](const SearchResultItem& item) { return item.title.find("ok") != std::string::npos; });
 
     auto okItem = base;
     okItem.title = "ok - match";
@@ -343,8 +341,8 @@ TEST_CASE("SearchFilters::apply filters a vector correctly (some pass, some don'
 TEST_CASE("SearchFilters::apply empty filter returns original vector unchanged",
           "[search][filters][catch2]") {
     const auto now = Clock::now();
-    const std::vector<SearchResultItem>
-        items{makeDefaultItem(now, "src/a.cpp"), makeDefaultItem(now, "src/b.cpp")};
+    const std::vector<SearchResultItem> items{makeDefaultItem(now, "src/a.cpp"),
+                                              makeDefaultItem(now, "src/b.cpp")};
 
     SearchFilters filters;
     const auto out = filters.apply(items);

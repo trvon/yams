@@ -1387,6 +1387,7 @@ struct ProviderSingleton {
                             cfg.model_path = onnxPath.string();
                             cfg.model_name = modelName;
                             cfg.num_threads = std::max(1u, std::thread::hardware_concurrency());
+                            // GPU usage is determined by runtime detection in the session
                             try {
                                 c->reranker = std::make_unique<yams::daemon::OnnxRerankerSession>(
                                     onnxPath.string(), modelName, cfg);

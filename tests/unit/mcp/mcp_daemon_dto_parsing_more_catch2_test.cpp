@@ -14,21 +14,26 @@
 
 using nlohmann::json;
 
-TEST_CASE("MCP DTO parsing - SearchRequest tolerant parsing for null/ints and before/after when no context",
+TEST_CASE("MCP DTO parsing - SearchRequest tolerant parsing for null/ints and before/after when no "
+          "context",
           "[mcp][dto][search][catch2]") {
     using yams::mcp::MCPSearchRequest;
 
     // null values should fall back to defaults
     {
-        const auto r = MCPSearchRequest::fromJson(json{{"query", "q"}, {"limit", nullptr}, {"similarity", nullptr}});
+        const auto r = MCPSearchRequest::fromJson(
+            json{{"query", "q"}, {"limit", nullptr}, {"similarity", nullptr}});
         CHECK(r.limit == 10u);
         CHECK(r.similarity == Catch::Approx(0.7));
     }
 
     // integer values should be accepted
     {
-        const auto r = MCPSearchRequest::fromJson(
-            json{{"query", "q"}, {"limit", 12}, {"similarity", 1}, {"before_context", "2"}, {"after_context", "4"}});
+        const auto r = MCPSearchRequest::fromJson(json{{"query", "q"},
+                                                       {"limit", 12},
+                                                       {"similarity", 1},
+                                                       {"before_context", "2"},
+                                                       {"after_context", "4"}});
         CHECK(r.limit == 12u);
         CHECK(r.similarity == 1.0);
         CHECK(r.context == 0);
@@ -45,8 +50,9 @@ TEST_CASE("MCP DTO parsing - SearchRequest tolerant parsing for null/ints and be
     }
 }
 
-TEST_CASE("MCP DTO parsing - SearchResponse toJson supports paths_only and score_breakdown optionals",
-          "[mcp][dto][search][catch2]") {
+TEST_CASE(
+    "MCP DTO parsing - SearchResponse toJson supports paths_only and score_breakdown optionals",
+    "[mcp][dto][search][catch2]") {
     using yams::mcp::MCPSearchResponse;
 
     {
@@ -117,17 +123,17 @@ TEST_CASE("MCP DTO parsing - SearchResponse fromJson parses optionals and breakd
         {"total", 1},
         {"type", "hybrid"},
         {"execution_time_ms", 9},
-        {"results",
-         json::array({json{{"id", "id1"},
-                          {"hash", "h"},
-                          {"title", "t"},
-                          {"path", "p"},
-                          {"score", 0.5},
-                          {"snippet", "sn"},
-                          {"diff", json{{"removed", 1}}},
-                          {"local_input_file", "/tmp/in"},
-                          {"score_breakdown",
-                           json{{"vector_score", 0.1}, {"keyword_score", 0.2}, {"structural_score", 0.3}}}}})},
+        {"results", json::array({json{{"id", "id1"},
+                                      {"hash", "h"},
+                                      {"title", "t"},
+                                      {"path", "p"},
+                                      {"score", 0.5},
+                                      {"snippet", "sn"},
+                                      {"diff", json{{"removed", 1}}},
+                                      {"local_input_file", "/tmp/in"},
+                                      {"score_breakdown", json{{"vector_score", 0.1},
+                                                               {"keyword_score", 0.2},
+                                                               {"structural_score", 0.3}}}}})},
     };
 
     const auto r = MCPSearchResponse::fromJson(fixture);
@@ -277,8 +283,8 @@ TEST_CASE("MCP DTO parsing - DeleteByNameResponse deleted accepts string/array/m
 TEST_CASE("MCP DTO parsing - Restore requests support include/exclude patterns",
           "[mcp][dto][restore][catch2]") {
     using yams::mcp::MCPRestoreCollectionRequest;
-    using yams::mcp::MCPRestoreSnapshotRequest;
     using yams::mcp::MCPRestoreRequest;
+    using yams::mcp::MCPRestoreSnapshotRequest;
 
     {
         const auto r = MCPRestoreCollectionRequest::fromJson(
@@ -303,13 +309,13 @@ TEST_CASE("MCP DTO parsing - Restore requests support include/exclude patterns",
     }
 
     {
-        const auto r = MCPRestoreRequest::fromJson(
-            json{{"collection", "c"},
-                 {"snapshot_id", "sid"},
-                 {"snapshot_label", "lab"},
-                 {"output_directory", "out"},
-                 {"dry_run", true},
-                 {"include_patterns", json::array({"a", 1, "b"})}});
+        const auto r =
+            MCPRestoreRequest::fromJson(json{{"collection", "c"},
+                                             {"snapshot_id", "sid"},
+                                             {"snapshot_label", "lab"},
+                                             {"output_directory", "out"},
+                                             {"dry_run", true},
+                                             {"include_patterns", json::array({"a", 1, "b"})}});
         CHECK(r.collection == "c");
         CHECK(r.snapshotId == "sid");
         CHECK(r.snapshotLabel == "lab");
@@ -322,8 +328,8 @@ TEST_CASE("MCP DTO parsing - Restore requests support include/exclude patterns",
 TEST_CASE("MCP DTO parsing - Restore responses parse restored_paths",
           "[mcp][dto][restore][catch2]") {
     using yams::mcp::MCPRestoreCollectionResponse;
-    using yams::mcp::MCPRestoreSnapshotResponse;
     using yams::mcp::MCPRestoreResponse;
+    using yams::mcp::MCPRestoreSnapshotResponse;
 
     {
         const auto r = MCPRestoreCollectionResponse::fromJson(
@@ -344,10 +350,10 @@ TEST_CASE("MCP DTO parsing - Restore responses parse restored_paths",
     }
 
     {
-        const auto r = MCPRestoreResponse::fromJson(
-            json{{"files_restored", 0},
-                 {"restored_paths", json::array({nullptr, "p"})},
-                 {"dry_run", true}});
+        const auto r =
+            MCPRestoreResponse::fromJson(json{{"files_restored", 0},
+                                              {"restored_paths", json::array({nullptr, "p"})},
+                                              {"dry_run", true}});
         CHECK(r.filesRestored == 0u);
         CHECK(r.restoredPaths == std::vector<std::string>{"p"});
         CHECK(r.dryRun == true);
@@ -380,12 +386,9 @@ TEST_CASE("MCP DTO parsing - GetByName and CatDocument roundtrip defaults",
     }
 
     {
-        const json fixture = {{"hash", "sha256:deadbeef"},
-                              {"name", "README.md"},
-                              {"path", "docs/README.md"},
-                              {"size", 123},
-                              {"mime_type", "text/markdown"},
-                              {"content", "# hi\n"}};
+        const json fixture = {{"hash", "sha256:deadbeef"},    {"name", "README.md"},
+                              {"path", "docs/README.md"},     {"size", 123},
+                              {"mime_type", "text/markdown"}, {"content", "# hi\n"}};
         const auto resp = MCPGetByNameResponse::fromJson(fixture);
         CHECK(resp.toJson() == fixture);
         CHECK(MCPGetByNameResponse::fromJson(resp.toJson()).toJson() == fixture);
@@ -400,10 +403,8 @@ TEST_CASE("MCP DTO parsing - GetByName and CatDocument roundtrip defaults",
     }
 
     {
-        const json fixture = {{"content", "hello"},
-                              {"hash", "sha256:abc123"},
-                              {"name", "README.md"},
-                              {"size", 5}};
+        const json fixture = {
+            {"content", "hello"}, {"hash", "sha256:abc123"}, {"name", "README.md"}, {"size", 5}};
         const auto resp = MCPCatDocumentResponse::fromJson(fixture);
         CHECK(resp.toJson() == fixture);
         CHECK(MCPCatDocumentResponse::fromJson(resp.toJson()).toJson() == fixture);
@@ -471,13 +472,12 @@ TEST_CASE("MCP DTO parsing - StatsResponse optionals only emitted when non-empty
     using yams::mcp::MCPStatsResponse;
 
     {
-        const auto r = MCPStatsResponse::fromJson(
-            json{{"total_objects", 1},
-                 {"total_bytes", 2},
-                 {"unique_hashes", 3},
-                 {"deduplication_savings", 4},
-                 {"file_types", json::array()},
-                 {"additional_stats", json::object()}});
+        const auto r = MCPStatsResponse::fromJson(json{{"total_objects", 1},
+                                                       {"total_bytes", 2},
+                                                       {"unique_hashes", 3},
+                                                       {"deduplication_savings", 4},
+                                                       {"file_types", json::array()},
+                                                       {"additional_stats", json::object()}});
         CHECK(r.fileTypes.empty());
         CHECK(r.additionalStats.empty());
         const auto j = r.toJson();
@@ -529,8 +529,7 @@ TEST_CASE("MCP DTO parsing - GraphRequest relation_filters and tolerant numeric 
     }
 }
 
-TEST_CASE("MCP DTO parsing - GraphResponse optional emission",
-          "[mcp][dto][graph][catch2]") {
+TEST_CASE("MCP DTO parsing - GraphResponse optional emission", "[mcp][dto][graph][catch2]") {
     using yams::mcp::MCPGraphResponse;
 
     {

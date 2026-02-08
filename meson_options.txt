@@ -41,6 +41,7 @@ option('enable-full-unit', type: 'boolean', value: true, description: 'Register 
 option('enable-vector-tests', type: 'boolean', value: false, description: 'Include vector/embedding tests (requires ONNX runtime and model downloads)')
 option('enable-bench-tests', type: 'boolean', value: false, description: 'Register bench/isolated performance-heavy unit tests')
 option('enable-profiling', type: 'boolean', value: false, description: 'Enable Tracy profiling instrumentation')
+option('enable-rocprofiler-tracy', type: 'feature', value: 'auto', description: 'Link Tracy client against ROCm rocprofiler (auto-detect ROCm; disabled otherwise)')
 option('enable-daemon-long-tests', type: 'boolean', value: false, description: 'Register long-running daemon lifecycle tests')
 option('enable-stress-tests', type: 'boolean', value: false, description: 'Register stress test binary')
 option('enable-reliability-tests', type: 'boolean', value: false, description: 'Register reliability gate (retries/latency sensitive)')
