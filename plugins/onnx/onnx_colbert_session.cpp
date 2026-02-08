@@ -81,9 +81,9 @@ public:
         // Attach GPU provider only if GPU is detected
         const auto& gpuInfo = resource::detectGpu();
         if (gpuInfo.detected) {
-            onnx_util::appendGpuProvider(*sessionOptions_);
-            spdlog::info("[ColBERT] GPU detected ({}), using {} provider", gpuInfo.name,
-                         gpuInfo.provider);
+            std::string ep = onnx_util::appendGpuProvider(*sessionOptions_);
+            spdlog::info("[ColBERT] GPU detected ({}), using {} execution provider", gpuInfo.name,
+                         ep);
         } else {
             spdlog::debug("[ColBERT] No GPU detected, using CPU execution provider");
         }

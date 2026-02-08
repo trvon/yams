@@ -29,7 +29,7 @@ TEST_CASE("CoreMLExecutionProvider is available in linked ONNX Runtime",
 
 TEST_CASE("appendGpuProvider attaches CoreML on macOS", "[daemon][gpu][onnx][coreml][catch2]") {
     Ort::SessionOptions opts;
-    REQUIRE_NOTHROW(yams::onnx_util::appendGpuProvider(opts));
+    REQUIRE_NOTHROW((void)yams::onnx_util::appendGpuProvider(opts));
 }
 
 #if defined(__aarch64__) || defined(__arm64__)

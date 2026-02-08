@@ -14,13 +14,13 @@ namespace yams::onnx_util {
 // Try to attach the best available GPU execution provider at runtime.
 // Queries Ort::GetAvailableProviders() so this works with any ONNX Runtime
 // build (Homebrew, pip, Conan, etc.) without compile-time defines.
-inline void appendGpuProvider(Ort::SessionOptions& opts) {
+inline std::string appendGpuProvider(Ort::SessionOptions& opts) {
     std::vector<std::string> providers;
     try {
         providers = Ort::GetAvailableProviders();
     } catch (...) {
         spdlog::debug("[ONNX] Could not query available providers");
-        return;
+        return "cpu";
     }
 
     auto has = [&](const char* name) {
@@ -38,7 +38,7 @@ inline void appendGpuProvider(Ort::SessionOptions& opts) {
             } else {
                 spdlog::debug("[ONNX] CoreML execution provider attached (pooled session)");
             }
-            return;
+            return "coreml";
         } catch (const std::exception& e) {
             spdlog::warn("[ONNX] CoreML provider failed: {}", e.what());
         }
@@ -54,7 +54,7 @@ inline void appendGpuProvider(Ort::SessionOptions& opts) {
             } else {
                 spdlog::debug("[ONNX] MIGraphX execution provider attached (pooled session)");
             }
-            return;
+            return "migraphx";
         } catch (const Ort::Exception& e) {
             spdlog::warn("[ONNX] MIGraphX provider failed: {}", e.what());
         }
@@ -74,7 +74,7 @@ inline void appendGpuProvider(Ort::SessionOptions& opts) {
             } else {
                 spdlog::debug("[ONNX] CUDA execution provider attached (pooled session)");
             }
-            return;
+            return "cuda";
         } catch (const Ort::Exception& e) {
             spdlog::warn("[ONNX] CUDA provider failed: {}", e.what());
         }
@@ -88,13 +88,14 @@ inline void appendGpuProvider(Ort::SessionOptions& opts) {
             } else {
                 spdlog::debug("[ONNX] DirectML execution provider attached (pooled session)");
             }
-            return;
+            return "directml";
         } catch (const Ort::Exception& e) {
             spdlog::warn("[ONNX] DirectML provider failed: {}", e.what());
         }
     }
 
-    spdlog::debug("[ONNX] No GPU execution provider available, using CPU");
+    spdlog::warn("[ONNX] No GPU execution provider available, using CPU");
+    return "cpu";
 }
 
 } // namespace yams::onnx_util

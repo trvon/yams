@@ -9,8 +9,11 @@
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_utils.h>
 
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 
 using namespace yams::daemon;
@@ -379,22 +382,134 @@ TEST_CASE("GraphComponent: Document ingestion when not initialized", "[daemon][g
 // =============================================================================
 
 TEST_CASE("GraphComponent: Repair graph (stub)", "[daemon][graph][maintenance]") {
-    // NOTE: repairGraph returns NotImplemented error for now.
-    // This test verifies the stub behavior.
     GraphComponentTestFixture fixture;
     GraphComponent component(fixture.metadataRepo, fixture.kgStore);
     auto initResult = component.initialize();
     REQUIRE(initResult.has_value());
 
-    auto result = component.repairGraph(true);
-    // Currently returns NotImplemented - update when implemented
-    REQUIRE_FALSE(result.has_value());
+    // Insert a document.
+    const auto filePath = (fixture.testDir / "repo" / "file.cpp").generic_string();
+    std::filesystem::create_directories(std::filesystem::path(filePath).parent_path());
+    {
+        std::ofstream f(filePath);
+        f << "int main() { return 0; }\n";
+    }
 
-    // TODO(graph-impl): When repairGraph is fully implemented, verify stats:
-    // REQUIRE(result.has_value());
-    // const auto& stats = result.value();
-    // REQUIRE(stats.nodesCreated == 0);
-    // REQUIRE(stats.nodesUpdated == 0);
+    DocumentInfo doc;
+    doc.fileName = "file.cpp";
+    doc.filePath = filePath;
+    doc.fileExtension = "cpp";
+    doc.fileSize = 100;
+    doc.sha256Hash = "repair-hash-abc";
+    doc.mimeType = "text/x-c++";
+    doc.setCreatedTime(1);
+    doc.setModifiedTime(1);
+    doc.setIndexedTime(1);
+    auto docIdRes = fixture.metadataRepo->insertDocument(doc);
+    REQUIRE(docIdRes.has_value());
+    const auto docId = docIdRes.value();
+
+    // Add a tag.
+    REQUIRE(fixture.metadataRepo
+                ->setMetadata(docId, "tag:alpha", yams::metadata::MetadataValue("alpha"))
+                .has_value());
+
+    // Repair.
+    auto result = component.repairGraph(false);
+    REQUIRE(result.has_value());
+
+    // Verify nodes.
+    auto derived = yams::metadata::computePathDerivedValues(filePath);
+    const std::string normalizedPath = derived.normalizedPath;
+    const std::string parentPath = derived.pathPrefix;
+
+    auto blobNode = fixture.kgStore->getNodeByKey("blob:repair-hash-abc");
+    REQUIRE(blobNode.has_value());
+    REQUIRE(blobNode.value().has_value());
+
+    auto docNode = fixture.kgStore->getNodeByKey("doc:repair-hash-abc");
+    REQUIRE(docNode.has_value());
+    REQUIRE(docNode.value().has_value());
+
+    auto fileNode = fixture.kgStore->getNodeByKey("file:" + normalizedPath);
+    REQUIRE(fileNode.has_value());
+    REQUIRE(fileNode.value().has_value());
+
+    auto dirNode = fixture.kgStore->getNodeByKey("dir:" + parentPath);
+    REQUIRE(dirNode.has_value());
+    REQUIRE(dirNode.value().has_value());
+
+    auto tagNode = fixture.kgStore->getNodeByKey("tag:alpha");
+    REQUIRE(tagNode.has_value());
+    REQUIRE(tagNode.value().has_value());
+
+    // Verify edges.
+    auto fileToBlob = fixture.kgStore->getEdgesFrom(fileNode.value()->id, "has_version");
+    REQUIRE(fileToBlob.has_value());
+    REQUIRE_FALSE(fileToBlob.value().empty());
+    CHECK(std::any_of(fileToBlob.value().begin(), fileToBlob.value().end(),
+                      [&](const auto& e) { return e.dstNodeId == blobNode.value()->id; }));
+
+    auto blobToFile = fixture.kgStore->getEdgesFrom(blobNode.value()->id, "blob_at_path");
+    REQUIRE(blobToFile.has_value());
+    REQUIRE_FALSE(blobToFile.value().empty());
+    CHECK(std::any_of(blobToFile.value().begin(), blobToFile.value().end(),
+                      [&](const auto& e) { return e.dstNodeId == fileNode.value()->id; }));
+
+    auto dirToFile = fixture.kgStore->getEdgesFrom(dirNode.value()->id, "contains");
+    REQUIRE(dirToFile.has_value());
+    REQUIRE_FALSE(dirToFile.value().empty());
+    CHECK(std::any_of(dirToFile.value().begin(), dirToFile.value().end(),
+                      [&](const auto& e) { return e.dstNodeId == fileNode.value()->id; }));
+
+    auto docToTag = fixture.kgStore->getEdgesFrom(docNode.value()->id, "has_tag");
+    REQUIRE(docToTag.has_value());
+    REQUIRE_FALSE(docToTag.value().empty());
+    CHECK(std::any_of(docToTag.value().begin(), docToTag.value().end(),
+                      [&](const auto& e) { return e.dstNodeId == tagNode.value()->id; }));
+
+    auto docToBlob = fixture.kgStore->getEdgesFrom(docNode.value()->id, "has_blob");
+    REQUIRE(docToBlob.has_value());
+    REQUIRE_FALSE(docToBlob.value().empty());
+    CHECK(std::any_of(docToBlob.value().begin(), docToBlob.value().end(),
+                      [&](const auto& e) { return e.dstNodeId == blobNode.value()->id; }));
+}
+
+TEST_CASE("GraphComponent: Repair graph dry-run rolls back", "[daemon][graph][maintenance]") {
+    GraphComponentTestFixture fixture;
+    GraphComponent component(fixture.metadataRepo, fixture.kgStore);
+    auto initResult = component.initialize();
+    REQUIRE(initResult.has_value());
+
+    // Insert a document.
+    const auto filePath = (fixture.testDir / "repo" / "dry" / "file.cpp").generic_string();
+    std::filesystem::create_directories(std::filesystem::path(filePath).parent_path());
+    {
+        std::ofstream f(filePath);
+        f << "int x = 1;\n";
+    }
+
+    DocumentInfo doc;
+    doc.fileName = "file.cpp";
+    doc.filePath = filePath;
+    doc.fileExtension = "cpp";
+    doc.fileSize = 10;
+    doc.sha256Hash = "repair-hash-dry";
+    doc.mimeType = "text/x-c++";
+    doc.setCreatedTime(1);
+    doc.setModifiedTime(1);
+    doc.setIndexedTime(1);
+    auto docIdRes = fixture.metadataRepo->insertDocument(doc);
+    REQUIRE(docIdRes.has_value());
+
+    // Repair (dry-run).
+    auto result = component.repairGraph(true);
+    REQUIRE(result.has_value());
+
+    // Ensure nothing persisted.
+    auto blobNode = fixture.kgStore->getNodeByKey("blob:repair-hash-dry");
+    REQUIRE(blobNode.has_value());
+    CHECK_FALSE(blobNode.value().has_value());
 }
 
 TEST_CASE("GraphComponent: Validate graph (stub)", "[daemon][graph][maintenance]") {

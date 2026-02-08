@@ -1,6 +1,7 @@
 // Replace stub with actual ONNX-backed implementation
 #include "model_provider.h"
 #include <nlohmann/json.hpp>
+#include <onnxruntime_cxx_api.h>
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <cstdlib>
@@ -88,6 +89,7 @@ struct ProviderCtx {
     bool ready = false;
     bool disabled = false;
     bool gpuEnabled = false; // Tracks whether GPU acceleration is configured
+    std::string actualExecutionProvider{"cpu"};
     std::string last_error;
     std::string rerankerModelPath; // Path to reranker model
     std::string rerankerModelName; // Name of reranker model
@@ -509,6 +511,18 @@ struct ProviderCtx {
                 ready = true;
                 last_error.clear();
                 spdlog::info("[ONNX-Plugin] Pool initialized successfully, ready=true");
+
+                // Best-effort: derive actual EP from a preloaded model (if any)
+                try {
+                    if (!cfg.preloadModels.empty()) {
+                        auto h = pool->acquireModel(cfg.preloadModels.front(),
+                                                    std::chrono::milliseconds(500));
+                        if (h) {
+                            actualExecutionProvider = h.value()->getExecutionProvider();
+                        }
+                    }
+                } catch (...) {
+                }
             } else {
                 ready = false;
                 last_error = res.error().message;
@@ -1237,23 +1251,39 @@ struct ProviderSingleton {
             j["model"] = model_id;
             // Best-effort dimension and runtime hints
             j["graph_optimization"] = "enabled";
-            // Report actual execution provider based on configuration
-            // GPU providers: CUDA (Linux), CoreML (macOS), DirectML (Windows)
-            if (c->gpuEnabled) {
-#if defined(__APPLE__)
-                j["execution_provider"] = "coreml";
-#elif defined(_WIN32)
-#if defined(YAMS_ONNX_CUDA_ENABLED)
-                j["execution_provider"] = "cuda";
-#else
-                j["execution_provider"] = "directml";
-#endif
-#else
-                j["execution_provider"] = "cuda";
-#endif
-            } else {
-                j["execution_provider"] = "cpu";
+
+            // Best-effort: report ONNX Runtime build's available providers
+            try {
+                auto providers = Ort::GetAvailableProviders();
+                auto arr = nlohmann::json::array();
+                for (const auto& p : providers)
+                    arr.push_back(p);
+                j["available_providers"] = std::move(arr);
+            } catch (...) {
+                // ignore
             }
+
+            // Report the actual execution provider used by a session (not a platform guess)
+            std::string ep = "cpu";
+            if (c->ready) {
+                try {
+                    auto h = c->pool->acquireModel(model_id, std::chrono::milliseconds(500));
+                    if (h) {
+                        ep = h.value()->getExecutionProvider();
+                        {
+                            std::lock_guard<std::mutex> lk(c->mu);
+                            c->actualExecutionProvider = ep;
+                        }
+                    }
+                } catch (...) {
+                }
+            }
+            if (ep == "cpu") {
+                std::lock_guard<std::mutex> lk(c->mu);
+                if (!c->actualExecutionProvider.empty())
+                    ep = c->actualExecutionProvider;
+            }
+            j["execution_provider"] = ep;
             size_t dim = 0;
             if (c->ready) {
                 auto h = c->pool->acquireModel(model_id, std::chrono::seconds(2));
@@ -1594,6 +1624,51 @@ extern "C" const char* yams_onnx_get_health_json_cstr() {
         j["reason"] = c.last_error.empty() ? "init_failed" : c.last_error;
     } else {
         j["status"] = "ok";
+    }
+
+    // Execution provider + available providers (best-effort)
+    {
+        std::string ep = "cpu";
+        {
+            std::lock_guard<std::mutex> lk(c.mu);
+            ep = c.actualExecutionProvider;
+        }
+
+        if (c.pool) {
+            try {
+                // Try a quick acquire of any ready model to get the real EP.
+                std::string candidateModelId;
+                {
+                    std::lock_guard<std::mutex> lk(c.mu);
+                    for (const auto& [modelId, state] : c.model_states) {
+                        if (state == ProviderCtx::State::Ready) {
+                            candidateModelId = modelId;
+                            break;
+                        }
+                    }
+                }
+
+                if (!candidateModelId.empty()) {
+                    auto h = c.pool->acquireModel(candidateModelId, std::chrono::milliseconds(50));
+                    if (h) {
+                        ep = h.value()->getExecutionProvider();
+                        std::lock_guard<std::mutex> lk(c.mu);
+                        c.actualExecutionProvider = ep;
+                    }
+                }
+            } catch (...) {
+                // Keep cached EP on any failure.
+            }
+        }
+
+        j["execution_provider"] = ep;
+
+        try {
+            auto providers = Ort::GetAvailableProviders();
+            j["available_providers"] = providers;
+        } catch (...) {
+            // omit on failure
+        }
     }
 
     // Add model states for diagnostics
