@@ -85,3 +85,9 @@ builddir
 /subprojects/*
 !/subprojects/*.wrap
 !/subprojects/packagefiles/
+
+# Local dev artifacts
+.conan2-local/
+ci_logs/
+**/__pycache__/
+*.pyc

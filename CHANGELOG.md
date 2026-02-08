@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Homebrew plugin directory structure**: Formula now preserves `lib/yams/plugins/` subdirectory instead of flattening all libs into Homebrew's `lib/`. Plugins are correctly discovered by the daemon after `brew install`.
 - **ONNX Runtime dependency**: Homebrew formulas now declare `depends_on "onnxruntime"` and strip the bundled `libonnxruntime*` to avoid conflicts. A `post_install` rpath fixup ensures plugins find Homebrew's copy.
 - **GPU acceleration not enabled**: Fixed ONNX plugin not receiving GPU provider defines (`YAMS_ONNX_COREML_ENABLED`, `YAMS_ONNX_CUDA_ENABLED`, etc.) despite `setup.sh` detecting GPU support. The Meson build now tries pkg-config first to get compile definitions, with platform detection fallback for macOS CoreML. Also fixed ROCm (AMD GPU) build logic in setup script.
+- **Stuck-doc recovery enqueue**: Fixed repair stuck-document recovery enqueueing `PostIngestTask`s to an unused InternalEventBus channel. Recovery now enqueues to `post_ingest` (consumed by PostInestQueue), so re-extraction actually runs.
+- **Doctor FTS5 reindex SQLite TOOBIG**: Added best-effort truncation retry for oversized extracted text and report `truncated=<n>` in output.
+- **SQLite bind diagnostics**: Improved error messages for string/blob binds with length/limit details and better rc/db context.
+- **Persisted extracted text cap**: Cap persisted extracted text to 16 MiB (best-effort) during ingest/repair/FTS rebuild to avoid SQLite length limit failures.
+- **Embedding repair lock contention**: Reduce time spent holding the cross-process vector DB lock by batching chunk embedding outside the lock and inserting records in a single batch.
 
 ## [v0.8.2] - February 2, 2026
 
