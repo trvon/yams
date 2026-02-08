@@ -77,8 +77,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
                 }
                 case 4: {
                     DeleteRequest req;
-                    req.hashOrPath = std::string(reinterpret_cast<const char*>(data),
-                                                 std::min(size, size_t(256)));
+                    req.hash = std::string(reinterpret_cast<const char*>(data),
+                                           std::min(size, size_t(256)));
                     msg.payload = req;
                     break;
                 }

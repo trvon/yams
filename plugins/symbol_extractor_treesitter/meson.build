@@ -30,6 +30,7 @@ extractor_headers = files(
 
 tl_expected_dep = dependency('tl-expected', required: true)
 spdlog_dep = dependency('spdlog', required: true)
+fmt_dep = dependency('fmt', required: true)
 yams_config_dep = dependency('yams_config', required: true)
 
 if cpp.get_id() == 'msvc' or cpp.get_id() == 'clang-cl'
@@ -42,7 +43,7 @@ shared_module(
   'yams_symbol_extractor',
   extractor_sources,
   include_directories: [ include_directories('../../include'), include_directories('.') ],
-  dependencies: [ts_dep, libdl_dep, tl_expected_dep, spdlog_dep, yams_config_dep],
+  dependencies: [ts_dep, libdl_dep, tl_expected_dep, spdlog_dep, fmt_dep, yams_config_dep],
   override_options: ['cpp_std=' + _plugin_std],
   build_by_default: true,
   install: true,

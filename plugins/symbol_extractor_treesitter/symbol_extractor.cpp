@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <array>
 #include <expected>
-#include <format>
 #include <ranges>
 #include <set>
 #include <span>
@@ -701,7 +700,7 @@ SymbolExtractor::Result SymbolExtractor::extract(std::string_view content,
                                                  std::string_view file_path, bool enable_call_graph,
                                                  std::source_location loc) {
     if (!language_) {
-        return tl::unexpected(std::format("No tree-sitter language loaded for {} (at {}:{})",
+        return tl::unexpected(fmt::format("No tree-sitter language loaded for {} (at {}:{})",
                                           language, loc.file_name(), loc.line()));
     }
 
@@ -790,7 +789,7 @@ SymbolExtractor::Result SymbolExtractor::extract(std::string_view content,
     } catch (const std::exception& e) {
         if (ctx.tree)
             ts_tree_delete(ctx.tree);
-        return tl::unexpected(std::format("Extraction exception: {}", e.what()));
+        return tl::unexpected(fmt::format("Extraction exception: {}", e.what()));
     }
 
     if (ctx.tree)

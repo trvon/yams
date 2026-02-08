@@ -7,6 +7,7 @@ AFL++ fuzzing harnesses for CLI/daemon IPC protocol testing per issue #8.
 ### Protocol Layer
 - `fuzz_ipc_protocol` - MessageFramer, CRC32 validation, frame header parsing
 - `fuzz_add_document` - AddDocumentRequest/UpdateDocumentRequest deserialization
+- `fuzz_ipc_roundtrip` - CLI<->daemon framing + payload decode/encode roundtrip
 
 ### Daemon Services & IPC Bus
 - `fuzz_proto_serializer` - Protobuf encoding/decoding of IPC message payloads
@@ -19,30 +20,31 @@ Fuzzers run in `aflplusplus/aflplusplus` Docker container for reproducibility.
 
 Build fuzzers:
 ```bash
-./tools/fuzzing/fuzz-docker.sh build
+./tools/fuzzing/fuzz.sh build
 ```
 
 Run fuzzer:
 ```bash
-./tools/fuzzing/fuzz-docker.sh fuzz ipc_protocol
-./tools/fuzzing/fuzz-docker.sh fuzz add_document
-./tools/fuzzing/fuzz-docker.sh fuzz proto_serializer
-./tools/fuzzing/fuzz-docker.sh fuzz request_handler
-./tools/fuzzing/fuzz-docker.sh fuzz streaming_processor
+./tools/fuzzing/fuzz.sh fuzz ipc_protocol
+./tools/fuzzing/fuzz.sh fuzz add_document
+./tools/fuzzing/fuzz.sh fuzz ipc_roundtrip
+./tools/fuzzing/fuzz.sh fuzz proto_serializer
+./tools/fuzzing/fuzz.sh fuzz request_handler
+./tools/fuzzing/fuzz.sh fuzz streaming_processor
 ```
 
 Monitor:
 ```bash
-./tools/fuzzing/fuzz-docker.sh exec afl-whatsup /fuzz/findings/ipc_protocol
-./tools/fuzzing/fuzz-docker.sh exec afl-whatsup /fuzz/findings/proto_serializer
+./tools/fuzzing/fuzz.sh exec afl-whatsup /fuzz/findings/ipc_protocol
+./tools/fuzzing/fuzz.sh exec afl-whatsup /fuzz/findings/proto_serializer
 ```
 
 Reproduce crash:
 ```bash
-./tools/fuzzing/fuzz-docker.sh exec \
-  /build/tools/fuzzing/fuzz_ipc_protocol /fuzz/findings/ipc_protocol/crashes/id:000000*
-./tools/fuzzing/fuzz-docker.sh exec \
-  /build/tools/fuzzing/fuzz_proto_serializer /fuzz/findings/proto_serializer/crashes/id:000000*
+./tools/fuzzing/fuzz.sh exec \
+  /src/build/fuzzing/tools/fuzzing/fuzz_ipc_protocol /fuzz/findings/ipc_protocol/crashes/id:000000*
+./tools/fuzzing/fuzz.sh exec \
+  /src/build/fuzzing/tools/fuzzing/fuzz_proto_serializer /fuzz/findings/proto_serializer/crashes/id:000000*
 ```
 
 ## Architecture
@@ -52,7 +54,7 @@ Reproduce crash:
 ```
 tools/fuzzing/
 ├── README.md                       # This file
-├── fuzz-docker.sh                 # Docker wrapper script
+├── fuzz.sh                         # Docker wrapper script
 ├── meson.build                    # Build definitions
 ├── fuzz_ipc_protocol.cpp          # IPC protocol fuzzer harness
 ├── fuzz_add_document.cpp          # Document fuzzer harness
@@ -64,12 +66,14 @@ tools/fuzzing/
 data/fuzz/
 ├── corpus/                        # Input seeds (read-only for fuzzer)
 │   ├── ipc_protocol/             # IPC protocol seeds
+│   ├── ipc_roundtrip/             # CLI/daemon roundtrip seeds
 │   ├── add_document/             # Document request seeds
 │   ├── proto_serializer/         # Protobuf message seeds
 │   ├── request_handler/          # Request handler seeds
 │   └── streaming_processor/      # Streaming processor seeds
 └── findings/                      # AFL++ output (crashes, hangs, queue)
     ├── ipc_protocol/
+    ├── ipc_roundtrip/
     ├── add_document/
     ├── proto_serializer/
     ├── request_handler/
@@ -100,11 +104,10 @@ data/fuzz/
 ## Configuration
 
 Conan profile (`conan/profiles/aflplusplus-docker`):
-- `AFL_HARDEN=1` - Stack protector, fortify source
 - `AFL_USE_ASAN=1` - Address sanitizer
 - `AFL_LLVM_INSTRUMENT=AFL` - AFL instrumentation mode
 - Compiler: `afl-clang-fast++`
-- libcxx: `libc++` (container default)
+- libcxx: `libstdc++11`
 
 Compiler flags:
 - `-fsanitize=fuzzer` (compile and link)
@@ -115,27 +118,26 @@ Compiler flags:
 Parallel fuzzing (main + secondary workers):
 ```bash
 # Terminal 1
-./tools/fuzzing/fuzz-docker.sh fuzz ipc
+./tools/fuzzing/fuzz.sh fuzz ipc_protocol
 
 # Terminal 2-N
-docker run -ti --rm -v "$(pwd):/src:ro" -v "$(pwd)/build/fuzzing:/build" \
-  -v "$(pwd)/data/fuzz:/fuzz" aflplusplus/aflplusplus \
-  afl-fuzz -i /fuzz/corpus/ipc -o /fuzz/findings/ipc \
-  -S worker1 -m none /build/tools/fuzzing/fuzz_ipc_protocol
+docker run -ti --rm -v "$(pwd)/data/fuzz:/fuzz" yams-fuzz \
+  afl-fuzz -i /fuzz/corpus/ipc_protocol -o /fuzz/findings/ipc_protocol \
+  -S worker1 -m none /src/build/fuzzing/tools/fuzzing/fuzz_ipc_protocol
 ```
 
 Corpus minimization:
 ```bash
-./tools/fuzzing/fuzz-docker.sh exec bash -c \
-  "afl-cmin -i /fuzz/findings/ipc/queue -o /fuzz/corpus/ipc_min -m none \
-   -- /build/tools/fuzzing/fuzz_ipc_protocol"
+./tools/fuzzing/fuzz.sh exec bash -c \
+  "afl-cmin -i /fuzz/findings/ipc_protocol/queue -o /fuzz/corpus/ipc_min -m none \
+  -- /src/build/fuzzing/tools/fuzzing/fuzz_ipc_protocol"
 ```
 
 Crash minimization:
 ```bash
-./tools/fuzzing/fuzz-docker.sh exec bash -c \
-  "afl-tmin -i /fuzz/findings/ipc/crashes/id:000000 -o crash_min -m none \
-   -- /build/tools/fuzzing/fuzz_ipc_protocol"
+./tools/fuzzing/fuzz.sh exec bash -c \
+  "afl-tmin -i /fuzz/findings/ipc_protocol/crashes/id:000000 -o crash_min -m none \
+  -- /src/build/fuzzing/tools/fuzzing/fuzz_ipc_protocol"
 ```
 
 ## Seed Corpus
@@ -164,8 +166,8 @@ See `.github/workflows/fuzzing.yml`:
 
 Reproduce:
 ```bash
-./tools/fuzzing/fuzz-docker.sh exec \
-  /build/tools/fuzzing/fuzz_ipc_protocol /fuzz/findings/ipc/crashes/id:000000*
+./tools/fuzzing/fuzz.sh exec \
+  /src/build/fuzzing/tools/fuzzing/fuzz_ipc_protocol /fuzz/findings/ipc_protocol/crashes/id:000000*
 ```
 
 ASAN provides automatic stack traces. After fixing:
@@ -175,7 +177,7 @@ ASAN provides automatic stack traces. After fixing:
 
 ## Troubleshooting
 
-AFL++ compiler not detected: Use `./tools/fuzzing/fuzz-docker.sh build`
+AFL++ compiler not detected: Use `./tools/fuzzing/fuzz.sh build`
 
 No instrumentation: Verify Conan profile `conan/profiles/aflplusplus-docker` sets `afl-clang-fast++`
 

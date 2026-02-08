@@ -259,7 +259,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
                      [language](const auto& repo) { return repo.language == language; });
 
     if (repo_info == std::end(kGrammarRepos)) {
-        return tl::unexpected(std::format("Language '{}' auto-download not supported", language));
+        return tl::unexpected(fmt::format("Language '{}' auto-download not supported", language));
     }
 
     auto grammar_path =
@@ -268,7 +268,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
 
     // Create temp directory for build
     auto temp_dir =
-        std::filesystem::temp_directory_path() / std::format("yams-grammar-build-{}", language);
+        std::filesystem::temp_directory_path() / fmt::format("yams-grammar-build-{}", language);
     std::filesystem::create_directories(temp_dir);
 
     // Cleanup guard
@@ -282,7 +282,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
     try {
         // Clone repository
         std::string clone_cmd =
-            std::format("cd {} && git clone --depth 1 https://github.com/{} tree-sitter-{}",
+            fmt::format("cd {} && git clone --depth 1 https://github.com/{} tree-sitter-{}",
                         temp_dir.string(), repo_info->repo, language);
 
         std::cout << "🔄 Cloning grammar repository..." << std::endl;
@@ -292,7 +292,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
         }
 
         // Build grammar (portable)
-        auto build_dir = temp_dir / std::format("tree-sitter-{}", language);
+        auto build_dir = temp_dir / fmt::format("tree-sitter-{}", language);
 
         // Special handling for TypeScript which has subdirectories
         if (language == "typescript") {
@@ -323,13 +323,13 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
         }
 
 #ifdef __APPLE__
-        std::string lib_name = std::format("libtree-sitter-{}.dylib", language);
+    std::string lib_name = fmt::format("libtree-sitter-{}.dylib", language);
         std::string flags = "-dynamiclib";
 #elif defined(_WIN32)
-        std::string lib_name = std::format("tree-sitter-{}.dll", language);
+    std::string lib_name = fmt::format("tree-sitter-{}.dll", language);
         std::string flags = "-shared";
 #else
-        std::string lib_name = std::format("libtree-sitter-{}.so", language);
+    std::string lib_name = fmt::format("libtree-sitter-{}.so", language);
         std::string flags = "-shared -fPIC";
 #endif
 
@@ -404,11 +404,11 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
 
         // Find built library
 #ifdef __APPLE__
-        auto built_lib = build_dir / std::format("libtree-sitter-{}.dylib", language);
+        auto built_lib = build_dir / fmt::format("libtree-sitter-{}.dylib", language);
 #elif defined(_WIN32)
-        auto built_lib = build_dir / std::format("tree-sitter-{}.dll", language);
+        auto built_lib = build_dir / fmt::format("tree-sitter-{}.dll", language);
 #else
-        auto built_lib = build_dir / std::format("libtree-sitter-{}.so", language);
+        auto built_lib = build_dir / fmt::format("libtree-sitter-{}.so", language);
 #endif
 
         if (!std::filesystem::exists(built_lib)) {

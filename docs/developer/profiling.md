@@ -110,6 +110,24 @@ valgrind --tool=massif \
 massif-visualizer massif.out.*
 ```
 
+#### Daemon under Massif (startup + ingest)
+
+1. Build the profiling daemon: `./setup.sh Profiling && meson compile -C build/profiling`
+2. Run the daemon under Massif and give it a few minutes to bring up plugins, repair, and model loads:
+   ```bash
+   timeout 600s valgrind --tool=massif --stacks=yes --time-unit=ms --detailed-freq=10 \
+           --max-snapshots=400 --massif-out-file=/tmp/massif.yams-daemon.out \
+           build/profiling/src/daemon/yams-daemon --foreground --log-level=info
+   ```
+3. While Massif runs, drive a workload from another shell (e.g., ingest a tree):  
+   `build/profiling/tools/yams-cli/yams add /path/to/data --recursive`
+4. Inspect results: `ms_print /tmp/massif.yams-daemon.out | less` or open in `massif-visualizer`.
+
+Tips:
+- Increase `timeout` and `--max-snapshots` for longer captures.
+- `--time-unit=ms` helps correlate snapshots with daemon logs.
+- If the profiling build is not available, you can substitute the installed daemon binary: replace the last line with `/usr/local/bin/yams-daemon --foreground --log-level=info` (features like TSAN may be disabled).
+
 ### Cachegrind (Cache Analysis)
 
 ```bash

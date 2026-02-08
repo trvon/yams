@@ -4,6 +4,11 @@ FROM aflplusplus/aflplusplus:latest
 
 # Install system dependencies (per docs/BUILD-GCC.md)
 RUN apt-get update && apt-get install -y \
+    gcc-12 \
+    g++-12 \
+    g++ \
+    libc6-dev \
+    libstdc++-12-dev \
     libssl-dev \
     libcurl4-openssl-dev \
     libsqlite3-dev \
@@ -11,6 +16,11 @@ RUN apt-get update && apt-get install -y \
     libprotobuf-dev \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Ensure clang toolchains can locate standard library headers on arm64 and x86_64
+ENV CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/aarch64-linux-gnu/c++/12:/usr/include/x86_64-linux-gnu/c++/12:/usr/include
+ENV C_INCLUDE_PATH=/usr/include
+ENV CXXFLAGS="-Wno-error=pointer-to-int-cast -Wno-error=int-to-pointer-cast"
 
 # Install Conan and dependencies
 RUN pip3 install conan
@@ -40,7 +50,7 @@ RUN mkdir -p build/fuzzing && \
       -o "zstd/*:build_programs=False" && \
     cd build/fuzzing && \
     . ./build-debug/conan/conanbuild.sh && \
-    CC=afl-clang-fast CXX=afl-clang-fast++ meson setup --native-file build-debug/conan/conan_meson_native.ini --buildtype=debug -Dbuild-fuzzers=true -Dbuild-tests=false ../.. && \
+    CC=afl-clang-fast CXX=afl-clang-fast++ meson setup --native-file build-debug/conan/conan_meson_native.ini --buildtype=debug -Dbuild-fuzzers=true -Dbuild-tests=false -Dbuild-benchmarks=false ../.. && \
     meson compile
 
 # Set up fuzzing directories
