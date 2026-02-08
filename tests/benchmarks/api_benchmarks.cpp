@@ -1,12 +1,12 @@
 #include <algorithm>
 #include <filesystem>
 #include <iterator>
-#include <random>
 #include <thread>
 #include <vector>
 
 #include "../common/fixture_manager.h"
 #include "../common/test_data_generator.h"
+#include "../common/test_helpers_catch2.h"
 #include "benchmark_base.h"
 
 #include <yams/api/content_metadata.h>
@@ -35,8 +35,7 @@ public:
 
 protected:
     void setUp() {
-        tempDir_ = std::filesystem::temp_directory_path() / "yams_bench_ingestion";
-        std::filesystem::create_directories(tempDir_);
+        tempDir_ = test::make_temp_dir("yams_bench_ingestion_");
         auto result = api::createContentStore(tempDir_ / "storage");
         if (!result) {
             throw std::runtime_error("Failed to create content store: " + result.error().message);
@@ -45,7 +44,10 @@ protected:
         generator_ = std::make_unique<test::TestDataGenerator>();
     }
 
-    void tearDown() { std::filesystem::remove_all(tempDir_); }
+    void tearDown() {
+        std::error_code ec;
+        std::filesystem::remove_all(tempDir_, ec);
+    }
 
     void collectCustomMetrics(std::map<std::string, double>& metrics) override {
         metrics["dedup_ratio"] = lastDedupRatio_;
@@ -108,8 +110,7 @@ public:
 
 protected:
     void setUp() {
-        tempDir_ = std::filesystem::temp_directory_path() / "yams_bench_metadata";
-        std::filesystem::create_directories(tempDir_);
+        tempDir_ = test::make_temp_dir("yams_bench_metadata_");
         auto dbPath = tempDir_ / "metadata.db";
         connectionPool_ = std::make_unique<metadata::ConnectionPool>(dbPath.string());
         metadataRepo_ = std::make_unique<metadata::MetadataRepository>(*connectionPool_);
@@ -120,7 +121,8 @@ protected:
     void tearDown() {
         metadataRepo_.reset();
         connectionPool_.reset();
-        std::filesystem::remove_all(tempDir_);
+        std::error_code ec;
+        std::filesystem::remove_all(tempDir_, ec);
     }
 
     void createTestDocuments() {
@@ -156,15 +158,23 @@ protected:
 
 BENCHMARK_F(MetadataBenchmark, SingleUpdate) {
     static size_t docIndex = 0;
-    const auto& docId = documentIds_[docIndex % documentIds_.size()];
-    docIndex++;
-    auto result = metadataRepo_->setMetadata(
-        docId, "status", metadata::MetadataValue("updated_" + std::to_string(docIndex)));
-    if (!result) {
-        failedOperations_++;
-        return 0;
+
+    // Amortize timing overhead (high_resolution_clock + loop) by executing several
+    // logically-independent single-row updates per benchmark iteration.
+    constexpr size_t kOpsPerIteration = 100;
+    size_t succeeded = 0;
+    for (size_t i = 0; i < kOpsPerIteration; ++i) {
+        const auto& docId = documentIds_[docIndex % documentIds_.size()];
+        ++docIndex;
+        auto result = metadataRepo_->setMetadata(
+            docId, "status", metadata::MetadataValue("updated_" + std::to_string(docIndex)));
+        if (!result) {
+            ++failedOperations_;
+            continue;
+        }
+        ++succeeded;
     }
-    return 1;
+    return succeeded;
 }
 
 BENCHMARK_F(MetadataBenchmark, BulkUpdate) {

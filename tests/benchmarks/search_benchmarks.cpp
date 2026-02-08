@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "../common/test_data_generator.h"
+#include "../common/test_helpers_catch2.h"
 #include "benchmark_base.h"
 
 #include <yams/api/content_store.h>
@@ -31,8 +32,7 @@ public:
 
 protected:
     void setUp() {
-        tempDir_ = std::filesystem::temp_directory_path() / "yams_bench_search";
-        std::filesystem::create_directories(tempDir_);
+        tempDir_ = test::make_temp_dir("yams_bench_search_");
         auto result = api::createContentStore(tempDir_ / "storage");
         if (!result) {
             throw std::runtime_error("Failed to create content store: " + result.error().message);
@@ -48,7 +48,10 @@ protected:
         queries_ = {"benchmark", "performance", "search"};
     }
 
-    void tearDown() { std::filesystem::remove_all(tempDir_); }
+    void tearDown() {
+        std::error_code ec;
+        std::filesystem::remove_all(tempDir_, ec);
+    }
 
     size_t runIteration() override {
         // This is a mock implementation as IContentStore has no search method.

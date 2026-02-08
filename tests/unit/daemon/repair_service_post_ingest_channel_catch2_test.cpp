@@ -88,10 +88,14 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     auto postIngest =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
             "post_ingest", 64);
+    auto postIngestRpc =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+            "post_ingest_rpc", 64);
     auto postIngestTasks =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
             "post_ingest_tasks", 64);
     drainQueue(postIngest);
+    drainQueue(postIngestRpc);
     drainQueue(postIngestTasks);
 
     // Ensure optional subsystems don't trigger heavy init in this unit test.
@@ -128,6 +132,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 
     // Clear any background noise after pause.
     drainQueue(postIngest);
+    drainQueue(postIngestRpc);
     drainQueue(postIngestTasks);
 
     metadata::DocumentInfo doc{};
@@ -166,11 +171,14 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 
     (void)repair.executeRepair(req, nullptr);
 
-    // Correct behavior: tasks land on the channel PostIngestQueue consumes ("post_ingest").
-    REQUIRE(postIngest->size_approx() == 1);
+    // Correct behavior: tasks land on the high-priority channel PostIngestQueue consumes first
+    // ("post_ingest_rpc").
+    REQUIRE(postIngestRpc->size_approx() == 1);
+    REQUIRE(postIngest->size_approx() == 0);
     REQUIRE(postIngestTasks->size_approx() == 0);
 
     drainQueue(postIngest);
+    drainQueue(postIngestRpc);
     drainQueue(postIngestTasks);
 
     sm->shutdown();

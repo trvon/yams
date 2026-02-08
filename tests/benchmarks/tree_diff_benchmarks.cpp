@@ -18,10 +18,13 @@
  * - Large snapshot performance (10k, 50k, 100k entries)
  */
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <random>
 #include <set>
+#include <sstream>
 #include "../benchmarks/benchmark_base.h"
 #include <yams/metadata/tree_builder.h>
 #include <yams/metadata/tree_differ.h>
@@ -77,7 +80,11 @@ public:
         std::stringstream ss;
         ss << std::hex << std::setfill('0');
         for (int i = 0; i < 8; ++i) {
-            ss << std::setw(8) << (seed + i);
+            // Force exactly 8 hex chars per chunk so we always emit 64 hex chars total.
+            // size_t is commonly 64-bit; without masking, values can exceed 8 hex chars.
+            const std::uint32_t word =
+                static_cast<std::uint32_t>((seed + static_cast<size_t>(i)) & 0xffffffffu);
+            ss << std::setw(8) << word;
         }
         return ss.str();
     }

@@ -925,6 +925,27 @@ if catch2_dep.found()
       build_rpath: ':'.join(_test_rpaths),
       install: false,
     )
+
+    catch2_onnx_embedding_diag_exe = executable('catch2_onnx_embedding_diag',
+      files(
+        'unit/daemon/onnx_embedding_diagnostic_test.cpp',
+        '../plugins/onnx/model_provider.cpp',
+        '../plugins/onnx/onnx_model_pool.cpp',
+        '../plugins/onnx/onnx_reranker_session.cpp',
+        '../plugins/onnx/onnx_colbert_session.cpp',
+      ),
+      include_directories: incs,
+      dependencies: onnx_provider_test_deps,
+      cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+      build_rpath: ':'.join(_test_rpaths),
+      install: false,
+    )
+
+    test('onnx_embedding_diagnostic', catch2_onnx_embedding_diag_exe,
+      suite: ['catch2', 'unit', 'daemon', 'onnx', 'diagnostic'],
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: 120,
+    )
   endif
 
   catch2_plugin_infrastructure_exe = executable('catch2_plugin_infrastructure',

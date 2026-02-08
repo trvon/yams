@@ -1029,16 +1029,19 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
 Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::string& key,
                                              const MetadataValue& value) {
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        repository::MetadataEntry entry;
-        entry.documentId = documentId;
-        entry.key = key;
-        entry.value = value.value;
-        entry.valueType = MetadataValueTypeUtils::toString(value.type);
-
-        // Use INSERT OR REPLACE which handles composite PK (document_id, key) correctly
-        repository::CrudOps<repository::MetadataEntry> ops;
-        std::vector<repository::MetadataEntry> batch{entry};
-        YAMS_TRY(ops.upsertBatch(db, batch));
+        // Single-row fast path: avoid batch scaffolding + explicit transaction.
+        // Use ON CONFLICT to avoid DELETE+INSERT semantics of OR REPLACE (less write
+        // amplification).
+        static const std::string sql =
+            "INSERT INTO metadata (document_id, key, value, value_type) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(document_id, key) DO UPDATE SET value = excluded.value, "
+            "value_type = excluded.value_type";
+        YAMS_TRY_UNWRAP(stmt, db.prepareCached(sql));
+        YAMS_TRY(stmt->bind(1, documentId));
+        YAMS_TRY(stmt->bind(2, key));
+        YAMS_TRY(stmt->bind(3, value.value));
+        YAMS_TRY(stmt->bind(4, MetadataValueTypeUtils::toString(value.type)));
+        YAMS_TRY(stmt->execute());
         return {};
     });
 

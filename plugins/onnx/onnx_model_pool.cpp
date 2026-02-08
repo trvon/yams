@@ -603,7 +603,14 @@ public:
 
 private:
     void appendGpuExecutionProvider() {
-        actualExecutionProvider_ = onnx_util::appendGpuProvider(*sessionOptions_);
+        std::string cacheDir;
+        if (!modelPath_.empty()) {
+            auto parentDir = fs::path(modelPath_).parent_path();
+            if (fs::exists(parentDir)) {
+                cacheDir = parentDir.string();
+            }
+        }
+        actualExecutionProvider_ = onnx_util::appendGpuProvider(*sessionOptions_, cacheDir);
     }
 
     // GenAI adapter (optional)

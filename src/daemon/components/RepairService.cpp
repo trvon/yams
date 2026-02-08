@@ -968,36 +968,42 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
         return result;
     }
 
-    // Re-enqueue stuck documents for re-extraction via PostIngestQueue
+    // Re-enqueue stuck documents for re-extraction via a high-priority PostIngestQueue channel.
+    // This keeps RPC repair responsive even when the normal channel is saturated.
+    const std::size_t rpcCapacity = static_cast<std::size_t>(TuneAdvisor::postIngestRpcQueueMax());
+    const bool useRpcChannel = (rpcCapacity > 0);
     auto postIngestChannel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            "post_ingest", 4096);
+            useRpcChannel ? "post_ingest_rpc" : "post_ingest",
+            useRpcChannel ? rpcCapacity : std::size_t(4096));
 
     for (size_t i = 0; i < stuckDocs.size(); ++i) {
         const auto& s = stuckDocs[i];
 
-        // Increment repair attempts
-        auto docRes = meta->getDocument(s.docId);
-        if (docRes && docRes.value().has_value()) {
-            auto doc = docRes.value().value();
-            doc.repairAttempts = s.repairAttempts + 1;
-            doc.repairAttemptedAt = std::chrono::time_point_cast<std::chrono::seconds>(
-                std::chrono::system_clock::now());
-            (void)meta->updateDocument(doc);
-        }
-
-        // Reset extraction status to Pending
-        (void)meta->updateDocumentExtractionStatus(
-            s.docId, false, metadata::ExtractionStatus::Pending, "RepairService: recovery attempt");
-
-        // Reset repair status to Pending
-        (void)meta->batchUpdateDocumentRepairStatuses({s.hash}, metadata::RepairStatus::Pending);
-
-        // Re-enqueue for extraction
+        // Re-enqueue for extraction (do not mutate metadata unless enqueue succeeds).
         InternalEventBus::PostIngestTask task;
         task.hash = s.hash;
         task.mime = ""; // will be re-detected
         if (postIngestChannel->try_push(task)) {
+            // Increment repair attempts
+            auto docRes = meta->getDocument(s.docId);
+            if (docRes && docRes.value().has_value()) {
+                auto doc = docRes.value().value();
+                doc.repairAttempts = s.repairAttempts + 1;
+                doc.repairAttemptedAt = std::chrono::time_point_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now());
+                (void)meta->updateDocument(doc);
+            }
+
+            // Reset extraction status to Pending
+            (void)meta->updateDocumentExtractionStatus(s.docId, false,
+                                                       metadata::ExtractionStatus::Pending,
+                                                       "RepairService: recovery attempt");
+
+            // Reset repair status to Pending
+            (void)meta->batchUpdateDocumentRepairStatuses({s.hash},
+                                                          metadata::RepairStatus::Pending);
+
             ++result.succeeded;
         } else {
             ++result.failed;
