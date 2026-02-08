@@ -38,6 +38,8 @@ struct EmbeddingRepairConfig {
     std::string preferredModel; // Empty = auto-detect
     std::filesystem::path dataPath;
     bool verbose = false;
+    // Optional cancellation flag (checked best-effort between operations)
+    std::atomic<bool>* cancelRequested = nullptr;
 };
 
 /**

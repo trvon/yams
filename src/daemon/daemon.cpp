@@ -322,7 +322,16 @@ Result<void> YamsDaemon::start() {
     socketServer_ = std::make_unique<SocketServer>(
         socketConfig, serviceManager_->getWorkCoordinator(), requestDispatcher_.get(), &state_);
 
-    // Provide SocketServer to DaemonMetrics for connection age tracking
+    if (auto result = socketServer_->start(); !result) {
+        running_ = false;
+        serviceManager_->shutdown();
+        lifecycleManager_->shutdown();
+        return Error{ErrorCode::IOError,
+                     "Failed to start socket server: " + result.error().message};
+    }
+    spdlog::info("[Startup] Phase: SocketServer Start OK");
+
+    // Provide SocketServer to DaemonMetrics after start() so proxy socket path is available.
     {
         std::shared_ptr<DaemonMetrics> m;
         {
@@ -333,15 +342,6 @@ Result<void> YamsDaemon::start() {
             m->setSocketServer(socketServer_.get());
         }
     }
-
-    if (auto result = socketServer_->start(); !result) {
-        running_ = false;
-        serviceManager_->shutdown();
-        lifecycleManager_->shutdown();
-        return Error{ErrorCode::IOError,
-                     "Failed to start socket server: " + result.error().message};
-    }
-    spdlog::info("[Startup] Phase: SocketServer Start OK");
 
     // Mark IPC as ready now that socket server is running
     state_.readiness.ipcServerReady = true;

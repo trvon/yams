@@ -175,6 +175,17 @@ Result<void> SocketServer::start() {
         slotLimit_.store(initialSlots, std::memory_order_relaxed);
         spdlog::info("SocketServer: bounded concurrency enabled (max {} slots)", initialSlots);
 
+        // Proxy gets its own hard cap so it cannot starve main/control connections.
+        if (!config_.proxySocketPath.empty()) {
+            size_t proxySlots = config_.proxyMaxConnections;
+            if (proxySlots == 0) {
+                proxySlots = 1;
+            }
+            proxyConnectionSlots_ = std::make_unique<std::counting_semaphore<>>(proxySlots);
+            spdlog::info("SocketServer: proxy bounded concurrency enabled (max {} slots)",
+                         proxySlots);
+        }
+
         if (state_) {
             state_->stats.maxConnections.store(initialSlots, std::memory_order_relaxed);
             state_->stats.connectionSlotsFree.store(initialSlots, std::memory_order_relaxed);
@@ -423,6 +434,7 @@ Result<void> SocketServer::stop() {
         // WorkCoordinator teardown).
         acceptor_.reset();
         connectionSlots_.reset();
+        proxyConnectionSlots_.reset();
 
         // WorkCoordinator manages thread lifecycle - just signal completion
         spdlog::info("SocketServer: accept loop stopped, WorkCoordinator continues running");
@@ -504,10 +516,16 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
     while (running_ && !stopping_) {
         YAMS_ZONE_SCOPED_N("SocketServer::accept_loop");
 
+        std::counting_semaphore<>* slots = nullptr;
         try {
             // Use non-blocking try_acquire with async retry to avoid blocking the accept loop
-            if (connectionSlots_) {
-                while (!connectionSlots_->try_acquire()) {
+            if (isProxy) {
+                slots = proxyConnectionSlots_.get();
+            } else {
+                slots = connectionSlots_.get();
+            }
+            if (slots) {
+                while (!slots->try_acquire()) {
                     if (!running_ || stopping_) {
                         break;
                     }
@@ -523,8 +541,8 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
 
             // Check if we're shutting down after acquiring slot
             if (!running_ || stopping_) {
-                if (connectionSlots_) {
-                    connectionSlots_->release(); // Release slot before exit
+                if (slots) {
+                    slots->release(); // Release slot before exit
                 }
                 break;
             }
@@ -545,8 +563,8 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
             // Handle errors without exception
             if (ec) {
                 // Release semaphore on error paths
-                if (connectionSlots_) {
-                    connectionSlots_->release();
+                if (slots) {
+                    slots->release();
                 }
 
                 if (!running_ || stopping_) {
@@ -639,6 +657,17 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 continue; // Retry accept
             }
 
+            // If shutdown begins after accept completes, do not spawn a handler.
+            // Close the just-accepted socket and release the acquired slot.
+            if (!running_ || stopping_) {
+                boost::system::error_code close_ec;
+                socket.close(close_ec);
+                if (slots) {
+                    slots->release();
+                }
+                break;
+            }
+
             if (trace) {
                 spdlog::info("stream-trace: [conn={}] slot_acquired", conn_token);
                 spdlog::info("stream-trace: [conn={}] accept completed (active={} total={})",
@@ -650,6 +679,8 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
             totalConnections_.fetch_add(1);
             if (isProxy) {
                 proxyActiveConnections_.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                mainActiveConnections_.fetch_add(1, std::memory_order_relaxed);
             }
 
             spdlog::info("SocketServer: [conn={}] accepted {} connection, active={} total={}",
@@ -686,30 +717,31 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 }
 
                 // Create a capturing lambda that releases the semaphore on completion
-                auto wrapped_handler = [this, conn_token, tracked,
-                                        isProxy]() mutable -> awaitable<void> {
+                auto wrapped_handler = [this, conn_token, tracked, isProxy,
+                                        slots]() mutable -> awaitable<void> {
                     // RAII guard for semaphore - handles shrink debt for graceful downsizing
                     struct SemaphoreGuard {
                         SocketServer* server;
                         std::counting_semaphore<>* sem;
+                        bool proxyConn;
                         ~SemaphoreGuard() {
                             if (!sem || !server)
                                 return;
-                            // Check shrink debt: if downsizing is in progress, consume debt
-                            // instead of releasing the semaphore back to the pool
+                            if (proxyConn) {
+                                sem->release();
+                                return;
+                            }
+                            // Main slot pool supports dynamic resizing via shrink debt.
                             int32_t debt = server->shrinkDebt_.load(std::memory_order_relaxed);
                             if (debt > 0) {
-                                // Try to decrement debt (may race with other connections,
-                                // which is fine - we just need eventual convergence)
                                 if (server->shrinkDebt_.compare_exchange_weak(
                                         debt, debt - 1, std::memory_order_relaxed)) {
-                                    // Debt consumed, don't release semaphore
                                     return;
                                 }
                             }
                             sem->release();
                         }
-                    } guard{this, connectionSlots_.get()};
+                    } guard{this, slots, isProxy};
 
                     // Handle the connection with tracing token
                     co_await handle_connection(tracked, conn_token, isProxy);
@@ -725,8 +757,8 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 break;
 
             // Release semaphore on unexpected exception
-            if (connectionSlots_) {
-                connectionSlots_->release();
+            if (slots) {
+                slots->release();
             }
 
             spdlog::error("Unexpected error in accept loop: {}", e.what());
@@ -786,6 +818,8 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
             auto current = server->activeConnections_.fetch_sub(1) - 1;
             if (proxyConn) {
                 server->proxyActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
+            } else {
+                server->mainActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
             }
             if (server->state_) {
                 server->state_->stats.activeConnections.store(current);

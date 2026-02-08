@@ -138,6 +138,7 @@ private:
 
     // Connection metrics
     std::atomic<size_t> activeConnections_{0};
+    std::atomic<size_t> mainActiveConnections_{0};
     std::atomic<uint64_t> totalConnections_{0};
     std::atomic<uint64_t> connectionToken_{0};
     std::atomic<uint64_t> forcedCloseCount_{0}; // Connections closed due to lifetime exceeded
@@ -160,6 +161,7 @@ private:
     std::vector<std::future<void>> connectionFutures_;
 
     std::unique_ptr<std::counting_semaphore<>> connectionSlots_;
+    std::unique_ptr<std::counting_semaphore<>> proxyConnectionSlots_;
 
     // Dynamic sizing state (PBI-085)
     std::atomic<size_t> slotLimit_{0};   // Current slot limit (tracked for resize decisions)

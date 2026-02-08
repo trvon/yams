@@ -16,7 +16,6 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/MetricsSnapshotRegistry.h>
 #include <yams/daemon/components/ResourceGovernor.h>
-#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -25,6 +24,7 @@
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/stream_metrics_registry.h>
+#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/search/search_tuner.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
@@ -292,6 +292,18 @@ DaemonMetrics::DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateCom
     : lifecycle_(lifecycle), state_(state), services_(services), coordinator_(coordinator),
       socketServer_(socketServer), strand_(coordinator->getExecutor()) {
     cacheMs_ = TuneAdvisor::metricsCacheMs();
+}
+
+void DaemonMetrics::setSocketServer(const SocketServer* socketServer) {
+    {
+        std::unique_lock lock(cacheMutex_);
+        socketServer_ = socketServer;
+
+        // Invalidate snapshot cache so newly-attached SocketServer details (e.g. proxy socket path)
+        // become visible immediately to status callers.
+        cachedSnapshot_.reset();
+        lastUpdate_ = {};
+    }
 }
 
 DaemonMetrics::~DaemonMetrics() {

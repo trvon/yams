@@ -315,7 +315,7 @@ public:
     EmbeddingServiceInfo getEmbeddingServiceInfo() const;
 
     // Set SocketServer (called after SocketServer is created, which happens after DaemonMetrics)
-    void setSocketServer(const SocketServer* socketServer) { socketServer_ = socketServer; }
+    void setSocketServer(const SocketServer* socketServer);
 
 private:
     boost::asio::awaitable<void> pollingLoop(); // Background polling loop

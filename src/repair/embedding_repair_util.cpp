@@ -124,6 +124,10 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                         const yams::extraction::ContentExtractorList& extractors) {
     EmbeddingRepairStats stats;
 
+    auto cancelRequested = [&]() -> bool {
+        return config.cancelRequested && config.cancelRequested->load(std::memory_order_relaxed);
+    };
+
     if (!contentStore || !metadataRepo || !modelProvider) {
         return Error{ErrorCode::InvalidArgument, "Missing required components"};
     }
@@ -203,12 +207,18 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
 
     // Process documents in batches
     for (size_t i = 0; i < documents.size(); i += config.batchSize) {
+        if (cancelRequested()) {
+            return Error{ErrorCode::OperationCancelled, "cancelled"};
+        }
         size_t end = std::min(i + config.batchSize, documents.size());
         std::vector<std::string> texts;
         std::vector<metadata::DocumentInfo> batchDocs;
 
         // Collect texts for this batch (extract text; avoid raw bytes)
         for (size_t j = i; j < end; ++j) {
+            if (cancelRequested()) {
+                return Error{ErrorCode::OperationCancelled, "cancelled"};
+            }
             const auto& doc = documents[j];
             stats.documentsProcessed++;
 
@@ -264,6 +274,9 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
         if (!texts.empty()) {
             // Insert per document with a bounded advisory lock; helper handles chunking/embeds.
             for (size_t k = 0; k < batchDocs.size() && k < texts.size(); ++k) {
+                if (cancelRequested()) {
+                    return Error{ErrorCode::OperationCancelled, "cancelled"};
+                }
                 const auto& doc = batchDocs[k];
                 const auto& text = texts[k];
                 if (text.empty()) {
@@ -284,6 +297,9 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                 uint64_t sleep_ms = 50;
                 bool done = false;
                 while (!done) {
+                    if (cancelRequested()) {
+                        return Error{ErrorCode::OperationCancelled, "cancelled"};
+                    }
                     VectorDbLock vlock(lockPath);
                     if (vlock.isLocked()) {
                         yams::vector::ChunkingConfig ccfg{};
@@ -302,6 +318,9 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                     } else {
                         if (progressCallback)
                             progressCallback(0, 0, "Waiting for vector DB lock...");
+                        if (cancelRequested()) {
+                            return Error{ErrorCode::OperationCancelled, "cancelled"};
+                        }
                         if (std::chrono::steady_clock::now() >= deadline) {
                             spdlog::warn("Vector DB lock timeout; skipping doc {}", doc.sha256Hash);
                             stats.failedOperations += 1;
