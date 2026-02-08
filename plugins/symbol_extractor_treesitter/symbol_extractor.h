@@ -1,6 +1,6 @@
 #pragma once
 
-#include <format>
+#include <fmt/format.h>
 
 extern "C" {
 #include <tree_sitter/api.h>
@@ -48,7 +48,7 @@ struct SymbolInfo {
     }
 
     [[nodiscard]] std::string to_string() const {
-        return std::format("{} [{}] at L{}:{}-L{}:{}", name, kind, start_line, start_offset,
+        return fmt::format("{} [{}] at L{}:{}-L{}:{}", name, kind, start_line, start_offset,
                            end_line, end_offset);
     }
 };
@@ -67,7 +67,7 @@ struct SymbolRelation {
     }
 
     [[nodiscard]] std::string to_string() const {
-        return std::format("{} --[{} {}]--> {}", src_symbol, kind, weight, dst_symbol);
+        return fmt::format("{} --[{} {}]--> {}", src_symbol, kind, weight, dst_symbol);
     }
 };
 
@@ -131,7 +131,7 @@ struct ExtractionResult {
     }
 
     [[nodiscard]] std::string summary() const {
-        return std::format("Extraction: {} symbols ({} functions, {} classes, {} structs), {} "
+        return fmt::format("Extraction: {} symbols ({} functions, {} classes, {} structs), {} "
                            "relations ({} calls)",
                            stats.total_symbols, stats.functions, stats.classes, stats.structs,
                            stats.relations, stats.calls);

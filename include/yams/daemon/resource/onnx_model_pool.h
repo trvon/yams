@@ -4,7 +4,6 @@
 #include <yams/daemon/resource/resource_pool.h>
 #include <yams/vector/embedding_generator.h>
 
-#include <boost/asio/thread_pool.hpp>
 #include <atomic>
 #include <condition_variable>
 #include <filesystem>
@@ -16,6 +15,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <boost/asio/thread_pool.hpp>
 
 // Forward declaration for ONNX Runtime
 namespace Ort {
@@ -67,6 +67,7 @@ public:
     std::string getName() const { return info_.name; }
     size_t getEmbeddingDim() const { return info_.embeddingDim; }
     size_t getMaxSequenceLength() const { return info_.maxSequenceLength; }
+    std::string getExecutionProvider() const;
 
     // Statistics
     size_t getRequestCount() const { return info_.requestCount.load(); }

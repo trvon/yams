@@ -6,13 +6,13 @@
 #include "onnx_gpu_provider.h"
 #include <yams/daemon/resource/gpu_info.h>
 
-#include <boost/asio/post.hpp>
-#include <boost/asio/thread_pool.hpp>
 #include <nlohmann/json.hpp>
 #include <onnxruntime_cxx_api.h>
 #include <spdlog/spdlog.h>
 #include <filesystem>
 #include <mutex>
+#include <boost/asio/post.hpp>
+#include <boost/asio/thread_pool.hpp>
 
 // GPU execution provider headers - conditionally included based on Conan build options
 // Note: Prebuilt ONNX Runtime binaries from GitHub releases use the C API for providers.
@@ -599,9 +599,12 @@ public:
 
     size_t getEmbeddingDim() const { return embeddingDim_; }
     size_t getMaxSequenceLength() const { return maxSequenceLength_; }
+    const std::string& getExecutionProvider() const { return actualExecutionProvider_; }
 
 private:
-    void appendGpuExecutionProvider() { onnx_util::appendGpuProvider(*sessionOptions_); }
+    void appendGpuExecutionProvider() {
+        actualExecutionProvider_ = onnx_util::appendGpuProvider(*sessionOptions_);
+    }
 
     // GenAI adapter (optional)
 #ifdef YAMS_ENABLE_ONNX_GENAI
@@ -958,6 +961,8 @@ private:
     std::unique_ptr<Ort::SessionOptions> sessionOptions_;
     std::unique_ptr<Ort::Session> session_;
 
+    std::string actualExecutionProvider_{"cpu"};
+
     std::vector<std::string> inputNames_;
     std::vector<std::string> outputNames_;
 
@@ -1132,6 +1137,10 @@ OnnxModelSession::generateBatchEmbeddings(const std::vector<std::string>& texts)
 
 bool OnnxModelSession::isValid() const {
     return pImpl->isValid();
+}
+
+std::string OnnxModelSession::getExecutionProvider() const {
+    return pImpl->getExecutionProvider();
 }
 
 // ============================================================================

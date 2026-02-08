@@ -171,6 +171,12 @@ RepairService::~RepairService() {
     stop();
 }
 
+std::shared_ptr<metadata::IMetadataRepository> RepairService::getMetadataRepoForRepair() const {
+    if (!services_)
+        return nullptr;
+    return std::static_pointer_cast<metadata::IMetadataRepository>(services_->getMetadataRepo());
+}
+
 std::shared_ptr<GraphComponent> RepairService::getGraphComponentForScheduling() const {
     return services_ ? services_->getGraphComponent() : nullptr;
 }

@@ -455,7 +455,9 @@ else
   if get_option('enable-mobile-bindings')
     subdir('src/mobile')
   endif
-  subdir('src/benchmarks')
+  if get_option('build-benchmarks')
+    subdir('src/benchmarks')
+  endif
 
   if get_option('build-mcp-server')
     subdir('src/mcp')
@@ -477,7 +479,7 @@ endif
 # Tests (enabled by default in Debug builds)
 _tests_opt = get_option('build-tests')
 _buildtype = get_option('buildtype')
-_tests_enabled = (not wasi_enabled) and (_tests_opt or (_buildtype == 'debug'))
+_tests_enabled = (not wasi_enabled) and (_tests_opt or (_buildtype == 'debug' and not get_option('build-fuzzers')))
 if _tests_enabled
   subdir('tests')
 endif

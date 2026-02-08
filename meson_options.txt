@@ -16,6 +16,7 @@ option('plugin-pdf', type: 'boolean', value: false, description: '[DEPRECATED] O
 option('plugin-onnx', type: 'boolean', value: true, description: 'Build ONNX plugin (requires onnxruntime and vector lib)')
 option('build-tests', type: 'boolean', value: false, description: 'Build unit/integration tests under tests/')
 option('build-fuzzers', type: 'boolean', value: false, description: 'Build fuzzing harnesses under tools/fuzzing/')
+option('build-benchmarks', type: 'boolean', value: true, description: 'Build benchmark utilities and executables under src/benchmarks')
 option('plugin-symbols', type: 'boolean', value: true, description: 'Build Tree-sitter symbol extractor plugin')
 option('plugin-zyp', type: 'boolean', value: false, description: 'Build zyp PDF extractor plugin (requires Zig 0.15.2+)')
 option('plugin-glint', type: 'boolean', value: false, description: 'Build Glint NL entity extractor plugin (GLiNER-based)')
