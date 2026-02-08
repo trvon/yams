@@ -42,6 +42,8 @@ namespace yams::daemon {
 
 namespace {
 
+constexpr size_t kMaxTextToPersistInMetadataBytes = 16 * 1024 * 1024; // 16 MiB (best-effort)
+
 // Check if vector operations are disabled via environment variables
 bool vectorsDisabledByEnv() {
     if (const char* env = std::getenv("YAMS_DISABLE_VECTORS"); env && *env)
@@ -969,7 +971,7 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
     // Re-enqueue stuck documents for re-extraction via PostIngestQueue
     auto postIngestChannel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            "post_ingest_tasks", 4096);
+            "post_ingest", 4096);
 
     for (size_t i = 0; i < stuckDocs.size(); ++i) {
         const auto& s = stuckDocs[i];
@@ -1531,7 +1533,11 @@ RepairOperationResult RepairService::rebuildFts5Index(bool dryRun, bool verbose,
 
                 metadata::DocumentContent content;
                 content.documentId = d.id;
-                content.contentText = *extractedOpt;
+                if (extractedOpt->size() > kMaxTextToPersistInMetadataBytes) {
+                    content.contentText = extractedOpt->substr(0, kMaxTextToPersistInMetadataBytes);
+                } else {
+                    content.contentText = *extractedOpt;
+                }
                 content.extractionMethod = "repair";
                 auto contentResult = meta->insertContent(content);
                 auto ir =

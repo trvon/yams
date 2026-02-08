@@ -1,6 +1,7 @@
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <thread>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -80,28 +81,89 @@ Result<void> Statement::bind(int index, double value) {
 }
 
 Result<void> Statement::bind(int index, const std::string& value) {
-    int rc = sqlite3_bind_text(stmt_, index, value.c_str(), static_cast<int>(value.size()),
-                               SQLITE_TRANSIENT);
+    if (!stmt_) {
+        return Error{ErrorCode::DatabaseError, "Failed to bind string: statement is null"};
+    }
+
+    const size_t len = value.size();
+    constexpr size_t kMaxSqliteBindLen = static_cast<size_t>(std::numeric_limits<int>::max());
+    if (len > kMaxSqliteBindLen) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to bind string (index=" + std::to_string(index) +
+                         ", len=" + std::to_string(len) + "): length exceeds int max"};
+    }
+
+    int rc =
+        sqlite3_bind_text(stmt_, index, value.c_str(), static_cast<int>(len), SQLITE_TRANSIENT);
     if (rc != SQLITE_OK) {
-        return Error{ErrorCode::DatabaseError, "Failed to bind string"};
+        sqlite3* db = sqlite3_db_handle(stmt_);
+        std::string dbMsg = db ? std::string(sqlite3_errmsg(db)) : std::string("<no db>");
+        int limitLen = db ? sqlite3_limit(db, SQLITE_LIMIT_LENGTH, -1) : -1;
+        std::string msg = "Failed to bind string (index=" + std::to_string(index) +
+                          ", len=" + std::to_string(len);
+        if (limitLen >= 0) {
+            msg += ", limit=" + std::to_string(limitLen);
+        }
+        msg += "): " + std::string(sqlite3_errstr(rc)) + ": " + dbMsg;
+        return Error{ErrorCode::DatabaseError, msg};
     }
     return {};
 }
 
 Result<void> Statement::bind(int index, std::string_view value) {
-    int rc = sqlite3_bind_text(stmt_, index, value.data(), static_cast<int>(value.size()),
-                               SQLITE_TRANSIENT);
+    if (!stmt_) {
+        return Error{ErrorCode::DatabaseError, "Failed to bind string_view: statement is null"};
+    }
+
+    const size_t len = value.size();
+    constexpr size_t kMaxSqliteBindLen = static_cast<size_t>(std::numeric_limits<int>::max());
+    if (len > kMaxSqliteBindLen) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to bind string_view (index=" + std::to_string(index) +
+                         ", len=" + std::to_string(len) + "): length exceeds int max"};
+    }
+
+    int rc = sqlite3_bind_text(stmt_, index, value.data(), static_cast<int>(len), SQLITE_TRANSIENT);
     if (rc != SQLITE_OK) {
-        return Error{ErrorCode::DatabaseError, "Failed to bind string_view"};
+        sqlite3* db = sqlite3_db_handle(stmt_);
+        std::string dbMsg = db ? std::string(sqlite3_errmsg(db)) : std::string("<no db>");
+        int limitLen = db ? sqlite3_limit(db, SQLITE_LIMIT_LENGTH, -1) : -1;
+        std::string msg = "Failed to bind string_view (index=" + std::to_string(index) +
+                          ", len=" + std::to_string(len);
+        if (limitLen >= 0) {
+            msg += ", limit=" + std::to_string(limitLen);
+        }
+        msg += "): " + std::string(sqlite3_errstr(rc)) + ": " + dbMsg;
+        return Error{ErrorCode::DatabaseError, msg};
     }
     return {};
 }
 
 Result<void> Statement::bind(int index, std::span<const std::byte> blob) {
-    int rc = sqlite3_bind_blob(stmt_, index, blob.data(), static_cast<int>(blob.size()),
-                               SQLITE_TRANSIENT);
+    if (!stmt_) {
+        return Error{ErrorCode::DatabaseError, "Failed to bind blob: statement is null"};
+    }
+
+    const size_t len = blob.size();
+    constexpr size_t kMaxSqliteBindLen = static_cast<size_t>(std::numeric_limits<int>::max());
+    if (len > kMaxSqliteBindLen) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to bind blob (index=" + std::to_string(index) +
+                         ", len=" + std::to_string(len) + "): length exceeds int max"};
+    }
+
+    int rc = sqlite3_bind_blob(stmt_, index, blob.data(), static_cast<int>(len), SQLITE_TRANSIENT);
     if (rc != SQLITE_OK) {
-        return Error{ErrorCode::DatabaseError, "Failed to bind blob"};
+        sqlite3* db = sqlite3_db_handle(stmt_);
+        std::string dbMsg = db ? std::string(sqlite3_errmsg(db)) : std::string("<no db>");
+        int limitLen = db ? sqlite3_limit(db, SQLITE_LIMIT_LENGTH, -1) : -1;
+        std::string msg =
+            "Failed to bind blob (index=" + std::to_string(index) + ", len=" + std::to_string(len);
+        if (limitLen >= 0) {
+            msg += ", limit=" + std::to_string(limitLen);
+        }
+        msg += "): " + std::string(sqlite3_errstr(rc)) + ": " + dbMsg;
+        return Error{ErrorCode::DatabaseError, msg};
     }
     return {};
 }

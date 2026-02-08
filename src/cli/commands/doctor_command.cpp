@@ -928,6 +928,34 @@ private:
                 };
 
                 bool cancelled = false;
+                uint64_t truncated = 0;
+
+                auto isTooBigError = [](const std::string& msg) -> bool {
+                    // sqlite3_errstr(SQLITE_TOOBIG) => "string or blob too big"
+                    // Our bind diagnostics also include "limit=<n>" and "len=<n>".
+                    return msg.find("too big") != std::string::npos ||
+                           msg.find("TOOBIG") != std::string::npos;
+                };
+
+                auto parseSqliteLimitLen = [](const std::string& msg) -> std::optional<size_t> {
+                    const std::string key = "limit=";
+                    auto pos = msg.find(key);
+                    if (pos == std::string::npos)
+                        return std::nullopt;
+                    pos += key.size();
+                    size_t end = pos;
+                    while (end < msg.size() && msg[end] >= '0' && msg[end] <= '9') {
+                        ++end;
+                    }
+                    if (end == pos)
+                        return std::nullopt;
+                    try {
+                        return static_cast<size_t>(std::stoull(msg.substr(pos, end - pos)));
+                    } catch (...) {
+                        return std::nullopt;
+                    }
+                };
+
                 for (const auto& d : docs.value()) {
                     if (g_doctor_cancel_requested.load(std::memory_order_relaxed)) {
                         cancelled = true;
@@ -944,7 +972,29 @@ private:
                         if (extracted && !extracted->empty()) {
                             auto ir = appCtx->metadataRepo->indexDocumentContent(
                                 d.id, d.fileName, *extracted, d.mimeType);
-                            if (ir) {
+                            if (!ir && isTooBigError(ir.error().message)) {
+                                // Best-effort retry: index a truncated prefix when SQLite
+                                // length limits would otherwise stall the entire repair.
+                                constexpr size_t kDefaultTruncateBytes = 8 * 1024 * 1024; // 8 MiB
+                                size_t cap = kDefaultTruncateBytes;
+                                if (auto limit = parseSqliteLimitLen(ir.error().message);
+                                    limit && *limit > 1024) {
+                                    cap = std::min(cap, *limit - 1024);
+                                }
+                                if (cap > 0 && extracted->size() > cap) {
+                                    std::string truncatedText = extracted->substr(0, cap);
+                                    auto ir2 = appCtx->metadataRepo->indexDocumentContent(
+                                        d.id, d.fileName, truncatedText, d.mimeType);
+                                    if (ir2) {
+                                        ++ok;
+                                        ++truncated;
+                                    } else {
+                                        ++fail;
+                                    }
+                                } else {
+                                    ++fail;
+                                }
+                            } else if (ir) {
                                 ++ok;
                             } else {
                                 ++fail;
@@ -981,7 +1031,8 @@ private:
                 }
                 std::cout << "  "
                           << ui::status_ok("FTS5 reindex complete: ok=" + std::to_string(ok) +
-                                           ", fail=" + std::to_string(fail))
+                                           ", fail=" + std::to_string(fail) +
+                                           ", truncated=" + std::to_string(truncated))
                           << "\n";
             }
         } catch (const std::exception& e) {
