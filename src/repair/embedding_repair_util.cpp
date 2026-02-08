@@ -1,3 +1,4 @@
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/extraction/text_extractor.h>
@@ -9,10 +10,12 @@
 
 #include <spdlog/spdlog.h>
 #include <atomic>
+#include <cmath>
 #include <ctime>
 #include <fcntl.h>
 #include <filesystem>
 #include <thread>
+#include <unordered_map>
 #ifdef _WIN32
 #include <io.h>
 #include <windows.h>
@@ -24,6 +27,9 @@
 namespace yams::repair {
 
 namespace {
+constexpr size_t kMaxTextForEmbeddingBytes = 1'000'000;               // 1MB (advisory)
+constexpr size_t kMaxTextToPersistInMetadataBytes = 16 * 1024 * 1024; // 16 MiB (best-effort)
+
 // File lock for cross-process safety
 class VectorDbLock {
 public:
@@ -240,10 +246,18 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
             }
 
             std::string text = std::move(*extractedOpt);
+
+            // Best-effort: persist extracted content for search/diagnostics.
+            // Guard against pathological extractor output that can trip SQLite bind/length limits.
             if (doc.id > 0) {
+                std::string persistText = text;
+                if (persistText.size() > kMaxTextToPersistInMetadataBytes) {
+                    persistText.resize(kMaxTextToPersistInMetadataBytes);
+                }
+
                 metadata::DocumentContent contentRow;
                 contentRow.documentId = doc.id;
-                contentRow.contentText = text;
+                contentRow.contentText = std::move(persistText);
                 contentRow.contentLength = static_cast<int64_t>(contentRow.contentText.size());
                 contentRow.extractionMethod = "repair";
                 double langConfidence = 0.0;
@@ -263,72 +277,247 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                     }
                 }
             }
-            // Guard overly large text
-            if (text.size() > 1000000) { // 1MB limit
-                text.resize(1000000);
+
+            // Guard overly large text for embedding input.
+            if (text.size() > kMaxTextForEmbeddingBytes) {
+                text.resize(kMaxTextForEmbeddingBytes);
             }
+
             texts.push_back(std::move(text));
             batchDocs.push_back(doc);
         }
 
         if (!texts.empty()) {
-            // Insert per document with a bounded advisory lock; helper handles chunking/embeds.
-            for (size_t k = 0; k < batchDocs.size() && k < texts.size(); ++k) {
+            // Chunk + embed + build records without holding the cross-process vector DB lock.
+            // We only take the lock around the DB write to reduce contention.
+            struct ChunkInfo {
+                size_t docIdx;
+                std::string chunkId;
+                std::string content;
+                size_t startOffset;
+                size_t endOffset;
+            };
+
+            std::vector<ChunkInfo> allChunks;
+            std::vector<std::string> allTexts;
+
+            yams::vector::ChunkingConfig ccfg{};
+            auto chunker = yams::vector::createChunker(
+                yams::vector::ChunkingStrategy::SENTENCE_BASED, ccfg, nullptr);
+
+            allChunks.reserve(texts.size() * 2);
+            allTexts.reserve(texts.size() * 2);
+
+            for (size_t docIdx = 0; docIdx < batchDocs.size() && docIdx < texts.size(); ++docIdx) {
                 if (cancelRequested()) {
                     return Error{ErrorCode::OperationCancelled, "cancelled"};
                 }
-                const auto& doc = batchDocs[k];
-                const auto& text = texts[k];
+                const auto& doc = batchDocs[docIdx];
+                const auto& text = texts[docIdx];
                 if (text.empty()) {
                     stats.failedOperations += 1;
                     continue;
                 }
 
-                const auto lockPath = config.dataPath / "vectors.db.lock";
-                auto now = std::chrono::steady_clock::now();
-                uint64_t timeout_ms = 10 * 60 * 1000ULL; // default 10 minutes
-                if (const char* env_ms = std::getenv("YAMS_REPAIR_LOCK_TIMEOUT_MS")) {
-                    try {
-                        timeout_ms = std::stoull(std::string(env_ms));
-                    } catch (...) {
+                auto chunks = chunker->chunkDocument(text, doc.sha256Hash);
+                if (chunks.empty()) {
+                    std::string chunkId = yams::vector::utils::generateChunkId(doc.sha256Hash, 0);
+                    allChunks.push_back({docIdx, std::move(chunkId), text, 0, text.size()});
+                    allTexts.push_back(text);
+                } else {
+                    for (size_t cidx = 0; cidx < chunks.size(); ++cidx) {
+                        auto& c = chunks[cidx];
+                        std::string chunkId =
+                            c.chunk_id.empty()
+                                ? yams::vector::utils::generateChunkId(doc.sha256Hash, cidx)
+                                : c.chunk_id;
+                        allChunks.push_back({docIdx, std::move(chunkId), std::move(c.content),
+                                             c.start_offset, c.end_offset});
+                        allTexts.push_back(allChunks.back().content);
                     }
                 }
-                const auto deadline = now + std::chrono::milliseconds(timeout_ms);
-                uint64_t sleep_ms = 50;
-                bool done = false;
-                while (!done) {
-                    if (cancelRequested()) {
-                        return Error{ErrorCode::OperationCancelled, "cancelled"};
+            }
+
+            if (allChunks.empty() || allTexts.empty()) {
+                continue;
+            }
+
+            // Batch embedding call with sub-batching to keep latency reasonable.
+            std::size_t maxBatch = yams::daemon::TuneAdvisor::getEmbedDocCap();
+            if (maxBatch == 0)
+                maxBatch = 64;
+            if (maxBatch < 1)
+                maxBatch = 1;
+
+            std::vector<std::vector<float>> embeddings;
+            embeddings.reserve(allTexts.size());
+            bool embedOk = true;
+            for (size_t start = 0; start < allTexts.size(); start += maxBatch) {
+                if (cancelRequested()) {
+                    return Error{ErrorCode::OperationCancelled, "cancelled"};
+                }
+                size_t eend = std::min(start + maxBatch, allTexts.size());
+                std::vector<std::string> subBatch(allTexts.begin() + start,
+                                                  allTexts.begin() + eend);
+                auto embedResult = modelProvider->generateBatchEmbeddingsFor(modelName, subBatch);
+                if (!embedResult) {
+                    spdlog::warn("[repair] batch embedding failed ({}-{} of {}): {}", start, eend,
+                                 allTexts.size(), embedResult.error().message);
+                    embedOk = false;
+                    break;
+                }
+                auto& batchEmbeddings = embedResult.value();
+                for (auto& emb : batchEmbeddings) {
+                    embeddings.push_back(std::move(emb));
+                }
+            }
+
+            if (!embedOk || embeddings.size() != allChunks.size()) {
+                stats.failedOperations += batchDocs.size();
+                continue;
+            }
+
+            // Build VectorRecords (chunk-level + doc-level). Note: insertion happens under lock.
+            std::unordered_map<size_t, std::vector<size_t>> docToChunkIndices;
+            docToChunkIndices.reserve(batchDocs.size());
+            for (size_t idx = 0; idx < allChunks.size(); ++idx) {
+                docToChunkIndices[allChunks[idx].docIdx].push_back(idx);
+            }
+
+            std::vector<yams::vector::VectorRecord> allRecords;
+            allRecords.reserve(allChunks.size() + batchDocs.size());
+
+            for (size_t docIdx = 0; docIdx < batchDocs.size() && docIdx < texts.size(); ++docIdx) {
+                const auto& doc = batchDocs[docIdx];
+                auto it = docToChunkIndices.find(docIdx);
+                if (it == docToChunkIndices.end() || it->second.empty()) {
+                    continue;
+                }
+
+                const auto& chunkIndices = it->second;
+                if (chunkIndices.empty()) {
+                    continue;
+                }
+
+                // Compute document-level embedding (average of chunks, normalized)
+                std::vector<float> docEmbedding;
+                if (!embeddings[chunkIndices[0]].empty()) {
+                    size_t dim = embeddings[chunkIndices[0]].size();
+                    docEmbedding.assign(dim, 0.0f);
+
+                    for (size_t chunkIdx : chunkIndices) {
+                        const auto& emb = embeddings[chunkIdx];
+                        for (size_t j = 0; j < dim && j < emb.size(); ++j) {
+                            docEmbedding[j] += emb[j];
+                        }
                     }
-                    VectorDbLock vlock(lockPath);
-                    if (vlock.isLocked()) {
-                        yams::vector::ChunkingConfig ccfg{};
-                        auto r = yams::ingest::embed_and_insert_document(
-                            *modelProvider, modelName, *vectorDb, *metadataRepo, doc.sha256Hash,
-                            text, doc.fileName, doc.filePath, doc.mimeType, ccfg);
-                        if (r) {
-                            stats.embeddingsGenerated += r.value();
-                            done = true;
-                        } else {
-                            stats.failedOperations += 1;
-                            spdlog::debug("[repair] embed/insert failed for {}: {}", doc.sha256Hash,
-                                          r.error().message);
-                            break;
-                        }
-                    } else {
-                        if (progressCallback)
-                            progressCallback(0, 0, "Waiting for vector DB lock...");
-                        if (cancelRequested()) {
-                            return Error{ErrorCode::OperationCancelled, "cancelled"};
-                        }
-                        if (std::chrono::steady_clock::now() >= deadline) {
-                            spdlog::warn("Vector DB lock timeout; skipping doc {}", doc.sha256Hash);
-                            stats.failedOperations += 1;
-                            break;
-                        }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-                        sleep_ms = std::min<uint64_t>(sleep_ms * 2, 2000);
+
+                    float norm = 0.0f;
+                    for (float v : docEmbedding) {
+                        norm += v * v;
                     }
+                    if (norm > 0.0f) {
+                        norm = std::sqrt(norm);
+                        for (float& v : docEmbedding) {
+                            v /= norm;
+                        }
+                    }
+                }
+
+                // Add chunk-level records (moves embeddings)
+                for (size_t chunkIdx : chunkIndices) {
+                    const auto& chunk = allChunks[chunkIdx];
+                    yams::vector::VectorRecord rec;
+                    rec.document_hash = doc.sha256Hash;
+                    rec.chunk_id = chunk.chunkId;
+                    rec.embedding = std::move(embeddings[chunkIdx]);
+                    rec.content = chunk.content;
+                    rec.start_offset = chunk.startOffset;
+                    rec.end_offset = chunk.endOffset;
+                    rec.level = yams::vector::EmbeddingLevel::CHUNK;
+                    rec.metadata["name"] = doc.fileName;
+                    rec.metadata["mime_type"] = doc.mimeType;
+                    rec.metadata["path"] = doc.filePath;
+                    allRecords.push_back(std::move(rec));
+                }
+
+                // Add doc-level record (after chunk records exist)
+                if (!docEmbedding.empty()) {
+                    yams::vector::VectorRecord docRec;
+                    docRec.document_hash = doc.sha256Hash;
+                    docRec.chunk_id = yams::vector::utils::generateChunkId(doc.sha256Hash, 999999);
+                    docRec.embedding = std::move(docEmbedding);
+                    docRec.content = texts[docIdx].substr(0, 1000);
+                    docRec.level = yams::vector::EmbeddingLevel::DOCUMENT;
+                    docRec.source_chunk_ids.reserve(chunkIndices.size());
+                    for (size_t chunkIdx : chunkIndices) {
+                        docRec.source_chunk_ids.push_back(allChunks[chunkIdx].chunkId);
+                    }
+                    docRec.metadata["name"] = doc.fileName;
+                    docRec.metadata["mime_type"] = doc.mimeType;
+                    docRec.metadata["path"] = doc.filePath;
+                    allRecords.push_back(std::move(docRec));
+                }
+            }
+
+            if (allRecords.empty()) {
+                continue;
+            }
+
+            // Insert once per batch under a bounded advisory lock.
+            const auto lockPath = config.dataPath / "vectors.db.lock";
+            auto now = std::chrono::steady_clock::now();
+            uint64_t timeout_ms = 10 * 60 * 1000ULL; // default 10 minutes
+            if (const char* env_ms = std::getenv("YAMS_REPAIR_LOCK_TIMEOUT_MS")) {
+                try {
+                    timeout_ms = std::stoull(std::string(env_ms));
+                } catch (...) {
+                }
+            }
+            const auto deadline = now + std::chrono::milliseconds(timeout_ms);
+            uint64_t sleep_ms = 50;
+            bool inserted = false;
+            while (!inserted) {
+                if (cancelRequested()) {
+                    return Error{ErrorCode::OperationCancelled, "cancelled"};
+                }
+                VectorDbLock vlock(lockPath);
+                if (vlock.isLocked()) {
+                    if (!vectorDb->insertVectorsBatch(allRecords)) {
+                        spdlog::warn("[repair] batch vector insert failed: {}",
+                                     vectorDb->getLastError());
+                        stats.failedOperations += batchDocs.size();
+                        break;
+                    }
+
+                    // Update embedding status for all docs in this batch.
+                    std::vector<std::string> successHashes;
+                    successHashes.reserve(batchDocs.size());
+                    for (const auto& d : batchDocs) {
+                        successHashes.push_back(d.sha256Hash);
+                    }
+                    auto metaUp = metadataRepo->batchUpdateDocumentEmbeddingStatusByHashes(
+                        successHashes, true, modelName);
+                    if (!metaUp) {
+                        spdlog::warn("[repair] Failed to batch update embedding status: {}",
+                                     metaUp.error().message);
+                    }
+
+                    // Count only chunk-level embeddings for stats (matches previous behavior).
+                    stats.embeddingsGenerated += allChunks.size();
+                    inserted = true;
+                } else {
+                    if (progressCallback)
+                        progressCallback(0, 0, "Waiting for vector DB lock...");
+                    if (std::chrono::steady_clock::now() >= deadline) {
+                        spdlog::warn("Vector DB lock timeout; skipping batch starting at doc {}",
+                                     batchDocs.empty() ? std::string("?")
+                                                       : batchDocs.front().sha256Hash);
+                        stats.failedOperations += batchDocs.size();
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                    sleep_ms = std::min<uint64_t>(sleep_ms * 2, 2000);
                 }
             }
         }

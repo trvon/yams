@@ -975,6 +975,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_repair_service_exe = executable('catch2_repair_service',
+    files('unit/daemon/repair_service_post_ingest_channel_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_service_manager_exe = executable('catch2_service_manager',
     files('unit/daemon/service_manager_catch2_test.cpp'),
     include_directories: incs,
@@ -2389,6 +2398,23 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'components'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
+    is_parallel: false
+  )
+
+  test('repair_service', catch2_repair_service_exe,
+    suite: ['catch2', 'unit', 'daemon', 'repair', 'stuck-docs'],
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+      'YAMS_SQLITE_VEC_SKIP_INIT': '1',
+      'YAMS_DISABLE_VECTORS': '1',
+      'YAMS_DISABLE_VECTOR_DB': '1',
+      'YAMS_SKIP_MODEL_LOADING': '1',
+      'YAMS_TESTING': '1',
+    },
+    timeout: 120,
     is_parallel: false
   )
 
