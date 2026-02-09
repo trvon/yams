@@ -937,8 +937,13 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         auto& statusStmt = *statusStmtResult.value();
 
         // Process each entry
+        constexpr size_t kMaxTextBytes = size_t{16} * 1024 * 1024; // 16 MiB
         for (const auto& entry : entries) {
-            const std::string sanitizedContent = common::sanitizeUtf8(entry.contentText);
+            std::string_view contentView = entry.contentText;
+            if (contentView.size() > kMaxTextBytes) {
+                contentView = contentView.substr(0, kMaxTextBytes);
+            }
+            const std::string sanitizedContent = common::sanitizeUtf8(contentView);
             const std::string sanitizedTitle = common::sanitizeUtf8(entry.title);
 
             // 1. Insert content
