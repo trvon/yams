@@ -1,7 +1,9 @@
 #pragma once
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -11,6 +13,8 @@
 #include <vector>
 #include "../common/benchmark_tracker.h"
 
+#include "benchmark_cli.h"
+
 namespace yams::benchmark {
 
 class BenchmarkBase {
@@ -18,8 +22,14 @@ public:
     struct Result {
         std::string name;
         double duration_ms;
+        double duration_ms_median;
+        double duration_ms_p95;
+        double duration_ms_min;
+        double duration_ms_max;
         size_t operations;
         double ops_per_sec;
+        double ops_per_sec_median;
+        double ops_per_sec_p95;
         size_t memory_used_bytes;
         std::map<std::string, double> custom_metrics;
 
@@ -27,8 +37,14 @@ public:
             nlohmann::json j;
             j["name"] = name;
             j["duration_ms"] = duration_ms;
+            j["duration_ms_median"] = duration_ms_median;
+            j["duration_ms_p95"] = duration_ms_p95;
+            j["duration_ms_min"] = duration_ms_min;
+            j["duration_ms_max"] = duration_ms_max;
             j["operations"] = operations;
             j["ops_per_sec"] = ops_per_sec;
+            j["ops_per_sec_median"] = ops_per_sec_median;
+            j["ops_per_sec_p95"] = ops_per_sec_p95;
             j["memory_used_bytes"] = memory_used_bytes;
             j["metrics"] = custom_metrics;
             return j;
@@ -50,6 +66,8 @@ public:
         : name_(name), config_(config) {}
 
     virtual ~BenchmarkBase() = default;
+
+    [[nodiscard]] std::string_view name() const { return name_; }
 
     // Run the benchmark
     Result run() {
@@ -97,18 +115,49 @@ public:
             memoryAfter = getCurrentMemoryUsage();
         }
 
-        // Calculate statistics
-        double totalDuration = 0;
+        auto percentile = [](std::vector<double> v, double p) -> double {
+            if (v.empty())
+                return 0.0;
+            std::sort(v.begin(), v.end());
+            const double clamped = std::max(0.0, std::min(1.0, p));
+            const double idx = clamped * static_cast<double>(v.size() - 1);
+            const auto lo = static_cast<std::size_t>(std::floor(idx));
+            const auto hi = static_cast<std::size_t>(std::ceil(idx));
+            if (lo == hi)
+                return v[lo];
+            const double t = idx - static_cast<double>(lo);
+            return v[lo] * (1.0 - t) + v[hi] * t;
+        };
+
+        double totalDuration = 0.0;
         for (double d : durations) {
             totalDuration += d;
         }
-        double avgDuration = totalDuration / durations.size();
+        const double avgDuration = durations.empty() ? 0.0 : (totalDuration / durations.size());
+        const double p50 = percentile(durations, 0.50);
+        const double p95 = percentile(durations, 0.95);
+        const double dmin =
+            durations.empty() ? 0.0 : *std::min_element(durations.begin(), durations.end());
+        const double dmax =
+            durations.empty() ? 0.0 : *std::max_element(durations.begin(), durations.end());
 
         Result result;
         result.name = name_;
         result.duration_ms = avgDuration;
+        result.duration_ms_median = p50;
+        result.duration_ms_p95 = p95;
+        result.duration_ms_min = dmin;
+        result.duration_ms_max = dmax;
         result.operations = totalOperations / config_.benchmark_iterations;
-        result.ops_per_sec = (result.operations / avgDuration) * 1000.0;
+
+        auto safeOpsPerSec = [&](double dur_ms) -> double {
+            if (dur_ms <= 0.0)
+                return 0.0;
+            return (static_cast<double>(result.operations) / dur_ms) * 1000.0;
+        };
+        result.ops_per_sec = safeOpsPerSec(avgDuration);
+        result.ops_per_sec_median = safeOpsPerSec(p50);
+        result.ops_per_sec_p95 = safeOpsPerSec(p95);
         result.memory_used_bytes = memoryAfter - memoryBefore;
 
         // Add custom metrics
@@ -172,8 +221,12 @@ private:
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "Benchmark: " << result.name << std::endl;
         std::cout << "  Duration: " << result.duration_ms << " ms" << std::endl;
+        std::cout << "  Duration(p50): " << result.duration_ms_median << " ms" << std::endl;
+        std::cout << "  Duration(p95): " << result.duration_ms_p95 << " ms" << std::endl;
         std::cout << "  Operations: " << result.operations << std::endl;
         std::cout << "  Throughput: " << result.ops_per_sec << " ops/sec" << std::endl;
+        std::cout << "  Throughput(p50): " << result.ops_per_sec_median << " ops/sec" << std::endl;
+        std::cout << "  Throughput(p95): " << result.ops_per_sec_p95 << " ops/sec" << std::endl;
 
         if (config_.track_memory && result.memory_used_bytes > 0) {
             std::cout << "  Memory: " << (result.memory_used_bytes / 1024.0 / 1024.0) << " MB"

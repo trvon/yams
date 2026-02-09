@@ -733,6 +733,25 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.postIngestQueued = pq->size();
                 out.postIngestInflight = pq->totalInFlight();
                 out.postIngestCapacity = pq->capacity();
+                // High-priority post-ingest channel for repair/stuck-doc recovery.
+                // Metrics are best-effort: if the channel is disabled (capacity=0) or
+                // not created yet, values remain 0.
+                try {
+                    const std::size_t rpcCap =
+                        static_cast<std::size_t>(TuneAdvisor::postIngestRpcQueueMax());
+                    out.postIngestRpcCapacity = rpcCap;
+                    out.postIngestRpcMaxPerBatch =
+                        static_cast<std::size_t>(TuneAdvisor::postIngestRpcMaxPerBatch());
+                    if (rpcCap > 0) {
+                        auto rpcCh =
+                            InternalEventBus::instance()
+                                .get_channel<InternalEventBus::PostIngestTask>("post_ingest_rpc");
+                        if (rpcCh) {
+                            out.postIngestRpcQueued = rpcCh->size_approx();
+                        }
+                    }
+                } catch (...) {
+                }
                 out.postIngestProcessed = pq->processed();
                 out.postIngestFailed = pq->failed();
                 out.postIngestLatencyMsEma = pq->latencyMsEma();

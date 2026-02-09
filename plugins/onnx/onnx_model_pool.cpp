@@ -99,6 +99,14 @@ public:
     Impl(const std::string& modelPath, const std::string& modelName,
          const vector::EmbeddingConfig& config)
         : modelPath_(modelPath), modelName_(modelName), config_(config), preprocessor_(config) {
+        // Check if dynamic padding is disabled via environment variable
+        if (const char* dp = std::getenv("YAMS_ONNX_DYNAMIC_PADDING")) {
+            std::string val(dp);
+            std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+            if (val == "0" || val == "false" || val == "no" || val == "off") {
+                dynamicPaddingEnabled_ = false;
+            }
+        }
 #ifdef GTEST_API_
         // Check if we should skip model loading in test mode
         if (yams::test::shouldSkipModelLoading()) {
@@ -391,6 +399,7 @@ public:
                             auto seq = inShape[1];
                             if (seq > 0) {
                                 maxSequenceLength_ = static_cast<size_t>(seq);
+                                hasFixedInputShape_ = true;
                             }
                         }
                     } catch (const std::exception& e) {
@@ -603,30 +612,53 @@ public:
 
 private:
     void appendGpuExecutionProvider() {
-        actualExecutionProvider_ = onnx_util::appendGpuProvider(*sessionOptions_);
+        std::string cacheDir;
+        if (!modelPath_.empty()) {
+            auto parentDir = fs::path(modelPath_).parent_path();
+            if (fs::exists(parentDir)) {
+                cacheDir = parentDir.string();
+            }
+        }
+        actualExecutionProvider_ = onnx_util::appendGpuProvider(*sessionOptions_, cacheDir);
     }
 
     // GenAI adapter (optional)
 #ifdef YAMS_ENABLE_ONNX_GENAI
     std::unique_ptr<OnnxGenAIAdapter> genai_;
 #endif
+    // Align a sequence length up to a SIMD-friendly multiple (AVX: 8 x int32, NEON: 4).
+    static size_t alignSeqLen(size_t len, size_t alignment = 8) {
+        return ((len + alignment - 1) / alignment) * alignment;
+    }
+
     // Helper that performs tokenization + ONNX run + pooling for single input
     Result<std::vector<float>> runOnnx(const std::string& t) {
         const size_t seq_len = maxSequenceLength_ > 0 ? maxSequenceLength_ : 512;
         auto tokens = preprocessor_.tokenize(t);
         tokens = preprocessor_.truncateTokens(tokens, seq_len);
-        tokens = preprocessor_.padTokens(tokens, seq_len);
+
+        // Dynamic padding: pad to aligned actual length instead of model max
+        size_t effective_seq_len = seq_len;
+        if (dynamicPaddingEnabled_ && !hasFixedInputShape_) {
+            effective_seq_len = std::min(alignSeqLen(tokens.size()), seq_len);
+            if (effective_seq_len == 0)
+                effective_seq_len = 1;
+            spdlog::debug("[ONNX] Dynamic padding (single): actual={} effective={} (model_max={})",
+                          tokens.size(), effective_seq_len, seq_len);
+        }
+
+        tokens = preprocessor_.padTokens(tokens, effective_seq_len);
         auto attention_mask = preprocessor_.generateAttentionMask(tokens);
 
-        std::vector<int64_t> input_shape = {1, static_cast<int64_t>(seq_len)};
-        const size_t input_tensor_size = seq_len;
+        std::vector<int64_t> input_shape = {1, static_cast<int64_t>(effective_seq_len)};
+        const size_t input_tensor_size = effective_seq_len;
         auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
         // Cap token ids to model vocab; Nomic uses 30528, MiniLM/mpnet ~30522
         const int64_t MAX_TOKEN_ID = 30527;
         const int64_t UNK_TOKEN_ID = 100;
         std::vector<int64_t> tokens_i64;
-        tokens_i64.reserve(seq_len);
+        tokens_i64.reserve(effective_seq_len);
         for (auto v : tokens) {
             tokens_i64.push_back((v < 0 || v > MAX_TOKEN_ID) ? UNK_TOKEN_ID
                                                              : static_cast<int64_t>(v));
@@ -640,7 +672,7 @@ private:
             memory_info, mask_i64.data(), input_tensor_size, input_shape.data(), 2));
         std::vector<int64_t> token_type_ids;
         if (inputNames_.size() >= 3) {
-            token_type_ids.resize(seq_len, 0);
+            token_type_ids.resize(effective_seq_len, 0);
             input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
                 memory_info, token_type_ids.data(), input_tensor_size, input_shape.data(), 2));
         }
@@ -754,24 +786,41 @@ private:
             return std::vector<std::vector<float>>{};
         const size_t seq_len = maxSequenceLength_ > 0 ? maxSequenceLength_ : 512;
 
-        // Tokenize all inputs
+        // Pass 1: tokenize + truncate (no padding yet)
         std::vector<std::vector<int32_t>> token_seqs;
         token_seqs.reserve(texts.size());
-        std::vector<std::vector<int32_t>> masks;
-        masks.reserve(texts.size());
         for (const auto& t : texts) {
             auto tokens = preprocessor_.tokenize(t);
             tokens = preprocessor_.truncateTokens(tokens, seq_len);
-            tokens = preprocessor_.padTokens(tokens, seq_len);
-            auto mask = preprocessor_.generateAttentionMask(tokens);
             token_seqs.push_back(std::move(tokens));
-            masks.push_back(std::move(mask));
+        }
+
+        // Determine effective padding length
+        size_t effective_seq_len = seq_len;
+        if (dynamicPaddingEnabled_ && !hasFixedInputShape_) {
+            size_t max_actual = 0;
+            for (const auto& toks : token_seqs)
+                max_actual = std::max(max_actual, toks.size());
+            effective_seq_len = std::min(alignSeqLen(max_actual), seq_len);
+            if (effective_seq_len == 0)
+                effective_seq_len = 1;
+            spdlog::debug("[ONNX] Dynamic padding: B={} max_actual={} effective={} (model_max={})",
+                          texts.size(), max_actual, effective_seq_len, seq_len);
+        }
+
+        // Pass 2: pad to effective_seq_len + generate masks
+        std::vector<std::vector<int32_t>> masks;
+        masks.reserve(texts.size());
+        for (auto& toks : token_seqs) {
+            toks = preprocessor_.padTokens(toks, effective_seq_len);
+            masks.push_back(preprocessor_.generateAttentionMask(toks));
         }
 
         // Prepare batched tensors [B, S]
         const size_t B = texts.size();
-        std::vector<int64_t> input_shape = {static_cast<int64_t>(B), static_cast<int64_t>(seq_len)};
-        const size_t tensor_size = B * seq_len;
+        std::vector<int64_t> input_shape = {static_cast<int64_t>(B),
+                                            static_cast<int64_t>(effective_seq_len)};
+        const size_t tensor_size = B * effective_seq_len;
         auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
         const int64_t MAX_TOKEN_ID = 30527;
@@ -783,12 +832,12 @@ private:
         for (size_t i = 0; i < B; ++i) {
             const auto& toks = token_seqs[i];
             const auto& m = masks[i];
-            for (size_t j = 0; j < seq_len && j < toks.size(); ++j) {
+            for (size_t j = 0; j < effective_seq_len && j < toks.size(); ++j) {
                 int64_t v = toks[j];
                 tokens_batched.push_back((v < 0 || v > MAX_TOKEN_ID) ? UNK_TOKEN_ID : v);
                 masks_batched.push_back(static_cast<int64_t>(m[j]));
             }
-            for (size_t j = toks.size(); j < seq_len; ++j) {
+            for (size_t j = toks.size(); j < effective_seq_len; ++j) {
                 tokens_batched.push_back(UNK_TOKEN_ID);
                 masks_batched.push_back(0);
             }
@@ -968,8 +1017,10 @@ private:
 
     size_t embeddingDim_ = 0;
     size_t maxSequenceLength_ = 512;
+    bool hasFixedInputShape_ = false; // true when ONNX model input dim[1] > 0
     bool isLoaded_ = false;
     bool test_mode_ = false;
+    bool dynamicPaddingEnabled_ = true; // controlled by YAMS_ONNX_DYNAMIC_PADDING
 
     enum class Pooling { MEAN, CLS, MAX };
     Pooling pooling_mode_ = Pooling::MEAN;
@@ -1772,10 +1823,10 @@ Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
 
     auto handle = std::move(handleResult.value());
 
-    // Do a dummy inference to trigger lazy loading
-    // Use a short text that will produce embeddings quickly
-    const std::string warmupText = "warmup";
-    auto embedResult = handle->generateEmbedding(warmupText);
+    // Do a batch inference to trigger lazy loading and warm the batch code path
+    std::vector<std::string> warmupTexts = {"warmup text one", "warmup text two",
+                                            "warmup text three", "warmup text four"};
+    auto embedResult = handle->generateBatchEmbeddings(warmupTexts);
     if (!embedResult) {
         spdlog::error("[ONNX Plugin] Warmup inference failed for {}: {}", modelName,
                       embedResult.error().message);
@@ -1784,27 +1835,76 @@ Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
 
     auto t1 = std::chrono::steady_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-    spdlog::info("[ONNX Plugin] Model '{}' warmed up in {}ms (embedding dim={})", modelName, ms,
-                 embedResult.value().size());
+    spdlog::info("[ONNX Plugin] Model '{}' warmed up in {}ms (batch={}, embedding dim={})",
+                 modelName, ms, warmupTexts.size(),
+                 embedResult.value().empty() ? 0 : embedResult.value()[0].size());
 
-    // Pre-warm additional sessions for GPU mode to avoid repeated provider init.
+    // Auto-tune batch size if not explicitly set and auto-tuning not disabled
+    auto autotuneDisabled = []() {
+        if (const char* s = std::getenv("YAMS_EMBED_AUTOTUNE")) {
+            std::string v(s);
+            std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+            return v == "0" || v == "false" || v == "no" || v == "off";
+        }
+        return false;
+    };
+    if (TuneAdvisor::getEmbedDocCap() == 0 && !autotuneDisabled()) {
+        spdlog::info("[ONNX Plugin] Auto-tuning batch size for '{}'...", modelName);
+
+        std::vector<std::string> probeTexts;
+        probeTexts.reserve(64);
+        for (uint32_t i = 0; i < 64; ++i)
+            probeTexts.push_back("probe text number " + std::to_string(i) + " for auto-tuning");
+
+        std::vector<uint32_t> candidates = {4, 8, 16, 32, 64};
+        double bestTps = 0.0;
+        uint32_t bestBatch = 16;
+
+        for (uint32_t bs : candidates) {
+            std::vector<std::string> batch(probeTexts.begin(),
+                                           probeTexts.begin() + static_cast<ptrdiff_t>(bs));
+            auto pt0 = std::chrono::steady_clock::now();
+            auto r = handle->generateBatchEmbeddings(batch);
+            auto elapsed = std::chrono::steady_clock::now() - pt0;
+            if (!r)
+                break;
+            double probeMs =
+                std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count() / 1000.0;
+            double tps = static_cast<double>(bs) / (probeMs / 1000.0);
+            spdlog::debug("[ONNX Plugin] Autotune probe: batch={} {:.1f}ms ({:.1f} texts/sec)", bs,
+                          probeMs, tps);
+            if (tps > bestTps) {
+                bestTps = tps;
+                bestBatch = bs;
+            }
+        }
+
+        TuneAdvisor::setEmbedDocCap(bestBatch);
+        spdlog::info("[ONNX Plugin] Auto-tuned batch size: {} ({:.1f} texts/sec)", bestBatch,
+                     bestTps);
+    }
+
+    // Pre-warm additional sessions to avoid cold-start penalty on concurrent requests.
+    // GPU mode: up to 3 sessions (GPU provider init is expensive).
+    // CPU mode: up to 2 sessions (eliminates ~1788ms cold start for second request).
     // The initial handle is still held; additional sessions are acquired and immediately
     // released back to the pool so they are pre-initialized for future use.
-    if (config_.enableGPU) {
+    {
         size_t targetWarm =
-            std::min(static_cast<size_t>(TuneAdvisor::onnxSessionsPerModel(true)), size_t{3});
+            std::min(static_cast<size_t>(TuneAdvisor::onnxSessionsPerModel(config_.enableGPU)),
+                     config_.enableGPU ? size_t{3} : size_t{2});
         for (size_t i = 1; i < targetWarm; ++i) {
             auto extra = acquireModel(modelName, std::chrono::seconds(60));
             if (!extra) {
-                spdlog::debug("[ONNX Plugin] GPU pre-warm: could not acquire session {} for {}",
-                              i + 1, modelName);
+                spdlog::debug("[ONNX Plugin] Pre-warm: could not acquire session {} for {}", i + 1,
+                              modelName);
                 break;
             }
             // Session returned to pool when extra goes out of scope
         }
         if (targetWarm > 1) {
-            spdlog::info("[ONNX Plugin] Pre-warmed {} GPU sessions for '{}'", targetWarm,
-                         modelName);
+            spdlog::info("[ONNX Plugin] Pre-warmed {} sessions for '{}' (gpu={})", targetWarm,
+                         modelName, config_.enableGPU ? "yes" : "no");
         }
     }
 

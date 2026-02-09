@@ -7,8 +7,8 @@
 #include <vector>
 
 #include <spdlog/spdlog.h>
-#include <boost/asio/awaitable.hpp>
 #include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/awaitable.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
@@ -19,6 +19,8 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 
 namespace yams::daemon {
+
+template <typename T> class SpscQueue;
 
 namespace detail {
 
@@ -78,6 +80,10 @@ template <typename Task> struct PressureLimitedPollerConfig {
     std::function<std::size_t()> batchSizeFn;
     std::function<void(std::vector<Task>&&)> batchProcessFn;
 
+    // Optional high-priority channel (for RPC / latency-sensitive work)
+    std::shared_ptr<SpscQueue<Task>> highPriorityChannel;
+    std::function<std::size_t()> highPriorityMaxPerBatchFn;
+
     // Capability check (titlePoller)
     std::function<bool()> isCapableFn;
 
@@ -121,20 +127,58 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
             if (cfg.batchMode) {
                 // Batch collection (channelPoller)
                 const std::size_t batchSize = cfg.batchSizeFn ? cfg.batchSizeFn() : std::size_t(1);
+                const std::size_t hpMax =
+                    cfg.highPriorityMaxPerBatchFn ? cfg.highPriorityMaxPerBatchFn() : batchSize;
                 std::vector<Task> batch;
                 batch.reserve(batchSize);
                 Task task;
 
-                while (cfg.inFlightCounter->load() < maxConcurrent && batch.size() < batchSize &&
-                       channel->try_pop(task)) {
+                auto tryPopFromAny = [&](Task& out, bool& fromHighPriority) -> bool {
+                    if (cfg.highPriorityChannel) {
+                        if (cfg.highPriorityChannel->try_pop(out)) {
+                            fromHighPriority = true;
+                            return true;
+                        }
+                    }
+                    if (channel->try_pop(out)) {
+                        fromHighPriority = false;
+                        return true;
+                    }
+                    return false;
+                };
+
+                std::size_t hpTaken = 0;
+
+                while (cfg.inFlightCounter->load() < maxConcurrent && batch.size() < batchSize) {
+                    bool fromHighPriority = false;
+                    if (cfg.highPriorityChannel && hpTaken >= hpMax) {
+                        // Quota consumed; only pull from the normal channel for fairness.
+                        if (!channel->try_pop(task)) {
+                            break;
+                        }
+                        fromHighPriority = false;
+                    } else {
+                        if (!tryPopFromAny(task, fromHighPriority)) {
+                            break;
+                        }
+                    }
+
                     GradientLimiter* lim = cfg.getLimiterFn ? cfg.getLimiterFn() : nullptr;
                     if (!cfg.tryAcquireFn(lim, cfg.getHashFn(task), cfg.stageName)) {
-                        channel->try_push(std::move(task));
+                        // Push back to the originating channel to preserve priority.
+                        if (fromHighPriority && cfg.highPriorityChannel) {
+                            cfg.highPriorityChannel->try_push(std::move(task));
+                        } else {
+                            channel->try_push(std::move(task));
+                        }
                         break;
                     }
                     didWork = true;
                     cfg.inFlightCounter->fetch_add(1);
                     batch.push_back(std::move(task));
+                    if (fromHighPriority) {
+                        ++hpTaken;
+                    }
                 }
 
                 if (didWork && !batch.empty()) {

@@ -1,7 +1,7 @@
 {
-  "dataset_path": "tests/data/ingestion",
-  "fixture_manifest": "tests/benchmarks/baseline/fixtures.json",
-  "output_metrics": "build/benchmarks/ingestion_baseline.jsonl",
+  "dataset_path": "..",
+  "fixture_manifest": "unused",
+  "output_metrics": "../../../build/benchmarks/ingestion_baseline.jsonl",
   "post_run_cleanup": true,
   "runs": [
     {

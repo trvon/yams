@@ -305,6 +305,15 @@ public:
                                 pj["queued"] = getCount("post_ingest_queued");
                                 pj["inflight"] = getCount("post_ingest_inflight");
                                 pj["capacity"] = getCount("post_ingest_capacity");
+                                // High-priority queue used for repair/stuck-doc recovery
+                                {
+                                    nlohmann::json rpc;
+                                    rpc["queued"] = getCount("post_ingest_rpc_queued");
+                                    rpc["capacity"] = getCount("post_ingest_rpc_capacity");
+                                    rpc["max_per_batch"] =
+                                        getCount("post_ingest_rpc_max_per_batch");
+                                    pj["rpc"] = std::move(rpc);
+                                }
                                 pj["rate_sec_ema"] = getCount("post_ingest_rate_sec_ema");
                                 pj["latency_ms_ema"] = getCount("post_ingest_latency_ms_ema");
                                 // Per-stage breakdown
@@ -633,6 +642,9 @@ public:
                                     uint64_t piq = getU64("post_ingest_queued");
                                     uint64_t pii = getU64("post_ingest_inflight");
                                     uint64_t pic = getU64("post_ingest_capacity");
+                                    uint64_t pirpcq = getU64("post_ingest_rpc_queued");
+                                    uint64_t pirpcc = getU64("post_ingest_rpc_capacity");
+                                    uint64_t pirpcb = getU64("post_ingest_rpc_max_per_batch");
                                     uint64_t pil = getU64("post_ingest_latency_ms_ema");
                                     uint64_t pir = getU64("post_ingest_rate_sec_ema");
                                     uint64_t pip = getU64("post_ingest_processed");
@@ -641,6 +653,11 @@ public:
                                               << ", cap=" << pic << ", rate=" << pir
                                               << "/s, lat=" << pil << "ms"
                                               << ", proc=" << pip << ", fail=" << pif << "\n";
+                                    if (pirpcc > 0) {
+                                        std::cout << "      rpc: queued=" << pirpcq
+                                                  << ", cap=" << pirpcc
+                                                  << ", max_per_batch=" << pirpcb << "\n";
+                                    }
                                     // Per-stage breakdown with dynamic limits (PBI-05a)
                                     uint64_t ext = getU64("extraction_inflight");
                                     uint64_t extLim = getU64("post_extraction_limit");

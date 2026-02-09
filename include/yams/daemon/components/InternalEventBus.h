@@ -190,6 +190,17 @@ public:
         return q;
     }
 
+    // Non-creating accessor: returns nullptr if channel doesn't exist.
+    // Use for observability paths (status/metrics) to avoid side effects.
+    template <typename T> std::shared_ptr<SpscQueue<T>> get_channel(const std::string& name) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = chans_.find(name);
+        if (it == chans_.end()) {
+            return nullptr;
+        }
+        return std::static_pointer_cast<SpscQueue<T>>(it->second);
+    }
+
     // Common event types
     struct EmbedJob {
         std::vector<std::string> hashes;

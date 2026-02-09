@@ -99,7 +99,8 @@ protected:
 
 BENCHMARK_DEFINE_F(MetadataQueryFixture, QueryExactPath)(benchmark::State& state) {
     DocumentQueryOptions opts;
-    opts.exactPath = "/workspace/project1/file_5.md";
+    // i=5 is always present for Arg(128)/Arg(1024) and routes to project5 (i % 16).
+    opts.exactPath = "/workspace/project5/file_5.md";
     for (auto _ : state) {
         auto res = ctx_.repo->queryDocuments(opts);
         benchmark::DoNotOptimize(res);

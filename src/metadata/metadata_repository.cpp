@@ -1029,16 +1029,19 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
 Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::string& key,
                                              const MetadataValue& value) {
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        repository::MetadataEntry entry;
-        entry.documentId = documentId;
-        entry.key = key;
-        entry.value = value.value;
-        entry.valueType = MetadataValueTypeUtils::toString(value.type);
-
-        // Use INSERT OR REPLACE which handles composite PK (document_id, key) correctly
-        repository::CrudOps<repository::MetadataEntry> ops;
-        std::vector<repository::MetadataEntry> batch{entry};
-        YAMS_TRY(ops.upsertBatch(db, batch));
+        // Single-row fast path: avoid batch scaffolding + explicit transaction.
+        // Use ON CONFLICT to avoid DELETE+INSERT semantics of OR REPLACE (less write
+        // amplification).
+        static const std::string sql =
+            "INSERT INTO metadata (document_id, key, value, value_type) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(document_id, key) DO UPDATE SET value = excluded.value, "
+            "value_type = excluded.value_type";
+        YAMS_TRY_UNWRAP(stmt, db.prepareCached(sql));
+        YAMS_TRY(stmt->bind(1, documentId));
+        YAMS_TRY(stmt->bind(2, key));
+        YAMS_TRY(stmt->bind(3, value.value));
+        YAMS_TRY(stmt->bind(4, MetadataValueTypeUtils::toStringView(value.type)));
+        YAMS_TRY(stmt->execute());
         return {};
     });
 
@@ -1056,21 +1059,70 @@ Result<void> MetadataRepository::setMetadataBatch(
     }
 
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        // Convert to MetadataEntry vector
-        std::vector<repository::MetadataEntry> batch;
-        batch.reserve(entries.size());
-        for (const auto& [documentId, key, value] : entries) {
-            repository::MetadataEntry entry;
-            entry.documentId = documentId;
-            entry.key = key;
-            entry.value = value.value;
-            entry.valueType = MetadataValueTypeUtils::toString(value.type);
-            batch.push_back(std::move(entry));
+        // Chunked multi-row upsert:
+        // - Avoid INSERT OR REPLACE delete+insert semantics (less write amplification)
+        // - Avoid per-entry MetadataEntry allocations/copies
+        // - Reuse cached statement for the common "full chunk" shape
+        constexpr int kColumnsPerRow = 4; // document_id, key, value, value_type
+        constexpr int kSqliteParamLimit = 999;
+        constexpr int kMaxRowsPerChunk = kSqliteParamLimit / kColumnsPerRow; // 249
+
+        auto buildUpsertSql = [](int rows) -> std::string {
+            std::string sql;
+            sql.reserve(static_cast<size_t>(rows) * 20 + 200);
+            sql += "INSERT INTO metadata (document_id, key, value, value_type) VALUES ";
+            for (int i = 0; i < rows; ++i) {
+                if (i > 0)
+                    sql += ',';
+                sql += "(?, ?, ?, ?)";
+            }
+            sql += " ON CONFLICT(document_id, key) DO UPDATE SET value = excluded.value, "
+                   "value_type = excluded.value_type";
+            return sql;
+        };
+
+        const std::string fullChunkSql = buildUpsertSql(kMaxRowsPerChunk);
+
+        // Wrap the full operation in a single transaction.
+        // beginTransactionWithRetry() uses BEGIN IMMEDIATE on SQLite to avoid mid-loop lock
+        // surprises; commit/rollback uses Database::execute.
+        YAMS_TRY(beginTransactionWithRetry(db));
+        auto rollback = scope_exit([&] { db.execute("ROLLBACK"); });
+
+        for (size_t offset = 0; offset < entries.size(); offset += kMaxRowsPerChunk) {
+            const int rows = static_cast<int>(
+                std::min(entries.size() - offset, static_cast<size_t>(kMaxRowsPerChunk)));
+
+            if (rows == kMaxRowsPerChunk) {
+                YAMS_TRY_UNWRAP(stmt, db.prepareCached(fullChunkSql));
+                int bindIndex = 1;
+                for (int i = 0; i < rows; ++i) {
+                    const auto& [documentId, key, value] = entries[offset + static_cast<size_t>(i)];
+                    YAMS_TRY(stmt->bind(bindIndex++, documentId));
+                    YAMS_TRY(stmt->bind(bindIndex++, key));
+                    YAMS_TRY(stmt->bind(bindIndex++, value.value));
+                    YAMS_TRY(
+                        stmt->bind(bindIndex++, MetadataValueTypeUtils::toStringView(value.type)));
+                }
+                YAMS_TRY(stmt->execute());
+            } else {
+                const std::string tailSql = buildUpsertSql(rows);
+                YAMS_TRY_UNWRAP(stmt, db.prepare(tailSql));
+                int bindIndex = 1;
+                for (int i = 0; i < rows; ++i) {
+                    const auto& [documentId, key, value] = entries[offset + static_cast<size_t>(i)];
+                    YAMS_TRY(stmt.bind(bindIndex++, documentId));
+                    YAMS_TRY(stmt.bind(bindIndex++, key));
+                    YAMS_TRY(stmt.bind(bindIndex++, value.value));
+                    YAMS_TRY(
+                        stmt.bind(bindIndex++, MetadataValueTypeUtils::toStringView(value.type)));
+                }
+                YAMS_TRY(stmt.execute());
+            }
         }
 
-        // CrudOps::upsertBatch handles transaction internally
-        repository::CrudOps<repository::MetadataEntry> ops;
-        YAMS_TRY(ops.upsertBatch(db, batch));
+        YAMS_TRY(db.execute("COMMIT"));
+        rollback.dismiss();
         return {};
     });
 

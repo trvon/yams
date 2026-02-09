@@ -14,7 +14,6 @@
 #include <yams/api/content_store.h>
 #include <yams/common/utf8_utils.h>
 #include <yams/daemon/async_batcher.h>
-#include <yams/daemon/pressure_limited_poller.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/KGWriteQueue.h>
@@ -23,6 +22,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
+#include <yams/daemon/pressure_limited_poller.h>
 #include <yams/daemon/resource/external_entity_provider_adapter.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/extraction/text_extractor.h>
@@ -492,6 +492,15 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
             "post_ingest", channelCapacity);
     spdlog::info("[PostIngestQueue] channelPoller got channel (cap={})", channelCapacity);
 
+    std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>> rpcChannel;
+    const std::size_t rpcCapacity = static_cast<std::size_t>(TuneAdvisor::postIngestRpcQueueMax());
+    if (rpcCapacity > 0) {
+        rpcChannel =
+            InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+                "post_ingest_rpc", rpcCapacity);
+        spdlog::info("[PostIngestQueue] channelPoller got RPC channel (cap={})", rpcCapacity);
+    }
+
     PressureLimitedPollerConfig<InternalEventBus::PostIngestTask> cfg;
     cfg.stageName = "extraction";
     cfg.stopFlag = &stop_;
@@ -511,6 +520,12 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     cfg.batchMode = true;
     cfg.batchSizeFn = []() -> std::size_t {
         return std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
+    };
+    cfg.highPriorityChannel = rpcChannel;
+    cfg.highPriorityMaxPerBatchFn = []() -> std::size_t {
+        const std::size_t batchSz = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
+        const std::size_t hp = std::max<std::size_t>(1u, TuneAdvisor::postIngestRpcMaxPerBatch());
+        return std::min(hp, batchSz);
     };
     cfg.batchProcessFn = [this](std::vector<InternalEventBus::PostIngestTask>&& tasks) {
         processBatch(std::move(tasks));
@@ -592,7 +607,17 @@ std::size_t PostIngestQueue::size() const {
     auto channel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
             kChannelName, channelCapacity);
-    return channel ? channel->size_approx() : 0;
+
+    const std::size_t rpcCapacity = static_cast<std::size_t>(TuneAdvisor::postIngestRpcQueueMax());
+    auto rpcChannel =
+        (rpcCapacity > 0)
+            ? InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+                  "post_ingest_rpc", rpcCapacity)
+            : nullptr;
+
+    const std::size_t normalDepth = channel ? channel->size_approx() : 0;
+    const std::size_t rpcDepth = rpcChannel ? rpcChannel->size_approx() : 0;
+    return normalDepth + rpcDepth;
 }
 
 std::size_t PostIngestQueue::kgQueueDepth() const {

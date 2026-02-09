@@ -88,6 +88,10 @@ struct MetricsSnapshot {
     std::size_t postIngestQueued{0};
     std::size_t postIngestInflight{0};
     std::size_t postIngestCapacity{0};
+    // High-priority post-ingest queue (used for repair/stuck-doc recovery)
+    std::size_t postIngestRpcQueued{0};
+    std::size_t postIngestRpcCapacity{0};
+    std::size_t postIngestRpcMaxPerBatch{0};
     std::size_t postIngestProcessed{0};
     std::size_t postIngestFailed{0};
     // File/directory add tracking

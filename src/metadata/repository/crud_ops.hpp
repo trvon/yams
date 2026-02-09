@@ -752,30 +752,55 @@ public:
              ...);
         }(std::make_index_sequence<N>{});
 
-        std::string sql = "INSERT OR REPLACE INTO " + std::string(Traits::table) + " (" + columns +
-                          ") VALUES (" + placeholders + ")";
+        // Batch using a multi-row INSERT OR REPLACE to reduce per-row overhead.
+        // Keep a conservative parameter cap (SQLite default is 999).
+        constexpr size_t kMaxParamsPerStmt = 900;
+        const size_t colsPerRow = static_cast<size_t>(N);
+        const size_t maxRowsPerStmt = std::max<size_t>(1, kMaxParamsPerStmt / colsPerRow);
 
         YAMS_TRY(db.beginTransaction());
         auto rollback = scope_exit([&db]() { db.rollback(); });
 
-        YAMS_TRY_UNWRAP(stmt, db.prepare(sql));
         int64_t affected = 0;
+        for (size_t start = 0; start < entities.size(); start += maxRowsPerStmt) {
+            const size_t end = std::min(start + maxRowsPerStmt, entities.size());
+            const size_t batchSize = end - start;
 
-        for (const auto& entity : entities) {
-            YAMS_TRY(stmt.reset());
+            // Build VALUES list: (?,?,?,?),(?,?,?,?),...
+            std::string values;
+            values.reserve(batchSize * (placeholders.size() + 3));
+            for (size_t i = 0; i < batchSize; ++i) {
+                if (i > 0)
+                    values += ", ";
+                values += "(" + placeholders + ")";
+            }
 
-            // Bind ALL columns for upsert (including PK)
+            std::string sql = "INSERT OR REPLACE INTO " + std::string(Traits::table) + " (" +
+                              columns + ") VALUES " + values;
+
+            YAMS_TRY_UNWRAP(stmt, db.prepare(sql));
+
             int idx = 1;
-            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-                (([&] {
-                     constexpr auto& col = std::get<Is>(cols);
-                     stmt.bind(idx++, entity.*(col.member));
-                 }()),
-                 ...);
-            }(std::make_index_sequence<N>{});
+            for (size_t i = start; i < end; ++i) {
+                const auto& entity = entities[i];
+                Result<void> bindResult{};
+
+                [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                    (([&] {
+                         if (!bindResult) {
+                             return;
+                         }
+                         constexpr auto& col = std::get<Is>(cols);
+                         bindResult = stmt.bind(idx++, entity.*(col.member));
+                     }()),
+                     ...);
+                }(std::make_index_sequence<N>{});
+
+                YAMS_TRY(bindResult);
+            }
 
             YAMS_TRY(stmt.execute());
-            ++affected;
+            affected += static_cast<int64_t>(batchSize);
         }
 
         rollback.dismiss();

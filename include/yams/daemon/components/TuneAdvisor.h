@@ -734,6 +734,46 @@ public:
         postIngestQueueMaxOverride_.store(v, std::memory_order_relaxed);
     }
 
+    // Post-ingest RPC queue capacity (high-priority channel). Env override:
+    // YAMS_POST_INGEST_RPC_QUEUE_MAX
+    static uint32_t postIngestRpcQueueMax() {
+        uint32_t ov = postIngestRpcQueueMaxOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_POST_INGEST_RPC_QUEUE_MAX")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 10 && v <= 1'000'000)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 256;
+    }
+    static void setPostIngestRpcQueueMax(uint32_t v) {
+        postIngestRpcQueueMaxOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    // Maximum number of high-priority (RPC) post-ingest tasks to drain per batch.
+    // Env override: YAMS_POST_INGEST_RPC_MAX_PER_BATCH
+    static uint32_t postIngestRpcMaxPerBatch() {
+        uint32_t ov = postIngestRpcMaxPerBatchOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_POST_INGEST_RPC_MAX_PER_BATCH")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 1024)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 4;
+    }
+    static void setPostIngestRpcMaxPerBatch(uint32_t v) {
+        postIngestRpcMaxPerBatchOverride_.store(v, std::memory_order_relaxed);
+    }
+
     // Post-ingest batching size. Env override: YAMS_POST_INGEST_BATCH_SIZE
     // Profile-scaled: Efficient=4, Balanced=6, Aggressive=8
     // Dynamically scales down when DB lock contention is detected.
@@ -2387,6 +2427,8 @@ private:
     static inline std::atomic<uint32_t> postIngestStageActiveMaskOverride_{0x3Fu};
     static inline std::atomic<uint32_t> postIngestQueueMaxOverride_{0};
     static inline std::atomic<uint32_t> postIngestBatchSizeOverride_{0};
+    static inline std::atomic<uint32_t> postIngestRpcQueueMaxOverride_{0};
+    static inline std::atomic<uint32_t> postIngestRpcMaxPerBatchOverride_{0};
     static inline std::atomic<uint32_t> ioConnPerThreadOverride_{0};
     static inline std::atomic<uint32_t> connectionSlotsMinOverride_{0};
     static inline std::atomic<uint32_t> connectionSlotsMaxOverride_{0};
