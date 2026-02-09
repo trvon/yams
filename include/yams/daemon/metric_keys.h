@@ -146,6 +146,14 @@ constexpr std::string_view kDirectoriesAdded = "directories_added";
 constexpr std::string_view kFilesProcessed = "files_processed";
 constexpr std::string_view kDirectoriesProcessed = "directories_processed";
 
+// Event Bus metrics
+constexpr std::string_view kBusEmbedQueued = "bus_embed_queued";
+constexpr std::string_view kBusEmbedConsumed = "bus_embed_consumed";
+constexpr std::string_view kBusEmbedDropped = "bus_embed_dropped";
+constexpr std::string_view kBusPostQueued = "bus_post_queued";
+constexpr std::string_view kBusPostConsumed = "bus_post_consumed";
+constexpr std::string_view kBusPostDropped = "bus_post_dropped";
+
 // Resource Governor metrics
 constexpr std::string_view kPressureLevel = "pressure_level";
 

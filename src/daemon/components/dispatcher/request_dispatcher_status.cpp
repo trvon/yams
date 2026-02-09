@@ -610,12 +610,18 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         }
         try {
             auto& bus = InternalEventBus::instance();
-            response.additionalStats["bus_embed_queued"] = std::to_string(bus.embedQueued());
-            response.additionalStats["bus_embed_consumed"] = std::to_string(bus.embedConsumed());
-            response.additionalStats["bus_embed_dropped"] = std::to_string(bus.embedDropped());
-            response.additionalStats["bus_post_queued"] = std::to_string(bus.postQueued());
-            response.additionalStats["bus_post_consumed"] = std::to_string(bus.postConsumed());
-            response.additionalStats["bus_post_dropped"] = std::to_string(bus.postDropped());
+            response.additionalStats[std::string(metrics::kBusEmbedQueued)] =
+                std::to_string(bus.embedQueued());
+            response.additionalStats[std::string(metrics::kBusEmbedConsumed)] =
+                std::to_string(bus.embedConsumed());
+            response.additionalStats[std::string(metrics::kBusEmbedDropped)] =
+                std::to_string(bus.embedDropped());
+            response.additionalStats[std::string(metrics::kBusPostQueued)] =
+                std::to_string(bus.postQueued());
+            response.additionalStats[std::string(metrics::kBusPostConsumed)] =
+                std::to_string(bus.postConsumed());
+            response.additionalStats[std::string(metrics::kBusPostDropped)] =
+                std::to_string(bus.postDropped());
         } catch (...) {
         }
         // Embedding service metrics (in-flight jobs being processed)
