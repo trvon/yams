@@ -605,4 +605,85 @@ TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: handle RAII returns sessi
     CHECK(acquireMs < 1000); // Should be near-instant, not waiting for timeout
 }
 
+// ---------------------------------------------------------------------------
+// Dynamic padding correctness: embeddings should be numerically identical
+// whether dynamic padding is enabled (default) or disabled.
+// ---------------------------------------------------------------------------
+TEST_CASE_METHOD(OnnxModelPoolFixture,
+                 "OnnxModelPool: dynamic padding produces identical embeddings",
+                 "[daemon][.slow][.requires_model]") {
+    auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found. Download with: yams model --download " +
+             modelName);
+    }
+
+    // Disable mock mode for real model tests
+    unsetenv("YAMS_TEST_MODE");
+
+    const std::vector<std::string> texts = {
+        "short", "a slightly longer sentence for testing dynamic padding behavior",
+        "the quick brown fox jumps over the lazy dog", "x"};
+
+    // Phase 1: Generate embeddings with dynamic padding enabled (default)
+    std::vector<std::vector<float>> dynamicEmbeddings;
+    {
+        config_.maxMemoryGB = 2;
+        config_.modelIdleTimeout = std::chrono::seconds(60);
+        pool_ = std::make_unique<OnnxModelPool>(config_);
+        REQUIRE(pool_->initialize());
+
+        auto h = pool_->acquireModel(modelName, 60s);
+        REQUIRE(h);
+        auto& session = *h.value();
+        auto r = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings(texts);
+        REQUIRE(r);
+        dynamicEmbeddings = std::move(r.value());
+
+        pool_->shutdown();
+        pool_.reset();
+    }
+
+    // Phase 2: Generate embeddings with dynamic padding disabled
+    std::vector<std::vector<float>> fixedEmbeddings;
+    {
+        setenv("YAMS_ONNX_DYNAMIC_PADDING", "0", 1);
+
+        config_.maxMemoryGB = 2;
+        config_.modelIdleTimeout = std::chrono::seconds(60);
+        pool_ = std::make_unique<OnnxModelPool>(config_);
+        REQUIRE(pool_->initialize());
+
+        auto h = pool_->acquireModel(modelName, 60s);
+        REQUIRE(h);
+        auto& session = *h.value();
+        auto r = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings(texts);
+        REQUIRE(r);
+        fixedEmbeddings = std::move(r.value());
+
+        pool_->shutdown();
+        pool_.reset();
+
+        unsetenv("YAMS_ONNX_DYNAMIC_PADDING");
+    }
+
+    // Compare: embeddings should be identical within floating point tolerance
+    REQUIRE(dynamicEmbeddings.size() == fixedEmbeddings.size());
+    REQUIRE(dynamicEmbeddings.size() == texts.size());
+
+    for (size_t i = 0; i < texts.size(); ++i) {
+        REQUIRE(dynamicEmbeddings[i].size() == fixedEmbeddings[i].size());
+        double maxDiff = 0.0;
+        for (size_t d = 0; d < dynamicEmbeddings[i].size(); ++d) {
+            double diff = std::abs(static_cast<double>(dynamicEmbeddings[i][d]) -
+                                   static_cast<double>(fixedEmbeddings[i][d]));
+            maxDiff = std::max(maxDiff, diff);
+        }
+        UNSCOPED_INFO("Text " << i << " (\"" << texts[i].substr(0, 30) << "...\")"
+                              << " max_diff=" << maxDiff << " dim=" << dynamicEmbeddings[i].size());
+        // Allow small epsilon for floating point rounding differences
+        CHECK(maxDiff < 1e-4);
+    }
+}
+
 } // namespace yams::daemon::test

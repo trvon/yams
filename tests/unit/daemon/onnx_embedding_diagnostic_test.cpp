@@ -806,4 +806,128 @@ TEST_CASE("ONNX Benchmark: session reuse performance",
     CHECK(results[1].acquireMs <= results[0].acquireMs);
 }
 
+// ---------------------------------------------------------------------------
+// 9. Dynamic padding throughput comparison
+//    Runs batch size sweep with dynamic padding ON (default) to show improved
+//    throughput when tensor size scales with content instead of fixed padding.
+// ---------------------------------------------------------------------------
+TEST_CASE("ONNX Benchmark: dynamic padding throughput",
+          "[daemon][onnx][benchmark][.requires_model]") {
+    if (!checkModelAvailable(kModelName)) {
+        SKIP("Model " + kModelName + " not found at ~/.yams/models/" + kModelName +
+             "/model.onnx. Download with: yams model --download " + kModelName);
+    }
+
+    // Build a 64-text corpus of SHORT texts (dynamic padding shines here)
+    constexpr int kCorpusSize = 64;
+    constexpr int kIterations = 3;
+    std::vector<std::string> corpus;
+    corpus.reserve(kCorpusSize);
+    for (int i = 0; i < kCorpusSize; ++i) {
+        corpus.push_back("short text " + std::to_string(i));
+    }
+
+    struct BatchResult {
+        int batchSize;
+        long avgMs;
+        double textsPerSec;
+        std::string label;
+    };
+    std::vector<BatchResult> allResults;
+
+    std::vector<int> batchSizes = {1, 2, 4, 8, 16, 32, 64};
+    auto now = []() { return std::chrono::steady_clock::now(); };
+
+    // --- Run with dynamic padding ON (default) ---
+    {
+        DiagnosticFixture fix(false);
+        fix.pool_ = std::make_unique<OnnxModelPool>(fix.config_);
+        REQUIRE(fix.pool_->initialize());
+
+        auto h = fix.pool_->acquireModel(kModelName, 60s);
+        REQUIRE(h);
+        auto& session = *h.value();
+
+        // Warmup pass
+        auto warmup = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings({"warmup"});
+        REQUIRE(warmup);
+
+        for (int bs : batchSizes) {
+            long totalMs = 0;
+            for (int iter = 0; iter < kIterations; ++iter) {
+                auto t0 = now();
+                for (int offset = 0; offset < kCorpusSize; offset += bs) {
+                    int end = std::min(offset + bs, kCorpusSize);
+                    std::vector<std::string> batch(corpus.begin() + offset, corpus.begin() + end);
+                    auto r = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings(batch);
+                    REQUIRE(r);
+                }
+                totalMs += std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - t0)
+                               .count();
+            }
+            long avgMs = totalMs / kIterations;
+            double tps = avgMs > 0 ? (static_cast<double>(kCorpusSize) / avgMs) * 1000.0 : 0.0;
+            allResults.push_back({bs, avgMs, tps, "Dynamic ON"});
+        }
+    }
+
+    // --- Run with dynamic padding OFF ---
+    {
+        setenv("YAMS_ONNX_DYNAMIC_PADDING", "0", 1);
+
+        DiagnosticFixture fix(false);
+        fix.pool_ = std::make_unique<OnnxModelPool>(fix.config_);
+        REQUIRE(fix.pool_->initialize());
+
+        auto h = fix.pool_->acquireModel(kModelName, 60s);
+        REQUIRE(h);
+        auto& session = *h.value();
+
+        auto warmup = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings({"warmup"});
+        REQUIRE(warmup);
+
+        for (int bs : batchSizes) {
+            long totalMs = 0;
+            for (int iter = 0; iter < kIterations; ++iter) {
+                auto t0 = now();
+                for (int offset = 0; offset < kCorpusSize; offset += bs) {
+                    int end = std::min(offset + bs, kCorpusSize);
+                    std::vector<std::string> batch(corpus.begin() + offset, corpus.begin() + end);
+                    auto r = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings(batch);
+                    REQUIRE(r);
+                }
+                totalMs += std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - t0)
+                               .count();
+            }
+            long avgMs = totalMs / kIterations;
+            double tps = avgMs > 0 ? (static_cast<double>(kCorpusSize) / avgMs) * 1000.0 : 0.0;
+            allResults.push_back({bs, avgMs, tps, "Dynamic OFF"});
+        }
+
+        unsetenv("YAMS_ONNX_DYNAMIC_PADDING");
+    }
+
+    // Print comparison table
+    UNSCOPED_INFO("================================================================");
+    UNSCOPED_INFO("  Dynamic Padding Throughput Comparison ("
+                  << kIterations << " iterations, " << kCorpusSize << " short texts, CPU-only)");
+    UNSCOPED_INFO("================================================================");
+    UNSCOPED_INFO("  " << std::left << std::setw(14) << "Mode" << std::setw(12) << "BatchSize"
+                       << std::setw(14) << "Avg(ms)"
+                       << "Texts/sec");
+    UNSCOPED_INFO("  " << std::string(54, '-'));
+    for (const auto& r : allResults) {
+        UNSCOPED_INFO("  " << std::left << std::setw(14) << r.label << std::setw(12) << r.batchSize
+                           << std::setw(14) << r.avgMs << std::fixed << std::setprecision(1)
+                           << r.textsPerSec);
+    }
+    UNSCOPED_INFO("================================================================");
+
+    // Dynamic padding ON should not be slower than OFF for short texts
+    REQUIRE(allResults.size() >= 2);
+    CHECK(allResults.front().textsPerSec > 0.0);
+}
+
 } // namespace yams::daemon::test

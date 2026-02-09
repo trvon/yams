@@ -78,20 +78,26 @@ grep_bench = executable('yams_grep_benchmarks', files('grep_benchmarks.cpp'),
   install: false,
 )
 
-search_tree_bench = executable('search_tree_bench', files('search_tree_bench.cpp'),
-  include_directories: incs,
-  dependencies: [
+# Large-scale ingestion benchmark (requires google-benchmark)
+if benchmark_dep.found()
+  large_scale_ingestion_bench_deps = [
+    test_deps,
     dependency('yams_benchmarks'),
-    dependency('yams_app_services'),
-    dependency('yams_metadata'),
-    dependency('yams_search'),
-    dependency('yams_daemon'),
-    dependency('spdlog'),
-    dependency('nlohmann_json'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-  install: false,
-)
+    benchmark_dep,
+  ] + tracy_deps
+
+  large_scale_ingestion_bench = executable('yams_large_scale_ingestion_bench',
+    files('large_scale_ingestion_bench.cpp'),
+    include_directories: incs,
+    dependencies: large_scale_ingestion_bench_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  alias_target('bench_large_scale_ingestion', large_scale_ingestion_bench)
+else
+  message('Google Benchmark not found; skipping large_scale_ingestion_bench')
+endif
 
 if benchmark_dep.found()
   retrieval_bench_deps = [test_deps, dependency('yams_benchmarks')] + tracy_deps + [benchmark_dep]
