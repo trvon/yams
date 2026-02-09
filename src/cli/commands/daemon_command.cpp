@@ -2030,6 +2030,9 @@ private:
                     uint64_t queued = findPostIngestCount("post_ingest_queued");
                     uint64_t inflight = findPostIngestCount("post_ingest_inflight");
                     uint64_t cap = findPostIngestCount("post_ingest_capacity");
+                    uint64_t rpcQueued = findPostIngestCount("post_ingest_rpc_queued");
+                    uint64_t rpcCap = findPostIngestCount("post_ingest_rpc_capacity");
+                    uint64_t rpcMaxPerBatch = findPostIngestCount("post_ingest_rpc_max_per_batch");
                     uint64_t processed = findPostIngestCount("post_ingest_processed");
                     uint64_t failed = findPostIngestCount("post_ingest_failed");
                     uint64_t latency = findPostIngestCount("post_ingest_latency_ms_ema");
@@ -2054,6 +2057,14 @@ private:
                     std::ostringstream throughput;
                     throughput << rate << "/s · " << latency << "ms latency";
                     postIngestRows.push_back({"Throughput", throughput.str(), ""});
+
+                    if (rpcCap > 0) {
+                        std::ostringstream rpc;
+                        rpc << rpcQueued << "/" << rpcCap;
+                        if (rpcMaxPerBatch > 0)
+                            rpc << " · max/batch " << rpcMaxPerBatch;
+                        postIngestRows.push_back({"RPC Queue", rpc.str(), ""});
+                    }
 
                     std::ostringstream stats;
                     stats << processed << " processed";

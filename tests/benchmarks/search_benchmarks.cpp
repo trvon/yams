@@ -130,42 +130,42 @@ protected:
 
 // --- Main Runner ---
 
+using yams::benchmark::archiveJsonFileBestEffort;
 using yams::benchmark::BenchmarkBase;
+using yams::benchmark::matchesAnyFilter;
+using yams::benchmark::parseBenchmarkArgs;
 using yams::benchmark::QueryParserBenchmark;
 using yams::benchmark::SearchBenchmark;
 using yams::test::BenchmarkTracker;
 
 int main(int argc, char** argv) {
-    BenchmarkBase::Config config;
-    config.verbose = true;
-    config.benchmark_iterations = 10;
+    const auto cli = parseBenchmarkArgs(argc, argv);
 
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--quiet") {
-            config.verbose = false;
-        } else if (arg == "--iterations" && i + 1 < argc) {
-            config.benchmark_iterations = std::stoi(argv[++i]);
-        } else if (arg == "--output" && i + 1 < argc) {
-            config.output_file = argv[++i];
-        }
-    }
+    BenchmarkBase::Config config;
+    config.verbose = cli.verbose;
+    config.warmup_iterations = cli.warmupIterations;
+    config.benchmark_iterations = cli.iterations;
+    config.track_memory = cli.trackMemory;
 
     std::cout << "YAMS Search Performance Benchmarks\n";
     std::cout << "====================================\n\n";
 
-    std::filesystem::path outDir = "bench_results";
+    std::filesystem::path outDir = cli.outDir;
     std::error_code ec_mkdir;
     std::filesystem::create_directories(outDir, ec_mkdir);
     if (ec_mkdir) {
         std::cerr << "WARNING: unable to create bench_results directory: " << ec_mkdir.message()
                   << std::endl;
     }
-    if (config.output_file.empty()) {
-        config.output_file = (outDir / "search_benchmarks.json").string();
+    const std::filesystem::path suiteHistoryJson = outDir / "search_benchmarks.json";
+    const std::filesystem::path suiteResultsJsonl = outDir / "search_benchmarks.jsonl";
+    if (cli.outputFile) {
+        config.output_file = cli.outputFile->string();
+    } else {
+        config.output_file = suiteResultsJsonl.string();
     }
 
-    BenchmarkTracker tracker(outDir / "search_benchmarks.json");
+    BenchmarkTracker tracker(suiteHistoryJson);
     std::vector<std::unique_ptr<BenchmarkBase>> benchmarks;
 
     // Search benchmarks
@@ -186,6 +186,9 @@ int main(int argc, char** argv) {
         "ParallelPostProcessor_1000", 1000, config));
 
     for (auto& benchmark : benchmarks) {
+        if (!matchesAnyFilter(benchmark->name(), cli.filters)) {
+            continue;
+        }
         auto result = benchmark->run();
         BenchmarkTracker::BenchmarkResult trackerResult;
         trackerResult.name = result.name;
@@ -198,6 +201,16 @@ int main(int argc, char** argv) {
 
     tracker.generateReport(outDir / "search_benchmark_report.json");
     tracker.generateMarkdownReport(outDir / "search_benchmark_report.md");
+
+    if (cli.archive) {
+        tracker.flushHistory();
+        if (auto dir = archiveJsonFileBestEffort(suiteHistoryJson, cli.archiveDir, "search")) {
+            std::error_code ec;
+            std::filesystem::copy_file(suiteResultsJsonl, *dir / suiteResultsJsonl.filename(),
+                                       std::filesystem::copy_options::overwrite_existing, ec);
+            tracker.snapshotTo(*dir / "snapshot.json");
+        }
+    }
 
     std::cout << "\n====================================\n";
     std::cout << "Benchmark complete. Reports generated.\n";

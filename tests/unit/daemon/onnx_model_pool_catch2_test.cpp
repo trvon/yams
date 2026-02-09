@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/core/types.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
 #include <yams/vector/embedding_generator.h>
 
@@ -28,14 +29,37 @@ namespace yams::daemon::test {
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
-// Helper to check model availability
-static bool checkModelAvailable(const std::string& modelName) {
-    const char* home = std::getenv("HOME");
-    if (!home)
-        return false;
+// Configurable model name: YAMS_TEST_MODEL_NAME env or default
+static std::string testModelName() {
+    if (const char* env = std::getenv("YAMS_TEST_MODEL_NAME"))
+        return env;
+    return "nomic-embed-text-v1.5";
+}
 
-    fs::path modelPath = fs::path(home) / ".yams/models" / modelName / "model.onnx";
-    return fs::exists(modelPath);
+// Resolve models root: YAMS_MODELS_ROOT env > /Volumes/picaso/yams/models > ~/.yams/models
+static std::string resolveModelsRoot() {
+    if (const char* env = std::getenv("YAMS_MODELS_ROOT"))
+        return env;
+
+    const fs::path configuredRoot = "/Volumes/picaso/yams/models";
+    if (fs::exists(configuredRoot))
+        return configuredRoot.string();
+
+    const char* home = std::getenv("HOME");
+    if (home) {
+        fs::path fallback = fs::path(home) / ".yams/models";
+        if (fs::exists(fallback))
+            return fallback.string();
+    }
+    return {};
+}
+
+// Helper to check model availability using resolved root
+static bool checkModelAvailable(const std::string& modelName) {
+    std::string root = resolveModelsRoot();
+    if (root.empty())
+        return false;
+    return fs::exists(fs::path(root) / modelName / "model.onnx");
 }
 
 // Test fixture
@@ -49,6 +73,7 @@ struct OnnxModelPoolFixture {
         config_.lazyLoading = true; // Don't block on initialization
         config_.modelIdleTimeout = std::chrono::seconds(1);
         config_.preloadModels.clear(); // No preloading for tests
+        config_.modelsRoot = resolveModelsRoot();
 
         // Set test mode environment variable to handle missing models gracefully
         setenv("YAMS_TEST_MODE", "1", 1);
@@ -106,9 +131,10 @@ TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: model loading non-existen
 // Test model loading with real model
 TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: model loading",
                  "[daemon][.slow][.requires_model]") {
-    if (!checkModelAvailable("all-MiniLM-L6-v2")) {
-        SKIP("Model all-MiniLM-L6-v2 not found at ~/.yams/models/all-MiniLM-L6-v2/model.onnx. "
-             "Download with: yams model --download all-MiniLM-L6-v2");
+    auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found. Download with: yams model --download " +
+             modelName);
     }
 
     // Skip in CI or when we want fast tests only
@@ -123,7 +149,7 @@ TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: model loading",
 
     // Test with real model - should complete in seconds, not minutes
     auto start = std::chrono::steady_clock::now();
-    auto result = pool_->loadModel("all-MiniLM-L6-v2");
+    auto result = pool_->loadModel(modelName);
     auto elapsed = std::chrono::steady_clock::now() - start;
 
     // Fail if it takes more than 30 seconds - something is wrong
@@ -132,10 +158,10 @@ TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: model loading",
     REQUIRE(elapsedSeconds < 30);
 
     if (result) {
-        CHECK(pool_->isModelLoaded("all-MiniLM-L6-v2"));
+        CHECK(pool_->isModelLoaded(modelName));
         auto loadedModels = pool_->getLoadedModels();
         CHECK(loadedModels.size() == 1);
-        CHECK(loadedModels[0] == "all-MiniLM-L6-v2");
+        CHECK(loadedModels[0] == modelName);
     } else {
         // Log but don't fail - model might have issues
         SKIP("Model loading failed: " + result.error().message);
@@ -148,9 +174,10 @@ TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: acquisition timeout", "[d
     auto initResult = pool_->initialize();
     REQUIRE(initResult);
 
-    if (checkModelAvailable("all-MiniLM-L6-v2")) {
+    auto modelName = testModelName();
+    if (checkModelAvailable(modelName)) {
         // Test with real model acquisition - should succeed or timeout appropriately
-        auto result = pool_->acquireModel("all-MiniLM-L6-v2", 100ms);
+        auto result = pool_->acquireModel(modelName, 100ms);
         // We don't assert success here since model might be slow to load
         // But we do verify that it doesn't crash
         SUCCEED("Model acquisition completed without crash");
@@ -174,8 +201,8 @@ TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: statistics", "[daemon]") 
     CHECK(stats1.cacheMisses == 0);
 
     // Try to acquire a model (should update stats regardless of success)
-    std::string testModel =
-        checkModelAvailable("all-MiniLM-L6-v2") ? "all-MiniLM-L6-v2" : "nonexistent-model";
+    auto modelName = testModelName();
+    std::string testModel = checkModelAvailable(modelName) ? modelName : "nonexistent-model";
     auto result = pool_->acquireModel(testModel, 10ms);
 
     auto stats2 = pool_->getStats();
@@ -197,8 +224,8 @@ TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: concurrent acquisition", 
     std::atomic<int> attempts{0};
     std::atomic<int> failures{0};
 
-    std::string testModel =
-        checkModelAvailable("all-MiniLM-L6-v2") ? "all-MiniLM-L6-v2" : "nonexistent-model";
+    auto modelName = testModelName();
+    std::string testModel = checkModelAvailable(modelName) ? modelName : "nonexistent-model";
 
     std::vector<std::thread> threads;
     for (int i = 0; i < numThreads; ++i) {
@@ -349,18 +376,233 @@ TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: model path resolution", "
     REQUIRE(initResult);
 
     // Test various model name formats
-    std::vector<std::string> testModels = {"all-MiniLM-L6-v2", "all-mpnet-base-v2", "test-model",
+    std::vector<std::string> testModels = {testModelName(), "all-mpnet-base-v2", "test-model",
                                            "/absolute/path/model.onnx"};
 
-    for (const auto& modelName : testModels) {
-        auto result = pool_->loadModel(modelName);
+    for (const auto& mn : testModels) {
+        auto result = pool_->loadModel(mn);
 
         // In test environment, these should all fail with NotFound
         if (!result) {
-            INFO("Model: " << modelName);
+            INFO("Model: " << mn);
             CHECK(result.error().code == yams::ErrorCode::NotFound);
         }
     }
+}
+
+// ============================================================================
+// Real-model tests (require ONNX model on disk)
+// ============================================================================
+
+// Test session reuse performance — second acquire should be fast (pool reuse)
+TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: session reuse performance",
+                 "[daemon][.slow][.requires_model]") {
+    auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found. Download with: yams model --download " +
+             modelName);
+    }
+
+    // Disable mock mode for real model tests
+    unsetenv("YAMS_TEST_MODE");
+
+    config_.maxMemoryGB = 2;
+    config_.modelIdleTimeout = std::chrono::seconds(60);
+    pool_ = std::make_unique<OnnxModelPool>(config_);
+    REQUIRE(pool_->initialize());
+
+    // First acquire — cold (triggers model load + session creation)
+    auto coldStart = std::chrono::steady_clock::now();
+    {
+        auto h = pool_->acquireModel(modelName, 60s);
+        REQUIRE(h);
+
+        auto& session = *h.value();
+        auto r = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings({"warmup text"});
+        REQUIRE(r);
+    }
+    // Handle released — session returned to pool
+    auto coldMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - coldStart)
+                      .count();
+
+    // Second acquire — warm (should reuse pooled session)
+    auto warmStart = std::chrono::steady_clock::now();
+    {
+        auto h = pool_->acquireModel(modelName, 5s);
+        REQUIRE(h);
+
+        auto& session = *h.value();
+        auto r = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings({"reuse text"});
+        REQUIRE(r);
+    }
+    auto warmMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - warmStart)
+                      .count();
+
+    UNSCOPED_INFO("Cold acquire+embed: " << coldMs << " ms");
+    UNSCOPED_INFO("Warm acquire+embed: " << warmMs << " ms");
+
+    // Warm acquire should be significantly faster (no model compilation)
+    CHECK(warmMs < coldMs);
+}
+
+// Test concurrent batch embedding — multiple threads acquire sessions simultaneously
+TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: concurrent batch embedding",
+                 "[daemon][.slow][.requires_model]") {
+    auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found. Download with: yams model --download " +
+             modelName);
+    }
+
+    // Disable mock mode for real model tests
+    unsetenv("YAMS_TEST_MODE");
+
+    constexpr int kThreads = 4;
+    TuneAdvisor::setOnnxSessionsPerModel(kThreads);
+
+    config_.maxMemoryGB = 4;
+    config_.modelIdleTimeout = std::chrono::seconds(60);
+    pool_ = std::make_unique<OnnxModelPool>(config_);
+    REQUIRE(pool_->initialize());
+
+    // Warm up the model with a single acquire first
+    {
+        auto h = pool_->acquireModel(modelName, 60s);
+        REQUIRE(h);
+        auto& session = *h.value();
+        auto r = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings({"warmup"});
+        REQUIRE(r);
+    }
+
+    std::atomic<int> successes{0};
+    std::atomic<int> failures{0};
+    std::vector<std::thread> threads;
+
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&, i]() {
+            auto h = pool_->acquireModel(modelName, 30s);
+            if (!h) {
+                failures++;
+                return;
+            }
+
+            auto& session = *h.value();
+            std::vector<std::string> texts = {
+                "thread " + std::to_string(i) + " text one",
+                "thread " + std::to_string(i) + " text two",
+                "thread " + std::to_string(i) + " text three",
+            };
+            auto r = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings(texts);
+            if (r && r.value().size() == texts.size()) {
+                successes++;
+            } else {
+                failures++;
+            }
+        });
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    // Reset override
+    TuneAdvisor::setOnnxSessionsPerModel(0);
+
+    UNSCOPED_INFO("Concurrent results: " << successes << " succeeded, " << failures << " failed");
+    CHECK(successes == kThreads);
+    CHECK(failures == 0);
+}
+
+// Test pool stats after real usage
+TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: pool stats after real usage",
+                 "[daemon][.slow][.requires_model]") {
+    auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found. Download with: yams model --download " +
+             modelName);
+    }
+
+    // Disable mock mode for real model tests
+    unsetenv("YAMS_TEST_MODE");
+
+    config_.maxMemoryGB = 2;
+    config_.modelIdleTimeout = std::chrono::seconds(60);
+    pool_ = std::make_unique<OnnxModelPool>(config_);
+    REQUIRE(pool_->initialize());
+
+    // First acquire (cold — cache miss)
+    {
+        auto h = pool_->acquireModel(modelName, 60s);
+        REQUIRE(h);
+    }
+
+    // Second acquire (warm — cache hit)
+    {
+        auto h = pool_->acquireModel(modelName, 5s);
+        REQUIRE(h);
+    }
+
+    auto stats = pool_->getStats();
+    UNSCOPED_INFO("totalRequests: " << stats.totalRequests);
+    UNSCOPED_INFO("cacheHits:     " << stats.cacheHits);
+    UNSCOPED_INFO("cacheMisses:   " << stats.cacheMisses);
+    UNSCOPED_INFO("loadedModels:  " << stats.loadedModels);
+    UNSCOPED_INFO("hitRate:       " << stats.hitRate);
+    UNSCOPED_INFO("memoryUsage:   " << pool_->getMemoryUsage());
+
+    CHECK(stats.totalRequests == 2);
+    CHECK(stats.cacheMisses == 1);
+    CHECK(stats.cacheHits == 1);
+    CHECK(stats.loadedModels == 1);
+    CHECK(stats.hitRate > 0.0);
+    CHECK(pool_->getMemoryUsage() > 0);
+}
+
+// Test that Handle RAII properly returns session to pool (single-session pool)
+TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: handle RAII returns session",
+                 "[daemon][.slow][.requires_model]") {
+    auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found. Download with: yams model --download " +
+             modelName);
+    }
+
+    // Disable mock mode for real model tests
+    unsetenv("YAMS_TEST_MODE");
+
+    // Single session pool — if RAII doesn't return the session, second acquire deadlocks
+    TuneAdvisor::setOnnxSessionsPerModel(1);
+
+    config_.maxMemoryGB = 2;
+    config_.modelIdleTimeout = std::chrono::seconds(60);
+    pool_ = std::make_unique<OnnxModelPool>(config_);
+    REQUIRE(pool_->initialize());
+
+    // Acquire in a scope block, run inference, let handle go out of scope
+    {
+        auto h = pool_->acquireModel(modelName, 60s);
+        REQUIRE(h);
+        auto& session = *h.value();
+        auto r = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings({"raii test"});
+        REQUIRE(r);
+    }
+    // Handle destroyed — session should be back in the pool
+
+    // Immediately re-acquire — should succeed quickly if RAII returned the session
+    auto start = std::chrono::steady_clock::now();
+    auto h2 = pool_->acquireModel(modelName, 5s);
+    auto acquireMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - start)
+                         .count();
+
+    // Reset override
+    TuneAdvisor::setOnnxSessionsPerModel(0);
+
+    UNSCOPED_INFO("Re-acquire after RAII release took " << acquireMs << " ms");
+    REQUIRE(h2);
+    CHECK(acquireMs < 1000); // Should be near-instant, not waiting for timeout
 }
 
 } // namespace yams::daemon::test

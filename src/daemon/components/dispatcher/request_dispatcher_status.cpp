@@ -98,6 +98,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.requestCounts["worker_queued"] = snap->workerQueued;
             res.requestCounts["post_ingest_threads"] = snap->postIngestThreads;
             res.requestCounts["post_ingest_queued"] = snap->postIngestQueued;
+            res.requestCounts["post_ingest_rpc_queued"] = snap->postIngestRpcQueued;
             res.searchMetrics.active = snap->searchActive;
             res.searchMetrics.queued = snap->searchQueued;
             res.searchMetrics.executed = snap->searchExecuted;
@@ -118,6 +119,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.requestCounts["deferred_queue_depth"] = snap->deferredQueueDepth;
             res.requestCounts["post_ingest_inflight"] = snap->postIngestInflight;
             res.requestCounts["post_ingest_capacity"] = snap->postIngestCapacity;
+            res.requestCounts["post_ingest_rpc_capacity"] = snap->postIngestRpcCapacity;
+            res.requestCounts["post_ingest_rpc_max_per_batch"] = snap->postIngestRpcMaxPerBatch;
             // Export selected tuning config values for clients (best-effort)
             try {
                 if (serviceManager_) {

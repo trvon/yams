@@ -20,6 +20,8 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/storage/storage_engine.h>
 
+#include <yams/core/types.h>
+
 using namespace yams;
 using namespace yams::benchmark;
 
@@ -107,6 +109,38 @@ public:
         setUp();
     }
     ~MetadataBenchmark() { tearDown(); }
+
+    void collectPragmas(std::map<std::string, std::string>& attrs) {
+        if (!connectionPool_) {
+            return;
+        }
+
+        auto bestEffortPragma = [&](metadata::Database& db, const char* name) {
+            auto stmtR = db.prepare(std::string("PRAGMA ") + name);
+            if (!stmtR) {
+                return;
+            }
+            auto stmt = std::move(stmtR).value();
+            auto stepR = stmt.step();
+            if (!stepR || !stepR.value()) {
+                return;
+            }
+            attrs[name] = stmt.getString(0);
+        };
+
+        // Best-effort: ignore DB errors; this is for run attribution.
+        connectionPool_->withConnection([&](metadata::Database& db) -> yams::Result<void> {
+            bestEffortPragma(db, "journal_mode");
+            bestEffortPragma(db, "synchronous");
+            bestEffortPragma(db, "busy_timeout");
+            bestEffortPragma(db, "cache_size");
+            bestEffortPragma(db, "temp_store");
+            bestEffortPragma(db, "mmap_size");
+            bestEffortPragma(db, "foreign_keys");
+            bestEffortPragma(db, "wal_autocheckpoint");
+            return {};
+        });
+    }
 
 protected:
     void setUp() {
@@ -204,43 +238,43 @@ BENCHMARK_F(MetadataBenchmark, BulkUpdate) {
 // --- Main Runner ---
 
 int main(int argc, char** argv) {
-    BenchmarkBase::Config config;
-    config.verbose = true;
-    config.benchmark_iterations = 5;
+    const auto cli = parseBenchmarkArgs(argc, argv);
 
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--quiet") {
-            config.verbose = false;
-        } else if (arg == "--iterations" && i + 1 < argc) {
-            config.benchmark_iterations = std::stoi(argv[++i]);
-        } else if (arg == "--output" && i + 1 < argc) {
-            config.output_file = argv[++i];
-        }
-    }
+    BenchmarkBase::Config config;
+    config.verbose = cli.verbose;
+    config.warmup_iterations = cli.warmupIterations;
+    config.benchmark_iterations = cli.iterations;
+    config.track_memory = cli.trackMemory;
 
     std::cout << "YAMS API Performance Benchmarks\n";
     std::cout << "====================================\n\n";
 
-    std::filesystem::path outDir = "bench_results";
+    std::filesystem::path outDir = cli.outDir;
     std::error_code ec_mkdir;
     std::filesystem::create_directories(outDir, ec_mkdir);
     if (ec_mkdir) {
         std::cerr << "WARNING: unable to create bench_results directory: " << ec_mkdir.message()
                   << std::endl;
     }
-    if (config.output_file.empty()) {
-        config.output_file = (outDir / "api_benchmarks.json").string();
+    const std::filesystem::path suiteHistoryJson = outDir / "api_benchmarks.json";
+    const std::filesystem::path suiteResultsJsonl = outDir / "api_benchmarks.jsonl";
+    if (cli.outputFile) {
+        config.output_file = cli.outputFile->string();
+    } else {
+        config.output_file = suiteResultsJsonl.string();
     }
-    test::BenchmarkTracker tracker(outDir / "api_benchmarks.json");
+    test::BenchmarkTracker tracker(suiteHistoryJson);
 
     std::vector<std::unique_ptr<BenchmarkBase>> benchmarks;
-    benchmarks.push_back(std::make_unique<SmallDocumentBenchmark>());
-    benchmarks.push_back(std::make_unique<MediumDocumentBenchmark>());
+    benchmarks.push_back(std::make_unique<SmallDocumentBenchmark>(config));
+    benchmarks.push_back(std::make_unique<MediumDocumentBenchmark>(config));
     benchmarks.push_back(std::make_unique<SingleUpdateBenchmark>(config));
     benchmarks.push_back(std::make_unique<BulkUpdateBenchmark>(config));
 
     for (auto& benchmark : benchmarks) {
+        if (!matchesAnyFilter(benchmark->name(), cli.filters)) {
+            continue;
+        }
         auto result = benchmark->run();
         test::BenchmarkTracker::BenchmarkResult trackerResult;
         trackerResult.name = result.name;
@@ -248,11 +282,25 @@ int main(int argc, char** argv) {
         trackerResult.unit = "ms";
         trackerResult.timestamp = std::chrono::system_clock::now();
         trackerResult.metrics = result.custom_metrics;
+        if (auto* md = dynamic_cast<MetadataBenchmark*>(benchmark.get())) {
+            md->collectPragmas(trackerResult.attributes);
+        }
         tracker.recordResult(trackerResult);
     }
 
     tracker.generateReport(outDir / "api_benchmark_report.json");
     tracker.generateMarkdownReport(outDir / "api_benchmark_report.md");
+
+    if (cli.archive) {
+        // Ensure the history JSON exists on disk before archiving.
+        tracker.flushHistory();
+        if (auto dir = archiveJsonFileBestEffort(suiteHistoryJson, cli.archiveDir, "api")) {
+            std::error_code ec;
+            std::filesystem::copy_file(suiteResultsJsonl, *dir / suiteResultsJsonl.filename(),
+                                       std::filesystem::copy_options::overwrite_existing, ec);
+            tracker.snapshotTo(*dir / "snapshot.json");
+        }
+    }
 
     std::cout << "\n====================================\n";
     std::cout << "Benchmark complete. Reports generated.\n";

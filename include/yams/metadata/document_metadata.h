@@ -507,7 +507,7 @@ namespace MetadataValueTypeUtils {
 /**
  * @brief Convert metadata value type to string
  */
-[[nodiscard]] inline std::string toString(MetadataValueType type) {
+[[nodiscard]] inline constexpr std::string_view toStringView(MetadataValueType type) {
     switch (type) {
         case MetadataValueType::String:
             return "string";
@@ -521,6 +521,10 @@ namespace MetadataValueTypeUtils {
             return "boolean";
     }
     return "string";
+}
+
+[[nodiscard]] inline std::string toString(MetadataValueType type) {
+    return std::string(toStringView(type));
 }
 
 /**
