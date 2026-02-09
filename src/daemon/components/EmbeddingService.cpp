@@ -47,6 +47,10 @@ Result<void> EmbeddingService::initialize() {
     if (postIngestCap > 0) {
         capacity = std::min(capacity, postIngestCap);
     }
+    // ONNX limits impose a hard ceiling of 64 concurrent embed jobs.
+    // Clamp channel capacity to this ceiling while keeping it at least a sane minimum.
+    const std::size_t kOnnxHardLimit = 64u;
+    capacity = std::min(capacity, kOnnxHardLimit);
     capacity = std::max<std::size_t>(256u, capacity);
     embedChannel_ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
         "embed_jobs", capacity);
@@ -499,14 +503,10 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     // ============================================================
     // Model inference can be slow for large batches. Sub-batch to keep response times reasonable.
     std::size_t kMaxBatchSize = TuneAdvisor::resolvedEmbedDocCap();
-    // Guard against a zero batch size which would cause an infinite loop.
-    // If TuneAdvisor returns 0 (e.g., unset), fall back to processing the whole payload
-    // as a single batch. Ensure at least one element when input is non‑empty.
-    if (kMaxBatchSize == 0) {
-        kMaxBatchSize = allTexts.size();
-        if (kMaxBatchSize == 0) {
-            kMaxBatchSize = 1;
-        }
+    // Ensure batch size does not exceed 64 as required by ONNX limits.
+    // If TuneAdvisor reports 0 (unset), default to the maximum allowed (64).
+    if (kMaxBatchSize == 0 || kMaxBatchSize > 64) {
+        kMaxBatchSize = 64;
     }
     std::vector<std::vector<float>> embeddings;
     embeddings.reserve(allTexts.size());
