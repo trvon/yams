@@ -13,7 +13,7 @@ Usage: $0 <command> [args...]
 
 Commands:
     build                 Build Docker image with fuzzers
-    fuzz <target>         Run AFL++ fuzzer for target (ipc_protocol, add_document, ipc_roundtrip)
+    fuzz <target>         Run AFL++ fuzzer for target (e.g., ipc_protocol, ipc_roundtrip, proto_serializer)
     exec <command>        Run a command inside the fuzzing container
     shell                 Open interactive shell in container
     clean                 Remove Docker image
@@ -37,9 +37,13 @@ cmd_build() {
 cmd_fuzz() {
     local target="${1:-}"
     if [[ -z "$target" ]]; then
-        echo "Error: target required (ipc_protocol, add_document, or ipc_roundtrip)"
+        echo "Error: target required (example: ipc_protocol, ipc_roundtrip, proto_serializer)"
         exit 1
     fi
+
+    # AFL++ uses a per-fuzzer subdirectory inside -o; without -M/-S it defaults to "default".
+    # If you have multiple terminals, "default" will collide. Use a unique ID by default.
+    local fuzzer_id="${AFL_FUZZER_ID:-$(hostname)-$$}"
 
     local fuzzer_bin="/src/build/fuzzing/tools/fuzzing/fuzz_${target}"
     local corpus_dir="/fuzz/corpus/${target}"
@@ -48,8 +52,9 @@ cmd_fuzz() {
     echo "Running AFL++ fuzzer for target: ${target}"
     docker run --rm -ti \
         -v "${PROJECT_ROOT}/data/fuzz:/fuzz" \
+        -e AFL_AUTORESUME=1 \
         "${IMAGE_NAME}" \
-        afl-fuzz -i "${corpus_dir}" -o "${findings_dir}" -m none "${fuzzer_bin}"
+        afl-fuzz -S "${fuzzer_id}" -i "${corpus_dir}" -o "${findings_dir}" -m none "${fuzzer_bin}"
 }
 
 cmd_exec() {

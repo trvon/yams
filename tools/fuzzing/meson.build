@@ -37,6 +37,15 @@ fuzz_deps = [
   dependency('nlohmann_json'),
 ]
 
+# Seed generator (non-fuzzer utility)
+seedgen = executable('seedgen',
+  'seedgen.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps,
+  build_by_default: true,
+)
+
 # AFL++ libFuzzer compatibility mode flags
 # Per docs: "-fsanitize=fuzzer" provides automatic persistent mode
 fuzzer_args = ['-fsanitize=fuzzer']
@@ -103,6 +112,28 @@ fuzz_streaming_processor = executable('fuzz_streaming_processor',
 # IPC Roundtrip Fuzzer (CLI<->daemon framing + payload)
 fuzz_ipc_roundtrip = executable('fuzz_ipc_roundtrip',
   'fuzz_ipc_roundtrip.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
+# QueryParser Fuzzer (user-facing search query parsing)
+fuzz_query_parser = executable('fuzz_query_parser',
+  'fuzz_query_parser.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
+# Plugin Trust/Path Fuzzer (trust file parsing + safe path containment)
+fuzz_plugin_trust = executable('fuzz_plugin_trust',
+  'fuzz_plugin_trust.cpp',
   include_directories: include_directories('../../include'),
   link_with: yams_daemon_lib,
   dependencies: fuzz_deps,

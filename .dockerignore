@@ -29,3 +29,6 @@ node_modules/
 .idea/
 .vscode/
 
+# Fuzzing runtime outputs (often root-owned from containers)
+data/fuzz/
+

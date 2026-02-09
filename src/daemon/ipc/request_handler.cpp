@@ -162,13 +162,14 @@ RequestHandler::RequestHandler(RequestDispatcher* dispatcher, Config config)
 RequestHandler::~RequestHandler() {}
 
 boost::asio::awaitable<std::vector<uint8_t>>
-RequestHandler::handle_request(const std::vector<uint8_t>& request_data,
+RequestHandler::handle_request(std::vector<uint8_t> request_data,
                                yams::compat::stop_token token) {
     (void)token; // unused
+    auto data = std::move(request_data);
     using boost::asio::use_awaitable;
     try {
         // Parse the message from raw data
-        auto message_result = ProtoSerializer::decode_payload(request_data);
+        auto message_result = ProtoSerializer::decode_payload(data);
         if (!message_result) {
             // Create error response
             ErrorResponse error;
@@ -237,10 +238,6 @@ RequestHandler::handle_request(const std::vector<uint8_t>& request_data,
     }
 }
 
-// Note: Only the compat::stop_token variant is provided. On platforms where
-// std::stop_token exists, yams::compat::stop_token aliases it, avoiding the
-// need for an overload that would collide at the type level.
-
 boost::asio::awaitable<void> RequestHandler::handle_connection(
     std::shared_ptr<boost::asio::local::stream_protocol::socket> socket,
     yams::compat::stop_token token, uint64_t conn_token) {
@@ -271,9 +268,6 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
         fsm.on_connect(sock->native_handle());
         // Prepare write serialization for multiplexing
         if (config_.enable_multiplexing) {
-            // Serialize all writes through a per-connection strand
-            // CRITICAL: Use worker_executor for write strand, NOT socket executor,
-            // to avoid deadlock when connection loop blocks on reads
             if (config_.worker_executor) {
                 write_strand_exec_.emplace(boost::asio::make_strand(config_.worker_executor));
             } else {
@@ -284,20 +278,12 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
             write_strand_exec_.reset();
             inflight_.store(0, std::memory_order_relaxed);
         }
-        // Note: downstream clients may close early (e.g., pager exits). Treat write-side resets
-        // as non-fatal for the daemon; logs will be at debug level when detected.
-
-        // Native boost::asio sockets don't have set_timeout, timeouts are handled per-operation
-        // Use protocol maximum message size for inbound frame reader
         FrameReader reader(MAX_MESSAGE_SIZE);
         bool should_exit = false;
 
         uint64_t fsm_guard_fail_count = 0;
-        // Track consecutive idle read timeouts to prevent leaking idle connections forever
         std::uint32_t consecutive_idle_timeouts = 0;
-        // C++ IPC should be fast: 3 idle timeouts = 6s max idle with 2s read_timeout
-        // This ensures connections don't hang during shutdown or idle periods
-        // PBI-089: Made configurable via TuneAdvisor to allow backpressure-aware tolerance
+
         const std::uint32_t kMaxIdleTimeouts = TuneAdvisor::maxIdleTimeouts();
         while (!token.stop_requested() && sock->is_open()) {
             // Pause reads when backpressured to avoid amplifying write pressure
@@ -323,8 +309,6 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 guard_err = ex.what();
             }
             if (!can_read) {
-                // FSM not ready to read (e.g., mid-response). If FSM is already in Error/Closed
-                // state, close immediately to allow recovery instead of spinning.
                 const auto st = fsm.state();
                 if (st == ConnectionFsm::State::Error || st == ConnectionFsm::State::Closed) {
                     spdlog::warn("Closing connection immediately due to FSM={} (context={}): {}",
@@ -369,8 +353,6 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 continue;
             }
 
-            // Inactivity-based timeout for reads: reset timer every awaited read
-            // Race read against timeout using async_initiate (no experimental APIs)
             auto executor = co_await boost::asio::this_coro::executor;
             using ReadResult = std::tuple<boost::system::error_code, std::size_t>;
             using RaceResult = std::variant<ReadResult, bool>; // ReadResult or timedOut
@@ -420,12 +402,6 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
 
             size_t bytes_read = 0;
             if (read_or_timeout.index() == 1) {
-                // Idle persistent connection; keep connection open and continue.
-                // IMPORTANT: Do not signal FSM on idle timeouts. The FSM's on_timeout()
-                // is reserved for operation deadlines (header/payload/write). Calling it
-                // while in Connected (idle) can spuriously transition to Error.
-
-                // Get socket handle BEFORE any potential close operations to avoid use-after-free
                 const uint64_t sock_fd = sock && sock->is_open()
                                              ? static_cast<uint64_t>(sock->native_handle())
                                              : static_cast<uint64_t>(-1);
@@ -443,9 +419,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         std::lock_guard<std::mutex> lk(ctx_mtx_);
                         has_active = !contexts_.empty();
                     }
-
-                    // Avoid closing a connection that still has active work (streaming or
-                    // inflight); reset the idle counter so long-running responses can complete.
+                    
                     if (has_active) {
                         spdlog::info("Idle timeout hit with active work (inflight={} ctxs={}) "
                                      "after {} timeouts (fd={}); keeping connection open",

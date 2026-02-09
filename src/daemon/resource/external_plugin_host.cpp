@@ -15,6 +15,8 @@
 #include <set>
 #include <unordered_map>
 
+#include <yams/daemon/resource/plugin_trust.h>
+
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
@@ -902,11 +904,16 @@ private:
         }
 
         std::ifstream file(trust_file);
-        std::string line;
-        while (std::getline(file, line)) {
-            if (!line.empty() && line[0] != '#') {
-                trusted.insert(fs::weakly_canonical(line));
+        std::string content((std::istreambuf_iterator<char>(file)),
+                            std::istreambuf_iterator<char>());
+        auto parsed = plugin_trust::parseTrustList(content);
+        for (const auto& raw : parsed) {
+            std::error_code ec;
+            auto canon = fs::weakly_canonical(raw, ec);
+            if (ec) {
+                canon = raw.lexically_normal();
             }
+            trusted.insert(std::move(canon));
         }
     }
 
@@ -927,11 +934,16 @@ private:
         std::set<fs::path> merged = trusted;
         if (fs::exists(trust_file)) {
             std::ifstream infile(trust_file);
-            std::string line;
-            while (std::getline(infile, line)) {
-                if (!line.empty() && line[0] != '#') {
-                    merged.insert(fs::weakly_canonical(line));
+            std::string content((std::istreambuf_iterator<char>(infile)),
+                                std::istreambuf_iterator<char>());
+            auto parsed = plugin_trust::parseTrustList(content);
+            for (const auto& raw : parsed) {
+                std::error_code ec;
+                auto canon = fs::weakly_canonical(raw, ec);
+                if (ec) {
+                    canon = raw.lexically_normal();
                 }
+                merged.insert(std::move(canon));
             }
         }
 
@@ -955,24 +967,8 @@ private:
             if (tec)
                 base = entry;
 
-            auto baseStr = base.string();
-            auto candStr = candidate.string();
-
-            // Check if candidate is inside base directory securely
-            if (baseStr.empty())
-                continue;
-
-            // Exact match is always trusted
-            if (candStr == baseStr)
+            if (plugin_trust::isPathWithin(base, candidate)) {
                 return true;
-
-            // Prefix match must be followed by separator to avoid /trusted-evil bypass
-            if (candStr.size() > baseStr.size() &&
-                candStr.compare(0, baseStr.size(), baseStr) == 0) {
-                char nextChar = candStr[baseStr.size()];
-                if (nextChar == '/' || nextChar == '\\') {
-                    return true;
-                }
             }
         }
         return false;

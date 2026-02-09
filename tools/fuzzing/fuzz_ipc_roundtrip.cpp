@@ -46,8 +46,9 @@ std::vector<uint8_t> run_handler_roundtrip(std::span<const uint8_t> payload,
     auto processor = std::make_shared<FuzzRoundtripProcessor>();
     RequestHandler handler(processor, config);
 
+    std::vector<uint8_t> request_data(payload.begin(), payload.end());
     auto fut = boost::asio::co_spawn(
-        io, handler.handle_request(std::vector<uint8_t>(payload.begin(), payload.end()),
+        io, handler.handle_request(std::move(request_data),
                                    yams::compat::stop_token{}),
         boost::asio::use_future);
     io.run();

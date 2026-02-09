@@ -147,7 +147,7 @@ public:
 
     // Simple interface for handling raw request data (for use with native Boost.ASIO)
     [[nodiscard]] boost::asio::awaitable<std::vector<uint8_t>>
-    handle_request(const std::vector<uint8_t>& request_data, yams::compat::stop_token token);
+    handle_request(std::vector<uint8_t> request_data, yams::compat::stop_token token);
 
     // Handle a streaming response
     [[nodiscard]] boost::asio::awaitable<Result<void>>
