@@ -845,6 +845,14 @@ PostIngestQueue::prepareMetadataEntry(
 
     prepared.extractedText = std::move(*txt);
 
+    // Cap extracted text to 16 MiB to avoid SQLite bind limits
+    constexpr size_t kMaxTextToPersistInMetadataBytes = size_t{16} * 1024 * 1024;
+    if (prepared.extractedText.size() > kMaxTextToPersistInMetadataBytes) {
+        spdlog::warn("[PostIngestQueue] Truncating extracted text for {} from {} to {} bytes", hash,
+                     prepared.extractedText.size(), kMaxTextToPersistInMetadataBytes);
+        prepared.extractedText.resize(kMaxTextToPersistInMetadataBytes);
+    }
+
     // Detect language
     double langConfidence = 0.0;
     prepared.language =
