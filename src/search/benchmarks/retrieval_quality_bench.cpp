@@ -1211,6 +1211,11 @@ struct BenchFixture {
                      vectorCount != lastVectorCount);
 
                 if (statusChanged) {
+                    bool vectorDbReady = statusResult.value().vectorDbReady;
+                    if (auto it = statusResult.value().readinessStates.find("vector_db");
+                        it != statusResult.value().readinessStates.end()) {
+                        vectorDbReady = it->second;
+                    }
                     spdlog::info(
                         "Documents: total={} indexed={} / {} | queue={} inflight={} | extracted={} "
                         "processed={} | extract={} kg={} symbol={} entity={} (total={}) | "
@@ -1218,7 +1223,7 @@ struct BenchFixture {
                         docCount, indexedCount, corpusSize, queuedTotal, postInflight,
                         contentExtracted, postProcessed, extractionInFlight, kgInFlight,
                         symbolInFlight, entityInFlight, totalInFlight, embedQueued, embedInFlight,
-                        vectorCount, (statusResult.value().vectorDbReady ? "true" : "false"));
+                        vectorCount, (vectorDbReady ? "true" : "false"));
                     lastDepth = queuedTotal;
                     lastDocCount = docCount;
                     lastIndexedDocCount = indexedCount;
@@ -1324,7 +1329,11 @@ struct BenchFixture {
                 }
                 auto statusResult = yams::cli::run_sync(client->status(), 5s);
                 if (statusResult) {
-                    const bool vectorDbReady = statusResult.value().vectorDbReady;
+                    bool vectorDbReady = statusResult.value().vectorDbReady;
+                    if (auto it = statusResult.value().readinessStates.find("vector_db");
+                        it != statusResult.value().readinessStates.end()) {
+                        vectorDbReady = it->second;
+                    }
                     // Access vector count from requestCounts map
                     uint64_t vectorCount = 0;
                     auto it = statusResult.value().requestCounts.find("vector_count");
@@ -1450,9 +1459,14 @@ struct BenchFixture {
                     finalVectorCount = it->second;
                 }
                 double finalCoverage = corpusSize > 0 ? (finalVectorCount * 100.0 / corpusSize) : 0;
+                bool vectorDbReady = finalStatus.value().vectorDbReady;
+                if (auto it = finalStatus.value().readinessStates.find("vector_db");
+                    it != finalStatus.value().readinessStates.end()) {
+                    vectorDbReady = it->second;
+                }
                 spdlog::info("Vector DB: ready={} dim={}, vectors={} ({:.1f}% coverage)",
-                             (finalStatus.value().vectorDbReady ? "true" : "false"),
-                             finalStatus.value().vectorDbDim, finalVectorCount, finalCoverage);
+                             (vectorDbReady ? "true" : "false"), finalStatus.value().vectorDbDim,
+                             finalVectorCount, finalCoverage);
 
                 if (finalVectorCount == 0) {
                     spdlog::warn("No vectors present after embedding wait");
@@ -1464,14 +1478,21 @@ struct BenchFixture {
                         "Consider reducing corpus size or increasing embed channel capacity.");
                 }
 
-                if (!finalStatus.value().vectorDbReady) {
+                if (!vectorDbReady) {
                     spdlog::warn("Vector DB not ready yet; waiting briefly before queries...");
                     const auto guardDeadline = std::chrono::steady_clock::now() + 30s;
                     while (std::chrono::steady_clock::now() < guardDeadline) {
                         auto st = yams::cli::run_sync(client->status(), 5s);
-                        if (st && st.value().vectorDbReady) {
-                            spdlog::info("Vector DB is now ready after guard wait");
-                            break;
+                        if (st) {
+                            bool ready = st.value().vectorDbReady;
+                            if (auto it = st.value().readinessStates.find("vector_db");
+                                it != st.value().readinessStates.end()) {
+                                ready = it->second;
+                            }
+                            if (ready) {
+                                spdlog::info("Vector DB is now ready after guard wait");
+                                break;
+                            }
                         }
                         std::this_thread::sleep_for(500ms);
                     }
@@ -1581,8 +1602,13 @@ struct BenchFixture {
                                                     std::to_string(st.postIngestQueueDepth));
                 statusEntry.returnedPaths.push_back(std::string("embedding_available=") +
                                                     (st.embeddingAvailable ? "true" : "false"));
+                bool vectorDbReady = st.vectorDbReady;
+                if (auto it = st.readinessStates.find("vector_db");
+                    it != st.readinessStates.end()) {
+                    vectorDbReady = it->second;
+                }
                 statusEntry.returnedPaths.push_back(std::string("vector_db_ready=") +
-                                                    (st.vectorDbReady ? "true" : "false"));
+                                                    (vectorDbReady ? "true" : "false"));
                 statusEntry.returnedPaths.push_back("vector_db_dim=" +
                                                     std::to_string(st.vectorDbDim));
                 statusEntry.returnedPaths.push_back("embedding_backend=" + st.embeddingBackend);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -42,9 +43,24 @@ public:
         setConnectionSlots_ = std::move(cb);
     }
 
+    static void testing_rebalanceTargetsByQueue(std::array<uint32_t, 6>& targets,
+                                                const std::array<uint32_t, 6>& floors,
+                                                const std::array<std::size_t, 6>& queueDepths,
+                                                const std::array<bool, 6>& active);
+    static uint32_t testing_computeEmbedScaleBias(std::size_t embedQueued,
+                                                  uint64_t embedDroppedDelta,
+                                                  std::size_t postQueued,
+                                                  std::size_t embedInFlight);
+
 private:
     boost::asio::awaitable<void> tuningLoop();
     void tick_once();
+    static void rebalanceTargetsByQueue(std::array<uint32_t, 6>& targets,
+                                        const std::array<uint32_t, 6>& floors,
+                                        const std::array<std::size_t, 6>& queueDepths,
+                                        const std::array<bool, 6>& active);
+    static uint32_t computeEmbedScaleBias(std::size_t embedQueued, uint64_t embedDroppedDelta,
+                                          std::size_t postQueued, std::size_t embedInFlight);
 
     ServiceManager* sm_;
     StateComponent* state_;
@@ -89,6 +105,9 @@ private:
 
     // Issue 6 fix: track previous pressure level for de-escalation detection
     uint8_t previousPressureLevel_{0};
+
+    // Track cumulative bus drop counter to derive per-tick delta.
+    uint64_t previousEmbedDropped_{0};
 };
 
 } // namespace yams::daemon

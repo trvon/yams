@@ -59,6 +59,30 @@ private:
     uint32_t prev_{0};
 };
 
+class PostIngestConcurrencyGuard {
+public:
+    PostIngestConcurrencyGuard(uint32_t totalConcurrent, uint32_t extractionConcurrent) {
+        prevHw_ = TuneAdvisor::hardwareConcurrency();
+        prevTotal_ = TuneAdvisor::postIngestTotalConcurrent();
+        prevExtraction_ = TuneAdvisor::postExtractionConcurrent();
+        TuneAdvisor::setHardwareConcurrencyForTests(32);
+        TuneAdvisor::setPostIngestTotalConcurrent(totalConcurrent);
+        TuneAdvisor::setPostExtractionConcurrent(extractionConcurrent);
+        TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
+    }
+    ~PostIngestConcurrencyGuard() {
+        TuneAdvisor::setHardwareConcurrencyForTests(prevHw_);
+        TuneAdvisor::setPostIngestTotalConcurrent(prevTotal_);
+        TuneAdvisor::setPostExtractionConcurrent(prevExtraction_);
+        TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
+    }
+
+private:
+    uint32_t prevHw_{0};
+    uint32_t prevTotal_{0};
+    uint32_t prevExtraction_{0};
+};
+
 // Unified StubContentStore (thread-safe, supports all required operations)
 class StubContentStore : public api::IContentStore {
 public:
@@ -267,7 +291,9 @@ public:
     Result<void>
     batchInsertContentAndIndex(const std::vector<metadata::BatchContentEntry>& entries) override {
         std::lock_guard<std::mutex> lk(mu_);
+        batchWriteSizes_.push_back(entries.size());
         for (const auto& entry : entries) {
+            batchInsertedDocIds_.push_back(entry.documentId);
             contentInserted_ = true;
             // Store last content for verification
             lastContent_.documentId = entry.documentId;
@@ -339,6 +365,20 @@ public:
         return batchGetCalls_;
     }
 
+    std::vector<int64_t> batchInsertedDocIds() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return batchInsertedDocIds_;
+    }
+
+    std::size_t maxBatchWriteSize() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        std::size_t maxSize = 0;
+        for (std::size_t n : batchWriteSizes_) {
+            maxSize = std::max(maxSize, n);
+        }
+        return maxSize;
+    }
+
 private:
     mutable std::mutex mu_;
     metadata::DocumentInfo lastUpdated_{};
@@ -346,6 +386,8 @@ private:
     std::string indexedContent_;
     bool contentInserted_{false};
     std::size_t batchGetCalls_{0};
+    std::vector<int64_t> batchInsertedDocIds_{};
+    std::vector<std::size_t> batchWriteSizes_{};
     std::unordered_map<std::string, metadata::DocumentInfo> docsByHash_{};
     std::unordered_map<int64_t, metadata::DocumentInfo> docsById_{};
 };
@@ -467,7 +509,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
     coordinator.join();
 }
 
-TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and does not enqueue embeds",
+TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embeds",
           "[daemon][background][queue][batch]") {
     BusToggleGuard busGuard(false);
     PostIngestBatchGuard batchGuard(4);
@@ -544,8 +586,202 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and does not enqu
         jobCount++;
     }
 
-    // PostIngestQueue no longer enqueues embed jobs; RequestCoordinator owns that path.
-    REQUIRE(jobCount == 0);
+    // PostIngestQueue should enqueue embedding jobs for successfully extracted documents.
+    REQUIRE(jobCount > 0);
+
+    queue.reset();
+    coordinator.stop();
+    coordinator.join();
+}
+
+TEST_CASE("PostIngestQueue: Parallel extraction preserves per-task identity",
+          "[daemon][background][queue][batch][regression]") {
+    BusToggleGuard busGuard(false);
+    PostIngestBatchGuard batchGuard(64);
+    PostIngestConcurrencyGuard concurrencyGuard(64, 16);
+
+    WorkCoordinator coordinator;
+    coordinator.start(4);
+
+    auto store = std::make_shared<StubContentStore>();
+    auto metadataRepo = std::make_shared<StubMetadataRepository>();
+    auto extractor = std::make_shared<StubExtractor>();
+    std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors{extractor};
+    REQUIRE(TuneAdvisor::postExtractionConcurrent() > 1);
+
+    constexpr int64_t kDocBaseId = 5000;
+    constexpr int kDocCount = 128;
+    std::vector<metadata::DocumentInfo> docs;
+    docs.reserve(kDocCount);
+    for (int i = 0; i < kDocCount; ++i) {
+        metadata::DocumentInfo doc{};
+        doc.id = kDocBaseId + i;
+        doc.fileName = "doc-" + std::to_string(i) + ".txt";
+        doc.fileExtension = ".txt";
+        doc.sha256Hash = "parallel-hash-" + std::to_string(i);
+        doc.mimeType = "text/plain";
+        doc.indexedTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        metadataRepo->setDocument(doc);
+        store->setContent(doc.sha256Hash, "payload-" + std::to_string(i));
+        docs.push_back(doc);
+    }
+
+    auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
+                                                   nullptr, &coordinator, nullptr, 512);
+    queue->start();
+
+    auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!queue->started() && std::chrono::steady_clock::now() < startDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(queue->started());
+
+    for (const auto& doc : docs) {
+        PostIngestQueue::Task task{
+            doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
+        REQUIRE(queue->tryEnqueue(std::move(task)));
+    }
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    while (queue->processed() < docs.size() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    REQUIRE(queue->processed() == docs.size());
+    REQUIRE(queue->failed() == 0);
+
+    auto insertedDocIds = metadataRepo->batchInsertedDocIds();
+    REQUIRE(insertedDocIds.size() == docs.size());
+
+    std::sort(insertedDocIds.begin(), insertedDocIds.end());
+    REQUIRE(std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) ==
+            insertedDocIds.end());
+    for (int i = 0; i < kDocCount; ++i) {
+        REQUIRE(insertedDocIds[static_cast<std::size_t>(i)] == kDocBaseId + i);
+    }
+
+    queue.reset();
+    coordinator.stop();
+    coordinator.join();
+}
+
+TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
+          "[daemon][background][queue][batch][enqueue]") {
+    BusToggleGuard busGuard(false);
+    PostIngestBatchGuard batchGuard(8);
+    PostIngestConcurrencyGuard concurrencyGuard(32, 8);
+
+    WorkCoordinator coordinator;
+    coordinator.start(4);
+
+    auto store = std::make_shared<StubContentStore>();
+    auto metadataRepo = std::make_shared<StubMetadataRepository>();
+    auto extractor = std::make_shared<StubExtractor>();
+    std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors{extractor};
+
+    constexpr int64_t kDocBaseId = 7000;
+    constexpr int kDocCount = 64;
+    std::vector<PostIngestQueue::Task> tasks;
+    tasks.reserve(kDocCount);
+    for (int i = 0; i < kDocCount; ++i) {
+        metadata::DocumentInfo doc{};
+        doc.id = kDocBaseId + i;
+        doc.fileName = "batch-doc-" + std::to_string(i) + ".txt";
+        doc.fileExtension = ".txt";
+        doc.sha256Hash = "batch-enqueue-hash-" + std::to_string(i);
+        doc.mimeType = "text/plain";
+        doc.indexedTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        metadataRepo->setDocument(doc);
+        store->setContent(doc.sha256Hash, "batch-payload-" + std::to_string(i));
+
+        tasks.push_back(PostIngestQueue::Task{
+            doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata});
+    }
+
+    auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
+                                                   nullptr, &coordinator, nullptr, 64);
+    queue->start();
+    auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!queue->started() && std::chrono::steady_clock::now() < startDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(queue->started());
+
+    queue->enqueueBatch(std::move(tasks));
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (queue->processed() < kDocCount && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    REQUIRE(queue->processed() == kDocCount);
+    REQUIRE(queue->failed() == 0);
+
+    auto insertedDocIds = metadataRepo->batchInsertedDocIds();
+    REQUIRE(insertedDocIds.size() == static_cast<std::size_t>(kDocCount));
+    std::sort(insertedDocIds.begin(), insertedDocIds.end());
+    REQUIRE(std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) ==
+            insertedDocIds.end());
+
+    queue.reset();
+    coordinator.stop();
+    coordinator.join();
+}
+
+TEST_CASE("PostIngestQueue: keeps multi-doc batches when extraction concurrency is low",
+          "[daemon][background][queue][batch][throughput]") {
+    BusToggleGuard busGuard(false);
+    PostIngestBatchGuard batchGuard(16);
+    PostIngestConcurrencyGuard concurrencyGuard(32, 1);
+
+    WorkCoordinator coordinator;
+    coordinator.start(2);
+
+    auto store = std::make_shared<StubContentStore>();
+    auto metadataRepo = std::make_shared<StubMetadataRepository>();
+    auto extractor = std::make_shared<StubExtractor>();
+    std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors{extractor};
+
+    constexpr int64_t kDocBaseId = 9000;
+    constexpr int kDocCount = 48;
+    std::vector<PostIngestQueue::Task> tasks;
+    tasks.reserve(kDocCount);
+    for (int i = 0; i < kDocCount; ++i) {
+        metadata::DocumentInfo doc{};
+        doc.id = kDocBaseId + i;
+        doc.fileName = "low-concurrency-batch-doc-" + std::to_string(i) + ".txt";
+        doc.fileExtension = ".txt";
+        doc.sha256Hash = "low-concurrency-batch-hash-" + std::to_string(i);
+        doc.mimeType = "text/plain";
+        doc.indexedTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        metadataRepo->setDocument(doc);
+        store->setContent(doc.sha256Hash, "payload-" + std::to_string(i));
+        tasks.push_back(PostIngestQueue::Task{
+            doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata});
+    }
+
+    auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
+                                                   nullptr, &coordinator, nullptr, 64);
+    queue->start();
+    auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!queue->started() && std::chrono::steady_clock::now() < startDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(queue->started());
+
+    queue->enqueueBatch(std::move(tasks));
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (queue->processed() < kDocCount && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    REQUIRE(queue->processed() == kDocCount);
+    REQUIRE(queue->failed() == 0);
+    REQUIRE(metadataRepo->maxBatchWriteSize() > 1);
 
     queue.reset();
     coordinator.stop();

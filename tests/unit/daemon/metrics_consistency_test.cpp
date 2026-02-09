@@ -100,3 +100,56 @@ TEST(MetricsConsistencyTest, ValidateSpecificValues) {
     EXPECT_EQ(kSearchActive, "search_active");
     EXPECT_EQ(kStorageLogicalBytes, "storage_logical_bytes");
 }
+
+TEST(MetricsConsistencyTest, ValidateReadinessKeysNotEmpty) {
+    static_assert(!yams::daemon::readiness::kIpcServer.empty());
+    static_assert(!yams::daemon::readiness::kVectorDb.empty());
+    static_assert(!yams::daemon::readiness::kSearchEngineDegraded.empty());
+
+    EXPECT_FALSE(yams::daemon::readiness::kIpcServer.empty());
+    EXPECT_FALSE(yams::daemon::readiness::kVectorDb.empty());
+    EXPECT_FALSE(yams::daemon::readiness::kSearchEngineDegraded.empty());
+}
+
+TEST(MetricsConsistencyTest, ValidateReadinessUniqueKeys) {
+    std::unordered_set<std::string_view> keys = {
+        yams::daemon::readiness::kIpcServer,
+        yams::daemon::readiness::kContentStore,
+        yams::daemon::readiness::kDatabase,
+        yams::daemon::readiness::kMetadataRepo,
+        yams::daemon::readiness::kSearchEngine,
+        yams::daemon::readiness::kModelProvider,
+        yams::daemon::readiness::kVectorIndex,
+        yams::daemon::readiness::kVectorDb,
+        yams::daemon::readiness::kPlugins,
+        yams::daemon::readiness::kVectorDbInitAttempted,
+        yams::daemon::readiness::kVectorDbReady,
+        yams::daemon::readiness::kVectorDbDim,
+        yams::daemon::readiness::kSearchEngineDegraded,
+        yams::daemon::readiness::kEmbeddingReady,
+        yams::daemon::readiness::kEmbeddingDegraded,
+        yams::daemon::readiness::kPluginsReady,
+        yams::daemon::readiness::kPluginsDegraded,
+        yams::daemon::readiness::kVectorEmbeddingsAvailable,
+        yams::daemon::readiness::kVectorScoringEnabled,
+        yams::daemon::readiness::kSearchEngineBuildReasonInitial,
+        yams::daemon::readiness::kSearchEngineBuildReasonRebuild,
+        yams::daemon::readiness::kSearchEngineBuildReasonDegraded,
+    };
+
+    EXPECT_EQ(keys.size(), 22);
+}
+
+TEST(MetricsConsistencyTest, ValidateReadinessSpecificValues) {
+    EXPECT_EQ(yams::daemon::readiness::kIpcServer, "ipc_server");
+    EXPECT_EQ(yams::daemon::readiness::kContentStore, "content_store");
+    EXPECT_EQ(yams::daemon::readiness::kMetadataRepo, "metadata_repo");
+    EXPECT_EQ(yams::daemon::readiness::kSearchEngine, "search_engine");
+    EXPECT_EQ(yams::daemon::readiness::kModelProvider, "model_provider");
+    EXPECT_EQ(yams::daemon::readiness::kVectorIndex, "vector_index");
+    EXPECT_EQ(yams::daemon::readiness::kVectorDb, "vector_db");
+    EXPECT_EQ(yams::daemon::readiness::kPlugins, "plugins");
+    EXPECT_EQ(yams::daemon::readiness::kVectorDbInitAttempted, "vector_db_init_attempted");
+    EXPECT_EQ(yams::daemon::readiness::kVectorDbReady, "vector_db_ready");
+    EXPECT_EQ(yams::daemon::readiness::kVectorDbDim, "vector_db_dim");
+}

@@ -24,6 +24,7 @@
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/stream_metrics_registry.h>
+#include <yams/daemon/metric_keys.h>
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/search/search_tuner.h>
 #include <yams/vector/embedding_generator.h>
@@ -654,15 +655,30 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         } else {
             out.ready = false;
         }
-        out.readinessStates["ipc_server"] = state_->readiness.ipcServerReady.load();
-        out.readinessStates["content_store"] = state_->readiness.contentStoreReady.load();
-        out.readinessStates["database"] = state_->readiness.databaseReady.load();
-        out.readinessStates["metadata_repo"] = state_->readiness.metadataRepoReady.load();
-        out.readinessStates["search_engine"] = state_->readiness.searchEngineReady.load();
-        out.readinessStates["model_provider"] = state_->readiness.modelProviderReady.load();
-        out.readinessStates["vector_index"] = state_->readiness.vectorIndexReady.load();
-        out.readinessStates["vector_db"] = state_->readiness.vectorDbReady.load();
-        out.readinessStates["plugins"] = state_->readiness.pluginsReady.load();
+        out.readinessStates[std::string(readiness::kIpcServer)] =
+            state_->readiness.ipcServerReady.load();
+        out.readinessStates[std::string(readiness::kContentStore)] =
+            state_->readiness.contentStoreReady.load();
+        out.readinessStates[std::string(readiness::kDatabase)] =
+            state_->readiness.databaseReady.load();
+        out.readinessStates[std::string(readiness::kMetadataRepo)] =
+            state_->readiness.metadataRepoReady.load();
+        out.readinessStates[std::string(readiness::kSearchEngine)] =
+            state_->readiness.searchEngineReady.load();
+        out.readinessStates[std::string(readiness::kModelProvider)] =
+            state_->readiness.modelProviderReady.load();
+        out.readinessStates[std::string(readiness::kVectorIndex)] =
+            state_->readiness.vectorIndexReady.load();
+        out.readinessStates[std::string(readiness::kVectorDb)] =
+            state_->readiness.vectorDbReady.load();
+        out.readinessStates[std::string(readiness::kVectorDbInitAttempted)] =
+            state_->readiness.vectorDbInitAttempted.load();
+        out.readinessStates[std::string(readiness::kVectorDbReady)] =
+            state_->readiness.vectorDbReady.load();
+        out.readinessStates[std::string(readiness::kVectorDbDim)] =
+            state_->readiness.vectorDbDim.load() > 0;
+        out.readinessStates[std::string(readiness::kPlugins)] =
+            state_->readiness.pluginsReady.load();
         // Only include search init progress while not fully ready or when progress < 100%
         const bool searchReady = state_->readiness.searchEngineReady.load();
         const int searchPct = std::clamp<int>(state_->readiness.searchProgress.load(), 0, 100);
@@ -1028,20 +1044,24 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.vectorDbDim = state_->readiness.vectorDbDim.load();
             } catch (...) {
             }
-            // Heal/mirror readiness from the actual handle if present: if a live vector DB
-            // instance exists and is initialized, consider it ready even if the flag wasn't
-            // updated earlier (e.g., lock-skips, reordered init). This avoids false negatives in
-            // doctor/status while embeddings and vector storage are operational.
+            // Heal/mirror vector DB readiness from the live handle.
+            // Readiness semantics: false while empty/building; true only when the vector DB
+            // is initialized AND has at least one vector row (serving).
             try {
                 auto vdb = services_->getVectorDatabase();
                 if (vdb && vdb->isInitialized()) {
-                    out.vectorDbReady = true;
-                    // Best-effort: propagate back to state so subsequent snapshots are consistent
+                    const auto dim = vdb->getConfig().embedding_dim;
+                    const auto rows = vdb->getVectorCount();
+                    out.vectorDbReady = (rows > 0);
+                    out.vectorDbInitAttempted = true;
+
+                    // Best-effort: propagate back to state so subsequent snapshots are consistent.
+                    // We intentionally do not mark ready=true just because isInitialized().
                     try {
                         auto& readiness =
                             const_cast<yams::daemon::DaemonReadiness&>(state_->readiness);
-                        readiness.vectorDbReady.store(true, std::memory_order_relaxed);
-                        auto dim = vdb->getConfig().embedding_dim;
+                        readiness.vectorDbInitAttempted.store(true, std::memory_order_relaxed);
+                        readiness.vectorDbReady.store(out.vectorDbReady, std::memory_order_relaxed);
                         if (dim > 0)
                             readiness.vectorDbDim.store(static_cast<uint32_t>(dim),
                                                         std::memory_order_relaxed);
@@ -1078,9 +1098,9 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     } catch (...) {
     }
 
-    // Ensure readinessStates["vector_db"] reflects the final vectorDbReady after healing.
+    // Ensure readinessStates[vector_db] reflects the final vectorDbReady after healing.
     try {
-        out.readinessStates["vector_db"] = out.vectorDbReady;
+        out.readinessStates[std::string(readiness::kVectorDb)] = out.vectorDbReady;
     } catch (...) {
     }
 

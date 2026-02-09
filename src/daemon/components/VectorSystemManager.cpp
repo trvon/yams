@@ -299,7 +299,10 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                 // Update state
                 if (deps_.state) {
                     try {
-                        deps_.state->readiness.vectorDbReady = true;
+                        deps_.state->readiness.vectorDbInitAttempted = true;
+                        // Readiness semantics: false while empty/building; true only when serving
+                        // (has data). The vector DB starts empty, so initialize as not ready.
+                        deps_.state->readiness.vectorDbReady = false;
                         deps_.state->readiness.vectorDbDim =
                             static_cast<uint32_t>(cfg.embedding_dim);
                     } catch (...) {

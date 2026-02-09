@@ -375,6 +375,29 @@ TEST_CASE("Repair batch size env var overrides", "[daemon][tune][advisor][catch2
     }
 }
 
+TEST_CASE("Embed doc cap resolves to safe default when unset",
+          "[daemon][tune][advisor][embed][catch2]") {
+    struct EmbedCapGuard {
+        std::size_t prev{TuneAdvisor::getEmbedDocCap()};
+        ~EmbedCapGuard() { TuneAdvisor::setEmbedDocCap(prev); }
+    } guard;
+
+    SECTION("Unset cap uses built-in default (no singleton fallback)") {
+        // Ensure no explicit override is active.
+        TuneAdvisor::setEmbedDocCap(0);
+        // Invalid env value should be ignored and still resolve to default.
+        EnvGuard envGuard("YAMS_EMBED_DOC_CAP", "0");
+        CHECK(TuneAdvisor::getEmbedDocCap() == 0u);
+        CHECK(TuneAdvisor::resolvedEmbedDocCap() == TuneAdvisor::kDefaultEmbedDocCap);
+        CHECK(TuneAdvisor::resolvedEmbedDocCap() == 64u);
+    }
+
+    SECTION("Explicit cap overrides default") {
+        TuneAdvisor::setEmbedDocCap(128);
+        CHECK(TuneAdvisor::resolvedEmbedDocCap() == 128u);
+    }
+}
+
 // =============================================================================
 // Worker poll cadence overrides
 // =============================================================================

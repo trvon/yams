@@ -7,8 +7,11 @@
 // Uses same TDD pattern as tuning_allocation_catch2_test.cpp.
 
 #include <catch2/catch_test_macros.hpp>
-#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/GradientLimiter.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningManager.h>
+#include <array>
 #include <cstdlib>
 #include <string>
 #include <yams/compat/unistd.h>
@@ -495,4 +498,168 @@ TEST_CASE("ETA remaining calculation handles integer truncation",
         // Progress beyond 100 should still be safe
         CHECK(computeEtaRemaining(5, 150) == 0);
     }
+}
+
+// =============================================================================
+// Group D: Embed scale bias under backlog pressure
+// =============================================================================
+
+TEST_CASE("Embed scale bias ramps with queue pressure",
+          "[daemon][tune][reconciliation][embed-bias][catch2]") {
+    SECTION("Bias increases as embed queue grows") {
+        const auto b0 = TuningManager::testing_computeEmbedScaleBias(0, 0, 0, 0);
+        const auto b1 = TuningManager::testing_computeEmbedScaleBias(200, 0, 0, 0);
+        const auto b2 = TuningManager::testing_computeEmbedScaleBias(800, 0, 0, 0);
+        const auto b3 = TuningManager::testing_computeEmbedScaleBias(2200, 0, 0, 0);
+
+        CHECK(b1 >= b0);
+        CHECK(b2 >= b1);
+        CHECK(b3 >= b2);
+    }
+
+    SECTION("Drops and saturation increase bias beyond pure queue level") {
+        const auto queueOnly = TuningManager::testing_computeEmbedScaleBias(900, 0, 0, 0);
+        const auto withDrops = TuningManager::testing_computeEmbedScaleBias(900, 50, 0, 0);
+        const auto withSaturation = TuningManager::testing_computeEmbedScaleBias(900, 50, 900, 1);
+
+        CHECK(withDrops >= queueOnly);
+        CHECK(withSaturation >= withDrops);
+    }
+
+    SECTION("Bias is bounded to avoid runaway oversubscription") {
+        const auto capped = TuningManager::testing_computeEmbedScaleBias(100000, 100000, 100000, 8);
+        CHECK(capped <= 8);
+    }
+}
+
+TEST_CASE("Queue-pressure rebalance shifts capacity to backlogged stages",
+          "[daemon][tune][reconciliation][queue][catch2]") {
+    SECTION("Shifts one slot from low-pressure to high-pressure stage") {
+        std::array<uint32_t, 6> targets{2, 2, 2, 2, 2, 2};
+        std::array<uint32_t, 6> floors{1, 0, 0, 0, 0, 0};
+        std::array<std::size_t, 6> depths{0, 400, 1, 1, 1, 1};
+        std::array<bool, 6> active{true, true, true, true, true, true};
+
+        TuningManager::testing_rebalanceTargetsByQueue(targets, floors, depths, active);
+
+        // KG backlog dominates, so KG should gain capacity.
+        CHECK(targets[1] > 2);
+        // Total budget must be preserved.
+        CHECK(targets[0] + targets[1] + targets[2] + targets[3] + targets[4] + targets[5] == 12);
+    }
+
+    SECTION("Does not violate configured floors") {
+        std::array<uint32_t, 6> targets{1, 3, 1, 1, 1, 1};
+        std::array<uint32_t, 6> floors{1, 0, 0, 0, 0, 0};
+        std::array<std::size_t, 6> depths{0, 0, 0, 0, 0, 500};
+        std::array<bool, 6> active{true, true, true, true, true, true};
+
+        TuningManager::testing_rebalanceTargetsByQueue(targets, floors, depths, active);
+
+        CHECK(targets[0] >= floors[0]);
+        CHECK(targets[5] > 1);
+        CHECK(targets[0] + targets[1] + targets[2] + targets[3] + targets[4] + targets[5] == 8);
+    }
+}
+
+// =============================================================================
+// Group E: Deterministic tuning simulation with GradientLimiter
+// =============================================================================
+
+TEST_CASE("Embed tuning simulation improves queue control with gradient limiter",
+          "[daemon][tune][reconciliation][gradient][sim][!benchmark]") {
+    struct SimResult {
+        std::size_t peakQueue{0};
+        std::size_t finalQueue{0};
+        std::size_t totalProcessed{0};
+        double avgTarget{0.0};
+    };
+
+    auto runSim = [&](bool useDynamicBias) -> SimResult {
+        GradientLimiter::Config cfg;
+        cfg.initialLimit = 4.0;
+        cfg.minLimit = 1.0;
+        cfg.maxLimit = 32.0;
+        cfg.warmupSamples = 3;
+        cfg.smoothingAlpha = 0.5;
+        cfg.longWindowAlpha = 0.1;
+        cfg.tolerance = 1.5;
+        GradientLimiter limiter("embed-sim", cfg);
+
+        constexpr std::size_t kTicks = 180;
+        constexpr uint32_t kBaseTarget = 2;
+        constexpr std::size_t kPerWorkerRate = 22;
+        constexpr std::size_t kDropThreshold = 1100;
+
+        std::size_t queue = 0;
+        std::size_t peakQueue = 0;
+        std::size_t totalProcessed = 0;
+        std::size_t targetAccumulator = 0;
+
+        for (std::size_t tick = 0; tick < kTicks; ++tick) {
+            std::size_t arrivals = 0;
+            if (tick < 40) {
+                arrivals = 35; // warm ramp
+            } else if (tick < 110) {
+                arrivals = 70; // sustained burst
+            } else {
+                arrivals = 18; // recovery tail
+            }
+
+            const uint64_t droppedDelta =
+                queue > kDropThreshold ? static_cast<uint64_t>((queue - kDropThreshold) / 60) : 0u;
+            const std::size_t inFlightHint = queue > 0 ? 1u : 0u;
+
+            const uint32_t bias = useDynamicBias ? TuningManager::testing_computeEmbedScaleBias(
+                                                       queue, droppedDelta, queue, inFlightHint)
+                                                 : 0u;
+            const uint32_t target = kBaseTarget + bias;
+            targetAccumulator += target;
+
+            const uint32_t limiterSlots = std::max<uint32_t>(1u, limiter.effectiveLimit());
+            const uint32_t workers = std::min(target, limiterSlots);
+
+            const std::size_t demand = queue + arrivals;
+            const std::size_t capacity = static_cast<std::size_t>(workers) * kPerWorkerRate;
+            const std::size_t processed = std::min(demand, capacity);
+            totalProcessed += processed;
+            queue = demand - processed;
+            peakQueue = std::max(peakQueue, queue);
+
+            // Drive gradient limiter using queue-correlated RTTs.
+            const uint32_t simulatedRttMs =
+                static_cast<uint32_t>(8 + std::min<std::size_t>(120, queue / 35));
+            const uint32_t inflightForLimiter = std::max<uint32_t>(1u, workers);
+            uint32_t acquired = 0;
+            for (uint32_t i = 0; i < inflightForLimiter; ++i) {
+                if (limiter.tryAcquire()) {
+                    ++acquired;
+                }
+            }
+            for (uint32_t i = 0; i < acquired; ++i) {
+                limiter.onJobComplete(std::chrono::milliseconds(simulatedRttMs), true);
+            }
+        }
+
+        SimResult out;
+        out.peakQueue = peakQueue;
+        out.finalQueue = queue;
+        out.totalProcessed = totalProcessed;
+        out.avgTarget = static_cast<double>(targetAccumulator) / static_cast<double>(kTicks);
+        return out;
+    };
+
+    const SimResult baseline = runSim(false);
+    const SimResult dynamic = runSim(true);
+
+    INFO("baseline peak=" << baseline.peakQueue << " final=" << baseline.finalQueue << " processed="
+                          << baseline.totalProcessed << " avgTarget=" << baseline.avgTarget);
+    INFO("dynamic  peak=" << dynamic.peakQueue << " final=" << dynamic.finalQueue << " processed="
+                          << dynamic.totalProcessed << " avgTarget=" << dynamic.avgTarget);
+
+    // Dynamic bias should improve drain behavior under the same gradient limiter.
+    CHECK(dynamic.totalProcessed >= baseline.totalProcessed);
+    CHECK(dynamic.peakQueue <= baseline.peakQueue);
+    CHECK(dynamic.finalQueue <= baseline.finalQueue);
+    CHECK(dynamic.avgTarget >= baseline.avgTarget);
 }

@@ -2190,6 +2190,10 @@ private:
         }
 
         bool dbReady = status.vectorDbReady;
+        if (auto it = status.readinessStates.find("vector_db");
+            it != status.readinessStates.end()) {
+            dbReady = it->second;
+        }
         size_t dbDim = status.vectorDbDim;
 
         // Avoid polling in CLI; rely on current daemon status only

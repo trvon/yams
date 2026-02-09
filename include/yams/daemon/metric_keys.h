@@ -158,3 +158,33 @@ constexpr std::string_view kBusPostDropped = "bus_post_dropped";
 constexpr std::string_view kPressureLevel = "pressure_level";
 
 } // namespace yams::daemon::metrics
+
+namespace yams::daemon::readiness {
+
+// Core readiness gates
+constexpr std::string_view kIpcServer = "ipc_server";
+constexpr std::string_view kContentStore = "content_store";
+constexpr std::string_view kDatabase = "database";
+constexpr std::string_view kMetadataRepo = "metadata_repo";
+constexpr std::string_view kSearchEngine = "search_engine";
+constexpr std::string_view kModelProvider = "model_provider";
+constexpr std::string_view kVectorIndex = "vector_index";
+constexpr std::string_view kVectorDb = "vector_db";
+constexpr std::string_view kPlugins = "plugins";
+
+// Extended readiness details
+constexpr std::string_view kVectorDbInitAttempted = "vector_db_init_attempted";
+constexpr std::string_view kVectorDbReady = "vector_db_ready";
+constexpr std::string_view kVectorDbDim = "vector_db_dim";
+constexpr std::string_view kSearchEngineDegraded = "search_engine_degraded";
+constexpr std::string_view kEmbeddingReady = "embedding_ready";
+constexpr std::string_view kEmbeddingDegraded = "embedding_degraded";
+constexpr std::string_view kPluginsReady = "plugins_ready";
+constexpr std::string_view kPluginsDegraded = "plugins_degraded";
+constexpr std::string_view kVectorEmbeddingsAvailable = "vector_embeddings_available";
+constexpr std::string_view kVectorScoringEnabled = "vector_scoring_enabled";
+constexpr std::string_view kSearchEngineBuildReasonInitial = "search_engine_build_reason_initial";
+constexpr std::string_view kSearchEngineBuildReasonRebuild = "search_engine_build_reason_rebuild";
+constexpr std::string_view kSearchEngineBuildReasonDegraded = "search_engine_build_reason_degraded";
+
+} // namespace yams::daemon::readiness

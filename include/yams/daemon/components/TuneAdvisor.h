@@ -103,8 +103,13 @@ public:
 
     // Public accessors for embedding-related knobs (used outside daemon module)
     // These forward to internal tunables while keeping implementation details private.
+    static constexpr std::size_t kDefaultEmbedDocCap = 64;
     static double getEmbedSafety() { return embedSafety(); }
     static std::size_t getEmbedDocCap() { return embedDocCap(); }
+    static std::size_t resolvedEmbedDocCap() {
+        const std::size_t cap = getEmbedDocCap();
+        return cap == 0 ? kDefaultEmbedDocCap : cap;
+    }
     static unsigned getEmbedPauseMs() { return embedPauseMs(); }
     static uint32_t getEmbedMaxConcurrency() { return embedMaxConcurrency(); }
 

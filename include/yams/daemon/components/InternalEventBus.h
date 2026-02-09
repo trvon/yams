@@ -53,6 +53,30 @@ public:
         head_.store(next, std::memory_order_release);
         return true;
     }
+    // Batch push with a single lock acquisition.
+    // Returns number of items successfully enqueued.
+    std::size_t try_push_many(std::vector<T>& values, std::size_t start = 0) noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (start >= values.size()) {
+            return 0;
+        }
+        std::size_t pushed = 0;
+        auto head = head_.load(std::memory_order_relaxed);
+        auto tail = tail_.load(std::memory_order_acquire);
+        for (std::size_t i = start; i < values.size(); ++i) {
+            auto next = inc(head);
+            if (next == tail) {
+                break; // full
+            }
+            buf_[head] = std::move(values[i]);
+            head = next;
+            ++pushed;
+        }
+        if (pushed > 0) {
+            head_.store(head, std::memory_order_release);
+        }
+        return pushed;
+    }
     bool try_pop(T& out) noexcept {
         std::lock_guard<std::mutex> lk(mu_);
         auto tail = tail_.load(std::memory_order_relaxed);
@@ -132,6 +156,19 @@ public:
         buf_[head] = std::move(v);
         head_.store(next, std::memory_order_release);
         return true;
+    }
+    std::size_t try_push_many(std::vector<T>& values, std::size_t start = 0) noexcept {
+        if (start >= values.size()) {
+            return 0;
+        }
+        std::size_t pushed = 0;
+        for (std::size_t i = start; i < values.size(); ++i) {
+            if (!try_push(std::move(values[i]))) {
+                break;
+            }
+            ++pushed;
+        }
+        return pushed;
     }
     bool try_pop(T& out) noexcept {
         auto tail = tail_.load(std::memory_order_relaxed);
@@ -335,9 +372,15 @@ private:
 
 public:
     // Counter helpers
-    void incEmbedQueued() { embedQueued_.fetch_add(1, std::memory_order_relaxed); }
-    void incEmbedDropped() { embedDropped_.fetch_add(1, std::memory_order_relaxed); }
-    void incEmbedConsumed() { embedConsumed_.fetch_add(1, std::memory_order_relaxed); }
+    void incEmbedQueued(std::uint64_t n = 1) {
+        embedQueued_.fetch_add(n, std::memory_order_relaxed);
+    }
+    void incEmbedDropped(std::uint64_t n = 1) {
+        embedDropped_.fetch_add(n, std::memory_order_relaxed);
+    }
+    void incEmbedConsumed(std::uint64_t n = 1) {
+        embedConsumed_.fetch_add(n, std::memory_order_relaxed);
+    }
     void incFts5Queued() { fts5Queued_.fetch_add(1, std::memory_order_relaxed); }
     void incFts5Dropped() { fts5Dropped_.fetch_add(1, std::memory_order_relaxed); }
     void incFts5Consumed() { fts5Consumed_.fetch_add(1, std::memory_order_relaxed); }

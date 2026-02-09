@@ -232,11 +232,9 @@ generate_batch(IModelProvider* provider, const std::string& model,
         if (texts.empty())
             return std::vector<std::vector<float>>{};
 
-        std::size_t cap = TuneAdvisor::getEmbedDocCap();
-        if (cap == 0 || cap > texts.size())
+        std::size_t cap = TuneAdvisor::resolvedEmbedDocCap();
+        if (cap > texts.size())
             cap = texts.size();
-        if (cap < 1)
-            cap = 1;
 
         if (texts.size() <= cap) {
             if (model.empty())

@@ -222,6 +222,7 @@ public:
                 ingestWorkerTarget_.load(std::memory_order_relaxed)};
     }
     void enqueuePostIngest(const std::string& hash, const std::string& mime);
+    void enqueuePostIngestBatch(const std::vector<std::string>& hashes, const std::string& mime);
     // Phase 2.4: Delegate to SearchEngineManager
     SearchEngineSnapshot getSearchEngineFsmSnapshot() const {
         return searchEngineManager_.getSnapshot();

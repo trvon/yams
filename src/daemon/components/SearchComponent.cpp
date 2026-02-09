@@ -89,6 +89,18 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
         return false;
     }
 
+    // Rebuild only when ingest/post-ingest/embedding pipelines are drained.
+    // Rebuilding during heavy ingest competes with extraction+embedding and reduces throughput.
+    if (const auto* postIngest = serviceManager_.getPostIngestQueue()) {
+        if (postIngest->size() > 0 || postIngest->totalInFlight() > 0) {
+            return false;
+        }
+    }
+    if (serviceManager_.getEmbeddingQueuedJobs() > 0 ||
+        serviceManager_.getEmbeddingInFlightJobs() > 0) {
+        return false;
+    }
+
     // Check for concurrent rebuild
     bool expected = false;
     if (!rebuildInProgress_.compare_exchange_strong(expected, true)) {

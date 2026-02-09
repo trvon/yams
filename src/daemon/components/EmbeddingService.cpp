@@ -2,8 +2,14 @@
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <string>
 #include <thread>
 #include <unordered_map>
+
+#include <fmt/format.h>
+
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/post.hpp>
@@ -116,14 +122,43 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
 
     spdlog::info("[EmbeddingService] Parallel poller started");
 
+    std::size_t lastEffectiveConcurrent = 0;
     while (!stop_.load()) {
         bool didWork = false;
         InternalEventBus::EmbedJob job;
 
-        // Dynamic concurrency limit from TuneAdvisor (scaled by TuningManager)
-        const std::size_t maxConcurrent = TuneAdvisor::postEmbedConcurrent();
-        const std::size_t maxBatchSize = std::max<std::size_t>(1u, TuneAdvisor::getEmbedDocCap());
-        const std::size_t maxPendingJobs = std::max<std::size_t>(maxBatchSize, maxConcurrent * 2);
+        // Dynamic concurrency from TuneAdvisor (scaled by TuningManager), plus local
+        // pressure-based ramp to avoid staying under-utilized while embed backlog spikes.
+        const std::size_t baseConcurrent =
+            std::max<std::size_t>(1, TuneAdvisor::postEmbedConcurrent());
+        const std::size_t hardConcurrentCap =
+            std::max<std::size_t>(baseConcurrent, TuneAdvisor::getEmbedMaxConcurrency());
+        const std::size_t maxBatchSize = TuneAdvisor::resolvedEmbedDocCap();
+        const std::size_t channelBacklog = embedChannel_ ? embedChannel_->size_approx() : 0;
+        const std::size_t bufferedBacklog = channelBacklog + this->pendingJobs_.size();
+
+        std::size_t effectiveMaxConcurrent = baseConcurrent;
+        if (hardConcurrentCap > baseConcurrent) {
+            const std::size_t rampThreshold =
+                std::max<std::size_t>(baseConcurrent * maxBatchSize, 32u);
+            const std::size_t rampStep = std::max<std::size_t>(maxBatchSize, 16u);
+            if (bufferedBacklog > rampThreshold) {
+                const std::size_t extra =
+                    (bufferedBacklog - rampThreshold + (rampStep - 1)) / rampStep;
+                effectiveMaxConcurrent =
+                    std::min<std::size_t>(hardConcurrentCap, baseConcurrent + extra);
+            }
+        }
+        const std::size_t maxPendingJobs =
+            std::max<std::size_t>(maxBatchSize, effectiveMaxConcurrent * 2);
+        if (effectiveMaxConcurrent != lastEffectiveConcurrent) {
+            spdlog::info(
+                "[EmbeddingService] adaptive concurrency: base={} effective={} hard_cap={} "
+                "backlog={} channel={} pending={}",
+                baseConcurrent, effectiveMaxConcurrent, hardConcurrentCap, bufferedBacklog,
+                channelBacklog, this->pendingJobs_.size());
+            lastEffectiveConcurrent = effectiveMaxConcurrent;
+        }
 
         // Pull jobs into pending buffer to allow model-based grouping
         while (embedChannel_ && embedChannel_->try_pop(job)) {
@@ -137,7 +172,7 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
         // Keep an approximate pending backlog for status/benchmarks.
         this->pendingApprox_.store(this->pendingJobs_.size(), std::memory_order_relaxed);
 
-        if (inFlight_.load() < maxConcurrent && !this->pendingJobs_.empty()) {
+        if (inFlight_.load() < effectiveMaxConcurrent && !this->pendingJobs_.empty()) {
             std::string defaultModel;
             if (getPreferredModel_) {
                 defaultModel = getPreferredModel_();
@@ -184,7 +219,7 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                 }
                 dispatch.batchSize = static_cast<uint32_t>(dispatch.hashes.size());
                 inFlight_.fetch_add(1);
-                InternalEventBus::instance().incEmbedConsumed();
+                InternalEventBus::instance().incEmbedConsumed(dispatch.batchSize);
 
                 boost::asio::post(
                     coordinator_->getExecutor(), [this, job = std::move(dispatch)]() mutable {
@@ -212,7 +247,8 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                         continue;
                     }
                     std::size_t offset = 0;
-                    while (offset < bucket.hashes.size() && inFlight_.load() < maxConcurrent) {
+                    while (offset < bucket.hashes.size() &&
+                           inFlight_.load() < effectiveMaxConcurrent) {
                         std::size_t take = std::min(maxBatchSize, bucket.hashes.size() - offset);
                         InternalEventBus::EmbedJob split;
                         split.modelName = bucket.modelName;
@@ -265,7 +301,42 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
 }
 
 void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
-    spdlog::debug("[EmbeddingService] processEmbedJob called with {} hashes", job.hashes.size());
+    const bool timingEnabled = []() {
+        if (const char* s = std::getenv("YAMS_EMBED_DEBUG_TIMINGS")) {
+            return std::string{s} == "1" || std::string{s} == "true" || std::string{s} == "yes";
+        }
+        return false;
+    }();
+    uint64_t warnMs = 5000;
+    if (const char* s = std::getenv("YAMS_EMBED_TIMING_WARN_MS")) {
+        try {
+            warnMs = static_cast<uint64_t>(std::stoull(s));
+        } catch (...) {
+        }
+    }
+
+    const auto jobTag = [&]() -> std::string {
+        if (!job.hashes.empty()) {
+            const auto& h = job.hashes.front();
+            return h.size() > 12 ? h.substr(0, 12) : h;
+        }
+        return std::string{"empty"};
+    }();
+
+    auto logPhase = [&](const char* phase, std::chrono::steady_clock::time_point start,
+                        const std::string& detail) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - start)
+                            .count();
+        if (timingEnabled || ms >= static_cast<long long>(warnMs)) {
+            spdlog::info("[EmbeddingService] job={} phase={} dur_ms={} {}", jobTag, phase, ms,
+                         detail);
+        }
+    };
+
+    spdlog::debug(
+        "[EmbeddingService] processEmbedJob job={} hashes={} skipExisting={} modelHint='{}'",
+        jobTag, job.hashes.size(), job.skipExisting ? "true" : "false", job.modelName);
     std::shared_ptr<IModelProvider> provider;
     std::string modelName;
     std::shared_ptr<yams::vector::VectorDatabase> vdb;
@@ -299,6 +370,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     // ============================================================
     // Phase 1: Gather all document content and metadata
     // ============================================================
+    const auto tGather = std::chrono::steady_clock::now();
     struct DocData {
         std::string hash;
         std::string text;
@@ -360,15 +432,22 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     failed_.fetch_add(failedGather);
 
     if (docsToEmbed.empty()) {
+        logPhase("gather", tGather,
+                 fmt::format("docs_to_embed=0 skipped={} failed_gather={}", skipped, failedGather));
         spdlog::debug("EmbeddingService: no documents to embed after gathering");
         return;
     }
+
+    logPhase("gather", tGather,
+             fmt::format("docs_to_embed={} skipped={} failed_gather={} hashes_in_job={} model='{}'",
+                         docsToEmbed.size(), skipped, failedGather, job.hashes.size(), modelName));
 
     spdlog::debug("EmbeddingService: gathered {} documents for embedding", docsToEmbed.size());
 
     // ============================================================
     // Phase 2: Chunk all documents
     // ============================================================
+    const auto tChunk = std::chrono::steady_clock::now();
     struct ChunkInfo {
         size_t docIdx;       // Index into docsToEmbed
         std::string chunkId; // Unique chunk ID
@@ -408,16 +487,26 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     spdlog::debug("EmbeddingService: chunked {} documents into {} chunks", docsToEmbed.size(),
                   allChunks.size());
 
+    logPhase("chunk", tChunk,
+             fmt::format("docs={} chunks={} avg_chunks_per_doc={:.2f}", docsToEmbed.size(),
+                         allChunks.size(),
+                         docsToEmbed.empty() ? 0.0
+                                             : (static_cast<double>(allChunks.size()) /
+                                                static_cast<double>(docsToEmbed.size()))));
+
     // ============================================================
     // Phase 3: Batch embedding call with sub-batching to avoid timeouts
     // ============================================================
     // Model inference can be slow for large batches. Sub-batch to keep response times reasonable.
-    std::size_t kMaxBatchSize = TuneAdvisor::getEmbedDocCap();
+    std::size_t kMaxBatchSize = TuneAdvisor::resolvedEmbedDocCap();
+    // Guard against a zero batch size which would cause an infinite loop.
+    // If TuneAdvisor returns 0 (e.g., unset), fall back to processing the whole payload
+    // as a single batch. Ensure at least one element when input is non‑empty.
     if (kMaxBatchSize == 0) {
-        kMaxBatchSize = 64; // Default cap when not configured
-    }
-    if (kMaxBatchSize < 1) {
-        kMaxBatchSize = 1;
+        kMaxBatchSize = allTexts.size();
+        if (kMaxBatchSize == 0) {
+            kMaxBatchSize = 1;
+        }
     }
     std::vector<std::vector<float>> embeddings;
     embeddings.reserve(allTexts.size());
@@ -429,7 +518,11 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         spdlog::debug("EmbeddingService: generating embeddings for batch {}-{} of {}", start, end,
                       allTexts.size());
 
+        const auto tInfer = std::chrono::steady_clock::now();
         auto embedResult = provider->generateBatchEmbeddingsFor(modelName, subBatch);
+        logPhase("infer", tInfer,
+                 fmt::format("sub_batch=[{}, {}) size={} total_texts={} model='{}'", start, end,
+                             subBatch.size(), allTexts.size(), modelName));
         if (!embedResult) {
             spdlog::error("EmbeddingService: batch embedding failed at {}-{}: {}", start, end,
                           embedResult.error().message);
@@ -469,6 +562,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     // ============================================================
     // Phase 4: Build VectorRecords and batch insert
     // ============================================================
+    const auto tBuild = std::chrono::steady_clock::now();
     // Group chunks by document for document-level embedding computation
     std::unordered_map<size_t, std::vector<size_t>> docToChunkIndices;
     for (size_t i = 0; i < allChunks.size(); ++i) {
@@ -539,21 +633,49 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         }
     }
 
-    // Single batch insert for all records
-    if (!vdb->insertVectorsBatch(allRecords)) {
-        spdlog::error("EmbeddingService: batch vector insert failed: {}", vdb->getLastError());
-        failed_.fetch_add(docsToEmbed.size());
-        std::vector<std::string> failedHashes;
-        failedHashes.reserve(docsToEmbed.size());
-        for (const auto& doc : docsToEmbed) {
-            failedHashes.push_back(doc.hash);
+    logPhase("build_records", tBuild,
+             fmt::format("docs={} chunks={} records={} (chunk+doc)", docsToEmbed.size(),
+                         allChunks.size(), allRecords.size()));
+
+    // Chunked batch insert: keeps each DB/HNSW critical section shorter so other
+    // embed jobs can make progress under high load.
+    const auto tInsert = std::chrono::steady_clock::now();
+    const std::size_t insertChunkSize =
+        std::clamp<std::size_t>(std::max<std::size_t>(64u, kMaxBatchSize * 2u), 64u, 512u);
+    std::size_t insertedRecords = 0;
+    for (std::size_t offset = 0; offset < allRecords.size(); offset += insertChunkSize) {
+        const std::size_t take = std::min(insertChunkSize, allRecords.size() - offset);
+        std::vector<yams::vector::VectorRecord> chunk;
+        chunk.reserve(take);
+        for (std::size_t i = 0; i < take; ++i) {
+            chunk.push_back(std::move(allRecords[offset + i]));
         }
-        (void)meta_->batchUpdateDocumentRepairStatuses(failedHashes,
-                                                       metadata::RepairStatus::Failed);
-        return;
+        if (!vdb->insertVectorsBatch(chunk)) {
+            logPhase("vdb_insert", tInsert,
+                     fmt::format("records={} inserted={} chunk={} result=fail err='{}'",
+                                 allRecords.size(), insertedRecords, take, vdb->getLastError()));
+            spdlog::error("EmbeddingService: chunked vector insert failed at offset={} size={}: {}",
+                          offset, take, vdb->getLastError());
+            failed_.fetch_add(docsToEmbed.size());
+            std::vector<std::string> failedHashes;
+            failedHashes.reserve(docsToEmbed.size());
+            for (const auto& doc : docsToEmbed) {
+                failedHashes.push_back(doc.hash);
+            }
+            (void)meta_->batchUpdateDocumentRepairStatuses(failedHashes,
+                                                           metadata::RepairStatus::Failed);
+            return;
+        }
+        insertedRecords += take;
     }
 
+    logPhase("vdb_insert", tInsert,
+             fmt::format("records={} chunk_size={} chunks={} result=ok", allRecords.size(),
+                         insertChunkSize,
+                         (allRecords.size() + (insertChunkSize - 1)) / insertChunkSize));
+
     // Update metadata and repair status for all succeeded documents (single transaction each)
+    const auto tMeta = std::chrono::steady_clock::now();
     std::vector<std::string> successHashes;
     successHashes.reserve(docsToEmbed.size());
     for (const auto& doc : docsToEmbed) {
@@ -562,6 +684,9 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     (void)meta_->batchUpdateDocumentEmbeddingStatusByHashes(successHashes, true, modelName);
     (void)meta_->batchUpdateDocumentRepairStatuses(successHashes,
                                                    metadata::RepairStatus::Completed);
+
+    logPhase("metadata_update", tMeta,
+             fmt::format("docs={} model='{}'", successHashes.size(), modelName));
 
     processed_.fetch_add(docsToEmbed.size());
 

@@ -66,12 +66,12 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/PoolManager.h>
-#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
+#include <yams/daemon/metric_keys.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 
 #include <yams/daemon/components/RepairService.h>
@@ -923,9 +923,17 @@ void ServiceManager::shutdown() {
     spdlog::info("[ServiceManager] Phase 6.6: Shutting down model provider");
     if (modelProvider_) {
         try {
-            auto loaded = modelProvider_->getLoadedModels();
-            for (const auto& name : loaded) {
-                (void)modelProvider_->unloadModel(name);
+            // Avoid unloading individual models during shutdown for ABI-backed providers.
+            // The ONNX plugin can have a background preload/warmup thread; unloading models here
+            // can race with that thread and lead to use-after-free (observed as
+            // std::system_error("mutex lock failed: Invalid argument") during teardown).
+            // For ABI providers, rely on plugin shutdown (Phase 6.9) to join background threads
+            // and release resources safely.
+            if (dynamic_cast<AbiModelProviderAdapter*>(modelProvider_.get()) == nullptr) {
+                auto loaded = modelProvider_->getLoadedModels();
+                for (const auto& name : loaded) {
+                    (void)modelProvider_->unloadModel(name);
+                }
             }
             modelProvider_->shutdown();
             modelProvider_.reset();
@@ -1113,30 +1121,33 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
             j["overall"] = ov;
         }
         nlohmann::json rd;
-        rd["ipc_server"] = state.readiness.ipcServerReady.load();
-        rd["content_store"] = state.readiness.contentStoreReady.load();
-        rd["database"] = state.readiness.databaseReady.load();
-        rd["metadata_repo"] = state.readiness.metadataRepoReady.load();
-        rd["search_engine"] = state.readiness.searchEngineReady.load();
-        rd["model_provider"] = state.readiness.modelProviderReady.load();
-        rd["vector_index"] = state.readiness.vectorIndexReady.load();
-        rd["plugins"] = state.readiness.pluginsReady.load();
+        rd[std::string(readiness::kIpcServer)] = state.readiness.ipcServerReady.load();
+        rd[std::string(readiness::kContentStore)] = state.readiness.contentStoreReady.load();
+        rd[std::string(readiness::kDatabase)] = state.readiness.databaseReady.load();
+        rd[std::string(readiness::kMetadataRepo)] = state.readiness.metadataRepoReady.load();
+        rd[std::string(readiness::kSearchEngine)] = state.readiness.searchEngineReady.load();
+        rd[std::string(readiness::kModelProvider)] = state.readiness.modelProviderReady.load();
+        rd[std::string(readiness::kVectorIndex)] = state.readiness.vectorIndexReady.load();
+        rd[std::string(readiness::kPlugins)] = state.readiness.pluginsReady.load();
         // Extended vector DB readiness fields
-        rd["vector_db_init_attempted"] = state.readiness.vectorDbInitAttempted.load();
-        rd["vector_db_ready"] = state.readiness.vectorDbReady.load();
-        rd["vector_db_dim"] = state.readiness.vectorDbDim.load();
+        rd[std::string(readiness::kVectorDbInitAttempted)] =
+            state.readiness.vectorDbInitAttempted.load();
+        rd[std::string(readiness::kVectorDbReady)] = state.readiness.vectorDbReady.load();
+        rd[std::string(readiness::kVectorDbDim)] = state.readiness.vectorDbDim.load();
         j["readiness"] = rd;
         nlohmann::json pr;
-        pr["search_engine"] = state.readiness.searchProgress.load();
-        pr["vector_index"] = state.readiness.vectorIndexProgress.load();
-        pr["model_provider"] = state.readiness.modelLoadProgress.load();
+        pr[std::string(readiness::kSearchEngine)] = state.readiness.searchProgress.load();
+        pr[std::string(readiness::kVectorIndex)] = state.readiness.vectorIndexProgress.load();
+        pr[std::string(readiness::kModelProvider)] = state.readiness.modelLoadProgress.load();
         j["progress"] = pr;
         auto sec_since_start = std::chrono::duration_cast<std::chrono::seconds>(
                                    std::chrono::steady_clock::now() - state.stats.startTime)
                                    .count();
         std::map<std::string, int> expected_s{
-            {"plugins", 1},      {"content_store", 2}, {"database", 2},       {"metadata_repo", 2},
-            {"vector_index", 3}, {"search_engine", 4}, {"model_provider", 20}};
+            {std::string(readiness::kPlugins), 1},       {std::string(readiness::kContentStore), 2},
+            {std::string(readiness::kDatabase), 2},      {std::string(readiness::kMetadataRepo), 2},
+            {std::string(readiness::kVectorIndex), 3},   {std::string(readiness::kSearchEngine), 4},
+            {std::string(readiness::kModelProvider), 20}};
         nlohmann::json eta;
         auto add_eta = [&](const std::string& key, bool ready, int progress) {
             if (ready)
@@ -1155,15 +1166,17 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
             int remain = std::max(remain_by_pct, remain_by_elapsed);
             eta[key] = remain;
         };
-        add_eta("plugins", state.readiness.pluginsReady.load(), 100);
-        add_eta("content_store", state.readiness.contentStoreReady.load(), 100);
-        add_eta("database", state.readiness.databaseReady.load(), 100);
-        add_eta("metadata_repo", state.readiness.metadataRepoReady.load(), 100);
-        add_eta("vector_index", state.readiness.vectorIndexReady.load(),
+        add_eta(std::string(readiness::kPlugins), state.readiness.pluginsReady.load(), 100);
+        add_eta(std::string(readiness::kContentStore), state.readiness.contentStoreReady.load(),
+                100);
+        add_eta(std::string(readiness::kDatabase), state.readiness.databaseReady.load(), 100);
+        add_eta(std::string(readiness::kMetadataRepo), state.readiness.metadataRepoReady.load(),
+                100);
+        add_eta(std::string(readiness::kVectorIndex), state.readiness.vectorIndexReady.load(),
                 state.readiness.vectorIndexProgress.load());
-        add_eta("search_engine", state.readiness.searchEngineReady.load(),
+        add_eta(std::string(readiness::kSearchEngine), state.readiness.searchEngineReady.load(),
                 state.readiness.searchProgress.load());
-        add_eta("model_provider", state.readiness.modelProviderReady.load(),
+        add_eta(std::string(readiness::kModelProvider), state.readiness.modelProviderReady.load(),
                 state.readiness.modelLoadProgress.load());
         j["eta_seconds"] = eta;
         if (!state.initDurationsMs.empty()) {
@@ -1263,7 +1276,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::info("[ServiceManager] Phase: Plugins Ready.");
     try {
         (void)init::record_duration(
-            "plugins",
+            std::string(readiness::kPlugins),
             [&]() -> yams::Result<void> {
                 try {
                     const auto ps = getPluginHostFsmSnapshot();
@@ -1314,7 +1327,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     {
         using T = std::unique_ptr<yams::api::IContentStore>;
         auto storeRes = init::record_duration(
-            "content_store",
+            std::string(readiness::kContentStore),
             [&]() -> yams::Result<T> {
                 return yams::api::ContentStoreBuilder::createDefault(storeRoot);
             },
@@ -1364,7 +1377,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         co_return Error{ErrorCode::OperationCancelled, "FSM dispatch failed during shutdown"};
     }
     bool db_ok = co_await init::await_record_duration(
-        "database",
+        std::string(readiness::kDatabase),
         [&]() -> boost::asio::awaitable<bool> {
             co_return co_await co_openDatabase(dbPath, open_timeout, token);
         },
@@ -1439,7 +1452,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                          poolInit.error().message);
         } else {
             auto repoRes = init::record_duration(
-                "metadata_repo",
+                std::string(readiness::kMetadataRepo),
                 [&]() -> yams::Result<void> {
                     metadataRepo_ =
                         std::make_shared<metadata::MetadataRepository>(*connectionPool_);
@@ -2869,7 +2882,11 @@ ServiceManager::co_initVectorSystem(boost::asio::any_io_executor exec,
         }
 
         vectorDatabase_ = vectorDb;
-        state_.readiness.vectorDbReady.store(true);
+        // Readiness semantics: false while empty/building; true only when serving (has data).
+        // A freshly initialized DB is empty, but we still mark initAttempted+dim.
+        state_.readiness.vectorDbInitAttempted.store(true, std::memory_order_relaxed);
+        state_.readiness.vectorDbDim.store(static_cast<uint32_t>(dim), std::memory_order_relaxed);
+        state_.readiness.vectorDbReady.store(false, std::memory_order_relaxed);
 
         spdlog::info("[ServiceManager::co_initVectorSystem] Vector system initialized with dim={}",
                      dim);
@@ -2979,17 +2996,34 @@ void ServiceManager::enqueuePostIngest(const std::string& hash, const std::strin
         return;
     }
 
-    // Check admission control - document is stored, post-processing can be retried later
-    if (!ResourceGovernor::instance().canAdmitWork()) {
-        spdlog::debug("[ServiceManager] PostIngest rejected: admission control blocked");
-        return;
-    }
-
     PostIngestQueue::Task task{hash, mime,
                                "", // session
                                std::chrono::steady_clock::now(),
                                PostIngestQueue::Task::Stage::Metadata};
-    postIngest_->tryEnqueue(std::move(task));
+    postIngest_->enqueue(std::move(task));
+}
+
+void ServiceManager::enqueuePostIngestBatch(const std::vector<std::string>& hashes,
+                                            const std::string& mime) {
+    if (!postIngest_ || hashes.empty()) {
+        return;
+    }
+
+    // Keep ingestion durable even when pressure is high: documents are already stored,
+    // so this stage should backpressure instead of dropping.
+    std::vector<PostIngestQueue::Task> tasks;
+    tasks.reserve(hashes.size());
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto& hash : hashes) {
+        if (hash.empty()) {
+            continue;
+        }
+        tasks.push_back(
+            PostIngestQueue::Task{hash, mime, "", now, PostIngestQueue::Task::Stage::Metadata});
+    }
+    if (!tasks.empty()) {
+        postIngest_->enqueueBatch(std::move(tasks));
+    }
 }
 
 void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {

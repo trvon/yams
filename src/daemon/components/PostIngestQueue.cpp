@@ -216,7 +216,8 @@ std::string extractFirstMeaningfulLine(std::string_view text) {
 
 // Dynamic concurrency limits from TuneAdvisor
 std::size_t PostIngestQueue::maxExtractionConcurrent() {
-    return static_cast<std::size_t>(TuneAdvisor::postExtractionConcurrent());
+    return std::max<std::size_t>(4u,
+                                 static_cast<std::size_t>(TuneAdvisor::postExtractionConcurrent()));
 }
 
 std::size_t PostIngestQueue::maxKgConcurrent() {
@@ -479,6 +480,10 @@ double PostIngestQueue::kgChannelFillRatio(std::size_t* depthOut, std::size_t* c
 
 std::size_t PostIngestQueue::adaptiveExtractionBatchSize(std::size_t baseBatchSize) const {
     baseBatchSize = std::max<std::size_t>(1u, baseBatchSize);
+    // Keep extraction commits meaningfully batched even when stage concurrency is clamped.
+    // Concurrency governs how many batches run at once; this floor governs docs per batch.
+    constexpr std::size_t kExtractionBatchFloor = 4u;
+    const std::size_t floorBatch = kExtractionBatchFloor;
 
     // When KG is saturated, reduce extraction batching to avoid overwhelming the KG stage.
     // We intentionally keep this simple and monotonic.
@@ -488,16 +493,34 @@ std::size_t PostIngestQueue::adaptiveExtractionBatchSize(std::size_t baseBatchSi
     (void)depth;
 
     if (cap == 0) {
-        return baseBatchSize;
+        return std::max(baseBatchSize, floorBatch);
     }
 
     if (fill > 0.85) {
-        return std::max<std::size_t>(1u, baseBatchSize / 4u);
+        return std::max<std::size_t>(floorBatch, baseBatchSize / 4u);
     }
     if (fill > 0.70) {
-        return std::max<std::size_t>(1u, baseBatchSize / 2u);
+        return std::max<std::size_t>(floorBatch, baseBatchSize / 2u);
     }
-    return baseBatchSize;
+    return std::max(baseBatchSize, floorBatch);
+}
+
+std::size_t PostIngestQueue::adaptiveStageBatchSize(std::size_t queueDepth,
+                                                    std::size_t baseBatchSize,
+                                                    std::size_t batchCap) const {
+    const std::size_t tuned = std::max<std::size_t>(1u, std::min(baseBatchSize, batchCap));
+
+    // Keep batches small at low depth for latency, but force larger fan-out under pressure.
+    if (queueDepth >= 1024) {
+        return std::max<std::size_t>(tuned, std::min<std::size_t>(batchCap, 32u));
+    }
+    if (queueDepth >= 512) {
+        return std::max<std::size_t>(tuned, std::min<std::size_t>(batchCap, 16u));
+    }
+    if (queueDepth >= 128) {
+        return std::max<std::size_t>(tuned, std::min<std::size_t>(batchCap, 8u));
+    }
+    return tuned;
 }
 
 bool PostIngestQueue::isKgChannelBackpressured() const {
@@ -572,6 +595,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](const InternalEventBus::PostIngestTask& t) -> std::string { return t.hash; };
     cfg.batchMode = true;
+    cfg.batchLimiterPerTask = false;
     cfg.batchSizeFn = [this]() -> std::size_t {
         const std::size_t base = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
         return adaptiveExtractionBatchSize(base);
@@ -614,29 +638,63 @@ void PostIngestQueue::enqueue(Task t) {
     task.hash = std::move(t.hash);
     task.mime = std::move(t.mime);
 
-    constexpr int maxRetries = 10;
-    constexpr auto baseBackoff = std::chrono::milliseconds(50);
-    constexpr auto maxBackoff = std::chrono::milliseconds(1000);
-
-    for (int i = 0; i < maxRetries; ++i) {
-        if (channel->try_push(task)) {
+    constexpr auto kEnqueueTimeout = std::chrono::milliseconds(250);
+    uint32_t waits = 0;
+    while (!stop_.load(std::memory_order_acquire)) {
+        if (channel->push_wait(task, kEnqueueTimeout)) {
             return;
         }
-        auto delay = std::min(baseBackoff * (1 << i), maxBackoff);
-        std::this_thread::sleep_for(delay);
+        ++waits;
+        if ((waits % 20u) == 1u) {
+            spdlog::warn("[PostIngestQueue] enqueue waiting on full channel (hash={}, waits={})",
+                         task.hash, waits);
+        }
+    }
+}
+
+void PostIngestQueue::enqueueBatch(std::vector<Task> tasks) {
+    if (tasks.empty()) {
+        return;
     }
 
-    spdlog::error("[PostIngestQueue] Channel full after {} retries, dropping task for hash: {}",
-                  maxRetries, task.hash);
+    static constexpr const char* kChannelName = "post_ingest";
+    const std::size_t channelCapacity = resolveChannelCapacity();
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+            kChannelName, channelCapacity);
+
+    std::vector<InternalEventBus::PostIngestTask> busTasks;
+    busTasks.reserve(tasks.size());
+    for (auto& t : tasks) {
+        InternalEventBus::PostIngestTask task;
+        task.hash = std::move(t.hash);
+        task.mime = std::move(t.mime);
+        busTasks.push_back(std::move(task));
+    }
+
+    constexpr auto kEnqueueTimeout = std::chrono::milliseconds(250);
+    std::size_t next = 0;
+    uint32_t waits = 0;
+    while (!stop_.load(std::memory_order_acquire) && next < busTasks.size()) {
+        const std::size_t pushed = channel->try_push_many(busTasks, next);
+        next += pushed;
+        if (next >= busTasks.size()) {
+            break;
+        }
+        if (channel->push_wait(busTasks[next], kEnqueueTimeout)) {
+            ++next;
+            continue;
+        }
+        ++waits;
+        if ((waits % 20u) == 1u) {
+            spdlog::warn(
+                "[PostIngestQueue] enqueueBatch waiting on full channel (remaining={}, waits={})",
+                busTasks.size() - next, waits);
+        }
+    }
 }
 
 bool PostIngestQueue::tryEnqueue(const Task& t) {
-    // Check admission control before accepting work
-    if (!ResourceGovernor::instance().canAdmitWork()) {
-        spdlog::debug("[PostIngestQueue] Rejecting enqueue: admission control blocked");
-        return false;
-    }
-
     // KG backpressure: if downstream KG pipeline is saturated, reject upstream work.
     // This prevents unbounded buffering and downstream channel drops.
     if (isKgChannelBackpressured()) {
@@ -665,12 +723,6 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
 }
 
 bool PostIngestQueue::tryEnqueue(Task&& t) {
-    // Check admission control before accepting work
-    if (!ResourceGovernor::instance().canAdmitWork()) {
-        spdlog::debug("[PostIngestQueue] Rejecting enqueue: admission control blocked");
-        return false;
-    }
-
     if (isKgChannelBackpressured()) {
         const auto n = backpressureRejects_.fetch_add(1, std::memory_order_relaxed) + 1;
         if ((n % 256u) == 1u) {
@@ -1090,6 +1142,16 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
                                           const std::string& filePath,
                                           std::vector<std::string> tags,
                                           std::shared_ptr<std::vector<std::byte>> contentBytes) {
+    // Do not let a disabled/saturated KG stage throttle extraction throughput.
+    // KG is an optional downstream enrichment path; metadata extraction/indexing should continue.
+    const bool kgStageActive = (graphComponent_ != nullptr) &&
+                               !stagePaused_[1].load(std::memory_order_acquire) &&
+                               (maxKgConcurrent() > 0);
+    if (!kgStageActive) {
+        InternalEventBus::instance().incKgDropped();
+        return;
+    }
+
     const std::size_t kgChannelCapacity = boundedStageChannelCapacity(16384);
     auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::KgJob>(
         "kg_jobs", kgChannelCapacity);
@@ -1101,9 +1163,14 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     job.tags = std::move(tags);
     job.contentBytes = std::move(contentBytes);
 
-    // Prefer correctness over throughput: KG jobs are used for graph/path-tree updates.
-    // If the channel is briefly full during bulk ingest, wait a short time instead of dropping.
-    static constexpr auto kEnqueueTimeout = std::chrono::milliseconds(250);
+    // Prefer non-blocking fast-path to avoid stalling extraction under load.
+    if (channel->try_push(std::move(job))) {
+        InternalEventBus::instance().incKgQueued();
+        return;
+    }
+
+    // If the channel is briefly full during bulk ingest, wait only a short time.
+    static constexpr auto kEnqueueTimeout = std::chrono::milliseconds(10);
     if (!channel->push_wait(std::move(job), kEnqueueTimeout)) {
         const auto n = InternalEventBus::instance().kgDropped();
         if (((n + 1u) % 64u) == 1u) {
@@ -1140,9 +1207,9 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     cfg.getHashFn = [](const InternalEventBus::KgJob& j) -> std::string { return j.hash; };
 
     cfg.batchMode = true;
-    cfg.batchSizeFn = []() -> std::size_t {
+    cfg.batchSizeFn = [this]() -> std::size_t {
         const std::size_t tuned = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
-        return std::min<std::size_t>(16u, tuned);
+        return adaptiveStageBatchSize(kgQueueDepth(), tuned, 32u);
     };
     cfg.batchProcessFn = [this](std::vector<InternalEventBus::KgJob>&& jobs) {
         processKnowledgeGraphBatch(std::move(jobs));
@@ -1177,9 +1244,9 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     };
 
     cfg.batchMode = true;
-    cfg.batchSizeFn = []() -> std::size_t {
+    cfg.batchSizeFn = [this]() -> std::size_t {
         const std::size_t tuned = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
-        return std::min<std::size_t>(8u, tuned);
+        return adaptiveStageBatchSize(symbolQueueDepth(), tuned, 16u);
     };
     cfg.batchProcessFn = [this](std::vector<InternalEventBus::SymbolExtractionJob>&& jobs) {
         processSymbolExtractionBatch(std::move(jobs));
@@ -1393,12 +1460,35 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
     cfg.getHashFn = [](const InternalEventBus::EntityExtractionJob& j) -> std::string {
         return j.hash;
     };
-    cfg.processFn = [this](InternalEventBus::EntityExtractionJob& j) {
-        processEntityExtractionStage(j.hash, j.documentId, j.filePath, j.extension,
-                                     std::move(j.contentBytes));
+    cfg.batchMode = true;
+    cfg.batchSizeFn = [this]() -> std::size_t {
+        const std::size_t tuned = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
+        return adaptiveStageBatchSize(entityQueueDepth(), tuned, 16u);
+    };
+    cfg.batchProcessFn = [this](std::vector<InternalEventBus::EntityExtractionJob>&& jobs) {
+        processEntityExtractionBatch(std::move(jobs));
     };
 
     co_await pressureLimitedPoll(channel, std::move(cfg));
+}
+
+void PostIngestQueue::processEntityExtractionBatch(
+    std::vector<InternalEventBus::EntityExtractionJob>&& jobs) {
+    if (jobs.empty()) {
+        return;
+    }
+    // Entity extraction is expensive; fan out within the batch to use available cores.
+    std::vector<std::future<void>> futures;
+    futures.reserve(jobs.size());
+    for (auto& job : jobs) {
+        futures.push_back(std::async(std::launch::async, [this, job = std::move(job)]() mutable {
+            processEntityExtractionStage(job.hash, job.documentId, job.filePath, job.extension,
+                                         std::move(job.contentBytes));
+        }));
+    }
+    for (auto& f : futures) {
+        f.get();
+    }
 }
 
 void PostIngestQueue::processEntityExtractionStage(
@@ -1726,12 +1816,35 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
         return j.hash;
     };
     cfg.isCapableFn = [this]() -> bool { return titleExtractor_ != nullptr; };
-    cfg.processFn = [this](InternalEventBus::TitleExtractionJob& j) {
-        processTitleExtractionStage(j.hash, j.documentId, j.textSnippet, j.fallbackTitle,
-                                    j.filePath, j.language, j.mimeType);
+    cfg.batchMode = true;
+    cfg.batchSizeFn = [this]() -> std::size_t {
+        const std::size_t tuned = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
+        return adaptiveStageBatchSize(titleQueueDepth(), tuned, 32u);
+    };
+    cfg.batchProcessFn = [this](std::vector<InternalEventBus::TitleExtractionJob>&& jobs) {
+        processTitleExtractionBatch(std::move(jobs));
     };
 
     co_await pressureLimitedPoll(channel, std::move(cfg));
+}
+
+void PostIngestQueue::processTitleExtractionBatch(
+    std::vector<InternalEventBus::TitleExtractionJob>&& jobs) {
+    if (jobs.empty()) {
+        return;
+    }
+    std::vector<std::future<void>> futures;
+    futures.reserve(jobs.size());
+    for (auto& job : jobs) {
+        futures.push_back(std::async(std::launch::async, [this, job = std::move(job)]() mutable {
+            processTitleExtractionStage(job.hash, job.documentId, job.textSnippet,
+                                        job.fallbackTitle, job.filePath, job.language,
+                                        job.mimeType);
+        }));
+    }
+    for (auto& f : futures) {
+        f.get();
+    }
 }
 
 void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64_t docId,
@@ -1975,12 +2088,19 @@ void PostIngestQueue::initializeGradientLimiters() {
                                                     "entity",     "title", "embed"};
     using ConcurrentFn = uint32_t (*)();
     static constexpr ConcurrentFn kConcurrentFns[] = {
-        &TuneAdvisor::postExtractionConcurrent, &TuneAdvisor::postKgConcurrent,
-        &TuneAdvisor::postSymbolConcurrent,     &TuneAdvisor::postEntityConcurrent,
-        &TuneAdvisor::postTitleConcurrent,      &TuneAdvisor::postEmbedConcurrent};
+        &TuneAdvisor::postKgConcurrent, &TuneAdvisor::postSymbolConcurrent,
+        &TuneAdvisor::postEntityConcurrent, &TuneAdvisor::postTitleConcurrent,
+        &TuneAdvisor::postEmbedConcurrent};
 
     for (std::size_t i = 0; i < kLimiterCount; ++i) {
-        cfg.maxLimit = std::min(globalMax, static_cast<double>(kConcurrentFns[i]()));
+        double stageMax = 0.0;
+        if (i == 0) {
+            // Keep extraction limiter aligned with the effective extraction worker cap.
+            stageMax = static_cast<double>(maxExtractionConcurrent());
+        } else {
+            stageMax = static_cast<double>(kConcurrentFns[i - 1]());
+        }
+        cfg.maxLimit = std::min(globalMax, stageMax);
         limiters_[i] = std::make_unique<GradientLimiter>(kLimiterNames[i], cfg);
     }
 
@@ -2029,7 +2149,9 @@ void PostIngestQueue::completeJob(const std::string& jobId, bool success) {
 // =========================================================================
 
 void PostIngestQueue::initializeExtractionSemaphore() {
-    const uint32_t maxConcurrent = TuneAdvisor::postExtractionConcurrent();
+    // Keep semaphore capacity aligned with the effective extraction floor used by pollers.
+    // Using the raw tuned value can collapse runtime concurrency to 1 under pressure.
+    const uint32_t maxConcurrent = static_cast<uint32_t>(maxExtractionConcurrent());
     if (maxConcurrent > 0) {
         extractionSemaphore_ = std::make_unique<std::counting_semaphore<>>(maxConcurrent);
         spdlog::info("[PostIngestQueue] Extraction semaphore initialized with {} slots",
@@ -2127,10 +2249,20 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         } else {
             spdlog::info("[PostIngestQueue] Batch DB write succeeded for {} documents",
                          entries.size());
+            std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> titleUpdates;
+            titleUpdates.reserve(successes.size());
             for (const auto& prepared : successes) {
-                if (!prepared.title.empty()) {
-                    (void)meta_->setMetadata(prepared.documentId, "title",
-                                             metadata::MetadataValue(prepared.title));
+                if (prepared.title.empty()) {
+                    continue;
+                }
+                titleUpdates.emplace_back(prepared.documentId, "title",
+                                          metadata::MetadataValue(prepared.title));
+            }
+            if (!titleUpdates.empty()) {
+                auto metaResult = meta_->setMetadataBatch(titleUpdates);
+                if (!metaResult) {
+                    spdlog::warn("[PostIngestQueue] Batch title metadata write failed: {}",
+                                 metaResult.error().message);
                 }
             }
         }
@@ -2161,8 +2293,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
             "embed_jobs", embedCap);
     }
     std::vector<std::string> embedBatch;
-    const std::size_t maxEmbedBatch =
-        std::max<std::size_t>(1u, static_cast<std::size_t>(TuneAdvisor::getEmbedDocCap()));
+    const std::size_t maxEmbedBatch = TuneAdvisor::resolvedEmbedDocCap();
     embedBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
 
     auto flushEmbedBatch = [&]() {
@@ -2175,11 +2306,22 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         job.batchSize = static_cast<uint32_t>(job.hashes.size());
         job.skipExisting = true;
 
-        // Best-effort: avoid blocking post-ingest; rely on repair coordinator for catch-up.
-        if (embedQ->try_push(std::move(job))) {
-            InternalEventBus::instance().incEmbedQueued();
-        } else {
-            InternalEventBus::instance().incEmbedDropped();
+        constexpr auto kEnqueueTimeout = std::chrono::milliseconds(100);
+        uint32_t waits = 0;
+        while (!stop_.load(std::memory_order_acquire)) {
+            if (embedQ->push_wait(job, kEnqueueTimeout)) {
+                InternalEventBus::instance().incEmbedQueued(job.batchSize);
+                break;
+            }
+            ++waits;
+            if ((waits % 20u) == 1u) {
+                spdlog::warn(
+                    "[PostIngestQueue] embed enqueue waiting on full channel (batch={}, waits={})",
+                    job.batchSize, waits);
+            }
+        }
+        if (stop_.load(std::memory_order_acquire)) {
+            InternalEventBus::instance().incEmbedDropped(job.batchSize);
         }
         embedBatch.clear();
     };
@@ -2246,7 +2388,7 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     auto stageCfg = snapshotStageConfig();
 
     // Get current concurrency limits from TuneAdvisor
-    const uint32_t maxWorkers = TuneAdvisor::postExtractionConcurrent();
+    const uint32_t maxWorkers = static_cast<uint32_t>(maxExtractionConcurrent());
     if (maxWorkers <= 1 || tasks.size() < 4) {
         // Sequential: single chunk
         auto result =
@@ -2315,8 +2457,9 @@ PostIngestQueue::ChunkResult PostIngestQueue::processChunkParallel(
     futures.reserve(tasks.size());
 
     for (const auto& task : tasks) {
-        futures.push_back(
-            std::async(std::launch::async, [this, &task, &symbolExtensionMap, &entityProviders]() {
+        const auto taskCopy = task;
+        futures.push_back(std::async(
+            std::launch::async, [this, taskCopy, &symbolExtensionMap, &entityProviders]() {
                 // Acquire semaphore slot for memory-safe extraction
                 if (extractionSemaphore_) {
                     extractionSemaphore_->acquire();
@@ -2339,10 +2482,10 @@ PostIngestQueue::ChunkResult PostIngestQueue::processChunkParallel(
                 SemaphoreGuard guard(extractionSemaphore_.get());
 
                 // Get cached metadata
-                auto infoOpt = getCachedDocumentInfo(task.hash);
+                auto infoOpt = getCachedDocumentInfo(taskCopy.hash);
                 if (!infoOpt) {
                     return std::variant<PreparedMetadataEntry, ExtractionFailure>(
-                        ExtractionFailure{-1, task.hash, "Metadata not found in cache or DB"});
+                        ExtractionFailure{-1, taskCopy.hash, "Metadata not found in cache or DB"});
                 }
 
                 auto tagsOpt = getCachedDocumentTags(infoOpt->id);
@@ -2350,7 +2493,7 @@ PostIngestQueue::ChunkResult PostIngestQueue::processChunkParallel(
                 const std::vector<std::string>& tags = tagsOpt ? *tagsOpt : emptyTags;
 
                 // Extract and prepare
-                return prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
+                return prepareMetadataEntry(taskCopy.hash, taskCopy.mime, *infoOpt, tags,
                                             symbolExtensionMap, entityProviders);
             }));
     }

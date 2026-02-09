@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <array>
 #include <filesystem>
 #include <random>
 
@@ -19,6 +20,7 @@
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/proto_serializer.h>
+#include <yams/daemon/metric_keys.h>
 #include <yams/daemon/resource/model_provider.h>
 
 #include <boost/asio/co_spawn.hpp>
@@ -169,6 +171,82 @@ TEST_CASE("DaemonMetrics: WAL metrics in GetStats", "[daemon][metrics][wal]") {
         // WAL metrics should be present
         REQUIRE(stats.additionalStats.count("wal_active_transactions") > 0);
         REQUIRE(stats.additionalStats.count("wal_pending_entries") > 0);
+    }
+}
+
+TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
+          "[daemon][status][readiness]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_readiness_flags_");
+
+    YamsDaemon daemon(cfg);
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&daemon, &svc, &state);
+
+    StatusRequest req;
+    req.detailed = false;
+    Request r = req;
+
+    boost::asio::io_context ioc;
+    auto fut = boost::asio::co_spawn(ioc, dispatcher.dispatch(r), boost::asio::use_future);
+    ioc.run();
+    auto resp = fut.get();
+
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+    const auto& status = std::get<StatusResponse>(resp);
+
+    const std::array<std::string_view, 19> requiredCoreReadinessKeys = {
+        readiness::kIpcServer,
+        readiness::kContentStore,
+        readiness::kDatabase,
+        readiness::kMetadataRepo,
+        readiness::kSearchEngine,
+        readiness::kModelProvider,
+        readiness::kVectorIndex,
+        readiness::kVectorDb,
+        readiness::kPlugins,
+        readiness::kVectorDbInitAttempted,
+        readiness::kVectorDbReady,
+        readiness::kVectorDbDim,
+        readiness::kEmbeddingReady,
+        readiness::kEmbeddingDegraded,
+        readiness::kPluginsReady,
+        readiness::kPluginsDegraded,
+        readiness::kSearchEngineBuildReasonInitial,
+        readiness::kSearchEngineBuildReasonRebuild,
+        readiness::kSearchEngineBuildReasonDegraded};
+
+    for (const auto key : requiredCoreReadinessKeys) {
+        INFO("missing readiness key: " << key);
+        REQUIRE(status.readinessStates.count(std::string(key)) > 0);
+    }
+}
+
+TEST_CASE("DaemonMetrics: snapshot includes canonical readiness flags",
+          "[daemon][metrics][readiness]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_metrics_readiness_flags_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+
+    auto snap = metrics.getSnapshot();
+    REQUIRE(snap != nullptr);
+
+    const std::array<std::string_view, 12> requiredCoreReadinessKeys = {
+        readiness::kIpcServer,     readiness::kContentStore,
+        readiness::kDatabase,      readiness::kMetadataRepo,
+        readiness::kSearchEngine,  readiness::kModelProvider,
+        readiness::kVectorIndex,   readiness::kVectorDb,
+        readiness::kPlugins,       readiness::kVectorDbInitAttempted,
+        readiness::kVectorDbReady, readiness::kVectorDbDim};
+
+    for (const auto key : requiredCoreReadinessKeys) {
+        INFO("missing readiness key: " << key);
+        REQUIRE(snap->readinessStates.count(std::string(key)) > 0);
     }
 }
 

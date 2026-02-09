@@ -1,5 +1,5 @@
-#include <yams/cli/doctor_checks.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/doctor_checks.h>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
@@ -7,9 +7,9 @@
 // Namespace alias for vector utilities (avoid collision with yams::vector)
 namespace vecutil = yams::cli::vecutil;
 
+#include <sqlite3.h>
 #include <cstdlib>
 #include <filesystem>
-#include <sqlite3.h>
 
 namespace yams::cli::doctor {
 
@@ -233,6 +233,10 @@ DimensionCheckResult checkDimensions(YamsCLI* cli,
     // Get DB status from daemon or validate locally
     if (cachedStatus) {
         result.dbReady = cachedStatus->vectorDbReady;
+        if (auto it = cachedStatus->readinessStates.find("vector_db");
+            it != cachedStatus->readinessStates.end()) {
+            result.dbReady = it->second;
+        }
         result.dbDimension = cachedStatus->vectorDbDim;
     } else {
         fs::path dbPath =

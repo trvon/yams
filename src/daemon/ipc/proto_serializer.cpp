@@ -1256,6 +1256,22 @@ template <> struct ProtoBinding<StatusResponse> {
             kv->set_key("embedding_threads_inter");
             kv->set_value(std::to_string(r.embeddingThreadsInter));
         }
+        // Vector DB diagnostics (best-effort)
+        {
+            auto* kv = o->add_request_counts();
+            kv->set_key("vector_db_init_attempted");
+            kv->set_value(r.vectorDbInitAttempted ? "1" : "0");
+        }
+        {
+            auto* kv = o->add_request_counts();
+            kv->set_key("vector_db_ready");
+            kv->set_value(r.vectorDbReady ? "1" : "0");
+        }
+        if (r.vectorDbDim > 0) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("vector_db_dim");
+            kv->set_value(std::to_string(r.vectorDbDim));
+        }
         // readiness: bool->string
         for (const auto& [k, v] : r.readinessStates) {
             auto* kv = o->add_readiness();
@@ -1363,6 +1379,27 @@ template <> struct ProtoBinding<StatusResponse> {
             if (kv.key() == "embedding_threads_inter") {
                 try {
                     r.embeddingThreadsInter = static_cast<int32_t>(std::stol(kv.value()));
+                } catch (...) {
+                }
+                continue;
+            }
+            if (kv.key() == "vector_db_init_attempted") {
+                std::string v = kv.value();
+                for (auto& c : v)
+                    c = static_cast<char>(std::tolower(c));
+                r.vectorDbInitAttempted = (v == "1" || v == "true" || v == "yes");
+                continue;
+            }
+            if (kv.key() == "vector_db_ready") {
+                std::string v = kv.value();
+                for (auto& c : v)
+                    c = static_cast<char>(std::tolower(c));
+                r.vectorDbReady = (v == "1" || v == "true" || v == "yes");
+                continue;
+            }
+            if (kv.key() == "vector_db_dim") {
+                try {
+                    r.vectorDbDim = static_cast<uint32_t>(std::stoul(kv.value()));
                 } catch (...) {
                 }
                 continue;

@@ -79,6 +79,13 @@ uint64_t getCountOrZero(const daemon::StatusResponse& st, const std::string& key
     return 0;
 }
 
+bool isVectorDbReady(const daemon::StatusResponse& st) {
+    if (auto it = st.readinessStates.find("vector_db"); it != st.readinessStates.end()) {
+        return it->second;
+    }
+    return st.vectorDbReady;
+}
+
 bool waitForCorpusIndexed(std::size_t expectedDocs, std::chrono::milliseconds timeout) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     int stableCount = 0;
@@ -141,7 +148,7 @@ bool waitForCorpusIndexed(std::size_t expectedDocs, std::chrono::milliseconds ti
                   << " docsIndexed=" << docsIndexed << " postQueued=" << postQueued
                   << " postInflight=" << postInflight << " embedQueued=" << embedQueued
                   << " embedInflight=" << embedInflight << " vectorCount=" << vectorCount
-                  << " vectorDbReady=" << (st.vectorDbReady ? 1 : 0)
+                  << " vectorDbReady=" << (isVectorDbReady(st) ? 1 : 0)
                   << " searchReady=" << (searchReady ? 1 : 0) << ")\n";
     }
     return false;
@@ -191,7 +198,7 @@ bool waitForEmbeddingDrain(std::size_t minDocCount, std::chrono::milliseconds ti
             ++stableCount;
         }
 
-        if (st.vectorDbReady && embedDrained && stableCount >= stableRequired) {
+        if (isVectorDbReady(st) && embedDrained && stableCount >= stableRequired) {
             if (minDocCount == 0)
                 return true;
             return vectorCount >= static_cast<uint64_t>(minDocCount);
@@ -243,7 +250,7 @@ bool waitForEmbeddingDrainWithMetrics(std::size_t minDocCount, std::chrono::mill
             ++stableCount;
         }
 
-        const bool vectorReady = st.vectorDbReady || minDocCount == 0;
+        const bool vectorReady = isVectorDbReady(st) || minDocCount == 0;
         if (vectorReady && embedDrained && stableCount >= stableRequired) {
             if (minDocCount == 0)
                 return true;
@@ -251,6 +258,18 @@ bool waitForEmbeddingDrainWithMetrics(std::size_t minDocCount, std::chrono::mill
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    return false;
+}
+
+bool waitForVectorDbServing(std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
+        if (status && isVectorDbReady(status.value())) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
     return false;
 }
@@ -317,7 +336,20 @@ void SetupBenchmarkSuite(const BenchConfig& config = {}) {
     ::setenv("YAMS_BENCH_ENABLE_EMBEDDINGS", config.embeddingsEnabled ? "1" : "0", 1);
 
     // Start daemon
-    g_harness = std::make_unique<DaemonHarness>();
+    DaemonHarness::Options harnessOptions;
+    if (config.embeddingsEnabled) {
+        // Keep everything enabled: let PluginManager decide availability.
+        harnessOptions.useMockModelProvider = false;
+        harnessOptions.autoLoadPlugins = true;
+        harnessOptions.configureModelPool = true;
+        harnessOptions.modelPoolLazyLoading = false;
+        if (const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR")) {
+            harnessOptions.pluginDir = std::filesystem::path(envPluginDir);
+        } else {
+            harnessOptions.pluginDir = std::filesystem::current_path() / "builddir" / "plugins";
+        }
+    }
+    g_harness = std::make_unique<DaemonHarness>(harnessOptions);
     if (!g_harness->start(std::chrono::seconds(5))) {
         std::cerr << "ERROR: Failed to start daemon\n";
         std::exit(1);

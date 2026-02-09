@@ -599,7 +599,15 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
         };
 
         auto tryAdopt = [&](const std::string& pluginName) -> bool {
-            auto ifaceRes = getActivePluginHost()->getInterface(pluginName, "model_provider_v1", 2);
+            // Prefer latest interface version, but fall back to v3 for older plugins.
+            // NOTE: Host-side code supports v3+ (v4 adds optional evict_under_pressure).
+            auto ifaceRes = getActivePluginHost()->getInterface(
+                pluginName, YAMS_IFACE_MODEL_PROVIDER_V1, YAMS_IFACE_MODEL_PROVIDER_V1_VERSION);
+            if (!ifaceRes) {
+                ifaceRes =
+                    getActivePluginHost()->getInterface(pluginName, YAMS_IFACE_MODEL_PROVIDER_V1,
+                                                        /*version*/ 3u);
+            }
             if (!ifaceRes) {
                 spdlog::info("[PluginManager] No model_provider_v1 interface for '{}': {}",
                              pluginName, ifaceRes.error().message);

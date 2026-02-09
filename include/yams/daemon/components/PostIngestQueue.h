@@ -190,6 +190,7 @@ public:
     void stop();
 
     void enqueue(Task t);
+    void enqueueBatch(std::vector<Task> tasks);
     bool tryEnqueue(const Task& t);
     bool tryEnqueue(Task&& t);
 
@@ -355,6 +356,8 @@ private:
                                       const std::string& filePath, const std::string& language,
                                       std::shared_ptr<std::vector<std::byte>> contentBytes);
     void processSymbolExtractionBatch(std::vector<InternalEventBus::SymbolExtractionJob>&& jobs);
+    void processEntityExtractionBatch(std::vector<InternalEventBus::EntityExtractionJob>&& jobs);
+    void processTitleExtractionBatch(std::vector<InternalEventBus::TitleExtractionJob>&& jobs);
     void dispatchToKgChannel(const std::string& hash, int64_t docId, const std::string& filePath,
                              std::vector<std::string> tags,
                              std::shared_ptr<std::vector<std::byte>> contentBytes);
@@ -385,6 +388,8 @@ private:
         double threshold{0.0};
     };
     std::size_t adaptiveExtractionBatchSize(std::size_t baseBatchSize) const;
+    std::size_t adaptiveStageBatchSize(std::size_t queueDepth, std::size_t baseBatchSize,
+                                       std::size_t batchCap) const;
     double kgChannelFillRatio(std::size_t* depthOut = nullptr,
                               std::size_t* capacityOut = nullptr) const;
     [[nodiscard]] bool isKgChannelBackpressured() const;

@@ -1,8 +1,10 @@
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <unordered_map>
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -15,7 +17,22 @@
 namespace yams::daemon {
 
 // Forward declare helper
-static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumentTask& task);
+using PendingPostIngestByMime = std::unordered_map<std::string, std::vector<std::string>>;
+static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumentTask& task,
+                        PendingPostIngestByMime& pendingPostIngest);
+static void flushPendingPostIngestBatches(ServiceManager* sm, PendingPostIngestByMime& pending) {
+    if (!sm || !sm->getPostIngestQueue() || pending.empty()) {
+        pending.clear();
+        return;
+    }
+    for (auto& [mime, hashes] : pending) {
+        if (hashes.empty()) {
+            continue;
+        }
+        sm->enqueuePostIngestBatch(hashes, mime);
+    }
+    pending.clear();
+}
 
 IngestService::IngestService(ServiceManager* sm, WorkCoordinator* coordinator)
     : sm_(sm), coordinator_(coordinator), strand_(coordinator_->makeStrand()) {}
@@ -52,33 +69,37 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
     };
 
     while (!stop_.load()) {
-        // Re-check admission control before processing each task
-        if (!ResourceGovernor::instance().canAdmitWork()) {
-            spdlog::debug("[IngestService] Backoff: resource pressure");
-            timer.expires_after(std::chrono::milliseconds(100));
-            co_await timer.async_wait(boost::asio::use_awaitable);
-            continue; // Skip this iteration, retry later
-        }
-
-        // CPU-aware batch sizing: process fewer items per cycle under load
-        int batchLimit = 10;
+        // CPU-aware batch sizing: keep enough fan-out to avoid singleton post-ingest flushes.
+        const int tunedBatch =
+            std::clamp<int>(static_cast<int>(TuneAdvisor::postIngestBatchSize()) * 4, 16, 128);
+        int batchLimit = tunedBatch;
+        bool underPressure = false;
         try {
             auto snap = ResourceGovernor::instance().getSnapshot();
             if (snap.cpuUsagePercent > 80)
-                batchLimit = 3;
+                batchLimit = std::max(8, tunedBatch / 4);
             else if (snap.cpuUsagePercent > 60)
-                batchLimit = 5;
+                batchLimit = std::max(10, tunedBatch / 3);
             else if (snap.cpuUsagePercent > 40)
-                batchLimit = 8;
+                batchLimit = std::max(12, tunedBatch / 2);
         } catch (...) {
+        }
+        if (!ResourceGovernor::instance().canAdmitWork()) {
+            // Avoid full ingestion deadlock under pressure: keep draining slowly.
+            underPressure = true;
+            batchLimit = std::max(4, tunedBatch / 4);
         }
 
         InternalEventBus::StoreDocumentTask task;
         int processed = 0;
+        PendingPostIngestByMime pendingPostIngest;
         while (processed < batchLimit && channel->try_pop(task)) {
             idleDelay = std::chrono::milliseconds(5);
-            processTask(sm_, task);
+            processTask(sm_, task, pendingPostIngest);
             ++processed;
+        }
+        if (!pendingPostIngest.empty()) {
+            flushPendingPostIngestBatches(sm_, pendingPostIngest);
         }
         if (processed == 0) {
             timer.expires_after(idleDelay);
@@ -90,13 +111,17 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
                     idleDelay = maxIdle;
                 }
             }
+        } else if (underPressure) {
+            timer.expires_after(std::chrono::milliseconds(25));
+            co_await timer.async_wait(boost::asio::use_awaitable);
         }
     }
 
     spdlog::info("[IngestService] Channel poller exited");
 }
 
-static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumentTask& task) {
+static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumentTask& task,
+                        PendingPostIngestByMime& pendingPostIngest) {
     const auto& req = task.request;
 
     try {
@@ -143,23 +168,18 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
             const auto& serviceResp = result.value();
 
             if (sm && sm->getPostIngestQueue()) {
-                constexpr std::size_t kBatchSize = 50;
-                std::vector<std::string> batch;
-                batch.reserve(kBatchSize);
+                constexpr std::size_t kBatchSize = 128;
+                auto& pending = pendingPostIngest[std::string()];
+                pending.reserve(pending.size() + std::min<std::size_t>(kBatchSize, 256));
                 for (const auto& r : serviceResp.results) {
                     if (!r.success || r.hash.empty()) {
                         continue;
                     }
-                    batch.push_back(r.hash);
-                    if (batch.size() >= kBatchSize) {
-                        for (const auto& h : batch) {
-                            sm->enqueuePostIngest(h, std::string());
-                        }
-                        batch.clear();
+                    pending.push_back(r.hash);
+                    if (pending.size() >= kBatchSize) {
+                        sm->enqueuePostIngestBatch(pending, std::string());
+                        pending.clear();
                     }
-                }
-                for (const auto& h : batch) {
-                    sm->enqueuePostIngest(h, std::string());
                 }
             }
         }
@@ -193,7 +213,7 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
 
             if (sm && sm->getPostIngestQueue() && !serviceResp.hash.empty()) {
                 spdlog::info("[IngestService] Enqueuing post-ingest for hash={}", serviceResp.hash);
-                sm->enqueuePostIngest(serviceResp.hash, req.mimeType);
+                pendingPostIngest[req.mimeType].push_back(serviceResp.hash);
             } else {
                 spdlog::warn("[IngestService] Post-ingest skipped: sm={} piq={} hash_empty={}",
                              sm != nullptr, sm ? (sm->getPostIngestQueue() != nullptr) : false,

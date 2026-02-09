@@ -76,6 +76,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.vectorDbInitAttempted = snap->vectorDbInitAttempted;
             res.vectorDbReady = snap->vectorDbReady;
             res.vectorDbDim = snap->vectorDbDim;
+            res.readinessStates[std::string(readiness::kVectorDbInitAttempted)] =
+                res.vectorDbInitAttempted;
+            res.readinessStates[std::string(readiness::kVectorDbReady)] = res.vectorDbReady;
+            res.readinessStates[std::string(readiness::kVectorDbDim)] = (res.vectorDbDim > 0);
             // Embedding runtime details (best-effort)
             res.embeddingAvailable = snap->embeddingAvailable;
             res.embeddingBackend = snap->embeddingBackend;
@@ -83,17 +87,19 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.embeddingModelPath = snap->embeddingModelPath;
             res.embeddingDim = snap->embeddingDim;
             // Vector diagnostics (from background snapshot - no blocking)
-            res.readinessStates["vector_embeddings_available"] = snap->vectorEmbeddingsAvailable;
-            res.readinessStates["vector_scoring_enabled"] = snap->vectorScoringEnabled;
+            res.readinessStates[std::string(readiness::kVectorEmbeddingsAvailable)] =
+                snap->vectorEmbeddingsAvailable;
+            res.readinessStates[std::string(readiness::kVectorScoringEnabled)] =
+                snap->vectorScoringEnabled;
             res.requestCounts[std::string(metrics::kVectorEmbeddingsAvailable)] =
                 snap->vectorEmbeddingsAvailable ? 1 : 0;
             res.requestCounts[std::string(metrics::kVectorScoringEnabled)] =
                 snap->vectorScoringEnabled ? 1 : 0;
-            res.readinessStates["search_engine_build_reason_initial"] =
+            res.readinessStates[std::string(readiness::kSearchEngineBuildReasonInitial)] =
                 (snap->searchEngineBuildReason == "initial");
-            res.readinessStates["search_engine_build_reason_rebuild"] =
+            res.readinessStates[std::string(readiness::kSearchEngineBuildReasonRebuild)] =
                 (snap->searchEngineBuildReason == "rebuild");
-            res.readinessStates["search_engine_build_reason_degraded"] =
+            res.readinessStates[std::string(readiness::kSearchEngineBuildReasonDegraded)] =
                 (snap->searchEngineBuildReason == "degraded");
             res.requestCounts[std::string(metrics::kWorkerThreads)] = snap->workerThreads;
             res.requestCounts[std::string(metrics::kWorkerActive)] = snap->workerActive;
@@ -152,11 +158,11 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         auto es = serviceManager_->getEmbeddingProviderFsmSnapshot();
                         res.requestCounts[std::string(metrics::kEmbeddingState)] =
                             static_cast<size_t>(es.state);
-                        res.readinessStates["embedding_ready"] =
+                        res.readinessStates[std::string(readiness::kEmbeddingReady)] =
                             (es.state == EmbeddingProviderState::ModelReady);
                         // Provide an explicit degraded flag for clients/tools that
                         // distinguish readiness from degraded modes.
-                        res.readinessStates["embedding_degraded"] =
+                        res.readinessStates[std::string(readiness::kEmbeddingDegraded)] =
                             (es.state == EmbeddingProviderState::Degraded);
                     } catch (...) {
                     }
@@ -172,8 +178,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         auto ps = serviceManager_->getPluginHostFsmSnapshot();
                         res.requestCounts[std::string(metrics::kPluginHostState)] =
                             static_cast<size_t>(ps.state);
-                        res.readinessStates["plugins_ready"] = (ps.state == PluginHostState::Ready);
-                        res.readinessStates["plugins_degraded"] =
+                        res.readinessStates[std::string(readiness::kPluginsReady)] =
+                            (ps.state == PluginHostState::Ready);
+                        res.readinessStates[std::string(readiness::kPluginsDegraded)] =
                             (ps.state == PluginHostState::Failed);
                     } catch (...) {
                     }
@@ -392,15 +399,24 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             } catch (...) {
                 res.ready = false;
             }
-            res.readinessStates["ipc_server"] = state_->readiness.ipcServerReady.load();
-            res.readinessStates["content_store"] = state_->readiness.contentStoreReady.load();
-            res.readinessStates["database"] = state_->readiness.databaseReady.load();
-            res.readinessStates["metadata_repo"] = state_->readiness.metadataRepoReady.load();
-            res.readinessStates["search_engine"] = state_->readiness.searchEngineReady.load();
-            res.readinessStates["model_provider"] = state_->readiness.modelProviderReady.load();
-            res.readinessStates["vector_index"] = state_->readiness.vectorIndexReady.load();
-            res.readinessStates["vector_db"] = state_->readiness.vectorDbReady.load();
-            res.readinessStates["plugins"] = state_->readiness.pluginsReady.load();
+            res.readinessStates[std::string(readiness::kIpcServer)] =
+                state_->readiness.ipcServerReady.load();
+            res.readinessStates[std::string(readiness::kContentStore)] =
+                state_->readiness.contentStoreReady.load();
+            res.readinessStates[std::string(readiness::kDatabase)] =
+                state_->readiness.databaseReady.load();
+            res.readinessStates[std::string(readiness::kMetadataRepo)] =
+                state_->readiness.metadataRepoReady.load();
+            res.readinessStates[std::string(readiness::kSearchEngine)] =
+                state_->readiness.searchEngineReady.load();
+            res.readinessStates[std::string(readiness::kModelProvider)] =
+                state_->readiness.modelProviderReady.load();
+            res.readinessStates[std::string(readiness::kVectorIndex)] =
+                state_->readiness.vectorIndexReady.load();
+            res.readinessStates[std::string(readiness::kVectorDb)] =
+                state_->readiness.vectorDbReady.load();
+            res.readinessStates[std::string(readiness::kPlugins)] =
+                state_->readiness.pluginsReady.load();
             try {
                 if (state_) {
                     res.vectorDbInitAttempted =
@@ -408,21 +424,35 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     res.vectorDbReady =
                         state_->readiness.vectorDbReady.load(std::memory_order_relaxed);
                     res.vectorDbDim = state_->readiness.vectorDbDim.load(std::memory_order_relaxed);
+                    res.readinessStates[std::string(readiness::kVectorDbInitAttempted)] =
+                        res.vectorDbInitAttempted;
+                    res.readinessStates[std::string(readiness::kVectorDbReady)] = res.vectorDbReady;
+                    res.readinessStates[std::string(readiness::kVectorDbDim)] =
+                        (res.vectorDbDim > 0);
                 }
             } catch (...) {
             }
-            if (!res.vectorDbReady && serviceManager_) {
+            // Heal/mirror vector DB readiness from the live handle.
+            // Readiness semantics: false while empty/building; true only when serving (has data).
+            if (serviceManager_) {
                 try {
                     // Only check if already initialized - never create/initialize here
                     if (auto vdb = serviceManager_->getVectorDatabase();
                         vdb && vdb->isInitialized()) {
-                        res.vectorDbReady = true;
-                        auto dim = vdb->getConfig().embedding_dim;
+                        const auto dim = vdb->getConfig().embedding_dim;
+                        const auto rows = vdb->getVectorCount();
+
+                        res.vectorDbReady = (rows > 0);
+                        res.vectorDbInitAttempted = true;
                         if (dim > 0) {
                             res.vectorDbDim = static_cast<uint32_t>(dim);
                         }
+
                         if (state_) {
-                            state_->readiness.vectorDbReady.store(true, std::memory_order_relaxed);
+                            state_->readiness.vectorDbInitAttempted.store(
+                                true, std::memory_order_relaxed);
+                            state_->readiness.vectorDbReady.store(res.vectorDbReady,
+                                                                  std::memory_order_relaxed);
                             if (dim > 0) {
                                 state_->readiness.vectorDbDim.store(static_cast<uint32_t>(dim),
                                                                     std::memory_order_relaxed);
@@ -431,6 +461,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     }
                 } catch (...) {
                 }
+            }
+
+            // Ensure readinessStates[vector_db] reflects the healed vectorDbReady.
+            try {
+                res.readinessStates[std::string(readiness::kVectorDb)] = res.vectorDbReady;
+            } catch (...) {
             }
         }
         spdlog::debug("[StatusRequest] About to check search engine degradation");
@@ -443,9 +479,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                               static_cast<void*>(engine.get()));
                 searchDegraded = (engine == nullptr);
             }
-            res.readinessStates["search_engine_degraded"] = searchDegraded;
+            res.readinessStates[std::string(readiness::kSearchEngineDegraded)] = searchDegraded;
         } catch (...) {
-            res.readinessStates["search_engine_degraded"] = true;
+            res.readinessStates[std::string(readiness::kSearchEngineDegraded)] = true;
         }
         // NOTE: Vector diagnostics are now collected via DaemonMetrics background thread
         // and read from the snapshot above (lines 81-92). This avoids blocking the status
@@ -565,6 +601,27 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     }
                 }
             } catch (...) {
+            }
+        }
+
+        // Keep canonical readiness keys stable for clients/tests even when
+        // specific FSM snapshots are unavailable in a given code path.
+        const std::pair<std::string_view, bool> defaultReadiness[] = {
+            {readiness::kEmbeddingReady, false},
+            {readiness::kEmbeddingDegraded, false},
+            {readiness::kPluginsReady, false},
+            {readiness::kPluginsDegraded, false},
+            {readiness::kSearchEngineBuildReasonInitial, false},
+            {readiness::kSearchEngineBuildReasonRebuild, false},
+            {readiness::kSearchEngineBuildReasonDegraded, false},
+            {readiness::kVectorDbInitAttempted, false},
+            {readiness::kVectorDbReady, false},
+            {readiness::kVectorDbDim, false},
+        };
+        for (const auto& [key, value] : defaultReadiness) {
+            auto it = res.readinessStates.find(std::string(key));
+            if (it == res.readinessStates.end()) {
+                res.readinessStates.emplace(std::string(key), value);
             }
         }
     } catch (...) {

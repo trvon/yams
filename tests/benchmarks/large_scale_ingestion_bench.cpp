@@ -68,10 +68,69 @@ bool waitForVectorDbReady(std::chrono::milliseconds timeout) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
         auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
-        if (status && status.value().vectorDbReady) {
-            return true;
+        if (status) {
+            const auto& st = status.value();
+            // Prefer readinessStates["vector_db"] (canonical) but keep compatibility with
+            // vectorDbReady field.
+            bool ready = st.vectorDbReady;
+            if (auto it = st.readinessStates.find("vector_db"); it != st.readinessStates.end()) {
+                ready = it->second;
+            }
+            if (ready) {
+                return true;
+            }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    return false;
+}
+
+bool waitForVectorDbInitialized(std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    auto nextLog = std::chrono::steady_clock::now();
+    daemon::StatusResponse lastStatus;
+    bool haveLastStatus = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
+        if (status) {
+            const auto& st = status.value();
+            lastStatus = st;
+            haveLastStatus = true;
+            // Initialization semantics: the vector DB can be initialized (dim set) but not
+            // "serving" yet (0 vectors). For setup, we just need init to have happened.
+            if (st.vectorDbInitAttempted && st.vectorDbDim > 0) {
+                return true;
+            }
+            auto now = std::chrono::steady_clock::now();
+            if (now >= nextLog) {
+                const uint64_t vectorCount = getCountOrZero(st, std::string(metrics::kVectorCount));
+                bool mapReady = false;
+                if (auto it = st.readinessStates.find("vector_db");
+                    it != st.readinessStates.end()) {
+                    mapReady = it->second;
+                }
+                std::cerr << "[bench] vector init wait: initAttempted="
+                          << (st.vectorDbInitAttempted ? 1 : 0) << " dim=" << st.vectorDbDim
+                          << " vectorDbReady=" << (st.vectorDbReady ? 1 : 0)
+                          << " readinessStates[vector_db]=" << (mapReady ? 1 : 0)
+                          << " vector_count=" << vectorCount << "\n";
+                nextLog = now + std::chrono::seconds(1);
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    if (haveLastStatus) {
+        const auto& st = lastStatus;
+        const uint64_t vectorCount = getCountOrZero(st, std::string(metrics::kVectorCount));
+        bool mapReady = false;
+        if (auto it = st.readinessStates.find("vector_db"); it != st.readinessStates.end()) {
+            mapReady = it->second;
+        }
+        std::cerr << "[bench] vector init wait timed out after " << timeout.count() << "ms"
+                  << " (initAttempted=" << (st.vectorDbInitAttempted ? 1 : 0)
+                  << " dim=" << st.vectorDbDim << " vectorDbReady=" << (st.vectorDbReady ? 1 : 0)
+                  << " readinessStates[vector_db]=" << (mapReady ? 1 : 0)
+                  << " vector_count=" << vectorCount << ")\n";
     }
     return false;
 }
@@ -109,7 +168,12 @@ bool waitForCorpusIndexed(std::size_t expectedDocs, bool embeddingsEnabled,
                                     docsIndexed >= static_cast<uint64_t>(expectedDocs));
         const bool postDrained = (postQueued == 0 && postInflight == 0);
         const bool embedDrained = (!embeddingsEnabled) || (embedQueued == 0 && embedInflight == 0);
-        const bool vectorReady = (!embeddingsEnabled) || st.vectorDbReady;
+        bool vectorReady = (!embeddingsEnabled) || st.vectorDbReady;
+        if (auto it = st.readinessStates.find("vector_db"); it != st.readinessStates.end()) {
+            vectorReady = (!embeddingsEnabled) || it->second;
+        }
+        // Serving semantics: vector_db readiness is only true once vector_count > 0.
+        // For corpus readiness, we actually care that vectors are produced for the corpus.
         const bool vectorMet =
             (!embeddingsEnabled) || (vectorCount >= static_cast<uint64_t>(expectedDocs));
 
@@ -388,7 +452,20 @@ void SetupHarness(const IngestionBenchConfig& config) {
     ::setenv("YAMS_BENCH_ENABLE_EMBEDDINGS", config.enableEmbeddings ? "1" : "0", 1);
 
     // Start daemon
-    g_harness = std::make_unique<DaemonHarness>();
+    DaemonHarness::Options harnessOptions;
+    if (config.enableEmbeddings) {
+        // Keep everything enabled: let PluginManager decide availability.
+        harnessOptions.useMockModelProvider = false;
+        harnessOptions.autoLoadPlugins = true;
+        harnessOptions.configureModelPool = true;
+        harnessOptions.modelPoolLazyLoading = false;
+        if (const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR")) {
+            harnessOptions.pluginDir = std::filesystem::path(envPluginDir);
+        } else {
+            harnessOptions.pluginDir = std::filesystem::current_path() / "builddir" / "plugins";
+        }
+    }
+    g_harness = std::make_unique<DaemonHarness>(harnessOptions);
     if (!g_harness->start(std::chrono::seconds(30))) {
         std::cerr << "ERROR: Failed to start daemon\n";
         std::exit(1);
@@ -411,9 +488,11 @@ void SetupHarness(const IngestionBenchConfig& config) {
             timeout = std::chrono::milliseconds(
                 static_cast<std::chrono::milliseconds::rep>(std::stoll(env)));
         }
-        std::cout << "Waiting for vector DB readiness...\n";
-        if (!waitForVectorDbReady(timeout)) {
-            std::cerr << "WARNING: Vector DB not ready after " << timeout.count() << "ms.\n";
+        std::cout << "Waiting for vector DB initialization...\n";
+        if (!waitForVectorDbInitialized(timeout)) {
+            std::cerr << "WARNING: Vector DB not initialized after " << timeout.count() << "ms.\n";
+            std::cerr
+                << "         (If this persists, check plugin autoload/model provider logs.)\n";
         }
     }
 
@@ -725,6 +804,14 @@ BENCHMARK(BM_LargeScaleIngestion)
 } // anonymous namespace
 
 int main(int argc, char** argv) {
+    const bool listOnly = [&]() {
+        for (int i = 1; i < argc; ++i) {
+            if (std::string(argv[i]) == "--benchmark_list_tests")
+                return true;
+        }
+        return false;
+    }();
+
     std::cout << "\n";
     std::cout << "╔═══════════════════════════════════════════════════════════════════╗\n";
     std::cout << "║  YAMS Large-Scale Ingestion Benchmarks                           ║\n";
@@ -744,24 +831,32 @@ int main(int argc, char** argv) {
     std::cout << "  - Resource: Peak RSS, CPU%, pressure level\n";
     std::cout << "  - Time series: CSV output for plotting\n\n";
 
-    // Setup default harness (will be reconfigured per benchmark)
-    IngestionBenchConfig defaultConfig;
-    defaultConfig.documentCount = getDocCount();
-    defaultConfig.enableEmbeddings = getEnableEmbeddings();
-    defaultConfig.tuningProfile = getTuningProfile();
-    SetupHarness(defaultConfig);
+    // When only listing tests, avoid starting the daemon (expensive, and can trigger
+    // model warmup/shutdown races in plugin backends).
+    if (!listOnly) {
+        // Setup default harness (will be reconfigured per benchmark)
+        IngestionBenchConfig defaultConfig;
+        defaultConfig.documentCount = getDocCount();
+        defaultConfig.enableEmbeddings = getEnableEmbeddings();
+        defaultConfig.tuningProfile = getTuningProfile();
+        SetupHarness(defaultConfig);
+    }
 
     // Run benchmarks
     ::benchmark::Initialize(&argc, argv);
     if (::benchmark::ReportUnrecognizedArguments(argc, argv)) {
-        TeardownHarness();
+        if (!listOnly) {
+            TeardownHarness();
+        }
         return 1;
     }
     ::benchmark::RunSpecifiedBenchmarks();
     ::benchmark::Shutdown();
 
     // Cleanup
-    TeardownHarness();
+    if (!listOnly) {
+        TeardownHarness();
+    }
 
     std::cout << "\n✅ Large-scale ingestion benchmarks completed\n";
     std::cout << "💡 Review throughput and queue metrics above\n";

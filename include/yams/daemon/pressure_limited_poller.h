@@ -24,11 +24,28 @@ template <typename T> class SpscQueue;
 
 namespace detail {
 
+template <typename Task>
+inline bool requeueWithBackoff(const std::shared_ptr<SpscQueue<Task>>& channel, Task&& task) {
+    if (!channel) {
+        return false;
+    }
+    constexpr auto kWait = std::chrono::milliseconds(5);
+    constexpr int kAttempts = 5;
+    for (int i = 0; i < kAttempts; ++i) {
+        if (channel->push_wait(task, kWait)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline bool applyPressureToLimit(std::size_t& maxConcurrent) {
     auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
     switch (pressureLevel) {
         case ResourcePressureLevel::Emergency:
-            maxConcurrent = 0;
+            // Preserve pipeline liveness under extreme pressure: slow to 1 worker
+            // rather than fully stalling and causing upstream queue saturation.
+            maxConcurrent = 1;
             return true;
         case ResourcePressureLevel::Critical:
             maxConcurrent = 1;
@@ -77,6 +94,8 @@ template <typename Task> struct PressureLimitedPollerConfig {
 
     // Batch mode (channelPoller only)
     bool batchMode = false;
+    // When false, limiter admission is applied once per batch instead of once per task.
+    bool batchLimiterPerTask = true;
     std::function<std::size_t()> batchSizeFn;
     std::function<void(std::vector<Task>&&)> batchProcessFn;
 
@@ -132,6 +151,9 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                 std::vector<Task> batch;
                 batch.reserve(batchSize);
                 Task task;
+                GradientLimiter* lim = cfg.getLimiterFn ? cfg.getLimiterFn() : nullptr;
+                std::string batchLimiterId;
+                bool batchLimiterAcquired = false;
 
                 auto tryPopFromAny = [&](Task& out, bool& fromHighPriority) -> bool {
                     if (cfg.highPriorityChannel) {
@@ -148,8 +170,24 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                 };
 
                 std::size_t hpTaken = 0;
+                if (!cfg.batchLimiterPerTask && lim) {
+                    static std::atomic<uint64_t> sBatchSeq{0};
+                    const auto seq = sBatchSeq.fetch_add(1, std::memory_order_relaxed) + 1u;
+                    batchLimiterId = cfg.stageName + "#batch#" + std::to_string(seq);
+                    if (!cfg.tryAcquireFn(lim, batchLimiterId, cfg.stageName)) {
+                        // Unable to admit a new batch under current limiter settings.
+                        timer.expires_after(kMinIdleDelay);
+                        co_await timer.async_wait(boost::asio::use_awaitable);
+                        continue;
+                    }
+                    batchLimiterAcquired = true;
+                }
 
-                while (cfg.inFlightCounter->load() < maxConcurrent && batch.size() < batchSize) {
+                // In batch mode, ensure we can admit at least one full batch even when
+                // maxConcurrent is temporarily clamped low (e.g., pressure=Critical/Emergency).
+                // inFlightCounter tracks admitted tasks (not batches), so use a task budget.
+                const std::size_t taskBudget = std::max(maxConcurrent, batchSize);
+                while (cfg.inFlightCounter->load() < taskBudget && batch.size() < batchSize) {
                     bool fromHighPriority = false;
                     if (cfg.highPriorityChannel && hpTaken >= hpMax) {
                         // Quota consumed; only pull from the normal channel for fairness.
@@ -163,15 +201,24 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                         }
                     }
 
-                    GradientLimiter* lim = cfg.getLimiterFn ? cfg.getLimiterFn() : nullptr;
-                    if (!cfg.tryAcquireFn(lim, cfg.getHashFn(task), cfg.stageName)) {
-                        // Push back to the originating channel to preserve priority.
-                        if (fromHighPriority && cfg.highPriorityChannel) {
-                            cfg.highPriorityChannel->try_push(std::move(task));
-                        } else {
-                            channel->try_push(std::move(task));
+                    if (cfg.batchLimiterPerTask) {
+                        if (!cfg.tryAcquireFn(lim, cfg.getHashFn(task), cfg.stageName)) {
+                            // Push back to the originating channel to preserve priority.
+                            bool requeued = false;
+                            if (fromHighPriority && cfg.highPriorityChannel) {
+                                requeued = detail::requeueWithBackoff(cfg.highPriorityChannel,
+                                                                      std::move(task));
+                            } else {
+                                requeued = detail::requeueWithBackoff(channel, std::move(task));
+                            }
+                            if (!requeued) {
+                                spdlog::warn(
+                                    "[PostIngestQueue] {} poller failed to requeue throttled "
+                                    "task; breaking to avoid hot-spin",
+                                    cfg.stageName);
+                            }
+                            break;
                         }
-                        break;
                     }
                     didWork = true;
                     cfg.inFlightCounter->fetch_add(1);
@@ -185,22 +232,28 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                     cfg.wasActiveFlag->store(true, std::memory_order_release);
                     const std::size_t batchCount = batch.size();
                     std::vector<std::string> hashes;
-                    GradientLimiter* lim = cfg.getLimiterFn ? cfg.getLimiterFn() : nullptr;
-                    if (lim) {
+                    if (cfg.batchLimiterPerTask && lim) {
                         hashes.reserve(batchCount);
                         for (const auto& t : batch) {
                             hashes.push_back(cfg.getHashFn(t));
                         }
                     }
                     boost::asio::post(cfg.executor, [cfg, batch = std::move(batch), batchCount,
-                                                     hashes = std::move(hashes)]() mutable {
+                                                     hashes = std::move(hashes),
+                                                     batchLimiterId = std::move(batchLimiterId),
+                                                     batchLimiterAcquired]() mutable {
                         cfg.batchProcessFn(std::move(batch));
+                        if (batchLimiterAcquired) {
+                            cfg.completeJobFn(batchLimiterId, true);
+                        }
                         for (const auto& h : hashes) {
                             cfg.completeJobFn(h, true);
                         }
                         cfg.inFlightCounter->fetch_sub(batchCount);
                         cfg.checkDrainFn();
                     });
+                } else if (batchLimiterAcquired) {
+                    cfg.completeJobFn(batchLimiterId, false);
                 }
             } else {
                 // Single-item processing (kg, symbol, entity, title pollers)
@@ -209,7 +262,12 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                     GradientLimiter* lim = cfg.getLimiterFn ? cfg.getLimiterFn() : nullptr;
                     std::string hash = cfg.getHashFn(job);
                     if (!cfg.tryAcquireFn(lim, hash, cfg.stageName)) {
-                        channel->try_push(std::move(job));
+                        if (!detail::requeueWithBackoff(channel, std::move(job))) {
+                            spdlog::warn(
+                                "[PostIngestQueue] {} poller failed to requeue throttled task; "
+                                "breaking to avoid hot-spin",
+                                cfg.stageName);
+                        }
                         break;
                     }
                     didWork = true;

@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -41,6 +42,7 @@ void TuningManager::start() {
     ipcHighTicks_ = ipcLowTicks_ = ioHighTicks_ = ioLowTicks_ = 0;
     slotHighTicks_ = slotLowTicks_ = 0;
     previousPressureLevel_ = 0;
+    previousEmbedDropped_ = 0;
 
     // Seed FsmMetricsRegistry with initial ResourceGovernor data immediately
     // so status requests have valid data before the first async tick completes.
@@ -99,6 +101,120 @@ boost::asio::awaitable<void> TuningManager::tuningLoop() {
     }
 
     spdlog::debug("TuningManager loop exiting");
+}
+
+void TuningManager::rebalanceTargetsByQueue(std::array<uint32_t, 6>& targets,
+                                            const std::array<uint32_t, 6>& floors,
+                                            const std::array<std::size_t, 6>& queueDepths,
+                                            const std::array<bool, 6>& active) {
+    auto pressure = [&](std::size_t i) -> double {
+        if (!active[i] || queueDepths[i] == 0) {
+            return 0.0;
+        }
+        const uint32_t denom = std::max<uint32_t>(1u, targets[i]);
+        return static_cast<double>(queueDepths[i]) / static_cast<double>(denom);
+    };
+
+    constexpr std::size_t kMaxIterations = 24;
+    for (std::size_t iter = 0; iter < kMaxIterations; ++iter) {
+        std::size_t receiver = 0;
+        std::size_t donor = 0;
+        double maxPressure = -1.0;
+        double minPressure = std::numeric_limits<double>::infinity();
+
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            if (!active[i]) {
+                continue;
+            }
+            const double p = pressure(i);
+            if (p > maxPressure) {
+                maxPressure = p;
+                receiver = i;
+            }
+        }
+
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            if (!active[i] || targets[i] <= floors[i]) {
+                continue;
+            }
+            const double p = pressure(i);
+            if (p < minPressure) {
+                minPressure = p;
+                donor = i;
+            }
+        }
+
+        if (maxPressure <= 0.0 || minPressure == std::numeric_limits<double>::infinity() ||
+            donor == receiver) {
+            break;
+        }
+        // Stop once the pressure skew is small enough.
+        if (maxPressure <= minPressure * 1.15) {
+            break;
+        }
+
+        targets[donor] -= 1;
+        targets[receiver] += 1;
+    }
+}
+
+void TuningManager::testing_rebalanceTargetsByQueue(std::array<uint32_t, 6>& targets,
+                                                    const std::array<uint32_t, 6>& floors,
+                                                    const std::array<std::size_t, 6>& queueDepths,
+                                                    const std::array<bool, 6>& active) {
+    rebalanceTargetsByQueue(targets, floors, queueDepths, active);
+}
+
+uint32_t TuningManager::computeEmbedScaleBias(std::size_t embedQueued, uint64_t embedDroppedDelta,
+                                              std::size_t postQueued, std::size_t embedInFlight) {
+    uint32_t bias = 0;
+
+    if (postQueued >= 500) {
+        bias = 1;
+    }
+
+    if (embedQueued >= 128) {
+        bias = std::max<uint32_t>(bias, 1);
+    }
+    if (embedQueued >= 384) {
+        bias = std::max<uint32_t>(bias, 2);
+    }
+    if (embedQueued >= 768) {
+        bias = std::max<uint32_t>(bias, 3);
+    }
+    if (embedQueued >= 1280) {
+        bias = std::max<uint32_t>(bias, 4);
+    }
+    if (embedQueued >= 2048) {
+        bias = std::max<uint32_t>(bias, 5);
+    }
+
+    if (embedDroppedDelta > 0) {
+        bias = std::max<uint32_t>(bias, 2);
+    }
+    if (embedDroppedDelta > 20) {
+        bias = std::max<uint32_t>(bias, 3);
+    }
+    if (embedDroppedDelta > 100) {
+        bias = std::max<uint32_t>(bias, 4);
+    }
+
+    // When embedding is active and backlog is present, add extra pressure.
+    if (embedInFlight > 0 && embedQueued > 0) {
+        bias += 1;
+    }
+    if (postQueued >= 750 && embedQueued >= 250) {
+        bias += 1;
+    }
+
+    return std::min<uint32_t>(bias, 8u);
+}
+
+uint32_t TuningManager::testing_computeEmbedScaleBias(std::size_t embedQueued,
+                                                      uint64_t embedDroppedDelta,
+                                                      std::size_t postQueued,
+                                                      std::size_t embedInFlight) {
+    return computeEmbedScaleBias(embedQueued, embedDroppedDelta, postQueued, embedInFlight);
 }
 
 void TuningManager::configureOnnxConcurrencyRegistry() {
@@ -313,24 +429,39 @@ void TuningManager::tick_once() {
         if (pq) {
             const std::size_t queuedItems = pq->size();
             [[maybe_unused]] const std::size_t currentInFlight = pq->totalInFlight();
+            const std::size_t kgQueued = pq->kgQueueDepth();
+            const std::size_t symbolQueued = pq->symbolQueueDepth();
+            const std::size_t entityQueued = pq->entityQueueDepth();
+            const std::size_t titleQueued = pq->titleQueueDepth();
 
             auto& bus = InternalEventBus::instance();
-            const std::size_t embedQueued = bus.embedQueued();
-            const std::size_t embedDropped = bus.embedDropped();
+            const std::size_t embedQueuedJobs = sm_->getEmbeddingQueuedJobs();
+            [[maybe_unused]] const std::size_t embedInFlight = sm_->getEmbeddingInFlightJobs();
+            // Prefer document-level backlog pressure over job-count depth.
+            // Embed jobs can carry many hashes, so job-depth alone can under-report pressure.
+            const uint64_t embedQueuedTotal = bus.embedQueued();
+            const uint64_t embedConsumedTotal = bus.embedConsumed();
+            const std::size_t embedQueuedDocs = static_cast<std::size_t>(
+                (embedQueuedTotal >= embedConsumedTotal) ? (embedQueuedTotal - embedConsumedTotal)
+                                                         : embedQueuedTotal);
+            const std::size_t embedQueued = std::max(embedQueuedJobs, embedQueuedDocs);
+            const uint64_t embedDroppedTotal = bus.embedDropped();
+            uint64_t embedDroppedDelta = 0;
+            if (embedDroppedTotal >= previousEmbedDropped_) {
+                embedDroppedDelta = embedDroppedTotal - previousEmbedDropped_;
+            } else {
+                // Counter reset/restart: treat current value as delta for this tick.
+                embedDroppedDelta = embedDroppedTotal;
+            }
+            previousEmbedDropped_ = embedDroppedTotal;
 
             // Derive total post-ingest budget and weighted targets.
             // Note: We compute a temporary scaled budget but do NOT persist it back
             // to TuneAdvisor to avoid runaway scaling. The base budget from
             // recommendedThreads() should remain stable.
             uint32_t baseBudget = TuneAdvisor::postIngestTotalConcurrent();
-            uint32_t scaleBias = 0;
-            if (embedQueued > 1000 || embedDropped > 100) {
-                scaleBias = 2;
-            } else if (embedQueued > 250 || embedDropped > 20) {
-                scaleBias = 1;
-            } else if (queuedItems > 500) {
-                scaleBias = 1;
-            }
+            uint32_t scaleBias =
+                computeEmbedScaleBias(embedQueued, embedDroppedDelta, queuedItems, embedInFlight);
             // Cap scaled budget to hardware concurrency to avoid oversubscription
             uint32_t hwCap = TuneAdvisor::hardwareConcurrency();
             uint32_t totalBudget = std::min<uint32_t>(hwCap, baseBudget + scaleBias);
@@ -349,6 +480,25 @@ void TuningManager::tick_once() {
             uint32_t entityTarget = budget.entity;
             uint32_t titleTarget = budget.title;
             uint32_t embedTarget = budget.embed;
+            uint32_t embedFloor = 0;
+
+            // Keep embed fan-out responsive to backlog growth, especially during model warmup
+            // and bursty ingestion where job-depth can lag document-depth.
+            if (embedQueued >= 128) {
+                embedFloor = 2;
+            }
+            if (embedQueued >= 512) {
+                embedFloor = 4;
+            }
+            if (embedQueued >= 1024) {
+                embedFloor = 6;
+            }
+            if (embedDroppedDelta > 0) {
+                embedFloor = std::max<uint32_t>(embedFloor, 4u);
+            }
+            if (queuedItems >= 512 && embedQueued >= 128) {
+                embedFloor = std::max<uint32_t>(embedFloor, 4u);
+            }
 
             // Override with gradient limiter values if enabled
             if (TuneAdvisor::enableGradientLimiters()) {
@@ -363,7 +513,6 @@ void TuningManager::tick_once() {
                 applyPressureToLimiter(pq->symbolLimiter());
                 applyPressureToLimiter(pq->entityLimiter());
                 applyPressureToLimiter(pq->titleLimiter());
-                applyPressureToLimiter(pq->embedLimiter());
 
                 if (auto* extractionLimiter = pq->extractionLimiter()) {
                     extractionTarget = extractionLimiter->effectiveLimit();
@@ -380,9 +529,8 @@ void TuningManager::tick_once() {
                 if (auto* titleLimiter = pq->titleLimiter()) {
                     titleTarget = titleLimiter->effectiveLimit();
                 }
-                if (auto* embedLimiter = pq->embedLimiter()) {
-                    embedTarget = embedLimiter->effectiveLimit();
-                }
+                // Embed limiter is not currently driven by embed job RTT/completions, so
+                // keep embed target derived from budget/governor instead of stale limiter state.
             }
 
             if (dbLockErrors > lockThreshold * 2) {
@@ -397,13 +545,19 @@ void TuningManager::tick_once() {
                               dbLockErrors);
             }
 
-            if (TuneAdvisor::enableResourceGovernor()) {
+            const bool applyGovernorConcurrencyCaps =
+                TuneAdvisor::enableResourceGovernor() &&
+                govSnap.level != ResourcePressureLevel::Normal;
+            if (applyGovernorConcurrencyCaps) {
                 extractionTarget = std::min(extractionTarget, governor.maxExtractionConcurrency());
                 kgTarget = std::min(kgTarget, governor.maxKgConcurrency());
                 symbolTarget = std::min(symbolTarget, governor.maxSymbolConcurrency());
                 entityTarget = std::min(entityTarget, governor.maxEntityConcurrency());
                 titleTarget = std::min(titleTarget, governor.maxTitleConcurrency());
-                embedTarget = std::min(embedTarget, governor.maxEmbedConcurrency());
+                const uint32_t embedCap = governor.maxEmbedConcurrency();
+                embedTarget = std::min(embedCap, std::max(embedTarget, embedFloor));
+            } else {
+                embedTarget = std::max(embedTarget, embedFloor);
             }
 
             // Reconcile per-stage targets to the total budget to avoid oversubscription.
@@ -420,14 +574,12 @@ void TuningManager::tick_once() {
                 applyActiveMask(1u << 3u, entityTarget);
                 applyActiveMask(1u << 4u, titleTarget);
                 applyActiveMask(1u << 5u, embedTarget);
+                const std::array<bool, 6> stageAllowed = {extractionTarget > 0, kgTarget > 0,
+                                                          symbolTarget > 0,     entityTarget > 0,
+                                                          titleTarget > 0,      embedTarget > 0};
 
                 const bool extractionActive = extractionTarget > 0;
-                const bool embedActive = embedTarget > 0;
                 const uint32_t minExtraction = (totalBudget >= 1 && extractionActive) ? 1u : 0u;
-                uint32_t minEmbed = (totalBudget >= 2 && embedActive) ? 1u : 0u;
-                if (totalBudget == 1 && !extractionActive && embedActive) {
-                    minEmbed = 1u;
-                }
 
                 auto sumTargets = [&]() {
                     return extractionTarget + kgTarget + symbolTarget + entityTarget + titleTarget +
@@ -446,7 +598,7 @@ void TuningManager::tick_once() {
                         StageRef{&symbolTarget, 0u},
                         StageRef{&kgTarget, 0u},
                         StageRef{&extractionTarget, minExtraction},
-                        StageRef{&embedTarget, minEmbed}};
+                        StageRef{&embedTarget, embedFloor}};
 
                     while (totalTarget > totalBudget) {
                         bool progressed = false;
@@ -466,6 +618,72 @@ void TuningManager::tick_once() {
                         }
                     }
                 }
+
+                // Fill any slack directly to the most backlogged active stages.
+                {
+                    auto chooseMostBacklogged = [&]() -> int {
+                        std::array<std::size_t, 6> depths = {queuedItems,  kgQueued,
+                                                             symbolQueued, entityQueued,
+                                                             titleQueued,  embedQueued};
+                        int best = -1;
+                        std::size_t bestDepth = 0;
+                        for (std::size_t i = 0; i < depths.size(); ++i) {
+                            if (!stageAllowed[i]) {
+                                continue;
+                            }
+                            if (depths[i] > bestDepth) {
+                                bestDepth = depths[i];
+                                best = static_cast<int>(i);
+                            }
+                        }
+                        return best;
+                    };
+
+                    uint32_t totalTarget = sumTargets();
+                    while (totalTarget < totalBudget) {
+                        const int idx = chooseMostBacklogged();
+                        if (idx < 0) {
+                            break;
+                        }
+                        switch (idx) {
+                            case 0:
+                                ++extractionTarget;
+                                break;
+                            case 1:
+                                ++kgTarget;
+                                break;
+                            case 2:
+                                ++symbolTarget;
+                                break;
+                            case 3:
+                                ++entityTarget;
+                                break;
+                            case 4:
+                                ++titleTarget;
+                                break;
+                            case 5:
+                                ++embedTarget;
+                                break;
+                            default:
+                                break;
+                        }
+                        ++totalTarget;
+                    }
+                }
+
+                // Dynamic stage-agnostic rebalance by queue pressure.
+                std::array<uint32_t, 6> stageTargets = {extractionTarget, kgTarget,    symbolTarget,
+                                                        entityTarget,     titleTarget, embedTarget};
+                std::array<uint32_t, 6> stageFloors = {minExtraction, 0u, 0u, 0u, 0u, embedFloor};
+                std::array<std::size_t, 6> queueDepths = {queuedItems,  kgQueued,    symbolQueued,
+                                                          entityQueued, titleQueued, embedQueued};
+                rebalanceTargetsByQueue(stageTargets, stageFloors, queueDepths, stageAllowed);
+                extractionTarget = stageTargets[0];
+                kgTarget = stageTargets[1];
+                symbolTarget = stageTargets[2];
+                entityTarget = stageTargets[3];
+                titleTarget = stageTargets[4];
+                embedTarget = stageTargets[5];
             }
 
             // Fix Issue 6 (timing audit): detect pressure de-escalation and clear
@@ -498,7 +716,7 @@ void TuningManager::tick_once() {
             // Align EmbeddingGenerator global gate with governor caps
             uint32_t baseEmbedGuard = TuneAdvisor::embedMaxConcurrencyBase();
             uint32_t desiredEmbedGuard = baseEmbedGuard;
-            if (TuneAdvisor::enableResourceGovernor()) {
+            if (applyGovernorConcurrencyCaps) {
                 desiredEmbedGuard = std::min(desiredEmbedGuard, governor.maxEmbedConcurrency());
             }
             if (desiredEmbedGuard < baseEmbedGuard) {
@@ -514,7 +732,8 @@ void TuningManager::tick_once() {
             TracyPlot("post.kg.limit", static_cast<double>(kgTarget));
             TracyPlot("post.embed.limit", static_cast<double>(embedTarget));
             TracyPlot("post.embed.queued", static_cast<double>(embedQueued));
-            TracyPlot("post.embed.dropped", static_cast<double>(embedDropped));
+            TracyPlot("post.embed.inflight", static_cast<double>(embedInFlight));
+            TracyPlot("post.embed.dropped_delta", static_cast<double>(embedDroppedDelta));
             TracyPlot("db.lock_errors_window", static_cast<double>(dbLockErrors));
 #endif
         }
