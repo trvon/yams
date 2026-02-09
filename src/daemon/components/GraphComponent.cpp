@@ -200,6 +200,154 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
     return Result<void>();
 }
 
+Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphContext>& contexts) {
+    if (!initialized_ || !kgStore_) {
+        return Error{ErrorCode::NotInitialized, "GraphComponent not initialized"};
+    }
+
+    if (contexts.empty()) {
+        return Result<void>();
+    }
+
+    auto startTime = std::chrono::steady_clock::now();
+    std::size_t processed = 0;
+    std::size_t skipped = 0;
+
+    // Collect all extraction jobs for batch submission
+    std::vector<EntityExtractionJob> extractionJobs;
+    extractionJobs.reserve(contexts.size());
+
+    for (auto& ctx : contexts) {
+        // Skip if entity extraction disabled or no service
+        if (ctx.skipEntityExtraction || !entityService_) {
+            skipped++;
+            continue;
+        }
+
+        // Need ServiceManager to access content store
+        if (!serviceManager_) {
+            skipped++;
+            continue;
+        }
+
+        // Get content store to load document content
+        auto contentStore = serviceManager_->getContentStore();
+        if (!contentStore) {
+            skipped++;
+            continue;
+        }
+
+        // Detect language from file extension
+        std::string language;
+        if (!ctx.filePath.empty()) {
+            std::filesystem::path path(ctx.filePath);
+            std::string ext = path.extension().string();
+            if (!ext.empty() && ext[0] == '.') {
+                ext = ext.substr(1);
+            }
+
+            // Query symbol extractors for language mapping
+            const auto& extractors = serviceManager_->getSymbolExtractors();
+            for (const auto& extractor : extractors) {
+                if (!extractor)
+                    continue;
+                auto supported = extractor->getSupportedExtensions();
+                auto it = supported.find(ext);
+                if (it != supported.end()) {
+                    language = it->second;
+                    break;
+                }
+            }
+        }
+
+        // Check if NL entity extractors support this file type
+        bool hasNlExtractor = false;
+        std::string contentType;
+        if (language.empty() && !ctx.filePath.empty()) {
+            std::filesystem::path path(ctx.filePath);
+            std::string ext = path.extension().string();
+
+            // Map extension to content type for NL extractors
+            if (ext == ".md" || ext == ".markdown") {
+                contentType = "text/markdown";
+            } else if (ext == ".json" || ext == ".jsonl") {
+                contentType = "application/json";
+            } else if (ext == ".txt" || ext.empty()) {
+                contentType = "text/plain";
+            }
+
+            // Check if any NL entity extractor supports this content type
+            if (!contentType.empty()) {
+                const auto& nlExtractors = serviceManager_->getEntityExtractors();
+                for (const auto& ex : nlExtractors) {
+                    if (ex && ex->supportsContentType(contentType)) {
+                        hasNlExtractor = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Skip if no language detected AND no NL extractor supports the content type
+        if (language.empty() && !hasNlExtractor) {
+            spdlog::debug(
+                "[GraphComponent] No language/extractor for {} (ext='{}'), skipping extraction",
+                ctx.filePath,
+                ctx.filePath.empty() ? ""
+                                     : std::filesystem::path(ctx.filePath).extension().string());
+            skipped++;
+            continue;
+        }
+
+        std::vector<std::byte> bytes;
+        if (ctx.contentBytes) {
+            bytes = *ctx.contentBytes;
+        } else {
+            // Load document content
+            auto contentResult = contentStore->retrieveBytes(ctx.documentHash);
+            if (!contentResult) {
+                spdlog::warn("[GraphComponent] Failed to load content for {}: {}",
+                             ctx.documentHash.substr(0, 12), contentResult.error().message);
+                skipped++;
+                continue;
+            }
+            bytes = std::move(contentResult.value());
+        }
+
+        // Convert bytes to UTF-8 string
+        std::string contentUtf8(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+
+        // Build extraction job
+        EntityExtractionJob job;
+        job.documentHash = std::move(ctx.documentHash);
+        job.filePath = std::move(ctx.filePath);
+        job.contentUtf8 = std::move(contentUtf8);
+        job.language = std::move(language);
+
+        extractionJobs.push_back(std::move(job));
+        processed++;
+    }
+
+    // Submit all extraction jobs in batch
+    if (!extractionJobs.empty()) {
+        for (auto& job : extractionJobs) {
+            auto submitResult = submitEntityExtraction(std::move(job));
+            if (!submitResult) {
+                spdlog::warn("[GraphComponent] Failed to submit extraction for batch job: {}",
+                             submitResult.error().message);
+            }
+        }
+    }
+
+    auto duration = std::chrono::steady_clock::now() - startTime;
+    double ms = std::chrono::duration<double, std::milli>(duration).count();
+
+    spdlog::info("[GraphComponent] Batch ingested {} contexts ({} jobs, {} skipped) in {:.2f}ms",
+                 contexts.size(), extractionJobs.size(), skipped, ms);
+
+    return Result<void>();
+}
+
 Result<void>
 GraphComponent::onTreeDiffApplied(int64_t diffId,
                                   const std::vector<metadata::TreeChangeRecord>& changes) {

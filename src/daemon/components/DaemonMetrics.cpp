@@ -733,6 +733,18 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.postIngestQueued = pq->size();
                 out.postIngestInflight = pq->totalInFlight();
                 out.postIngestCapacity = pq->capacity();
+
+                // KG backpressure observability
+                try {
+                    out.postIngestBackpressureRejects = pq->backpressureRejects();
+                    std::size_t kgDepth = 0;
+                    std::size_t kgCap = 0;
+                    out.kgJobsFillRatio = pq->kgFillRatio(&kgDepth, &kgCap);
+                    out.kgJobsDepth = kgDepth;
+                    out.kgJobsCapacity = kgCap;
+                } catch (...) {
+                }
+
                 // High-priority post-ingest channel for repair/stuck-doc recovery.
                 // Metrics are best-effort: if the channel is disabled (capacity=0) or
                 // not created yet, values remain 0.
@@ -778,6 +790,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.postKgLimit = TuneAdvisor::postKgConcurrent();
                 out.postSymbolLimit = TuneAdvisor::postSymbolConcurrent();
                 out.postEntityLimit = TuneAdvisor::postEntityConcurrent();
+                out.postEmbedLimit = TuneAdvisor::postEmbedConcurrent();
 
                 // Gradient limiter per-stage metrics
                 out.gradientLimitersEnabled = TuneAdvisor::enableGradientLimiters();
@@ -1096,6 +1109,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.documentsTotal = cachedDocumentsTotal_;
                 out.documentsIndexed = cachedDocumentsIndexed_;
                 out.documentsContentExtracted = cachedDocumentsExtracted_;
+                out.documentsEmbedded = cachedVectorRows_; // Vector count = embedded docs
             }
             // FTS5 orphan scan metrics from InternalEventBus
             try {

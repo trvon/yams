@@ -98,6 +98,7 @@ if lzma_dep.found() and lzma_opt.allowed()
 endif
 
 unit_daemon_base = files(
+  'daemon/metrics_consistency_test.cpp',
   # Daemon FSM tests migrated to Catch2 (see tests/meson.build catch2_test_sources)
   # Previously: 14 FSM test files now consolidated in daemon_fsm_suite_test.cpp
 

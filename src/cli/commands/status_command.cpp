@@ -323,6 +323,13 @@ public:
                                 stages["kg_inflight"] = getCount("kg_inflight");
                                 stages["kg_limit"] = getCount("post_kg_limit");
                                 stages["kg_queued"] = getCount("kg_queued");
+                                if (getCount("kg_jobs_capacity") > 0) {
+                                    stages["kg_channel_depth"] = getCount("kg_jobs_depth");
+                                    stages["kg_channel_capacity"] = getCount("kg_jobs_capacity");
+                                    stages["kg_channel_fill_pct"] = getCount("kg_jobs_fill_pct");
+                                    stages["backpressure_rejects"] =
+                                        getCount("post_ingest_backpressure_rejects");
+                                }
                                 stages["symbol_inflight"] = getCount("symbol_inflight");
                                 stages["symbol_limit"] = getCount("post_symbol_limit");
                                 // Entity extraction metrics (external plugins like Ghidra)

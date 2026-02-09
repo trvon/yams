@@ -88,6 +88,11 @@ struct MetricsSnapshot {
     std::size_t postIngestQueued{0};
     std::size_t postIngestInflight{0};
     std::size_t postIngestCapacity{0};
+    // Post-ingest backpressure (KG saturation)
+    std::uint64_t postIngestBackpressureRejects{0};
+    std::size_t kgJobsDepth{0};
+    std::size_t kgJobsCapacity{0};
+    double kgJobsFillRatio{0.0};
     // High-priority post-ingest queue (used for repair/stuck-doc recovery)
     std::size_t postIngestRpcQueued{0};
     std::size_t postIngestRpcCapacity{0};
@@ -125,6 +130,7 @@ struct MetricsSnapshot {
     std::size_t postKgLimit{8};
     std::size_t postSymbolLimit{4};
     std::size_t postEntityLimit{2};
+    std::size_t postEmbedLimit{0};
 
     // Session watch status
     bool watchEnabled{false};
@@ -151,8 +157,9 @@ struct MetricsSnapshot {
 
     // Document counts (cached from metadata repo, avoid live DB queries on hot path)
     std::uint64_t documentsTotal{0};
-    std::uint64_t documentsIndexed{0};
+    std::uint64_t documentsIndexed{0}; // Docs with FTS5 indexed + content extracted
     std::uint64_t documentsContentExtracted{0};
+    std::uint64_t documentsEmbedded{0}; // Docs with vector embeddings (from VectorDatabase)
 
     // FTS5 orphan scan metrics (from InternalEventBus)
     std::uint64_t fts5OrphansDetected{0}; // total orphans found since daemon start

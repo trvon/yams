@@ -16,8 +16,8 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
-#include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/GradientLimiter.h>
+#include <yams/daemon/components/InternalEventBus.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/search/query_concept_extractor.h>
@@ -139,6 +139,8 @@ struct MetadataCache {
 
 class PostIngestQueue {
 public:
+    static constexpr double kKgBackpressureThreshold = 0.95;
+
     struct Task {
         std::string hash;
         std::string mime;
@@ -215,6 +217,14 @@ public:
     double latencyMsEma() const { return latencyMsEma_.load(); }
     double ratePerSecEma() const { return ratePerSecEma_.load(); }
     std::size_t capacity() const { return capacity_; }
+
+    // Backpressure observability
+    std::uint64_t backpressureRejects() const {
+        return backpressureRejects_.load(std::memory_order_relaxed);
+    }
+    double kgFillRatio(std::size_t* depthOut = nullptr, std::size_t* capacityOut = nullptr) const {
+        return kgChannelFillRatio(depthOut, capacityOut);
+    }
 
     /// Returns true once the channel poller coroutine has started.
     /// Tests should wait for this before enqueueing to avoid race conditions.
@@ -340,13 +350,11 @@ private:
         const std::unordered_map<std::string, std::string>& symbolExtensionMap,
         const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders);
 
-    void processKnowledgeGraphStage(const std::string& hash, int64_t docId,
-                                    const std::string& filePath,
-                                    const std::vector<std::string>& tags,
-                                    std::shared_ptr<std::vector<std::byte>> contentBytes);
+    void processKnowledgeGraphBatch(std::vector<InternalEventBus::KgJob>&& jobs);
     void processSymbolExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& language,
                                       std::shared_ptr<std::vector<std::byte>> contentBytes);
+    void processSymbolExtractionBatch(std::vector<InternalEventBus::SymbolExtractionJob>&& jobs);
     void dispatchToKgChannel(const std::string& hash, int64_t docId, const std::string& filePath,
                              std::vector<std::string> tags,
                              std::shared_ptr<std::vector<std::byte>> contentBytes);
@@ -369,6 +377,19 @@ private:
                                      const std::string& language, const std::string& mimeType);
     std::size_t resolveChannelCapacity() const;
     std::size_t boundedStageChannelCapacity(std::size_t defaultCap) const;
+
+    struct BackpressureStatus {
+        std::size_t kgDepth{0};
+        std::size_t kgCapacity{0};
+        double kgFillRatio{0.0};
+        double threshold{0.0};
+    };
+    std::size_t adaptiveExtractionBatchSize(std::size_t baseBatchSize) const;
+    double kgChannelFillRatio(std::size_t* depthOut = nullptr,
+                              std::size_t* capacityOut = nullptr) const;
+    [[nodiscard]] bool isKgChannelBackpressured() const;
+    BackpressureStatus getBackpressureStatus() const;
+
     void checkDrainAndSignal(); // Check if drained and signal corpus stats stale
     std::string deriveTitle(const std::string& text, const std::string& fileName,
                             const std::string& mimeType, const std::string& extension) const;
@@ -490,6 +511,9 @@ private:
 
     /// Initialize the extraction semaphore based on TuneAdvisor limits
     void initializeExtractionSemaphore();
+
+    // Backpressure metrics
+    std::atomic<std::uint64_t> backpressureRejects_{0};
 };
 
 } // namespace yams::daemon

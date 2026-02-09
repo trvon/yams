@@ -457,6 +457,60 @@ std::size_t PostIngestQueue::boundedStageChannelCapacity(std::size_t defaultCap)
     return std::max<std::size_t>(1u, std::min(defaultCap, tuned));
 }
 
+double PostIngestQueue::kgChannelFillRatio(std::size_t* depthOut, std::size_t* capacityOut) const {
+    // Observability-only: do not create the channel as a side effect.
+    auto ch = InternalEventBus::instance().get_channel<InternalEventBus::KgJob>("kg_jobs");
+    if (!ch) {
+        if (depthOut)
+            *depthOut = 0;
+        if (capacityOut)
+            *capacityOut = 0;
+        return 0.0;
+    }
+
+    const std::size_t cap = std::max<std::size_t>(1u, ch->capacity());
+    const std::size_t depth = ch->size_approx();
+    if (depthOut)
+        *depthOut = depth;
+    if (capacityOut)
+        *capacityOut = cap;
+    return static_cast<double>(depth) / static_cast<double>(cap);
+}
+
+std::size_t PostIngestQueue::adaptiveExtractionBatchSize(std::size_t baseBatchSize) const {
+    baseBatchSize = std::max<std::size_t>(1u, baseBatchSize);
+
+    // When KG is saturated, reduce extraction batching to avoid overwhelming the KG stage.
+    // We intentionally keep this simple and monotonic.
+    std::size_t depth = 0;
+    std::size_t cap = 0;
+    const double fill = kgChannelFillRatio(&depth, &cap);
+    (void)depth;
+
+    if (cap == 0) {
+        return baseBatchSize;
+    }
+
+    if (fill > 0.85) {
+        return std::max<std::size_t>(1u, baseBatchSize / 4u);
+    }
+    if (fill > 0.70) {
+        return std::max<std::size_t>(1u, baseBatchSize / 2u);
+    }
+    return baseBatchSize;
+}
+
+bool PostIngestQueue::isKgChannelBackpressured() const {
+    return kgChannelFillRatio() >= PostIngestQueue::kKgBackpressureThreshold;
+}
+
+PostIngestQueue::BackpressureStatus PostIngestQueue::getBackpressureStatus() const {
+    BackpressureStatus st;
+    st.threshold = PostIngestQueue::kKgBackpressureThreshold;
+    st.kgFillRatio = kgChannelFillRatio(&st.kgDepth, &st.kgCapacity);
+    return st;
+}
+
 void PostIngestQueue::checkDrainAndSignal() {
     // Check if queue is now drained (all stages idle)
     if (totalInFlight() == 0) {
@@ -518,13 +572,28 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](const InternalEventBus::PostIngestTask& t) -> std::string { return t.hash; };
     cfg.batchMode = true;
-    cfg.batchSizeFn = []() -> std::size_t {
-        return std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
+    cfg.batchSizeFn = [this]() -> std::size_t {
+        const std::size_t base = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
+        return adaptiveExtractionBatchSize(base);
     };
     cfg.highPriorityChannel = rpcChannel;
-    cfg.highPriorityMaxPerBatchFn = []() -> std::size_t {
-        const std::size_t batchSz = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
-        const std::size_t hp = std::max<std::size_t>(1u, TuneAdvisor::postIngestRpcMaxPerBatch());
+    cfg.highPriorityMaxPerBatchFn = [this]() -> std::size_t {
+        const std::size_t baseBatchSz =
+            std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
+        const std::size_t batchSz = adaptiveExtractionBatchSize(baseBatchSz);
+
+        const std::size_t tunedHp =
+            std::max<std::size_t>(1u, TuneAdvisor::postIngestRpcMaxPerBatch());
+
+        std::size_t kgDepth = 0;
+        std::size_t kgCap = 0;
+        const double kgFill = kgChannelFillRatio(&kgDepth, &kgCap);
+        const bool pressure = (kgFill > 0.70);
+
+        // Under KG pressure, skew batches toward RPC tasks to keep interactive calls snappy.
+        // Normal mode preserves TuneAdvisor steering.
+        const std::size_t pressureHp = std::max<std::size_t>(1u, (batchSz * 3u) / 4u);
+        const std::size_t hp = pressure ? std::max(tunedHp, pressureHp) : tunedHp;
         return std::min(hp, batchSz);
     };
     cfg.batchProcessFn = [this](std::vector<InternalEventBus::PostIngestTask>&& tasks) {
@@ -568,6 +637,20 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
         return false;
     }
 
+    // KG backpressure: if downstream KG pipeline is saturated, reject upstream work.
+    // This prevents unbounded buffering and downstream channel drops.
+    if (isKgChannelBackpressured()) {
+        const auto n = backpressureRejects_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((n % 256u) == 1u) {
+            const auto st = getBackpressureStatus();
+            spdlog::warn(
+                "[PostIngestQueue] Backpressure active; rejecting enqueue (kg={}/{} {:.1f}%, "
+                "threshold={:.2f}, rejects={})",
+                st.kgDepth, st.kgCapacity, st.kgFillRatio * 100.0, st.threshold, n);
+        }
+        return false;
+    }
+
     static constexpr const char* kChannelName = "post_ingest";
     const std::size_t channelCapacity = resolveChannelCapacity();
     auto channel =
@@ -585,6 +668,18 @@ bool PostIngestQueue::tryEnqueue(Task&& t) {
     // Check admission control before accepting work
     if (!ResourceGovernor::instance().canAdmitWork()) {
         spdlog::debug("[PostIngestQueue] Rejecting enqueue: admission control blocked");
+        return false;
+    }
+
+    if (isKgChannelBackpressured()) {
+        const auto n = backpressureRejects_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((n % 256u) == 1u) {
+            const auto st = getBackpressureStatus();
+            spdlog::warn(
+                "[PostIngestQueue] Backpressure active; rejecting enqueue (kg={}/{} {:.1f}%, "
+                "threshold={:.2f}, rejects={})",
+                st.kgDepth, st.kgCapacity, st.kgFillRatio * 100.0, st.threshold, n);
+        }
         return false;
     }
 
@@ -939,40 +1034,55 @@ std::string PostIngestQueue::deriveTitle(const std::string& text, const std::str
     return fileName;
 }
 
-void PostIngestQueue::processKnowledgeGraphStage(
-    const std::string& hash, int64_t docId, const std::string& filePath,
-    const std::vector<std::string>& tags, std::shared_ptr<std::vector<std::byte>> contentBytes) {
-    if (!graphComponent_) {
-        spdlog::warn("[PostIngestQueue] KG stage skipped for {} - no graphComponent", hash);
+void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::KgJob>&& jobs) {
+    if (jobs.empty()) {
         return;
     }
 
-    spdlog::info("[PostIngestQueue] KG stage starting for {} ({})", filePath, hash.substr(0, 12));
+    // Count all jobs as consumed for metrics
+    for (const auto& job : jobs) {
+        (void)job;
+        InternalEventBus::instance().incKgConsumed();
+    }
 
-    try {
-        auto startTime = std::chrono::steady_clock::now();
+    if (!graphComponent_) {
+        if (!jobs.empty()) {
+            spdlog::warn("[PostIngestQueue] KG batch skipped ({} jobs) - no graphComponent",
+                         jobs.size());
+        }
+        return;
+    }
 
-        GraphComponent::DocumentGraphContext ctx{.documentHash = hash,
-                                                 .filePath = filePath,
+    auto startTime = std::chrono::steady_clock::now();
+    spdlog::info("[PostIngestQueue] KG batch starting for {} documents", jobs.size());
+
+    // Build DocumentGraphContext objects for batch processing
+    std::vector<GraphComponent::DocumentGraphContext> contexts;
+    contexts.reserve(jobs.size());
+
+    for (auto& job : jobs) {
+        GraphComponent::DocumentGraphContext ctx{.documentHash = std::move(job.hash),
+                                                 .filePath = std::move(job.filePath),
                                                  .snapshotId = std::nullopt,
                                                  .rootTreeHash = std::nullopt,
-                                                 .tags = tags,
-                                                 .documentDbId = docId,
-                                                 .contentBytes = std::move(contentBytes),
+                                                 .tags = std::move(job.tags),
+                                                 .documentDbId = job.documentId,
+                                                 .contentBytes = std::move(job.contentBytes),
                                                  .skipEntityExtraction = true};
+        contexts.push_back(std::move(ctx));
+    }
 
-        auto result = graphComponent_->onDocumentIngested(ctx);
-        if (!result) {
-            spdlog::warn("[PostIngestQueue] Graph ingestion failed for {}: {}", hash,
-                         result.error().message);
-        } else {
-            auto duration = std::chrono::steady_clock::now() - startTime;
-            double ms = std::chrono::duration<double, std::milli>(duration).count();
-            spdlog::debug("[PostIngestQueue] KG stage completed for {} in {:.2f}ms", hash, ms);
-        }
-        InternalEventBus::instance().incKgConsumed();
-    } catch (const std::exception& e) {
-        spdlog::error("[PostIngestQueue] KG stage failed for {}: {}", hash, e.what());
+    // Submit batch to GraphComponent for parallel processing
+    auto result = graphComponent_->onDocumentsIngestedBatch(contexts);
+
+    auto duration = std::chrono::steady_clock::now() - startTime;
+    double ms = std::chrono::duration<double, std::milli>(duration).count();
+
+    if (!result) {
+        spdlog::error("[PostIngestQueue] KG batch failed: {}", result.error().message);
+    } else {
+        spdlog::info("[PostIngestQueue] KG batch completed {} docs in {:.2f}ms (avg {:.2f}ms/doc)",
+                     jobs.size(), ms, ms / jobs.size());
     }
 }
 
@@ -1022,9 +1132,14 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
     cfg.executor = coordinator_->getExecutor();
     cfg.getHashFn = [](const InternalEventBus::KgJob& j) -> std::string { return j.hash; };
-    cfg.processFn = [this](InternalEventBus::KgJob& j) {
-        processKnowledgeGraphStage(j.hash, j.documentId, j.filePath, j.tags,
-                                   std::move(j.contentBytes));
+
+    cfg.batchMode = true;
+    cfg.batchSizeFn = []() -> std::size_t {
+        const std::size_t tuned = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
+        return std::min<std::size_t>(16u, tuned);
+    };
+    cfg.batchProcessFn = [this](std::vector<InternalEventBus::KgJob>&& jobs) {
+        processKnowledgeGraphBatch(std::move(jobs));
     };
 
     co_await pressureLimitedPoll(channel, std::move(cfg));
@@ -1054,12 +1169,91 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     cfg.getHashFn = [](const InternalEventBus::SymbolExtractionJob& j) -> std::string {
         return j.hash;
     };
-    cfg.processFn = [this](InternalEventBus::SymbolExtractionJob& j) {
-        processSymbolExtractionStage(j.hash, j.documentId, j.filePath, j.language,
-                                     std::move(j.contentBytes));
+
+    cfg.batchMode = true;
+    cfg.batchSizeFn = []() -> std::size_t {
+        const std::size_t tuned = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
+        return std::min<std::size_t>(8u, tuned);
+    };
+    cfg.batchProcessFn = [this](std::vector<InternalEventBus::SymbolExtractionJob>&& jobs) {
+        processSymbolExtractionBatch(std::move(jobs));
     };
 
     co_await pressureLimitedPoll(channel, std::move(cfg));
+}
+
+void PostIngestQueue::processSymbolExtractionBatch(
+    std::vector<InternalEventBus::SymbolExtractionJob>&& jobs) {
+    // Metrics are per consumed job even if we dedupe processing.
+    for (const auto& j : jobs) {
+        (void)j;
+        InternalEventBus::instance().incSymbolConsumed();
+    }
+
+    if (!graphComponent_) {
+        // Preserve prior behavior: treat as a no-op rather than retrying.
+        if (!jobs.empty()) {
+            spdlog::warn("[PostIngestQueue] Symbol extraction batch skipped ({} jobs) - no "
+                         "graphComponent",
+                         jobs.size());
+        }
+        return;
+    }
+
+    // Dedupe by hash so we load content at most once per doc per batch.
+    std::unordered_set<std::string> seen;
+    seen.reserve(jobs.size());
+
+    for (auto& j : jobs) {
+        const std::string& hash = j.hash;
+        if (hash.empty()) {
+            continue;
+        }
+        if (!seen.insert(hash).second) {
+            continue;
+        }
+        try {
+            // Skip already-extracted docs before loading content.
+            if (GraphComponent::shouldSkipEntityExtraction(kg_, hash)) {
+                spdlog::debug("[PostIngestQueue] Skip symbol extraction for {} (already extracted)",
+                              hash.substr(0, 12));
+                continue;
+            }
+
+            std::vector<std::byte> bytes;
+            if (j.contentBytes) {
+                bytes = *j.contentBytes;
+            } else if (store_) {
+                auto contentResult = store_->retrieveBytes(hash);
+                if (contentResult) {
+                    bytes = std::move(contentResult.value());
+                } else {
+                    spdlog::warn(
+                        "[PostIngestQueue] Failed to load content for symbol extraction: {}",
+                        hash.substr(0, 12));
+                    continue;
+                }
+            } else {
+                spdlog::warn("[PostIngestQueue] No content store for symbol extraction");
+                continue;
+            }
+
+            GraphComponent::EntityExtractionJob extractJob;
+            extractJob.documentHash = hash;
+            extractJob.filePath = j.filePath;
+            extractJob.language = j.language;
+            extractJob.contentUtf8 =
+                std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+
+            auto result = graphComponent_->submitEntityExtraction(std::move(extractJob));
+            if (!result) {
+                spdlog::warn("[PostIngestQueue] Symbol extraction failed for {}: {}", hash,
+                             result.error().message);
+            }
+        } catch (const std::exception& e) {
+            spdlog::error("[PostIngestQueue] Symbol extraction failed for {}: {}", hash, e.what());
+        }
+    }
 }
 
 void PostIngestQueue::dispatchToSymbolChannel(
@@ -1090,6 +1284,7 @@ void PostIngestQueue::dispatchToSymbolChannel(
 void PostIngestQueue::processSymbolExtractionStage(
     const std::string& hash, [[maybe_unused]] int64_t docId, const std::string& filePath,
     const std::string& language, std::shared_ptr<std::vector<std::byte>> contentBytes) {
+    // Legacy single-item handler (kept for now); metrics are owned by the poller layer.
     if (!graphComponent_) {
         spdlog::warn("[PostIngestQueue] Symbol extraction skipped for {} - no graphComponent",
                      hash);
@@ -1137,7 +1332,6 @@ void PostIngestQueue::processSymbolExtractionStage(
             spdlog::debug("[PostIngestQueue] Symbol extraction submitted for {} in {:.2f}ms", hash,
                           ms);
         }
-        InternalEventBus::instance().incSymbolConsumed();
     } catch (const std::exception& e) {
         spdlog::error("[PostIngestQueue] Symbol extraction failed for {}: {}", hash, e.what());
     }

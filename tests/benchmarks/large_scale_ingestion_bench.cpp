@@ -30,9 +30,11 @@
 #include "../integration/daemon/test_daemon_harness.h"
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/metric_keys.h>
 
 using namespace yams;
 using namespace yams::test;
+using namespace yams::daemon;
 
 namespace {
 
@@ -166,22 +168,22 @@ private:
                 return (it != st.requestCounts.end()) ? it->second : 0;
             };
 
-            sample.postIngestQueued = getCount("post_ingest_queued");
-            sample.postIngestInflight = getCount("post_ingest_inflight");
-            sample.embedQueued = getCount("embed_svc_queued");
-            sample.embedInflight = getCount("embed_in_flight");
-            sample.kgQueued = getCount("kg_queued");
-            sample.kgInflight = getCount("kg_inflight");
-            sample.symbolQueued = getCount("symbol_queued");
-            sample.symbolInflight = getCount("symbol_inflight");
-            sample.entityQueued = getCount("entity_queued");
-            sample.entityInflight = getCount("entity_inflight");
-            sample.titleQueued = getCount("title_queued");
-            sample.titleInflight = getCount("title_inflight");
+            sample.postIngestQueued = getCount(std::string(metrics::kPostIngestQueued));
+            sample.postIngestInflight = getCount(std::string(metrics::kPostIngestInflight));
+            sample.embedQueued = getCount(std::string(metrics::kEmbedQueued));
+            sample.embedInflight = getCount(std::string(metrics::kEmbedInflight));
+            sample.kgQueued = getCount(std::string(metrics::kKgQueueDepth));
+            sample.kgInflight = getCount(std::string(metrics::kKgInflight));
+            sample.symbolQueued = getCount(std::string(metrics::kSymbolQueueDepth));
+            sample.symbolInflight = getCount(std::string(metrics::kSymbolInflight));
+            sample.entityQueued = getCount(std::string(metrics::kEntityQueueDepth));
+            sample.entityInflight = getCount(std::string(metrics::kEntityInflight));
+            sample.titleQueued = getCount(std::string(metrics::kTitleQueueDepth));
+            sample.titleInflight = getCount(std::string(metrics::kTitleInflight));
 
             // Document counts
-            sample.docsIngested = getCount("documents_ingested");
-            sample.docsFailed = getCount("documents_failed");
+            sample.docsIngested = getCount(std::string(metrics::kDocumentsTotal));
+            sample.docsFailed = getCount(std::string(metrics::kPostIngestFailed));
 
             // Resource metrics
             sample.rssBytes = static_cast<uint64_t>(st.memoryUsageMb * 1024 * 1024);
@@ -313,13 +315,19 @@ bool waitForDrain(std::chrono::milliseconds timeout) {
             return (it != st.requestCounts.end()) ? it->second : 0;
         };
 
-        uint64_t totalQueued = getCount("post_ingest_queued") + getCount("embed_svc_queued") +
-                               getCount("kg_queued") + getCount("symbol_queued") +
-                               getCount("entity_queued") + getCount("title_queued");
+        uint64_t totalQueued = getCount(std::string(metrics::kPostIngestQueued)) +
+                               getCount(std::string(metrics::kEmbedQueued)) +
+                               getCount(std::string(metrics::kKgQueueDepth)) +
+                               getCount(std::string(metrics::kSymbolQueueDepth)) +
+                               getCount(std::string(metrics::kEntityQueueDepth)) +
+                               getCount(std::string(metrics::kTitleQueueDepth));
 
-        uint64_t totalInflight = getCount("post_ingest_inflight") + getCount("embed_in_flight") +
-                                 getCount("kg_inflight") + getCount("symbol_inflight") +
-                                 getCount("entity_inflight") + getCount("title_inflight");
+        uint64_t totalInflight = getCount(std::string(metrics::kPostIngestInflight)) +
+                                 getCount(std::string(metrics::kEmbedInflight)) +
+                                 getCount(std::string(metrics::kKgInflight)) +
+                                 getCount(std::string(metrics::kSymbolInflight)) +
+                                 getCount(std::string(metrics::kEntityInflight)) +
+                                 getCount(std::string(metrics::kTitleInflight));
 
         if (totalQueued == 0 && totalInflight == 0) {
             if (++stableCount >= stableRequired) {

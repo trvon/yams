@@ -56,6 +56,7 @@ public:
         bool skipEntityExtraction{false};
     };
     Result<void> onDocumentIngested(const DocumentGraphContext& ctx);
+    Result<void> onDocumentsIngestedBatch(std::vector<DocumentGraphContext>& contexts);
 
     Result<void> onTreeDiffApplied(int64_t diffId,
                                    const std::vector<metadata::TreeChangeRecord>& changes);

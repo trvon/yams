@@ -197,6 +197,33 @@ TEST_CASE("StatusResponse: post_ingest_rpc requestCounts keys round-trip",
     REQUIRE(decoded.requestCounts.at("post_ingest_rpc_max_per_batch") == 8);
 }
 
+TEST_CASE("StatusResponse: backpressure requestCounts keys round-trip",
+          "[daemon][status][protocol][post_ingest]") {
+    StatusResponse s{};
+    s.requestCounts["post_ingest_backpressure_rejects"] = 123;
+    s.requestCounts["kg_jobs_depth"] = 3880;
+    s.requestCounts["kg_jobs_capacity"] = 4096;
+    s.requestCounts["kg_jobs_fill_pct"] = 95;
+
+    Message m{};
+    m.payload = Response{std::in_place_type<StatusResponse>, s};
+
+    auto enc = ProtoSerializer::encode_payload(m);
+    REQUIRE(enc.has_value());
+
+    auto dec = ProtoSerializer::decode_payload(enc.value());
+    REQUIRE(dec.has_value());
+
+    const auto& resp = std::get<Response>(dec.value().payload);
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+
+    const auto& decoded = std::get<StatusResponse>(resp);
+    REQUIRE(decoded.requestCounts.at("post_ingest_backpressure_rejects") == 123);
+    REQUIRE(decoded.requestCounts.at("kg_jobs_depth") == 3880);
+    REQUIRE(decoded.requestCounts.at("kg_jobs_capacity") == 4096);
+    REQUIRE(decoded.requestCounts.at("kg_jobs_fill_pct") == 95);
+}
+
 // =============================================================================
 // StatusResponse Protocol Serialization Tests
 // =============================================================================

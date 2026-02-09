@@ -15,6 +15,7 @@
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/stream_metrics_registry.h>
+#include <yams/daemon/metric_keys.h>
 #include <yams/storage/corpus_stats.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
@@ -84,43 +85,58 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             // Vector diagnostics (from background snapshot - no blocking)
             res.readinessStates["vector_embeddings_available"] = snap->vectorEmbeddingsAvailable;
             res.readinessStates["vector_scoring_enabled"] = snap->vectorScoringEnabled;
-            res.requestCounts["vector_embeddings_available"] =
+            res.requestCounts[std::string(metrics::kVectorEmbeddingsAvailable)] =
                 snap->vectorEmbeddingsAvailable ? 1 : 0;
-            res.requestCounts["vector_scoring_enabled"] = snap->vectorScoringEnabled ? 1 : 0;
+            res.requestCounts[std::string(metrics::kVectorScoringEnabled)] =
+                snap->vectorScoringEnabled ? 1 : 0;
             res.readinessStates["search_engine_build_reason_initial"] =
                 (snap->searchEngineBuildReason == "initial");
             res.readinessStates["search_engine_build_reason_rebuild"] =
                 (snap->searchEngineBuildReason == "rebuild");
             res.readinessStates["search_engine_build_reason_degraded"] =
                 (snap->searchEngineBuildReason == "degraded");
-            res.requestCounts["worker_threads"] = snap->workerThreads;
-            res.requestCounts["worker_active"] = snap->workerActive;
-            res.requestCounts["worker_queued"] = snap->workerQueued;
-            res.requestCounts["post_ingest_threads"] = snap->postIngestThreads;
-            res.requestCounts["post_ingest_queued"] = snap->postIngestQueued;
-            res.requestCounts["post_ingest_rpc_queued"] = snap->postIngestRpcQueued;
+            res.requestCounts[std::string(metrics::kWorkerThreads)] = snap->workerThreads;
+            res.requestCounts[std::string(metrics::kWorkerActive)] = snap->workerActive;
+            res.requestCounts[std::string(metrics::kWorkerQueued)] = snap->workerQueued;
+            res.requestCounts[std::string(metrics::kPostIngestThreads)] = snap->postIngestThreads;
+            res.requestCounts[std::string(metrics::kPostIngestQueued)] = snap->postIngestQueued;
+            res.requestCounts[std::string(metrics::kPostIngestRpcQueued)] =
+                snap->postIngestRpcQueued;
             res.searchMetrics.active = snap->searchActive;
             res.searchMetrics.queued = snap->searchQueued;
             res.searchMetrics.executed = snap->searchExecuted;
             res.searchMetrics.cacheHitRate = snap->searchCacheHitRate;
             res.searchMetrics.avgLatencyUs = snap->searchAvgLatencyUs;
             res.searchMetrics.concurrencyLimit = snap->searchConcurrencyLimit;
-            res.requestCounts["search_active"] = snap->searchActive;
-            res.requestCounts["search_queued"] = snap->searchQueued;
-            res.requestCounts["search_executed"] = static_cast<size_t>(snap->searchExecuted);
-            res.requestCounts["search_cache_hit_rate_pct"] =
+            res.requestCounts[std::string(metrics::kSearchActive)] = snap->searchActive;
+            res.requestCounts[std::string(metrics::kSearchQueued)] = snap->searchQueued;
+            res.requestCounts[std::string(metrics::kSearchExecuted)] =
+                static_cast<size_t>(snap->searchExecuted);
+            res.requestCounts[std::string(metrics::kSearchCacheHitRatePct)] =
                 static_cast<size_t>(snap->searchCacheHitRate * 100.0);
-            res.requestCounts["search_avg_latency_us"] =
+            res.requestCounts[std::string(metrics::kSearchAvgLatencyUs)] =
                 static_cast<size_t>(snap->searchAvgLatencyUs);
-            res.requestCounts["search_concurrency_limit"] = snap->searchConcurrencyLimit;
+            res.requestCounts[std::string(metrics::kSearchConcurrencyLimit)] =
+                snap->searchConcurrencyLimit;
             // PBI-040, task 040-1: Expose queue depth for FTS5 readiness checks
             res.postIngestQueueDepth = static_cast<uint32_t>(snap->postIngestQueued);
             // Deferred ingestion queue depth (adds queued under memory pressure)
-            res.requestCounts["deferred_queue_depth"] = snap->deferredQueueDepth;
-            res.requestCounts["post_ingest_inflight"] = snap->postIngestInflight;
-            res.requestCounts["post_ingest_capacity"] = snap->postIngestCapacity;
-            res.requestCounts["post_ingest_rpc_capacity"] = snap->postIngestRpcCapacity;
-            res.requestCounts["post_ingest_rpc_max_per_batch"] = snap->postIngestRpcMaxPerBatch;
+            res.requestCounts[std::string(metrics::kDeferredQueueDepth)] = snap->deferredQueueDepth;
+            res.requestCounts[std::string(metrics::kPostIngestInflight)] = snap->postIngestInflight;
+            res.requestCounts[std::string(metrics::kPostIngestCapacity)] = snap->postIngestCapacity;
+            // KG backpressure observability
+            res.requestCounts[std::string(metrics::kPostIngestBackpressureRejects)] =
+                static_cast<size_t>(snap->postIngestBackpressureRejects);
+            if (snap->kgJobsCapacity > 0) {
+                res.requestCounts[std::string(metrics::kKgQueueDepth)] = snap->kgJobsDepth;
+                res.requestCounts[std::string(metrics::kKgJobsCapacity)] = snap->kgJobsCapacity;
+                res.requestCounts[std::string(metrics::kKgJobsFillPct)] =
+                    static_cast<size_t>(std::clamp(snap->kgJobsFillRatio * 100.0, 0.0, 100.0));
+            }
+            res.requestCounts[std::string(metrics::kPostIngestRpcCapacity)] =
+                snap->postIngestRpcCapacity;
+            res.requestCounts[std::string(metrics::kPostIngestRpcMaxPerBatch)] =
+                snap->postIngestRpcMaxPerBatch;
             // Export selected tuning config values for clients (best-effort)
             try {
                 if (serviceManager_) {
@@ -128,12 +144,14 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     // readinessStates
                     try {
                         auto ss = serviceManager_->getServiceManagerFsmSnapshot();
-                        res.requestCounts["service_fsm_state"] = static_cast<size_t>(ss.state);
+                        res.requestCounts[std::string(metrics::kServiceFsmState)] =
+                            static_cast<size_t>(ss.state);
                     } catch (...) {
                     }
                     try {
                         auto es = serviceManager_->getEmbeddingProviderFsmSnapshot();
-                        res.requestCounts["embedding_state"] = static_cast<size_t>(es.state);
+                        res.requestCounts[std::string(metrics::kEmbeddingState)] =
+                            static_cast<size_t>(es.state);
                         res.readinessStates["embedding_ready"] =
                             (es.state == EmbeddingProviderState::ModelReady);
                         // Provide an explicit degraded flag for clients/tools that
@@ -144,94 +162,106 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     }
                     // EmbeddingService metrics (jobs currently being processed)
                     try {
-                        res.requestCounts["embed_in_flight"] =
+                        res.requestCounts[std::string(metrics::kEmbedInflight)] =
                             serviceManager_->getEmbeddingInFlightJobs();
-                        res.requestCounts["embed_svc_queued"] =
+                        res.requestCounts[std::string(metrics::kEmbedQueued)] =
                             serviceManager_->getEmbeddingQueuedJobs();
                     } catch (...) {
                     }
                     try {
                         auto ps = serviceManager_->getPluginHostFsmSnapshot();
-                        res.requestCounts["plugin_host_state"] = static_cast<size_t>(ps.state);
+                        res.requestCounts[std::string(metrics::kPluginHostState)] =
+                            static_cast<size_t>(ps.state);
                         res.readinessStates["plugins_ready"] = (ps.state == PluginHostState::Ready);
                         res.readinessStates["plugins_degraded"] =
                             (ps.state == PluginHostState::Failed);
                     } catch (...) {
                     }
                     const auto& tc = serviceManager_->getConfig().tuning;
-                    res.requestCounts["tuning_post_ingest_capacity"] = tc.postIngestCapacity;
-                    res.requestCounts["tuning_post_ingest_threads_min"] = tc.postIngestThreadsMin;
-                    res.requestCounts["tuning_post_ingest_threads_max"] = tc.postIngestThreadsMax;
-                    res.requestCounts["tuning_admit_warn_threshold"] = tc.admitWarnThreshold;
-                    res.requestCounts["tuning_admit_stop_threshold"] = tc.admitStopThreshold;
+                    res.requestCounts[std::string(metrics::kTuningPostIngestCapacity)] =
+                        tc.postIngestCapacity;
+                    res.requestCounts[std::string(metrics::kTuningPostIngestThreadsMin)] =
+                        tc.postIngestThreadsMin;
+                    res.requestCounts[std::string(metrics::kTuningPostIngestThreadsMax)] =
+                        tc.postIngestThreadsMax;
+                    res.requestCounts[std::string(metrics::kTuningAdmitWarnThreshold)] =
+                        tc.admitWarnThreshold;
+                    res.requestCounts[std::string(metrics::kTuningAdmitStopThreshold)] =
+                        tc.admitStopThreshold;
                     // WorkCoordinator metrics
-                    res.requestCounts["work_coordinator_active"] =
+                    res.requestCounts[std::string(metrics::kWorkCoordinatorActive)] =
                         snap->workCoordinatorActiveWorkers;
-                    res.requestCounts["work_coordinator_running"] =
+                    res.requestCounts[std::string(metrics::kWorkCoordinatorRunning)] =
                         snap->workCoordinatorRunning ? 1 : 0;
                 }
             } catch (...) {
             }
-            res.requestCounts["post_ingest_processed"] = snap->postIngestProcessed;
-            res.requestCounts["post_ingest_failed"] = snap->postIngestFailed;
-            res.requestCounts["post_ingest_latency_ms_ema"] =
+            res.requestCounts[std::string(metrics::kPostIngestProcessed)] =
+                snap->postIngestProcessed;
+            res.requestCounts[std::string(metrics::kPostIngestFailed)] = snap->postIngestFailed;
+            res.requestCounts[std::string(metrics::kPostIngestLatencyEma)] =
                 static_cast<size_t>(snap->postIngestLatencyMsEma);
-            res.requestCounts["post_ingest_rate_sec_ema"] =
+            res.requestCounts[std::string(metrics::kPostIngestRateEma)] =
                 static_cast<size_t>(snap->postIngestRateSecEma);
-            res.requestCounts["extraction_inflight"] = snap->extractionInFlight;
-            res.requestCounts["kg_queued"] = snap->kgQueued;
-            res.requestCounts["kg_dropped"] = snap->kgDropped;
-            res.requestCounts["kg_consumed"] = snap->kgConsumed;
-            res.requestCounts["kg_inflight"] = snap->kgInFlight;
-            res.requestCounts["kg_queue_depth"] = snap->kgQueueDepth;
-            res.requestCounts["symbol_inflight"] = snap->symbolInFlight;
-            res.requestCounts["symbol_queue_depth"] = snap->symbolQueueDepth;
+            res.requestCounts[std::string(metrics::kExtractionInflight)] = snap->extractionInFlight;
+            res.requestCounts[std::string(metrics::kKgQueued)] = snap->kgQueued;
+            res.requestCounts[std::string(metrics::kKgDropped)] = snap->kgDropped;
+            res.requestCounts[std::string(metrics::kKgConsumed)] = snap->kgConsumed;
+            res.requestCounts[std::string(metrics::kKgInflight)] = snap->kgInFlight;
+            res.requestCounts[std::string(metrics::kKgQueueDepth)] = snap->kgQueueDepth;
+            res.requestCounts[std::string(metrics::kSymbolInflight)] = snap->symbolInFlight;
+            res.requestCounts[std::string(metrics::kSymbolQueueDepth)] = snap->symbolQueueDepth;
             // Entity extraction metrics (external plugins like Ghidra)
-            res.requestCounts["entity_queued"] = snap->entityQueued;
-            res.requestCounts["entity_dropped"] = snap->entityDropped;
-            res.requestCounts["entity_consumed"] = snap->entityConsumed;
-            res.requestCounts["entity_inflight"] = snap->entityInFlight;
-            res.requestCounts["entity_queue_depth"] = snap->entityQueueDepth;
-            res.requestCounts["title_queue_depth"] = snap->titleQueueDepth;
-            res.requestCounts["title_inflight"] = snap->titleInFlight;
-            res.requestCounts["post_title_limit"] = snap->titleConcurrencyLimit;
-            res.requestCounts["title_queued"] = snap->titleQueued;
-            res.requestCounts["title_dropped"] = snap->titleDropped;
-            res.requestCounts["title_consumed"] = snap->titleConsumed;
+            res.requestCounts[std::string(metrics::kEntityQueued)] = snap->entityQueued;
+            res.requestCounts[std::string(metrics::kEntityDropped)] = snap->entityDropped;
+            res.requestCounts[std::string(metrics::kEntityConsumed)] = snap->entityConsumed;
+            res.requestCounts[std::string(metrics::kEntityInflight)] = snap->entityInFlight;
+            res.requestCounts[std::string(metrics::kEntityQueueDepth)] = snap->entityQueueDepth;
+            res.requestCounts[std::string(metrics::kTitleQueueDepth)] = snap->titleQueueDepth;
+            res.requestCounts[std::string(metrics::kTitleInflight)] = snap->titleInFlight;
+            res.requestCounts[std::string(metrics::kPostTitleLimit)] = snap->titleConcurrencyLimit;
+            res.requestCounts[std::string(metrics::kTitleQueued)] = snap->titleQueued;
+            res.requestCounts[std::string(metrics::kTitleDropped)] = snap->titleDropped;
+            res.requestCounts[std::string(metrics::kTitleConsumed)] = snap->titleConsumed;
             // FTS5 indexing metrics
-            res.requestCounts["fts5_queued"] = snap->fts5Queued;
-            res.requestCounts["fts5_dropped"] = snap->fts5Dropped;
-            res.requestCounts["fts5_consumed"] = snap->fts5Consumed;
+            res.requestCounts[std::string(metrics::kFts5Queued)] = snap->fts5Queued;
+            res.requestCounts[std::string(metrics::kFts5Dropped)] = snap->fts5Dropped;
+            res.requestCounts[std::string(metrics::kFts5Consumed)] = snap->fts5Consumed;
             // Symbol extraction metrics
-            res.requestCounts["symbol_queued"] = snap->symbolQueued;
-            res.requestCounts["symbol_dropped"] = snap->symbolDropped;
-            res.requestCounts["symbol_consumed"] = snap->symbolConsumed;
+            res.requestCounts[std::string(metrics::kSymbolQueued)] = snap->symbolQueued;
+            res.requestCounts[std::string(metrics::kSymbolDropped)] = snap->symbolDropped;
+            res.requestCounts[std::string(metrics::kSymbolConsumed)] = snap->symbolConsumed;
             // Stream metrics
-            res.requestCounts["stream_total"] = snap->streamTotal;
-            res.requestCounts["stream_batches"] = snap->streamBatches;
-            res.requestCounts["stream_keepalives"] = snap->streamKeepalives;
-            res.requestCounts["stream_ttfb_avg_ms"] = snap->streamTtfbAvgMs;
+            res.requestCounts[std::string(metrics::kStreamTotal)] = snap->streamTotal;
+            res.requestCounts[std::string(metrics::kStreamBatches)] = snap->streamBatches;
+            res.requestCounts[std::string(metrics::kStreamKeepalives)] = snap->streamKeepalives;
+            res.requestCounts[std::string(metrics::kStreamTtfbAvgMs)] = snap->streamTtfbAvgMs;
             // File/directory add tracking
-            res.requestCounts["files_added"] = static_cast<size_t>(snap->filesAdded);
-            res.requestCounts["directories_added"] = static_cast<size_t>(snap->directoriesAdded);
-            res.requestCounts["files_processed"] = static_cast<size_t>(snap->filesProcessed);
-            res.requestCounts["directories_processed"] =
+            res.requestCounts[std::string(metrics::kFilesAdded)] =
+                static_cast<size_t>(snap->filesAdded);
+            res.requestCounts[std::string(metrics::kDirectoriesAdded)] =
+                static_cast<size_t>(snap->directoriesAdded);
+            res.requestCounts[std::string(metrics::kFilesProcessed)] =
+                static_cast<size_t>(snap->filesProcessed);
+            res.requestCounts[std::string(metrics::kDirectoriesProcessed)] =
                 static_cast<size_t>(snap->directoriesProcessed);
             // Dynamic concurrency limits (PBI-05a)
-            res.requestCounts["post_extraction_limit"] = snap->postExtractionLimit;
-            res.requestCounts["post_kg_limit"] = snap->postKgLimit;
-            res.requestCounts["post_symbol_limit"] = snap->postSymbolLimit;
-            res.requestCounts["post_entity_limit"] = snap->postEntityLimit;
+            res.requestCounts[std::string(metrics::kPostExtractionLimit)] =
+                snap->postExtractionLimit;
+            res.requestCounts[std::string(metrics::kPostKgLimit)] = snap->postKgLimit;
+            res.requestCounts[std::string(metrics::kPostSymbolLimit)] = snap->postSymbolLimit;
+            res.requestCounts[std::string(metrics::kPostEntityLimit)] = snap->postEntityLimit;
             // Surface whether the InternalEventBus is being used for post-ingest
             try {
-                res.requestCounts["post_ingest_use_bus"] =
+                res.requestCounts[std::string(metrics::kPostIngestUseBus)] =
                     yams::daemon::TuneAdvisor::useInternalBusForPostIngest() ? 1 : 0;
             } catch (...) {
             }
+            res.requestCounts[std::string(metrics::kPostEmbedLimit)] = snap->postEmbedLimit;
             // Session watch status
-            res.requestCounts["watch_enabled"] = snap->watchEnabled ? 1 : 0;
+            res.requestCounts[std::string(metrics::kWatchEnabled)] = snap->watchEnabled ? 1 : 0;
             if (snap->watchIntervalMs > 0) {
-                res.requestCounts["watch_interval_ms"] = snap->watchIntervalMs;
+                res.requestCounts[std::string(metrics::kWatchIntervalMs)] = snap->watchIntervalMs;
             }
             res.retryAfterMs = snap->retryAfterMs;
             for (const auto& [k, v] : snap->readinessStates)
@@ -250,6 +280,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.governorBudgetBytes = snap->governorBudgetBytes;
             res.governorPressureLevel = snap->governorPressureLevel;
             res.governorHeadroomPct = snap->governorHeadroomPct;
+            res.requestCounts[std::string(metrics::kPressureLevel)] =
+                static_cast<size_t>(snap->governorPressureLevel);
             // ONNX concurrency metrics
             res.onnxTotalSlots = snap->onnxTotalSlots;
             res.onnxUsedSlots = snap->onnxUsedSlots;
@@ -258,70 +290,79 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.onnxRerankerUsed = snap->onnxRerankerUsed;
             // Storage size summary (exposed via requestCounts for backwards compatible clients)
             if (snap->logicalBytes > 0)
-                res.requestCounts["storage_logical_bytes"] =
+                res.requestCounts[std::string(metrics::kStorageLogicalBytes)] =
                     static_cast<size_t>(snap->logicalBytes);
             if (snap->physicalBytes > 0)
-                res.requestCounts["storage_physical_bytes"] =
+                res.requestCounts[std::string(metrics::kStoragePhysicalBytes)] =
                     static_cast<size_t>(snap->physicalBytes);
             if (snap->storeObjects > 0)
-                res.requestCounts["storage_documents"] = static_cast<size_t>(snap->storeObjects);
+                res.requestCounts[std::string(metrics::kStorageDocuments)] =
+                    static_cast<size_t>(snap->storeObjects);
             if (snap->logicalBytes > 0 && snap->physicalBytes > 0) {
                 std::uint64_t saved = (snap->logicalBytes > snap->physicalBytes)
                                           ? (snap->logicalBytes - snap->physicalBytes)
                                           : 0ULL;
-                res.requestCounts["storage_saved_bytes"] = static_cast<size_t>(saved);
+                res.requestCounts[std::string(metrics::kStorageSavedBytes)] =
+                    static_cast<size_t>(saved);
                 std::uint64_t pct =
                     snap->logicalBytes ? (saved * 100ULL) / snap->logicalBytes : 0ULL;
-                res.requestCounts["storage_saved_pct"] = static_cast<size_t>(pct);
+                res.requestCounts[std::string(metrics::kStorageSavedPct)] =
+                    static_cast<size_t>(pct);
             } else {
                 // Avoid signaling 100% savings when physical is unknown
-                res.requestCounts.erase("storage_saved_bytes");
-                res.requestCounts.erase("storage_saved_pct");
+                res.requestCounts.erase(std::string(metrics::kStorageSavedBytes));
+                res.requestCounts.erase(std::string(metrics::kStorageSavedPct));
             }
             // New: detailed storage breakdown (when available)
             if (snap->casPhysicalBytes > 0)
-                res.requestCounts["cas_physical_bytes"] =
+                res.requestCounts[std::string(metrics::kCasPhysicalBytes)] =
                     static_cast<size_t>(snap->casPhysicalBytes);
             if (snap->casUniqueRawBytes > 0)
-                res.requestCounts["cas_unique_raw_bytes"] =
+                res.requestCounts[std::string(metrics::kCasUniqueRawBytes)] =
                     static_cast<size_t>(snap->casUniqueRawBytes);
             if (snap->casDedupSavedBytes > 0)
-                res.requestCounts["cas_dedup_saved_bytes"] =
+                res.requestCounts[std::string(metrics::kCasDedupSavedBytes)] =
                     static_cast<size_t>(snap->casDedupSavedBytes);
             if (snap->casCompressSavedBytes > 0)
-                res.requestCounts["cas_compress_saved_bytes"] =
+                res.requestCounts[std::string(metrics::kCasCompressSavedBytes)] =
                     static_cast<size_t>(snap->casCompressSavedBytes);
             if (snap->metadataPhysicalBytes > 0)
-                res.requestCounts["metadata_physical_bytes"] =
+                res.requestCounts[std::string(metrics::kMetadataPhysicalBytes)] =
                     static_cast<size_t>(snap->metadataPhysicalBytes);
             if (snap->indexPhysicalBytes > 0)
-                res.requestCounts["index_physical_bytes"] =
+                res.requestCounts[std::string(metrics::kIndexPhysicalBytes)] =
                     static_cast<size_t>(snap->indexPhysicalBytes);
             if (snap->vectorPhysicalBytes > 0)
-                res.requestCounts["vector_physical_bytes"] =
+                res.requestCounts[std::string(metrics::kVectorPhysicalBytes)] =
                     static_cast<size_t>(snap->vectorPhysicalBytes);
             if (snap->logsTmpPhysicalBytes > 0)
-                res.requestCounts["logs_tmp_physical_bytes"] =
+                res.requestCounts[std::string(metrics::kLogsTmpPhysicalBytes)] =
                     static_cast<size_t>(snap->logsTmpPhysicalBytes);
             if (snap->physicalTotalBytes > 0)
-                res.requestCounts["physical_total_bytes"] =
+                res.requestCounts[std::string(metrics::kPhysicalTotalBytes)] =
                     static_cast<size_t>(snap->physicalTotalBytes);
 
             // Document counters from cached metrics (no live DB queries on hot path!)
             if (snap->documentsTotal > 0) {
-                res.requestCounts["documents_total"] = static_cast<size_t>(snap->documentsTotal);
+                res.requestCounts[std::string(metrics::kDocumentsTotal)] =
+                    static_cast<size_t>(snap->documentsTotal);
             }
             if (snap->documentsIndexed > 0) {
-                res.requestCounts["documents_indexed"] =
+                res.requestCounts[std::string(metrics::kDocumentsIndexed)] =
                     static_cast<size_t>(snap->documentsIndexed);
             }
             if (snap->documentsContentExtracted > 0) {
-                res.requestCounts["documents_content_extracted"] =
+                res.requestCounts[std::string(metrics::kDocumentsContentExtracted)] =
                     static_cast<size_t>(snap->documentsContentExtracted);
+            }
+            if (snap->documentsEmbedded > 0) {
+                res.requestCounts[std::string(metrics::kDocumentsEmbedded)] =
+                    static_cast<size_t>(snap->documentsEmbedded);
             }
             // Vector count from cached metrics (for benchmarks/tools waiting for embeddings)
             if (snap->vectorRowsExact > 0) {
-                res.requestCounts["vector_count"] = static_cast<size_t>(snap->vectorRowsExact);
+                res.requestCounts[std::string(metrics::kVectorCount)] =
+                    static_cast<size_t>(snap->vectorRowsExact);
             }
         } else {
             auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
@@ -510,9 +551,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     } else {
                         threads = std::max(1u, std::thread::hardware_concurrency());
                     }
-                    res.requestCounts["worker_threads"] = threads;
-                    res.requestCounts["worker_active"] = active;
-                    res.requestCounts["worker_queued"] = queued;
+                    res.requestCounts[std::string(metrics::kWorkerThreads)] = threads;
+                    res.requestCounts[std::string(metrics::kWorkerActive)] = active;
+                    res.requestCounts[std::string(metrics::kWorkerQueued)] = queued;
                     // PBI-040, task 040-1: Populate postIngestQueueDepth in non-metrics path
                     if (serviceManager_) {
                         if (auto piq = serviceManager_->getPostIngestQueue()) {
