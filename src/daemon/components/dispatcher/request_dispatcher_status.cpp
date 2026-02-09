@@ -258,6 +258,17 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             } catch (...) {
             }
             res.requestCounts[std::string(metrics::kPostEmbedLimit)] = snap->postEmbedLimit;
+            // Internal bus metrics
+            try {
+                auto& bus = InternalEventBus::instance();
+                res.requestCounts[std::string(metrics::kBusEmbedQueued)] = bus.embedQueued();
+                res.requestCounts[std::string(metrics::kBusEmbedConsumed)] = bus.embedConsumed();
+                res.requestCounts[std::string(metrics::kBusEmbedDropped)] = bus.embedDropped();
+                res.requestCounts[std::string(metrics::kBusPostQueued)] = bus.postQueued();
+                res.requestCounts[std::string(metrics::kBusPostConsumed)] = bus.postConsumed();
+                res.requestCounts[std::string(metrics::kBusPostDropped)] = bus.postDropped();
+            } catch (...) {
+            }
             // Session watch status
             res.requestCounts[std::string(metrics::kWatchEnabled)] = snap->watchEnabled ? 1 : 0;
             if (snap->watchIntervalMs > 0) {
@@ -342,28 +353,20 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 res.requestCounts[std::string(metrics::kPhysicalTotalBytes)] =
                     static_cast<size_t>(snap->physicalTotalBytes);
 
-            // Document counters from cached metrics (no live DB queries on hot path!)
-            if (snap->documentsTotal > 0) {
-                res.requestCounts[std::string(metrics::kDocumentsTotal)] =
-                    static_cast<size_t>(snap->documentsTotal);
-            }
-            if (snap->documentsIndexed > 0) {
-                res.requestCounts[std::string(metrics::kDocumentsIndexed)] =
-                    static_cast<size_t>(snap->documentsIndexed);
-            }
-            if (snap->documentsContentExtracted > 0) {
-                res.requestCounts[std::string(metrics::kDocumentsContentExtracted)] =
-                    static_cast<size_t>(snap->documentsContentExtracted);
-            }
-            if (snap->documentsEmbedded > 0) {
-                res.requestCounts[std::string(metrics::kDocumentsEmbedded)] =
-                    static_cast<size_t>(snap->documentsEmbedded);
-            }
+            // Document/vector counters from cached metrics (no live DB queries on hot path!).
+            // Always include these keys, even when 0, so clients/benchmarks can distinguish
+            // "zero" from "missing" and avoid fragile presence checks.
+            res.requestCounts[std::string(metrics::kDocumentsTotal)] =
+                static_cast<size_t>(snap->documentsTotal);
+            res.requestCounts[std::string(metrics::kDocumentsIndexed)] =
+                static_cast<size_t>(snap->documentsIndexed);
+            res.requestCounts[std::string(metrics::kDocumentsContentExtracted)] =
+                static_cast<size_t>(snap->documentsContentExtracted);
+            res.requestCounts[std::string(metrics::kDocumentsEmbedded)] =
+                static_cast<size_t>(snap->documentsEmbedded);
             // Vector count from cached metrics (for benchmarks/tools waiting for embeddings)
-            if (snap->vectorRowsExact > 0) {
-                res.requestCounts[std::string(metrics::kVectorCount)] =
-                    static_cast<size_t>(snap->vectorRowsExact);
-            }
+            res.requestCounts[std::string(metrics::kVectorCount)] =
+                static_cast<size_t>(snap->vectorRowsExact);
         } else {
             auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
             res.running = true;

@@ -600,8 +600,16 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         }();
 
         spdlog::info("Executing search query: '{}'", tq.query);
-        auto run =
-            yams::cli::run_sync(yams::cli::search_runner::daemon_search(client, opts, true), 10s);
+        // Wait at least as long as the query timeout, plus a small margin.
+        // Using a shorter run_sync deadline can leave in-flight requests behind,
+        // which can cascade into timeouts/backpressure across subsequent queries.
+        auto waitBudget = std::chrono::duration_cast<std::chrono::milliseconds>(opts.timeout) +
+                          std::chrono::seconds(10);
+        if (waitBudget < std::chrono::seconds(10)) {
+            waitBudget = std::chrono::seconds(10);
+        }
+        auto run = yams::cli::run_sync(yams::cli::search_runner::daemon_search(client, opts, true),
+                                       waitBudget);
         if (!run) {
             spdlog::warn("Search failed for query '{}': {}", tq.query, run.error().message);
             continue;
@@ -771,7 +779,9 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
                 shadowEntry.diagnostics.push_back("shadow_query=" + diagQuery);
 
                 auto shadowRun = yams::cli::run_sync(
-                    yams::cli::search_runner::daemon_search(client, shadow, true), 10s);
+                    yams::cli::search_runner::daemon_search(client, shadow, true),
+                    std::chrono::duration_cast<std::chrono::milliseconds>(shadow.timeout) +
+                        std::chrono::seconds(10));
                 if (shadowRun) {
                     shadowEntry.attempts = shadowRun.value().attempts;
                     shadowEntry.usedStreaming = shadowRun.value().usedStreaming;
@@ -1055,7 +1065,19 @@ struct BenchFixture {
         }
 
         yams::daemon::ClientConfig clientCfg;
-        clientCfg.socketPath = harness->socketPath();
+        // Prefer proxy socket for long-running benchmark connections; it skips
+        // maxConnectionLifetime enforcement (main socket forces close at ~300s).
+        {
+            fs::path proxySock = harness->socketPath().parent_path() / "proxy.sock";
+            if (fs::exists(proxySock)) {
+                clientCfg.socketPath = proxySock;
+                spdlog::info("Using proxy socket for benchmark client: {}", proxySock.string());
+            } else {
+                clientCfg.socketPath = harness->socketPath();
+                spdlog::info("Proxy socket not found; using main socket: {}",
+                             clientCfg.socketPath.string());
+            }
+        }
         clientCfg.connectTimeout = 5s;
         clientCfg.requestTimeout = 300s; // 5 minutes for bulk ingestion
         clientCfg.autoStart = false;
@@ -1085,7 +1107,8 @@ struct BenchFixture {
         // Use progress-based timeout: only timeout if no progress for N seconds
         // This is more robust than a hard deadline because slow ingestion won't fail,
         // but true hangs will still be detected.
-        auto progressTimeoutSec = std::chrono::seconds(120); // 2 minutes without progress = stalled
+        auto progressTimeoutSec = std::chrono::seconds(
+            300); // 5 minutes without progress = stalled (embedding/model load)
         if (const char* env = std::getenv("YAMS_BENCH_PROGRESS_TIMEOUT")) {
             progressTimeoutSec = std::chrono::seconds(std::stoi(env));
         }
@@ -1094,10 +1117,14 @@ struct BenchFixture {
                      corpusSize, progressTimeoutSec.count());
 
         auto lastProgressTime = std::chrono::steady_clock::now();
+        auto ingestHeartbeatAt = lastProgressTime + std::chrono::seconds(5);
         uint64_t lastDocCount = 0;
         uint64_t lastIndexedDocCount = 0;
         uint64_t lastContentExtracted = 0;
         uint64_t lastPostProcessed = 0;
+        uint64_t lastEmbedQueued = 0;
+        uint64_t lastEmbedInFlight = 0;
+        uint64_t lastVectorCount = 0;
         uint32_t lastDepth = 0;
         bool completed = false;
         int stableChecks = 0;
@@ -1119,15 +1146,25 @@ struct BenchFixture {
             auto timeSinceProgress =
                 std::chrono::duration_cast<std::chrono::seconds>(now - lastProgressTime);
 
+            if (now >= ingestHeartbeatAt) {
+                ingestHeartbeatAt = now + std::chrono::seconds(5);
+                spdlog::info("Ingest wait heartbeat: since_progress={}s last_total={} "
+                             "last_indexed={} last_queue={} "
+                             "last_processed={}",
+                             timeSinceProgress.count(), lastDocCount, lastIndexedDocCount,
+                             lastDepth, lastPostProcessed);
+            }
+
             // Check for stall (no progress for progressTimeoutSec)
             if (timeSinceProgress > progressTimeoutSec) {
                 spdlog::error(
                     "Ingestion stalled - no progress for {}s (docs: total={} indexed={} target={} "
                     "queue={}, inflight: extract={} kg={} symbol={} entity={} extracted={} "
-                    "processed={})",
+                    "processed={} embed_queue={} embed_in_flight={} vectors={})",
                     timeSinceProgress.count(), lastDocCount, lastIndexedDocCount, corpusSize,
                     lastDepth, lastExtractionInFlight, lastKgInFlight, lastSymbolInFlight,
-                    lastEntityInFlight, lastContentExtracted, lastPostProcessed);
+                    lastEntityInFlight, lastContentExtracted, lastPostProcessed, lastEmbedQueued,
+                    lastEmbedInFlight, lastVectorCount);
                 throw std::runtime_error("Ingestion stalled - benchmark results would be invalid. "
                                          "Set YAMS_BENCH_PROGRESS_TIMEOUT=300 for slower systems. "
                                          "For faster ingestion: YAMS_POST_EMBED_CONCURRENT=12 "
@@ -1147,6 +1184,9 @@ struct BenchFixture {
                     getMetric(counts, "post_ingest_inflight");
                 auto [postProcessed, postProcessedPresent] =
                     getMetric(counts, "post_ingest_processed");
+                auto [embedQueued, embedQueuedPresent] = getMetric(counts, "embed_svc_queued");
+                auto [embedInFlight, embedInFlightPresent] = getMetric(counts, "embed_in_flight");
+                auto [vectorCount, vectorPresent] = getMetric(counts, "vector_count");
                 uint64_t queuedTotal = std::max<uint64_t>(depth, postQueued);
 
                 // Check all processing stage in-flight counters
@@ -1166,20 +1206,27 @@ struct BenchFixture {
                      contentExtracted != lastContentExtracted ||
                      postProcessed != lastPostProcessed || kgInFlight != lastKgInFlight ||
                      symbolInFlight != lastSymbolInFlight || entityInFlight != lastEntityInFlight ||
-                     extractionInFlight != lastExtractionInFlight);
+                     extractionInFlight != lastExtractionInFlight ||
+                     embedQueued != lastEmbedQueued || embedInFlight != lastEmbedInFlight ||
+                     vectorCount != lastVectorCount);
 
                 if (statusChanged) {
                     spdlog::info(
                         "Documents: total={} indexed={} / {} | queue={} inflight={} | extracted={} "
-                        "processed={} | extract={} kg={} symbol={} entity={} (total={})",
+                        "processed={} | extract={} kg={} symbol={} entity={} (total={}) | "
+                        "embed_queue={} embed_in_flight={} vectors={} (ready={})",
                         docCount, indexedCount, corpusSize, queuedTotal, postInflight,
                         contentExtracted, postProcessed, extractionInFlight, kgInFlight,
-                        symbolInFlight, entityInFlight, totalInFlight);
+                        symbolInFlight, entityInFlight, totalInFlight, embedQueued, embedInFlight,
+                        vectorCount, (statusResult.value().vectorDbReady ? "true" : "false"));
                     lastDepth = queuedTotal;
                     lastDocCount = docCount;
                     lastIndexedDocCount = indexedCount;
                     lastContentExtracted = contentExtracted;
                     lastPostProcessed = postProcessed;
+                    lastEmbedQueued = embedQueued;
+                    lastEmbedInFlight = embedInFlight;
+                    lastVectorCount = vectorCount;
                     lastKgInFlight = kgInFlight;
                     lastSymbolInFlight = symbolInFlight;
                     lastEntityInFlight = entityInFlight;
@@ -1215,6 +1262,11 @@ struct BenchFixture {
                     completed = true;
                     break;
                 }
+            } else {
+                if (now >= ingestHeartbeatAt - std::chrono::seconds(5)) {
+                    spdlog::warn("Status polling failed during ingest wait: {}",
+                                 statusResult.error().message);
+                }
             }
             std::this_thread::sleep_for(500ms);
         }
@@ -1246,6 +1298,8 @@ struct BenchFixture {
         if (vectorsEnabled) {
             spdlog::info("Waiting for embeddings to be generated (target: {} docs)...", corpusSize);
 
+            auto embedHeartbeatAt = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+
             // Log to summary file
             if (summaryLog) {
                 summaryLog << "=== Embedding Generation ===" << std::endl;
@@ -1263,6 +1317,11 @@ struct BenchFixture {
             // We need vectors >= corpusSize AND queue/in-flight drained for complete coverage
             // Note: Each document may produce multiple chunk vectors, so we wait for stability
             while (std::chrono::steady_clock::now() < deadline) {
+                auto now = std::chrono::steady_clock::now();
+                if (now >= embedHeartbeatAt) {
+                    embedHeartbeatAt = now + std::chrono::seconds(5);
+                    spdlog::info("Embed wait heartbeat: polling daemon status");
+                }
                 auto statusResult = yams::cli::run_sync(client->status(), 5s);
                 if (statusResult) {
                     const bool vectorDbReady = statusResult.value().vectorDbReady;
@@ -1327,14 +1386,15 @@ struct BenchFixture {
                     // Success condition: vectors >= corpusSize AND queue drained AND no in-flight
                     // This ensures all chunks are embedded before running queries
                     bool queueDrained = (embedQueued == 0 && embedInFlight == 0);
-                    if (haveQueueMetrics && vectorDbReady && vectorCount >= corpusSize &&
+                    if (haveQueueMetrics && vectorCount >= static_cast<uint64_t>(corpusSize) &&
                         queueDrained && stableCount >= 10) {
                         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now() - embedStartTime)
                                            .count();
                         spdlog::info("Full embedding coverage achieved: {} vectors for {} docs "
-                                     "(queue drained, stable for {}s)",
-                                     vectorCount, corpusSize, stableCount / 2);
+                                     "(queue drained, stable for {}s, vector_db_ready={})",
+                                     vectorCount, corpusSize, stableCount / 2,
+                                     (vectorDbReady ? "true" : "false"));
                         if (summaryLog) {
                             summaryLog << "\n*** SUCCESS: Full coverage in " << elapsed << "ms ***"
                                        << std::endl;
@@ -1351,14 +1411,14 @@ struct BenchFixture {
                     // transient queue drain (e.g., between embedding batches)
                     double coverage = corpusSize > 0 ? (vectorCount * 100.0 / corpusSize) : 0;
                     constexpr double MIN_COVERAGE_THRESHOLD = 90.0;
-                    if (haveQueueMetrics && vectorDbReady && stableCount >= 40 && queueDrained &&
-                        vectorCount > 0 && coverage >= MIN_COVERAGE_THRESHOLD) {
+                    if (haveQueueMetrics && stableCount >= 40 && queueDrained && vectorCount > 0 &&
+                        coverage >= MIN_COVERAGE_THRESHOLD) {
                         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now() - embedStartTime)
                                            .count();
                         spdlog::info("Embedding generation complete (queue drained, stable): "
-                                     "{} vectors ({:.1f}% coverage)",
-                                     vectorCount, coverage);
+                                     "{} vectors ({:.1f}% coverage, vector_db_ready={})",
+                                     vectorCount, coverage, (vectorDbReady ? "true" : "false"));
                         if (summaryLog) {
                             summaryLog << "\n*** Complete (queue drained) in " << elapsed
                                        << "ms ***" << std::endl;
@@ -1383,35 +1443,42 @@ struct BenchFixture {
 
             // Final status check
             auto finalStatus = yams::cli::run_sync(client->status(), 5s);
-            if (finalStatus && finalStatus.value().vectorDbReady) {
+            if (finalStatus) {
                 uint64_t finalVectorCount = 0;
                 auto it = finalStatus.value().requestCounts.find("vector_count");
                 if (it != finalStatus.value().requestCounts.end()) {
                     finalVectorCount = it->second;
                 }
                 double finalCoverage = corpusSize > 0 ? (finalVectorCount * 100.0 / corpusSize) : 0;
-                spdlog::info("Vector DB ready: dim={}, vectors={} ({:.1f}% coverage)",
+                spdlog::info("Vector DB: ready={} dim={}, vectors={} ({:.1f}% coverage)",
+                             (finalStatus.value().vectorDbReady ? "true" : "false"),
                              finalStatus.value().vectorDbDim, finalVectorCount, finalCoverage);
 
-                if (finalCoverage < 90.0) {
+                if (finalVectorCount == 0) {
+                    spdlog::warn("No vectors present after embedding wait");
+                } else if (finalCoverage < 90.0) {
                     spdlog::error(
                         "WARNING: Low embedding coverage ({:.1f}%) will degrade retrieval quality!",
                         finalCoverage);
                     spdlog::error(
                         "Consider reducing corpus size or increasing embed channel capacity.");
                 }
-            } else {
-                spdlog::warn("Vector DB may not be ready or no embeddings generated");
-                // Guard: wait briefly for vector DB readiness before proceeding
-                const auto guardDeadline = std::chrono::steady_clock::now() + 300s;
-                while (std::chrono::steady_clock::now() < guardDeadline) {
-                    auto st = yams::cli::run_sync(client->status(), 5s);
-                    if (st && st.value().vectorDbReady) {
-                        spdlog::info("Vector DB is now ready after guard wait");
-                        break;
+
+                if (!finalStatus.value().vectorDbReady) {
+                    spdlog::warn("Vector DB not ready yet; waiting briefly before queries...");
+                    const auto guardDeadline = std::chrono::steady_clock::now() + 30s;
+                    while (std::chrono::steady_clock::now() < guardDeadline) {
+                        auto st = yams::cli::run_sync(client->status(), 5s);
+                        if (st && st.value().vectorDbReady) {
+                            spdlog::info("Vector DB is now ready after guard wait");
+                            break;
+                        }
+                        std::this_thread::sleep_for(500ms);
                     }
-                    std::this_thread::sleep_for(500ms);
                 }
+            } else {
+                spdlog::warn("Final status check failed after embedding wait: {}",
+                             finalStatus.error().message);
             }
         } else {
             spdlog::info("Vectors disabled - skipping embedding generation wait");
@@ -1444,8 +1511,11 @@ struct BenchFixture {
         uint64_t indexedDocCount = 0;
         auto statusResult = yams::cli::run_sync(client->status(), 5s);
         if (statusResult) {
-            auto it = statusResult.value().requestCounts.find("documents_total");
-            if (it != statusResult.value().requestCounts.end()) {
+            if (auto it = statusResult.value().requestCounts.find("documents_indexed");
+                it != statusResult.value().requestCounts.end()) {
+                indexedDocCount = it->second;
+            } else if (auto it = statusResult.value().requestCounts.find("documents_total");
+                       it != statusResult.value().requestCounts.end()) {
                 indexedDocCount = it->second;
             }
         }
@@ -1461,7 +1531,11 @@ struct BenchFixture {
                     static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
             }
             testReq.timeout = queryTimeout;
-            auto testResult = yams::cli::run_sync(client->search(testReq), 10s);
+            auto waitBudget = queryTimeout + std::chrono::seconds(10);
+            if (waitBudget < std::chrono::seconds(10)) {
+                waitBudget = std::chrono::seconds(10);
+            }
+            auto testResult = yams::cli::run_sync(client->search(testReq), waitBudget);
             indexedDocCount = testResult ? testResult.value().results.size() : 0;
         }
 
@@ -1592,8 +1666,14 @@ struct BenchFixture {
                 DebugLogEntry sanityEntry;
                 sanityEntry.query = std::move(label);
 
+                auto waitBudget =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(opts.timeout) +
+                    std::chrono::seconds(10);
+                if (waitBudget < std::chrono::seconds(10)) {
+                    waitBudget = std::chrono::seconds(10);
+                }
                 auto run = yams::cli::run_sync(
-                    yams::cli::search_runner::daemon_search(*client, opts, true), 10s);
+                    yams::cli::search_runner::daemon_search(*client, opts, true), waitBudget);
                 if (!run) {
                     sanityEntry.returnedPaths.push_back("error=" + run.error().message);
                     debugLogWriteJsonLine(sanityEntry);
@@ -1663,15 +1743,12 @@ void CleanupFixture() {
 void BM_RetrievalQuality(benchmark::State& state) {
     SetupFixture();
     auto& fixture = *g_fixture;
+    RetrievalMetrics metrics;
     for (auto _ : state) {
-        auto metrics =
-            evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries, fixture.topK);
+        metrics = evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries,
+                                  fixture.topK, "hybrid");
         benchmark::DoNotOptimize(metrics);
     }
-
-    // Evaluate hybrid search (default)
-    auto metrics = evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries,
-                                   fixture.topK, "hybrid");
 
     // Store metrics globally for post-teardown summary
     g_final_metrics = metrics;
@@ -1692,7 +1769,9 @@ void BM_RetrievalQuality(benchmark::State& state) {
     state.counters["MRR_keyword"] = g_keyword_metrics.mrr;
     state.counters["Recall_keyword"] = g_keyword_metrics.recallAtK;
 }
-BENCHMARK(BM_RetrievalQuality);
+// Retrieval quality is a long-running, end-to-end evaluation.
+// Force a single iteration to avoid repeated full-corpus evaluations.
+BENCHMARK(BM_RetrievalQuality)->Iterations(1);
 
 int main(int argc, char** argv) {
     benchmark::Initialize(&argc, argv);

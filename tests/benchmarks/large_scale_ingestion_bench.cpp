@@ -38,6 +38,111 @@ using namespace yams::daemon;
 
 namespace {
 
+// Forward declarations for globals used by helper waits.
+extern std::unique_ptr<DaemonHarness> g_harness;
+extern std::unique_ptr<daemon::DaemonClient> g_client;
+
+uint64_t getCountOrZero(const daemon::StatusResponse& st, const std::string& key) {
+    if (auto it = st.requestCounts.find(key); it != st.requestCounts.end()) {
+        return it->second;
+    }
+    return 0;
+}
+
+bool waitForSearchEngineReady(std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
+        if (status) {
+            if (auto it = status.value().readinessStates.find("search_engine");
+                it != status.value().readinessStates.end() && it->second) {
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    return false;
+}
+
+bool waitForVectorDbReady(std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
+        if (status && status.value().vectorDbReady) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    return false;
+}
+
+bool waitForCorpusIndexed(std::size_t expectedDocs, bool embeddingsEnabled,
+                          std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    int stableCount = 0;
+    constexpr int stableRequired = 10;
+
+    daemon::StatusResponse lastStatus;
+    bool haveLastStatus = false;
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
+        if (!status) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+
+        lastStatus = status.value();
+        haveLastStatus = true;
+
+        const auto& st = lastStatus;
+        const uint64_t docsTotal = getCountOrZero(st, std::string(metrics::kDocumentsTotal));
+        const uint64_t docsIndexed = getCountOrZero(st, std::string(metrics::kDocumentsIndexed));
+        const uint64_t postQueued = getCountOrZero(st, std::string(metrics::kPostIngestQueued));
+        const uint64_t postInflight = getCountOrZero(st, std::string(metrics::kPostIngestInflight));
+        const uint64_t embedQueued = getCountOrZero(st, std::string(metrics::kEmbedQueued));
+        const uint64_t embedInflight = getCountOrZero(st, std::string(metrics::kEmbedInflight));
+        const uint64_t vectorCount = getCountOrZero(st, std::string(metrics::kVectorCount));
+
+        const bool countsMet =
+            (expectedDocs == 0) || (docsTotal >= static_cast<uint64_t>(expectedDocs) &&
+                                    docsIndexed >= static_cast<uint64_t>(expectedDocs));
+        const bool postDrained = (postQueued == 0 && postInflight == 0);
+        const bool embedDrained = (!embeddingsEnabled) || (embedQueued == 0 && embedInflight == 0);
+        const bool vectorReady = (!embeddingsEnabled) || st.vectorDbReady;
+        const bool vectorMet =
+            (!embeddingsEnabled) || (vectorCount >= static_cast<uint64_t>(expectedDocs));
+
+        if (countsMet && postDrained && embedDrained && vectorReady && vectorMet) {
+            ++stableCount;
+        } else {
+            stableCount = 0;
+        }
+
+        if (stableCount >= stableRequired) {
+            return true;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
+    if (haveLastStatus) {
+        const auto& st = lastStatus;
+        std::cerr << "WARNING: Corpus indexing readiness timeout after " << timeout.count() << "ms"
+                  << " (expectedDocs=" << expectedDocs
+                  << " docsTotal=" << getCountOrZero(st, std::string(metrics::kDocumentsTotal))
+                  << " docsIndexed=" << getCountOrZero(st, std::string(metrics::kDocumentsIndexed))
+                  << " postQueued=" << getCountOrZero(st, std::string(metrics::kPostIngestQueued))
+                  << " postInflight="
+                  << getCountOrZero(st, std::string(metrics::kPostIngestInflight))
+                  << " embedQueued=" << getCountOrZero(st, std::string(metrics::kEmbedQueued))
+                  << " embedInflight=" << getCountOrZero(st, std::string(metrics::kEmbedInflight))
+                  << " vectorCount=" << getCountOrZero(st, std::string(metrics::kVectorCount))
+                  << " vectorDbReady=" << (st.vectorDbReady ? 1 : 0) << ")\n";
+    }
+    return false;
+}
+
 struct IngestionBenchConfig {
     size_t documentCount{10000};
     bool enableEmbeddings{false};
@@ -84,6 +189,13 @@ struct TimeSeriesSample {
     uint64_t rssBytes{0};
     double cpuPercent{0.0};
     int pressureLevel{0};
+
+    // Dropped counters for diagnostic
+    uint64_t kgDropped{0};
+    uint64_t symbolDropped{0};
+    uint64_t entityDropped{0};
+    uint64_t titleDropped{0};
+    uint64_t busPostDropped{0};
 
     // Instantaneous throughput (docs/sec in last interval)
     double docsPerSecond{0.0};
@@ -188,11 +300,16 @@ private:
             // Resource metrics
             sample.rssBytes = static_cast<uint64_t>(st.memoryUsageMb * 1024 * 1024);
             sample.cpuPercent = st.cpuUsagePercent;
+            sample.pressureLevel = static_cast<int>(getCount(std::string(metrics::kPressureLevel)));
 
-            // Pressure level from governor
-            if (auto it = st.requestCounts.find("pressure_level"); it != st.requestCounts.end()) {
-                sample.pressureLevel = static_cast<int>(it->second);
-            }
+            // Dropped counters
+            sample.kgDropped = getCount(std::string(metrics::kKgDropped));
+            sample.symbolDropped = getCount(std::string(metrics::kSymbolDropped));
+            sample.entityDropped = getCount(std::string(metrics::kEntityDropped));
+            sample.titleDropped = getCount(std::string(metrics::kTitleDropped));
+
+            // Bus dropped
+            sample.busPostDropped = getCount(std::string(metrics::kBusPostDropped));
         }
 
         return sample;
@@ -282,6 +399,23 @@ void SetupHarness(const IngestionBenchConfig& config) {
     cc.socketPath = g_harness->socketPath();
     cc.autoStart = false;
     g_client = std::make_unique<daemon::DaemonClient>(cc);
+
+    std::cout << "Waiting for search engine readiness...\n";
+    if (!waitForSearchEngineReady(std::chrono::seconds(60))) {
+        std::cerr << "WARNING: Search engine not ready after 60s.\n";
+    }
+
+    if (config.enableEmbeddings) {
+        auto timeout = std::chrono::milliseconds(600000);
+        if (const char* env = std::getenv("YAMS_BENCH_VECTOR_READY_WAIT_MS")) {
+            timeout = std::chrono::milliseconds(
+                static_cast<std::chrono::milliseconds::rep>(std::stoll(env)));
+        }
+        std::cout << "Waiting for vector DB readiness...\n";
+        if (!waitForVectorDbReady(timeout)) {
+            std::cerr << "WARNING: Vector DB not ready after " << timeout.count() << "ms.\n";
+        }
+    }
 
     std::cout << "Daemon started successfully\n\n";
 }
@@ -394,7 +528,9 @@ void writeTimeSeriesCsv(const std::vector<TimeSeriesSample>& samples,
         << "post_queued,post_inflight,embed_queued,embed_inflight,"
         << "kg_queued,kg_inflight,symbol_queued,symbol_inflight,"
         << "entity_queued,entity_inflight,title_queued,title_inflight,"
-        << "rss_bytes,cpu_percent,pressure_level,docs_per_sec,bytes_per_sec\n";
+        << "rss_bytes,cpu_percent,pressure_level,"
+        << "kg_dropped,symbol_dropped,entity_dropped,title_dropped,bus_post_dropped,"
+        << "docs_per_sec,bytes_per_sec\n";
 
     for (const auto& s : samples) {
         csv << s.elapsedMs << "," << s.docsIngested << "," << s.docsFailed << "," << s.totalBytes
@@ -402,8 +538,9 @@ void writeTimeSeriesCsv(const std::vector<TimeSeriesSample>& samples,
             << "," << s.embedInflight << "," << s.kgQueued << "," << s.kgInflight << ","
             << s.symbolQueued << "," << s.symbolInflight << "," << s.entityQueued << ","
             << s.entityInflight << "," << s.titleQueued << "," << s.titleInflight << ","
-            << s.rssBytes << "," << s.cpuPercent << "," << s.pressureLevel << "," << s.docsPerSecond
-            << "," << s.bytesPerSecond << "\n";
+            << s.rssBytes << "," << s.cpuPercent << "," << s.pressureLevel << "," << s.kgDropped
+            << "," << s.symbolDropped << "," << s.entityDropped << "," << s.titleDropped << ","
+            << s.busPostDropped << "," << s.docsPerSecond << "," << s.bytesPerSecond << "\n";
     }
 }
 
@@ -494,6 +631,10 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
         if (!waitForDrain(drainTimeout)) {
             std::cerr << "WARNING: Pipeline drain timeout\n";
         }
+
+        // Ensure cached counters and indexing are truly caught up before recording final metrics.
+        // Ingest can complete far faster than post-ingest/FTS5/vector indexing.
+        (void)waitForCorpusIndexed(config.documentCount, config.enableEmbeddings, drainTimeout);
 
         g_collector.stop();
         auto endTime = std::chrono::steady_clock::now();

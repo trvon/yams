@@ -881,6 +881,11 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         return Result<void>();
     }
 
+    // Track counter deltas for component-owned cached metrics.
+    // These counters are intentionally maintained without live DB queries on hot paths.
+    uint64_t newlyExtracted = 0;
+    uint64_t newlyIndexed = 0;
+
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         // Begin transaction for batch operation
         auto beginResult = beginTransactionWithRetry(db);
@@ -927,16 +932,43 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             ftsStmtOpt = std::move(ftsStmtResult.value());
         }
 
-        auto statusStmtResult = db.prepareCached(R"(
+        // Two conditional updates so we can maintain cachedExtractedCount_/cachedIndexedCount_
+        // without per-row SELECTs.
+        auto extractedStmtResult = db.prepareCached(R"(
             UPDATE documents
-            SET content_extracted = 1, extraction_status = 'Success', extraction_error = NULL
-            WHERE id = ?
+            SET content_extracted = 1
+            WHERE id = ? AND COALESCE(content_extracted, 0) != 1
         )");
-        if (!statusStmtResult) {
+        if (!extractedStmtResult) {
             db.execute("ROLLBACK");
-            return statusStmtResult.error();
+            return extractedStmtResult.error();
         }
-        auto& statusStmt = *statusStmtResult.value();
+        auto& extractedStmt = *extractedStmtResult.value();
+
+        // Keep cachedIndexedCount_ correct:
+        // - Only increment when extraction_status transitions to Success.
+        // - Still clear stale extraction_error even if status already Success.
+        auto indexedStmtResult = db.prepareCached(R"(
+            UPDATE documents
+            SET extraction_status = 'Success', extraction_error = NULL
+            WHERE id = ? AND extraction_status != 'Success'
+        )");
+        if (!indexedStmtResult) {
+            db.execute("ROLLBACK");
+            return indexedStmtResult.error();
+        }
+        auto& indexedStmt = *indexedStmtResult.value();
+
+        auto clearIndexedErrorStmtResult = db.prepareCached(R"(
+            UPDATE documents
+            SET extraction_error = NULL
+            WHERE id = ? AND extraction_status = 'Success' AND extraction_error IS NOT NULL
+        )");
+        if (!clearIndexedErrorStmtResult) {
+            db.execute("ROLLBACK");
+            return clearIndexedErrorStmtResult.error();
+        }
+        auto& clearIndexedErrorStmt = *clearIndexedErrorStmtResult.value();
 
         // Process each entry
         constexpr size_t kMaxTextBytes = size_t{16} * 1024 * 1024; // 16 MiB
@@ -993,24 +1025,71 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 }
             }
 
-            // 3. Update extraction status
-            if (auto r = statusStmt.reset(); !r) {
+            // 3. Update extracted/indexed flags.
+            // Note: cachedIndexedCount_ tracks extraction_status='Success' ("search-ready")
+            // rather than embedding status.
+            if (auto r = extractedStmt.reset(); !r) {
                 db.execute("ROLLBACK");
                 return r.error();
             }
-            if (auto r = statusStmt.clearBindings(); !r) {
+            if (auto r = extractedStmt.clearBindings(); !r) {
                 db.execute("ROLLBACK");
                 return r.error();
             }
-            auto statusBind = statusStmt.bind(1, entry.documentId);
-            if (!statusBind) {
+            auto extBind = extractedStmt.bind(1, entry.documentId);
+            if (!extBind) {
                 db.execute("ROLLBACK");
-                return statusBind.error();
+                return extBind.error();
             }
-            auto statusExec = statusStmt.execute();
-            if (!statusExec) {
+            auto extExec = extractedStmt.execute();
+            if (!extExec) {
                 db.execute("ROLLBACK");
-                return statusExec.error();
+                return extExec.error();
+            }
+            if (db.changes() > 0) {
+                newlyExtracted++;
+            }
+
+            if (auto r = indexedStmt.reset(); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            if (auto r = indexedStmt.clearBindings(); !r) {
+                db.execute("ROLLBACK");
+                return r.error();
+            }
+            auto idxBind = indexedStmt.bind(1, entry.documentId);
+            if (!idxBind) {
+                db.execute("ROLLBACK");
+                return idxBind.error();
+            }
+            auto idxExec = indexedStmt.execute();
+            if (!idxExec) {
+                db.execute("ROLLBACK");
+                return idxExec.error();
+            }
+            if (db.changes() > 0) {
+                newlyIndexed++;
+            } else {
+                // extraction_status was already Success; still clear any stale error.
+                if (auto r = clearIndexedErrorStmt.reset(); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                if (auto r = clearIndexedErrorStmt.clearBindings(); !r) {
+                    db.execute("ROLLBACK");
+                    return r.error();
+                }
+                auto errBind = clearIndexedErrorStmt.bind(1, entry.documentId);
+                if (!errBind) {
+                    db.execute("ROLLBACK");
+                    return errBind.error();
+                }
+                auto errExec = clearIndexedErrorStmt.execute();
+                if (!errExec) {
+                    db.execute("ROLLBACK");
+                    return errExec.error();
+                }
             }
         }
 
@@ -1028,6 +1107,13 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         invalidateQueryCache();
         // Signal corpus stats stale - batch content affects extractionCoverage stats
         signalCorpusStatsStale();
+
+        if (newlyExtracted > 0) {
+            cachedExtractedCount_.fetch_add(newlyExtracted, std::memory_order_relaxed);
+        }
+        if (newlyIndexed > 0) {
+            cachedIndexedCount_.fetch_add(newlyIndexed, std::memory_order_relaxed);
+        }
     }
     return result;
 }

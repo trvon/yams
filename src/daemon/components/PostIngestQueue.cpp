@@ -1101,12 +1101,18 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     job.tags = std::move(tags);
     job.contentBytes = std::move(contentBytes);
 
-    if (!channel->try_push(std::move(job))) {
-        spdlog::warn("[PostIngestQueue] KG channel full, dropping job for {}", hash);
+    // Prefer correctness over throughput: KG jobs are used for graph/path-tree updates.
+    // If the channel is briefly full during bulk ingest, wait a short time instead of dropping.
+    static constexpr auto kEnqueueTimeout = std::chrono::milliseconds(250);
+    if (!channel->push_wait(std::move(job), kEnqueueTimeout)) {
+        const auto n = InternalEventBus::instance().kgDropped();
+        if (((n + 1u) % 64u) == 1u) {
+            spdlog::warn(
+                "[PostIngestQueue] KG channel full (depth={}/{}), dropping job for {} (drops={})",
+                channel->size_approx(), channel->capacity(), hash.substr(0, 12), n + 1u);
+        }
         InternalEventBus::instance().incKgDropped();
     } else {
-        spdlog::info("[PostIngestQueue] Dispatched KG job for {} ({})", filePath,
-                     hash.substr(0, 12));
         InternalEventBus::instance().incKgQueued();
     }
 }
@@ -2146,6 +2152,38 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
 void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>& successes) {
     std::unordered_map<std::string, std::shared_ptr<std::vector<std::byte>>> contentByHash;
 
+    // Opportunistically enqueue embedding jobs for successfully extracted/indexed documents.
+    // This is the primary path for generating vector embeddings during normal ingestion.
+    std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedQ;
+    const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
+    if (embedCap > 0) {
+        embedQ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
+            "embed_jobs", embedCap);
+    }
+    std::vector<std::string> embedBatch;
+    const std::size_t maxEmbedBatch =
+        std::max<std::size_t>(1u, static_cast<std::size_t>(TuneAdvisor::getEmbedDocCap()));
+    embedBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
+
+    auto flushEmbedBatch = [&]() {
+        if (!embedQ || embedBatch.empty()) {
+            embedBatch.clear();
+            return;
+        }
+        InternalEventBus::EmbedJob job;
+        job.hashes = std::move(embedBatch);
+        job.batchSize = static_cast<uint32_t>(job.hashes.size());
+        job.skipExisting = true;
+
+        // Best-effort: avoid blocking post-ingest; rely on repair coordinator for catch-up.
+        if (embedQ->try_push(std::move(job))) {
+            InternalEventBus::instance().incEmbedQueued();
+        } else {
+            InternalEventBus::instance().incEmbedDropped();
+        }
+        embedBatch.clear();
+    };
+
     auto getOrLoadContent =
         [this, &contentByHash](const std::string& hash) -> std::shared_ptr<std::vector<std::byte>> {
         if (!store_) {
@@ -2165,6 +2203,13 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
     };
 
     for (const auto& prepared : successes) {
+        if (embedQ) {
+            embedBatch.push_back(prepared.hash);
+            if (embedBatch.size() >= maxEmbedBatch) {
+                flushEmbedBatch();
+            }
+        }
+
         std::shared_ptr<std::vector<std::byte>> contentBytes;
         if (prepared.shouldDispatchKg || prepared.shouldDispatchSymbol ||
             prepared.shouldDispatchEntity) {
@@ -2189,6 +2234,8 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         }
         InternalEventBus::instance().incPostConsumed();
     }
+
+    flushEmbedBatch();
 }
 
 void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks) {

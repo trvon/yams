@@ -72,6 +72,81 @@ bool waitForSearchEngineReady(std::chrono::milliseconds timeout) {
     return false;
 }
 
+uint64_t getCountOrZero(const daemon::StatusResponse& st, const std::string& key) {
+    if (auto it = st.requestCounts.find(key); it != st.requestCounts.end()) {
+        return it->second;
+    }
+    return 0;
+}
+
+bool waitForCorpusIndexed(std::size_t expectedDocs, std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    int stableCount = 0;
+    constexpr int stableRequired = 10;
+
+    daemon::StatusResponse lastStatus;
+    bool haveLastStatus = false;
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
+        if (!status) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+
+        lastStatus = status.value();
+        haveLastStatus = true;
+
+        const auto& st = lastStatus;
+        const uint64_t docsTotal = getCountOrZero(st, "documents_total");
+        const uint64_t docsIndexed = getCountOrZero(st, "documents_indexed");
+        const uint64_t postQueued = getCountOrZero(st, "post_ingest_queued");
+        const uint64_t postInflight = getCountOrZero(st, "post_ingest_inflight");
+
+        const bool countsMet =
+            (expectedDocs == 0) || (docsTotal >= static_cast<uint64_t>(expectedDocs) &&
+                                    docsIndexed >= static_cast<uint64_t>(expectedDocs));
+        const bool postDrained = (postQueued == 0 && postInflight == 0);
+
+        if (countsMet && postDrained) {
+            ++stableCount;
+        } else {
+            stableCount = 0;
+        }
+
+        if (stableCount >= stableRequired) {
+            return true;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
+    if (haveLastStatus) {
+        const auto& st = lastStatus;
+        const uint64_t docsTotal = getCountOrZero(st, "documents_total");
+        const uint64_t docsIndexed = getCountOrZero(st, "documents_indexed");
+        const uint64_t postQueued = getCountOrZero(st, "post_ingest_queued");
+        const uint64_t postInflight = getCountOrZero(st, "post_ingest_inflight");
+        const uint64_t embedQueued = getCountOrZero(st, "embed_svc_queued");
+        const uint64_t embedInflight = getCountOrZero(st, "embed_in_flight");
+        const uint64_t vectorCount = getCountOrZero(st, "vector_count");
+
+        bool searchReady = false;
+        if (auto it = st.readinessStates.find("search_engine"); it != st.readinessStates.end()) {
+            searchReady = it->second;
+        }
+
+        std::cerr << "WARNING: Corpus readiness timeout after " << timeout.count() << "ms"
+                  << " (expectedDocs=" << expectedDocs << " docsTotal=" << docsTotal
+                  << " docsIndexed=" << docsIndexed << " postQueued=" << postQueued
+                  << " postInflight=" << postInflight << " embedQueued=" << embedQueued
+                  << " embedInflight=" << embedInflight << " vectorCount=" << vectorCount
+                  << " vectorDbReady=" << (st.vectorDbReady ? 1 : 0)
+                  << " searchReady=" << (searchReady ? 1 : 0) << ")\n";
+    }
+    return false;
+}
+
 bool waitForEmbeddingDrain(std::size_t minDocCount, std::chrono::milliseconds timeout) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     uint64_t lastVectorCount = 0;
@@ -109,16 +184,17 @@ bool waitForEmbeddingDrain(std::size_t minDocCount, std::chrono::milliseconds ti
         }
 
         const bool embedDrained = (embedQueued == 0 && embedInFlight == 0);
-        const bool postDrained = (postQueued == 0 && postInFlight == 0);
-        if (vectorCount != lastVectorCount || !embedDrained || !postDrained) {
+        if (vectorCount != lastVectorCount || !embedDrained) {
             stableCount = 0;
             lastVectorCount = vectorCount;
         } else {
             ++stableCount;
         }
 
-        if (st.vectorDbReady && embedDrained && postDrained && stableCount >= stableRequired) {
-            return vectorCount > 0 || minDocCount == 0;
+        if (st.vectorDbReady && embedDrained && stableCount >= stableRequired) {
+            if (minDocCount == 0)
+                return true;
+            return vectorCount >= static_cast<uint64_t>(minDocCount);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -148,27 +224,11 @@ bool waitForEmbeddingDrainWithMetrics(std::size_t minDocCount, std::chrono::mill
         }
 
         const auto& st = status.value();
-        uint64_t vectorCount = 0;
-        uint64_t embedQueued = 0;
-        uint64_t embedInFlight = 0;
-        uint64_t postQueued = 0;
-        uint64_t postInFlight = 0;
-
-        if (auto it = st.requestCounts.find("vector_count"); it != st.requestCounts.end()) {
-            vectorCount = it->second;
-        }
-        if (auto it = st.requestCounts.find("embed_svc_queued"); it != st.requestCounts.end()) {
-            embedQueued = it->second;
-        }
-        if (auto it = st.requestCounts.find("embed_in_flight"); it != st.requestCounts.end()) {
-            embedInFlight = it->second;
-        }
-        if (auto it = st.requestCounts.find("post_ingest_queued"); it != st.requestCounts.end()) {
-            postQueued = it->second;
-        }
-        if (auto it = st.requestCounts.find("post_ingest_inflight"); it != st.requestCounts.end()) {
-            postInFlight = it->second;
-        }
+        const uint64_t vectorCount = getCountOrZero(st, "vector_count");
+        const uint64_t embedQueued = getCountOrZero(st, "embed_svc_queued");
+        const uint64_t embedInFlight = getCountOrZero(st, "embed_in_flight");
+        const uint64_t postQueued = getCountOrZero(st, "post_ingest_queued");
+        const uint64_t postInFlight = getCountOrZero(st, "post_ingest_inflight");
 
         metrics.maxEmbedQueued = std::max(metrics.maxEmbedQueued, embedQueued);
         metrics.maxEmbedInflight = std::max(metrics.maxEmbedInflight, embedInFlight);
@@ -176,16 +236,57 @@ bool waitForEmbeddingDrainWithMetrics(std::size_t minDocCount, std::chrono::mill
         metrics.maxPostInflight = std::max(metrics.maxPostInflight, postInFlight);
 
         const bool embedDrained = (embedQueued == 0 && embedInFlight == 0);
-        const bool postDrained = (postQueued == 0 && postInFlight == 0);
-        if (vectorCount != lastVectorCount || !embedDrained || !postDrained) {
+        if (vectorCount != lastVectorCount || !embedDrained) {
             stableCount = 0;
             lastVectorCount = vectorCount;
         } else {
             ++stableCount;
         }
 
-        if (st.vectorDbReady && embedDrained && postDrained && stableCount >= stableRequired) {
-            return vectorCount > 0 || minDocCount == 0;
+        const bool vectorReady = st.vectorDbReady || minDocCount == 0;
+        if (vectorReady && embedDrained && stableCount >= stableRequired) {
+            if (minDocCount == 0)
+                return true;
+            return vectorCount >= static_cast<uint64_t>(minDocCount);
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    return false;
+}
+
+bool waitForPostIngestDrainWithMetrics(std::chrono::milliseconds timeout, DrainMetrics& metrics) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    int stableCount = 0;
+    constexpr int stableRequired = 10;
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
+        if (!status) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+
+        const auto& st = status.value();
+        const uint64_t postQueued = getCountOrZero(st, "post_ingest_queued");
+        const uint64_t postInflight = getCountOrZero(st, "post_ingest_inflight");
+        const uint64_t embedQueued = getCountOrZero(st, "embed_svc_queued");
+        const uint64_t embedInflight = getCountOrZero(st, "embed_in_flight");
+
+        metrics.maxEmbedQueued = std::max(metrics.maxEmbedQueued, embedQueued);
+        metrics.maxEmbedInflight = std::max(metrics.maxEmbedInflight, embedInflight);
+        metrics.maxPostQueued = std::max(metrics.maxPostQueued, postQueued);
+        metrics.maxPostInflight = std::max(metrics.maxPostInflight, postInflight);
+
+        const bool postDrained = (postQueued == 0 && postInflight == 0);
+        if (postDrained) {
+            ++stableCount;
+        } else {
+            stableCount = 0;
+        }
+
+        if (stableCount >= stableRequired) {
+            return true;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -275,6 +376,20 @@ void SetupBenchmarkSuite(const BenchConfig& config = {}) {
     std::cout << "Waiting for search engine readiness...\n";
     if (!waitForSearchEngineReady(std::chrono::seconds(60))) {
         std::cerr << "WARNING: Search engine not ready after 60s.\n";
+    }
+
+    // Benchmarks assume a queryable corpus; wait for post-ingest + FTS5/doc indexing to catch up.
+    // With faster ingestion this can otherwise race and lead to false stalls/timeouts.
+    {
+        auto timeout = std::chrono::milliseconds(180000);
+        if (const char* env = std::getenv("YAMS_BENCH_INDEX_WAIT_MS")) {
+            timeout = std::chrono::milliseconds(
+                static_cast<std::chrono::milliseconds::rep>(std::stoll(env)));
+        }
+        std::cout << "Waiting for corpus to be indexed (FTS5/doc counters)...\n";
+        if (!waitForCorpusIndexed(g_test_docs.size(), timeout)) {
+            std::cerr << "WARNING: Corpus indexing not observed as ready; proceeding anyway.\n";
+        }
     }
 
     if (embeddingsEnabled) {
@@ -557,7 +672,7 @@ static void BM_PostIngest_Throughput(benchmark::State& state) {
         // Wait for post-ingest queue to drain to capture peak queue sizes
         state.PauseTiming();
         auto timeout = std::chrono::milliseconds(120000);
-        waitForEmbeddingDrainWithMetrics(0, timeout, metrics);
+        waitForPostIngestDrainWithMetrics(timeout, metrics);
 
         state.counters["max_embed_queued"] = static_cast<double>(metrics.maxEmbedQueued);
         state.counters["max_embed_inflight"] = static_cast<double>(metrics.maxEmbedInflight);

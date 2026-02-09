@@ -75,6 +75,9 @@ private:
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};
     std::atomic<std::size_t> inFlight_{0}; // PBI-05b: parallel job tracking
+    // pendingJobs_ is owned by the channelPoller coroutine; expose an approximate size
+    // for status/benchmarks without cross-thread container access.
+    std::atomic<std::size_t> pendingApprox_{0};
     std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedChannel_;
     std::vector<InternalEventBus::EmbedJob> pendingJobs_;
 };

@@ -95,7 +95,9 @@ void EmbeddingService::setProviders(
 }
 
 std::size_t EmbeddingService::queuedJobs() const {
-    return embedChannel_ ? embedChannel_->size_approx() : 0;
+    const std::size_t ch = embedChannel_ ? embedChannel_->size_approx() : 0;
+    const std::size_t pending = this->pendingApprox_.load(std::memory_order_relaxed);
+    return ch + pending;
 }
 
 std::size_t EmbeddingService::inFlightJobs() const {
@@ -131,6 +133,9 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                 break;
             }
         }
+
+        // Keep an approximate pending backlog for status/benchmarks.
+        this->pendingApprox_.store(this->pendingJobs_.size(), std::memory_order_relaxed);
 
         if (inFlight_.load() < maxConcurrent && !this->pendingJobs_.empty()) {
             std::string defaultModel;
@@ -170,6 +175,8 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                                           std::make_move_iterator(deferred.begin()),
                                           std::make_move_iterator(deferred.end()));
             }
+
+            this->pendingApprox_.store(this->pendingJobs_.size(), std::memory_order_relaxed);
 
             auto dispatchJob = [this](InternalEventBus::EmbedJob&& dispatch) {
                 if (dispatch.hashes.empty()) {
@@ -231,6 +238,8 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
 
             dispatchBuckets(true);
             dispatchBuckets(false);
+
+            this->pendingApprox_.store(this->pendingJobs_.size(), std::memory_order_relaxed);
         }
 
         if (didWork) {
@@ -249,6 +258,8 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
             }
         }
     }
+
+    this->pendingApprox_.store(0, std::memory_order_relaxed);
 
     spdlog::info("[EmbeddingService] Parallel poller exited");
 }

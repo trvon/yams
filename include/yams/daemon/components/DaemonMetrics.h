@@ -121,6 +121,10 @@ struct MetricsSnapshot {
     std::size_t entityConsumed{0};
     std::size_t entityInFlight{0};
     std::size_t entityQueueDepth{0}; // Current channel queue depth
+    // Embedding Service metrics
+    std::size_t embedQueued{0};
+    std::size_t embedDropped{0};
+    std::size_t embedInFlight{0};
     // Title extraction metrics
     std::size_t titleQueueDepth{0}; // Current channel queue depth
     std::size_t titleInFlight{0};
