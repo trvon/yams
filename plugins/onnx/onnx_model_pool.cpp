@@ -912,14 +912,24 @@ private:
 
         auto& out = outputs[0];
         auto shape = out.GetTensorTypeAndShapeInfo().GetShape();
-        const size_t hidden_dim = embeddingDim_;
+        // Some execution providers can leave output dims unknown until the first Run.
+        // If we don't know the embedding dim yet, infer it from the first output tensor.
+        size_t hidden_dim = embeddingDim_;
         std::vector<std::vector<float>> result;
         if (shape.size() == 3) {
             // [B, S, D]
-            const size_t BB = static_cast<size_t>(shape[0]);
-            const size_t SS = static_cast<size_t>(shape[1]);
-            const size_t DD = static_cast<size_t>(shape[2]);
-            if (BB != B || DD != hidden_dim)
+            const int64_t b0 = shape[0];
+            const int64_t s1 = shape[1];
+            const int64_t d2 = shape[2];
+            const size_t SS = (s1 > 0) ? static_cast<size_t>(s1) : maxSequenceLength_;
+            const size_t DD = (d2 > 0) ? static_cast<size_t>(d2) : 0;
+            if (hidden_dim == 0 && DD > 0) {
+                hidden_dim = DD;
+                embeddingDim_ = hidden_dim;
+            }
+
+            if ((b0 > 0 && static_cast<size_t>(b0) != B) ||
+                (hidden_dim > 0 && d2 > 0 && DD != hidden_dim))
                 return Error{ErrorCode::InvalidData, "Output shape mismatch"};
             const float* data = out.GetTensorData<float>();
             result.resize(B, std::vector<float>(hidden_dim, 0.0f));
@@ -973,9 +983,16 @@ private:
         }
         if (shape.size() == 2) {
             // [B, D]
-            const size_t BB = static_cast<size_t>(shape[0]);
-            const size_t DD = static_cast<size_t>(shape[1]);
-            if (BB != B || DD != hidden_dim)
+            const int64_t b0 = shape[0];
+            const int64_t d1 = shape[1];
+            const size_t DD = (d1 > 0) ? static_cast<size_t>(d1) : 0;
+            if (hidden_dim == 0 && DD > 0) {
+                hidden_dim = DD;
+                embeddingDim_ = hidden_dim;
+            }
+
+            if ((b0 > 0 && static_cast<size_t>(b0) != B) ||
+                (hidden_dim > 0 && d1 > 0 && DD != hidden_dim))
                 return Error{ErrorCode::InvalidData, "Output shape mismatch"};
             const float* data = out.GetTensorData<float>();
             result.resize(B);

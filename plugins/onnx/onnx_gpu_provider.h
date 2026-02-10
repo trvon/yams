@@ -109,6 +109,11 @@ inline void setEnvIfAbsent(const char* name, const std::string& value) {
 // recompilation overhead on subsequent loads).
 inline std::string appendGpuProvider(Ort::SessionOptions& opts,
                                      const std::string& modelCacheDir = "") {
+    constexpr const char kProviderMIGraphX[] = "MIGraphX";
+    constexpr const char kProviderMIGraphXAvailable[] = "MIGraphXExecutionProvider";
+    constexpr const char kMIGraphXModelCacheDirKey[] = "migraphx_model_cache_dir";
+    constexpr const char kOrtMIGraphXModelCachePathEnv[] = "ORT_MIGRAPHX_MODEL_CACHE_PATH";
+
     std::vector<std::string> providers;
     try {
         providers = Ort::GetAvailableProviders();
@@ -162,7 +167,7 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
     // -----------------------------------------------------------------
     // MIGraphX (AMD ROCm) — modern string-map API
     // -----------------------------------------------------------------
-    if (has("MIGraphXExecutionProvider")) {
+    if (has(kProviderMIGraphXAvailable)) {
         try {
             // IMPORTANT: In ORT 1.23.x the legacy OrtMIGraphXProviderOptions constructor
             // does not propagate model cache dir / compiled caching settings.
@@ -220,37 +225,39 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
                 std::error_code ec;
                 std::filesystem::create_directories(cacheDir, ec);
 
+                const std::string cacheDirStr = cacheDir.string();
                 const bool hit = detail::directoryHasMxrFiles(cacheDir);
 
                 // Defensive: some ORT ROCm builds appear to still consult the env override
                 // even when provider options are set. Setting this (without overriding user
                 // configuration) avoids attempts to write to an empty cache dir (""/hash.mxr).
-                constexpr const char kOrtCacheEnv[] = "ORT_MIGRAPHX_MODEL_CACHE_PATH";
-                detail::setEnvIfAbsent(kOrtCacheEnv, cacheDir.string());
-                if (!std::getenv(kOrtCacheEnv) && !cacheDir.string().empty()) {
+                detail::setEnvIfAbsent(kOrtMIGraphXModelCachePathEnv, cacheDirStr);
+                if (!std::getenv(kOrtMIGraphXModelCachePathEnv) && !cacheDirStr.empty()) {
                     // Unreachable due to setEnvIfAbsent, but keep logic simple.
                     // (If setenv failed, getenv would still be null.)
                     spdlog::warn("[ONNX] Failed to set ORT_MIGRAPHX_MODEL_CACHE_PATH; caching may fail");
                 } else {
-                    spdlog::debug("[ONNX] ORT_MIGRAPHX_MODEL_CACHE_PATH={}", cacheDir.string());
+                    spdlog::debug("[ONNX] ORT_MIGRAPHX_MODEL_CACHE_PATH={}", cacheDirStr);
                 }
                 if (hit) {
-                    spdlog::info("[ONNX] MIGraphX compiled cache hit (dir={})", cacheDir.string());
+                    spdlog::info("[ONNX] MIGraphX compiled cache hit (dir={})", cacheDirStr);
                 } else if (loadCompiled) {
-                    spdlog::info("[ONNX] MIGraphX compiled cache miss (dir={})", cacheDir.string());
+                    spdlog::info("[ONNX] MIGraphX compiled cache miss (dir={})", cacheDirStr);
                 }
 
-                migraphx_opts["migraphx_model_cache_dir"] = cacheDir.string();
+                migraphx_opts[kMIGraphXModelCacheDirKey] = cacheDirStr;
                 if (!hit) {
                     spdlog::info("[ONNX] MIGraphX will save compiled artifact under: {}",
-                                 cacheDir.string());
+                                 cacheDirStr);
                 }
                 spdlog::info("[ONNX] MIGraphX cache config: migraphx_model_cache_dir='{}' ORT_MIGRAPHX_MODEL_CACHE_PATH='{}'",
-                             migraphx_opts["migraphx_model_cache_dir"],
-                             (std::getenv(kOrtCacheEnv) ? std::getenv(kOrtCacheEnv) : "(unset)"));
+                             migraphx_opts[kMIGraphXModelCacheDirKey],
+                             (std::getenv(kOrtMIGraphXModelCachePathEnv)
+                                  ? std::getenv(kOrtMIGraphXModelCachePathEnv)
+                                  : "(unset)"));
             }
 
-            opts.AppendExecutionProvider("MIGraphX", migraphx_opts);
+            opts.AppendExecutionProvider(kProviderMIGraphX, migraphx_opts);
             static std::atomic<bool> logged_migraphx{false};
             if (!logged_migraphx.exchange(true)) {
                 spdlog::info(

@@ -7,6 +7,8 @@
 
 #include <cstdlib>
 
+#include "../../common/test_helpers_catch2.h"
+
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/RepairService.h>
@@ -18,29 +20,6 @@ using namespace yams;
 using namespace yams::daemon;
 
 namespace {
-
-class EnvGuard {
-    std::string name_;
-    std::string prev_;
-    bool hadPrev_;
-
-public:
-    EnvGuard(const char* name, const char* value) : name_(name), hadPrev_(false) {
-        if (const char* existing = std::getenv(name)) {
-            prev_ = existing;
-            hadPrev_ = true;
-        }
-        setenv(name, value, 1);
-    }
-    ~EnvGuard() {
-        if (hadPrev_)
-            setenv(name_.c_str(), prev_.c_str(), 1);
-        else
-            unsetenv(name_.c_str());
-    }
-    EnvGuard(const EnvGuard&) = delete;
-    EnvGuard& operator=(const EnvGuard&) = delete;
-};
 
 template <typename T> void drainQueue(const std::shared_ptr<SpscQueue<T>>& q) {
     if (!q)
@@ -99,10 +78,11 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     drainQueue(postIngestTasks);
 
     // Ensure optional subsystems don't trigger heavy init in this unit test.
-    EnvGuard disableVectors("YAMS_DISABLE_VECTORS", "1");
-    EnvGuard disableVectorDb("YAMS_DISABLE_VECTOR_DB", "1");
-    EnvGuard skipModelLoading("YAMS_SKIP_MODEL_LOADING", "1");
-    EnvGuard safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE", "1");
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
     REQUIRE(sm->initialize());

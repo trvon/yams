@@ -12,6 +12,8 @@
 #include <yams/daemon/resource/onnx_model_pool.h>
 
 #include <atomic>
+#include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -54,6 +56,43 @@ static bool checkModelAvailable(const std::string& modelName) {
     if (root.empty())
         return false;
     return fs::exists(fs::path(root) / modelName / "model.onnx");
+}
+
+// ---------------------------------------------------------------------------
+// Latency stats helpers
+// ---------------------------------------------------------------------------
+struct LatencyStats {
+    std::int64_t avgMs = 0;
+    std::int64_t p50Ms = 0;
+    std::int64_t p95Ms = 0;
+};
+
+static std::int64_t percentileNearestRankMs(std::vector<std::int64_t> samples,
+                                           double percentile01) {
+    if (samples.empty())
+        return 0;
+    if (percentile01 <= 0.0)
+        percentile01 = 0.0;
+    if (percentile01 >= 1.0)
+        percentile01 = 1.0;
+
+    std::sort(samples.begin(), samples.end());
+    const size_t n = samples.size();
+    const size_t idx = static_cast<size_t>(std::llround(percentile01 * static_cast<double>(n - 1)));
+    return samples[std::min(idx, n - 1)];
+}
+
+static LatencyStats computeLatencyStatsMs(const std::vector<std::int64_t>& samples) {
+    LatencyStats st;
+    if (samples.empty())
+        return st;
+    std::int64_t sum = 0;
+    for (auto v : samples)
+        sum += v;
+    st.avgMs = sum / static_cast<std::int64_t>(samples.size());
+    st.p50Ms = percentileNearestRankMs(samples, 0.50);
+    st.p95Ms = percentileNearestRankMs(samples, 0.95);
+    return st;
 }
 
 // ---------------------------------------------------------------------------
@@ -433,6 +472,13 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
 // ---------------------------------------------------------------------------
 TEST_CASE("ONNX Diagnostic: CoreML config variants",
           "[daemon][onnx][diagnostic][.requires_model]") {
+    auto providers = Ort::GetAvailableProviders();
+    const bool hasCoreML =
+        std::find(providers.begin(), providers.end(), "CoreMLExecutionProvider") != providers.end();
+    if (!hasCoreML) {
+        SKIP("CoreMLExecutionProvider not available (non-macOS build)");
+    }
+
     if (!checkModelAvailable(kModelName)) {
         SKIP("Model " + kModelName + " not found at ~/.yams/models/" + kModelName +
              "/model.onnx. Download with: yams model --download " + kModelName);
@@ -573,6 +619,180 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
     UNSCOPED_INFO("================================================================");
 
     // At minimum, the CPU control should work
+    REQUIRE(!results.empty());
+    CHECK(results.back().ok);
+}
+
+// ---------------------------------------------------------------------------
+// 5b. MIGraphX (ROCm) configuration variants benchmark
+//     Parity with CoreML table: separate first inference from steady-state.
+// ---------------------------------------------------------------------------
+TEST_CASE("ONNX Diagnostic: MIGraphX config variants",
+          "[daemon][onnx][diagnostic][.requires_model]") {
+    auto providers = Ort::GetAvailableProviders();
+    const bool hasMIGraphX =
+        std::find(providers.begin(), providers.end(), "MIGraphXExecutionProvider") != providers.end();
+    if (!hasMIGraphX) {
+        SKIP("MIGraphXExecutionProvider not available (no ROCm / no MIGraphX EP)");
+    }
+
+    if (!checkModelAvailable(kModelName)) {
+        SKIP("Model " + kModelName + " not found at ~/.yams/models/" + kModelName +
+             "/model.onnx. Download with: yams model --download " + kModelName);
+    }
+
+    const std::vector<std::string> texts = {"hello world", "diagnostic benchmark text"};
+    constexpr int kWarmIterationsGpu = 30;
+    constexpr int kWarmIterationsCpu = 5;
+
+    struct Variant {
+        std::string label;
+        bool enableGpu;
+        bool fp16;
+    };
+
+    std::vector<Variant> variants = {
+        {"ROCm: MIGraphX (cache)", true, false},
+        {"ROCm: MIGraphX fp16 (cache)", true, true},
+        {"CPU-only (control)", false, false},
+    };
+
+    struct ResultRow {
+        std::string label;
+        std::int64_t loadMs = 0;
+        std::int64_t firstInferMs = 0;
+        LatencyStats warm;
+        double textsPerSec = 0.0;
+        std::string ep;
+        bool ok = false;
+        std::string error;
+    };
+
+    auto now = []() { return std::chrono::steady_clock::now(); };
+    auto elapsedMs = [](auto start) -> std::int64_t {
+        return static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::steady_clock::now() - start)
+                                             .count());
+    };
+
+    std::vector<ResultRow> results;
+    results.reserve(variants.size());
+
+    for (const auto& variant : variants) {
+        ResultRow row;
+        row.label = variant.label;
+
+        // Configure MIGraphX knobs for this run.
+        if (variant.enableGpu) {
+            ::setenv("YAMS_MIGRAPHX_FP16", variant.fp16 ? "1" : "0", 1);
+            ::setenv("YAMS_MIGRAPHX_FP8", "0", 1);
+            ::setenv("YAMS_MIGRAPHX_INT8", "0", 1);
+            ::setenv("YAMS_MIGRAPHX_EXHAUSTIVE_TUNE", "0", 1);
+            // Keep caching enabled by default; relies on model directory cache.
+            ::setenv("YAMS_MIGRAPHX_SAVE_COMPILED", "1", 1);
+            ::setenv("YAMS_MIGRAPHX_LOAD_COMPILED", "1", 1);
+        }
+
+        {
+            DiagnosticFixture fix(variant.enableGpu);
+            fix.pool_ = std::make_unique<OnnxModelPool>(fix.config_);
+            auto init = fix.pool_->initialize();
+            REQUIRE(init);
+
+            try {
+                auto tLoad = now();
+                auto h = fix.pool_->acquireModel(kModelName, 120s);
+                row.loadMs = elapsedMs(tLoad);
+                if (!h) {
+                    row.error = "load: " + h.error().message;
+                    results.push_back(row);
+                    continue;
+                }
+
+                auto& s = *h.value();
+                row.ep = s.getExecutionProvider();
+
+                // First inference (includes any lazy compilation / graph init).
+                // IMPORTANT: MIGraphX compiled artifacts appear shape-specialized; using the same
+                // batch shape as steady-state avoids cache mismatches (e.g., batch=1 vs batch=2).
+                auto tFirst = now();
+                auto warmup = const_cast<OnnxModelSession&>(s).generateBatchEmbeddings(texts);
+                row.firstInferMs = elapsedMs(tFirst);
+                if (!warmup) {
+                    row.error = "first infer: " + warmup.error().message;
+                    results.push_back(row);
+                    continue;
+                }
+
+                const int warmIters = variant.enableGpu ? kWarmIterationsGpu : kWarmIterationsCpu;
+                std::vector<std::int64_t> lat;
+                lat.reserve(static_cast<size_t>(warmIters));
+
+                for (int i = 0; i < warmIters; ++i) {
+                    auto t0 = now();
+                    auto r = const_cast<OnnxModelSession&>(s).generateBatchEmbeddings(texts);
+                    const std::int64_t dt = elapsedMs(t0);
+                    lat.push_back(dt);
+                    if (!r) {
+                        row.error = "embed iter " + std::to_string(i) + ": " + r.error().message;
+                        break;
+                    }
+                }
+
+                if (row.error.empty()) {
+                    row.warm = computeLatencyStatsMs(lat);
+                    const double textsPerCall = static_cast<double>(texts.size());
+                    row.textsPerSec = row.warm.avgMs > 0
+                        ? (textsPerCall / static_cast<double>(row.warm.avgMs)) * 1000.0
+                        : 0.0;
+                    row.ok = true;
+                }
+            } catch (const std::exception& ex) {
+                row.error = std::string("exception: ") + ex.what();
+            }
+        }
+
+        if (variant.enableGpu) {
+            ::unsetenv("YAMS_MIGRAPHX_FP16");
+            ::unsetenv("YAMS_MIGRAPHX_FP8");
+            ::unsetenv("YAMS_MIGRAPHX_INT8");
+            ::unsetenv("YAMS_MIGRAPHX_EXHAUSTIVE_TUNE");
+            ::unsetenv("YAMS_MIGRAPHX_SAVE_COMPILED");
+            ::unsetenv("YAMS_MIGRAPHX_LOAD_COMPILED");
+        }
+
+        results.push_back(row);
+    }
+
+    // ---- Report ----
+    UNSCOPED_INFO("========================================================================================");
+    UNSCOPED_INFO("  MIGraphX (ROCm) Config Variants Benchmark");
+    UNSCOPED_INFO("  Load      = acquireModel() (session create / provider attach)");
+    UNSCOPED_INFO("  FirstInfer = first generateBatchEmbeddings() (compile / graph init if any)");
+    UNSCOPED_INFO("  Warm      = steady-state embedding latency over repeated calls");
+    UNSCOPED_INFO("========================================================================================");
+    UNSCOPED_INFO("  " << std::left << std::setw(28) << "Config" << std::setw(10) << "EP" << std::setw(10)
+                       << "Load" << std::setw(12) << "FirstInfer" << std::setw(10) << "Avg" << std::setw(10)
+                       << "p50" << std::setw(10) << "p95" << std::setw(12) << "texts/s"
+                       << "Status");
+    UNSCOPED_INFO("  " << std::string(92, '-'));
+    for (const auto& r : results) {
+        if (r.ok) {
+            UNSCOPED_INFO("  " << std::left << std::setw(28) << r.label << std::setw(10)
+                               << (r.ep.empty() ? "?" : r.ep) << std::setw(10) << r.loadMs << std::setw(12)
+                               << r.firstInferMs << std::setw(10) << r.warm.avgMs << std::setw(10)
+                               << r.warm.p50Ms << std::setw(10) << r.warm.p95Ms << std::fixed
+                               << std::setprecision(1) << std::setw(12) << r.textsPerSec << "OK");
+        } else {
+            UNSCOPED_INFO("  " << std::left << std::setw(28) << r.label << std::setw(10)
+                               << (r.ep.empty() ? "?" : r.ep) << std::setw(10) << r.loadMs << std::setw(12)
+                               << r.firstInferMs << std::setw(10) << "-" << std::setw(10) << "-" << std::setw(10)
+                               << "-" << std::setw(12) << "-" << "FAIL: " << r.error);
+        }
+    }
+    UNSCOPED_INFO("========================================================================================");
+
+    // At minimum, CPU control should work.
     REQUIRE(!results.empty());
     CHECK(results.back().ok);
 }

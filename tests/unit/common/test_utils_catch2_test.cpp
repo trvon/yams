@@ -4,6 +4,7 @@
 #include <cstdlib>
 
 #include <yams/common/test_utils.h>
+#include <yams/compat/unistd.h>
 
 using yams::test::isModelDownloadAllowed;
 using yams::test::isTestDiscoveryMode;
