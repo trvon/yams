@@ -162,8 +162,7 @@ RequestHandler::RequestHandler(RequestDispatcher* dispatcher, Config config)
 RequestHandler::~RequestHandler() {}
 
 boost::asio::awaitable<std::vector<uint8_t>>
-RequestHandler::handle_request(std::vector<uint8_t> request_data,
-                               yams::compat::stop_token token) {
+RequestHandler::handle_request(std::vector<uint8_t> request_data, yams::compat::stop_token token) {
     (void)token; // unused
     auto data = std::move(request_data);
     using boost::asio::use_awaitable;
@@ -419,7 +418,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         std::lock_guard<std::mutex> lk(ctx_mtx_);
                         has_active = !contexts_.empty();
                     }
-                    
+
                     if (has_active) {
                         spdlog::info("Idle timeout hit with active work (inflight={} ctxs={}) "
                                      "after {} timeouts (fd={}); keeping connection open",
@@ -1900,7 +1899,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
 
         // Resolve RepairService (daemon-first)
         ServiceManager* sm = dispatcher_ ? dispatcher_->getServiceManager() : nullptr;
-        RepairService* rs = sm ? sm->getRepairService() : nullptr;
+        auto rs = sm ? sm->getRepairServiceShared() : std::shared_ptr<RepairService>{};
         if (!rs) {
             ErrorResponse err{ErrorCode::NotInitialized,
                               "RepairService not available; is the daemon fully initialized?"};

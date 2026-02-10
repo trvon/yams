@@ -2934,7 +2934,7 @@ public:
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 64)
-                    return v;
+                    return static_cast<uint32_t>(v * profileScale());
             } catch (...) {
             }
         }

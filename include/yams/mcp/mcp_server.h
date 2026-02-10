@@ -224,6 +224,24 @@ private:
         false};                   // Set when client supports io.modelcontextprotocol/ui
     std::string mcpAppsMimeType_; // The negotiated mime type (e.g., "text/html;profile=mcp-app")
 
+    // --- MCP Apps UI Resources ---
+    struct UIResource {
+        std::string uri;         // ui://...
+        std::string name;        // Human-readable
+        std::string description; // Optional
+        std::string mimeType;    // e.g., text/html;profile=mcp-app
+        std::string htmlContent; // HTML template content
+        json meta;               // Extension-specific metadata (CSP, permissions, etc.)
+    };
+
+    void ensureUiResourcesInitialized();
+    bool isUiResourceUri(const std::string& uri) const;
+    json uiResourcesAsMcpResources();
+    json readUiResource(const std::string& uri);
+
+    std::once_flag uiResourcesInitOnce_{};
+    std::unordered_map<std::string, UIResource> uiResources_;
+
     // --- Cancellation scaffolding ---
     // Each in-flight request id can be marked cancelable; a cancellation sets the token to true.
     mutable std::mutex cancelMutex_;

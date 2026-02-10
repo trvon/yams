@@ -15,7 +15,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleRepairRequest(const Re
         co_return ErrorResponse{ErrorCode::NotInitialized, "ServiceManager not available"};
     }
 
-    auto* repairService = serviceManager_->getRepairService();
+    auto repairService = serviceManager_->getRepairServiceShared();
     if (!repairService) {
         co_return ErrorResponse{ErrorCode::NotInitialized,
                                 "RepairService not running; is auto-repair enabled?"};

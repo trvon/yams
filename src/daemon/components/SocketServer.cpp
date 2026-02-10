@@ -30,6 +30,7 @@ bool stream_trace_enabled() {
 } // namespace
 
 #include <spdlog/spdlog.h>
+#include <atomic>
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
@@ -494,19 +495,17 @@ void SocketServer::setWriterBudget(std::size_t bytes) {
 
 awaitable<void> SocketServer::accept_loop(bool isProxy) {
     static const bool trace = stream_trace_enabled();
-    static bool trace_env_logged = false;
-    static bool logged_entry = false;
+    static std::atomic<bool> trace_env_logged{false};
+    static std::atomic<bool> logged_entry{false};
 
     const char* loopLabel = isProxy ? "proxy" : "main";
     auto* activeAcceptor = isProxy ? proxyAcceptor_.get() : acceptor_.get();
 
     spdlog::debug("{} accept loop started", loopLabel);
-    if (!logged_entry) {
-        logged_entry = true;
+    if (!logged_entry.exchange(true, std::memory_order_relaxed)) {
         spdlog::info("SocketServer: accept_loop coroutine entered");
     }
-    if (!trace && !trace_env_logged) {
-        trace_env_logged = true;
+    if (!trace && !trace_env_logged.exchange(true, std::memory_order_relaxed)) {
         if (const char* raw = std::getenv("YAMS_STREAM_TRACE")) {
             spdlog::info("stream-trace: accept_loop env present but disabled ('{}')", raw);
         } else {

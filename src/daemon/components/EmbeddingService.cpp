@@ -1,7 +1,9 @@
 #include <yams/daemon/components/EmbeddingService.h>
 
 #include <spdlog/spdlog.h>
+
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <string>
@@ -102,7 +104,8 @@ void EmbeddingService::setProviders(
 }
 
 std::size_t EmbeddingService::queuedJobs() const {
-    const std::size_t ch = embedChannel_ ? embedChannel_->size_approx() : 0;
+    const auto chPtr = std::atomic_load_explicit(&embedChannel_, std::memory_order_acquire);
+    const std::size_t ch = chPtr ? chPtr->size_approx() : 0;
     const std::size_t pending = this->pendingApprox_.load(std::memory_order_relaxed);
     return ch + pending;
 }
@@ -128,6 +131,8 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
         bool didWork = false;
         InternalEventBus::EmbedJob job;
 
+        auto channel = std::atomic_load_explicit(&embedChannel_, std::memory_order_acquire);
+
         // Dynamic concurrency from TuneAdvisor (scaled by TuningManager), plus local
         // pressure-based ramp to avoid staying under-utilized while embed backlog spikes.
         const std::size_t baseConcurrent =
@@ -135,7 +140,7 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
         const std::size_t hardConcurrentCap =
             std::max<std::size_t>(baseConcurrent, TuneAdvisor::getEmbedMaxConcurrency());
         const std::size_t maxBatchSize = TuneAdvisor::resolvedEmbedDocCap();
-        const std::size_t channelBacklog = embedChannel_ ? embedChannel_->size_approx() : 0;
+        const std::size_t channelBacklog = channel ? channel->size_approx() : 0;
         const std::size_t bufferedBacklog = channelBacklog + this->pendingJobs_.size();
 
         std::size_t effectiveMaxConcurrent = baseConcurrent;
@@ -173,7 +178,7 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
         }
 
         // Pull jobs into pending buffer to allow model-based grouping
-        while (embedChannel_ && embedChannel_->try_pop(job)) {
+        while (channel && channel->try_pop(job)) {
             didWork = true;
             this->pendingJobs_.push_back(std::move(job));
             if (this->pendingJobs_.size() >= maxPendingJobs) {
