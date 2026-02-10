@@ -21,4 +21,4 @@
 	url = https://github.com/trvon/yams-symspell.git
 [submodule "external/opencode-blackboard"]
 	path = external/opencode-blackboard
-	url = git@github.com:trvon/opencode-blackboard.git
+	url = https://github.com/trvon/opencode-blackboard.git
