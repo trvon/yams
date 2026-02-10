@@ -739,11 +739,16 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                 // Scale max tokens based on VRAM (larger VRAM -> larger batches)
                 // Base: 262144 tokens for 8GB VRAM, scale linearly
                 double vramScale = static_cast<double>(gpu.vramBytes) / (8.0 * 1024 * 1024 * 1024);
-                bcfg.maxTokens = static_cast<size_t>(262144.0 * std::clamp(vramScale, 0.25, 4.0));
-                spdlog::info("[Embedding] GPU detected: {} ({:.1f} GB VRAM), maxTokens={}",
-                             gpu.name,
-                             static_cast<double>(gpu.vramBytes) / (1024.0 * 1024.0 * 1024.0),
-                             bcfg.maxTokens);
+                const double profileScale = yams::daemon::TuneAdvisor::profileScale();
+                // Efficient -> 25% of VRAM-based budget, Balanced -> 62.5%, Aggressive -> 100%
+                const double profileFactor = 0.25 + 0.75 * std::clamp(profileScale, 0.0, 1.0);
+                bcfg.maxTokens = static_cast<size_t>(
+                    262144.0 * std::clamp(vramScale, 0.25, 4.0) * profileFactor);
+                spdlog::debug(
+                    "[Embedding] GPU detected: {} ({:.1f} GB VRAM), profile_scale={:.2f}, maxTokens={}",
+                    gpu.name,
+                    static_cast<double>(gpu.vramBytes) / (1024.0 * 1024.0 * 1024.0),
+                    profileScale, bcfg.maxTokens);
             }
         }
 

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/resource/gpu_info.h>
+
 #include <onnxruntime_cxx_api.h>
 #include <spdlog/spdlog.h>
 
@@ -57,6 +60,26 @@ inline size_t envSizeT(const char* name, size_t fallback) {
     } catch (...) {
         return fallback;
     }
+}
+
+inline std::optional<size_t> envSizeTOpt(const char* name) {
+    const char* v = std::getenv(name);
+    if (!v || !v[0])
+        return std::nullopt;
+    try {
+        return static_cast<size_t>(std::stoull(v));
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+inline double profileGpuMemFraction() {
+    // Map TuneAdvisor profile to a conservative VRAM fraction.
+    // Efficient  -> ~55% (leave headroom for desktop + other workloads)
+    // Balanced   -> ~70%
+    // Aggressive -> ~85%
+    const double s = yams::daemon::TuneAdvisor::profileScale();
+    return std::clamp(0.55 + 0.30 * s, 0.10, 0.95);
 }
 
 inline std::string arenaExtendStrategyName(int v) {
@@ -179,8 +202,6 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
             const bool fp8 = detail::envBool("YAMS_MIGRAPHX_FP8", false);
             const bool int8 = detail::envBool("YAMS_MIGRAPHX_INT8", false);
             const bool exhaustiveTune = detail::envBool("YAMS_MIGRAPHX_EXHAUSTIVE_TUNE", false);
-            const size_t memLimit =
-                detail::envSizeT("YAMS_MIGRAPHX_MEM_LIMIT", std::numeric_limits<size_t>::max());
             const int arenaExtend = detail::envInt("YAMS_MIGRAPHX_ARENA_EXTEND_STRATEGY", 0);
 
             migraphx_opts["device_id"] = std::to_string(deviceId);
@@ -188,8 +209,33 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
             migraphx_opts["migraphx_fp8_enable"] = fp8 ? "1" : "0";
             migraphx_opts["migraphx_int8_enable"] = int8 ? "1" : "0";
             migraphx_opts["migraphx_exhaustive_tune"] = exhaustiveTune ? "1" : "0";
-            migraphx_opts["migraphx_mem_limit"] = std::to_string(memLimit);
             migraphx_opts["migraphx_arena_extend_strategy"] = detail::arenaExtendStrategyName(arenaExtend);
+
+            // Profile-aware VRAM budgeting. If YAMS_MIGRAPHX_MEM_LIMIT is set, it always wins.
+            // Otherwise, set a conservative fraction of total VRAM (when detectable) so we
+            // don't default to effectively "use 100% GPU".
+            {
+                if (auto overrideLimit = detail::envSizeTOpt("YAMS_MIGRAPHX_MEM_LIMIT")) {
+                    migraphx_opts["migraphx_mem_limit"] = std::to_string(*overrideLimit);
+                } else {
+                    const auto& gpu = yams::daemon::resource::detectGpu();
+                    if (gpu.detected && gpu.vramBytes > 0 &&
+                        gpu.vramBytes <=
+                            static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+                        const double frac = detail::profileGpuMemFraction();
+                        uint64_t budget = static_cast<uint64_t>(
+                            static_cast<double>(gpu.vramBytes) * std::clamp(frac, 0.0, 1.0));
+                        constexpr uint64_t kMinBudgetBytes = 256ull * 1024ull * 1024ull;
+                        budget = std::clamp(budget, kMinBudgetBytes, gpu.vramBytes);
+                        migraphx_opts["migraphx_mem_limit"] =
+                            std::to_string(static_cast<size_t>(budget));
+                        spdlog::debug(
+                            "[ONNX] MIGraphX mem budget: {:.0f}% of VRAM ({} bytes / {} bytes) [profile_scale={:.2f}]",
+                            frac * 100.0, budget, gpu.vramBytes,
+                            yams::daemon::TuneAdvisor::profileScale());
+                    }
+                }
+            }
 
             // Optional INT8 calibration settings
             const bool useNativeCalTable = detail::envBool("YAMS_MIGRAPHX_USE_NATIVE_CAL_TABLE", false);
