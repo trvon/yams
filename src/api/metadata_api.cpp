@@ -416,7 +416,10 @@ QueryMetadataResponse MetadataApi::queryMetadata(const QueryMetadataRequest& req
         size_t startIdx = std::min(request.offset, filteredDocs.size());
         size_t endIdx = std::min(startIdx + request.limit, filteredDocs.size());
 
-        response.documents.assign(filteredDocs.begin() + startIdx, filteredDocs.begin() + endIdx);
+        if (startIdx < endIdx) {
+            response.documents.assign(filteredDocs.begin() + startIdx,
+                                      filteredDocs.begin() + endIdx);
+        }
         response.returnedCount = response.documents.size();
         response.hasMore = (endIdx < filteredDocs.size());
 

@@ -114,7 +114,14 @@ RUN --mount=type=cache,target=/root/.conan2 \
   meson compile -C build/release -j${BUILD_JOBS} && \
   meson install -C build/release --destdir /opt/yams
 
+# Stage 1.5: runtime self-test (fails the build if runtime deps are missing)
+FROM builder AS runtime-test
+RUN set -eux; \
+  /opt/yams/usr/local/bin/yams --version >/dev/null; \
+  if [ -x /opt/yams/usr/local/bin/yams-mcp-server ]; then /opt/yams/usr/local/bin/yams-mcp-server --help >/dev/null; fi
+
 FROM debian:trixie-slim AS runtime
+ARG DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \
   for i in 1 2 3; do \
   apt-get update && \

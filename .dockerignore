@@ -7,6 +7,17 @@ out/
 dist/
 target/
 
+# Nested build artifacts (subprojects/vendor)
+subprojects/*/target/
+subprojects/*/build/
+subprojects/*/build-*/
+subprojects/*/builddir/
+subprojects/*/zig-cache/
+subprojects/*/zig-out/
+
+# libsql can be checked out locally; keep sources, drop cargo outputs
+subprojects/libsql/target/
+
 # Beads task tracking (locked files cause context transfer failures)
 .beads/
 
@@ -19,6 +30,7 @@ CMakeUserPresets.json
 .conan/
 .conan2/
 .conan_cache/
+.conan2-local/
 
 # Python/Node junk
 __pycache__/
@@ -32,3 +44,5 @@ node_modules/
 # Fuzzing runtime outputs (often root-owned from containers)
 data/fuzz/
 
+# Local logs
+ci_logs/

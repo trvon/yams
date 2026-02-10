@@ -10,6 +10,7 @@
 #include <fstream>
 #include <future>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -105,11 +106,8 @@ struct Manifest {
 
     // Calculate total size from chunks
     [[nodiscard]] uint64_t calculateTotalSize() const noexcept {
-        uint64_t total = 0;
-        for (const auto& chunk : chunks) {
-            total += chunk.size;
-        }
-        return total;
+        return std::accumulate(chunks.begin(), chunks.end(), uint64_t{0},
+                               [](uint64_t acc, const auto& chunk) { return acc + chunk.size; });
     }
 
     // Get chunk count

@@ -3179,7 +3179,7 @@ Result<std::vector<uint8_t>> ProtoSerializer::encode_payload(const Message& msg)
     auto res = encode_payload_into(msg, out);
     if (!res)
         return res.error();
-    return std::move(out);
+    return out;
 }
 
 Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) {
@@ -3650,7 +3650,7 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             return Error{ErrorCode::InvalidData, "Unsupported or empty Envelope payload"};
     }
 
-    return std::move(m);
+    return m;
 }
 
 } // namespace daemon

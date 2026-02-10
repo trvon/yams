@@ -112,7 +112,7 @@ struct MetadataValue {
     }
 
     // Keep legacy accessors for compatibility
-    [[nodiscard]] std::string asString() const { return value; }
+    [[nodiscard]] const std::string& asString() const { return value; }
     [[nodiscard]] int64_t asInteger() const { return std::stoll(value); }
     [[nodiscard]] double asReal() const { return std::stod(value); }
     [[nodiscard]] bool asBoolean() const { return value == "1"; }

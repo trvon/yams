@@ -35,6 +35,21 @@
 *:*/examples/plugins/*
 
 # =============================================================================
+# Public DTOs / API structs
+# =============================================================================
+# Many header-only DTO structs are populated/consumed across TUs (serialization,
+# DB mapping, IPC, etc.). cppcheck reports unusedStructMember within a single TU.
+
+unusedStructMember:*include/yams/api/*
+unusedStructMember:*include/yams/core/types.h
+unusedStructMember:*include/yams/metadata/*
+unusedStructMember:*include/yams/vector/*
+unusedStructMember:*include/yams/content/*_content_handler.h
+
+# Various headers intentionally include private impl/rolling-window state.
+unusedStructMember:*include/yams/chunking/chunker.h
+
+# =============================================================================
 # C++20/23 feature false positives
 # =============================================================================
 # cppcheck doesn't fully support C++20/23 features like coroutines, concepts,
@@ -127,6 +142,16 @@ duplicateExpression:*query*
 constParameter:*hot_path*
 constParameter:*performance*
 constParameter:*fast_*
+
+# Result rendering: FilePathAdapter deliberately reports size=0.
+knownConditionTrueFalse:*include/yams/cli/result_renderer.h
+
+# Generated / schema-like code: avoid refactoring-only suggestions.
+functionStatic:*include/yams/daemon/ipc/ipc_protocol.h
+
+# Refactor-only suggestions we don't want to chase in normal workflow.
+useStlAlgorithm
+functionStatic
 
 # =============================================================================
 # Cppcheck false positives for control flow patterns

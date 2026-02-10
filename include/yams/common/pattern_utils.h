@@ -111,8 +111,9 @@ inline void brace_expand_impl(std::string_view pat, std::vector<std::string>& ou
                 size_t innerLevel = 0;
                 for (size_t pos = 0; pos <= inner.size(); ++pos) {
                     const bool atEnd = (pos == inner.size());
-                    const char ch = atEnd ? '\0' : inner[pos];
+                    char ch = '\0';
                     if (!atEnd) {
+                        ch = inner[pos];
                         if (ch == '{') {
                             ++innerLevel;
                         } else if (ch == '}') {
