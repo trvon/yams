@@ -1103,7 +1103,7 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
     }
 
     auto startTime = std::chrono::steady_clock::now();
-    spdlog::info("[PostIngestQueue] KG batch starting for {} documents", jobs.size());
+    spdlog::debug("[PostIngestQueue] KG batch starting for {} documents", jobs.size());
 
     // Build DocumentGraphContext objects for batch processing
     std::vector<GraphComponent::DocumentGraphContext> contexts;
@@ -1130,8 +1130,9 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
     if (!result) {
         spdlog::error("[PostIngestQueue] KG batch failed: {}", result.error().message);
     } else {
-        spdlog::info("[PostIngestQueue] KG batch completed {} docs in {:.2f}ms (avg {:.2f}ms/doc)",
-                     jobs.size(), ms, ms / jobs.size());
+        spdlog::debug(
+            "[PostIngestQueue] KG batch completed {} docs in {:.2f}ms (avg {:.2f}ms/doc)",
+            jobs.size(), ms, ms / jobs.size());
     }
 }
 

@@ -88,7 +88,13 @@ private:
 
     static void set_env(const std::string& key, std::optional<std::string> value) {
 #ifdef _WIN32
-        _putenv_s(key.c_str(), value ? value->c_str() : "");
+        if (value) {
+            _putenv_s(key.c_str(), value->c_str());
+        } else {
+            // MSVC does not provide setenv/unsetenv; `_putenv("KEY=")` removes the variable.
+            std::string entry = key + "=";
+            _putenv(entry.c_str());
+        }
 #else
         if (value) {
             ::setenv(key.c_str(), value->c_str(), 1);

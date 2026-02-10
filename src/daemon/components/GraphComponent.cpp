@@ -342,8 +342,8 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
     auto duration = std::chrono::steady_clock::now() - startTime;
     double ms = std::chrono::duration<double, std::milli>(duration).count();
 
-    spdlog::info("[GraphComponent] Batch ingested {} contexts ({} jobs, {} skipped) in {:.2f}ms",
-                 contexts.size(), extractionJobs.size(), skipped, ms);
+    spdlog::debug("[GraphComponent] Batch ingested {} contexts ({} jobs, {} skipped) in {:.2f}ms",
+                  contexts.size(), extractionJobs.size(), skipped, ms);
 
     return Result<void>();
 }

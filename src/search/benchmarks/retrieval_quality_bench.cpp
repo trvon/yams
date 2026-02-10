@@ -1216,7 +1216,7 @@ struct BenchFixture {
                         it != statusResult.value().readinessStates.end()) {
                         vectorDbReady = it->second;
                     }
-                    spdlog::info(
+                    spdlog::debug(
                         "Documents: total={} indexed={} / {} | queue={} inflight={} | extracted={} "
                         "processed={} | extract={} kg={} symbol={} entity={} (total={}) | "
                         "embed_queue={} embed_in_flight={} vectors={} (ready={})",

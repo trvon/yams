@@ -240,21 +240,22 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
                     spdlog::debug("[ONNX] ORT_MIGRAPHX_MODEL_CACHE_PATH={}", cacheDirStr);
                 }
                 if (hit) {
-                    spdlog::info("[ONNX] MIGraphX compiled cache hit (dir={})", cacheDirStr);
+                    spdlog::debug("[ONNX] MIGraphX compiled cache hit (dir={})", cacheDirStr);
                 } else if (loadCompiled) {
-                    spdlog::info("[ONNX] MIGraphX compiled cache miss (dir={})", cacheDirStr);
+                    spdlog::debug("[ONNX] MIGraphX compiled cache miss (dir={})", cacheDirStr);
                 }
 
                 migraphx_opts[kMIGraphXModelCacheDirKey] = cacheDirStr;
                 if (!hit) {
-                    spdlog::info("[ONNX] MIGraphX will save compiled artifact under: {}",
-                                 cacheDirStr);
+                    spdlog::debug("[ONNX] MIGraphX will save compiled artifact under: {}",
+                                  cacheDirStr);
                 }
-                spdlog::info("[ONNX] MIGraphX cache config: migraphx_model_cache_dir='{}' ORT_MIGRAPHX_MODEL_CACHE_PATH='{}'",
-                             migraphx_opts[kMIGraphXModelCacheDirKey],
-                             (std::getenv(kOrtMIGraphXModelCachePathEnv)
-                                  ? std::getenv(kOrtMIGraphXModelCachePathEnv)
-                                  : "(unset)"));
+                spdlog::debug(
+                    "[ONNX] MIGraphX cache config: migraphx_model_cache_dir='{}' ORT_MIGRAPHX_MODEL_CACHE_PATH='{}'",
+                    migraphx_opts[kMIGraphXModelCacheDirKey],
+                    (std::getenv(kOrtMIGraphXModelCachePathEnv)
+                         ? std::getenv(kOrtMIGraphXModelCachePathEnv)
+                         : "(unset)"));
             }
 
             opts.AppendExecutionProvider(kProviderMIGraphX, migraphx_opts);

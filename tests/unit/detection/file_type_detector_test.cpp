@@ -6,6 +6,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/detection/file_type_detector.h>
 
+#include "../../common/test_helpers_catch2.h"
+
 #include "detection_test_helpers.h"
 
 using namespace yams::detection;
@@ -13,33 +15,6 @@ using yams::detection::test_utils::ScopedCurrentPath;
 using yams::detection::test_utils::TestDirectory;
 
 namespace {
-class ScopedEnvVar {
-public:
-    ScopedEnvVar(const char* name, const std::string& value) : name_(name) {
-        if (const char* old = std::getenv(name)) {
-            oldValue_ = old;
-        }
-        ::setenv(name, value.c_str(), 1);
-    }
-
-    ~ScopedEnvVar() {
-        if (oldValue_) {
-            ::setenv(name_, oldValue_->c_str(), 1);
-        } else {
-            ::unsetenv(name_);
-        }
-    }
-
-    ScopedEnvVar(const ScopedEnvVar&) = delete;
-    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
-    ScopedEnvVar(ScopedEnvVar&&) = delete;
-    ScopedEnvVar& operator=(ScopedEnvVar&&) = delete;
-
-private:
-    const char* name_;
-    std::optional<std::string> oldValue_;
-};
-
 struct DetectorFixture {
     DetectorFixture() = default;
     ~DetectorFixture() = default;
@@ -318,7 +293,7 @@ TEST_CASE_METHOD(DetectorFixture, "Text extensions include common and additional
 TEST_CASE_METHOD(DetectorFixture, "findMagicNumbersFile honors YAMS_DATA_DIR",
                  "[detection][init]") {
     const auto expected = dir.createDataFile("magic_numbers.json", "{\"patterns\": []}\n");
-    ScopedEnvVar env("YAMS_DATA_DIR", dir.root().string());
+    yams::test::ScopedEnvVar env("YAMS_DATA_DIR", std::optional<std::string>{dir.root().string()});
     ScopedCurrentPath cwdGuard(dir.root());
 
     const auto found = FileTypeDetector::findMagicNumbersFile();
@@ -328,7 +303,7 @@ TEST_CASE_METHOD(DetectorFixture, "findMagicNumbersFile honors YAMS_DATA_DIR",
 TEST_CASE("initializeWithMagicNumbers is idempotent", "[detection][init]") {
     TestDirectory dir{};
     (void)dir.createDataFile("magic_numbers.json", "{\"patterns\": []}\n");
-    ScopedEnvVar env("YAMS_DATA_DIR", dir.root().string());
+    yams::test::ScopedEnvVar env("YAMS_DATA_DIR", std::optional<std::string>{dir.root().string()});
     ScopedCurrentPath cwdGuard(dir.root());
 
     auto r1 = FileTypeDetector::initializeWithMagicNumbers();
