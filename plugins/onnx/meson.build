@@ -67,6 +67,12 @@ if not boost_dep.found()
   boost_dep = dependency('boost', required: false)
 endif
 
+win_extra_deps = []
+if host_machine.system() == 'windows'
+  cpp = meson.get_compiler('cpp')
+  win_extra_deps += [cpp.find_library('dxgi', required: true)]
+endif
+
 onnx_opt = get_option('enable-onnx')
 onnx_feature_requested = not onnx_opt.disabled()
 onnx_genai_headers_present = false
@@ -163,7 +169,7 @@ endif
 yams_onnx_plugin = shared_module('yams_onnx_plugin',
   yams_onnx_plugin_srcs,
   include_directories: [ include_directories('../../include') ],
-  dependencies: [onnx_dep, spdlog_dep, json_dep, yams_core, yams_vector, yams_onnx_resource, dependency('yams_daemon_client'), boost_dep],
+  dependencies: [onnx_dep, spdlog_dep, json_dep, yams_core, yams_vector, yams_onnx_resource, dependency('yams_daemon_client'), boost_dep] + win_extra_deps,
   cpp_args: plugin_cppargs,
   install: true,
   install_dir: plugins_dir,

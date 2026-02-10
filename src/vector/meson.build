@@ -208,10 +208,15 @@ yams_daemon_client = dependency('yams_daemon_client', required: true)
 
 deps_vec = [spdlog_dep, sqlite_dep, json_dep, fmt_dep, boost_dep, yams_core, yams_metadata, tl_expected_dep, yams_daemon_client]
 
+vector_platform_deps = []
+if host_machine.system() == 'windows'
+  vector_platform_deps += [cpp_comp.find_library('dxgi', required: true)]
+endif
+
 yams_vector = static_library('yams_vector',
   srcs,
   include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc],
-  dependencies: deps_vec,
+  dependencies: deps_vec + vector_platform_deps,
   cpp_args: vector_cppargs,
   install: true,
 )
@@ -226,5 +231,6 @@ pkg.generate(yams_vector,
 yams_vector_dep = declare_dependency(
   link_with: yams_vector,
   include_directories: include_directories('../../include'),
+  dependencies: vector_platform_deps,
 )
 meson.override_dependency('yams_vector', yams_vector_dep)

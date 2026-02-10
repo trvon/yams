@@ -372,10 +372,10 @@ echo "--- Exporting custom Conan recipes... ---"
 # Export custom onnxruntime recipe if it exists
 if [[ -f "conan/onnxruntime/conanfile.py" ]]; then
   # Avoid sporadic Conan cache race/collision errors by retrying export once.
-  echo "Exporting onnxruntime/1.23.2 from conan/onnxruntime/"
-  if ! conan export conan/onnxruntime --name=onnxruntime --version=1.23.2; then
-    echo "Retrying conan export onnxruntime/1.23.2..."
-    conan export conan/onnxruntime --name=onnxruntime --version=1.23.2
+  echo "Exporting onnxruntime/1.23.0 from conan/onnxruntime/"
+  if ! conan export conan/onnxruntime --name=onnxruntime --version=1.23.0; then
+    echo "Retrying conan export onnxruntime/1.23.0..."
+    conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
   fi
 fi
 

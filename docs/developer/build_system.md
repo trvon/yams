@@ -77,7 +77,7 @@ meson test -C builddir
 ```pwsh
 # Export local recipes (required once)
 conan export conan/qpdf --name=qpdf --version=11.9.0
-conan export conan/onnxruntime --name=onnxruntime --version=1.23.2
+conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
 
 # Debug dependencies
 conan install . -of build\debug `

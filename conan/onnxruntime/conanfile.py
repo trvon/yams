@@ -9,7 +9,10 @@ import subprocess
 
 class OnnxRuntimeConan(ConanFile):
     name = "onnxruntime"
-    version = "1.23.2"
+    # NOTE: Windows DirectML binaries are distributed via NuGet and the latest
+    # DirectML package versions may lag behind GitHub release tags.
+    # As of Feb 2026, Microsoft.ML.OnnxRuntime.DirectML is published as 1.23.0.
+    version = "1.23.0"
     license = "MIT"
     url = "https://github.com/microsoft/onnxruntime"
     description = "ONNX Runtime: cross-platform, high performance ML inferencing and training accelerator"
@@ -423,7 +426,119 @@ class OnnxRuntimeConan(ConanFile):
 
     def _package_prebuilt(self):
         """Package prebuilt binaries"""
-        # Find the extracted directory
+        gpu = str(self.options.with_gpu) if self.options.with_gpu else None
+
+        # Windows DirectML builds are distributed via NuGet (nupkg). Conan's get()
+        # extracts the nupkg into the build folder root (no onnxruntime-* directory),
+        # with native artifacts typically under runtimes/win-x64/native.
+        if str(self.settings.os) == "Windows" and gpu == "directml" and os.path.isdir(
+            os.path.join(self.build_folder, "runtimes")
+        ):
+            native_candidates = [
+                os.path.join(self.build_folder, "runtimes", "win-x64", "native"),
+                os.path.join(self.build_folder, "runtimes", "win10-x64", "native"),
+            ]
+            native_src = next(
+                (p for p in native_candidates if os.path.isdir(p)),
+                None,
+            )
+            if not native_src:
+                self.output.error("DirectML NuGet layout detected but native folder not found")
+                self.output.info(f"Build folder contents: {os.listdir(self.build_folder)}")
+                raise ConanInvalidConfiguration(
+                    "ONNX Runtime DirectML native binaries not found in NuGet package"
+                )
+
+            lib_dst = os.path.join(self.package_folder, "lib")
+            bin_dst = os.path.join(self.package_folder, "bin")
+            mkdir(self, lib_dst)
+            mkdir(self, bin_dst)
+
+            copied_any = False
+            for item in os.listdir(native_src):
+                src_path = os.path.join(native_src, item)
+                if not os.path.isfile(src_path) and not os.path.islink(src_path):
+                    continue
+                if item.endswith(".dll"):
+                    shutil.copy2(src_path, os.path.join(bin_dst, item))
+                    self.output.info(f"Copied library: {item}")
+                    copied_any = True
+                elif item.endswith(".lib"):
+                    shutil.copy2(src_path, os.path.join(lib_dst, item))
+                    self.output.info(f"Copied library: {item}")
+                    copied_any = True
+
+            if not copied_any:
+                raise ConanInvalidConfiguration(
+                    "NuGet package did not contain any .dll/.lib artifacts under runtimes/*/native"
+                )
+
+            # Headers are not consistently shipped in the NuGet package; try common paths,
+            # then fall back to downloading the official CPU zip just for headers.
+            include_src = None
+            include_candidates = [
+                os.path.join(self.build_folder, "build", "native", "include"),
+                os.path.join(self.build_folder, "build", "include"),
+                os.path.join(self.build_folder, "include"),
+            ]
+            include_src = next((p for p in include_candidates if os.path.isdir(p)), None)
+
+            if not include_src:
+                headers_root = os.path.join(self.build_folder, "_headers")
+                mkdir(self, headers_root)
+                cpu_zip = (
+                    f"https://github.com/microsoft/onnxruntime/releases/download/v{self.version}/"
+                    f"onnxruntime-win-x64-{self.version}.zip"
+                )
+                self.output.info(f"Downloading ONNX Runtime headers from: {cpu_zip}")
+                get(self, cpu_zip, destination=headers_root, strip_root=False)
+
+                # Find extracted onnxruntime-* directory inside headers_root
+                extracted_dir = None
+                for item in os.listdir(headers_root):
+                    item_path = os.path.join(headers_root, item)
+                    if os.path.isdir(item_path) and item.startswith("onnxruntime-"):
+                        extracted_dir = item_path
+                        break
+                if extracted_dir:
+                    candidate = os.path.join(extracted_dir, "include")
+                    if os.path.isdir(candidate):
+                        include_src = candidate
+
+            if not include_src:
+                self.output.error("Could not locate ONNX Runtime headers for DirectML packaging")
+                raise ConanInvalidConfiguration(
+                    "ONNX Runtime headers not found (NuGet package lacks headers and header fallback failed)"
+                )
+
+            copy(
+                self,
+                "*.h",
+                src=include_src,
+                dst=os.path.join(self.package_folder, "include"),
+                keep_path=True,
+            )
+            copy(
+                self,
+                "*.hpp",
+                src=include_src,
+                dst=os.path.join(self.package_folder, "include"),
+                keep_path=True,
+            )
+
+            # Copy license/docs if present
+            for license_name in ["LICENSE", "ThirdPartyNotices.txt"]:
+                if os.path.exists(os.path.join(self.build_folder, license_name)):
+                    copy(
+                        self,
+                        license_name,
+                        src=self.build_folder,
+                        dst=os.path.join(self.package_folder, "licenses"),
+                        keep_path=False,
+                    )
+            return
+
+        # Default behavior: archives extracted into an onnxruntime-* root with include/ and lib/
         extracted_dir = None
         for item in os.listdir(self.build_folder):
             item_path = os.path.join(self.build_folder, item)
@@ -432,7 +547,7 @@ class OnnxRuntimeConan(ConanFile):
                 break
 
         if not extracted_dir:
-            self.output.error(f"Could not find extracted onnxruntime directory")
+            self.output.error("Could not find extracted onnxruntime directory")
             self.output.info(f"Build folder contents: {os.listdir(self.build_folder)}")
             raise ConanInvalidConfiguration(
                 "ONNX Runtime directory not found after extraction"
@@ -446,7 +561,6 @@ class OnnxRuntimeConan(ConanFile):
                 "ONNX Runtime headers not found in expected location"
             )
 
-        # Copy headers
         copy(
             self,
             "*.h",
@@ -454,7 +568,6 @@ class OnnxRuntimeConan(ConanFile):
             dst=os.path.join(self.package_folder, "include"),
             keep_path=True,
         )
-
         copy(
             self,
             "*.hpp",
@@ -463,7 +576,6 @@ class OnnxRuntimeConan(ConanFile):
             keep_path=True,
         )
 
-        # Copy libraries, preserving symlinks
         lib_src = os.path.join(extracted_dir, "lib")
         lib_dst = os.path.join(self.package_folder, "lib")
         bin_dst = os.path.join(self.package_folder, "bin")
@@ -494,7 +606,6 @@ class OnnxRuntimeConan(ConanFile):
                 shutil.copy2(src_path, dst_path)
                 self.output.info(f"Copied library: {item}")
 
-        # Copy license
         license_path = os.path.join(extracted_dir, "LICENSE")
         if os.path.exists(license_path):
             copy(
@@ -630,7 +741,10 @@ Cflags: -I${{includedir}}
             )
             self.cpp_info.defines = ["YAMS_ONNX_CUDA_ENABLED=1"]
         elif gpu == "directml":
-            self.cpp_info.libs.append("onnxruntime_providers_dml")
+            # The DirectML NuGet package layout used on Windows does not ship
+            # an import library named "onnxruntime_providers_dml" (and may not
+            # ship a separate providers DLL at all). Linking against it causes
+            # LNK1181. The DML EP is enabled via runtime provider registration.
             self.cpp_info.defines = ["YAMS_ONNX_DIRECTML_ENABLED=1"]
         elif gpu == "coreml":
             self.cpp_info.defines = ["YAMS_ONNX_COREML_ENABLED=1"]

@@ -116,7 +116,7 @@ meson compile -C build/debug
 ```pwsh
 # Export local Conan recipes (required once)
 conan export conan/qpdf --name=qpdf --version=11.9.0
-conan export conan/onnxruntime --name=onnxruntime --version=1.23.2
+conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
 
 # Release
 conan install . -of build\release `

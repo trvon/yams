@@ -8,7 +8,7 @@ from conan.tools.build import check_min_cppstd
 
 class YamsConan(ConanFile):
     name = "yams"
-    version = "0.8.0"
+    version = "0.9.0"
     license = "GPL-3.0-or-later"
     author = "YAMS Contributors"
     url = "https://github.com/trvon/yams"
@@ -66,9 +66,6 @@ class YamsConan(ConanFile):
         self.requires("protobuf/3.21.12")
         self.requires("taglib/2.0")
         self.requires("tl-expected/1.1.0")
-        # Boost is used directly (e.g., boost.asio for daemon comms); declare as a direct requirement
-        # Using only override=True will not pull Boost into the graph when no transitive dep needs it
-        # Use 1.85.0 for cross-platform stability (1.86+ has MSVC regressions)
         self.requires("boost/1.85.0")
 
         if self.options.enable_symbol_extraction:  # type: ignore
@@ -79,7 +76,9 @@ class YamsConan(ConanFile):
 
         # ONNX Runtime for vector/embedding support (optional)
         if self.options.enable_onnx:  # type: ignore
-            self.requires("onnxruntime/1.23.2")
+            # Keep in sync with conan/onnxruntime recipe.
+            # DirectML NuGet releases can lag behind GitHub releases.
+            self.requires("onnxruntime/1.23.0")
             # Set compiler flags for clang 19
             if self.settings.compiler != "msvc":
                 self.conf.append("tools.build:cxxflags", "-Wno-unused-but-set-variable")
@@ -102,8 +101,6 @@ class YamsConan(ConanFile):
         self.tool_requires("meson/[>=1.2.2 <2]")
         self.tool_requires("ninja/[>=1.10.2 <2]")
         
-        # Use requires() instead of test_requires() to ensure pkg-config files
-        # are generated for Meson to find gtest/benchmark dependencies
         if self.options.build_tests:  # type: ignore
             self.requires("gtest/1.15.0")
             # Add Catch2 for modern test framework migration (PBI-050)
@@ -133,16 +130,6 @@ class YamsConan(ConanFile):
         self.options["taglib"].shared = False
         self.options["spdlog"].header_only = False
 
-        # qpdf configuration removed - PDF plugin will be updated in separate PBI
-        # if self.options.enable_pdf:  # type: ignore
-        #     self.options["qpdf"].fPIC = True
-        #     self.options["qpdf"].shared = False
-        #     self.options["qpdf"].with_jpeg = "libjpeg"
-        #     self.options["qpdf"].with_ssl = "openssl"
-        
-        # Configure ONNX Runtime if enabled
-        # Note: onnxruntime uses pre-built shared libraries (DLLs on Windows),
-        # so we set shared=True to ensure runtime_deploy copies them
         if self.options.enable_onnx:  # type: ignore
             self.options["onnxruntime"].fPIC = True
             self.options["onnxruntime"].shared = True

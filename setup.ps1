@@ -37,57 +37,58 @@ if (-not $env:VSINSTALLDIR -or -not (Get-Command cl.exe -ErrorAction SilentlyCon
                 $toolsetArg = ""
                 $forceVs2022Toolset = $false
                 
-                # Check for VS 2025 (v18.x) and auto-downgrade to v143 (VS 2022) if available
-                # This is required because Boost 1.85/1.86 build system (b2) fails with VS 2025 toolset (v145)
-                $vsInstallVersion = & $vswhere -path $vsPath -property installationVersion
+                # Check for VS 2025 (v18.x) and (optionally) select an older toolset for Boost compatibility.
+                # NOTE: vswhere's "-path" flag takes *no argument* (it means "current path"), so we avoid
+                # using it with $vsPath. Instead, we:
+                #   1) resolve installationVersion via JSON and matching installationPath
+                #   2) detect v143/v144 by checking the installed VC\Tools\MSVC directories
+                $vsInstallVersion = $null
+                try {
+                    $instancesJson = & $vswhere -all -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json
+                    $instances = $instancesJson | ConvertFrom-Json
+                    $thisInstance = $instances | Where-Object { $_.installationPath -eq $vsPath } | Select-Object -First 1
+                    if ($thisInstance) {
+                        $vsInstallVersion = $thisInstance.installationVersion
+                    }
+                } catch {
+                    # Best-effort; continue without installationVersion string.
+                    $vsInstallVersion = $null
+                }
+
                 $compatMsvcVersion = '193' # Default to 193 if forcing compatibility
-                
-                if ($vsInstallVersion -match '^18\.') {
-                    Write-Host "VS 2025 detected (Version $vsInstallVersion)"
-                    # Check if v143 toolset is installed
-                    $hasV143 = & $vswhere -path $vsPath -requires Microsoft.VisualStudio.Component.VC.v143.x86.x64
-                    
-                    # Check if v144 toolset is installed (VS 2022 17.10+) - often present in VS 2025 Preview
-                    $vcToolsPath = Join-Path $vsPath "VC\Tools\MSVC"
-                    $v144Dir = $null
-                    if (Test-Path $vcToolsPath) {
-                        $v144Dir = Get-ChildItem -Path $vcToolsPath -Filter "14.4*" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+
+                $vcToolsPath = Join-Path $vsPath "VC\Tools\MSVC"
+                $v143Dir = $null
+                $v144Dir = $null
+                if (Test-Path $vcToolsPath) {
+                    $v143Dir = Get-ChildItem -Path $vcToolsPath -Filter "14.3*" -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+                    $v144Dir = Get-ChildItem -Path $vcToolsPath -Filter "14.4*" -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+                }
+
+                if ($vsPath -match "\\18\\" -or ($vsInstallVersion -and $vsInstallVersion -match '^18\.')) {
+                    if ($vsInstallVersion) {
+                        Write-Host "VS 2025 detected (Version $vsInstallVersion)"
+                    } else {
+                        Write-Host "VS 2025 detected"
                     }
 
-                    if ($hasV143) {
-                        # Try to find the exact version directory to be more robust
-                        if (Test-Path $vcToolsPath) {
-                            $v143Dir = Get-ChildItem -Path $vcToolsPath -Filter "14.3*" -Directory | Sort-Object Name -Descending | Select-Object -First 1
-                            if ($v143Dir) {
-                                Write-Host "Found v143 toolset: $($v143Dir.Name)"
-                                $toolsetArg = "-vcvars_ver=$($v143Dir.Name)"
-                                $forceVs2022Toolset = $true
-                            } else {
-                                Write-Host "Automatically downgrading to v143 (VS 2022) toolset..."
-                                $toolsetArg = "-vcvars_ver=14.3"
-                                $forceVs2022Toolset = $true
-                            }
-                        } else {
-                             $toolsetArg = "-vcvars_ver=14.3"
-                             $forceVs2022Toolset = $true
-                        }
+                    if ($v143Dir) {
+                        Write-Host "Found v143 toolset: $($v143Dir.Name)"
+                        $toolsetArg = "-vcvars_ver=$($v143Dir.Name)"
+                        $forceVs2022Toolset = $true
                         $compatMsvcVersion = '193'
                     } elseif ($v144Dir) {
-                        # Fallback to v144 if v143 is missing but v144 is present
                         Write-Host "Found v144 toolset: $($v144Dir.Name)"
                         Write-Host "Using v144 (VS 2022 17.10+) as fallback for VS 2025 compatibility."
                         $toolsetArg = "-vcvars_ver=$($v144Dir.Name)"
                         $forceVs2022Toolset = $true
                         $compatMsvcVersion = '194'
                     } else {
-                        # If v143/v144 is missing, try to use the default v145 toolset but warn heavily
-                        # This is a "Hail Mary" for users who refuse to install v143
-                        Write-Warning "VS 2025 detected but 'MSVC v143/v144' toolsets not found."
-                        Write-Warning "Attempting to build with default VS 2025 toolset (v145). This is known to fail with Boost 1.85/1.86."
-                        $toolsetArg = "" 
+                        Write-Warning "VS 2025 detected but 'MSVC v143/v144' toolsets not found in '$vcToolsPath'."
+                        Write-Warning "Building with the default VS 2025 toolset (v145). This may fail with Boost 1.85/1.86."
+                        Write-Warning "Fix: install the 'MSVC v143' (or v144) toolset in Visual Studio Installer, or set YAMS_VS_TOOLSET=14.5 to silence toolset selection."
+                        $toolsetArg = ""
                         $forceVs2022Toolset = $false
-                        # Reset our "lie" to Conan so it matches reality
-                        $msvcVersion = '195'
                     }
                 }
 
@@ -119,13 +120,19 @@ if (-not $env:VSINSTALLDIR -or -not (Get-Command cl.exe -ErrorAction SilentlyCon
     
     # Verify compiler is now available
     if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
-        Write-Error @"
-Visual Studio 2022 with C++ tools not found or could not be initialized.
+                Write-Error @"
+MSVC compiler (cl.exe) not found or could not be initialized.
 
-Please either:
-1. Run this script from 'Developer PowerShell for VS 2022' (Start Menu), OR
-2. Install Visual Studio 2022 with 'Desktop development with C++' workload, OR
-3. Ensure vswhere.exe is available at: ${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe
+Detected Visual Studio instance:
+    $vsPath
+
+Common fixes:
+1. Install the 'Desktop development with C++' workload for your Visual Studio installation.
+2. Ensure the Windows 10/11 SDK is installed.
+3. If using VS 2025 and you see messages about forcing v143/v144:
+     - Install the 'MSVC v143' (VS 2022) toolset as an individual component inside VS 2025, OR
+     - Override toolset selection via:  `$env:YAMS_VS_TOOLSET = '14.5'`
+4. Ensure vswhere.exe exists at: ${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe
 
 For installation: https://visualstudio.microsoft.com/downloads/
 "@
@@ -298,8 +305,8 @@ Write-Host '--- Exporting custom Conan recipes... ---'
 # qpdf export removed - PDF plugin will be updated in separate PBI
 
 if (Test-Path 'conan/onnxruntime/conanfile.py') {
-    Write-Host 'Exporting onnxruntime/1.23.2 from conan/onnxruntime/'
-    conan export conan/onnxruntime --name=onnxruntime --version=1.23.2
+    Write-Host 'Exporting onnxruntime/1.23.0 from conan/onnxruntime/'
+    conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Failed to export onnxruntime recipe"
         exit $LASTEXITCODE
