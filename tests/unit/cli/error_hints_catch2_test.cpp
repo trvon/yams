@@ -54,20 +54,20 @@ TEST_CASE("ErrorHints - Dimension mismatch pattern detected", "[cli][error_hints
 
 TEST_CASE("ErrorHints - Daemon error pattern detected", "[cli][error_hints][catch2]") {
     auto hint = getErrorHint(ErrorCode::NetworkError, "daemon not responding");
-    CHECK(hint.hint == std::string(kDaemonLoadMessage));
-    CHECK(hint.command.empty());
+    CHECK(hint.hint == "Daemon connection issue detected");
+    CHECK(hint.command == "yams daemon start");
 }
 
 TEST_CASE("ErrorHints - Socket error pattern detected", "[cli][error_hints][catch2]") {
     auto hint = getErrorHint(ErrorCode::NetworkError, "socket connection failed");
-    CHECK(hint.hint == std::string(kDaemonLoadMessage));
-    CHECK(hint.command.empty());
+    CHECK(hint.hint == "Daemon connection issue detected");
+    CHECK(hint.command == "yams daemon start");
 }
 
 TEST_CASE("ErrorHints - Connection refused pattern detected", "[cli][error_hints][catch2]") {
     auto hint = getErrorHint(ErrorCode::NetworkError, "connection refused to /tmp/yams.sock");
-    CHECK(hint.hint == std::string(kDaemonLoadMessage));
-    CHECK(hint.command.empty());
+    CHECK(hint.hint == "Daemon connection issue detected");
+    CHECK(hint.command == "yams daemon start");
 }
 
 TEST_CASE("ErrorHints - Unique constraint pattern detected", "[cli][error_hints][catch2]") {
@@ -206,6 +206,13 @@ TEST_CASE("ErrorHints - Format error passes command", "[cli][error_hints][catch2
     CHECK(formatted.find("yams search --help") != std::string::npos);
 }
 
+TEST_CASE("ErrorHints - Format error preserves IPC message", "[cli][error_hints][catch2]") {
+    auto formatted =
+        formatErrorWithHint(ErrorCode::NetworkError, "[ipc:refused] Connection refused");
+    CHECK(formatted.find("[ipc:refused]") != std::string::npos);
+    CHECK(formatted.find("yams daemon start") != std::string::npos);
+}
+
 // ============================================================================
 // shouldSuggestInit() tests
 // ============================================================================
@@ -279,7 +286,7 @@ TEST_CASE("ErrorHints - Should not suggest doctor for unrelated error",
 
 TEST_CASE("ErrorHints - Is daemon connection error for NetworkError code",
           "[cli][error_hints][catch2]") {
-    CHECK(isDaemonConnectionError(ErrorCode::NetworkError, "any message"));
+    CHECK_FALSE(isDaemonConnectionError(ErrorCode::NetworkError, "any message"));
 }
 
 TEST_CASE("ErrorHints - Is daemon connection error for daemon message",
@@ -320,6 +327,18 @@ TEST_CASE("ErrorHints - Message pattern takes precedence over code", "[cli][erro
 TEST_CASE("ErrorHints - Daemon message with database code gives daemon hint",
           "[cli][error_hints][catch2]") {
     auto hint = getErrorHint(ErrorCode::DatabaseError, "daemon connection refused");
+    CHECK(hint.hint == "Daemon connection issue detected");
+    CHECK(hint.command == "yams daemon start");
+}
+
+TEST_CASE("ErrorHints - IPC socket missing kind gives daemon start hint",
+          "[cli][error_hints][catch2]") {
+    auto hint = getErrorHint(ErrorCode::NetworkError, "[ipc:socket_missing] /tmp/yams.sock");
+    CHECK(hint.hint == "Daemon IPC socket not found; start the daemon or check socket path");
+    CHECK(hint.command == "yams daemon start");
+}
+
+TEST_CASE("ErrorHints - IPC timeout kind gives load hint", "[cli][error_hints][catch2]") {
+    auto hint = getErrorHint(ErrorCode::Timeout, "[ipc:timeout] connect timed out");
     CHECK(hint.hint == std::string(kDaemonLoadMessage));
-    CHECK(hint.command.empty());
 }

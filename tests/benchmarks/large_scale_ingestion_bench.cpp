@@ -139,7 +139,13 @@ bool waitForCorpusIndexed(std::size_t expectedDocs, bool embeddingsEnabled,
                           std::chrono::milliseconds timeout) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     int stableCount = 0;
-    constexpr int stableRequired = 10;
+    int stableRequired = 10;
+    if (const char* env = std::getenv("YAMS_BENCH_CORPUS_STABLE_REQUIRED")) {
+        try {
+            stableRequired = std::max(1, std::stoi(env));
+        } catch (...) {
+        }
+    }
 
     daemon::StatusResponse lastStatus;
     bool haveLastStatus = false;
@@ -225,6 +231,9 @@ std::unique_ptr<DaemonHarness> g_harness;
 std::unique_ptr<daemon::DaemonClient> g_client;
 IngestionBenchConfig g_activeConfig;
 
+// Best-effort counters for time series (bench-local; daemon counters are separate).
+std::atomic<uint64_t> g_bytesIngested{0};
+
 // Time series sample structure
 struct TimeSeriesSample {
     std::chrono::steady_clock::time_point timestamp;
@@ -270,6 +279,7 @@ struct TimeSeriesSample {
 class TimeSeriesCollector {
 public:
     void start(std::chrono::milliseconds interval = std::chrono::milliseconds(1000)) {
+        startTime_ = std::chrono::steady_clock::now();
         stop_ = false;
         thread_ = std::thread([this, interval]() { collectLoop(interval); });
     }
@@ -332,6 +342,9 @@ private:
     TimeSeriesSample collectSample() {
         TimeSeriesSample sample;
         sample.timestamp = std::chrono::steady_clock::now();
+
+        // Bench-local bytes ingested (successful addViaDaemon only).
+        sample.totalBytes = g_bytesIngested.load(std::memory_order_relaxed);
 
         // Get daemon status
         auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
@@ -509,10 +522,45 @@ void TeardownHarness() {
 }
 
 // Wait for all queues to drain
-bool waitForDrain(std::chrono::milliseconds timeout) {
+enum class DrainScope {
+    Full,
+    PostEmbed,
+    None,
+};
+
+DrainScope getDrainScope() {
+    if (const char* env = std::getenv("YAMS_BENCH_DRAIN_SCOPE")) {
+        const std::string v(env);
+        if (v == "none")
+            return DrainScope::None;
+        if (v == "post_embed")
+            return DrainScope::PostEmbed;
+        if (v == "full")
+            return DrainScope::Full;
+    }
+    return DrainScope::Full;
+}
+
+int getDrainStableRequired() {
+    int stableRequired = 10;
+    if (const char* env = std::getenv("YAMS_BENCH_DRAIN_STABLE_REQUIRED")) {
+        try {
+            stableRequired = std::max(1, std::stoi(env));
+        } catch (...) {
+        }
+    }
+    return stableRequired;
+}
+
+bool waitForDrain(std::chrono::milliseconds timeout, bool embeddingsEnabled) {
+    const auto scope = getDrainScope();
+    if (scope == DrainScope::None) {
+        return true;
+    }
+
     auto deadline = std::chrono::steady_clock::now() + timeout;
     int stableCount = 0;
-    constexpr int stableRequired = 10;
+    const int stableRequired = getDrainStableRequired();
 
     while (std::chrono::steady_clock::now() < deadline) {
         auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
@@ -528,19 +576,30 @@ bool waitForDrain(std::chrono::milliseconds timeout) {
             return (it != st.requestCounts.end()) ? it->second : 0;
         };
 
-        uint64_t totalQueued = getCount(std::string(metrics::kPostIngestQueued)) +
-                               getCount(std::string(metrics::kEmbedQueued)) +
-                               getCount(std::string(metrics::kKgQueueDepth)) +
-                               getCount(std::string(metrics::kSymbolQueueDepth)) +
-                               getCount(std::string(metrics::kEntityQueueDepth)) +
-                               getCount(std::string(metrics::kTitleQueueDepth));
+        uint64_t totalQueued = 0;
+        uint64_t totalInflight = 0;
 
-        uint64_t totalInflight = getCount(std::string(metrics::kPostIngestInflight)) +
-                                 getCount(std::string(metrics::kEmbedInflight)) +
-                                 getCount(std::string(metrics::kKgInflight)) +
-                                 getCount(std::string(metrics::kSymbolInflight)) +
-                                 getCount(std::string(metrics::kEntityInflight)) +
-                                 getCount(std::string(metrics::kTitleInflight));
+        // For embedding perf sweeps, it's useful to drain only the embed-critical stages.
+        // Full drain remains available for end-to-end pipeline benchmarking.
+        totalQueued += getCount(std::string(metrics::kPostIngestQueued));
+        totalInflight += getCount(std::string(metrics::kPostIngestInflight));
+
+        if (embeddingsEnabled) {
+            totalQueued += getCount(std::string(metrics::kEmbedQueued));
+            totalInflight += getCount(std::string(metrics::kEmbedInflight));
+        }
+
+        if (scope == DrainScope::Full) {
+            totalQueued += getCount(std::string(metrics::kKgQueueDepth));
+            totalQueued += getCount(std::string(metrics::kSymbolQueueDepth));
+            totalQueued += getCount(std::string(metrics::kEntityQueueDepth));
+            totalQueued += getCount(std::string(metrics::kTitleQueueDepth));
+
+            totalInflight += getCount(std::string(metrics::kKgInflight));
+            totalInflight += getCount(std::string(metrics::kSymbolInflight));
+            totalInflight += getCount(std::string(metrics::kEntityInflight));
+            totalInflight += getCount(std::string(metrics::kTitleInflight));
+        }
 
         if (totalQueued == 0 && totalInflight == 0) {
             if (++stableCount >= stableRequired) {
@@ -573,25 +632,29 @@ generateDocuments(const std::filesystem::path& dataDir, size_t count, double dup
     std::bernoulli_distribution dupDist(duplicationRate);
 
     for (size_t i = 0; i < count; ++i) {
-        std::string content;
-
-        // Apply duplication
-        if (!docs.empty() && dupDist(gen)) {
-            // Copy a previous document
-            std::uniform_int_distribution<size_t> pick(0, docs.size() - 1);
-            content = generator.generateTextDocument(sizeBuckets[sizeDist(gen)], "duplicated");
-        } else {
-            // Generate new document
-            size_t size = sizeBuckets[sizeDist(gen)];
-            content = generator.generateTextDocument(size, "benchmark");
-        }
-
         std::string filename = "bench_doc_" + std::to_string(i) + ".txt";
         auto path = dataDir / filename;
 
-        std::ofstream ofs(path);
-        ofs << content;
-        ofs.close();
+        // Apply duplication: reuse bytes from an existing file (no in-memory corpus).
+        if (!docs.empty() && dupDist(gen)) {
+            std::uniform_int_distribution<size_t> pick(0, docs.size() - 1);
+            const auto& srcPath = docs[pick(gen)].first;
+            std::error_code ec;
+            std::filesystem::copy_file(srcPath, path,
+                                       std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) {
+                // Fallback: read/write if copy_file fails (e.g., cross-device quirks).
+                std::ifstream ifs(srcPath, std::ios::binary);
+                std::ofstream ofs(path, std::ios::binary);
+                ofs << ifs.rdbuf();
+            }
+        } else {
+            // Generate new document
+            size_t size = sizeBuckets[sizeDist(gen)];
+            std::string content = generator.generateTextDocument(size, "benchmark");
+            std::ofstream ofs(path);
+            ofs << content;
+        }
 
         docs.emplace_back(path, filename);
     }
@@ -658,6 +721,7 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
         // Clear previous data
         g_collector.clear();
         g_collector.start(std::chrono::milliseconds(1000));
+        g_bytesIngested.store(0, std::memory_order_relaxed);
 
         // Generate documents
         std::cout << "Generating " << config.documentCount << " documents...\n";
@@ -672,11 +736,14 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
         opts.noEmbeddings = !config.enableEmbeddings;
 
         auto startTime = std::chrono::steady_clock::now();
+        auto ingestStartTime = startTime;
         size_t successCount = 0;
         size_t failCount = 0;
         uint64_t totalBytes = 0;
 
         state.ResumeTiming();
+
+        ingestStartTime = std::chrono::steady_clock::now();
 
         // Ingest documents in batches
         const size_t batchSize = config.batchSize;
@@ -689,8 +756,14 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
                 auto result = docSvc.addViaDaemon(opts);
                 if (result && !result.value().hash.empty()) {
                     ++successCount;
-                    // Approximate bytes
-                    totalBytes += 1024; // Average size estimate
+                    // Real bytes (best-effort)
+                    std::error_code ec;
+                    const uint64_t fileBytes =
+                        static_cast<uint64_t>(std::filesystem::file_size(docs[j].first, ec));
+                    if (!ec && fileBytes > 0) {
+                        totalBytes += fileBytes;
+                        g_bytesIngested.fetch_add(fileBytes, std::memory_order_relaxed);
+                    }
                 } else {
                     ++failCount;
                 }
@@ -700,6 +773,8 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
+        const auto ingestEndTime = std::chrono::steady_clock::now();
+
         state.PauseTiming();
 
         // Wait for post-ingest queue to drain
@@ -707,23 +782,53 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
         auto drainTimeout = std::chrono::milliseconds(
             config.enableEmbeddings ? 1200000 : 300000); // 20 min with embeddings, 5 min without
 
-        if (!waitForDrain(drainTimeout)) {
+        if (const char* env = std::getenv("YAMS_BENCH_DRAIN_WAIT_MS")) {
+            try {
+                drainTimeout = std::chrono::milliseconds(
+                    static_cast<std::chrono::milliseconds::rep>(std::stoll(env)));
+            } catch (...) {
+            }
+        }
+
+        if (!waitForDrain(drainTimeout, config.enableEmbeddings)) {
             std::cerr << "WARNING: Pipeline drain timeout\n";
         }
 
         // Ensure cached counters and indexing are truly caught up before recording final metrics.
         // Ingest can complete far faster than post-ingest/FTS5/vector indexing.
-        (void)waitForCorpusIndexed(config.documentCount, config.enableEmbeddings, drainTimeout);
+        if (const char* env = std::getenv("YAMS_BENCH_SKIP_CORPUS_READY")) {
+            if (std::string(env) != "1") {
+                (void)waitForCorpusIndexed(config.documentCount, config.enableEmbeddings,
+                                           drainTimeout);
+            }
+        } else {
+            (void)waitForCorpusIndexed(config.documentCount, config.enableEmbeddings, drainTimeout);
+        }
 
         g_collector.stop();
         auto endTime = std::chrono::steady_clock::now();
         auto totalDuration =
             std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
+        auto ingestDuration =
+            std::chrono::duration_cast<std::chrono::milliseconds>(ingestEndTime - ingestStartTime);
+
         // Calculate metrics
         double throughput = 0.0;
         if (totalDuration.count() > 0) {
             throughput = static_cast<double>(successCount) * 1000.0 / totalDuration.count();
+        }
+        double ingestThroughput = 0.0;
+        if (ingestDuration.count() > 0) {
+            ingestThroughput = static_cast<double>(successCount) * 1000.0 / ingestDuration.count();
+        }
+        double bytesPerSec = 0.0;
+        if (totalDuration.count() > 0) {
+            bytesPerSec = static_cast<double>(totalBytes) * 1000.0 / totalDuration.count();
+        }
+        double ingestBytesPerSec = 0.0;
+        if (ingestDuration.count() > 0) {
+            ingestBytesPerSec = static_cast<double>(totalBytes) * 1000.0 / ingestDuration.count();
         }
 
         // Get final stats
@@ -748,7 +853,12 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
         state.counters["docs_success"] = static_cast<double>(successCount);
         state.counters["docs_failed"] = static_cast<double>(failCount);
         state.counters["throughput_dps"] = throughput;
+        state.counters["ingest_throughput_dps"] = ingestThroughput;
+        state.counters["bytes_total"] = static_cast<double>(totalBytes);
+        state.counters["throughput_Bps"] = bytesPerSec;
+        state.counters["ingest_throughput_Bps"] = ingestBytesPerSec;
         state.counters["duration_ms"] = static_cast<double>(totalDuration.count());
+        state.counters["ingest_duration_ms"] = static_cast<double>(ingestDuration.count());
         state.counters["peak_post_queued"] = static_cast<double>(peakPostQueued);
         state.counters["peak_embed_queued"] = static_cast<double>(peakEmbedQueued);
         state.counters["peak_rss_mb"] = static_cast<double>(peakRss / (1024 * 1024));
@@ -756,27 +866,55 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
         state.counters["max_pressure"] = static_cast<double>(maxPressure);
 
         // Write time series CSV
-        std::filesystem::path csvPath =
-            g_harness->dataDir().parent_path() /
-            ("ingestion_timeseries_" + std::to_string(config.documentCount) + ".csv");
+        std::filesystem::path outDir = g_harness->dataDir().parent_path();
+        if (const char* env = std::getenv("YAMS_BENCH_OUT_DIR")) {
+            if (std::string(env).size() > 0) {
+                outDir = std::filesystem::path(env);
+            }
+        }
+        std::error_code outEc;
+        std::filesystem::create_directories(outDir, outEc);
+
+        std::string fileName = "ingestion_timeseries_" + std::to_string(config.documentCount);
+        if (const char* env = std::getenv("YAMS_BENCH_RUN_ID")) {
+            const std::string runId(env);
+            if (!runId.empty()) {
+                fileName += "_" + runId;
+            }
+        }
+        fileName += ".csv";
+
+        std::filesystem::path csvPath = outDir / fileName;
         writeTimeSeriesCsv(samples, csvPath);
         std::cout << "Time series written to: " << csvPath << "\n";
 
         std::cout << "Completed: " << successCount << "/" << config.documentCount << " docs in "
                   << (totalDuration.count() / 1000.0) << "s"
-                  << " (" << throughput << " docs/sec)\n";
+                  << " (" << throughput << " docs/sec, " << (bytesPerSec / (1024.0 * 1024.0))
+                  << " MiB/sec)\n";
 
         // Cleanup documents
         for (const auto& doc : docs) {
             std::error_code ec;
             std::filesystem::remove(doc.first, ec);
         }
+
+        // Ensure benchmark timing is running when the iteration ends.
+        // Google Benchmark asserts if an iteration finishes with timing paused.
+        state.ResumeTiming();
     }
 }
 
 // Benchmark configurations
 // Args: documentCount, enableEmbeddings(0/1),
 // profile(0=default,1=Efficient,2=Balanced,3=Aggressive)
+
+// Tier 0: Embedding smoke test (tiny corpus; completes even on slow inference)
+BENCHMARK(BM_LargeScaleIngestion)
+    ->Args({200, 0, 2}) // 200, no embeddings, Balanced
+    ->Args({10, 1, 2})  // 10, with embeddings, Balanced
+    ->Unit(benchmark::kMillisecond)
+    ->Iterations(1);
 
 // Tier 1: Quick validation (10K docs, ~2-5 min)
 BENCHMARK(BM_LargeScaleIngestion)
@@ -821,7 +959,31 @@ int main(int argc, char** argv) {
     std::cout << "  YAMS_BENCH_ENABLE_EMBEDDINGS=1  Enable embedding generation\n";
     std::cout << "  YAMS_TUNING_PROFILE=NAME        Set profile (Efficient/Balanced/Aggressive)\n";
     std::cout << "  YAMS_BENCH_DUPLICATION_RATE=0.05 Set duplication rate (0.0-1.0)\n";
+    std::cout << "  YAMS_BENCH_DRAIN_SCOPE=full|post_embed|none\n";
+    std::cout << "  YAMS_BENCH_DRAIN_WAIT_MS=N          Override drain wait timeout\n";
+    std::cout << "  YAMS_BENCH_DRAIN_STABLE_REQUIRED=N  Stable samples needed for drain\n";
+    std::cout << "  YAMS_BENCH_CORPUS_STABLE_REQUIRED=N Stable samples needed for corpus ready\n";
+    std::cout << "  YAMS_BENCH_SKIP_CORPUS_READY=1      Skip corpus indexed readiness wait\n";
+    std::cout << "  YAMS_BENCH_SKIP_DEFAULT_SETUP=1     Don't pre-start daemon before benchmarks\n";
+    std::cout << "  YAMS_BENCH_OUT_DIR=PATH             Write CSV time series into PATH\n";
+    std::cout << "  YAMS_BENCH_RUN_ID=ID                Suffix for CSV filename\n";
+    std::cout << "\nEmbedding Chunk Tuning (daemon env):\n";
+    std::cout
+        << "  "
+           "YAMS_EMBED_CHUNK_STRATEGY=fixed|sentence|paragraph|recursive|sliding_window|markdown\n";
+    std::cout << "  YAMS_EMBED_CHUNK_TARGET=N        Target size (chars by default; tokens if "
+                 "USE_TOKENS=1)\n";
+    std::cout << "  YAMS_EMBED_CHUNK_MIN=N           Minimum chunk size\n";
+    std::cout << "  YAMS_EMBED_CHUNK_MAX=N           Maximum chunk size\n";
+    std::cout << "  YAMS_EMBED_CHUNK_OVERLAP=N       Overlap size (0 disables)\n";
+    std::cout << "  YAMS_EMBED_CHUNK_OVERLAP_PCT=F   Overlap percentage (0 disables)\n";
+    std::cout
+        << "  YAMS_EMBED_CHUNK_USE_TOKENS=0/1  Interpret sizes as tokens (roughly 4 chars/token)\n";
+    std::cout << "  YAMS_EMBED_CHUNK_PRESERVE_SENTENCES=0/1\n";
+    std::cout << "  YAMS_EMBED_DEBUG_TIMINGS=1       Log per-job chunk/infer timings\n";
+    std::cout << "  YAMS_EMBED_TIMING_WARN_MS=5000   Also log when phases exceed this\n";
     std::cout << "\nTiers:\n";
+    std::cout << "  Tier 0 (10 docs):    Embedding smoke test (~1-3 min)\n";
     std::cout << "  Tier 1 (10K docs):   Quick validation (~2-5 min)\n";
     std::cout << "  Tier 2 (100K docs):  Standard benchmark (~15-30 min)\n";
     std::cout << "  Tier 3 (1M docs):    Stress test (~2-4 hours, manual enable)\n";
@@ -835,11 +997,21 @@ int main(int argc, char** argv) {
     // model warmup/shutdown races in plugin backends).
     if (!listOnly) {
         // Setup default harness (will be reconfigured per benchmark)
-        IngestionBenchConfig defaultConfig;
-        defaultConfig.documentCount = getDocCount();
-        defaultConfig.enableEmbeddings = getEnableEmbeddings();
-        defaultConfig.tuningProfile = getTuningProfile();
-        SetupHarness(defaultConfig);
+        if (const char* env = std::getenv("YAMS_BENCH_SKIP_DEFAULT_SETUP")) {
+            if (std::string(env) != "1") {
+                IngestionBenchConfig defaultConfig;
+                defaultConfig.documentCount = getDocCount();
+                defaultConfig.enableEmbeddings = getEnableEmbeddings();
+                defaultConfig.tuningProfile = getTuningProfile();
+                SetupHarness(defaultConfig);
+            }
+        } else {
+            IngestionBenchConfig defaultConfig;
+            defaultConfig.documentCount = getDocCount();
+            defaultConfig.enableEmbeddings = getEnableEmbeddings();
+            defaultConfig.tuningProfile = getTuningProfile();
+            SetupHarness(defaultConfig);
+        }
     }
 
     // Run benchmarks
@@ -858,9 +1030,9 @@ int main(int argc, char** argv) {
         TeardownHarness();
     }
 
-    std::cout << "\n✅ Large-scale ingestion benchmarks completed\n";
-    std::cout << "💡 Review throughput and queue metrics above\n";
-    std::cout << "📊 Time series CSV files available for analysis\n\n";
+    std::cout << "\nLarge-scale ingestion benchmarks completed\n";
+    std::cout << "Review throughput and queue metrics above\n";
+    std::cout << "Time series CSV files available for analysis\n\n";
 
     return 0;
 }

@@ -148,7 +148,9 @@ DocumentChunker::mergeSmallChunks(const std::vector<DocumentChunk>& chunks) {
             current_chunk.word_count += chunk.word_count;
         } else {
             // Save current and start new
-            if (current_chunk.content.size() >= config_.min_chunk_size) {
+            size_t current_size =
+                config_.use_token_count ? current_chunk.token_count : current_chunk.content.size();
+            if (current_size >= config_.min_chunk_size) {
                 merged.push_back(current_chunk);
             }
             current_chunk = chunk;
@@ -156,8 +158,12 @@ DocumentChunker::mergeSmallChunks(const std::vector<DocumentChunk>& chunks) {
     }
 
     // Add the last chunk
-    if (has_current && current_chunk.content.size() >= config_.min_chunk_size) {
-        merged.push_back(current_chunk);
+    if (has_current) {
+        size_t current_size =
+            config_.use_token_count ? current_chunk.token_count : current_chunk.content.size();
+        if (current_size >= config_.min_chunk_size) {
+            merged.push_back(current_chunk);
+        }
     }
 
     return merged;
@@ -171,6 +177,9 @@ DocumentChunker::splitLargeChunks(const std::vector<DocumentChunk>& chunks) {
 
     std::vector<DocumentChunk> split_chunks;
 
+    const size_t max_chunk_chars =
+        config_.use_token_count ? (config_.max_chunk_size * 4) : config_.max_chunk_size;
+
     for (const auto& chunk : chunks) {
         size_t chunk_size = config_.use_token_count ? chunk.token_count : chunk.content.size();
 
@@ -183,23 +192,36 @@ DocumentChunker::splitLargeChunks(const std::vector<DocumentChunk>& chunks) {
 
             while (start < content.size()) {
                 // Calculate end position based on max_chunk_size
-                size_t end = std::min(start + config_.max_chunk_size, content.size());
+                size_t end = std::min(start + max_chunk_chars, content.size());
 
                 // Find word boundary if needed (move back to last space)
                 if (config_.preserve_words && end < content.size()) {
                     size_t last_space = end;
-                    while (last_space > start && !std::isspace(content[last_space])) {
+                    while (last_space > start &&
+                           !std::isspace(static_cast<unsigned char>(content[last_space - 1]))) {
                         --last_space;
                     }
                     // Only use word boundary if we found a space
-                    if (last_space > start && std::isspace(content[last_space])) {
-                        end = last_space;
+                    if (last_space > start &&
+                        std::isspace(static_cast<unsigned char>(content[last_space - 1]))) {
+                        end = last_space - 1;
                     }
                 }
 
                 // Skip leading whitespace
-                while (start < content.size() && std::isspace(content[start])) {
+                while (start < content.size() &&
+                       std::isspace(static_cast<unsigned char>(content[start]))) {
                     ++start;
+                }
+
+                // Trim trailing whitespace.
+                while (end > start && std::isspace(static_cast<unsigned char>(content[end - 1]))) {
+                    --end;
+                }
+
+                // Ensure end is always after start.
+                if (end <= start) {
+                    end = std::min(start + 1, content.size());
                 }
 
                 if (start >= end) {
@@ -234,6 +256,8 @@ std::vector<DocumentChunk> DocumentChunker::addOverlap(const std::vector<Documen
 
     std::vector<DocumentChunk> overlapped;
 
+    auto toCharCount = [this](size_t v) -> size_t { return config_.use_token_count ? (v * 4) : v; };
+
     for (size_t i = 0; i < chunks.size(); ++i) {
         DocumentChunk chunk = chunks[i];
 
@@ -244,15 +268,18 @@ std::vector<DocumentChunk> DocumentChunker::addOverlap(const std::vector<Documen
             overlap_size = static_cast<size_t>(chunk_size * config_.overlap_percentage);
         }
 
+        // Overlap extraction uses character offsets.
+        const size_t overlap_chars = toCharCount(overlap_size);
+
         // Add overlap from previous chunk
-        if (i > 0 && overlap_size > 0) {
+        if (i > 0 && overlap_chars > 0) {
             const auto& prev = chunks[i - 1];
             size_t prev_size = prev.content.size();
 
-            if (prev_size > overlap_size) {
-                std::string overlap_text = prev.content.substr(prev_size - overlap_size);
+            if (prev_size > overlap_chars) {
+                std::string overlap_text = prev.content.substr(prev_size - overlap_chars);
                 chunk.content = overlap_text + config_.chunk_separator + chunk.content;
-                chunk.start_offset = std::max(chunk.start_offset - overlap_size, size_t(0));
+                chunk.start_offset = std::max(chunk.start_offset - overlap_chars, size_t(0));
                 chunk.overlapping_chunks.push_back(prev.chunk_id);
             }
         }
@@ -457,7 +484,10 @@ FixedSizeChunker::FixedSizeChunker(const ChunkingConfig& config) : DocumentChunk
 std::vector<DocumentChunk> FixedSizeChunker::doChunking(const std::string& content,
                                                         const std::string& document_hash) {
     std::vector<DocumentChunk> chunks;
-    size_t chunk_size = config_.target_chunk_size;
+    // config_.target_chunk_size is interpreted as chars by default.
+    // When use_token_count=true, interpret it as an approximate token budget.
+    size_t chunk_size =
+        config_.use_token_count ? (config_.target_chunk_size * 4) : config_.target_chunk_size;
     size_t start = 0;
     size_t chunk_index = 0;
 
@@ -506,8 +536,11 @@ RecursiveTextSplitter::RecursiveTextSplitter(const ChunkingConfig& config)
 
 std::vector<DocumentChunk> RecursiveTextSplitter::doChunking(const std::string& content,
                                                              const std::string& document_hash) {
-    // Use recursive splitting to get text segments
-    auto segments = recursiveSplit(content, config_.separators, config_.target_chunk_size);
+    // Use recursive splitting to get text segments.
+    // When use_token_count=true, interpret target_chunk_size as an approximate token budget.
+    const size_t target =
+        config_.use_token_count ? (config_.target_chunk_size * 4) : config_.target_chunk_size;
+    auto segments = recursiveSplit(content, config_.separators, target);
 
     std::vector<DocumentChunk> chunks;
     size_t position = 0;
@@ -637,7 +670,8 @@ SlidingWindowChunker::SlidingWindowChunker(const ChunkingConfig& config) : Docum
 std::vector<DocumentChunk> SlidingWindowChunker::doChunking(const std::string& content,
                                                             const std::string& document_hash) {
     std::vector<DocumentChunk> chunks;
-    size_t window_size = config_.target_chunk_size;
+    size_t window_size =
+        config_.use_token_count ? (config_.target_chunk_size * 4) : config_.target_chunk_size;
     size_t stride = calculateStride();
 
     size_t start = 0;
@@ -701,11 +735,15 @@ std::vector<DocumentChunk> SlidingWindowChunker::doChunking(const std::string& c
 }
 
 size_t SlidingWindowChunker::calculateStride() const {
-    size_t window_size = config_.target_chunk_size;
+    size_t window_size =
+        config_.use_token_count ? (config_.target_chunk_size * 4) : config_.target_chunk_size;
     size_t overlap = config_.overlap_size;
 
     if (config_.overlap_percentage > 0) {
         overlap = static_cast<size_t>(window_size * config_.overlap_percentage);
+    } else if (config_.use_token_count) {
+        // overlap_size is configured in the same unit as target_chunk_size.
+        overlap = overlap * 4;
     }
 
     size_t stride = window_size - overlap;
@@ -1058,7 +1096,8 @@ std::vector<DocumentChunk> SemanticChunker::doChunking(const std::string& conten
     // Full implementation would use embeddings to group semantically similar sentences
     std::vector<DocumentChunk> chunks;
 
-    size_t chunk_size = config_.target_chunk_size;
+    size_t chunk_size =
+        config_.use_token_count ? (config_.target_chunk_size * 4) : config_.target_chunk_size;
     size_t start = 0;
     size_t chunk_index = 0;
 
@@ -1173,7 +1212,11 @@ std::vector<DocumentChunk> SentenceBasedChunker::doChunking(const std::string& c
         bool should_split = false;
         if (!current_chunk.empty()) {
             size_t new_size = current_chunk.size() + sentence.size();
-            if (new_size > config_.target_chunk_size) {
+            size_t limit = config_.target_chunk_size;
+            if (config_.use_token_count) {
+                limit = config_.target_chunk_size * 4;
+            }
+            if (new_size > limit) {
                 should_split = true;
             } else if (config_.preserve_sentences &&
                        current_sentence_count >= 3) { // Default to 3 sentences per chunk
@@ -1297,7 +1340,11 @@ std::vector<DocumentChunk> ParagraphBasedChunker::doChunking(const std::string& 
         if (!current_chunk.empty()) {
             size_t new_size =
                 current_chunk.size() + paragraph.size() + 2; // +2 for paragraph separator
-            if (new_size > config_.target_chunk_size) {
+            size_t limit = config_.target_chunk_size;
+            if (config_.use_token_count) {
+                limit = config_.target_chunk_size * 4;
+            }
+            if (new_size > limit) {
                 should_split = true;
             } else if (config_.preserve_paragraphs &&
                        current_paragraph_count >= 2) { // Default to 2 paragraphs per chunk
@@ -1365,7 +1412,8 @@ std::vector<DocumentChunk> MarkdownChunker::doChunking(const std::string& conten
     // Full implementation would parse markdown structure
     std::vector<DocumentChunk> chunks;
 
-    size_t chunk_size = config_.target_chunk_size;
+    size_t chunk_size =
+        config_.use_token_count ? (config_.target_chunk_size * 4) : config_.target_chunk_size;
     size_t start = 0;
     size_t chunk_index = 0;
 

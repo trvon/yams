@@ -3,6 +3,7 @@
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/client/ipc_failure.h>
 #include <yams/daemon/client/streaming_handlers.h>
 #include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -750,15 +751,22 @@ boost::asio::awaitable<Result<StatusResponse>> DaemonClient::status() {
 
         lastErr = response.error();
         const std::string& msg = lastErr.message;
-        bool transient = (lastErr.code == ErrorCode::NetworkError) &&
-                         (msg.find("Connection closed") != std::string::npos ||
-                          msg.find("Connection reset") != std::string::npos ||
-                          msg.find("ECONNRESET") != std::string::npos ||
-                          msg.find("EPIPE") != std::string::npos ||
-                          msg.find("Broken pipe") != std::string::npos ||
-                          msg.find("read header failed") != std::string::npos ||
-                          msg.find("read payload failed") != std::string::npos ||
-                          msg.find("Read failed") != std::string::npos);
+        bool transient = false;
+
+        // Prefer stable classification when available.
+        if (auto kindOpt = yams::daemon::parseIpcFailureKind(msg)) {
+            transient = yams::daemon::isTransient(*kindOpt);
+        } else {
+            transient = (lastErr.code == ErrorCode::NetworkError) &&
+                        (msg.find("Connection closed") != std::string::npos ||
+                         msg.find("Connection reset") != std::string::npos ||
+                         msg.find("ECONNRESET") != std::string::npos ||
+                         msg.find("EPIPE") != std::string::npos ||
+                         msg.find("Broken pipe") != std::string::npos ||
+                         msg.find("read header failed") != std::string::npos ||
+                         msg.find("read payload failed") != std::string::npos ||
+                         msg.find("Read failed") != std::string::npos);
+        }
         if (!transient) {
             co_return lastErr;
         }

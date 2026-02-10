@@ -9,6 +9,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 
+#include <yams/core/types.h>
 #include <yams/daemon/client/asio_connection.h>
 #include <yams/daemon/client/transport_options.h>
 
@@ -21,7 +22,7 @@ public:
     static std::shared_ptr<AsioConnectionPool> get_or_create(const TransportOptions& opts);
     static void shutdown_all(std::chrono::milliseconds timeout = std::chrono::milliseconds{2000});
 
-    boost::asio::awaitable<std::shared_ptr<AsioConnection>> acquire();
+    boost::asio::awaitable<Result<std::shared_ptr<AsioConnection>>> acquire();
     void release(const std::shared_ptr<AsioConnection>& conn);
     void shutdown(std::chrono::milliseconds timeout = std::chrono::milliseconds{2000});
     boost::asio::awaitable<void> ensure_read_loop_started(std::shared_ptr<AsioConnection> conn);
@@ -37,7 +38,7 @@ public:
     ~AsioConnectionPool();
 
 private:
-    boost::asio::awaitable<std::shared_ptr<AsioConnection>> create_connection();
+    boost::asio::awaitable<Result<std::shared_ptr<AsioConnection>>> create_connection();
     void cleanup_stale_connections();
 
     TransportOptions opts_;

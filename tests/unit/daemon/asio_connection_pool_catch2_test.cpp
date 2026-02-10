@@ -90,7 +90,9 @@ TEST_CASE("AsioConnectionPool drops closed socket on reuse", "[daemon][connectio
     auto fut1 = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
                                       boost::asio::use_future);
     REQUIRE(fut1.wait_for(1s) == std::future_status::ready);
-    auto conn1 = fut1.get();
+    auto conn1_res = fut1.get();
+    REQUIRE(conn1_res);
+    auto conn1 = conn1_res.value();
     REQUIRE(conn1);
     REQUIRE(accepted1.get_future().wait_for(1s) == std::future_status::ready);
     pool->release(conn1);
@@ -101,7 +103,9 @@ TEST_CASE("AsioConnectionPool drops closed socket on reuse", "[daemon][connectio
     auto fut2 = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
                                       boost::asio::use_future);
     REQUIRE(fut2.wait_for(1s) == std::future_status::ready);
-    auto conn2 = fut2.get();
+    auto conn2_res = fut2.get();
+    REQUIRE(conn2_res);
+    auto conn2 = conn2_res.value();
     REQUIRE(conn2);
     REQUIRE(accepted2.get_future().wait_for(1s) == std::future_status::ready);
     REQUIRE(conn1.get() != conn2.get());
@@ -181,7 +185,9 @@ TEST_CASE("AsioConnectionPool handles server idle close", "[daemon][connection-p
     auto fut1 = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
                                       boost::asio::use_future);
     REQUIRE(fut1.wait_for(2s) == std::future_status::ready);
-    auto conn1 = fut1.get();
+    auto conn1_res = fut1.get();
+    REQUIRE(conn1_res);
+    auto conn1 = conn1_res.value();
     REQUIRE(conn1);
     REQUIRE(first_accepted.get_future().wait_for(1s) == std::future_status::ready);
     REQUIRE(connections_accepted.load() == 1);
@@ -194,7 +200,9 @@ TEST_CASE("AsioConnectionPool handles server idle close", "[daemon][connection-p
     auto fut2 = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
                                       boost::asio::use_future);
     REQUIRE(fut2.wait_for(2s) == std::future_status::ready);
-    auto conn2 = fut2.get();
+    auto conn2_res = fut2.get();
+    REQUIRE(conn2_res);
+    auto conn2 = conn2_res.value();
     REQUIRE(conn2);
     REQUIRE(second_accepted.get_future().wait_for(1s) == std::future_status::ready);
     // Should be a different connection (stale one was detected and replaced)
@@ -254,7 +262,9 @@ TEST_CASE("AsioConnectionPool handles EOF during read", "[daemon][connection-poo
     auto fut = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
                                      boost::asio::use_future);
     REQUIRE(fut.wait_for(1s) == std::future_status::ready);
-    auto conn = fut.get();
+    auto conn_res = fut.get();
+    REQUIRE(conn_res);
+    auto conn = conn_res.value();
     REQUIRE(conn);
     REQUIRE(connected.get_future().wait_for(1s) == std::future_status::ready);
 
@@ -323,7 +333,9 @@ TEST_CASE("AsioConnectionPool handles read timeout", "[daemon][connection-pool][
     auto fut = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
                                      boost::asio::use_future);
     REQUIRE(fut.wait_for(1s) == std::future_status::ready);
-    auto conn = fut.get();
+    auto conn_res = fut.get();
+    REQUIRE(conn_res);
+    auto conn = conn_res.value();
     REQUIRE(conn);
     REQUIRE(connected.get_future().wait_for(1s) == std::future_status::ready);
 
@@ -393,7 +405,9 @@ TEST_CASE("Non-shared pool connection stays alive via pool_keepalive",
         auto fut = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
                                          boost::asio::use_future);
         REQUIRE(fut.wait_for(2s) == std::future_status::ready);
-        conn = fut.get();
+        auto conn_res = fut.get();
+        REQUIRE(conn_res);
+        conn = conn_res.value();
         REQUIRE(conn);
         REQUIRE(connected.get_future().wait_for(1s) == std::future_status::ready);
 
@@ -463,7 +477,9 @@ TEST_CASE("Shared pool does not set pool_keepalive", "[daemon][connection-pool][
     auto fut = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
                                      boost::asio::use_future);
     REQUIRE(fut.wait_for(2s) == std::future_status::ready);
-    auto conn = fut.get();
+    auto conn_res = fut.get();
+    REQUIRE(conn_res);
+    auto conn = conn_res.value();
     REQUIRE(conn);
     REQUIRE(connected.get_future().wait_for(1s) == std::future_status::ready);
 

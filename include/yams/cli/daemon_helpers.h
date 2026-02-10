@@ -25,6 +25,7 @@
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/client/ipc_failure.h>
 #include <yams/daemon/ipc/response_of.hpp>
 
 namespace yams::cli {
@@ -494,7 +495,10 @@ public:
         const auto client_id = lease.client_id();
 
         auto is_transient = [](const Error& e) {
-            // Treat transport resets as transient
+            // Prefer stable classification when available
+            if (auto kindOpt = yams::daemon::parseIpcFailureKind(e.message))
+                return yams::daemon::isTransient(*kindOpt);
+            // Back-compat: treat transport/network as transient
             if (e.code == ErrorCode::NetworkError)
                 return true;
             // Treat startup/initialization as transient

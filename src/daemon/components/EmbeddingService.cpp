@@ -476,11 +476,150 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     std::vector<std::string> allTexts; // For batch embedding call
 
     yams::vector::ChunkingConfig ccfg{};
-    auto chunker =
-        yams::vector::createChunker(yams::vector::ChunkingStrategy::SENTENCE_BASED, ccfg, nullptr);
+
+    // Allow tuning chunking for embedding workloads without rebuilding.
+    // These environment variables intentionally apply only to the daemon embedding pipeline.
+    // - YAMS_EMBED_CHUNK_STRATEGY: chunking strategy
+    // (fixed|sentence|paragraph|recursive|sliding_window|markdown)
+    // - YAMS_EMBED_CHUNK_USE_TOKENS: 0/1 (interpret sizes as tokens; default 0)
+    // - YAMS_EMBED_CHUNK_TARGET: target chunk size
+    // - YAMS_EMBED_CHUNK_MAX:    max chunk size
+    // - YAMS_EMBED_CHUNK_MIN:    min chunk size
+    // - YAMS_EMBED_CHUNK_OVERLAP:      overlap size (0 disables)
+    // - YAMS_EMBED_CHUNK_OVERLAP_PCT:  overlap percentage (0 disables)
+    // - YAMS_EMBED_CHUNK_PRESERVE_SENTENCES: 0/1 (sentence strategy only; default 0 for embeddings)
+    const auto parseSizeEnv = [](const char* v) -> std::optional<std::size_t> {
+        if (!v || !*v)
+            return std::nullopt;
+        try {
+            return static_cast<std::size_t>(std::stoull(v));
+        } catch (...) {
+            return std::nullopt;
+        }
+    };
+    const auto parseBoolEnv = [](const char* v) -> std::optional<bool> {
+        if (!v || !*v)
+            return std::nullopt;
+        try {
+            auto n = std::stoll(v);
+            return n != 0;
+        } catch (...) {
+            return std::nullopt;
+        }
+    };
+    const auto parseDoubleEnv = [](const char* v) -> std::optional<double> {
+        if (!v || !*v)
+            return std::nullopt;
+        try {
+            return std::stod(v);
+        } catch (...) {
+            return std::nullopt;
+        }
+    };
+
+    const auto parseStrategyEnv =
+        [](const char* v) -> std::optional<yams::vector::ChunkingStrategy> {
+        if (!v || !*v)
+            return std::nullopt;
+        std::string s(v);
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (s == "fixed" || s == "fixed_size")
+            return yams::vector::ChunkingStrategy::FIXED_SIZE;
+        if (s == "sentence" || s == "sentence_based")
+            return yams::vector::ChunkingStrategy::SENTENCE_BASED;
+        if (s == "paragraph" || s == "paragraph_based")
+            return yams::vector::ChunkingStrategy::PARAGRAPH_BASED;
+        if (s == "recursive" || s == "recursive_split")
+            return yams::vector::ChunkingStrategy::RECURSIVE;
+        if (s == "sliding" || s == "sliding_window")
+            return yams::vector::ChunkingStrategy::SLIDING_WINDOW;
+        if (s == "markdown" || s == "markdown_aware")
+            return yams::vector::ChunkingStrategy::MARKDOWN_AWARE;
+        // NOTE: semantic chunking requires an embedder instance; not supported here.
+        return std::nullopt;
+    };
+
+    bool chunkCfgOverridden = false;
+    auto strategy = yams::vector::ChunkingStrategy::SENTENCE_BASED;
+    if (auto v = parseStrategyEnv(std::getenv("YAMS_EMBED_CHUNK_STRATEGY")); v) {
+        strategy = *v;
+        chunkCfgOverridden = true;
+    }
+
+    // For embedding workloads, the sentence chunker has a conservative default cap (3
+    // sentences/chunk) gated by preserve_sentences=true. That tends to explode chunk counts;
+    // default this OFF.
+    ccfg.preserve_sentences = false;
+    if (auto v = parseBoolEnv(std::getenv("YAMS_EMBED_CHUNK_PRESERVE_SENTENCES")); v) {
+        ccfg.preserve_sentences = *v;
+        chunkCfgOverridden = true;
+    }
+
+    // Default is character-based sizing; allow token sizing for embedding workloads.
+    // Token estimator is heuristic (see DocumentChunker::estimateTokenCount).
+    ccfg.use_token_count = false;
+    if (auto v = parseBoolEnv(std::getenv("YAMS_EMBED_CHUNK_USE_TOKENS")); v) {
+        ccfg.use_token_count = *v;
+        chunkCfgOverridden = true;
+    }
+
+    if (auto v = parseSizeEnv(std::getenv("YAMS_EMBED_CHUNK_TARGET")); v && *v > 0) {
+        ccfg.target_chunk_size = *v;
+        chunkCfgOverridden = true;
+    }
+    if (auto v = parseSizeEnv(std::getenv("YAMS_EMBED_CHUNK_MAX")); v && *v > 0) {
+        ccfg.max_chunk_size = *v;
+        chunkCfgOverridden = true;
+    }
+    if (auto v = parseSizeEnv(std::getenv("YAMS_EMBED_CHUNK_MIN")); v && *v > 0) {
+        ccfg.min_chunk_size = *v;
+        chunkCfgOverridden = true;
+    }
+
+    if (auto v = parseSizeEnv(std::getenv("YAMS_EMBED_CHUNK_OVERLAP")); v) {
+        ccfg.overlap_size = *v;
+        if (*v == 0)
+            ccfg.overlap_percentage = 0.0;
+        chunkCfgOverridden = true;
+    }
+    if (auto v = parseDoubleEnv(std::getenv("YAMS_EMBED_CHUNK_OVERLAP_PCT")); v) {
+        double pct = *v;
+        if (pct < 0.0)
+            pct = 0.0;
+        if (pct > 1.0)
+            pct = 1.0;
+        ccfg.overlap_percentage = pct;
+        if (pct == 0.0)
+            ccfg.overlap_size = 0;
+        chunkCfgOverridden = true;
+    }
+
+    // Basic sanity: ensure min <= target <= max.
+    if (ccfg.min_chunk_size > ccfg.max_chunk_size)
+        ccfg.max_chunk_size = ccfg.min_chunk_size;
+    if (ccfg.target_chunk_size < ccfg.min_chunk_size)
+        ccfg.target_chunk_size = ccfg.min_chunk_size;
+    if (ccfg.target_chunk_size > ccfg.max_chunk_size)
+        ccfg.target_chunk_size = ccfg.max_chunk_size;
+
+    if (timingEnabled && chunkCfgOverridden) {
+        spdlog::info("[EmbeddingService] job={} chunk_cfg strategy={} target={} min={} max={} "
+                     "overlap_size={} "
+                     "overlap_pct={:.3f} preserve_sentences={} use_tokens={}",
+                     jobTag, static_cast<int>(strategy), ccfg.target_chunk_size,
+                     ccfg.min_chunk_size, ccfg.max_chunk_size, ccfg.overlap_size,
+                     ccfg.overlap_percentage, ccfg.preserve_sentences,
+                     ccfg.use_token_count ? 1 : 0);
+    }
+    auto chunker = yams::vector::createChunker(strategy, ccfg, nullptr);
+
+    uint64_t totalDocChars = 0;
+    uint64_t totalChunkChars = 0;
 
     for (size_t docIdx = 0; docIdx < docsToEmbed.size(); ++docIdx) {
         const auto& doc = docsToEmbed[docIdx];
+        totalDocChars += static_cast<uint64_t>(doc.text.size());
         auto chunks = chunker->chunkDocument(doc.text, doc.hash);
 
         if (chunks.empty()) {
@@ -488,6 +627,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             std::string chunkId = yams::vector::utils::generateChunkId(doc.hash, 0);
             allChunks.push_back({docIdx, chunkId, doc.text, 0, doc.text.size()});
             allTexts.push_back(doc.text);
+            totalChunkChars += static_cast<uint64_t>(doc.text.size());
         } else {
             for (size_t i = 0; i < chunks.size(); ++i) {
                 auto& c = chunks[i];
@@ -497,6 +637,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                 allChunks.push_back(
                     {docIdx, chunkId, std::move(c.content), c.start_offset, c.end_offset});
                 allTexts.push_back(allChunks.back().content);
+                totalChunkChars += static_cast<uint64_t>(allChunks.back().content.size());
             }
         }
     }
@@ -505,11 +646,20 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                   allChunks.size());
 
     logPhase("chunk", tChunk,
-             fmt::format("docs={} chunks={} avg_chunks_per_doc={:.2f}", docsToEmbed.size(),
-                         allChunks.size(),
+             fmt::format("docs={} chunks={} avg_chunks_per_doc={:.2f} doc_chars={} "
+                         "avg_doc_chars={:.0f} chunk_chars={} avg_chunk_chars={:.0f}",
+                         docsToEmbed.size(), allChunks.size(),
                          docsToEmbed.empty() ? 0.0
                                              : (static_cast<double>(allChunks.size()) /
-                                                static_cast<double>(docsToEmbed.size()))));
+                                                static_cast<double>(docsToEmbed.size())),
+                         totalDocChars,
+                         docsToEmbed.empty() ? 0.0
+                                             : (static_cast<double>(totalDocChars) /
+                                                static_cast<double>(docsToEmbed.size())),
+                         totalChunkChars,
+                         allChunks.empty() ? 0.0
+                                           : (static_cast<double>(totalChunkChars) /
+                                              static_cast<double>(allChunks.size()))));
 
     // ============================================================
     // Phase 3: Batch embedding call with sub-batching to avoid timeouts

@@ -1134,6 +1134,24 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_asio_transport_exhaustion_exe = executable('catch2_asio_transport_exhaustion',
+    files('unit/daemon/asio_transport_exhaustion_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_asio_transport_inflight_close_ipc_prefix_exe = executable('catch2_asio_transport_inflight_close_ipc_prefix',
+    files('unit/daemon/asio_transport_inflight_close_ipc_prefix_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_daemon_exe = executable('catch2_daemon',
     files('unit/daemon/daemon_catch2_test.cpp'),
     files('unit/daemon/streaming_handlers_catch2_test.cpp'),
@@ -2653,6 +2671,24 @@ if catch2_dep.found()
 
   test('asio_connection_pool', catch2_asio_connection_pool_exe,
     suite: ['catch2', 'unit', 'daemon', 'connection-pool'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120,
+    is_parallel: false,
+    # Test skips on Windows (Unix domain sockets not supported)
+    should_fail: host_machine.system() == 'windows'
+  )
+
+  test('asio_transport_exhaustion', catch2_asio_transport_exhaustion_exe,
+    suite: ['catch2', 'unit', 'daemon', 'transport', 'max-inflight'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120,
+    is_parallel: false,
+    # Test skips on Windows (Unix domain sockets not supported)
+    should_fail: host_machine.system() == 'windows'
+  )
+
+  test('asio_transport_inflight_close_ipc_prefix', catch2_asio_transport_inflight_close_ipc_prefix_exe,
+    suite: ['catch2', 'unit', 'daemon', 'transport', 'ipc'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120,
     is_parallel: false,
