@@ -381,7 +381,8 @@ version_header = configure_file(
   install: true,
   install_dir: get_option('includedir') / 'yams',
   configuration: version_config,
-  format: 'cmake', # Simple @VAR@ substitution; header template below.
+  # Header template uses @VAR@ tokens.
+  format: 'meson',
   input: files('include/yams/version_generated.h.in')
 )
 

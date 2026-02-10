@@ -250,9 +250,9 @@ private:
 #if defined(__cpp_lib_format)
 #include <format>
 template <> struct std::formatter<yams::ErrorCode> {
-    constexpr auto parse(std::format_parse_context& ctx) { return ctx.begin(); }
+    static constexpr auto parse(std::format_parse_context& ctx) { return ctx.begin(); }
 
-    auto format(yams::ErrorCode error, std::format_context& ctx) const {
+    static auto format(yams::ErrorCode error, std::format_context& ctx) {
         return std::format_to(ctx.out(), "{}", yams::errorToString(error));
     }
 };
@@ -263,9 +263,10 @@ template <> struct std::formatter<yams::ErrorCode> {
 #if defined(SPDLOG_FMT_EXTERNAL) || defined(FMT_VERSION)
 #include <spdlog/fmt/fmt.h>
 template <> struct fmt::formatter<yams::ErrorCode> {
-    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+    static constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
 
-    template <typename FormatContext> auto format(yams::ErrorCode error, FormatContext& ctx) const {
+    template <typename FormatContext>
+    static auto format(yams::ErrorCode error, FormatContext& ctx) {
         return fmt::format_to(ctx.out(), "{}", yams::errorToString(error));
     }
 };

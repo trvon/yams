@@ -176,7 +176,7 @@ public:
         std::unordered_map<ErrorCode, size_t> errorCounts;
     };
 
-    ApiStatistics getStatistics() const { return stats_; }
+    const ApiStatistics& getStatistics() const noexcept { return stats_; }
     void resetStatistics() { stats_ = ApiStatistics{}; }
 
     /**

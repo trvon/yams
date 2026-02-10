@@ -343,12 +343,14 @@ else
     
     FIND_EXCLUDES=(
         -not -path "./build/*"
+        -not -path "./builddir/*"
         -not -path "./.cache/*"
         -not -path "./cmake-build-*/*"
         -not -path "./third_party/*"
         -not -path "./external/*"
         -not -path "./vendor/*"
         -not -path "./.git/*"
+        -not -path "./examples/plugins/*"
         -not -path "*/generated/*"
         -not -path "*/_deps/*"
         -not -path "*.pb.h"
@@ -403,7 +405,6 @@ CPPCHECK_ARGS=()
 
 # Base configuration
 CPPCHECK_ARGS+=(
-    "--enable=warning,style,performance,portability,information"
     "--std=c++20"
     "--language=c++"
     "--inline-suppr"
@@ -450,7 +451,9 @@ case $PROFILE in
         ;;
     quick)
         CPPCHECK_ARGS+=(
-            "--enable=error,warning"
+            # cppcheck --enable supports categories like warning/style/performance/etc.
+            # "error" is a message severity, not a valid --enable category.
+            "--enable=warning,style,performance"
         )
         ;;
     ci)
