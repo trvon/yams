@@ -224,6 +224,36 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
     }
 }
 
+TEST_CASE("RequestDispatcher: status responds even when lifecycle not ready",
+          "[daemon][status][readiness]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_not_ready_");
+
+    YamsDaemon daemon(cfg);
+    // Daemon is not started; lifecycle state is expected to be non-ready.
+    {
+        const auto snap = daemon.getLifecycle().snapshot();
+        REQUIRE(snap.state != LifecycleState::Ready);
+        REQUIRE(snap.state != LifecycleState::Degraded);
+    }
+
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&daemon, &svc, &state);
+
+    StatusRequest req;
+    req.detailed = true;
+    Request r = req;
+
+    boost::asio::io_context ioc;
+    auto fut = boost::asio::co_spawn(ioc, dispatcher.dispatch(r), boost::asio::use_future);
+    ioc.run();
+    auto resp = fut.get();
+
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+}
+
 TEST_CASE("DaemonMetrics: snapshot includes canonical readiness flags",
           "[daemon][metrics][readiness]") {
     StateComponent state;
