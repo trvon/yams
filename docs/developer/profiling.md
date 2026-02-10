@@ -154,20 +154,22 @@ perf report
 perf script | stackcollapse-perf.pl | flamegraph.pl > flamegraph.svg
 ```
 
-## Fuzzing Build (Stub)
+## Fuzzing (AFL++)
 
-The `Fuzzing` build type is reserved for future AFL++/libFuzzer integration:
+YAMS includes AFL++ fuzz harnesses and a Docker-based runner:
 
 ```bash
-# TODO: Not yet implemented
-# ./setup.sh Fuzzing
+./tools/fuzzing/fuzz.sh build
+./tools/fuzzing/fuzz.sh fuzz ipc_roundtrip
 ```
 
-When implemented, this will enable:
+This setup provides:
 - AFL++ instrumentation for coverage-guided fuzzing
-- libFuzzer support for targeted fuzzing
-- Sanitizer integration (ASan, UBSan, MSan)
-- Corpus generation and minimization
+- libFuzzer-compat mode harnesses (`-fsanitize=fuzzer`)
+- Sanitizer integration via `AFL_USE_ASAN=1` (ASan)
+- Corpus + findings directories under `data/fuzz/`
+
+Details and additional targets live in `tools/fuzzing/README.md`.
 
 Target areas for fuzzing:
 - Query parser (malformed queries)
@@ -182,7 +184,7 @@ Target areas for fuzzing:
 | `Debug` | Development | Low | GDB, basic profiling |
 | `Release` | Production | None | Minimal instrumentation |
 | `Profiling` | Performance analysis | Low-Medium | Tracy, Valgrind, Perf |
-| `Fuzzing` | Security testing | High | AFL++, libFuzzer (TODO) |
+| `Fuzzing` | Security testing | High | AFL++ (Docker-based harnesses) |
 
 ## Best Practices
 

@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <csignal>
+#include <cstdlib>
+#include <cstdio>
+#include <unistd.h>
 #include <string>
 
 #include <yams/search/query_parser.h>
@@ -47,6 +51,18 @@ static QueryParserConfig configFromBytes(const uint8_t* data, size_t size) {
 } // namespace
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+    // Debug-only hook: allow attaching a debugger in AFL mode.
+    // Usage:
+    //   YAMS_FUZZ_PAUSE=1 afl-showmap ... -- fuzz_query_parser - < input
+    // Then attach: gdb -p <pid> and 'continue'.
+    static bool pausedOnce = false;
+    if (!pausedOnce && std::getenv("YAMS_FUZZ_PAUSE")) {
+        pausedOnce = true;
+        std::fprintf(stderr, "YAMS_FUZZ_PAUSE pid=%d\n", static_cast<int>(::getpid()));
+        std::fflush(stderr);
+        std::raise(SIGSTOP);
+    }
+
     if (!data || size == 0)
         return 0;
 

@@ -6,6 +6,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <filesystem>
+#include <limits>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,6 +22,81 @@ namespace detail {
 inline std::string envOr(const char* name, const std::string& fallback) {
     const char* v = std::getenv(name);
     return (v && v[0]) ? std::string(v) : fallback;
+}
+
+inline bool envBool(const char* name, bool fallback) {
+    const char* v = std::getenv(name);
+    if (!v || !v[0])
+        return fallback;
+    std::string s(v);
+    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    if (s == "0" || s == "false" || s == "no" || s == "off")
+        return false;
+    if (s == "1" || s == "true" || s == "yes" || s == "on")
+        return true;
+    return fallback;
+}
+
+inline int envInt(const char* name, int fallback) {
+    const char* v = std::getenv(name);
+    if (!v || !v[0])
+        return fallback;
+    try {
+        return std::stoi(v);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+inline size_t envSizeT(const char* name, size_t fallback) {
+    const char* v = std::getenv(name);
+    if (!v || !v[0])
+        return fallback;
+    try {
+        return static_cast<size_t>(std::stoull(v));
+    } catch (...) {
+        return fallback;
+    }
+}
+
+inline std::string arenaExtendStrategyName(int v) {
+    // ORT expects the string names for MIGraphX arena strategy.
+    // See ORT's migraphx_execution_provider_info.cc mapping.
+    switch (v) {
+    case 1:
+        return "kSameAsRequested";
+    case 0:
+    default:
+        return "kNextPowerOfTwo";
+    }
+}
+
+inline bool directoryHasMxrFiles(const std::filesystem::path& dir) {
+    std::error_code ec;
+    if (dir.empty() || !std::filesystem::exists(dir, ec) || !std::filesystem::is_directory(dir, ec))
+        return false;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (ec)
+            return false;
+        if (!entry.is_regular_file(ec) || ec)
+            continue;
+        if (entry.path().extension() == ".mxr")
+            return true;
+    }
+    return false;
+}
+
+inline void setEnvIfAbsent(const char* name, const std::string& value) {
+    if (value.empty())
+        return;
+    const char* existing = std::getenv(name);
+    if (existing && existing[0])
+        return;
+#ifdef _WIN32
+    (void)_putenv_s(name, value.c_str());
+#else
+    (void)setenv(name, value.c_str(), 0);
+#endif
 }
 
 } // namespace detail
@@ -85,16 +164,98 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
     // -----------------------------------------------------------------
     if (has("MIGraphXExecutionProvider")) {
         try {
+            // IMPORTANT: In ORT 1.23.x the legacy OrtMIGraphXProviderOptions constructor
+            // does not propagate model cache dir / compiled caching settings.
+            // Use the provider-options map API instead.
             std::unordered_map<std::string, std::string> migraphx_opts;
-            migraphx_opts["device_id"] = "0";
-            migraphx_opts["migraphx_fp16_enable"] = detail::envOr("YAMS_MIGRAPHX_FP16", "0");
-            migraphx_opts["migraphx_exhaustive_tune"] =
-                detail::envOr("YAMS_MIGRAPHX_EXHAUSTIVE_TUNE", "0");
+
+            const int deviceId = detail::envInt("YAMS_MIGRAPHX_DEVICE_ID", 0);
+            const bool fp16 = detail::envBool("YAMS_MIGRAPHX_FP16", false);
+            const bool fp8 = detail::envBool("YAMS_MIGRAPHX_FP8", false);
+            const bool int8 = detail::envBool("YAMS_MIGRAPHX_INT8", false);
+            const bool exhaustiveTune = detail::envBool("YAMS_MIGRAPHX_EXHAUSTIVE_TUNE", false);
+            const size_t memLimit =
+                detail::envSizeT("YAMS_MIGRAPHX_MEM_LIMIT", std::numeric_limits<size_t>::max());
+            const int arenaExtend = detail::envInt("YAMS_MIGRAPHX_ARENA_EXTEND_STRATEGY", 0);
+
+            migraphx_opts["device_id"] = std::to_string(deviceId);
+            migraphx_opts["migraphx_fp16_enable"] = fp16 ? "1" : "0";
+            migraphx_opts["migraphx_fp8_enable"] = fp8 ? "1" : "0";
+            migraphx_opts["migraphx_int8_enable"] = int8 ? "1" : "0";
+            migraphx_opts["migraphx_exhaustive_tune"] = exhaustiveTune ? "1" : "0";
+            migraphx_opts["migraphx_mem_limit"] = std::to_string(memLimit);
+            migraphx_opts["migraphx_arena_extend_strategy"] = detail::arenaExtendStrategyName(arenaExtend);
+
+            // Optional INT8 calibration settings
+            const bool useNativeCalTable = detail::envBool("YAMS_MIGRAPHX_USE_NATIVE_CAL_TABLE", false);
+            if (useNativeCalTable) {
+                migraphx_opts["migraphx_int8_use_native_calibration_table"] = "1";
+            }
+            if (const char* table = std::getenv("YAMS_MIGRAPHX_INT8_CAL_TABLE")) {
+                if (table[0]) {
+                    migraphx_opts["migraphx_int8_calibration_table_name"] = table;
+                }
+            }
+
+            // Compiled model caching (dramatically reduces repeated compile time when sessions
+            // are recreated, e.g., after scale-down / eviction).
+            const bool saveCompiled = detail::envBool("YAMS_MIGRAPHX_SAVE_COMPILED", true);
+            const bool loadCompiled = detail::envBool("YAMS_MIGRAPHX_LOAD_COMPILED", true);
+            std::string compiledPath = detail::envOr("YAMS_MIGRAPHX_COMPILED_PATH", "");
+            // NOTE: ORT's MIGraphX EP writes a hashed `*.mxr` filename under the provided path.
+            // In practice this behaves like a cache directory, not a single fixed file.
+            std::filesystem::path cacheDir;
+            if (!compiledPath.empty()) {
+                std::filesystem::path p(compiledPath);
+                cacheDir = (p.extension() == ".mxr") ? p.parent_path() : p;
+            } else if (!modelCacheDir.empty()) {
+                // modelCacheDir is typically the model directory (e.g., ~/.local/share/yams/models/<name>).
+                cacheDir = std::filesystem::path(modelCacheDir);
+            }
+
+            // ORT MIGraphX caching is enabled by setting migraphx_model_cache_dir.
+            // ORT does not currently support independent save/load toggles, so we treat
+            // either knob disabling as "disable caching".
+            if (!cacheDir.empty() && saveCompiled && loadCompiled) {
+                std::error_code ec;
+                std::filesystem::create_directories(cacheDir, ec);
+
+                const bool hit = detail::directoryHasMxrFiles(cacheDir);
+
+                // Defensive: some ORT ROCm builds appear to still consult the env override
+                // even when provider options are set. Setting this (without overriding user
+                // configuration) avoids attempts to write to an empty cache dir (""/hash.mxr).
+                constexpr const char kOrtCacheEnv[] = "ORT_MIGRAPHX_MODEL_CACHE_PATH";
+                detail::setEnvIfAbsent(kOrtCacheEnv, cacheDir.string());
+                if (!std::getenv(kOrtCacheEnv) && !cacheDir.string().empty()) {
+                    // Unreachable due to setEnvIfAbsent, but keep logic simple.
+                    // (If setenv failed, getenv would still be null.)
+                    spdlog::warn("[ONNX] Failed to set ORT_MIGRAPHX_MODEL_CACHE_PATH; caching may fail");
+                } else {
+                    spdlog::debug("[ONNX] ORT_MIGRAPHX_MODEL_CACHE_PATH={}", cacheDir.string());
+                }
+                if (hit) {
+                    spdlog::info("[ONNX] MIGraphX compiled cache hit (dir={})", cacheDir.string());
+                } else if (loadCompiled) {
+                    spdlog::info("[ONNX] MIGraphX compiled cache miss (dir={})", cacheDir.string());
+                }
+
+                migraphx_opts["migraphx_model_cache_dir"] = cacheDir.string();
+                if (!hit) {
+                    spdlog::info("[ONNX] MIGraphX will save compiled artifact under: {}",
+                                 cacheDir.string());
+                }
+                spdlog::info("[ONNX] MIGraphX cache config: migraphx_model_cache_dir='{}' ORT_MIGRAPHX_MODEL_CACHE_PATH='{}'",
+                             migraphx_opts["migraphx_model_cache_dir"],
+                             (std::getenv(kOrtCacheEnv) ? std::getenv(kOrtCacheEnv) : "(unset)"));
+            }
 
             opts.AppendExecutionProvider("MIGraphX", migraphx_opts);
             static std::atomic<bool> logged_migraphx{false};
             if (!logged_migraphx.exchange(true)) {
-                spdlog::info("[ONNX] MIGraphX execution provider enabled (AMD GPU via ROCm)");
+                spdlog::info(
+                    "[ONNX] MIGraphX execution provider enabled (AMD GPU via ROCm) (device_id={}, fp16={}, fp8={}, int8={}, exhaustive_tune={})",
+                    deviceId, fp16, fp8, int8, exhaustiveTune);
             } else {
                 spdlog::debug("[ONNX] MIGraphX execution provider attached (pooled session)");
             }

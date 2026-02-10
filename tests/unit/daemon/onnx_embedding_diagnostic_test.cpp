@@ -180,6 +180,24 @@ TEST_CASE("ONNX Diagnostic: GPU model load and embed",
     if (!mat.empty()) {
         UNSCOPED_INFO("  embedding dim returned: " << mat[0].size());
     }
+
+    // After the first successful inference, the session should have discovered model dims.
+    UNSCOPED_INFO("  session embedding dim (post-infer): " << session.getEmbeddingDim());
+    UNSCOPED_INFO("  session max seq length (post-infer): " << session.getMaxSequenceLength());
+    UNSCOPED_INFO("  session isValid (post-infer): " << session.isValid());
+
+    // Warm (steady-state) timing: run 3 more times and report avg.
+    constexpr int kWarmIters = 3;
+    long warmTotalMs = 0;
+    for (int i = 0; i < kWarmIters; ++i) {
+        auto t0 = std::chrono::steady_clock::now();
+        auto warm = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings(texts);
+        auto t1 = std::chrono::steady_clock::now();
+        warmTotalMs +=
+            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        REQUIRE(warm);
+    }
+    UNSCOPED_INFO("  warm avg time: " << (warmTotalMs / kWarmIters) << " ms");
     CHECK(mat.size() == texts.size());
 }
 

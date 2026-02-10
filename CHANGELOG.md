@@ -19,20 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.8.3] - Unreleased
 
 ### Fixed
-- **Homebrew plugin directory structure**: Formula now preserves `lib/yams/plugins/` subdirectory instead of flattening all libs into Homebrew's `lib/`. Plugins are correctly discovered by the daemon after `brew install`.
-- **ONNX Runtime dependency**: Homebrew formulas now declare `depends_on "onnxruntime"` and strip the bundled `libonnxruntime*` to avoid conflicts. A `post_install` rpath fixup ensures plugins find Homebrew's copy.
-- **GPU acceleration not enabled**: Fixed ONNX plugin not receiving GPU provider defines (`YAMS_ONNX_COREML_ENABLED`, `YAMS_ONNX_CUDA_ENABLED`, etc.) despite `setup.sh` detecting GPU support. The Meson build now tries pkg-config first to get compile definitions, with platform detection fallback for macOS CoreML. Also fixed ROCm (AMD GPU) build logic in setup script.
 - **Stuck-doc recovery enqueue**: Fixed repair stuck-document recovery enqueueing `PostIngestTask`s to an unused InternalEventBus channel. Recovery now enqueues to `post_ingest` (consumed by PostInestQueue), so re-extraction actually runs.
 - **Doctor FTS5 reindex SQLite TOOBIG**: Added best-effort truncation retry for oversized extracted text and report `truncated=<n>` in output.
-- **SQLite bind diagnostics**: Improved error messages for string/blob binds with length/limit details and better rc/db context.
-- **Persisted extracted text cap**: Cap persisted extracted text to 16 MiB (best-effort) during ingest/repair/FTS rebuild to avoid SQLite length limit failures.
-- **Embedding repair lock contention**: Reduce time spent holding the cross-process vector DB lock by batching chunk embedding outside the lock and inserting records in a single batch.
 
-### Performance
 - **ONNX dynamic tensor padding**: Pads input tensors to the aligned actual token length instead of the model's `max_seq_len` (512). Short texts now skip hundreds of zero-padded positions, yielding **~70-85x throughput improvement** for short inputs (93 texts/sec vs 1.6 texts/sec on CPU with `nomic-embed-text-v1.5`). Enabled by default; disable with `YAMS_ONNX_DYNAMIC_PADDING=0`. Sequence lengths are 8-byte aligned to balance SIMD efficiency with padding reduction.
+- **ROCm / MIGraphX compiled-model caching**: Enable save/load of compiled MIGraphX artifacts to avoid paying multi-minute `compile_program` costs when sessions are recreated (e.g., after scale-down/eviction). Defaults to caching hashed `*.mxr` artifacts under the model directory. Configure with `YAMS_MIGRAPHX_COMPILED_PATH` (directory; if a `.mxr` path is provided, its parent directory is used), `YAMS_MIGRAPHX_SAVE_COMPILED`, and `YAMS_MIGRAPHX_LOAD_COMPILED`.
 - **ONNX batch warmup and auto-tuning**: `warmupModel()` runs a 4-text batch embedding immediately after model load, pre-warming the ONNX Runtime session and measuring throughput. When `YAMS_EMBED_DOC_CAP` is unset, an auto-tuning sweep (batch sizes 4→8→16→32→64) selects the batch size with peak texts/sec as the default cap via `TuneAdvisor::setEmbedDocCap()`. Disable auto-tuning with `YAMS_EMBED_AUTOTUNE=0`.
 - **ONNX session reuse**: Pool-managed sessions now show **25x latency reduction** on warm cycles (259ms cold → 10ms warm), confirming session creation cost is amortized after the first inference.
 - **Hardware-adaptive pool sizing**: `TuneAdvisor::onnxSessionsPerModel()` dynamically sizes the session pool based on available CPU cores and GPU state, preventing over-subscription on constrained hardware.
+
+### Diagnostics
+- **ONNX ROCm diagnostic output**: GPU diagnostic now reports cold vs warm embedding timing to distinguish first-run compilation from steady-state inference.
 
 #### ONNX Embedding Benchmarks (CPU-only, macOS M3 Max, `nomic-embed-text-v1.5` 768-dim)
 
