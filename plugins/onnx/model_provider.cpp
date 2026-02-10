@@ -957,8 +957,8 @@ struct ProviderSingleton {
                                              const uint8_t* const* inputs, const size_t* input_lens,
                                              size_t batch_size, float** out_vecs, size_t* out_batch,
                                              size_t* out_dim) -> yams_status_t {
-            spdlog::info("[ONNX Plugin] generate_embedding_batch called: model={} batch={}",
-                         model_id ? model_id : "(null)", batch_size);
+            spdlog::debug("[ONNX Plugin] generate_embedding_batch called: model={} batch={}",
+                          model_id ? model_id : "(null)", batch_size);
 
             if (!self || !model_id || !inputs || !input_lens || !out_vecs || !out_batch ||
                 !out_dim) {
@@ -1012,7 +1012,7 @@ struct ProviderSingleton {
                         texts.emplace_back(reinterpret_cast<const char*>(inputs[i]), input_lens[i]);
                     }
 
-                    spdlog::info("[ONNX Plugin] acquiring model '{}'...", model_id);
+                    spdlog::debug("[ONNX Plugin] acquiring model '{}'...", model_id);
                     auto h = c->pool->acquireModel(model_id, std::chrono::seconds(30));
                     if (!h) {
                         std::string errMsg = h.error().message;

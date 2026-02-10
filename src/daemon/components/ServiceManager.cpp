@@ -71,8 +71,8 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
-#include <yams/daemon/metric_keys.h>
 #include <yams/daemon/ipc/retrieval_session.h>
+#include <yams/daemon/metric_keys.h>
 
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
@@ -852,14 +852,16 @@ void ServiceManager::shutdown() {
     spdlog::info("[ServiceManager] Phase 6: Shutting down daemon services");
 
     spdlog::info("[ServiceManager] Phase 6.0.5: Stopping repair service");
-    if (repairService_) {
-        try {
-            repairService_->stop();
-            repairService_.reset();
-            spdlog::info("[ServiceManager] Phase 6.0.5: Repair service stopped");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 6.0.5: RepairService shutdown failed: {}",
-                         e.what());
+    {
+        auto rs = getRepairServiceShared();
+        if (rs) {
+            try {
+                stopRepairService();
+                spdlog::info("[ServiceManager] Phase 6.0.5: Repair service stopped");
+            } catch (const std::exception& e) {
+                spdlog::warn("[ServiceManager] Phase 6.0.5: RepairService shutdown failed: {}",
+                             e.what());
+            }
         }
     }
 
@@ -3027,7 +3029,8 @@ void ServiceManager::enqueuePostIngestBatch(const std::vector<std::string>& hash
 }
 
 void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {
-    if (repairService_) {
+    std::lock_guard<std::mutex> lk(repairServiceMutex_);
+    if (std::atomic_load_explicit(&repairService_, std::memory_order_acquire)) {
         spdlog::debug("[ServiceManager] RepairService already started");
         return;
     }
@@ -3037,17 +3040,25 @@ void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {
     rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
     rcfg.autoRebuildOnDimMismatch = config_.autoRebuildOnDimMismatch;
 
-    repairService_ = std::make_unique<RepairService>(this, &state_, std::move(activeConnFn), rcfg);
-    repairService_->start();
+    auto rs = std::make_shared<RepairService>(this, &state_, std::move(activeConnFn), rcfg);
+    std::atomic_store_explicit(&repairService_, rs, std::memory_order_release);
+    rs->start();
     spdlog::info("[ServiceManager] RepairService started");
 }
 
 void ServiceManager::stopRepairService() {
-    if (repairService_) {
-        repairService_->stop();
-        repairService_.reset();
-        spdlog::info("[ServiceManager] RepairService stopped");
+    std::shared_ptr<RepairService> rs;
+    {
+        std::lock_guard<std::mutex> lk(repairServiceMutex_);
+        rs = std::atomic_load_explicit(&repairService_, std::memory_order_acquire);
+        if (!rs) {
+            return;
+        }
+        std::atomic_store_explicit(&repairService_, std::shared_ptr<RepairService>{},
+                                   std::memory_order_release);
     }
+    rs->stop();
+    spdlog::info("[ServiceManager] RepairService stopped");
 }
 
 } // namespace yams::daemon

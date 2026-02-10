@@ -276,34 +276,39 @@ void TuningManager::tick_once() {
         uint32_t embedReserved = TuneAdvisor::onnxEmbedReserved();
         uint32_t rerankerReserved = TuneAdvisor::onnxRerankerReserved();
 
-        if (TuneAdvisor::enableResourceGovernor()) {
+        // Only clamp ONNX slots under memory pressure.
+        // OnnxConcurrencyRegistry is a global budget across multiple lanes; clamping it to
+        // embedding concurrency during Normal pressure can underutilize other lanes.
+        const bool underPressure =
+            TuneAdvisor::enableResourceGovernor() && govSnap.level != ResourcePressureLevel::Normal;
+        if (underPressure) {
             desiredMax = std::min<uint32_t>(desiredMax, governor.maxEmbedConcurrency());
+        } else {
+            // Under normal conditions, preserve the invariant that there is at least 1 shared slot
+            // beyond the configured reserved total.
+            const uint32_t totalReservedWanted = glinerReserved + embedReserved + rerankerReserved;
+            desiredMax = std::max<uint32_t>(desiredMax, totalReservedWanted + 1u);
         }
 
-        desiredMax = std::max<uint32_t>(desiredMax, 1u);
+        desiredMax = std::max<uint32_t>(desiredMax, 2u);
         if (desiredMax > 64u) { // counting_semaphore<64> limit in registry
             desiredMax = 64u;
         }
 
-        uint32_t remaining = desiredMax;
-        auto consume = [&remaining](uint32_t v) {
-            if (remaining == 0)
+        // Always leave at least 1 shared slot beyond reserved budgets when possible.
+        uint32_t remainingForReserved = (desiredMax > 1u) ? (desiredMax - 1u) : 0u;
+        auto consume = [&remainingForReserved](uint32_t v) {
+            if (remainingForReserved == 0)
                 return 0u;
-            uint32_t take = std::min(v, remaining);
-            remaining -= take;
+            uint32_t take = std::min(v, remainingForReserved);
+            remainingForReserved -= take;
             return take;
         };
         uint32_t effGliner = consume(glinerReserved);
         uint32_t effEmbed = consume(embedReserved);
         uint32_t effReranker = consume(rerankerReserved);
 
-        static_cast<void>(remaining);
-
-        if (lastOnnxMax_ != desiredMax) {
-            registry.setMaxSlots(desiredMax);
-            lastOnnxMax_ = desiredMax;
-            spdlog::info("[TuningManager] ONNX slots set to {}", desiredMax);
-        }
+        // Apply reserved first, then maxSlots to avoid transient states where reserved > max.
         if (lastOnnxGliner_ != effGliner) {
             registry.setReservedSlots(OnnxLane::Gliner, effGliner);
             lastOnnxGliner_ = effGliner;
@@ -315,6 +320,11 @@ void TuningManager::tick_once() {
         if (lastOnnxReranker_ != effReranker) {
             registry.setReservedSlots(OnnxLane::Reranker, effReranker);
             lastOnnxReranker_ = effReranker;
+        }
+        if (lastOnnxMax_ != desiredMax) {
+            registry.setMaxSlots(desiredMax);
+            lastOnnxMax_ = desiredMax;
+            spdlog::info("[TuningManager] ONNX slots set to {}", desiredMax);
         }
     } catch (...) {
     }

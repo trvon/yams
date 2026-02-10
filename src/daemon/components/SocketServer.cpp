@@ -30,6 +30,7 @@ bool stream_trace_enabled() {
 } // namespace
 
 #include <spdlog/spdlog.h>
+#include <atomic>
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
@@ -494,19 +495,17 @@ void SocketServer::setWriterBudget(std::size_t bytes) {
 
 awaitable<void> SocketServer::accept_loop(bool isProxy) {
     static const bool trace = stream_trace_enabled();
-    static bool trace_env_logged = false;
-    static bool logged_entry = false;
+    static std::atomic<bool> trace_env_logged{false};
+    static std::atomic<bool> logged_entry{false};
 
     const char* loopLabel = isProxy ? "proxy" : "main";
     auto* activeAcceptor = isProxy ? proxyAcceptor_.get() : acceptor_.get();
 
     spdlog::debug("{} accept loop started", loopLabel);
-    if (!logged_entry) {
-        logged_entry = true;
+    if (!logged_entry.exchange(true, std::memory_order_relaxed)) {
         spdlog::info("SocketServer: accept_loop coroutine entered");
     }
-    if (!trace && !trace_env_logged) {
-        trace_env_logged = true;
+    if (!trace && !trace_env_logged.exchange(true, std::memory_order_relaxed)) {
         if (const char* raw = std::getenv("YAMS_STREAM_TRACE")) {
             spdlog::info("stream-trace: accept_loop env present but disabled ('{}')", raw);
         } else {
@@ -537,57 +536,17 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
     while (running_ && !stopping_) {
         YAMS_ZONE_SCOPED_N("SocketServer::accept_loop");
 
-        std::counting_semaphore<>* slots = nullptr;
+        // IMPORTANT: Accept first, then try to acquire a slot.
+        // If we acquire slots before accept(), we can starve the acceptor/backlog under load.
+        std::counting_semaphore<>* slots =
+            isProxy ? proxyConnectionSlots_.get() : connectionSlots_.get();
         try {
-            // Use non-blocking try_acquire with async retry to avoid blocking the accept loop
-            if (isProxy) {
-                slots = proxyConnectionSlots_.get();
-            } else {
-                slots = connectionSlots_.get();
-            }
-            if (slots) {
-                while (!slots->try_acquire()) {
-                    if (!running_ || stopping_) {
-                        break;
-                    }
-                    // Async wait before retrying - doesn't block other coroutines
-                    boost::asio::steady_timer slot_timer(*coordinator_->getIOContext());
-                    slot_timer.expires_after(std::chrono::milliseconds(1));
-                    co_await slot_timer.async_wait(use_awaitable);
-                }
-                if (trace) {
-                    spdlog::debug("stream-trace: acquired connection slot");
-                }
-            }
-
-            // Check if we're shutting down after acquiring slot
-            if (!running_ || stopping_) {
-                if (slots) {
-                    slots->release(); // Release slot before exit
-                }
-                break;
-            }
-
-            // Generate monotonic connection token for end-to-end tracing
-            const uint64_t conn_token = connectionToken_.fetch_add(1, std::memory_order_relaxed);
-
-            if (trace) {
-                spdlog::info("stream-trace: [conn={}] accept_start (active={} total={})",
-                             conn_token, activeConnections_.load(std::memory_order_relaxed),
-                             totalConnections_.load(std::memory_order_relaxed));
-            }
-
             // Use as_tuple to avoid exception overhead during shutdown
             auto [ec, socket] =
                 co_await activeAcceptor->async_accept(boost::asio::as_tuple(use_awaitable));
 
             // Handle errors without exception
             if (ec) {
-                // Release semaphore on error paths
-                if (slots) {
-                    slots->release();
-                }
-
                 if (!running_ || stopping_) {
                     break; // Clean shutdown
                 }
@@ -693,7 +652,44 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
             }
 
             // If shutdown begins after accept completes, do not spawn a handler.
-            // Close the just-accepted socket and release the acquired slot.
+            // Close the just-accepted socket.
+            if (!running_ || stopping_) {
+                boost::system::error_code close_ec;
+                socket.close(close_ec);
+                break;
+            }
+
+            bool slotAcquired = true;
+            if (slots) {
+                slotAcquired = slots->try_acquire();
+            }
+
+            if (!slotAcquired) {
+                // Hard cap reached. Close immediately to apply backpressure without
+                // stalling the acceptor/backlog.
+                boost::system::error_code close_ec;
+                socket.close(close_ec);
+
+                if (trace) {
+                    spdlog::debug("stream-trace: accept rejected (no slots)");
+                } else {
+                    static std::atomic<uint64_t> s_noSlotRejects{0};
+                    uint64_t n = s_noSlotRejects.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if ((n & 0x3FFu) == 0) { // log every 1024th reject
+                        spdlog::debug("SocketServer: {} accept rejected (no slots), rejects={}",
+                                      loopLabel, n);
+                    }
+                }
+
+                // Yield briefly to avoid a tight accept/close loop under sustained load.
+                boost::asio::steady_timer slot_timer(*coordinator_->getIOContext());
+                slot_timer.expires_after(std::chrono::milliseconds(1));
+                co_await slot_timer.async_wait(use_awaitable);
+
+                continue;
+            }
+
+            // If shutdown begins after slot acquisition, do not spawn a handler.
             if (!running_ || stopping_) {
                 boost::system::error_code close_ec;
                 socket.close(close_ec);
@@ -702,6 +698,9 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 }
                 break;
             }
+
+            // Generate monotonic connection token for end-to-end tracing
+            const uint64_t conn_token = connectionToken_.fetch_add(1, std::memory_order_relaxed);
 
             if (trace) {
                 spdlog::info("stream-trace: [conn={}] slot_acquired", conn_token);
@@ -790,11 +789,6 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
         } catch (const std::exception& e) {
             if (!running_ || stopping_)
                 break;
-
-            // Release semaphore on unexpected exception
-            if (slots) {
-                slots->release();
-            }
 
             spdlog::error("Unexpected error in accept loop: {}", e.what());
             break;

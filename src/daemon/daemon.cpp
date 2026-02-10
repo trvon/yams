@@ -84,7 +84,7 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
         spdlog::debug("TuningManager constructed early in YamsDaemon");
         tuningManager_->setRepairControlHook([this](uint32_t tokens, uint32_t batch) {
             try {
-                if (auto* rs = serviceManager_->getRepairService()) {
+                if (auto rs = serviceManager_->getRepairServiceShared()) {
                     rs->setMaintenanceTokens(tokens);
                     rs->setMaxBatch(batch);
                 }
@@ -565,7 +565,7 @@ void YamsDaemon::runLoop() {
         // so we start it when FSM is Ready rather than waiting for searchEngineReady.
         auto snap = lifecycleFsm_.snapshot();
         {
-            auto* rs = serviceManager_->getRepairService();
+            auto rs = serviceManager_->getRepairServiceShared();
             spdlog::debug("[DaemonLoop] FSM state={}, enableAutoRepair={}, repairService_exists={}",
                           static_cast<int>(snap.state), config_.enableAutoRepair, (rs != nullptr));
             if (snap.state == LifecycleState::Ready) {
@@ -589,7 +589,7 @@ void YamsDaemon::runLoop() {
             }
         }
         {
-            auto* rs = serviceManager_->getRepairService();
+            auto rs = serviceManager_->getRepairServiceShared();
             if (rs) {
                 size_t active = static_cast<size_t>(state_.stats.activeConnections.load());
                 uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();

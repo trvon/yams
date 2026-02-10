@@ -452,10 +452,7 @@ std::size_t PostIngestQueue::resolveChannelCapacity() const {
 }
 
 std::size_t PostIngestQueue::boundedStageChannelCapacity(std::size_t defaultCap) const {
-    auto tuned = static_cast<std::size_t>(TuneAdvisor::postIngestQueueMax());
-    if (tuned == 0)
-        tuned = defaultCap;
-    return std::max<std::size_t>(1u, std::min(defaultCap, tuned));
+    return std::max<std::size_t>(1u, defaultCap);
 }
 
 double PostIngestQueue::kgChannelFillRatio(std::size_t* depthOut, std::size_t* capacityOut) const {
@@ -2247,8 +2244,8 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
             }
             successes.clear();
         } else {
-            spdlog::info("[PostIngestQueue] Batch DB write succeeded for {} documents",
-                         entries.size());
+            spdlog::debug("[PostIngestQueue] Batch DB write succeeded for {} documents",
+                          entries.size());
             std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> titleUpdates;
             titleUpdates.reserve(successes.size());
             for (const auto& prepared : successes) {

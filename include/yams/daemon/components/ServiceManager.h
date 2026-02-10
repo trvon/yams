@@ -299,7 +299,12 @@ public:
     }
 
     // RepairService lifecycle (replaces RepairCoordinator)
-    RepairService* getRepairService() const { return repairService_.get(); }
+    // Note: accessed from multiple threads (daemon loop, tuning tick, request handlers).
+    // Use a shared_ptr snapshot to avoid data races and lifetime issues.
+    std::shared_ptr<RepairService> getRepairServiceShared() const {
+        return std::atomic_load_explicit(&repairService_, std::memory_order_acquire);
+    }
+    RepairService* getRepairService() const { return getRepairServiceShared().get(); }
     void startRepairService(std::function<size_t()> activeConnFn);
     void stopRepairService();
 
@@ -604,7 +609,8 @@ private:
     std::unique_ptr<PostIngestQueue> postIngest_;
     std::unique_ptr<EmbeddingService> embeddingService_;
     std::unique_ptr<KGWriteQueue> kgWriteQueue_;
-    std::unique_ptr<RepairService> repairService_;
+    std::shared_ptr<RepairService> repairService_;
+    mutable std::mutex repairServiceMutex_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
     bool embeddingsAutoOnAdd_{false};

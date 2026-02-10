@@ -7,11 +7,13 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/compat/unistd.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iomanip>
@@ -295,7 +297,7 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
     std::string gpuEP;
     size_t gpuDim = 0;
     std::string gpuError;
-    long gpuLoadMs = 0, gpuEmbedMs = 0;
+    std::int64_t gpuLoadMs = 0, gpuEmbedMs = 0;
 
     {
         DiagnosticFixture fix(true);
@@ -306,9 +308,10 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
         auto t0 = std::chrono::steady_clock::now();
         try {
             auto h = fix.pool_->acquireModel(kModelName, 60s);
-            gpuLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - t0)
-                            .count();
+            gpuLoadMs =
+                static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now() - t0)
+                                              .count());
             if (h) {
                 gpuLoadOk = true;
                 auto& s = *h.value();
@@ -317,9 +320,10 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
 
                 auto t1 = std::chrono::steady_clock::now();
                 auto r = const_cast<OnnxModelSession&>(s).generateBatchEmbeddings(texts);
-                gpuEmbedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 std::chrono::steady_clock::now() - t1)
-                                 .count();
+                gpuEmbedMs =
+                    static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  std::chrono::steady_clock::now() - t1)
+                                                  .count());
                 if (r) {
                     gpuEmbedOk = true;
                 } else {
@@ -329,9 +333,10 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
                 gpuError = "load: " + h.error().message;
             }
         } catch (const std::exception& ex) {
-            gpuLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - t0)
-                            .count();
+            gpuLoadMs =
+                static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now() - t0)
+                                              .count());
             gpuError = std::string("exception: ") + ex.what();
         }
     }
@@ -342,7 +347,7 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
     std::string cpuEP;
     size_t cpuDim = 0;
     std::string cpuError;
-    long cpuLoadMs = 0, cpuEmbedMs = 0;
+    std::int64_t cpuLoadMs = 0, cpuEmbedMs = 0;
 
     {
         DiagnosticFixture fix(false);
@@ -353,9 +358,10 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
         auto t0 = std::chrono::steady_clock::now();
         try {
             auto h = fix.pool_->acquireModel(kModelName, 60s);
-            cpuLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - t0)
-                            .count();
+            cpuLoadMs =
+                static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now() - t0)
+                                              .count());
             if (h) {
                 cpuLoadOk = true;
                 auto& s = *h.value();
@@ -364,9 +370,10 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
 
                 auto t1 = std::chrono::steady_clock::now();
                 auto r = const_cast<OnnxModelSession&>(s).generateBatchEmbeddings(texts);
-                cpuEmbedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 std::chrono::steady_clock::now() - t1)
-                                 .count();
+                cpuEmbedMs =
+                    static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  std::chrono::steady_clock::now() - t1)
+                                                  .count());
                 if (r) {
                     cpuEmbedOk = true;
                 } else {
@@ -376,9 +383,10 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
                 cpuError = "load: " + h.error().message;
             }
         } catch (const std::exception& ex) {
-            cpuLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - t0)
-                            .count();
+            cpuLoadMs =
+                static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now() - t0)
+                                              .count());
             cpuError = std::string("exception: ") + ex.what();
         }
     }
@@ -456,8 +464,8 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
 
     struct TimingResult {
         std::string label;
-        long compileMs = 0; // First inference (includes lazy CoreML compilation)
-        long embedMs = 0;   // Steady-state inference average
+        std::int64_t compileMs = 0; // First inference (includes lazy CoreML compilation)
+        std::int64_t embedMs = 0;   // Steady-state inference average
         bool ok = false;
         std::string error;
     };
@@ -465,10 +473,10 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
     std::vector<TimingResult> results;
 
     auto now = []() { return std::chrono::steady_clock::now(); };
-    auto elapsedMs = [](auto start) {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-                   std::chrono::steady_clock::now() - start)
-            .count();
+    auto elapsedMs = [](auto start) -> std::int64_t {
+        return static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::steady_clock::now() - start)
+                                             .count());
     };
 
     for (const auto& variant : variants) {
@@ -478,11 +486,11 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
         // Set env vars for this variant
         if (variant.enableGpu) {
             if (!variant.computeUnits.empty())
-                setenv("YAMS_COREML_COMPUTE_UNITS", variant.computeUnits.c_str(), 1);
+                ::setenv("YAMS_COREML_COMPUTE_UNITS", variant.computeUnits.c_str(), 1);
             if (!variant.modelFormat.empty())
-                setenv("YAMS_COREML_MODEL_FORMAT", variant.modelFormat.c_str(), 1);
+                ::setenv("YAMS_COREML_MODEL_FORMAT", variant.modelFormat.c_str(), 1);
             if (!variant.cacheDir.empty())
-                setenv("YAMS_COREML_CACHE_DIR", variant.cacheDir.c_str(), 1);
+                ::setenv("YAMS_COREML_CACHE_DIR", variant.cacheDir.c_str(), 1);
         }
 
         {
@@ -509,7 +517,7 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
                         timing.error = "compile warmup: " + warmup.error().message;
                     } else {
                         // --- Steady-state inference ---
-                        long totalEmbedMs = 0;
+                        std::int64_t totalEmbedMs = 0;
                         bool allOk = true;
                         for (int i = 0; i < kIterations; ++i) {
                             auto t1 = now();
@@ -535,9 +543,9 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
         }
 
         // Clean up env vars
-        unsetenv("YAMS_COREML_COMPUTE_UNITS");
-        unsetenv("YAMS_COREML_MODEL_FORMAT");
-        unsetenv("YAMS_COREML_CACHE_DIR");
+        ::unsetenv("YAMS_COREML_COMPUTE_UNITS");
+        ::unsetenv("YAMS_COREML_MODEL_FORMAT");
+        ::unsetenv("YAMS_COREML_CACHE_DIR");
 
         results.push_back(timing);
     }
@@ -603,7 +611,7 @@ TEST_CASE("ONNX Benchmark: batch size sweep", "[daemon][onnx][benchmark][.requir
 
     struct BatchResult {
         int batchSize;
-        long avgMs;
+        std::int64_t avgMs;
         double textsPerSec;
     };
     std::vector<BatchResult> results;
@@ -613,7 +621,7 @@ TEST_CASE("ONNX Benchmark: batch size sweep", "[daemon][onnx][benchmark][.requir
     auto now = []() { return std::chrono::steady_clock::now(); };
 
     for (int bs : batchSizes) {
-        long totalMs = 0;
+        std::int64_t totalMs = 0;
 
         for (int iter = 0; iter < kIterations; ++iter) {
             // Process corpus in chunks of batchSize
@@ -629,7 +637,7 @@ TEST_CASE("ONNX Benchmark: batch size sweep", "[daemon][onnx][benchmark][.requir
                            .count();
         }
 
-        long avgMs = totalMs / kIterations;
+        std::int64_t avgMs = totalMs / kIterations;
         double textsPerSec = avgMs > 0 ? (static_cast<double>(kCorpusSize) / avgMs) * 1000.0 : 0.0;
         results.push_back({bs, avgMs, textsPerSec});
     }
@@ -674,7 +682,7 @@ TEST_CASE("ONNX Benchmark: concurrent inference throughput",
 
     struct ThreadResult {
         int threadCount;
-        long totalMs;
+        std::int64_t totalMs;
         double textsPerSec;
         int successes;
     };
@@ -723,9 +731,10 @@ TEST_CASE("ONNX Benchmark: concurrent inference throughput",
             t.join();
         }
 
-        auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                           std::chrono::steady_clock::now() - t0)
-                           .count();
+        auto totalMs =
+            static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - t0)
+                                          .count());
         int totalTexts = successes.load() * static_cast<int>(texts.size());
         double textsPerSec =
             totalMs > 0 ? (static_cast<double>(totalTexts) / totalMs) * 1000.0 : 0.0;
@@ -778,8 +787,8 @@ TEST_CASE("ONNX Benchmark: session reuse performance",
 
     struct CycleResult {
         int cycle;
-        long acquireMs;
-        long embedMs;
+        std::int64_t acquireMs;
+        std::int64_t embedMs;
     };
     std::vector<CycleResult> results;
 
@@ -788,17 +797,19 @@ TEST_CASE("ONNX Benchmark: session reuse performance",
     for (int i = 0; i < kCycles; ++i) {
         auto t0 = now();
         auto h = fix.pool_->acquireModel(kModelName, 60s);
-        auto acquireMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::steady_clock::now() - t0)
-                             .count();
+        auto acquireMs =
+            static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - t0)
+                                          .count());
         REQUIRE(h);
 
         auto& session = *h.value();
         auto t1 = now();
         auto r = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings(texts);
-        auto embedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                           std::chrono::steady_clock::now() - t1)
-                           .count();
+        auto embedMs =
+            static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - t1)
+                                          .count());
         REQUIRE(r);
 
         results.push_back({i, acquireMs, embedMs});
@@ -847,7 +858,7 @@ TEST_CASE("ONNX Benchmark: dynamic padding throughput",
 
     struct BatchResult {
         int batchSize;
-        long avgMs;
+        std::int64_t avgMs;
         double textsPerSec;
         std::string label;
     };
@@ -871,7 +882,7 @@ TEST_CASE("ONNX Benchmark: dynamic padding throughput",
         REQUIRE(warmup);
 
         for (int bs : batchSizes) {
-            long totalMs = 0;
+            std::int64_t totalMs = 0;
             for (int iter = 0; iter < kIterations; ++iter) {
                 auto t0 = now();
                 for (int offset = 0; offset < kCorpusSize; offset += bs) {
@@ -880,11 +891,12 @@ TEST_CASE("ONNX Benchmark: dynamic padding throughput",
                     auto r = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings(batch);
                     REQUIRE(r);
                 }
-                totalMs += std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::steady_clock::now() - t0)
-                               .count();
+                totalMs +=
+                    static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  std::chrono::steady_clock::now() - t0)
+                                                  .count());
             }
-            long avgMs = totalMs / kIterations;
+            std::int64_t avgMs = totalMs / kIterations;
             double tps = avgMs > 0 ? (static_cast<double>(kCorpusSize) / avgMs) * 1000.0 : 0.0;
             allResults.push_back({bs, avgMs, tps, "Dynamic ON"});
         }
@@ -892,7 +904,7 @@ TEST_CASE("ONNX Benchmark: dynamic padding throughput",
 
     // --- Run with dynamic padding OFF ---
     {
-        setenv("YAMS_ONNX_DYNAMIC_PADDING", "0", 1);
+        ::setenv("YAMS_ONNX_DYNAMIC_PADDING", "0", 1);
 
         DiagnosticFixture fix(false);
         fix.pool_ = std::make_unique<OnnxModelPool>(fix.config_);
@@ -906,7 +918,7 @@ TEST_CASE("ONNX Benchmark: dynamic padding throughput",
         REQUIRE(warmup);
 
         for (int bs : batchSizes) {
-            long totalMs = 0;
+            std::int64_t totalMs = 0;
             for (int iter = 0; iter < kIterations; ++iter) {
                 auto t0 = now();
                 for (int offset = 0; offset < kCorpusSize; offset += bs) {
@@ -915,16 +927,17 @@ TEST_CASE("ONNX Benchmark: dynamic padding throughput",
                     auto r = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings(batch);
                     REQUIRE(r);
                 }
-                totalMs += std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::steady_clock::now() - t0)
-                               .count();
+                totalMs +=
+                    static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  std::chrono::steady_clock::now() - t0)
+                                                  .count());
             }
-            long avgMs = totalMs / kIterations;
+            std::int64_t avgMs = totalMs / kIterations;
             double tps = avgMs > 0 ? (static_cast<double>(kCorpusSize) / avgMs) * 1000.0 : 0.0;
             allResults.push_back({bs, avgMs, tps, "Dynamic OFF"});
         }
 
-        unsetenv("YAMS_ONNX_DYNAMIC_PADDING");
+        ::unsetenv("YAMS_ONNX_DYNAMIC_PADDING");
     }
 
     // Print comparison table

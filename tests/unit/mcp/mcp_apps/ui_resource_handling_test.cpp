@@ -31,8 +31,6 @@ public:
 
 TEST_CASE("MCP Apps Resource - Declaration With UI Support",
           "[mcp][apps][resource][mcp-apps-res-01][phase1]") {
-    SKIP("Pending MCP Apps implementation");
-
     auto transport = std::make_unique<NullTransport>();
     auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
@@ -75,8 +73,6 @@ TEST_CASE("MCP Apps Resource - Declaration With UI Support",
 
 TEST_CASE("MCP Apps Resource - Content Retrieval Text",
           "[mcp][apps][resource][mcp-apps-res-03][phase1]") {
-    SKIP("Pending MCP Apps implementation");
-
     auto transport = std::make_unique<NullTransport>();
     auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 

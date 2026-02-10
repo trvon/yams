@@ -217,7 +217,7 @@ public:
     }
     double latencyMsEma() const { return latencyMsEma_.load(); }
     double ratePerSecEma() const { return ratePerSecEma_.load(); }
-    std::size_t capacity() const { return capacity_; }
+    std::size_t capacity() const { return capacity_.load(std::memory_order_relaxed); }
 
     // Backpressure observability
     std::uint64_t backpressureRejects() const {
@@ -266,7 +266,11 @@ public:
     GradientLimiter* titleLimiter() const { return limiters_[4].get(); }
     GradientLimiter* embedLimiter() const { return limiters_[5].get(); }
 
-    void setCapacity(std::size_t cap) { capacity_ = cap > 0 ? cap : capacity_; }
+    void setCapacity(std::size_t cap) {
+        if (cap > 0) {
+            capacity_.store(cap, std::memory_order_relaxed);
+        }
+    }
 
     // ========================================================================
     // Pause/Resume Support (for ResourceGovernor pressure response)
@@ -425,7 +429,7 @@ private:
     std::atomic<std::uint64_t> directoriesProcessed_{0};
     std::atomic<double> latencyMsEma_{0.0};
     std::atomic<double> ratePerSecEma_{0.0};
-    std::size_t capacity_{1000};
+    std::atomic<std::size_t> capacity_{1000};
     // Concurrency limits now dynamic via TuneAdvisor (PBI-05a)
 
     // Drain detection: signals corpus stats stale once per drain cycle

@@ -144,6 +144,19 @@ void OnnxConcurrencyRegistry::setReservedSlots(OnnxLane lane, std::uint32_t rese
         spdlog::debug("[OnnxConcurrencyRegistry] Lane {} reserved slots: {} -> {}", laneIdx,
                       oldReserved, reserved);
     }
+
+    // Note: callers may update maxSlots and reserved slots in separate operations.
+    // Ensure maxSlots never falls below total reserved to preserve accounting invariants.
+    std::uint32_t totalReserved = 0;
+    for (std::size_t i = 0; i < kOnnxLaneCount; ++i) {
+        totalReserved += laneStates_[i].reserved.load(std::memory_order_acquire);
+    }
+    std::uint32_t currentMax = maxSlots_.load(std::memory_order_acquire);
+    if (currentMax < totalReserved) {
+        maxSlots_.store(totalReserved, std::memory_order_release);
+        spdlog::warn("[OnnxConcurrencyRegistry] maxSlots raised to {} to satisfy reserved={}",
+                     totalReserved, totalReserved);
+    }
 }
 
 // ============================================================================
