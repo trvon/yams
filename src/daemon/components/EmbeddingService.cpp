@@ -22,6 +22,7 @@
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/ingest/ingest_helpers.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/document_chunker.h>
@@ -47,10 +48,6 @@ Result<void> EmbeddingService::initialize() {
     if (postIngestCap > 0) {
         capacity = std::min(capacity, postIngestCap);
     }
-    // ONNX limits impose a hard ceiling of 64 concurrent embed jobs.
-    // Clamp channel capacity to this ceiling while keeping it at least a sane minimum.
-    const std::size_t kOnnxHardLimit = 64u;
-    capacity = std::min(capacity, kOnnxHardLimit);
     capacity = std::max<std::size_t>(256u, capacity);
     embedChannel_ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
         "embed_jobs", capacity);
@@ -152,6 +149,17 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
                 effectiveMaxConcurrent =
                     std::min<std::size_t>(hardConcurrentCap, baseConcurrent + extra);
             }
+        }
+
+        try {
+            auto snap = OnnxConcurrencyRegistry::instance().snapshot();
+            const std::size_t embedLane = static_cast<std::size_t>(OnnxLane::Embedding);
+            const std::size_t embedReserved = snap.lanes[embedLane].reserved;
+            const std::size_t sharedAvailable = snap.availableSlots;
+            const std::size_t onnxBudget =
+                std::max<std::size_t>(1u, embedReserved + sharedAvailable);
+            effectiveMaxConcurrent = std::min(effectiveMaxConcurrent, onnxBudget);
+        } catch (...) {
         }
         const std::size_t maxPendingJobs =
             std::max<std::size_t>(maxBatchSize, effectiveMaxConcurrent * 2);

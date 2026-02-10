@@ -280,7 +280,7 @@ void TuningManager::tick_once() {
             desiredMax = std::min<uint32_t>(desiredMax, governor.maxEmbedConcurrency());
         }
 
-        desiredMax = std::max<uint32_t>(desiredMax, 1u);
+        desiredMax = std::max<uint32_t>(desiredMax, 2u);
         if (desiredMax > 64u) { // counting_semaphore<64> limit in registry
             desiredMax = 64u;
         }

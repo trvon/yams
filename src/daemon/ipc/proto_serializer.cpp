@@ -1272,6 +1272,18 @@ template <> struct ProtoBinding<StatusResponse> {
             kv->set_key("vector_db_dim");
             kv->set_value(std::to_string(r.vectorDbDim));
         }
+
+        // Proxy socket observability (serialized via request_counts until proto gains fields)
+        if (!r.proxySocketPath.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("proxy_socket_path");
+            kv->set_value(r.proxySocketPath);
+        }
+        {
+            auto* kv = o->add_request_counts();
+            kv->set_key("proxy_active_connections");
+            kv->set_value(std::to_string(static_cast<uint64_t>(r.proxyActiveConnections)));
+        }
         // readiness: bool->string
         for (const auto& [k, v] : r.readinessStates) {
             auto* kv = o->add_readiness();
@@ -1333,6 +1345,18 @@ template <> struct ProtoBinding<StatusResponse> {
         for (const auto& kv : i.request_counts()) {
             if (kv.key() == "last_error") {
                 r.lastError = kv.value();
+                continue;
+            }
+            if (kv.key() == "proxy_socket_path") {
+                r.proxySocketPath = kv.value();
+                continue;
+            }
+            if (kv.key() == "proxy_active_connections") {
+                try {
+                    r.proxyActiveConnections = static_cast<size_t>(std::stoull(kv.value()));
+                } catch (...) {
+                    r.proxyActiveConnections = 0;
+                }
                 continue;
             }
             if (kv.key() == "content_store_root") {
