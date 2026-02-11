@@ -357,6 +357,13 @@ public:
     // Embedding service metrics accessors
     std::size_t getEmbeddingInFlightJobs() const;
     std::size_t getEmbeddingQueuedJobs() const;
+    std::size_t getEmbeddingActiveInferSubBatches() const;
+    uint64_t getEmbeddingInferOldestMs() const;
+    uint64_t getEmbeddingInferStartedCount() const;
+    uint64_t getEmbeddingInferCompletedCount() const;
+    uint64_t getEmbeddingInferLastMs() const;
+    uint64_t getEmbeddingInferMaxMs() const;
+    uint64_t getEmbeddingInferWarnCount() const;
 
     RetrievalSessionManager* getRetrievalSessionManager() const { return retrievalSessions_.get(); }
 

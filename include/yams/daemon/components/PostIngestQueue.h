@@ -168,6 +168,7 @@ public:
         std::string symbolLanguage;
         bool shouldDispatchEntity = false;
         bool shouldDispatchTitle = false;
+        bool shouldDispatchEmbed = true;
         std::string titleTextSnippet; // First N chars for async GLiNER title extraction
     };
 

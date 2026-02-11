@@ -1,10 +1,10 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <unordered_map>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
-#include <unordered_map>
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -125,11 +125,12 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
     const auto& req = task.request;
 
     try {
-        spdlog::info("[IngestService] task path='{}' name='{}' recursive={} has_content={} "
-                     "noEmbeddings={} include_count={} exclude_count={} tag_count={} metadata={}",
-                     req.path, req.name, req.recursive ? 1 : 0, req.content.empty() ? 0 : 1,
-                     req.noEmbeddings ? 1 : 0, req.includePatterns.size(),
-                     req.excludePatterns.size(), req.tags.size(), req.metadata.size());
+        spdlog::debug(
+            "[IngestService] task path='{}' name='{}' recursive={} has_content={} noEmbeddings={} "
+            "include_count={} exclude_count={} tag_count={} metadata={}",
+            req.path, req.name, req.recursive ? 1 : 0, req.content.empty() ? 0 : 1,
+            req.noEmbeddings ? 1 : 0, req.includePatterns.size(), req.excludePatterns.size(),
+            req.tags.size(), req.metadata.size());
     } catch (...) { // NOLINT(bugprone-empty-catch): logging failures must not interrupt ingest
     }
 
@@ -207,12 +208,13 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
             spdlog::error("Failed to store document from ingest queue: {}", result.error().message);
         } else {
             const auto& serviceResp = result.value();
-            spdlog::info("Successfully stored document from ingest queue: {} "
-                         "(bytesStored={}, bytesDeduped={})",
-                         serviceResp.hash, serviceResp.bytesStored, serviceResp.bytesDeduped);
+            spdlog::debug("Successfully stored document from ingest queue: {} "
+                          "(bytesStored={}, bytesDeduped={})",
+                          serviceResp.hash, serviceResp.bytesStored, serviceResp.bytesDeduped);
 
             if (sm && sm->getPostIngestQueue() && !serviceResp.hash.empty()) {
-                spdlog::info("[IngestService] Enqueuing post-ingest for hash={}", serviceResp.hash);
+                spdlog::debug("[IngestService] Enqueuing post-ingest for hash={}",
+                              serviceResp.hash);
                 pendingPostIngest[req.mimeType].push_back(serviceResp.hash);
             } else {
                 spdlog::warn("[IngestService] Post-ingest skipped: sm={} piq={} hash_empty={}",

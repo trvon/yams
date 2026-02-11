@@ -48,6 +48,7 @@ TEST_CASE("GPU detection and ONNX provider are consistent on Apple Silicon",
     const auto& gpu = yams::daemon::resource::detectGpu();
     CHECK(gpu.detected);
     CHECK(gpu.provider == "coreml");
+    CHECK(gpu.unifiedMemory);
 
     auto providers = Ort::GetAvailableProviders();
     bool hasCoreML =

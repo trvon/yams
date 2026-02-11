@@ -17,11 +17,11 @@
 #include <yams/extraction/text_extractor.h>
 
 #include <yams/core/cpp23_features.hpp>
+#include <yams/ingest/ingest_helpers.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
-#include <yams/ingest/ingest_helpers.h>
 
 #include <algorithm>
 #include <cctype>
@@ -560,6 +560,10 @@ public:
             md.tags["snapshot_label"] = req.snapshotLabel;
         }
         if (req.noEmbeddings) {
+            // Persist the opt-out as both:
+            // - a tag key (tag:no_embeddings) so tag queries and getDocumentTags() see it
+            // - a legacy metadata key (no_embeddings=true) for any existing consumers
+            md.tags["tag:no_embeddings"] = "no_embeddings";
             md.tags["no_embeddings"] = "true";
         }
         if (!req.sessionId.empty() && !req.bypassSession) {

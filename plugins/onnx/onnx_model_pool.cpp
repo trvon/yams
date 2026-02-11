@@ -1243,9 +1243,11 @@ OnnxModelPool::OnnxModelPool(const ModelPoolConfig& config) : config_(config) {
         spdlog::info(
             "[ONNX] Pool: Using shared global Ort::Env (sessions use single-threaded execution)");
 
+        runtimeGpuEnabled_ = false;
         if (config.enableGPU) {
             const auto& gpu = yams::daemon::resource::detectGpu();
             if (gpu.detected) {
+                runtimeGpuEnabled_ = true;
                 spdlog::info("[ONNX] GPU enabled: {} ({:.1f} GB VRAM, provider={})", gpu.name,
                              static_cast<double>(gpu.vramBytes) / (1024.0 * 1024.0 * 1024.0),
                              gpu.provider);
@@ -1667,12 +1669,16 @@ Result<void> OnnxModelPool::loadModelSync(const std::string& modelName) {
     // Use TuneAdvisor for GPU-aware pool sizing:
     //   GPU mode: larger pool (GPU handles inference, more sessions for throughput)
     //   CPU mode: smaller pool (avoid CPU saturation from parallel inference)
-    const bool gpuEnabled = config_.enableGPU;
-    const size_t dynamic_max = TuneAdvisor::onnxSessionsPerModel(gpuEnabled);
+    const bool gpuEnabled = runtimeGpuEnabled_;
+    const size_t embedConcurrencyCap =
+        std::max<size_t>(1u, std::min<size_t>(TuneAdvisor::postEmbedConcurrent(),
+                                              TuneAdvisor::getEmbedMaxConcurrency()));
+    const size_t dynamic_max = std::max<size_t>(
+        1u, std::min<size_t>(TuneAdvisor::onnxSessionsPerModel(gpuEnabled), embedConcurrencyCap));
     const size_t dynamic_min = std::min(size_t{2}, dynamic_max);
 
-    spdlog::info("[ONNX Plugin] Configuring resource pool (gpu={}, pool_max={})",
-                 gpuEnabled ? "enabled" : "disabled", dynamic_max);
+    spdlog::info("[ONNX Plugin] Configuring resource pool (gpu={}, pool_max={}, embed_cap={})",
+                 gpuEnabled ? "enabled" : "disabled", dynamic_max, embedConcurrencyCap);
     PoolConfig<OnnxModelSession> poolConfig;
     poolConfig.minSize = dynamic_min;
     poolConfig.maxSize = dynamic_max;
@@ -1689,7 +1695,7 @@ Result<void> OnnxModelPool::loadModelSync(const std::string& modelName) {
     vector::EmbeddingConfig embConfig;
     embConfig.model_path = modelPath;
     embConfig.model_name = modelName;
-    embConfig.enable_gpu = config_.enableGPU;
+    embConfig.enable_gpu = gpuEnabled;
     embConfig.num_threads = config_.numThreads;
 
     // Create ResourcePool WITHOUT holding mutex_ - the factory lambda will be called
@@ -1908,8 +1914,27 @@ Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
     // released back to the pool so they are pre-initialized for future use.
     {
         size_t targetWarm =
-            std::min(static_cast<size_t>(TuneAdvisor::onnxSessionsPerModel(config_.enableGPU)),
-                     config_.enableGPU ? size_t{3} : size_t{2});
+            std::min(static_cast<size_t>(TuneAdvisor::onnxSessionsPerModel(runtimeGpuEnabled_)),
+                     runtimeGpuEnabled_ ? size_t{3} : size_t{2});
+
+        // Keep warm session count aligned with current embedding throughput budget
+        // to avoid retaining idle ONNX sessions under low-concurrency settings.
+        const size_t embedConcurrencyCap =
+            std::max<size_t>(1u, std::min<size_t>(TuneAdvisor::postEmbedConcurrent(),
+                                                  TuneAdvisor::getEmbedMaxConcurrency()));
+        targetWarm = std::min(targetWarm, embedConcurrencyCap);
+
+        // Optional explicit cap for test/benchmark scenarios.
+        if (const char* s = std::getenv("YAMS_ONNX_PREWARM_SESSIONS")) {
+            try {
+                size_t forced = static_cast<size_t>(std::stoull(s));
+                if (forced >= 1 && forced <= 8) {
+                    targetWarm = std::min(targetWarm, forced);
+                }
+            } catch (...) {
+            }
+        }
+
         for (size_t i = 1; i < targetWarm; ++i) {
             auto extra = acquireModel(modelName, std::chrono::seconds(60));
             if (!extra) {
@@ -1921,7 +1946,7 @@ Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
         }
         if (targetWarm > 1) {
             spdlog::info("[ONNX Plugin] Pre-warmed {} sessions for '{}' (gpu={})", targetWarm,
-                         modelName, config_.enableGPU ? "yes" : "no");
+                         modelName, runtimeGpuEnabled_ ? "yes" : "no");
         }
     }
 
@@ -1950,6 +1975,10 @@ void OnnxModelPool::evictLRU(size_t numToEvict) {
             spdlog::info("Evicting model due to LRU: {}", modelName);
             it->second.pool->shutdown();
             it->second.pool.reset();
+            const size_t count = loadedModelCount_.load(std::memory_order_relaxed);
+            if (count > 0) {
+                loadedModelCount_.fetch_sub(1, std::memory_order_relaxed);
+            }
         }
     }
 }
@@ -2018,6 +2047,10 @@ void OnnxModelPool::performMaintenance() {
                 spdlog::info("Unloading idle model: {}", name);
                 entry.pool->shutdown();
                 entry.pool.reset();
+                const size_t count = loadedModelCount_.load(std::memory_order_relaxed);
+                if (count > 0) {
+                    loadedModelCount_.fetch_sub(1, std::memory_order_relaxed);
+                }
             } else if (entry.pool) {
                 // Clean up expired resources in the pool
                 entry.pool->evictExpired();

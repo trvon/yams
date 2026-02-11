@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -24,6 +26,9 @@ struct GpuInfo {
     std::string name;      // e.g. "AMD Radeon RX 7900 XTX"
     uint64_t vramBytes{0}; // Total VRAM in bytes
     std::string provider;  // "migraphx", "cuda", "coreml", "directml", ""
+    // True when GPU and CPU share a unified memory pool (e.g., Apple Silicon/CoreML).
+    // In this mode, vramBytes is a heuristic budget signal, not dedicated VRAM.
+    bool unifiedMemory{false};
     bool detected{false};
 };
 
@@ -223,6 +228,7 @@ inline bool detectAppleSiliconGpu(GpuInfo& info) {
     }
 
     info.provider = "coreml";
+    info.unifiedMemory = true;
     info.detected = true;
     return true;
 }
@@ -291,6 +297,7 @@ inline void detectMacGpu(GpuInfo& info) {
         // Conservative estimate for Intel Iris/UHD shared VRAM
         info.vramBytes = 1536ULL * 1024ULL * 1024ULL; // 1.5 GB
         info.provider = "coreml";
+        info.unifiedMemory = true;
         info.detected = true;
     }
 }
@@ -331,6 +338,83 @@ inline void detectWindowsGpu(GpuInfo& info) {
 
 } // namespace detail
 
+/// Effective embedding batch budget for GPU-backed inference.
+///
+/// For dedicated-memory GPUs this returns the detected VRAM budget unchanged.
+/// For unified-memory GPUs (CoreML on Apple Silicon), this applies a conservative
+/// safety cap to avoid treating shared system RAM as freely available VRAM.
+///
+/// Environment overrides:
+/// - YAMS_GPU_BATCH_BUDGET_MB (global hard override)
+/// - YAMS_GPU_UNIFIED_BUDGET_MB (unified-memory override)
+/// - YAMS_GPU_UNIFIED_BUDGET_FRACTION (0.01-1.00 fraction of detected budget)
+inline uint64_t effectiveGpuBatchBudgetBytes(const GpuInfo& info) {
+    constexpr uint64_t kMiB = 1024ULL * 1024ULL;
+    constexpr uint64_t kGiB = 1024ULL * kMiB;
+    constexpr uint64_t kMinBudgetBytes = 256ULL * kMiB;
+
+    if (!info.detected || info.vramBytes == 0) {
+        return 0;
+    }
+
+    auto parseMbEnv = [](const char* name, uint64_t& outBytes) -> bool {
+        const char* s = std::getenv(name);
+        if (!s || !*s) {
+            return false;
+        }
+        try {
+            uint64_t mb = std::stoull(s);
+            if (mb == 0) {
+                return false;
+            }
+            outBytes = mb * 1024ULL * 1024ULL;
+            return true;
+        } catch (...) {
+            return false;
+        }
+    };
+
+    auto parseFractionEnv = [](const char* name, double& outFraction) -> bool {
+        const char* s = std::getenv(name);
+        if (!s || !*s) {
+            return false;
+        }
+        try {
+            double v = std::stod(s);
+            if (v < 0.01 || v > 1.0) {
+                return false;
+            }
+            outFraction = v;
+            return true;
+        } catch (...) {
+            return false;
+        }
+    };
+
+    uint64_t budgetBytes = 0;
+    if (parseMbEnv("YAMS_GPU_BATCH_BUDGET_MB", budgetBytes)) {
+        return std::clamp(budgetBytes, kMinBudgetBytes, info.vramBytes);
+    }
+
+    if (!info.unifiedMemory) {
+        return info.vramBytes;
+    }
+
+    if (parseMbEnv("YAMS_GPU_UNIFIED_BUDGET_MB", budgetBytes)) {
+        return std::clamp(budgetBytes, kMinBudgetBytes, info.vramBytes);
+    }
+
+    double fraction = 0.0;
+    if (parseFractionEnv("YAMS_GPU_UNIFIED_BUDGET_FRACTION", fraction)) {
+        budgetBytes = static_cast<uint64_t>(static_cast<long double>(info.vramBytes) * fraction);
+        return std::clamp(budgetBytes, kMinBudgetBytes, info.vramBytes);
+    }
+
+    // Safety-first CoreML default: cap effective budget to 4 GiB.
+    return std::clamp(std::min<uint64_t>(info.vramBytes, 4ULL * kGiB), kMinBudgetBytes,
+                      info.vramBytes);
+}
+
 /// Cached, thread-safe GPU detection. Runs detection once at first call.
 /// Use YAMS_GPU_VRAM_MB environment variable to override on any platform.
 inline const GpuInfo& detectGpu() {
@@ -359,6 +443,11 @@ inline const GpuInfo& detectGpu() {
         }
     });
     return info;
+}
+
+/// Convenience overload using cached detection state.
+inline uint64_t effectiveGpuBatchBudgetBytes() {
+    return effectiveGpuBatchBudgetBytes(detectGpu());
 }
 
 } // namespace yams::daemon::resource

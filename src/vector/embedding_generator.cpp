@@ -1307,7 +1307,25 @@ public:
                 for (auto& c : v)
                     c = static_cast<char>(std::tolower(c));
                 if (!v.empty() && v != "0" && v != "false" && v != "off" && v != "no") {
-                    fallback_provider_ = yams::ml::createEmbeddingProvider();
+                    auto isTruthy = [](const char* value) {
+                        if (!value || !*value) {
+                            return false;
+                        }
+                        std::string normalized(value);
+                        for (auto& c : normalized) {
+                            c = static_cast<char>(std::tolower(c));
+                        }
+                        return normalized != "0" && normalized != "false" && normalized != "off" &&
+                               normalized != "no";
+                    };
+
+                    // In synthetic/unit tests we intentionally force a deterministic mock provider
+                    // while running in-daemon mode.
+                    if (isTruthy(std::getenv("YAMS_USE_MOCK_PROVIDER"))) {
+                        fallback_provider_ = yams::ml::createEmbeddingProvider("Mock");
+                    } else {
+                        fallback_provider_ = yams::ml::createEmbeddingProvider();
+                    }
                     if (fallback_provider_ && fallback_provider_->isAvailable()) {
                         auto initRes = fallback_provider_->initialize();
                         if (!initRes) {
@@ -1706,7 +1724,7 @@ public:
             return true;
         }
 
-        spdlog::error("HybridBackend: Daemon not available - start with 'yams daemon start'");
+        spdlog::error("HybridBackend: daemon unavailable (legacy alias of daemon backend)");
         return false;
     }
 
@@ -1802,13 +1820,10 @@ class EmbeddingGenerator::Impl {
 public:
     explicit Impl(const EmbeddingConfig& config) : config_(config) {
         switch (config.backend) {
-            case EmbeddingConfig::Backend::Local:
             case EmbeddingConfig::Backend::Daemon:
-                backend_ = std::make_unique<DaemonBackend>(config);
-                break;
             case EmbeddingConfig::Backend::Hybrid:
             default:
-                backend_ = std::make_unique<HybridBackend>(config);
+                backend_ = std::make_unique<DaemonBackend>(config);
                 break;
         }
     }

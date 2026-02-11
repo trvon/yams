@@ -70,6 +70,13 @@ constexpr std::string_view kPostTitleLimit = "post_title_limit";
 // Embedding Service metrics
 constexpr std::string_view kEmbedQueued = "embed_svc_queued";
 constexpr std::string_view kEmbedInflight = "embed_in_flight";
+constexpr std::string_view kEmbedInferActive = "embed_infer_active";
+constexpr std::string_view kEmbedInferOldestMs = "embed_infer_oldest_ms";
+constexpr std::string_view kEmbedInferStarted = "embed_infer_started";
+constexpr std::string_view kEmbedInferCompleted = "embed_infer_completed";
+constexpr std::string_view kEmbedInferLastMs = "embed_infer_last_ms";
+constexpr std::string_view kEmbedInferMaxMs = "embed_infer_max_ms";
+constexpr std::string_view kEmbedInferWarnCount = "embed_infer_warn_count";
 constexpr std::string_view kPostEmbedLimit = "post_embed_limit";
 
 // FTS5 indexing metrics

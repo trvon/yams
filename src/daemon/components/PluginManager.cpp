@@ -325,24 +325,33 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
                 roots.push_back(p);
         }
 
-        // Add platform-specific default directories
+        // Add platform-specific default directories unless strict plugin-dir mode is enabled.
+        // Strict mode is useful for benchmark/test isolation where only explicitly trusted roots
+        // should be scanned.
         namespace fs = std::filesystem;
+        const bool strictPluginDirMode =
+            ConfigResolver::envTruthy(std::getenv("YAMS_PLUGIN_DIR_STRICT"));
+        if (!strictPluginDirMode) {
 #ifdef _WIN32
-        roots.push_back(yams::config::get_data_dir() / "plugins");
+            roots.push_back(yams::config::get_data_dir() / "plugins");
 #else
-        if (const char* home = std::getenv("HOME")) {
-            roots.push_back(fs::path(home) / ".local" / "lib" / "yams" / "plugins");
-        }
+            if (const char* home = std::getenv("HOME")) {
+                roots.push_back(fs::path(home) / ".local" / "lib" / "yams" / "plugins");
+            }
 #ifdef __APPLE__
-        // macOS: Homebrew default install location
-        roots.push_back(fs::path("/opt/homebrew/lib/yams/plugins"));
+            // macOS: Homebrew default install location
+            roots.push_back(fs::path("/opt/homebrew/lib/yams/plugins"));
 #endif
-        roots.push_back(fs::path("/usr/local/lib/yams/plugins"));
-        roots.push_back(fs::path("/usr/lib/yams/plugins"));
+            roots.push_back(fs::path("/usr/local/lib/yams/plugins"));
+            roots.push_back(fs::path("/usr/lib/yams/plugins"));
 #endif
 #ifdef YAMS_INSTALL_PREFIX
-        roots.push_back(fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins");
+            roots.push_back(fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins");
 #endif
+        } else {
+            spdlog::info("[PluginManager] strict plugin-dir mode enabled; skipping default plugin "
+                         "roots");
+        }
 
         // Deduplicate
         std::sort(roots.begin(), roots.end());

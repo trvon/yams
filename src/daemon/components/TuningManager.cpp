@@ -1054,10 +1054,14 @@ void TuningManager::tick_once() {
             auto searchMetrics = sm_->getSearchLoadMetrics();
             std::size_t postIngestQueued = 0;
             std::size_t currentInFlight = 0;
+            std::size_t embedQueued = 0;
+            std::size_t embedInFlight = 0;
             if (auto* pq = sm_->getPostIngestQueue()) {
                 postIngestQueued = pq->size();
                 currentInFlight = pq->totalInFlight();
             }
+            embedQueued = sm_->getEmbeddingQueuedJobs();
+            embedInFlight = sm_->getEmbeddingInFlightJobs();
 
             // Profile-aware thresholds: Efficient=permissive, Balanced=moderate, Aggressive=strict
             const uint32_t connThresh = TuneAdvisor::modelMaintenanceConnThreshold();
@@ -1066,12 +1070,18 @@ void TuningManager::tick_once() {
 
             bool canDoMaintenance = (activeConns <= connThresh) &&
                                     (searchMetrics.active <= searchThresh) &&
-                                    (postIngestQueued <= queueThresh) && (currentInFlight == 0);
+                                    (postIngestQueued <= queueThresh) && (currentInFlight == 0) &&
+                                    (embedQueued == 0) && (embedInFlight == 0);
 
             if (canDoMaintenance) {
                 if (auto provider = sm_->getModelProvider()) {
                     provider->releaseUnusedResources();
                 }
+            } else {
+                spdlog::debug("[TuningManager] Skip model maintenance: conns={} search_active={} "
+                              "post_q={} post_inflight={} embed_q={} embed_inflight={}",
+                              activeConns, searchMetrics.active, postIngestQueued, currentInFlight,
+                              embedQueued, embedInFlight);
             }
         }
     } catch (...) {

@@ -1,9 +1,13 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
@@ -52,6 +56,13 @@ public:
     std::size_t failed() const { return failed_.load(); }
     std::size_t queuedJobs() const;
     std::size_t inFlightJobs() const;
+    std::size_t activeInferSubBatches() const;
+    uint64_t inferSubBatchStartedCount() const;
+    uint64_t inferSubBatchCompletedCount() const;
+    uint64_t inferSubBatchLastDurationMs() const;
+    uint64_t inferSubBatchMaxDurationMs() const;
+    uint64_t inferSubBatchWarnCount() const;
+    uint64_t inferOldestActiveMs() const;
 
     void start();
 
@@ -75,9 +86,23 @@ private:
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};
     std::atomic<std::size_t> inFlight_{0}; // PBI-05b: parallel job tracking
+    std::atomic<bool> pollerRunning_{false};
     // pendingJobs_ is owned by the channelPoller coroutine; expose an approximate size
     // for status/benchmarks without cross-thread container access.
     std::atomic<std::size_t> pendingApprox_{0};
+    mutable std::mutex lifecycleMutex_;
+    std::condition_variable lifecycleCv_;
+    std::string lastDispatchedModel_;
+
+    // Infer watchdog/instrumentation
+    std::atomic<uint64_t> inferSubBatchStarted_{0};
+    std::atomic<uint64_t> inferSubBatchCompleted_{0};
+    std::atomic<uint64_t> inferSubBatchLastDurationMs_{0};
+    std::atomic<uint64_t> inferSubBatchMaxDurationMs_{0};
+    std::atomic<uint64_t> inferSubBatchWarnCount_{0};
+    std::atomic<uint64_t> inferTokenCounter_{0};
+    mutable std::mutex inferTrackerMutex_;
+    std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> activeInferSubBatches_;
     std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedChannel_;
     std::vector<InternalEventBus::EmbedJob> pendingJobs_;
 };

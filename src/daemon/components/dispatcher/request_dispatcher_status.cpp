@@ -172,6 +172,20 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                             serviceManager_->getEmbeddingInFlightJobs();
                         res.requestCounts[std::string(metrics::kEmbedQueued)] =
                             serviceManager_->getEmbeddingQueuedJobs();
+                        res.requestCounts[std::string(metrics::kEmbedInferActive)] =
+                            serviceManager_->getEmbeddingActiveInferSubBatches();
+                        res.requestCounts[std::string(metrics::kEmbedInferOldestMs)] =
+                            serviceManager_->getEmbeddingInferOldestMs();
+                        res.requestCounts[std::string(metrics::kEmbedInferStarted)] =
+                            serviceManager_->getEmbeddingInferStartedCount();
+                        res.requestCounts[std::string(metrics::kEmbedInferCompleted)] =
+                            serviceManager_->getEmbeddingInferCompletedCount();
+                        res.requestCounts[std::string(metrics::kEmbedInferLastMs)] =
+                            serviceManager_->getEmbeddingInferLastMs();
+                        res.requestCounts[std::string(metrics::kEmbedInferMaxMs)] =
+                            serviceManager_->getEmbeddingInferMaxMs();
+                        res.requestCounts[std::string(metrics::kEmbedInferWarnCount)] =
+                            serviceManager_->getEmbeddingInferWarnCount();
                     } catch (...) {
                     }
                     try {

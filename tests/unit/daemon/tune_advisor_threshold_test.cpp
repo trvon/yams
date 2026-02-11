@@ -500,6 +500,70 @@ TEST_CASE("detectGpu returns consistent cached result", "[daemon][gpu][catch2]")
     CHECK(first.name == second.name);
     CHECK(first.vramBytes == second.vramBytes);
     CHECK(first.provider == second.provider);
+    CHECK(first.unifiedMemory == second.unifiedMemory);
+}
+
+TEST_CASE("effectiveGpuBatchBudgetBytes applies unified-memory safety defaults",
+          "[daemon][gpu][batch-budget][catch2]") {
+    using namespace yams::daemon::resource;
+
+    constexpr uint64_t GiB = 1024ULL * 1024ULL * 1024ULL;
+
+    SECTION("Dedicated memory uses full detected budget by default") {
+        EnvGuard clear1("YAMS_GPU_BATCH_BUDGET_MB", "");
+        EnvGuard clear2("YAMS_GPU_UNIFIED_BUDGET_MB", "");
+        EnvGuard clear3("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "");
+
+        GpuInfo gpu;
+        gpu.detected = true;
+        gpu.unifiedMemory = false;
+        gpu.provider = "migraphx";
+        gpu.vramBytes = 12ULL * GiB;
+
+        CHECK(effectiveGpuBatchBudgetBytes(gpu) == 12ULL * GiB);
+    }
+
+    SECTION("Unified memory defaults to conservative 4 GiB cap") {
+        EnvGuard clear1("YAMS_GPU_BATCH_BUDGET_MB", "");
+        EnvGuard clear2("YAMS_GPU_UNIFIED_BUDGET_MB", "");
+        EnvGuard clear3("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "");
+
+        GpuInfo gpu;
+        gpu.detected = true;
+        gpu.unifiedMemory = true;
+        gpu.provider = "coreml";
+        gpu.vramBytes = 24ULL * GiB;
+
+        CHECK(effectiveGpuBatchBudgetBytes(gpu) == 4ULL * GiB);
+    }
+
+    SECTION("Unified memory MB override is honored") {
+        EnvGuard clear1("YAMS_GPU_BATCH_BUDGET_MB", "");
+        EnvGuard envMb("YAMS_GPU_UNIFIED_BUDGET_MB", "6144");
+        EnvGuard clear3("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "");
+
+        GpuInfo gpu;
+        gpu.detected = true;
+        gpu.unifiedMemory = true;
+        gpu.provider = "coreml";
+        gpu.vramBytes = 24ULL * GiB;
+
+        CHECK(effectiveGpuBatchBudgetBytes(gpu) == 6ULL * GiB);
+    }
+
+    SECTION("Global budget override takes precedence") {
+        EnvGuard envGlobal("YAMS_GPU_BATCH_BUDGET_MB", "2048");
+        EnvGuard envMb("YAMS_GPU_UNIFIED_BUDGET_MB", "6144");
+        EnvGuard envFrac("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "0.5");
+
+        GpuInfo gpu;
+        gpu.detected = true;
+        gpu.unifiedMemory = true;
+        gpu.provider = "coreml";
+        gpu.vramBytes = 24ULL * GiB;
+
+        CHECK(effectiveGpuBatchBudgetBytes(gpu) == 2ULL * GiB);
+    }
 }
 
 #if defined(__APPLE__) && defined(__aarch64__)
@@ -512,6 +576,7 @@ TEST_CASE("detectAppleSiliconGpu populates all fields", "[daemon][gpu][catch2]")
     CHECK(result == true);
     CHECK(info.detected == true);
     CHECK(info.provider == "coreml");
+    CHECK(info.unifiedMemory == true);
 
     // Brand string should contain "Apple" (e.g. "Apple M3 Max")
     CHECK(info.name.find("Apple") != std::string::npos);

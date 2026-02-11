@@ -978,6 +978,18 @@ PostIngestQueue::prepareMetadataEntry(
     prepared.extension = info.fileExtension;
     prepared.tags = tags;
 
+    // Respect per-document opt-out (set by StoreDocumentRequest.noEmbeddings).
+    // DocumentService persists this as a real tag key "tag:no_embeddings".
+    try {
+        for (const auto& t : prepared.tags) {
+            if (t == "no_embeddings") {
+                prepared.shouldDispatchEmbed = false;
+                break;
+            }
+        }
+    } catch (...) {
+    }
+
     // Extract document text
     auto txt =
         extractDocumentText(store_, hash, prepared.mimeType, prepared.extension, extractors_);
@@ -1130,9 +1142,8 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
     if (!result) {
         spdlog::error("[PostIngestQueue] KG batch failed: {}", result.error().message);
     } else {
-        spdlog::debug(
-            "[PostIngestQueue] KG batch completed {} docs in {:.2f}ms (avg {:.2f}ms/doc)",
-            jobs.size(), ms, ms / jobs.size());
+        spdlog::debug("[PostIngestQueue] KG batch completed {} docs in {:.2f}ms (avg {:.2f}ms/doc)",
+                      jobs.size(), ms, ms / jobs.size());
     }
 }
 
@@ -2291,8 +2302,11 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
             "embed_jobs", embedCap);
     }
     std::vector<std::string> embedBatch;
-    const std::size_t maxEmbedBatch = TuneAdvisor::resolvedEmbedDocCap();
+    const std::size_t maxEmbedBatch = TuneAdvisor::resolvedEmbedJobDocCap();
     embedBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
+    const bool embedStageActive =
+        (TuneAdvisor::postIngestStageActiveMask() &
+         (1u << static_cast<uint8_t>(TuneAdvisor::PostIngestStage::Embed))) != 0u;
 
     auto flushEmbedBatch = [&]() {
         if (!embedQ || embedBatch.empty()) {
@@ -2343,7 +2357,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
     };
 
     for (const auto& prepared : successes) {
-        if (embedQ) {
+        if (embedQ && embedStageActive && prepared.shouldDispatchEmbed) {
             embedBatch.push_back(prepared.hash);
             if (embedBatch.size() >= maxEmbedBatch) {
                 flushEmbedBatch();

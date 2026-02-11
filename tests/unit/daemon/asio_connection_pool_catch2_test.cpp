@@ -7,14 +7,18 @@
 #include <boost/asio/use_future.hpp>
 
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <future>
 #include <thread>
 
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/client/ipc_failure.h>
 
 #ifndef _WIN32
+#include <unistd.h>
+#include <sys/socket.h>
 #include <sys/un.h>
 #endif
 
@@ -491,6 +495,53 @@ TEST_CASE("Shared pool does not set pool_keepalive", "[daemon][connection-pool][
     boost::system::error_code bec;
     acceptor.close(bec);
     server_thread.join();
+    fs::remove(socketPath, ec);
+    AsioConnectionPool::shutdown_all(100ms);
+}
+
+TEST_CASE("AsioConnectionPool does not double-wrap IPC failure prefixes",
+          "[daemon][connection-pool][unit][ipc]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    auto runtimeDir = makeTempRuntimeDir("ipc-prefix-refused-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+#ifndef _WIN32
+    // Create a stale AF_UNIX socket path (bound but not listening) to induce ECONNREFUSED.
+    int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    REQUIRE(fd >= 0);
+
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    const auto sockStr = socketPath.string();
+    REQUIRE(sockStr.size() < sizeof(addr.sun_path));
+    std::strncpy(addr.sun_path, sockStr.c_str(), sizeof(addr.sun_path) - 1);
+
+    REQUIRE(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    REQUIRE(::close(fd) == 0);
+#endif
+
+    TransportOptions opts;
+    opts.socketPath = socketPath;
+    opts.poolEnabled = false;
+    opts.requestTimeout = 500ms;
+
+    auto pool = AsioConnectionPool::get_or_create(opts);
+    auto fut = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                     boost::asio::use_future);
+    REQUIRE(fut.wait_for(2s) == std::future_status::ready);
+    auto conn_res = fut.get();
+    REQUIRE_FALSE(conn_res);
+
+    const auto& msg = conn_res.error().message;
+    REQUIRE(msg.rfind(std::string(kIpcFailurePrefix), 0) == 0);
+    REQUIRE(parseIpcFailureKind(msg).has_value());
+    CHECK(msg.find(std::string(kIpcFailurePrefix), 1) == std::string::npos);
+
     fs::remove(socketPath, ec);
     AsioConnectionPool::shutdown_all(100ms);
 }

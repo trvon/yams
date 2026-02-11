@@ -374,17 +374,24 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 }
             }
 
-            // Trust system install location
+            // Trust system install location unless strict plugin-dir mode is enabled.
 #ifdef YAMS_INSTALL_PREFIX
             namespace fs = std::filesystem;
-            fs::path system_plugins = fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins";
-            if (fs::exists(system_plugins) && fs::is_directory(system_plugins)) {
-                if (auto tr = abiHost_->trustAdd(system_plugins)) {
-                    spdlog::info("Auto-trusted system plugin directory: {}",
-                                 system_plugins.string());
-                } else {
-                    spdlog::warn("Failed to auto-trust system plugins: {}", tr.error().message);
+            const bool strictPluginDirMode =
+                ConfigResolver::envTruthy(std::getenv("YAMS_PLUGIN_DIR_STRICT"));
+            if (!strictPluginDirMode) {
+                fs::path system_plugins =
+                    fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins";
+                if (fs::exists(system_plugins) && fs::is_directory(system_plugins)) {
+                    if (auto tr = abiHost_->trustAdd(system_plugins)) {
+                        spdlog::info("Auto-trusted system plugin directory: {}",
+                                     system_plugins.string());
+                    } else {
+                        spdlog::warn("Failed to auto-trust system plugins: {}", tr.error().message);
+                    }
                 }
+            } else {
+                spdlog::info("Strict plugin-dir mode enabled; skipping system plugin trust");
             }
 #endif
         } else {
@@ -478,6 +485,9 @@ ServiceManager::~ServiceManager() {
 }
 
 yams::Result<void> ServiceManager::initialize() {
+    // Clear any stale shutdown marker from prior daemon lifecycles in this process.
+    ::unsetenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS");
+
     // Validate data directory synchronously to fail fast if unwritable
     namespace fs = std::filesystem;
     fs::path dataDir = config_.dataDir;
@@ -730,6 +740,9 @@ void ServiceManager::shutdown() {
     spdlog::info("[ServiceManager] Shutdown initiated");
     auto shutdownStart = std::chrono::steady_clock::now();
 
+    // Signal plugin providers to fast-fail long acquire paths while shutdown drains work.
+    ::setenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS", "1", 1);
+
     // Hold components that must outlive WorkCoordinator shutdown.
     // We move these out of member storage during early shutdown phases to prevent
     // accidental reuse, while keeping the objects alive until we finish draining threads.
@@ -822,6 +835,41 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 3.6: CheckpointManager stopped");
     }
 
+    // Phase 3.6.5: Stop post-ingest queue before quiescing embedding workers.
+    // This prevents new extraction/embedding dispatch during shutdown and reduces metadata lock
+    // contention while in-flight embed jobs finish.
+    spdlog::info("[ServiceManager] Phase 3.6.5: Quiescing post-ingest queue");
+    if (postIngest_) {
+        try {
+            postIngest_.reset();
+            spdlog::info("[ServiceManager] Phase 3.6.5: Post-ingest queue quiesced");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.6.5: Post-ingest quiesce failed: {}", e.what());
+        } catch (...) {
+            spdlog::warn("[ServiceManager] Phase 3.6.5: Post-ingest quiesce failed");
+        }
+    } else {
+        spdlog::info("[ServiceManager] Phase 3.6.5: No post-ingest queue to quiesce");
+    }
+
+    // Phase 3.7: Quiesce embedding service before stopping WorkCoordinator threads.
+    // Embedding jobs run on WorkCoordinator executors; stopping/joining workers first can leave
+    // in-flight embed tasks stranded and trigger shutdown detaches/timeouts.
+    spdlog::info("[ServiceManager] Phase 3.7: Quiescing embedding service");
+    if (embeddingService_) {
+        try {
+            embeddingService_->shutdown();
+            spdlog::info("[ServiceManager] Phase 3.7: Embedding service quiesced");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.7: Embedding service quiesce failed: {}",
+                         e.what());
+        } catch (...) {
+            spdlog::warn("[ServiceManager] Phase 3.7: Embedding service quiesce failed");
+        }
+    } else {
+        spdlog::info("[ServiceManager] Phase 3.7: No embedding service to quiesce");
+    }
+
     // Phase 4: Cancel all asynchronous operations and stop WorkCoordinator io_context
     spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
     shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
@@ -898,13 +946,12 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 6.3: No post-ingest queue to reset");
     }
 
-    spdlog::info("[ServiceManager] Phase 6.3.5: Shutting down embedding service");
+    spdlog::info("[ServiceManager] Phase 6.3.5: Resetting embedding service");
     if (embeddingService_) {
-        embeddingService_->shutdown();
         embeddingService_.reset();
-        spdlog::info("[ServiceManager] Phase 6.3.5: Embedding service shutdown complete");
+        spdlog::info("[ServiceManager] Phase 6.3.5: Embedding service reset complete");
     } else {
-        spdlog::info("[ServiceManager] Phase 6.3.5: No embedding service to shutdown");
+        spdlog::info("[ServiceManager] Phase 6.3.5: No embedding service to reset");
     }
 
     spdlog::info("[ServiceManager] Phase 6.3.6: Shutting down KG write queue");
@@ -1083,6 +1130,8 @@ void ServiceManager::shutdown() {
     } catch (...) {
         spdlog::warn("[ServiceManager] Failed to dispatch ServiceManagerStoppedEvent");
     }
+
+    ::unsetenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS");
 }
 
 // Single-attempt vector database initialization. Safe to call multiple times; only
@@ -2689,6 +2738,55 @@ std::size_t ServiceManager::getEmbeddingInFlightJobs() const {
 std::size_t ServiceManager::getEmbeddingQueuedJobs() const {
     if (embeddingService_) {
         return embeddingService_->queuedJobs();
+    }
+    return 0;
+}
+
+std::size_t ServiceManager::getEmbeddingActiveInferSubBatches() const {
+    if (embeddingService_) {
+        return embeddingService_->activeInferSubBatches();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingInferOldestMs() const {
+    if (embeddingService_) {
+        return embeddingService_->inferOldestActiveMs();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingInferStartedCount() const {
+    if (embeddingService_) {
+        return embeddingService_->inferSubBatchStartedCount();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingInferCompletedCount() const {
+    if (embeddingService_) {
+        return embeddingService_->inferSubBatchCompletedCount();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingInferLastMs() const {
+    if (embeddingService_) {
+        return embeddingService_->inferSubBatchLastDurationMs();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingInferMaxMs() const {
+    if (embeddingService_) {
+        return embeddingService_->inferSubBatchMaxDurationMs();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingInferWarnCount() const {
+    if (embeddingService_) {
+        return embeddingService_->inferSubBatchWarnCount();
     }
     return 0;
 }

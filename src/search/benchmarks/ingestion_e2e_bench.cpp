@@ -93,6 +93,9 @@ public:
         cfg.pidFile = pid_;
         cfg.logFile = log_;
         cfg.enableModelProvider = true;
+        // Disable auto-repair during benchmarks to avoid background work (per-hash DB checks,
+        // vector cleanup, etc.) affecting ingestion measurements.
+        cfg.enableAutoRepair = false;
 
         // Check if vectors are disabled (FTS-only mode)
         const char* disableVectors = std::getenv("YAMS_DISABLE_VECTORS");

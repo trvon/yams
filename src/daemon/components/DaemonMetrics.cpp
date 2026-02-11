@@ -428,7 +428,21 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                 try {
                     if (services_) {
                         if (auto* searchComp = services_->getSearchComponent()) {
-                            searchComp->checkAndTriggerRebuildIfNeeded();
+                            // Allow disabling rebuild checks for high-scale benchmarks.
+                            // Rebuilds compete with ingestion/post-ingest and can dominate runtime.
+                            bool disableRebuilds = false;
+                            try {
+                                if (const char* env = std::getenv("YAMS_DISABLE_SEARCH_REBUILDS")) {
+                                    std::string v(env);
+                                    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                                    disableRebuilds =
+                                        (v == "1" || v == "true" || v == "yes" || v == "on");
+                                }
+                            } catch (...) {
+                            }
+                            if (!disableRebuilds) {
+                                searchComp->checkAndTriggerRebuildIfNeeded();
+                            }
                         }
                     }
                 } catch (...) {

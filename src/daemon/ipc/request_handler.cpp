@@ -1821,6 +1821,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                               const Request& request, uint64_t request_id,
                               std::shared_ptr<RequestProcessor> processor, ConnectionFsm* fsm) {
     using boost::asio::use_awaitable;
+
+    const bool stream_trace = stream_trace_enabled_local();
     // First, send a header-only response to tell client to expect chunks
     // Create an empty response or use the first chunk as header
     Response headerResponse;
@@ -1862,14 +1864,16 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         }
     }
     // Send header frame
-    spdlog::info("[STREAM] req_id={} about to write_header", request_id);
+    if (stream_trace)
+        spdlog::info("[STREAM] req_id={} about to write_header", request_id);
     auto header_result = co_await write_header(socket, headerResponse, request_id, true, fsm);
     if (!header_result) {
         spdlog::warn("[STREAM] req_id={} write_header failed: {}", request_id,
                      header_result.error().message);
         co_return header_result.error();
     }
-    spdlog::info("[STREAM] req_id={} header written successfully", request_id);
+    if (stream_trace)
+        spdlog::info("[STREAM] req_id={} header written successfully", request_id);
     if (fsm) {
         // Move FSM from WritingHeader -> StreamingChunks
         fsm->on_stream_next(false);
@@ -2074,7 +2078,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
     }
 
     while (!last_chunk_received) {
-        spdlog::info("[STREAM] req_id={} preparing chunk #{}", request_id, chunk_count + 1);
+        if (stream_trace)
+            spdlog::info("[STREAM] req_id={} preparing chunk #{}", request_id, chunk_count + 1);
         {
             std::lock_guard<std::mutex> lk(ctx_mtx_);
             auto it = contexts_.find(request_id);
@@ -2083,12 +2088,14 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
             }
         }
         RequestProcessor::ResponseChunk chunk_result{};
-        spdlog::info("[STREAM] req_id={} chunk #{} stream_chunk_timeout={}ms", request_id,
-                     chunk_count + 1, config_.stream_chunk_timeout.count());
+        if (stream_trace)
+            spdlog::info("[STREAM] req_id={} chunk #{} stream_chunk_timeout={}ms", request_id,
+                         chunk_count + 1, config_.stream_chunk_timeout.count());
         if (config_.stream_chunk_timeout.count() > 0) {
             // Race next_chunk() against timeout using async_initiate (no experimental APIs)
-            spdlog::info("[STREAM] req_id={} using timeout path, about to co_await next_chunk",
-                         request_id);
+            if (stream_trace)
+                spdlog::info("[STREAM] req_id={} using timeout path, about to co_await next_chunk",
+                             request_id);
             auto executor = co_await boost::asio::this_coro::executor;
             using ChunkResult = RequestProcessor::ResponseChunk;
             using RaceResult = std::variant<ChunkResult, bool>; // ChunkResult or timedOut
@@ -2143,8 +2150,9 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                     },
                     boost::asio::use_awaitable);
 
-            spdlog::info("[STREAM] req_id={} co_await returned, index={}", request_id,
-                         chunk_or_timeout.index());
+            if (stream_trace)
+                spdlog::info("[STREAM] req_id={} co_await returned, index={}", request_id,
+                             chunk_or_timeout.index());
 
             if (chunk_or_timeout.index() == 1) {
                 // next_chunk() exceeded timeout; emit a terminal timeout chunk to unblock client
@@ -2160,10 +2168,12 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                 chunk_result = std::get<0>(std::move(chunk_or_timeout));
             }
         } else {
-            spdlog::info("[STREAM] req_id={} no timeout path, about to co_await next_chunk",
-                         request_id);
+            if (stream_trace)
+                spdlog::info("[STREAM] req_id={} no timeout path, about to co_await next_chunk",
+                             request_id);
             chunk_result = co_await processor->next_chunk();
-            spdlog::info("[STREAM] req_id={} no timeout path returned", request_id);
+            if (stream_trace)
+                spdlog::info("[STREAM] req_id={} no timeout path returned", request_id);
         }
         spdlog::debug("stream_chunks processor->next_chunk() returned req_id={} last={}",
                       request_id, chunk_result.is_last_chunk);
@@ -2212,8 +2222,13 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         spdlog::debug("stream_chunks: chunk #{} type={} items={} last={} (request_id={})",
                       chunk_count + 1, msg_type, item_count, last_chunk_received, request_id);
         if (msg_type == static_cast<int>(MessageType::AddDocumentResponse)) {
-            spdlog::info("stream_chunks: AddDocument chunk #{} last={} (request_id={})",
-                         chunk_count + 1, last_chunk_received, request_id);
+            if (stream_trace) {
+                spdlog::info("stream_chunks: AddDocument chunk #{} last={} (request_id={})",
+                             chunk_count + 1, last_chunk_received, request_id);
+            } else {
+                spdlog::debug("stream_chunks: AddDocument chunk #{} last={} (request_id={})",
+                              chunk_count + 1, last_chunk_received, request_id);
+            }
         }
 
         // FSM guard before chunk write

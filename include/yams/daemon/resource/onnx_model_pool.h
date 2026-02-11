@@ -255,6 +255,7 @@ private:
     // ONNX Runtime environment (shared across all models)
     std::shared_ptr<Ort::Env> ortEnv_;
     std::shared_ptr<Ort::SessionOptions> sessionOptions_;
+    bool runtimeGpuEnabled_ = false;
 
     bool initialized_ = false;
     std::atomic<bool> shutdown_{false}; // Guard against double-shutdown

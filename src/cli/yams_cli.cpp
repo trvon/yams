@@ -935,15 +935,15 @@ Result<void> YamsCLI::initializeStorage() {
                         embConfig.max_sequence_length = 512;
                         embConfig.normalize_embeddings = true;
 
-                        // Configure backend selection (Hybrid by default for best performance)
-                        embConfig.backend = vector::EmbeddingConfig::Backend::Hybrid;
+                        // Configure backend selection (daemon-only embedding path)
+                        embConfig.backend = vector::EmbeddingConfig::Backend::Daemon;
 
                         // Additional daemon settings
                         embConfig.daemon_timeout = std::chrono::milliseconds(5000);
                         embConfig.daemon_max_retries = 3;
                         embConfig.daemon_auto_start = false;
 
-                        spdlog::info("Creating EmbeddingGenerator with model: {} (hybrid backend)",
+                        spdlog::info("Creating EmbeddingGenerator with model: {} (daemon backend)",
                                      selectedModel);
 
                         embeddingGenerator_ =

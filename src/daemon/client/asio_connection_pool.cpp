@@ -544,8 +544,11 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
                          socket_res.error().message);
             // Preserve the underlying error (refused, timeout, etc.) instead of collapsing to
             // nullptr.
-            co_return Error{socket_res.error().code,
-                            formatIpcFailure(IpcFailureKind::Other, socket_res.error().message)};
+            const auto& msg = socket_res.error().message;
+            if (parseIpcFailureKind(msg)) {
+                co_return socket_res.error();
+            }
+            co_return Error{socket_res.error().code, formatIpcFailure(IpcFailureKind::Other, msg)};
         }
     }
     conn->socket = std::move(socket_res.value());

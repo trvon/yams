@@ -104,11 +104,21 @@ public:
     // Public accessors for embedding-related knobs (used outside daemon module)
     // These forward to internal tunables while keeping implementation details private.
     static constexpr std::size_t kDefaultEmbedDocCap = 64;
+    static constexpr std::size_t kDefaultEmbedJobDocCap = 16;
     static double getEmbedSafety() { return embedSafety(); }
     static std::size_t getEmbedDocCap() { return embedDocCap(); }
     static std::size_t resolvedEmbedDocCap() {
         const std::size_t cap = getEmbedDocCap();
         return cap == 0 ? kDefaultEmbedDocCap : cap;
+    }
+    static std::size_t getEmbedJobDocCap() { return embedJobDocCap(); }
+    static std::size_t resolvedEmbedJobDocCap() {
+        const std::size_t cap = getEmbedJobDocCap();
+        if (cap != 0) {
+            return cap;
+        }
+        const std::size_t inferCap = resolvedEmbedDocCap();
+        return std::min(inferCap, kDefaultEmbedJobDocCap);
     }
     static unsigned getEmbedPauseMs() { return embedPauseMs(); }
     static uint32_t getEmbedMaxConcurrency() { return embedMaxConcurrency(); }
@@ -243,6 +253,26 @@ public:
         return 0;
     }
     static void setEmbedDocCap(std::size_t v) { embedDocCap_.store(v, std::memory_order_relaxed); }
+    // Maximum number of document hashes grouped into a single EmbedJob.
+    // This is intentionally separate from embedDocCap (inference sub-batch size)
+    // to keep individual jobs bounded while preserving model-efficient infer batches.
+    static std::size_t embedJobDocCap() {
+        std::size_t ov = embedJobDocCap_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        if (const char* s = std::getenv("YAMS_EMBED_JOB_DOC_CAP")) {
+            try {
+                std::size_t v = static_cast<std::size_t>(std::stoull(s));
+                if (v >= 1 && v <= 4096)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 0;
+    }
+    static void setEmbedJobDocCap(std::size_t v) {
+        embedJobDocCap_.store(v, std::memory_order_relaxed);
+    }
     static unsigned embedPauseMs() { return embedPauseMs_.load(std::memory_order_relaxed); }
     static void setEmbedPauseMs(unsigned v) { embedPauseMs_.store(v, std::memory_order_relaxed); }
 
@@ -2399,8 +2429,9 @@ private:
     static inline std::atomic<double> cpuHighPct_{70.0};
     static inline std::atomic<std::uint64_t> muxHighBytes_{256ull * 1024ull * 1024ull};
     static inline std::atomic<double> embedSafety_{0.90};
-    static inline std::atomic<std::size_t> embedDocCap_{0}; // 0 = no extra cap
-    static inline std::atomic<unsigned> embedPauseMs_{0};   // 0 = no pause
+    static inline std::atomic<std::size_t> embedDocCap_{0};    // 0 = no extra cap
+    static inline std::atomic<std::size_t> embedJobDocCap_{0}; // 0 = use derived default
+    static inline std::atomic<unsigned> embedPauseMs_{0};      // 0 = no pause
     static inline std::atomic<uint32_t> postIngestThreads_{0};
     static inline std::atomic<uint32_t> mcpWorkerThreads_{0};
     static inline std::atomic<bool> kgBatchEdges_{true};

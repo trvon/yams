@@ -14,8 +14,10 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include <benchmark/benchmark.h>
@@ -135,11 +137,18 @@ bool waitForVectorDbInitialized(std::chrono::milliseconds timeout) {
     return false;
 }
 
-bool waitForCorpusIndexed(std::size_t expectedDocs, bool embeddingsEnabled,
-                          std::chrono::milliseconds timeout) {
+bool waitForCorpusIndexed(
+    std::size_t expectedDocs, bool embeddingsEnabled, std::chrono::milliseconds timeout,
+    std::optional<std::chrono::steady_clock::time_point> hardDeadline = std::nullopt,
+    bool* hardTimedOut = nullptr) {
+    if (hardTimedOut) {
+        *hardTimedOut = false;
+    }
+
     auto deadline = std::chrono::steady_clock::now() + timeout;
     int stableCount = 0;
     int stableRequired = 10;
+    auto nextLog = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     if (const char* env = std::getenv("YAMS_BENCH_CORPUS_STABLE_REQUIRED")) {
         try {
             stableRequired = std::max(1, std::stoi(env));
@@ -151,6 +160,14 @@ bool waitForCorpusIndexed(std::size_t expectedDocs, bool embeddingsEnabled,
     bool haveLastStatus = false;
 
     while (std::chrono::steady_clock::now() < deadline) {
+        if (hardDeadline && std::chrono::steady_clock::now() >= *hardDeadline) {
+            if (hardTimedOut) {
+                *hardTimedOut = true;
+            }
+            std::cerr << "WARNING: Corpus indexing wait hit phase hard-timeout\n";
+            return false;
+        }
+
         auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
         if (!status) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -191,6 +208,20 @@ bool waitForCorpusIndexed(std::size_t expectedDocs, bool embeddingsEnabled,
 
         if (stableCount >= stableRequired) {
             return true;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        if (now >= nextLog) {
+            std::cerr << "[bench] corpus wait: expected=" << expectedDocs
+                      << " docsTotal=" << docsTotal << " docsIndexed=" << docsIndexed
+                      << " postQ=" << postQueued << " postIn=" << postInflight
+                      << " embedQ=" << embedQueued << " embedIn=" << embedInflight
+                      << " vectorCount=" << vectorCount
+                      << " vectorDbReady=" << (st.vectorDbReady ? 1 : 0)
+                      << " stable=" << stableCount << "/" << stableRequired
+                      << " rss_mb=" << std::fixed << std::setprecision(1) << st.memoryUsageMb
+                      << " cpu_pct=" << st.cpuUsagePercent << "\n";
+            nextLog = now + std::chrono::seconds(5);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -249,6 +280,13 @@ struct TimeSeriesSample {
     uint64_t postIngestInflight{0};
     uint64_t embedQueued{0};
     uint64_t embedInflight{0};
+    uint64_t embedInferActive{0};
+    uint64_t embedInferOldestMs{0};
+    uint64_t embedInferStarted{0};
+    uint64_t embedInferCompleted{0};
+    uint64_t embedInferLastMs{0};
+    uint64_t embedInferMaxMs{0};
+    uint64_t embedInferWarnCount{0};
     uint64_t kgQueued{0};
     uint64_t kgInflight{0};
     uint64_t symbolQueued{0};
@@ -361,6 +399,13 @@ private:
             sample.postIngestInflight = getCount(std::string(metrics::kPostIngestInflight));
             sample.embedQueued = getCount(std::string(metrics::kEmbedQueued));
             sample.embedInflight = getCount(std::string(metrics::kEmbedInflight));
+            sample.embedInferActive = getCount(std::string(metrics::kEmbedInferActive));
+            sample.embedInferOldestMs = getCount(std::string(metrics::kEmbedInferOldestMs));
+            sample.embedInferStarted = getCount(std::string(metrics::kEmbedInferStarted));
+            sample.embedInferCompleted = getCount(std::string(metrics::kEmbedInferCompleted));
+            sample.embedInferLastMs = getCount(std::string(metrics::kEmbedInferLastMs));
+            sample.embedInferMaxMs = getCount(std::string(metrics::kEmbedInferMaxMs));
+            sample.embedInferWarnCount = getCount(std::string(metrics::kEmbedInferWarnCount));
             sample.kgQueued = getCount(std::string(metrics::kKgQueueDepth));
             sample.kgInflight = getCount(std::string(metrics::kKgInflight));
             sample.symbolQueued = getCount(std::string(metrics::kSymbolQueueDepth));
@@ -429,6 +474,13 @@ std::string getTuningProfile() {
     return "";
 }
 
+std::string getBenchEmbedProfile() {
+    if (const char* env = std::getenv("YAMS_BENCH_EMBED_PROFILE")) {
+        return std::string(env);
+    }
+    return "";
+}
+
 double getDuplicationRate() {
     if (const char* env = std::getenv("YAMS_BENCH_DUPLICATION_RATE")) {
         try {
@@ -456,6 +508,11 @@ void SetupHarness(const IngestionBenchConfig& config) {
               << (config.tuningProfile.empty() ? "default" : config.tuningProfile) << "\n";
     std::cout << "Duplication rate: " << (config.duplicationRate * 100) << "%\n";
 
+    const std::string embedProfile = getBenchEmbedProfile();
+    if (!embedProfile.empty()) {
+        std::cout << "Embed benchmark profile: " << embedProfile << "\n";
+    }
+
     // Set environment variables
     if (!config.tuningProfile.empty()) {
         ::setenv("YAMS_TUNING_PROFILE", config.tuningProfile.c_str(), 1);
@@ -463,9 +520,26 @@ void SetupHarness(const IngestionBenchConfig& config) {
         ::unsetenv("YAMS_TUNING_PROFILE");
     }
     ::setenv("YAMS_BENCH_ENABLE_EMBEDDINGS", config.enableEmbeddings ? "1" : "0", 1);
+    if (!embedProfile.empty()) {
+        ::setenv("YAMS_BENCH_EMBED_PROFILE", embedProfile.c_str(), 1);
+    }
+
+    // Disable automatic search engine rebuilds by default for benchmark determinism.
+    // Rebuilds compete with ingestion and can dominate runtime on large corpora.
+    // Set YAMS_BENCH_ENABLE_SEARCH_REBUILDS=1 to allow rebuilds.
+    bool enableRebuilds = false;
+    if (const char* env = std::getenv("YAMS_BENCH_ENABLE_SEARCH_REBUILDS")) {
+        enableRebuilds = (std::string(env) == "1");
+    }
+    if (!enableRebuilds) {
+        ::setenv("YAMS_DISABLE_SEARCH_REBUILDS", "1", 1);
+    }
 
     // Start daemon
     DaemonHarness::Options harnessOptions;
+    // AutoRepair/RepairService can compete with ingestion at high scale (per-hash DB checks).
+    // Disable for benchmark determinism and throughput analysis.
+    harnessOptions.enableAutoRepair = false;
     if (config.enableEmbeddings) {
         // Keep everything enabled: let PluginManager decide availability.
         harnessOptions.useMockModelProvider = false;
@@ -519,6 +593,7 @@ void TeardownHarness() {
     g_activeConfig = {};
     ::unsetenv("YAMS_TUNING_PROFILE");
     ::unsetenv("YAMS_BENCH_ENABLE_EMBEDDINGS");
+    ::unsetenv("YAMS_BENCH_EMBED_PROFILE");
 }
 
 // Wait for all queues to drain
@@ -526,6 +601,28 @@ enum class DrainScope {
     Full,
     PostEmbed,
     None,
+};
+
+struct DrainSnapshot {
+    uint64_t totalQueued{0};
+    uint64_t totalInflight{0};
+    uint64_t postQueued{0};
+    uint64_t postInflight{0};
+    uint64_t embedQueued{0};
+    uint64_t embedInflight{0};
+    uint64_t kgQueued{0};
+    uint64_t kgInflight{0};
+    uint64_t symbolQueued{0};
+    uint64_t symbolInflight{0};
+    uint64_t entityQueued{0};
+    uint64_t entityInflight{0};
+    uint64_t titleQueued{0};
+    uint64_t titleInflight{0};
+    int stableCount{0};
+    int stableRequired{0};
+    uint64_t polls{0};
+    bool hitTimeout{false};
+    bool hitHardTimeout{false};
 };
 
 DrainScope getDrainScope() {
@@ -552,7 +649,13 @@ int getDrainStableRequired() {
     return stableRequired;
 }
 
-bool waitForDrain(std::chrono::milliseconds timeout, bool embeddingsEnabled) {
+bool waitForDrain(std::chrono::milliseconds timeout, bool embeddingsEnabled,
+                  std::optional<std::chrono::steady_clock::time_point> hardDeadline = std::nullopt,
+                  bool* hardTimedOut = nullptr, DrainSnapshot* snapshotOut = nullptr) {
+    if (hardTimedOut) {
+        *hardTimedOut = false;
+    }
+
     const auto scope = getDrainScope();
     if (scope == DrainScope::None) {
         return true;
@@ -561,8 +664,26 @@ bool waitForDrain(std::chrono::milliseconds timeout, bool embeddingsEnabled) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     int stableCount = 0;
     const int stableRequired = getDrainStableRequired();
+    DrainSnapshot snapshot;
+    snapshot.stableRequired = stableRequired;
+    auto nextLog = std::chrono::steady_clock::now() + std::chrono::seconds(5);
 
     while (std::chrono::steady_clock::now() < deadline) {
+        snapshot.polls += 1;
+        if (hardDeadline && std::chrono::steady_clock::now() >= *hardDeadline) {
+            if (hardTimedOut) {
+                *hardTimedOut = true;
+            }
+            snapshot.hitHardTimeout = true;
+            snapshot.hitTimeout = true;
+            snapshot.stableCount = stableCount;
+            if (snapshotOut) {
+                *snapshotOut = snapshot;
+            }
+            std::cerr << "WARNING: Drain wait hit phase hard-timeout\n";
+            return false;
+        }
+
         auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
         if (!status) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -581,35 +702,97 @@ bool waitForDrain(std::chrono::milliseconds timeout, bool embeddingsEnabled) {
 
         // For embedding perf sweeps, it's useful to drain only the embed-critical stages.
         // Full drain remains available for end-to-end pipeline benchmarking.
-        totalQueued += getCount(std::string(metrics::kPostIngestQueued));
-        totalInflight += getCount(std::string(metrics::kPostIngestInflight));
+        const uint64_t postQueued = getCount(std::string(metrics::kPostIngestQueued));
+        const uint64_t postInflight = getCount(std::string(metrics::kPostIngestInflight));
+        totalQueued += postQueued;
+        totalInflight += postInflight;
+
+        uint64_t embedQueued = 0;
+        uint64_t embedInflight = 0;
 
         if (embeddingsEnabled) {
-            totalQueued += getCount(std::string(metrics::kEmbedQueued));
-            totalInflight += getCount(std::string(metrics::kEmbedInflight));
+            embedQueued = getCount(std::string(metrics::kEmbedQueued));
+            embedInflight = getCount(std::string(metrics::kEmbedInflight));
+            totalQueued += embedQueued;
+            totalInflight += embedInflight;
         }
+
+        uint64_t kgQueued = 0, kgInflight = 0;
+        uint64_t symbolQueued = 0, symbolInflight = 0;
+        uint64_t entityQueued = 0, entityInflight = 0;
+        uint64_t titleQueued = 0, titleInflight = 0;
 
         if (scope == DrainScope::Full) {
-            totalQueued += getCount(std::string(metrics::kKgQueueDepth));
-            totalQueued += getCount(std::string(metrics::kSymbolQueueDepth));
-            totalQueued += getCount(std::string(metrics::kEntityQueueDepth));
-            totalQueued += getCount(std::string(metrics::kTitleQueueDepth));
+            kgQueued = getCount(std::string(metrics::kKgQueueDepth));
+            symbolQueued = getCount(std::string(metrics::kSymbolQueueDepth));
+            entityQueued = getCount(std::string(metrics::kEntityQueueDepth));
+            titleQueued = getCount(std::string(metrics::kTitleQueueDepth));
 
-            totalInflight += getCount(std::string(metrics::kKgInflight));
-            totalInflight += getCount(std::string(metrics::kSymbolInflight));
-            totalInflight += getCount(std::string(metrics::kEntityInflight));
-            totalInflight += getCount(std::string(metrics::kTitleInflight));
+            kgInflight = getCount(std::string(metrics::kKgInflight));
+            symbolInflight = getCount(std::string(metrics::kSymbolInflight));
+            entityInflight = getCount(std::string(metrics::kEntityInflight));
+            titleInflight = getCount(std::string(metrics::kTitleInflight));
+
+            totalQueued += kgQueued + symbolQueued + entityQueued + titleQueued;
+            totalInflight += kgInflight + symbolInflight + entityInflight + titleInflight;
         }
+
+        snapshot.totalQueued = totalQueued;
+        snapshot.totalInflight = totalInflight;
+        snapshot.postQueued = postQueued;
+        snapshot.postInflight = postInflight;
+        snapshot.embedQueued = embedQueued;
+        snapshot.embedInflight = embedInflight;
+        snapshot.kgQueued = kgQueued;
+        snapshot.kgInflight = kgInflight;
+        snapshot.symbolQueued = symbolQueued;
+        snapshot.symbolInflight = symbolInflight;
+        snapshot.entityQueued = entityQueued;
+        snapshot.entityInflight = entityInflight;
+        snapshot.titleQueued = titleQueued;
+        snapshot.titleInflight = titleInflight;
 
         if (totalQueued == 0 && totalInflight == 0) {
             if (++stableCount >= stableRequired) {
+                snapshot.stableCount = stableCount;
+                if (snapshotOut) {
+                    *snapshotOut = snapshot;
+                }
                 return true;
             }
         } else {
             stableCount = 0;
         }
+        snapshot.stableCount = stableCount;
+
+        auto now = std::chrono::steady_clock::now();
+        if (now >= nextLog) {
+            std::cerr << "[bench] drain wait: scope="
+                      << (scope == DrainScope::Full
+                              ? "full"
+                              : (scope == DrainScope::PostEmbed ? "post_embed" : "none"))
+                      << " queued=" << totalQueued << " inflight=" << totalInflight
+                      << " postQ=" << postQueued << " postIn=" << postInflight
+                      << " embedQ=" << embedQueued << " embedIn=" << embedInflight;
+            if (scope == DrainScope::Full) {
+                std::cerr << " kgQ=" << kgQueued << " kgIn=" << kgInflight
+                          << " symQ=" << symbolQueued << " symIn=" << symbolInflight
+                          << " entQ=" << entityQueued << " entIn=" << entityInflight
+                          << " titleQ=" << titleQueued << " titleIn=" << titleInflight;
+            }
+            std::cerr << " stable=" << stableCount << "/" << stableRequired
+                      << " rss_mb=" << std::fixed << std::setprecision(1) << st.memoryUsageMb
+                      << " cpu_pct=" << st.cpuUsagePercent << "\n";
+            nextLog = now + std::chrono::seconds(5);
+        }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
+    snapshot.hitTimeout = true;
+    snapshot.stableCount = stableCount;
+    if (snapshotOut) {
+        *snapshotOut = snapshot;
     }
 
     return false;
@@ -668,6 +851,8 @@ void writeTimeSeriesCsv(const std::vector<TimeSeriesSample>& samples,
     std::ofstream csv(path);
     csv << "elapsed_ms,docs_ingested,docs_failed,total_bytes,"
         << "post_queued,post_inflight,embed_queued,embed_inflight,"
+        << "embed_infer_active,embed_infer_oldest_ms,embed_infer_started,embed_infer_completed,"
+        << "embed_infer_last_ms,embed_infer_max_ms,embed_infer_warn_count,"
         << "kg_queued,kg_inflight,symbol_queued,symbol_inflight,"
         << "entity_queued,entity_inflight,title_queued,title_inflight,"
         << "rss_bytes,cpu_percent,pressure_level,"
@@ -677,12 +862,15 @@ void writeTimeSeriesCsv(const std::vector<TimeSeriesSample>& samples,
     for (const auto& s : samples) {
         csv << s.elapsedMs << "," << s.docsIngested << "," << s.docsFailed << "," << s.totalBytes
             << "," << s.postIngestQueued << "," << s.postIngestInflight << "," << s.embedQueued
-            << "," << s.embedInflight << "," << s.kgQueued << "," << s.kgInflight << ","
-            << s.symbolQueued << "," << s.symbolInflight << "," << s.entityQueued << ","
-            << s.entityInflight << "," << s.titleQueued << "," << s.titleInflight << ","
-            << s.rssBytes << "," << s.cpuPercent << "," << s.pressureLevel << "," << s.kgDropped
-            << "," << s.symbolDropped << "," << s.entityDropped << "," << s.titleDropped << ","
-            << s.busPostDropped << "," << s.docsPerSecond << "," << s.bytesPerSecond << "\n";
+            << "," << s.embedInflight << "," << s.embedInferActive << "," << s.embedInferOldestMs
+            << "," << s.embedInferStarted << "," << s.embedInferCompleted << ","
+            << s.embedInferLastMs << "," << s.embedInferMaxMs << "," << s.embedInferWarnCount << ","
+            << s.kgQueued << "," << s.kgInflight << "," << s.symbolQueued << "," << s.symbolInflight
+            << "," << s.entityQueued << "," << s.entityInflight << "," << s.titleQueued << ","
+            << s.titleInflight << "," << s.rssBytes << "," << s.cpuPercent << "," << s.pressureLevel
+            << "," << s.kgDropped << "," << s.symbolDropped << "," << s.entityDropped << ","
+            << s.titleDropped << "," << s.busPostDropped << "," << s.docsPerSecond << ","
+            << s.bytesPerSecond << "\n";
     }
 }
 
@@ -739,6 +927,8 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
         auto ingestStartTime = startTime;
         size_t successCount = 0;
         size_t failCount = 0;
+        std::unordered_set<std::string> uniqueHashes;
+        uniqueHashes.reserve(config.documentCount);
         uint64_t totalBytes = 0;
 
         state.ResumeTiming();
@@ -756,6 +946,7 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
                 auto result = docSvc.addViaDaemon(opts);
                 if (result && !result.value().hash.empty()) {
                     ++successCount;
+                    uniqueHashes.insert(result.value().hash);
                     // Real bytes (best-effort)
                     std::error_code ec;
                     const uint64_t fileBytes =
@@ -779,8 +970,24 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
 
         // Wait for post-ingest queue to drain
         std::cout << "Waiting for post-ingest pipeline to drain...\n";
+        const auto waitPhaseStart = std::chrono::steady_clock::now();
         auto drainTimeout = std::chrono::milliseconds(
             config.enableEmbeddings ? 1200000 : 300000); // 20 min with embeddings, 5 min without
+        auto phaseHardTimeout = std::chrono::milliseconds(0);
+        if (const char* env = std::getenv("YAMS_BENCH_PHASE_TIMEOUT_MS")) {
+            try {
+                auto parsed = static_cast<std::chrono::milliseconds::rep>(std::stoll(env));
+                if (parsed > 0) {
+                    phaseHardTimeout = std::chrono::milliseconds(parsed);
+                }
+            } catch (...) {
+            }
+        }
+        std::optional<std::chrono::steady_clock::time_point> phaseDeadline;
+        if (phaseHardTimeout.count() > 0) {
+            phaseDeadline = waitPhaseStart + phaseHardTimeout;
+            std::cout << "Phase hard-timeout enabled: " << phaseHardTimeout.count() << "ms\n";
+        }
 
         if (const char* env = std::getenv("YAMS_BENCH_DRAIN_WAIT_MS")) {
             try {
@@ -790,20 +997,48 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
             }
         }
 
-        if (!waitForDrain(drainTimeout, config.enableEmbeddings)) {
+        bool hardTimeoutTriggered = false;
+        DrainSnapshot drainSnapshot;
+        bool drainOk = waitForDrain(drainTimeout, config.enableEmbeddings, phaseDeadline,
+                                    &hardTimeoutTriggered, &drainSnapshot);
+        if (!drainOk) {
             std::cerr << "WARNING: Pipeline drain timeout\n";
         }
 
-        // Ensure cached counters and indexing are truly caught up before recording final metrics.
-        // Ingest can complete far faster than post-ingest/FTS5/vector indexing.
+        // Ensure cached counters and indexing are truly caught up before recording final
+        // metrics. Ingest can complete far faster than post-ingest/FTS5/vector indexing.
+        // IMPORTANT: expected corpus size should be unique document hashes, not attempted adds.
+        // Bench data generation can include duplicates (deduped by CAS hash), so using
+        // config.documentCount would cause false readiness timeouts.
+        const std::size_t expectedUniqueDocs = uniqueHashes.size();
+        bool corpusReadyOk = true;
+        bool corpusCheckSkipped = false;
         if (const char* env = std::getenv("YAMS_BENCH_SKIP_CORPUS_READY")) {
             if (std::string(env) != "1") {
-                (void)waitForCorpusIndexed(config.documentCount, config.enableEmbeddings,
-                                           drainTimeout);
+                if (hardTimeoutTriggered) {
+                    corpusCheckSkipped = true;
+                    std::cerr << "WARNING: Skipping corpus readiness due to phase hard-timeout\n";
+                } else {
+                    corpusReadyOk =
+                        waitForCorpusIndexed(expectedUniqueDocs, config.enableEmbeddings,
+                                             drainTimeout, phaseDeadline, &hardTimeoutTriggered);
+                }
             }
         } else {
-            (void)waitForCorpusIndexed(config.documentCount, config.enableEmbeddings, drainTimeout);
+            if (hardTimeoutTriggered) {
+                corpusCheckSkipped = true;
+                std::cerr << "WARNING: Skipping corpus readiness due to phase hard-timeout\n";
+            } else {
+                corpusReadyOk =
+                    waitForCorpusIndexed(expectedUniqueDocs, config.enableEmbeddings, drainTimeout,
+                                         phaseDeadline, &hardTimeoutTriggered);
+            }
         }
+
+        const auto waitPhaseEnd = std::chrono::steady_clock::now();
+        const auto waitPhaseDurationMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(waitPhaseEnd - waitPhaseStart)
+                .count();
 
         g_collector.stop();
         auto endTime = std::chrono::steady_clock::now();
@@ -836,22 +1071,87 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
 
         // Find peak values
         uint64_t peakPostQueued = 0, peakEmbedQueued = 0;
+        uint64_t peakEmbedInflight = 0;
+        uint64_t peakEmbedInferActive = 0;
+        uint64_t peakEmbedInferOldestMs = 0;
+        uint64_t peakEmbedInferLastMs = 0;
+        uint64_t peakEmbedInferMaxMs = 0;
         uint64_t peakRss = 0;
         double maxCpu = 0.0;
         int maxPressure = 0;
+        double embedBacklogSeconds = 0.0;
+        double embedBacklogSingleWorkerSeconds = 0.0;
 
+        uint64_t endEmbedQueued = 0;
+        uint64_t endEmbedInflight = 0;
+        uint64_t endEmbedInferActive = 0;
+        uint64_t endEmbedInferOldestMs = 0;
+        uint64_t endEmbedInferLastMs = 0;
+        uint64_t endEmbedInferMaxMs = 0;
+        uint64_t endEmbedInferStarted = 0;
+        uint64_t endEmbedInferCompleted = 0;
+        uint64_t endEmbedInferWarnCount = 0;
+        uint64_t firstEmbedInferStarted = 0;
+        uint64_t firstEmbedInferCompleted = 0;
+        uint64_t firstEmbedInferWarnCount = 0;
+        bool firstSeen = false;
+
+        uint64_t prevElapsedMs = 0;
         for (const auto& s : samples) {
             peakPostQueued = std::max(peakPostQueued, s.postIngestQueued);
             peakEmbedQueued = std::max(peakEmbedQueued, s.embedQueued);
+            peakEmbedInflight = std::max(peakEmbedInflight, s.embedInflight);
+            peakEmbedInferActive = std::max(peakEmbedInferActive, s.embedInferActive);
+            peakEmbedInferOldestMs = std::max(peakEmbedInferOldestMs, s.embedInferOldestMs);
+            peakEmbedInferLastMs = std::max(peakEmbedInferLastMs, s.embedInferLastMs);
+            peakEmbedInferMaxMs = std::max(peakEmbedInferMaxMs, s.embedInferMaxMs);
             peakRss = std::max(peakRss, s.rssBytes);
             maxCpu = std::max(maxCpu, s.cpuPercent);
             maxPressure = std::max(maxPressure, s.pressureLevel);
+
+            if (!firstSeen) {
+                firstSeen = true;
+                firstEmbedInferStarted = s.embedInferStarted;
+                firstEmbedInferCompleted = s.embedInferCompleted;
+                firstEmbedInferWarnCount = s.embedInferWarnCount;
+            }
+
+            uint64_t deltaMs = (s.elapsedMs > prevElapsedMs) ? (s.elapsedMs - prevElapsedMs) : 0;
+            prevElapsedMs = s.elapsedMs;
+            if (deltaMs > 0 && s.embedQueued > 0) {
+                embedBacklogSeconds += static_cast<double>(deltaMs) / 1000.0;
+                if (s.embedInflight <= 1) {
+                    embedBacklogSingleWorkerSeconds += static_cast<double>(deltaMs) / 1000.0;
+                }
+            }
+
+            endEmbedQueued = s.embedQueued;
+            endEmbedInflight = s.embedInflight;
+            endEmbedInferActive = s.embedInferActive;
+            endEmbedInferOldestMs = s.embedInferOldestMs;
+            endEmbedInferLastMs = s.embedInferLastMs;
+            endEmbedInferMaxMs = s.embedInferMaxMs;
+            endEmbedInferStarted = s.embedInferStarted;
+            endEmbedInferCompleted = s.embedInferCompleted;
+            endEmbedInferWarnCount = s.embedInferWarnCount;
         }
+
+        const uint64_t inferStartedDelta = (endEmbedInferStarted >= firstEmbedInferStarted)
+                                               ? (endEmbedInferStarted - firstEmbedInferStarted)
+                                               : 0;
+        const uint64_t inferCompletedDelta =
+            (endEmbedInferCompleted >= firstEmbedInferCompleted)
+                ? (endEmbedInferCompleted - firstEmbedInferCompleted)
+                : 0;
+        const uint64_t inferWarnDelta = (endEmbedInferWarnCount >= firstEmbedInferWarnCount)
+                                            ? (endEmbedInferWarnCount - firstEmbedInferWarnCount)
+                                            : 0;
 
         // Output counters
         state.counters["docs_total"] = static_cast<double>(config.documentCount);
         state.counters["docs_success"] = static_cast<double>(successCount);
         state.counters["docs_failed"] = static_cast<double>(failCount);
+        state.counters["docs_unique"] = static_cast<double>(expectedUniqueDocs);
         state.counters["throughput_dps"] = throughput;
         state.counters["ingest_throughput_dps"] = ingestThroughput;
         state.counters["bytes_total"] = static_cast<double>(totalBytes);
@@ -861,9 +1161,42 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
         state.counters["ingest_duration_ms"] = static_cast<double>(ingestDuration.count());
         state.counters["peak_post_queued"] = static_cast<double>(peakPostQueued);
         state.counters["peak_embed_queued"] = static_cast<double>(peakEmbedQueued);
+        state.counters["peak_embed_inflight"] = static_cast<double>(peakEmbedInflight);
+        state.counters["peak_embed_infer_active"] = static_cast<double>(peakEmbedInferActive);
+        state.counters["peak_embed_infer_oldest_ms"] = static_cast<double>(peakEmbedInferOldestMs);
+        state.counters["peak_embed_infer_last_ms"] = static_cast<double>(peakEmbedInferLastMs);
+        state.counters["peak_embed_infer_max_ms"] = static_cast<double>(peakEmbedInferMaxMs);
         state.counters["peak_rss_mb"] = static_cast<double>(peakRss / (1024 * 1024));
         state.counters["max_cpu_pct"] = maxCpu;
         state.counters["max_pressure"] = static_cast<double>(maxPressure);
+        state.counters["embed_backlog_sec"] = embedBacklogSeconds;
+        state.counters["embed_backlog_single_worker_sec"] = embedBacklogSingleWorkerSeconds;
+        state.counters["end_embed_queued"] = static_cast<double>(endEmbedQueued);
+        state.counters["end_embed_inflight"] = static_cast<double>(endEmbedInflight);
+        state.counters["end_embed_infer_active"] = static_cast<double>(endEmbedInferActive);
+        state.counters["end_embed_infer_oldest_ms"] = static_cast<double>(endEmbedInferOldestMs);
+        state.counters["end_embed_infer_last_ms"] = static_cast<double>(endEmbedInferLastMs);
+        state.counters["end_embed_infer_max_ms"] = static_cast<double>(endEmbedInferMaxMs);
+        state.counters["embed_infer_started_delta"] = static_cast<double>(inferStartedDelta);
+        state.counters["embed_infer_completed_delta"] = static_cast<double>(inferCompletedDelta);
+        state.counters["embed_infer_warn_delta"] = static_cast<double>(inferWarnDelta);
+        state.counters["drain_last_total_queued"] = static_cast<double>(drainSnapshot.totalQueued);
+        state.counters["drain_last_total_inflight"] =
+            static_cast<double>(drainSnapshot.totalInflight);
+        state.counters["drain_last_embed_queued"] = static_cast<double>(drainSnapshot.embedQueued);
+        state.counters["drain_last_embed_inflight"] =
+            static_cast<double>(drainSnapshot.embedInflight);
+        state.counters["drain_last_post_queued"] = static_cast<double>(drainSnapshot.postQueued);
+        state.counters["drain_last_post_inflight"] =
+            static_cast<double>(drainSnapshot.postInflight);
+        state.counters["drain_poll_count"] = static_cast<double>(drainSnapshot.polls);
+        state.counters["drain_stable_count"] = static_cast<double>(drainSnapshot.stableCount);
+        state.counters["drain_hard_timeout"] = drainSnapshot.hitHardTimeout ? 1.0 : 0.0;
+        state.counters["wait_phase_ms"] = static_cast<double>(waitPhaseDurationMs);
+        state.counters["drain_timeout"] = drainOk ? 0.0 : 1.0;
+        state.counters["corpus_timeout"] = corpusReadyOk ? 0.0 : 1.0;
+        state.counters["phase_timeout"] = hardTimeoutTriggered ? 1.0 : 0.0;
+        state.counters["corpus_check_skipped"] = corpusCheckSkipped ? 1.0 : 0.0;
 
         // Write time series CSV
         std::filesystem::path outDir = g_harness->dataDir().parent_path();
@@ -912,6 +1245,8 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
 // Tier 0: Embedding smoke test (tiny corpus; completes even on slow inference)
 BENCHMARK(BM_LargeScaleIngestion)
     ->Args({200, 0, 2}) // 200, no embeddings, Balanced
+    ->Args({200, 1, 2}) // 200, with embeddings, Balanced
+    ->Args({100, 1, 2}) // 100, with embeddings, Balanced
     ->Args({10, 1, 2})  // 10, with embeddings, Balanced
     ->Unit(benchmark::kMillisecond)
     ->Iterations(1);
@@ -958,6 +1293,7 @@ int main(int argc, char** argv) {
     std::cout << "  YAMS_BENCH_DOC_COUNT=N          Override document count\n";
     std::cout << "  YAMS_BENCH_ENABLE_EMBEDDINGS=1  Enable embedding generation\n";
     std::cout << "  YAMS_TUNING_PROFILE=NAME        Set profile (Efficient/Balanced/Aggressive)\n";
+    std::cout << "  YAMS_BENCH_EMBED_PROFILE=NAME   Embedding profile (safe|balanced)\n";
     std::cout << "  YAMS_BENCH_DUPLICATION_RATE=0.05 Set duplication rate (0.0-1.0)\n";
     std::cout << "  YAMS_BENCH_DRAIN_SCOPE=full|post_embed|none\n";
     std::cout << "  YAMS_BENCH_DRAIN_WAIT_MS=N          Override drain wait timeout\n";
@@ -965,6 +1301,8 @@ int main(int argc, char** argv) {
     std::cout << "  YAMS_BENCH_CORPUS_STABLE_REQUIRED=N Stable samples needed for corpus ready\n";
     std::cout << "  YAMS_BENCH_SKIP_CORPUS_READY=1      Skip corpus indexed readiness wait\n";
     std::cout << "  YAMS_BENCH_SKIP_DEFAULT_SETUP=1     Don't pre-start daemon before benchmarks\n";
+    std::cout
+        << "  YAMS_BENCH_ENABLE_SEARCH_REBUILDS=1 Allow search engine rebuilds during bench\n";
     std::cout << "  YAMS_BENCH_OUT_DIR=PATH             Write CSV time series into PATH\n";
     std::cout << "  YAMS_BENCH_RUN_ID=ID                Suffix for CSV filename\n";
     std::cout << "\nEmbedding Chunk Tuning (daemon env):\n";
