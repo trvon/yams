@@ -28,6 +28,7 @@ class ServiceManager;
 class RequestDispatcher;
 class DaemonMetrics;
 class SocketServer;
+class IOCoordinator;
 class TuningManager; // centralized tuner (moved from ServiceManager)
 // Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
 
@@ -140,6 +141,8 @@ public:
     std::shared_ptr<DaemonMetrics> metrics_;
     // Integrated socket server (replaces external yams-socket-server)
     std::unique_ptr<SocketServer> socketServer_;
+    // Dedicated I/O thread pool for IPC sockets
+    std::unique_ptr<IOCoordinator> ioCoordinator_;
     std::unique_ptr<TuningManager> tuningManager_;
 
     // Lifecycle FSM (authoritative lifecycle state)

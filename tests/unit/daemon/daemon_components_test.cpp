@@ -17,6 +17,7 @@
 #include <thread>
 #include <yams/compat/unistd.h>
 
+#include <yams/daemon/components/IOCoordinator.h>
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/WorkCoordinator.h>
@@ -159,7 +160,9 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
     SECTION("Start and stop clears stopping flag") {
         WorkCoordinator coordinator;
         coordinator.start(2);
-        SocketServer server(config, &coordinator, nullptr, &state);
+        IOCoordinator io;
+        io.start();
+        SocketServer server(config, &io, &coordinator, nullptr, &state);
 
         auto first = server.start();
         if (!first) {
@@ -184,6 +187,9 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
         REQUIRE(second);
 
         REQUIRE(server.stop());
+
+        io.stop();
+        io.join();
         coordinator.stop();
         coordinator.join();
     }
@@ -191,7 +197,9 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
     SECTION("Multiple start attempts are safe") {
         WorkCoordinator coordinator;
         coordinator.start(2);
-        SocketServer server(config, &coordinator, nullptr, &state);
+        IOCoordinator io;
+        io.start();
+        SocketServer server(config, &io, &coordinator, nullptr, &state);
 
         auto first = server.start();
         if (!first) {
@@ -207,6 +215,9 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
         REQUIRE(!second); // Already running
 
         REQUIRE(server.stop());
+
+        io.stop();
+        io.join();
         coordinator.stop();
         coordinator.join();
     }

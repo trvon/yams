@@ -1068,7 +1068,14 @@ struct BenchFixture {
         // Prefer proxy socket for long-running benchmark connections; it skips
         // maxConnectionLifetime enforcement (main socket forces close at ~300s).
         {
-            fs::path proxySock = harness->socketPath().parent_path() / "proxy.sock";
+            // Proxy socket is derived from daemon socket stem + ".proxy.sock".
+            fs::path daemonSock = harness->socketPath();
+            auto base = daemonSock.stem().string();
+            if (base.empty())
+                base = daemonSock.filename().string();
+            if (base.empty())
+                base = "yams-daemon";
+            fs::path proxySock = daemonSock.parent_path() / (base + ".proxy.sock");
             if (fs::exists(proxySock)) {
                 clientCfg.socketPath = proxySock;
                 spdlog::info("Using proxy socket for benchmark client: {}", proxySock.string());

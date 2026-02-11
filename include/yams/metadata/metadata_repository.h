@@ -691,8 +691,13 @@ private:
     // Legacy makeSelect removed; callers now use sql::QuerySpec to build SELECTs
 
     // SymSpell fuzzy search (SQLite-backed)
+    // Note: SymSpellSearch stores a raw sqlite3* that must remain valid for its lifetime.
+    // We keep a dedicated pooled connection alive for the SymSpell index to avoid
+    // holding a pointer to a pooled handle that can be returned to the pool.
+    mutable std::mutex symspellInitMutex_;
+    mutable std::unique_ptr<PooledConnection> symspellConn_;
     mutable std::unique_ptr<search::SymSpellSearch> symspellIndex_;
-    mutable bool symspellInitialized_{false};
+    mutable std::atomic<bool> symspellInitialized_{false};
 
     struct PathCacheEntry {
         std::string path;

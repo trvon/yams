@@ -15,6 +15,7 @@
 #include <boost/asio/use_future.hpp>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/IOCoordinator.h>
 #include <yams/daemon/components/LifecycleComponent.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -269,6 +270,23 @@ Result<void> YamsDaemon::start() {
     spdlog::info("[Startup] Phase: FSM BootstrappedEvent");
     lifecycleFsm_.dispatch(BootstrappedEvent{});
 
+    // Start dedicated IOCoordinator BEFORE accepting connections to prevent IPC starvation
+    spdlog::info("[Startup] Phase: IOCoordinator Start");
+    try {
+        IOCoordinator::Config ioCfg;
+        ioCfg.num_threads = static_cast<size_t>(TuneAdvisor::ioThreadCount());
+        if (ioCfg.num_threads == 0) {
+            ioCfg.num_threads = 2;
+        }
+        ioCoordinator_ = std::make_unique<IOCoordinator>(ioCfg);
+        ioCoordinator_->start();
+    } catch (const std::exception& e) {
+        running_ = false;
+        return Error{ErrorCode::InternalError,
+                     std::string("Failed to start IOCoordinator: ") + e.what()};
+    }
+    spdlog::info("[Startup] Phase: IOCoordinator Start OK");
+
     // Start integrated socket server ASAP so status requests work during initialization
     spdlog::info("[Startup] Phase: SocketServer Start");
     SocketServer::Config socketConfig;
@@ -308,22 +326,31 @@ Result<void> YamsDaemon::start() {
         socketConfig.maxConnections = static_cast<std::size_t>(cap);
     }
 
-    // Derive proxy socket path: sibling of daemon socket (e.g. proxy.sock alongside daemon.sock)
+    // Derive proxy socket path from daemon socket to avoid global /tmp/proxy.sock collisions.
     {
-        std::filesystem::path proxyPath;
-        if (const char* env = std::getenv("YAMS_PROXY_SOCKET"); env && *env) {
-            proxyPath = env;
-        } else {
-            proxyPath = socketConfig.socketPath.parent_path() / "proxy.sock";
-        }
-        socketConfig.proxySocketPath = proxyPath;
+        const auto& daemonSocket = socketConfig.socketPath;
+        auto base = daemonSocket.stem().string();
+        if (base.empty())
+            base = daemonSocket.filename().string();
+        if (base.empty())
+            base = "yams-daemon";
+        socketConfig.proxySocketPath = daemonSocket.parent_path() / (base + ".proxy.sock");
     }
 
-    socketServer_ = std::make_unique<SocketServer>(
-        socketConfig, serviceManager_->getWorkCoordinator(), requestDispatcher_.get(), &state_);
+    socketServer_ = std::make_unique<SocketServer>(socketConfig, ioCoordinator_.get(),
+                                                   serviceManager_->getWorkCoordinator(),
+                                                   requestDispatcher_.get(), &state_);
 
     if (auto result = socketServer_->start(); !result) {
         running_ = false;
+        if (ioCoordinator_) {
+            try {
+                ioCoordinator_->stop();
+                ioCoordinator_->join();
+            } catch (...) {
+            }
+            ioCoordinator_.reset();
+        }
         serviceManager_->shutdown();
         lifecycleManager_->shutdown();
         return Error{ErrorCode::IOError,
@@ -718,6 +745,21 @@ Result<void> YamsDaemon::stop() {
             spdlog::warn("Socket server stop returned error: {}", stopResult.error().message);
         }
         state_.readiness.ipcServerReady = false;
+    }
+
+    // Stop dedicated IOCoordinator after SocketServer is down.
+    if (ioCoordinator_) {
+        try {
+            spdlog::debug("Stopping IOCoordinator...");
+            ioCoordinator_->stop();
+            ioCoordinator_->join();
+            spdlog::debug("IOCoordinator stopped");
+        } catch (const std::exception& e) {
+            spdlog::warn("IOCoordinator stop exception: {}", e.what());
+        } catch (...) {
+            spdlog::warn("IOCoordinator stop: unknown exception");
+        }
+        ioCoordinator_.reset();
     }
 
     // Stop ServiceManager (this will stop WorkCoordinator's io_context in Phase 4)

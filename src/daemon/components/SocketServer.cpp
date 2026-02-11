@@ -1,3 +1,4 @@
+#include <yams/daemon/components/IOCoordinator.h>
 #include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -66,9 +67,11 @@ using boost::asio::detached;
 using boost::asio::use_awaitable;
 using local = boost::asio::local::stream_protocol;
 
-SocketServer::SocketServer(const Config& config, WorkCoordinator* coordinator,
-                           RequestDispatcher* dispatcher, StateComponent* state)
-    : config_(config), coordinator_(coordinator), dispatcher_(dispatcher), state_(state) {}
+SocketServer::SocketServer(const Config& config, IOCoordinator* ioCoordinator,
+                           WorkCoordinator* coordinator, RequestDispatcher* dispatcher,
+                           StateComponent* state)
+    : config_(config), ioCoordinator_(ioCoordinator), coordinator_(coordinator),
+      dispatcher_(dispatcher), state_(state) {}
 
 SocketServer::~SocketServer() {
     stop();
@@ -117,13 +120,18 @@ Result<void> SocketServer::start() {
             }
         }
 #endif
+        if (!ioCoordinator_ || !ioCoordinator_->isRunning()) {
+            running_ = false;
+            return Error{ErrorCode::InvalidState,
+                         "IOCoordinator must be started before SocketServer"};
+        }
         if (!coordinator_ || !coordinator_->isRunning()) {
             running_ = false;
             return Error{ErrorCode::InvalidState,
                          "WorkCoordinator must be started before SocketServer"};
         }
 
-        auto io_context = coordinator_->getIOContext();
+        auto io_context = ioCoordinator_->getIOContext();
 
         // Create acceptor on the io_context executor to avoid TSan race with
         // worker threads already running io_context->run(). The kqueue_reactor
@@ -206,13 +214,13 @@ Result<void> SocketServer::start() {
         setWriterBudget(initialBudget);
 
         acceptLoopFuture_ = co_spawn(
-            coordinator_->getExecutor(),
+            ioCoordinator_->getExecutor(),
             [this]() -> awaitable<void> {
                 co_await accept_loop(false);
                 co_return;
             },
             boost::asio::use_future);
-        spdlog::info("SocketServer: accept_loop scheduled on WorkCoordinator");
+        spdlog::info("SocketServer: accept_loop scheduled on IOCoordinator");
 
         // Start proxy acceptor if configured
         if (!config_.proxySocketPath.empty()) {
@@ -284,7 +292,7 @@ Result<void> SocketServer::start() {
                 }
 
                 proxyAcceptLoopFuture_ = co_spawn(
-                    coordinator_->getExecutor(),
+                    ioCoordinator_->getExecutor(),
                     [this]() -> awaitable<void> {
                         co_await accept_loop(true);
                         co_return;
@@ -297,8 +305,9 @@ Result<void> SocketServer::start() {
         }
 
         // WorkCoordinator handles all threading - no need for separate worker pool
-        spdlog::info("SocketServer: using WorkCoordinator ({} threads) for async execution",
-                     coordinator_->getWorkerCount());
+        spdlog::info("SocketServer: using IOCoordinator ({} threads) for IPC I/O; WorkCoordinator "
+                     "({} threads) for CPU",
+                     ioCoordinator_->getThreadCount(), coordinator_->getWorkerCount());
 
         if (state_) {
             state_->readiness.ipcServerReady.store(true);
@@ -584,7 +593,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                             }
                             std::filesystem::remove(rebuildPath, rebuild_ec);
                             auto rebuilt =
-                                std::make_unique<local::acceptor>(*coordinator_->getIOContext());
+                                std::make_unique<local::acceptor>(*ioCoordinator_->getIOContext());
                             local::endpoint endpoint(rebuildPath.string());
                             rebuilt->open(endpoint.protocol());
                             rebuilt->bind(endpoint);
@@ -639,7 +648,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 }
 
                 if (need_delay) {
-                    boost::asio::steady_timer timer(*coordinator_->getIOContext());
+                    boost::asio::steady_timer timer(*ioCoordinator_->getIOContext());
                     timer.expires_after(backoff_ms);
                     try {
                         co_await timer.async_wait(use_awaitable);
@@ -682,7 +691,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 }
 
                 // Yield briefly to avoid a tight accept/close loop under sustained load.
-                boost::asio::steady_timer slot_timer(*coordinator_->getIOContext());
+                boost::asio::steady_timer slot_timer(*ioCoordinator_->getIOContext());
                 slot_timer.expires_after(std::chrono::milliseconds(1));
                 co_await slot_timer.async_wait(use_awaitable);
 
@@ -729,7 +738,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 state_->stats.connectionSlotsFree.store(slotsFree, std::memory_order_relaxed);
             }
 
-            auto connectionExecutor = boost::asio::make_strand(coordinator_->getExecutor());
+            auto connectionExecutor = boost::asio::make_strand(ioCoordinator_->getExecutor());
             auto sock = std::make_shared<local::socket>(std::move(socket));
             auto tracked = std::make_shared<TrackedSocket>();
             tracked->socket = sock;
@@ -1061,8 +1070,8 @@ void SocketServer::execute_on_io_context(std::function<void()> fn) {
         return;
     }
 
-    auto io_context = coordinator_->getIOContext();
-    auto executor = coordinator_->getExecutor();
+    auto io_context = ioCoordinator_->getIOContext();
+    auto executor = ioCoordinator_->getExecutor();
     if (io_context->stopped() || executor.running_in_this_thread()) {
         fn();
         return;

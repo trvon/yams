@@ -74,14 +74,8 @@ TEST_CASE("Proxy connections cannot starve main status/shutdown", "[daemon][prox
     // Keep the main slot budget small so starvation is easy to reproduce.
     EnvGuard envMaxConn("YAMS_MAX_ACTIVE_CONN", "8");
 
-    // Ensure this test's proxy socket cannot collide with other daemons.
-    // Default proxy path is sibling of daemon socket: /tmp/proxy.sock (shared).
-    const auto proxySock = std::filesystem::path("/tmp") /
-                           ("proxy_" + std::to_string(static_cast<uint64_t>(getpid())) + "_" +
-                            std::to_string(static_cast<uint64_t>(
-                                std::chrono::steady_clock::now().time_since_epoch().count())) +
-                            ".sock");
-    EnvGuard envProxySock("YAMS_PROXY_SOCKET", proxySock.string().c_str());
+    // Proxy socket is derived from daemon socket (no env override required).
+    // This avoids global /tmp/proxy.sock collisions and keeps tests isolated.
 
     constexpr size_t kMainSlots = 8;
     constexpr size_t kProxyTarget = kMainSlots - 1; // keep 1 slot for the initial main client
@@ -105,7 +99,17 @@ TEST_CASE("Proxy connections cannot starve main status/shutdown", "[daemon][prox
         std::this_thread::sleep_for(50ms);
     }
     REQUIRE_FALSE(proxyPath.empty());
-    REQUIRE(proxyPath == proxySock);
+    // Sanity: derived proxy path should match daemon socket stem + ".proxy.sock".
+    {
+        const auto daemonSock = harness.socketPath();
+        auto base = daemonSock.stem().string();
+        if (base.empty())
+            base = daemonSock.filename().string();
+        if (base.empty())
+            base = "yams-daemon";
+        const auto expected = daemonSock.parent_path() / (base + ".proxy.sock");
+        REQUIRE(proxyPath == expected);
+    }
 
     auto waitForProxyAccepted = [&](size_t want) {
         for (int i = 0; i < 50; ++i) {

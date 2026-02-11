@@ -1635,7 +1635,7 @@ private:
                 spinner->stop();
             }
             if (!sres) {
-                std::cout << "YAMS daemon is running\n";
+                std::cout << "YAMS daemon status unavailable (IPC error)\n";
                 return;
             }
 

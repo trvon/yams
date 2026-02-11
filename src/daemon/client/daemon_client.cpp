@@ -346,25 +346,32 @@ std::filesystem::path resolveDataDirCached() {
 }
 } // namespace
 
+// Forward declaration: used during DaemonClient construction for proxy health checks.
+static bool pingDaemonSync(const std::filesystem::path& socketPath);
+
 // DaemonClient implementation
 DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<Impl>(config)) {
     if (pImpl->config_.socketPath.empty()) {
-        // Resolve daemon socket path, then check for proxy socket alongside it.
-        // Priority:
-        //  1) YAMS_PROXY_SOCKET env var (explicit override)
-        //  2) proxy.sock sibling of daemon.sock (auto-discovery)
-        //  3) Fall back to daemon.sock directly
+        // Resolve daemon socket path, then prefer a healthy proxy socket derived from it.
+        // IMPORTANT: do not select the proxy based on filesystem existence alone; stale socket
+        // files are common when the daemon crashes.
         auto daemonSock = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
 
-        std::filesystem::path proxyCandidate;
-        if (const char* env = std::getenv("YAMS_PROXY_SOCKET"); env && *env) {
-            proxyCandidate = env;
-        } else {
-            proxyCandidate = daemonSock.parent_path() / "proxy.sock";
-        }
+        auto deriveProxySock = [](const std::filesystem::path& daemonSocket) {
+            if (daemonSocket.empty())
+                return std::filesystem::path{};
+            auto base = daemonSocket.stem().string();
+            if (base.empty())
+                base = daemonSocket.filename().string();
+            if (base.empty())
+                base = "yams-daemon";
+            return daemonSocket.parent_path() / (base + ".proxy.sock");
+        };
 
-        std::error_code ec;
-        if (!proxyCandidate.empty() && std::filesystem::exists(proxyCandidate, ec)) {
+        const auto proxyCandidate = deriveProxySock(daemonSock);
+
+        // Prefer proxy only if it is connectable; otherwise fall back to the main daemon socket.
+        if (!proxyCandidate.empty() && pingDaemonSync(proxyCandidate)) {
             pImpl->config_.socketPath = proxyCandidate;
         } else {
             pImpl->config_.socketPath = daemonSock;

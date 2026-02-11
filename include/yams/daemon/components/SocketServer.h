@@ -24,6 +24,7 @@ namespace yams::daemon {
 
 // Forward declarations
 class RequestDispatcher;
+class IOCoordinator;
 class WorkCoordinator;
 struct StateComponent;
 
@@ -47,8 +48,8 @@ public:
         size_t proxyMaxConnections = 512;
     };
 
-    SocketServer(const Config& config, WorkCoordinator* coordinator, RequestDispatcher* dispatcher,
-                 StateComponent* state);
+    SocketServer(const Config& config, IOCoordinator* ioCoordinator, WorkCoordinator* coordinator,
+                 RequestDispatcher* dispatcher, StateComponent* state);
     ~SocketServer();
 
     // Lifecycle
@@ -121,12 +122,13 @@ private:
 
     // Configuration
     Config config_;
+    IOCoordinator* ioCoordinator_{nullptr};
     WorkCoordinator* coordinator_;
     RequestDispatcher* dispatcher_;
     StateComponent* state_;
     mutable std::mutex dispatcherMutex_;
 
-    // Boost.ASIO components (use WorkCoordinator's io_context)
+    // Boost.ASIO components (use IOCoordinator's io_context)
     std::unique_ptr<boost::asio::local::stream_protocol::acceptor> acceptor_;
     std::future<void> acceptLoopFuture_;
 

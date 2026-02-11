@@ -3919,37 +3919,49 @@ void MetadataRepository::signalCorpusStatsStale() {
 // -----------------------------------------------------------------------------
 
 Result<void> MetadataRepository::ensureSymSpellInitialized() {
-    if (symspellInitialized_) {
-        return Result<void>();
+    if (symspellInitialized_.load(std::memory_order_acquire)) {
+        return {};
     }
 
-    // Get a connection and initialize the schema + index
-    return executeQuery<void>([this](Database& db) -> Result<void> {
-        // Double-check after acquiring connection
-        if (symspellInitialized_) {
-            return Result<void>();
-        }
+    std::lock_guard<std::mutex> lock(symspellInitMutex_);
+    if (symspellInitialized_.load(std::memory_order_relaxed)) {
+        return {};
+    }
 
-        sqlite3* rawDb = db.rawHandle();
-        if (!rawDb) {
-            return Error{ErrorCode::DatabaseError, "Failed to get raw SQLite handle"};
-        }
+    // Keep a dedicated pooled connection alive for SymSpell. SymSpellSearch stores
+    // a raw sqlite3* pointer and assumes it remains valid for its entire lifetime.
+    auto connResult = pool_.acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal);
+    if (!connResult) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "Failed to acquire database connection for SymSpell"};
+    }
 
-        // Initialize schema (idempotent - creates tables if not exist)
-        auto schemaResult = search::SymSpellSearch::initializeSchema(rawDb);
-        if (!schemaResult) {
-            spdlog::error("SymSpell schema initialization failed: {}",
-                          schemaResult.error().message);
-            return schemaResult;
-        }
+    symspellConn_ = std::move(connResult).value();
+    if (!symspellConn_ || !symspellConn_->isValid()) {
+        symspellConn_.reset();
+        return Error{ErrorCode::DatabaseError, "Invalid database connection for SymSpell"};
+    }
 
-        // Create the search index instance
-        symspellIndex_ = std::make_unique<search::SymSpellSearch>(rawDb);
-        symspellInitialized_ = true;
+    sqlite3* rawDb = (*symspellConn_)->rawHandle();
+    if (!rawDb) {
+        symspellConn_.reset();
+        return Error{ErrorCode::DatabaseError, "Failed to get raw SQLite handle"};
+    }
 
-        spdlog::info("SymSpell fuzzy search index initialized");
-        return Result<void>();
-    });
+    // Initialize schema (idempotent - creates tables if not exist)
+    auto schemaResult = search::SymSpellSearch::initializeSchema(rawDb);
+    if (!schemaResult) {
+        spdlog::error("SymSpell schema initialization failed: {}", schemaResult.error().message);
+        symspellConn_.reset();
+        return schemaResult;
+    }
+
+    // Create the search index instance
+    symspellIndex_ = std::make_unique<search::SymSpellSearch>(rawDb);
+    symspellInitialized_.store(true, std::memory_order_release);
+
+    spdlog::info("SymSpell fuzzy search index initialized");
+    return {};
 }
 
 void MetadataRepository::addSymSpellTerm(std::string_view term, int64_t frequency) {
