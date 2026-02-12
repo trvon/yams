@@ -18,7 +18,9 @@ mkdir -p \
 	"${CORPUS_DIR}/request_handler" \
 	"${CORPUS_DIR}/streaming_processor" \
 	"${CORPUS_DIR}/query_parser" \
-	"${CORPUS_DIR}/plugin_trust"
+	"${CORPUS_DIR}/plugin_trust" \
+	"${CORPUS_DIR}/plugin_abi_mount" \
+	"${CORPUS_DIR}/plugin_abi_negotiation"
 
 echo "Creating minimal seed inputs..."
 
@@ -69,6 +71,24 @@ EOF
 # Format: base\0candidate\0trustfile-body
 printf '/trusted\0/trusted_evil/plugin.so\0/trusted\n' > "${CORPUS_DIR}/plugin_trust/01_prefix_bypass.bin"
 printf '/trusted\0/trusted/plugin.so\0/trusted\n#comment\n' > "${CORPUS_DIR}/plugin_trust/02_trusted_ok.bin"
+
+# ABI plugin mount seeds (treated as config bytes and interface selectors)
+cat > "${CORPUS_DIR}/plugin_abi_mount/01_empty_json.txt" <<'EOF'
+{}
+EOF
+cat > "${CORPUS_DIR}/plugin_abi_mount/02_simple.txt" <<'EOF'
+{"mode":"smoke","feature":"abi"}
+EOF
+head -c 128 /dev/urandom > "${CORPUS_DIR}/plugin_abi_mount/03_random.bin"
+
+# ABI negotiation seeds (manifest/interface oriented)
+cat > "${CORPUS_DIR}/plugin_abi_negotiation/01_ifaces.txt" <<'EOF'
+fuzz_iface_v1 content_extractor_v1 dr_provider_v1
+EOF
+cat > "${CORPUS_DIR}/plugin_abi_negotiation/02_versions.txt" <<'EOF'
+v=1 v=2 v=999
+EOF
+head -c 128 /dev/urandom > "${CORPUS_DIR}/plugin_abi_negotiation/03_random.bin"
 
 echo "Generating structured IPC seeds (Search/Grep/Delete) via seedgen (if available)..."
 if docker image inspect yams-fuzz >/dev/null 2>&1; then

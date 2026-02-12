@@ -50,6 +50,24 @@ seedgen = executable('seedgen',
 # Per docs: "-fsanitize=fuzzer" provides automatic persistent mode
 fuzzer_args = ['-fsanitize=fuzzer']
 
+# Controlled ABI plugin used by fuzz_plugin_abi_mount.
+# This keeps dlopen() deterministic and avoids loading random fuzz bytes as shared libs.
+fuzz_abi_test_plugin = shared_module('fuzz_abi_test_plugin',
+  'fuzz_abi_test_plugin.c',
+  include_directories: include_directories('../../include'),
+  c_args: ['-fPIC'],
+  install: false,
+  build_by_default: true,
+)
+
+fuzz_abi_negotiation_plugin = shared_module('fuzz_abi_negotiation_plugin',
+  'fuzz_abi_negotiation_plugin.c',
+  include_directories: include_directories('../../include'),
+  c_args: ['-fPIC'],
+  install: false,
+  build_by_default: true,
+)
+
 # Link against the daemon library built in this tree
 # The daemon library contains MessageFramer and IPC protocol implementation
 # Note: yams_daemon_lib is defined in src/daemon/meson.build and available in this scope
@@ -134,6 +152,28 @@ fuzz_query_parser = executable('fuzz_query_parser',
 # Plugin Trust/Path Fuzzer (trust file parsing + safe path containment)
 fuzz_plugin_trust = executable('fuzz_plugin_trust',
   'fuzz_plugin_trust.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
+# ABI plugin mount fuzzer (loads controlled test plugin .so through AbiPluginLoader)
+fuzz_plugin_abi_mount = executable('fuzz_plugin_abi_mount',
+  'fuzz_plugin_abi_mount.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
+# ABI interface/manifest negotiation fuzzer
+fuzz_plugin_abi_negotiation = executable('fuzz_plugin_abi_negotiation',
+  'fuzz_plugin_abi_negotiation.cpp',
   include_directories: include_directories('../../include'),
   link_with: yams_daemon_lib,
   dependencies: fuzz_deps,

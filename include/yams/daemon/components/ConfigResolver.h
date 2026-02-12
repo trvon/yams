@@ -27,6 +27,15 @@ struct DaemonConfig; // Forward declaration
  */
 class ConfigResolver {
 public:
+    struct EmbeddingSelectionPolicy {
+        enum class Mode { Full, Budgeted, Adaptive };
+        Mode mode{Mode::Budgeted};
+        std::size_t maxChunksPerDoc{8};
+        std::size_t maxCharsPerDoc{24000};
+        double headingBoost{1.25};
+        double introBoost{0.75};
+    };
+
     ConfigResolver() = delete; // Static-only class
 
     /**
@@ -146,6 +155,25 @@ public:
      * @return true if preload is enabled
      */
     static bool detectEmbeddingPreloadFlag(const DaemonConfig& config);
+
+    /**
+     * @brief Resolve embedding chunk-selection policy from config with env overrides.
+     *
+     * Config keys:
+     * - embeddings.selection.mode = full|budgeted|adaptive
+     * - embeddings.selection.max_chunks_per_doc = int
+     * - embeddings.selection.max_chars_per_doc = int
+     * - embeddings.selection.heading_boost = float
+     * - embeddings.selection.intro_boost = float
+     *
+     * Environment overrides:
+     * - YAMS_EMBED_SELECTION_MODE
+     * - YAMS_EMBED_MAX_CHUNKS_PER_DOC
+     * - YAMS_EMBED_MAX_CHARS_PER_DOC
+     * - YAMS_EMBED_SELECTION_HEADING_BOOST
+     * - YAMS_EMBED_SELECTION_INTRO_BOOST
+     */
+    static EmbeddingSelectionPolicy resolveEmbeddingSelectionPolicy();
 
     /**
      * @brief Read an integer timeout from environment with bounds.

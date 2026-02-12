@@ -45,13 +45,13 @@
 			"label": "build (Debug)",
 			"type": "shell",
 			"windows": {
-				"command": "builddir\\build-debug\\conan\\conanbuild.ps1; meson compile -C builddir"
+				"command": "builddir\\build-debug\\conan\\conanbuild.ps1; meson compile -j 4 -C builddir"
 			},
 			"linux": {
-				"command": "meson compile -C builddir"
+				"command": "meson compile -j 4 -C builddir"
 			},
 			"osx": {
-				"command": "meson compile -C builddir"
+				"command": "meson compile -j 4 -C builddir"
 			},
 			"problemMatcher": [
 				"$msCompile"
@@ -72,10 +72,10 @@
 				"command": "if (Test-Path builddir\\build-debug\\conan\\conanbuild.ps1) { builddir\\build-debug\\conan\\conanbuild.ps1 }; meson compile -C builddir"
 			},
 			"linux": {
-				"command": "meson compile -C builddir"
+				"command": "meson compile -j 4 -C builddir"
 			},
 			"osx": {
-				"command": "meson compile -C builddir"
+				"command": "meson compile -j 4 -C builddir"
 			},
 			"problemMatcher": [
 				"$msCompile"
@@ -90,13 +90,13 @@
 			"label": "build (Release)",
 			"type": "shell",
 			"windows": {
-				"command": "build\\release\\build-release\\conan\\conanbuild.ps1; meson compile -C build/release"
+				"command": "build\\release\\build-release\\conan\\conanbuild.ps1; meson compile -j 4 -C build/release"
 			},
 			"linux": {
-				"command": "meson compile -C build/release"
+				"command": "meson compile -j 4 -C build/release"
 			},
 			"osx": {
-				"command": "meson compile -C build/release"
+				"command": "meson compile -j 4 -C build/release"
 			},
 			"problemMatcher": [
 				"$msCompile"
@@ -114,10 +114,10 @@
 				"command": "if (Test-Path build\\release\\build-release\\conan\\conanbuild.ps1) { build\\release\\build-release\\conan\\conanbuild.ps1 }; meson compile -C build/release"
 			},
 			"linux": {
-				"command": "meson compile -C build/release"
+				"command": "meson compile -j 4 -C build/release"
 			},
 			"osx": {
-				"command": "meson compile -C build/release"
+				"command": "meson compile -j 4 -C build/release"
 			},
 			"problemMatcher": [
 				"$msCompile"
@@ -134,7 +134,7 @@
 			"dependsOn": [
 				"build (Debug)"
 			],
-			"command": "meson test -C builddir --print-errorlogs",
+			"command": "meson test -j 4 -C builddir --print-errorlogs",
 			"problemMatcher": [
 				"$gcc"
 			],
@@ -190,7 +190,7 @@
 			"dependsOn": [
 				"local-ci: build image (ubuntu-24.04)"
 			],
-			"command": "docker run --rm -v ${workspaceFolder}:/work -w /work yams/local-ci:ubuntu-24.04 bash -lc 'XDG_RUNTIME_DIR=/run/user/$(id -u) mkdir -p \"$XDG_RUNTIME_DIR\" && BUILD_DIR=build/yams-debug conan install . -of \"$BUILD_DIR\" -s build_type=Debug -o \"yams/*:build_tests=True\" --build=missing && meson setup \"$BUILD_DIR\" -Dbuildtype=debug -Dbuild-tests=true -Denable-onnx=disabled && meson compile -C \"$BUILD_DIR\" && meson test -C \"$BUILD_DIR\" --print-errorlogs --no-rebuild --suite unit+isolated --test-args=\"--gtest_filter=DaemonTest.*\"'",
+			"command": "docker run --rm -v ${workspaceFolder}:/work -w /work yams/local-ci:ubuntu-24.04 bash -lc 'XDG_RUNTIME_DIR=/run/user/$(id -u) mkdir -p \"$XDG_RUNTIME_DIR\" && BUILD_DIR=build/yams-debug conan install . -of \"$BUILD_DIR\" -s build_type=Debug -o \"yams/*:build_tests=True\" --build=missing && meson setup \"$BUILD_DIR\" -Dbuildtype=debug -Dbuild-tests=true -Denable-onnx=disabled && meson compile -j 4 -C \"$BUILD_DIR\" && meson test -j 4 -C \"$BUILD_DIR\" --print-errorlogs --no-rebuild --suite unit+isolated --test-args=\"--gtest_filter=DaemonTest.*\"'",
 			"problemMatcher": [
 				"$gcc"
 			],

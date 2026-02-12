@@ -11,6 +11,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <fmt/format.h>
 
@@ -21,6 +22,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/api/content_store.h>
 #include <yams/core/types.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningSnapshot.h>
@@ -999,6 +1001,163 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
     spdlog::debug("EmbeddingService: chunked {} documents into {} chunks", docsToEmbed.size(),
                   allChunks.size());
+
+    const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
+
+    if (selectionCfg.mode != ConfigResolver::EmbeddingSelectionPolicy::Mode::Full &&
+        !allChunks.empty()) {
+        auto looksLikeHeading = [](const std::string& text) {
+            if (text.empty()) {
+                return false;
+            }
+            std::size_t lineEnd = text.find('\n');
+            if (lineEnd == std::string::npos) {
+                lineEnd = text.size();
+            }
+            std::string firstLine = text.substr(0, lineEnd);
+            firstLine.erase(firstLine.begin(),
+                            std::find_if(firstLine.begin(), firstLine.end(), [](unsigned char ch) {
+                                return !std::isspace(ch);
+                            }));
+            firstLine.erase(
+                std::find_if(firstLine.rbegin(), firstLine.rend(), [](unsigned char ch) {
+                    return !std::isspace(ch);
+                }).base(),
+                firstLine.end());
+            if (firstLine.empty()) {
+                return false;
+            }
+            if (firstLine.rfind("#", 0) == 0 || firstLine.rfind("##", 0) == 0) {
+                return true;
+            }
+            if (firstLine.size() <= 120 && firstLine.back() == ':') {
+                return true;
+            }
+            int alpha = 0;
+            int upper = 0;
+            for (unsigned char ch : firstLine) {
+                if (std::isalpha(ch)) {
+                    ++alpha;
+                    if (std::isupper(ch)) {
+                        ++upper;
+                    }
+                }
+            }
+            return alpha >= 6 && upper >= (alpha * 8) / 10;
+        };
+
+        std::vector<std::vector<std::size_t>> perDocChunkIdx(docsToEmbed.size());
+        for (std::size_t idx = 0; idx < allChunks.size(); ++idx) {
+            auto docIdx = allChunks[idx].docIdx;
+            if (docIdx < perDocChunkIdx.size()) {
+                perDocChunkIdx[docIdx].push_back(idx);
+            }
+        }
+
+        std::vector<ChunkInfo> selectedChunks;
+        selectedChunks.reserve(allChunks.size());
+        std::size_t droppedChunks = 0;
+        std::size_t totalSelectedChars = 0;
+
+        for (const auto& chunkIndexes : perDocChunkIdx) {
+            if (chunkIndexes.empty()) {
+                continue;
+            }
+
+            std::size_t effectiveMaxChunks = selectionCfg.maxChunksPerDoc;
+            std::size_t effectiveMaxChars = selectionCfg.maxCharsPerDoc;
+            if (selectionCfg.mode == ConfigResolver::EmbeddingSelectionPolicy::Mode::Adaptive) {
+                const std::size_t localChunkCount = chunkIndexes.size();
+                if (effectiveMaxChunks > 0) {
+                    effectiveMaxChunks = std::min<std::size_t>(
+                        std::max<std::size_t>(effectiveMaxChunks, 4u),
+                        std::max<std::size_t>(effectiveMaxChunks,
+                                              4u + (localChunkCount / 12u)));
+                }
+                if (effectiveMaxChars > 0) {
+                    effectiveMaxChars =
+                        std::max<std::size_t>(effectiveMaxChars, 16000u + localChunkCount * 256u);
+                }
+            }
+
+            struct ScoredChunk {
+                double score;
+                std::size_t idx;
+            };
+            std::vector<ScoredChunk> scored;
+            scored.reserve(chunkIndexes.size());
+
+            for (std::size_t rank = 0; rank < chunkIndexes.size(); ++rank) {
+                const auto idx = chunkIndexes[rank];
+                const auto& chunk = allChunks[idx];
+                const auto chunkSize = chunk.content.size();
+                double score = 1.0 / (1.0 + static_cast<double>(rank));
+                if (rank == 0) {
+                    score += selectionCfg.introBoost;
+                }
+                if (looksLikeHeading(chunk.content)) {
+                    score += selectionCfg.headingBoost;
+                }
+                if (chunkSize >= 200 && chunkSize <= 1600) {
+                    score += 0.25;
+                } else if (chunkSize < 80) {
+                    score -= 0.15;
+                }
+                scored.push_back(ScoredChunk{score, idx});
+            }
+
+            std::stable_sort(scored.begin(), scored.end(),
+                             [](const ScoredChunk& a, const ScoredChunk& b) {
+                                 return a.score > b.score;
+                             });
+
+            std::size_t selectedCount = 0;
+            std::size_t selectedChars = 0;
+            std::unordered_set<std::size_t> picked;
+            picked.reserve(scored.size());
+
+            for (const auto& item : scored) {
+                if (effectiveMaxChunks > 0 && selectedCount >= effectiveMaxChunks) {
+                    break;
+                }
+                const auto chunkSize = allChunks[item.idx].content.size();
+                if (effectiveMaxChars > 0 && selectedChars > 0 &&
+                    (selectedChars + chunkSize) > effectiveMaxChars) {
+                    continue;
+                }
+                selectedChunks.push_back(std::move(allChunks[item.idx]));
+                picked.insert(item.idx);
+                selectedCount += 1;
+                selectedChars += chunkSize;
+                totalSelectedChars += chunkSize;
+            }
+
+            if (selectedCount == 0) {
+                const auto fallbackIdx = chunkIndexes.front();
+                totalSelectedChars += allChunks[fallbackIdx].content.size();
+                selectedChunks.push_back(std::move(allChunks[fallbackIdx]));
+                picked.insert(fallbackIdx);
+                selectedCount = 1;
+            }
+
+            droppedChunks += (chunkIndexes.size() - selectedCount);
+        }
+
+        if (!selectedChunks.empty()) {
+            allChunks = std::move(selectedChunks);
+            totalChunkChars = totalSelectedChars;
+            if (timingEnabled || poolDebug) {
+                spdlog::info(
+                    "[EmbeddingService] chunk_selection mode={} selected_chunks={} dropped_chunks={} "
+                    "max_chunks_per_doc={} max_chars_per_doc={} selected_chars={}",
+                    selectionCfg.mode == ConfigResolver::EmbeddingSelectionPolicy::Mode::Budgeted
+                        ? "budgeted"
+                        : "adaptive",
+                    allChunks.size(), droppedChunks, selectionCfg.maxChunksPerDoc,
+                    selectionCfg.maxCharsPerDoc, totalChunkChars);
+            }
+        }
+    }
 
     logPhase("chunk", tChunk,
              fmt::format("docs={} chunks={} avg_chunks_per_doc={:.2f} doc_chars={} "

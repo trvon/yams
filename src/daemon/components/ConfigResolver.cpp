@@ -201,6 +201,81 @@ bool ConfigResolver::detectEmbeddingPreloadFlag(const DaemonConfig& config) {
     return flag;
 }
 
+ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelectionPolicy() {
+    EmbeddingSelectionPolicy policy{};
+
+    auto parseMode = [](const std::string& raw) {
+        std::string value = raw;
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (value == "full") {
+            return EmbeddingSelectionPolicy::Mode::Full;
+        }
+        if (value == "adaptive") {
+            return EmbeddingSelectionPolicy::Mode::Adaptive;
+        }
+        return EmbeddingSelectionPolicy::Mode::Budgeted;
+    };
+
+    auto parseSize = [](const std::string& raw, std::size_t fallback) {
+        try {
+            return static_cast<std::size_t>(std::stoull(raw));
+        } catch (...) {
+            return fallback;
+        }
+    };
+
+    auto parseDouble = [](const std::string& raw, double fallback) {
+        try {
+            return std::stod(raw);
+        } catch (...) {
+            return fallback;
+        }
+    };
+
+    try {
+        auto cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty()) {
+            auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("embeddings.selection.mode"); it != kv.end()) {
+                policy.mode = parseMode(it->second);
+            }
+            if (auto it = kv.find("embeddings.selection.max_chunks_per_doc"); it != kv.end()) {
+                policy.maxChunksPerDoc = parseSize(it->second, policy.maxChunksPerDoc);
+            }
+            if (auto it = kv.find("embeddings.selection.max_chars_per_doc"); it != kv.end()) {
+                policy.maxCharsPerDoc = parseSize(it->second, policy.maxCharsPerDoc);
+            }
+            if (auto it = kv.find("embeddings.selection.heading_boost"); it != kv.end()) {
+                policy.headingBoost = parseDouble(it->second, policy.headingBoost);
+            }
+            if (auto it = kv.find("embeddings.selection.intro_boost"); it != kv.end()) {
+                policy.introBoost = parseDouble(it->second, policy.introBoost);
+            }
+        }
+    } catch (...) {
+    }
+
+    // Env overrides (config component owns this precedence)
+    if (const char* v = std::getenv("YAMS_EMBED_SELECTION_MODE")) {
+        policy.mode = parseMode(v);
+    }
+    if (const char* v = std::getenv("YAMS_EMBED_MAX_CHUNKS_PER_DOC")) {
+        policy.maxChunksPerDoc = parseSize(v, policy.maxChunksPerDoc);
+    }
+    if (const char* v = std::getenv("YAMS_EMBED_MAX_CHARS_PER_DOC")) {
+        policy.maxCharsPerDoc = parseSize(v, policy.maxCharsPerDoc);
+    }
+    if (const char* v = std::getenv("YAMS_EMBED_SELECTION_HEADING_BOOST")) {
+        policy.headingBoost = parseDouble(v, policy.headingBoost);
+    }
+    if (const char* v = std::getenv("YAMS_EMBED_SELECTION_INTRO_BOOST")) {
+        policy.introBoost = parseDouble(v, policy.introBoost);
+    }
+
+    return policy;
+}
+
 std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
                                                   const std::filesystem::path& resolvedDataDir) {
     std::string preferred;

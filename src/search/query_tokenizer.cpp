@@ -118,7 +118,9 @@ std::vector<Token> QueryTokenizer::tokenize(const std::string& query) {
 
             // Check if it's a reserved word
             std::string upper = token.value;
-            std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+            std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::toupper(ch));
+            });
 
             if (upper == "AND") {
                 tokens.emplace_back(TokenType::And, token.value, token.position, token.length);
@@ -161,7 +163,7 @@ bool QueryTokenizer::isAtEnd() const {
 }
 
 void QueryTokenizer::skipWhitespace() {
-    while (!isAtEnd() && std::isspace(peek())) {
+    while (!isAtEnd() && std::isspace(static_cast<unsigned char>(peek()))) {
         advance();
     }
 }
@@ -227,7 +229,9 @@ bool QueryTokenizer::isReservedWord(const std::string& word) const {
     static const std::unordered_set<std::string> reserved = {"AND", "OR", "NOT", "TO"};
 
     std::string upper = word;
-    std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+    std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::toupper(ch));
+    });
     return reserved.find(upper) != reserved.end();
 }
 

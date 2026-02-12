@@ -1,6 +1,6 @@
 {
     "C_Cpp.default.configurationProvider": "mesonbuild.mesonbuild",
-    "C_Cpp.default.compileCommands": "${workspaceFolder}/builddir/compile_commands.json",
+    "C_Cpp.default.compileCommands": "/home/trevon/Documents/depend/yams/builddir/compile_commands.json",
     "mesonbuild.configureOnOpen": false,
     "mesonbuild.buildFolder": "builddir",
     "files.associations": {

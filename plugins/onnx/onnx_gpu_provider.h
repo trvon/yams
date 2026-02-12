@@ -11,8 +11,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
-#include <memory>
-#include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -287,7 +286,7 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
                 }
                 if (hit) {
                     spdlog::debug("[ONNX] MIGraphX compiled cache hit (dir={})", cacheDirStr);
-                } else if (loadCompiled) {
+                } else {
                     spdlog::debug("[ONNX] MIGraphX compiled cache miss (dir={})", cacheDirStr);
                 }
 

@@ -15,6 +15,8 @@ AFL++ fuzzing harnesses for CLI/daemon IPC protocol testing per issue #8.
 - `fuzz_streaming_processor` - Chunked streaming response handling and processor delegation
 - `fuzz_query_parser` - User-facing search query parsing + FTS5 translation
 - `fuzz_plugin_trust` - Plugin trust list parsing + safe path containment checks
+- `fuzz_plugin_abi_mount` - ABI plugin mount/load/unload path via `AbiPluginLoader`
+- `fuzz_plugin_abi_negotiation` - ABI manifest/interface negotiation across controlled plugins
 
 Fuzzers run in `aflplusplus/aflplusplus` Docker container for reproducibility.
 
@@ -35,6 +37,8 @@ Run a fuzzer (interactive / live AFL++ UI):
 ./tools/fuzzing/fuzz.sh fuzz streaming_processor
 ./tools/fuzzing/fuzz.sh fuzz query_parser
 ./tools/fuzzing/fuzz.sh fuzz plugin_trust
+./tools/fuzzing/fuzz.sh fuzz plugin_abi_mount
+./tools/fuzzing/fuzz.sh fuzz plugin_abi_negotiation
 ```
 
 Notes:
@@ -85,6 +89,8 @@ data/fuzz/
 │   ├── request_handler/          # Request handler seeds
 │   └── streaming_processor/      # Streaming processor seeds
 │   └── plugin_trust/             # Plugin trust/path seeds
+│   └── plugin_abi_mount/         # Plugin ABI mount/load seeds
+│   └── plugin_abi_negotiation/   # Plugin ABI negotiation seeds
 └── findings/                      # AFL++ output (crashes, hangs, queue)
     ├── ipc_protocol/
     ├── ipc_roundtrip/
@@ -93,6 +99,8 @@ data/fuzz/
     ├── request_handler/
     └── streaming_processor/
     └── plugin_trust/
+    └── plugin_abi_mount/
+    └── plugin_abi_negotiation/
 ```
 
 ### Instrumentation Flow

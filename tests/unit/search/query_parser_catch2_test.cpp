@@ -84,6 +84,20 @@ TEST_CASE("QueryTokenizer - Parentheses", "[search][query][tokenizer][catch2]") 
     CHECK(tokens[4].type == TokenType::RightParen);
 }
 
+TEST_CASE("QueryTokenizer - NonAsciiBytes", "[search][query][tokenizer][catch2]") {
+    QueryTokenizer tokenizer;
+
+    std::string input;
+    input.push_back(static_cast<char>(0xFF));
+    input.push_back('a');
+    input.push_back(' ');
+    input.push_back(static_cast<char>(0x80));
+
+    auto tokens = tokenizer.tokenize(input);
+    REQUIRE_FALSE(tokens.empty());
+    CHECK(tokens.back().type == TokenType::EndOfInput);
+}
+
 // ============================================================================
 // QueryParser Tests
 // ============================================================================

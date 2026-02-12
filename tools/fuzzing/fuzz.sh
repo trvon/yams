@@ -49,6 +49,10 @@ cmd_fuzz() {
     local corpus_dir="/fuzz/corpus/${target}"
     local findings_dir="/fuzz/findings/${target}"
 
+    # Ensure mounted host directories exist for AFL input/output.
+    mkdir -p "${PROJECT_ROOT}/data/fuzz/corpus/${target}"
+    mkdir -p "${PROJECT_ROOT}/data/fuzz/findings/${target}"
+
     echo "Running AFL++ fuzzer for target: ${target}"
     docker run --rm -ti \
         -v "${PROJECT_ROOT}/data/fuzz:/fuzz" \
