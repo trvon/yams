@@ -41,7 +41,7 @@ public:
     };
 
     struct EmbeddingChunkingPolicy {
-        yams::vector::ChunkingStrategy strategy{yams::vector::ChunkingStrategy::SENTENCE_BASED};
+        yams::vector::ChunkingStrategy strategy{yams::vector::ChunkingStrategy::PARAGRAPH_BASED};
         yams::vector::ChunkingConfig config{};
         bool overridden{false};
     };

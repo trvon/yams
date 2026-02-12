@@ -195,8 +195,13 @@ if host_machine.system() == 'windows'
 
   # As a last resort, probe the Conan cache directly (~/.conan2/p/**/p/bin) via a tiny Python helper
   py_mod = import('python')
-  python3 = py_mod.find_installation('python3')
-  conan_probe = run_command(python3, ['-c', '''import pathlib, os
+  python3 = py_mod.find_installation('python3', required: false)
+  if not python3.found()
+    python3 = py_mod.find_installation('python', required: false)
+  endif
+
+  if python3.found()
+    conan_probe = run_command(python3, ['-c', '''import pathlib, os
 root = pathlib.Path(os.path.expanduser("~/.conan2/p"))
 dirs = []
 if root.exists():
@@ -207,13 +212,16 @@ if root.exists():
             if dll.exists():
                 dirs.append(str(bin_dir))
 print(";".join(dirs))'''], check: false)
-  if conan_probe.returncode() == 0
-    conan_dirs = conan_probe.stdout().strip().split(';')
-    foreach d : conan_dirs
-      if d != ''
-        onnx_bindir_candidates += [d]
-      endif
-    endforeach
+    if conan_probe.returncode() == 0
+      conan_dirs = conan_probe.stdout().strip().split(';')
+      foreach d : conan_dirs
+        if d != ''
+          onnx_bindir_candidates += [d]
+        endif
+      endforeach
+    endif
+  else
+    message('Python not found (python3/python); skipping Conan cache probe for ONNX Runtime DLLs')
   endif
 
   foreach bindir : onnx_bindir_candidates

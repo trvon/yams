@@ -362,7 +362,7 @@ ConfigResolver::EmbeddingChunkingPolicy ConfigResolver::resolveEmbeddingChunking
     EmbeddingChunkingPolicy policy{};
 
     // Embedding pipeline defaults differ from generic chunker defaults.
-    policy.strategy = yams::vector::ChunkingStrategy::SENTENCE_BASED;
+    policy.strategy = yams::vector::ChunkingStrategy::PARAGRAPH_BASED;
     policy.config.preserve_sentences = false;
     policy.config.use_token_count = false;
     policy.config.strategy = policy.strategy;

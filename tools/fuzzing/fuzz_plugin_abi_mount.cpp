@@ -46,25 +46,22 @@ std::string configFromBytes(const uint8_t* data, size_t size) {
 } // namespace
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-    if (!data || size == 0) {
+    if (!data || size == 0)
         return 0;
-    }
 
-    const fs::path pluginPath = resolvePluginPath();
-    if (!fs::exists(pluginPath)) {
+    // Persistent mode: avoid expensive per-iteration filesystem I/O.
+    // This fuzzer only ever loads controlled, in-tree plugins.
+    static const bool envInit = [] {
+        setenv("YAMS_PLUGIN_TRUST_ALL", "1", 1);
+        return true;
+    }();
+    (void)envInit;
+
+    static const fs::path pluginPath = resolvePluginPath();
+    if (!fs::exists(pluginPath))
         return 0;
-    }
-
-    const fs::path trustRoot = pluginPath.parent_path();
-    if (trustRoot.empty() || !fs::exists(trustRoot)) {
-        return 0;
-    }
-
-    const fs::path trustFile = fs::temp_directory_path() / "yams_fuzz_plugin_abi.trust";
 
     yams::daemon::AbiPluginLoader loader;
-    loader.setTrustFile(trustFile);
-    (void)loader.trustAdd(trustRoot);
 
     std::string configJson = configFromBytes(data, size);
 
@@ -86,7 +83,5 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         (void)loader.unload(name);
     }
 
-    std::error_code ec;
-    fs::remove(trustFile, ec);
     return 0;
 }

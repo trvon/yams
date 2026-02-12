@@ -47,17 +47,20 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     if (!data || size == 0)
         return 0;
 
+    static const bool envInit = [] {
+        setenv("YAMS_PLUGIN_TRUST_ALL", "1", 1);
+        return true;
+    }();
+    (void)envInit;
+
     auto plugins = pluginCandidates();
     if (plugins.empty()) {
         return 0;
     }
 
     const fs::path pluginRoot = plugins.front().parent_path();
-    const fs::path trustFile = fs::temp_directory_path() / "yams_fuzz_plugin_abi_negotiation.trust";
 
     yams::daemon::AbiPluginLoader loader;
-    loader.setTrustFile(trustFile);
-    (void)loader.trustAdd(pluginRoot);
 
     loader.setNamePolicy((data[0] & 1) ? yams::daemon::AbiPluginLoader::NamePolicy::Spec
                                        : yams::daemon::AbiPluginLoader::NamePolicy::Relaxed);
@@ -89,7 +92,5 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         (void)loader.unload(info.name);
     }
 
-    std::error_code ec;
-    fs::remove(trustFile, ec);
     return 0;
 }

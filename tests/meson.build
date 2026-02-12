@@ -164,36 +164,43 @@ endif
 # the Conan-shipped runtime used for installation.
 if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
   py_mod = import('python')
-  python = py_mod.find_installation('python3')
+  python = py_mod.find_installation('python3', required: false)
+  if not python.found()
+    python = py_mod.find_installation('python', required: false)
+  endif
 
-  # All test binary directories (relative to builddir/tests)
-  test_runtime_dirs = [
-    '.',
-    'integration',
-    'integration/smoke',
-    'integration/daemon',
-    'integration/cli',
-    'integration/search',
-    'integration/services',
-  ]
+  if python.found()
+    # All test binary directories (relative to builddir/tests)
+    test_runtime_dirs = [
+      '.',
+      'integration',
+      'integration/smoke',
+      'integration/daemon',
+      'integration/cli',
+      'integration/search',
+      'integration/services',
+    ]
 
-  foreach dll_info : windows_runtime_dlls
-    dll_name = dll_info[0]
-    dll_src = dll_info[1]
+    foreach dll_info : windows_runtime_dlls
+      dll_name = dll_info[0]
+      dll_src = dll_info[1]
 
-    foreach dest_rel : test_runtime_dirs
-      dest_path = join_paths(meson.current_build_dir(), dest_rel, dll_name)
-      stamp = 'dllcopy_@0@_@1@.stamp'.format(dll_name, dest_rel.replace('/', '_'))
-      custom_target(stamp,
-        input: dll_src,
-        output: stamp,
-        command: [python, '-c',
-          'import pathlib, shutil, sys; src=sys.argv[1]; dest=pathlib.Path(sys.argv[2]); stamp=pathlib.Path(sys.argv[3]); dest.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dest); stamp.parent.mkdir(parents=True, exist_ok=True); stamp.write_text("ok")',
-          dll_src, dest_path, '@OUTPUT@'],
-        build_by_default: true,
-      )
+      foreach dest_rel : test_runtime_dirs
+        dest_path = join_paths(meson.current_build_dir(), dest_rel, dll_name)
+        stamp = 'dllcopy_@0@_@1@.stamp'.format(dll_name, dest_rel.replace('/', '_'))
+        custom_target(stamp,
+          input: dll_src,
+          output: stamp,
+          command: [python, '-c',
+            'import pathlib, shutil, sys; src=sys.argv[1]; dest=pathlib.Path(sys.argv[2]); stamp=pathlib.Path(sys.argv[3]); dest.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dest); stamp.parent.mkdir(parents=True, exist_ok=True); stamp.write_text("ok")',
+            dll_src, dest_path, '@OUTPUT@'],
+          build_by_default: true,
+        )
+      endforeach
     endforeach
-  endforeach
+  else
+    message('Python not found (python3/python); skipping Windows test runtime DLL staging')
+  endif
 endif
 
 tests_has_cli = false

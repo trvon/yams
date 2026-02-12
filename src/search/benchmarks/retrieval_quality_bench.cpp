@@ -1323,6 +1323,7 @@ struct BenchFixture {
             uint64_t lastVectorCount = 0;
             int stableCount = 0;
             uint64_t embedDropped = 0;
+            bool embeddingDrainSatisfied = false;
             auto embedStartTime = std::chrono::steady_clock::now();
 
             // Phase 1: Wait for embedding queue to drain and vectors to reach target
@@ -1418,6 +1419,7 @@ struct BenchFixture {
                             summaryLog << "Total dropped: " << embedDropped << std::endl;
                             summaryLog.flush();
                         }
+                        embeddingDrainSatisfied = true;
                         break;
                     }
 
@@ -1442,6 +1444,7 @@ struct BenchFixture {
                                        << "%)" << std::endl;
                             summaryLog.flush();
                         }
+                        embeddingDrainSatisfied = true;
                         break;
                     }
 
@@ -1465,6 +1468,16 @@ struct BenchFixture {
                 if (it != finalStatus.value().requestCounts.end()) {
                     finalVectorCount = it->second;
                 }
+                uint64_t finalEmbedQueued = 0;
+                auto itQ = finalStatus.value().requestCounts.find("embed_svc_queued");
+                if (itQ != finalStatus.value().requestCounts.end()) {
+                    finalEmbedQueued = itQ->second;
+                }
+                uint64_t finalEmbedInFlight = 0;
+                auto itInFlight = finalStatus.value().requestCounts.find("embed_in_flight");
+                if (itInFlight != finalStatus.value().requestCounts.end()) {
+                    finalEmbedInFlight = itInFlight->second;
+                }
                 double finalCoverage = corpusSize > 0 ? (finalVectorCount * 100.0 / corpusSize) : 0;
                 bool vectorDbReady = finalStatus.value().vectorDbReady;
                 if (auto it = finalStatus.value().readinessStates.find("vector_db");
@@ -1474,6 +1487,21 @@ struct BenchFixture {
                 spdlog::info("Vector DB: ready={} dim={}, vectors={} ({:.1f}% coverage)",
                              (vectorDbReady ? "true" : "false"), finalStatus.value().vectorDbDim,
                              finalVectorCount, finalCoverage);
+
+                if (!embeddingDrainSatisfied) {
+                    const bool queueDrained = (finalEmbedQueued == 0 && finalEmbedInFlight == 0);
+                    if (!queueDrained) {
+                        throw std::runtime_error(
+                            "Embedding drain not reached before benchmark queries (embed_svc_queued=" +
+                            std::to_string(finalEmbedQueued) +
+                            ", embed_in_flight=" + std::to_string(finalEmbedInFlight) +
+                            ", vectors=" + std::to_string(finalVectorCount) +
+                            "). Increase timeout/concurrency or reduce corpus size to obtain valid results.");
+                    }
+
+                    // Queue may only be fully drained on the final status check.
+                    embeddingDrainSatisfied = true;
+                }
 
                 if (finalVectorCount == 0) {
                     spdlog::warn("No vectors present after embedding wait");
@@ -1507,6 +1535,11 @@ struct BenchFixture {
             } else {
                 spdlog::warn("Final status check failed after embedding wait: {}",
                              finalStatus.error().message);
+                if (!embeddingDrainSatisfied) {
+                    throw std::runtime_error(
+                        "Final status check failed after embedding wait; cannot verify embedding drain. "
+                        "Benchmark results would be unreliable.");
+                }
             }
         } else {
             spdlog::info("Vectors disabled - skipping embedding generation wait");

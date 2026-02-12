@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stuck-doc recovery enqueue**: Fixed repair stuck-document recovery enqueueing `PostIngestTask`s to an unused InternalEventBus channel. Recovery now enqueues to `post_ingest` (consumed by PostInestQueue), so re-extraction actually runs.
 - **Doctor FTS5 reindex SQLite TOOBIG**: Added best-effort truncation retry for oversized extracted text and report `truncated=<n>` in output.
 
+- **Embedding plugin output-shape compatibility**: ONNX provider output handling now accepts provider-padded batch dimensions (`output_B >= requested_B`) and uses the requested prefix rows, preventing false shape-mismatch failures under MIGraphX/accelerated providers.
+- **Embedding dim hint precedence**: ONNX plugin no longer lets stale config hints override graph-inferred embedding dimensions when model metadata is available, reducing startup/runtime mismatches.
+- **GPU escape hatch for stability triage**: Added ONNX env controls to force CPU execution (`YAMS_ONNX_FORCE_CPU=1` / `YAMS_ONNX_DISABLE_GPU=1`) for benchmark/repro stability when GPU EPs are unstable.
+- **Gradient limiter clamp safety**: Prevented invalid limiter bounds (`minLimit > maxLimit`) in post-ingest stage limiter setup when a stage cap resolves to unset/zero, fixing debug-build aborts from `std::clamp` assertions during title stage completion.
+
 - **ONNX dynamic tensor padding**: Pads input tensors to the aligned actual token length instead of the model's `max_seq_len` (512). Short texts now skip hundreds of zero-padded positions, yielding **~70-85x throughput improvement** for short inputs (93 texts/sec vs 1.6 texts/sec on CPU with `nomic-embed-text-v1.5`). Enabled by default; disable with `YAMS_ONNX_DYNAMIC_PADDING=0`. Sequence lengths are 8-byte aligned to balance SIMD efficiency with padding reduction.
 - **ROCm / MIGraphX compiled-model caching**: Enable save/load of compiled MIGraphX artifacts to avoid paying multi-minute `compile_program` costs when sessions are recreated (e.g., after scale-down/eviction). Defaults to caching hashed `*.mxr` artifacts under the model directory. Configure with `YAMS_MIGRAPHX_COMPILED_PATH` (directory; if a `.mxr` path is provided, its parent directory is used), `YAMS_MIGRAPHX_SAVE_COMPILED`, and `YAMS_MIGRAPHX_LOAD_COMPILED`.
 - **ONNX batch warmup and auto-tuning**: `warmupModel()` runs a 4-text batch embedding immediately after model load, pre-warming the ONNX Runtime session and measuring throughput. When `YAMS_EMBED_DOC_CAP` is unset, an auto-tuning sweep (batch sizes 4→8→16→32→64) selects the batch size with peak texts/sec as the default cap via `TuneAdvisor::setEmbedDocCap()`. Disable auto-tuning with `YAMS_EMBED_AUTOTUNE=0`.
@@ -30,6 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Diagnostics
 - **ONNX ROCm diagnostic output**: GPU diagnostic now reports cold vs warm embedding timing to distinguish first-run compilation from steady-state inference.
+
+### Changed
+- **Post-ingest embedding fan-out (phased rollout)**:
+  - **Phase 1**: Added centralized embedding selection policy (strategy + mode + caps/boosts) via `ConfigResolver` with config/env precedence.
+  - **Phase 2**: Moved embed preparation upstream so post-ingest can queue prepared embed payloads; embedding service consumes prepared-doc fast-path.
+  - **Phase 3**: Added extraction utility that returns both extracted text and optional content bytes, enabling downstream stage reuse and reducing duplicate content-store reads.
+  - **Phase 4**: Added selection strategy toggle (`ranked` vs `intro_headings`) and queue observability counters for prepared-doc/chunk vs hash-only embed dispatch.
+
+- **Embedding selection defaults codified**: default strategy `ranked`, mode `budgeted`, `max_chunks_per_doc=8`, `max_chars_per_doc=24000`, `heading_boost=1.25`, `intro_boost=0.75`.
+- **Embedding chunking defaults codified**: default chunk strategy `paragraph`; default config favors sentence boundary flexibility in embedding pipeline (`preserve_sentences=false`, `use_token_count=false` unless overridden).
 
 #### ONNX Embedding Benchmarks (CPU-only, macOS M3 Max, `nomic-embed-text-v1.5` 768-dim)
 
