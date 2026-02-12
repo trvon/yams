@@ -17,6 +17,8 @@
 #include <fstream>
 #include <string>
 
+#include <yams/vector/document_chunker.h>
+
 using namespace yams::daemon;
 using Catch::Matchers::ContainsSubstring;
 
@@ -95,6 +97,94 @@ struct EnvGuard {
 };
 
 } // namespace
+
+TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy defaults are embedding-safe",
+          "[daemon][components][config][chunking][catch2]") {
+    // Ensure config file discovery doesn't accidentally pick up a user config during local dev.
+    EnvGuard cfg("YAMS_CONFIG_PATH", "");
+
+    auto policy = ConfigResolver::resolveEmbeddingChunkingPolicy();
+    CHECK(policy.strategy == yams::vector::ChunkingStrategy::SENTENCE_BASED);
+    CHECK_FALSE(policy.config.preserve_sentences);
+    CHECK_FALSE(policy.config.use_token_count);
+}
+
+TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy supports all embed strategies",
+          "[daemon][components][config][chunking][catch2]") {
+    struct Case {
+        const char* value;
+        yams::vector::ChunkingStrategy expected;
+    };
+
+    const std::vector<Case> cases = {
+        {"fixed", yams::vector::ChunkingStrategy::FIXED_SIZE},
+        {"sentence", yams::vector::ChunkingStrategy::SENTENCE_BASED},
+        {"paragraph", yams::vector::ChunkingStrategy::PARAGRAPH_BASED},
+        {"recursive", yams::vector::ChunkingStrategy::RECURSIVE},
+        {"sliding_window", yams::vector::ChunkingStrategy::SLIDING_WINDOW},
+        {"markdown", yams::vector::ChunkingStrategy::MARKDOWN_AWARE},
+    };
+
+    const std::string sample =
+        "# Title\n\n"
+        "Intro paragraph with enough text to chunk reasonably. "
+        "Second sentence here. Third sentence here.\n\n"
+        "## Section\n"
+        "- bullet one\n- bullet two\n\n"
+        "Final paragraph.";
+
+    for (const auto& tc : cases) {
+        DYNAMIC_SECTION("strategy=" << tc.value) {
+            EnvGuard g("YAMS_EMBED_CHUNK_STRATEGY", tc.value);
+
+            auto policy = ConfigResolver::resolveEmbeddingChunkingPolicy();
+            CHECK(policy.strategy == tc.expected);
+
+            auto chunker = yams::vector::createChunker(policy.strategy, policy.config, nullptr);
+            REQUIRE(chunker);
+
+            auto chunks = chunker->chunkDocument(sample, "hash");
+            // Some strategies may return empty and rely on caller fallback, but for this
+            // representative input we expect at least one chunk.
+            REQUIRE_FALSE(chunks.empty());
+
+            for (const auto& c : chunks) {
+                CHECK(c.strategy_used == tc.expected);
+                CHECK_FALSE(c.content.empty());
+            }
+        }
+    }
+}
+
+TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy reads from config file",
+          "[daemon][components][config][chunking][catch2]") {
+    ConfigResolverFixture fx;
+
+    auto configPath = fx.writeToml(
+        "config.toml",
+        R"TOML(
+[embeddings.chunking]
+strategy = "fixed"
+target = 256
+min = 64
+max = 512
+overlap = 0
+use_tokens = 0
+preserve_sentences = 0
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+
+    auto policy = ConfigResolver::resolveEmbeddingChunkingPolicy();
+    CHECK(policy.strategy == yams::vector::ChunkingStrategy::FIXED_SIZE);
+    CHECK(policy.config.target_chunk_size == 256);
+    CHECK(policy.config.min_chunk_size == 64);
+    CHECK(policy.config.max_chunk_size == 512);
+    CHECK(policy.config.overlap_size == 0);
+    CHECK(policy.config.overlap_percentage == 0.0);
+    CHECK_FALSE(policy.config.use_token_count);
+    CHECK_FALSE(policy.config.preserve_sentences);
+}
 
 TEST_CASE("ConfigResolver::envTruthy correctly parses truthy values",
           "[daemon][components][config][catch2]") {

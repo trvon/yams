@@ -203,6 +203,8 @@ preload_on_startup = false
 max_model_memory_mb = 1024
 
 [embeddings.selection]
+# Selection strategy: "ranked" (score-based) or "intro_headings" (intro + headings only)
+strategy = "ranked"
 # Chunk selection mode before embedding: "full", "budgeted", or "adaptive"
 mode = "budgeted"
 # Maximum chunks selected per document when mode != "full"

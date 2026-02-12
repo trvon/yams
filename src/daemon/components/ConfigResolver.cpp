@@ -18,6 +18,72 @@
 
 namespace yams::daemon {
 
+namespace {
+
+std::optional<std::size_t> parseSize(const std::string& raw) {
+    try {
+        if (raw.empty()) {
+            return std::nullopt;
+        }
+        return static_cast<std::size_t>(std::stoull(raw));
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<bool> parseBool01(const std::string& raw) {
+    try {
+        if (raw.empty()) {
+            return std::nullopt;
+        }
+        return std::stoll(raw) != 0;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<double> parseDouble(const std::string& raw) {
+    try {
+        if (raw.empty()) {
+            return std::nullopt;
+        }
+        return std::stod(raw);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<yams::vector::ChunkingStrategy> parseChunkingStrategy(const std::string& raw) {
+    if (raw.empty()) {
+        return std::nullopt;
+    }
+    std::string s = raw;
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    if (s == "fixed" || s == "fixed_size") {
+        return yams::vector::ChunkingStrategy::FIXED_SIZE;
+    }
+    if (s == "sentence" || s == "sentence_based") {
+        return yams::vector::ChunkingStrategy::SENTENCE_BASED;
+    }
+    if (s == "paragraph" || s == "paragraph_based") {
+        return yams::vector::ChunkingStrategy::PARAGRAPH_BASED;
+    }
+    if (s == "recursive" || s == "recursive_split") {
+        return yams::vector::ChunkingStrategy::RECURSIVE;
+    }
+    if (s == "sliding" || s == "sliding_window") {
+        return yams::vector::ChunkingStrategy::SLIDING_WINDOW;
+    }
+    if (s == "markdown" || s == "markdown_aware") {
+        return yams::vector::ChunkingStrategy::MARKDOWN_AWARE;
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
 bool ConfigResolver::envTruthy(const char* value) {
     if (!value || !*value) {
         return false;
@@ -204,6 +270,16 @@ bool ConfigResolver::detectEmbeddingPreloadFlag(const DaemonConfig& config) {
 ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelectionPolicy() {
     EmbeddingSelectionPolicy policy{};
 
+    auto parseStrategy = [](const std::string& raw) {
+        std::string value = raw;
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (value == "intro_headings" || value == "intro+headings" || value == "intro_headings_only") {
+            return EmbeddingSelectionPolicy::Strategy::IntroHeadings;
+        }
+        return EmbeddingSelectionPolicy::Strategy::Ranked;
+    };
+
     auto parseMode = [](const std::string& raw) {
         std::string value = raw;
         std::transform(value.begin(), value.end(), value.begin(),
@@ -237,6 +313,9 @@ ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelecti
         auto cfgPath = resolveDefaultConfigPath();
         if (!cfgPath.empty()) {
             auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("embeddings.selection.strategy"); it != kv.end()) {
+                policy.strategy = parseStrategy(it->second);
+            }
             if (auto it = kv.find("embeddings.selection.mode"); it != kv.end()) {
                 policy.mode = parseMode(it->second);
             }
@@ -257,6 +336,9 @@ ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelecti
     }
 
     // Env overrides (config component owns this precedence)
+    if (const char* v = std::getenv("YAMS_EMBED_SELECTION_STRATEGY")) {
+        policy.strategy = parseStrategy(v);
+    }
     if (const char* v = std::getenv("YAMS_EMBED_SELECTION_MODE")) {
         policy.mode = parseMode(v);
     }
@@ -271,6 +353,167 @@ ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelecti
     }
     if (const char* v = std::getenv("YAMS_EMBED_SELECTION_INTRO_BOOST")) {
         policy.introBoost = parseDouble(v, policy.introBoost);
+    }
+
+    return policy;
+}
+
+ConfigResolver::EmbeddingChunkingPolicy ConfigResolver::resolveEmbeddingChunkingPolicy() {
+    EmbeddingChunkingPolicy policy{};
+
+    // Embedding pipeline defaults differ from generic chunker defaults.
+    policy.strategy = yams::vector::ChunkingStrategy::SENTENCE_BASED;
+    policy.config.preserve_sentences = false;
+    policy.config.use_token_count = false;
+    policy.config.strategy = policy.strategy;
+
+    auto applyFromKv = [&](const std::map<std::string, std::string>& kv) {
+        if (auto it = kv.find("embeddings.chunking.strategy"); it != kv.end()) {
+            if (auto s = parseChunkingStrategy(it->second); s) {
+                policy.strategy = *s;
+                policy.config.strategy = *s;
+                policy.overridden = true;
+            }
+        }
+        if (auto it = kv.find("embeddings.chunking.preserve_sentences"); it != kv.end()) {
+            if (auto v = parseBool01(it->second); v) {
+                policy.config.preserve_sentences = *v;
+                policy.overridden = true;
+            }
+        }
+        if (auto it = kv.find("embeddings.chunking.use_tokens"); it != kv.end()) {
+            if (auto v = parseBool01(it->second); v) {
+                policy.config.use_token_count = *v;
+                policy.overridden = true;
+            }
+        }
+        if (auto it = kv.find("embeddings.chunking.target"); it != kv.end()) {
+            if (auto v = parseSize(it->second); v && *v > 0) {
+                policy.config.target_chunk_size = *v;
+                policy.overridden = true;
+            }
+        }
+        if (auto it = kv.find("embeddings.chunking.max"); it != kv.end()) {
+            if (auto v = parseSize(it->second); v && *v > 0) {
+                policy.config.max_chunk_size = *v;
+                policy.overridden = true;
+            }
+        }
+        if (auto it = kv.find("embeddings.chunking.min"); it != kv.end()) {
+            if (auto v = parseSize(it->second); v && *v > 0) {
+                policy.config.min_chunk_size = *v;
+                policy.overridden = true;
+            }
+        }
+        if (auto it = kv.find("embeddings.chunking.overlap"); it != kv.end()) {
+            if (auto v = parseSize(it->second); v) {
+                policy.config.overlap_size = *v;
+                if (*v == 0) {
+                    policy.config.overlap_percentage = 0.0;
+                }
+                policy.overridden = true;
+            }
+        }
+        if (auto it = kv.find("embeddings.chunking.overlap_pct"); it != kv.end()) {
+            if (auto v = parseDouble(it->second); v) {
+                double pct = *v;
+                if (pct < 0.0) {
+                    pct = 0.0;
+                }
+                if (pct > 1.0) {
+                    pct = 1.0;
+                }
+                policy.config.overlap_percentage = pct;
+                if (pct == 0.0) {
+                    policy.config.overlap_size = 0;
+                }
+                policy.overridden = true;
+            }
+        }
+    };
+
+    // Config file (best-effort).
+    try {
+        auto cfgPath = resolveDefaultConfigPath();
+        if (!cfgPath.empty()) {
+            applyFromKv(parseSimpleTomlFlat(cfgPath));
+        }
+    } catch (...) {
+    }
+
+    // Env overrides (backwards compatible with existing embedding pipeline vars).
+    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_STRATEGY")) {
+        if (auto s = parseChunkingStrategy(v); s) {
+            policy.strategy = *s;
+            policy.config.strategy = *s;
+            policy.overridden = true;
+        }
+    }
+    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_PRESERVE_SENTENCES")) {
+        if (auto b = parseBool01(v); b) {
+            policy.config.preserve_sentences = *b;
+            policy.overridden = true;
+        }
+    }
+    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_USE_TOKENS")) {
+        if (auto b = parseBool01(v); b) {
+            policy.config.use_token_count = *b;
+            policy.overridden = true;
+        }
+    }
+    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_TARGET")) {
+        if (auto s = parseSize(v); s && *s > 0) {
+            policy.config.target_chunk_size = *s;
+            policy.overridden = true;
+        }
+    }
+    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_MAX")) {
+        if (auto s = parseSize(v); s && *s > 0) {
+            policy.config.max_chunk_size = *s;
+            policy.overridden = true;
+        }
+    }
+    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_MIN")) {
+        if (auto s = parseSize(v); s && *s > 0) {
+            policy.config.min_chunk_size = *s;
+            policy.overridden = true;
+        }
+    }
+    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_OVERLAP")) {
+        if (auto s = parseSize(v); s) {
+            policy.config.overlap_size = *s;
+            if (*s == 0) {
+                policy.config.overlap_percentage = 0.0;
+            }
+            policy.overridden = true;
+        }
+    }
+    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_OVERLAP_PCT")) {
+        if (auto d = parseDouble(v); d) {
+            double pct = *d;
+            if (pct < 0.0) {
+                pct = 0.0;
+            }
+            if (pct > 1.0) {
+                pct = 1.0;
+            }
+            policy.config.overlap_percentage = pct;
+            if (pct == 0.0) {
+                policy.config.overlap_size = 0;
+            }
+            policy.overridden = true;
+        }
+    }
+
+    // Sanity: ensure min <= target <= max.
+    if (policy.config.min_chunk_size > policy.config.max_chunk_size) {
+        policy.config.max_chunk_size = policy.config.min_chunk_size;
+    }
+    if (policy.config.target_chunk_size < policy.config.min_chunk_size) {
+        policy.config.target_chunk_size = policy.config.min_chunk_size;
+    }
+    if (policy.config.target_chunk_size > policy.config.max_chunk_size) {
+        policy.config.target_chunk_size = policy.config.max_chunk_size;
     }
 
     return policy;

@@ -6,10 +6,12 @@
 #include <deque>
 #include <functional>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <semaphore>
 #include <string>
+#include <cstddef>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -161,6 +163,9 @@ public:
         std::string extension;
         std::vector<std::string> tags;
         std::string language;
+
+        // Optional: raw document bytes (reused for KG/symbol/entity stages to avoid re-reading).
+        std::shared_ptr<std::vector<std::byte>> contentBytes;
 
         // Dispatch flags (determined during preparation)
         bool shouldDispatchKg = true;

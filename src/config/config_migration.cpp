@@ -132,6 +132,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2A
     return {{"embeddings", {{"auto_on_add", "false"}}},
             {"embeddings.selection",
                          {{"mode", "budgeted"},
+                           {"strategy", "ranked"},
                             {"max_chunks_per_doc", "8"},
               {"max_chars_per_doc", "24000"},
                             {"heading_boost", "1.25"},
@@ -360,6 +361,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
 
                         {"embeddings.selection",
                          {{"mode", "budgeted"},
+                                                    {"strategy", "ranked"},
                             {"max_chunks_per_doc", "8"},
                             {"max_chars_per_doc", "24000"},
                             {"heading_boost", "1.25"},

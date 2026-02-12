@@ -15,6 +15,7 @@
 #include <yams/common/utf8_utils.h>
 #include <yams/daemon/async_batcher.h>
 #include <yams/daemon/components/GraphComponent.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/PostIngestQueue.h>
@@ -31,6 +32,8 @@
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
+
+#include <yams/daemon/components/embed_preparer.h>
 
 using yams::extraction::util::extractDocumentText;
 
@@ -868,6 +871,7 @@ void PostIngestQueue::processMetadataStage(
 
         int64_t docId = -1;
         std::string fileName;
+        std::string filePath;
         std::string mimeType = mime;
         std::string extension;
         metadata::DocumentInfo info;
@@ -888,6 +892,8 @@ void PostIngestQueue::processMetadataStage(
         docId = info.id;
         if (!info.fileName.empty())
             fileName = info.fileName;
+        if (!info.filePath.empty())
+            filePath = info.filePath;
         if (!info.mimeType.empty())
             mimeType = info.mimeType;
         if (!info.fileExtension.empty())
@@ -937,7 +943,8 @@ void PostIngestQueue::processMetadataStage(
             if (tagsOverride) {
                 tags = *tagsOverride;
             }
-            dispatchToKgChannel(hash, docId, fileName, std::move(tags), nullptr);
+            dispatchToKgChannel(hash, docId, filePath.empty() ? fileName : filePath, std::move(tags),
+                                nullptr);
 
             // Dispatch symbol extraction for code files (if plugin supports this extension)
             {
@@ -948,14 +955,16 @@ void PostIngestQueue::processMetadataStage(
                 }
                 auto it = symbolExtensionMap.find(extKey);
                 if (it != symbolExtensionMap.end()) {
-                    dispatchToSymbolChannel(hash, docId, fileName, it->second, nullptr);
+                    dispatchToSymbolChannel(hash, docId, filePath.empty() ? fileName : filePath,
+                                            it->second, nullptr);
                 }
             }
 
             // Dispatch entity extraction for binary files (if any entity provider supports this
             // extension)
             if (extensionSupportsEntityProviders(entityProviders, extension)) {
-                dispatchToEntityChannel(hash, docId, fileName, extension, nullptr);
+                dispatchToEntityChannel(hash, docId, filePath.empty() ? fileName : filePath,
+                                        extension, nullptr);
             }
         }
     } catch (const std::exception& e) {
@@ -990,16 +999,44 @@ PostIngestQueue::prepareMetadataEntry(
     } catch (...) {
     }
 
-    // Extract document text
-    auto txt =
-        extractDocumentText(store_, hash, prepared.mimeType, prepared.extension, extractors_);
-    if (!txt || txt->empty()) {
-        spdlog::debug("[PostIngestQueue] no text extracted for {} (mime={}, ext={})", hash,
-                      prepared.mimeType, prepared.extension);
-        return ExtractionFailure{info.id, hash, "No text extracted"};
+    // Determine dispatch flags that depend only on document metadata (not extracted text).
+    prepared.shouldDispatchKg = (info.id >= 0);
+
+    std::string extKey = prepared.extension;
+    if (!extKey.empty() && extKey[0] == '.') {
+        extKey = extKey.substr(1);
+    }
+    auto symIt = symbolExtensionMap.find(extKey);
+    if (symIt != symbolExtensionMap.end()) {
+        prepared.shouldDispatchSymbol = true;
+        prepared.symbolLanguage = symIt->second;
     }
 
-    prepared.extractedText = std::move(*txt);
+    prepared.shouldDispatchEntity =
+        extensionSupportsEntityProviders(entityProviders, prepared.extension);
+
+    // Extract document text
+    const bool wantContentBytes = prepared.shouldDispatchSymbol || prepared.shouldDispatchEntity;
+    if (wantContentBytes) {
+        auto extracted = yams::extraction::util::extractDocumentTextAndBytes(
+            store_, hash, prepared.mimeType, prepared.extension, extractors_);
+        if (!extracted || extracted->text.empty()) {
+            spdlog::debug("[PostIngestQueue] no text extracted for {} (mime={}, ext={})", hash,
+                          prepared.mimeType, prepared.extension);
+            return ExtractionFailure{info.id, hash, "No text extracted"};
+        }
+        prepared.extractedText = std::move(extracted->text);
+        prepared.contentBytes = std::move(extracted->bytes);
+    } else {
+        auto txt =
+            extractDocumentText(store_, hash, prepared.mimeType, prepared.extension, extractors_);
+        if (!txt || txt->empty()) {
+            spdlog::debug("[PostIngestQueue] no text extracted for {} (mime={}, ext={})", hash,
+                          prepared.mimeType, prepared.extension);
+            return ExtractionFailure{info.id, hash, "No text extracted"};
+        }
+        prepared.extractedText = std::move(*txt);
+    }
 
     // Cap extracted text to 16 MiB to avoid SQLite bind limits
     constexpr size_t kMaxTextToPersistInMetadataBytes = size_t{16} * 1024 * 1024;
@@ -1026,25 +1063,8 @@ PostIngestQueue::prepareMetadataEntry(
                                         : prepared.extractedText;
     }
 
-    // Determine dispatch flags
-    prepared.shouldDispatchKg = (info.id >= 0);
-
-    // Symbol extraction: check if extension is in the symbol map
-    std::string extKey = prepared.extension;
-    if (!extKey.empty() && extKey[0] == '.') {
-        extKey = extKey.substr(1);
-    }
-    auto symIt = symbolExtensionMap.find(extKey);
-    if (symIt != symbolExtensionMap.end()) {
-        prepared.shouldDispatchSymbol = true;
-        prepared.symbolLanguage = symIt->second;
-    }
-
-    // Entity extraction: check if any provider supports this extension
-    prepared.shouldDispatchEntity =
-        extensionSupportsEntityProviders(entityProviders, prepared.extension);
-
     return prepared;
+
 }
 
 std::string PostIngestQueue::deriveTitle(const std::string& text, const std::string& fileName,
@@ -2301,21 +2321,38 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         embedQ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
             "embed_jobs", embedCap);
     }
-    std::vector<std::string> embedBatch;
+    std::vector<InternalEventBus::EmbedPreparedDoc> embedPreparedBatch;
+    std::vector<std::string> embedHashBatch;
     const std::size_t maxEmbedBatch = TuneAdvisor::resolvedEmbedJobDocCap();
-    embedBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
+    embedPreparedBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
+    embedHashBatch.reserve(std::min<std::size_t>(maxEmbedBatch, successes.size()));
     const bool embedStageActive =
         (TuneAdvisor::postIngestStageActiveMask() &
          (1u << static_cast<uint8_t>(TuneAdvisor::PostIngestStage::Embed))) != 0u;
 
     auto flushEmbedBatch = [&]() {
-        if (!embedQ || embedBatch.empty()) {
-            embedBatch.clear();
+        if (!embedQ || (embedPreparedBatch.empty() && embedHashBatch.empty())) {
+            embedPreparedBatch.clear();
+            embedHashBatch.clear();
             return;
         }
+
+        const std::uint64_t preparedDocsCount = embedPreparedBatch.size();
+        std::uint64_t preparedChunksCount = 0;
+        for (const auto& d : embedPreparedBatch) {
+            preparedChunksCount += static_cast<std::uint64_t>(d.chunks.size());
+        }
+        const std::uint64_t hashOnlyDocsCount = embedHashBatch.size();
+
         InternalEventBus::EmbedJob job;
-        job.hashes = std::move(embedBatch);
-        job.batchSize = static_cast<uint32_t>(job.hashes.size());
+        job.preparedDocs = std::move(embedPreparedBatch);
+        job.hashes = std::move(embedHashBatch);
+        job.batchSize =
+            static_cast<uint32_t>(job.preparedDocs.size() + job.hashes.size());
+        job.hashes.reserve(job.hashes.size() + job.preparedDocs.size());
+        for (const auto& doc : job.preparedDocs) {
+            job.hashes.push_back(doc.hash);
+        }
         job.skipExisting = true;
 
         constexpr auto kEnqueueTimeout = std::chrono::milliseconds(100);
@@ -2323,6 +2360,13 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         while (!stop_.load(std::memory_order_acquire)) {
             if (embedQ->push_wait(job, kEnqueueTimeout)) {
                 InternalEventBus::instance().incEmbedQueued(job.batchSize);
+                if (preparedDocsCount > 0) {
+                    InternalEventBus::instance().incEmbedPreparedDocsQueued(preparedDocsCount);
+                    InternalEventBus::instance().incEmbedPreparedChunksQueued(preparedChunksCount);
+                }
+                if (hashOnlyDocsCount > 0) {
+                    InternalEventBus::instance().incEmbedHashOnlyDocsQueued(hashOnlyDocsCount);
+                }
                 break;
             }
             ++waits;
@@ -2335,7 +2379,26 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         if (stop_.load(std::memory_order_acquire)) {
             InternalEventBus::instance().incEmbedDropped(job.batchSize);
         }
-        embedBatch.clear();
+        embedPreparedBatch.clear();
+        embedHashBatch.clear();
+    };
+
+    const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
+    const auto chunkPolicy = ConfigResolver::resolveEmbeddingChunkingPolicy();
+    auto embedChunker = yams::vector::createChunker(chunkPolicy.strategy, chunkPolicy.config, nullptr);
+
+    auto makePreparedDoc = [&](const PreparedMetadataEntry& prepared)
+        -> std::optional<InternalEventBus::EmbedPreparedDoc> {
+        if (!embedChunker) {
+            return std::nullopt;
+        }
+        embed::EmbedSourceDoc src;
+        src.hash = prepared.hash;
+        src.extractedText = prepared.extractedText;
+        src.fileName = prepared.fileName;
+        src.filePath = prepared.filePath;
+        src.mimeType = prepared.mimeType;
+        return embed::prepareEmbedPreparedDoc(src, *embedChunker, selectionCfg);
     };
 
     auto getOrLoadContent =
@@ -2358,27 +2421,33 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
 
     for (const auto& prepared : successes) {
         if (embedQ && embedStageActive && prepared.shouldDispatchEmbed) {
-            embedBatch.push_back(prepared.hash);
-            if (embedBatch.size() >= maxEmbedBatch) {
+            if (auto preparedDoc = makePreparedDoc(prepared); preparedDoc &&
+                                                   !preparedDoc->chunks.empty()) {
+                embedPreparedBatch.push_back(std::move(*preparedDoc));
+            } else {
+                // Fallback: queue by hash.
+                embedHashBatch.push_back(prepared.hash);
+            }
+
+            if ((embedPreparedBatch.size() + embedHashBatch.size()) >= maxEmbedBatch) {
                 flushEmbedBatch();
             }
         }
 
-        std::shared_ptr<std::vector<std::byte>> contentBytes;
-        if (prepared.shouldDispatchKg || prepared.shouldDispatchSymbol ||
-            prepared.shouldDispatchEntity) {
+        std::shared_ptr<std::vector<std::byte>> contentBytes = prepared.contentBytes;
+        if (!contentBytes && (prepared.shouldDispatchSymbol || prepared.shouldDispatchEntity)) {
             contentBytes = getOrLoadContent(prepared.hash);
         }
         if (prepared.shouldDispatchKg) {
-            dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.fileName,
+            dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.filePath,
                                 std::vector<std::string>(prepared.tags), contentBytes);
         }
         if (prepared.shouldDispatchSymbol) {
-            dispatchToSymbolChannel(prepared.hash, prepared.documentId, prepared.fileName,
+            dispatchToSymbolChannel(prepared.hash, prepared.documentId, prepared.filePath,
                                     prepared.symbolLanguage, contentBytes);
         }
         if (prepared.shouldDispatchEntity) {
-            dispatchToEntityChannel(prepared.hash, prepared.documentId, prepared.fileName,
+            dispatchToEntityChannel(prepared.hash, prepared.documentId, prepared.filePath,
                                     prepared.extension, contentBytes);
         }
         if (prepared.shouldDispatchTitle) {

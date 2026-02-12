@@ -285,6 +285,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 res.requestCounts[std::string(metrics::kBusEmbedQueued)] = bus.embedQueued();
                 res.requestCounts[std::string(metrics::kBusEmbedConsumed)] = bus.embedConsumed();
                 res.requestCounts[std::string(metrics::kBusEmbedDropped)] = bus.embedDropped();
+                res.requestCounts[std::string(metrics::kBusEmbedPreparedDocsQueued)] =
+                    bus.embedPreparedDocsQueued();
+                res.requestCounts[std::string(metrics::kBusEmbedPreparedChunksQueued)] =
+                    bus.embedPreparedChunksQueued();
+                res.requestCounts[std::string(metrics::kBusEmbedHashOnlyDocsQueued)] =
+                    bus.embedHashOnlyDocsQueued();
                 res.requestCounts[std::string(metrics::kBusPostQueued)] = bus.postQueued();
                 res.requestCounts[std::string(metrics::kBusPostConsumed)] = bus.postConsumed();
                 res.requestCounts[std::string(metrics::kBusPostDropped)] = bus.postDropped();
@@ -690,6 +696,12 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 std::to_string(bus.embedConsumed());
             response.additionalStats[std::string(metrics::kBusEmbedDropped)] =
                 std::to_string(bus.embedDropped());
+            response.additionalStats[std::string(metrics::kBusEmbedPreparedDocsQueued)] =
+                std::to_string(bus.embedPreparedDocsQueued());
+            response.additionalStats[std::string(metrics::kBusEmbedPreparedChunksQueued)] =
+                std::to_string(bus.embedPreparedChunksQueued());
+            response.additionalStats[std::string(metrics::kBusEmbedHashOnlyDocsQueued)] =
+                std::to_string(bus.embedHashOnlyDocsQueued());
             response.additionalStats[std::string(metrics::kBusPostQueued)] =
                 std::to_string(bus.postQueued());
             response.additionalStats[std::string(metrics::kBusPostConsumed)] =

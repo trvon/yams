@@ -239,11 +239,27 @@ public:
     }
 
     // Common event types
+    struct EmbedPreparedChunk {
+        std::string chunkId;
+        std::string content;
+        std::size_t startOffset{0};
+        std::size_t endOffset{0};
+    };
+
+    struct EmbedPreparedDoc {
+        std::string hash;
+        std::string fileName;
+        std::string filePath;
+        std::string mimeType;
+        std::vector<EmbedPreparedChunk> chunks;
+    };
+
     struct EmbedJob {
         std::vector<std::string> hashes;
         uint32_t batchSize{0};
         bool skipExisting{true};
         std::string modelName;
+        std::vector<EmbedPreparedDoc> preparedDocs;
     };
 
     enum class Fts5Operation {
@@ -338,6 +354,9 @@ private:
     std::atomic<std::uint64_t> embedQueued_{0};
     std::atomic<std::uint64_t> embedDropped_{0};
     std::atomic<std::uint64_t> embedConsumed_{0};
+    std::atomic<std::uint64_t> embedPreparedDocsQueued_{0};
+    std::atomic<std::uint64_t> embedPreparedChunksQueued_{0};
+    std::atomic<std::uint64_t> embedHashOnlyDocsQueued_{0};
     std::atomic<std::uint64_t> fts5Queued_{0};
     std::atomic<std::uint64_t> fts5Dropped_{0};
     std::atomic<std::uint64_t> fts5Consumed_{0};
@@ -380,6 +399,15 @@ public:
     }
     void incEmbedConsumed(std::uint64_t n = 1) {
         embedConsumed_.fetch_add(n, std::memory_order_relaxed);
+    }
+    void incEmbedPreparedDocsQueued(std::uint64_t n = 1) {
+        embedPreparedDocsQueued_.fetch_add(n, std::memory_order_relaxed);
+    }
+    void incEmbedPreparedChunksQueued(std::uint64_t n = 1) {
+        embedPreparedChunksQueued_.fetch_add(n, std::memory_order_relaxed);
+    }
+    void incEmbedHashOnlyDocsQueued(std::uint64_t n = 1) {
+        embedHashOnlyDocsQueued_.fetch_add(n, std::memory_order_relaxed);
     }
     void incFts5Queued() { fts5Queued_.fetch_add(1, std::memory_order_relaxed); }
     void incFts5Dropped() { fts5Dropped_.fetch_add(1, std::memory_order_relaxed); }
@@ -424,6 +452,15 @@ public:
     std::uint64_t embedQueued() const { return embedQueued_.load(std::memory_order_relaxed); }
     std::uint64_t embedDropped() const { return embedDropped_.load(std::memory_order_relaxed); }
     std::uint64_t embedConsumed() const { return embedConsumed_.load(std::memory_order_relaxed); }
+    std::uint64_t embedPreparedDocsQueued() const {
+        return embedPreparedDocsQueued_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t embedPreparedChunksQueued() const {
+        return embedPreparedChunksQueued_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t embedHashOnlyDocsQueued() const {
+        return embedHashOnlyDocsQueued_.load(std::memory_order_relaxed);
+    }
     std::uint64_t fts5Queued() const { return fts5Queued_.load(std::memory_order_relaxed); }
     std::uint64_t fts5Dropped() const { return fts5Dropped_.load(std::memory_order_relaxed); }
     std::uint64_t fts5Consumed() const { return fts5Consumed_.load(std::memory_order_relaxed); }

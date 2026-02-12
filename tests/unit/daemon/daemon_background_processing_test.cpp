@@ -34,6 +34,30 @@ namespace {
 // Test Helpers
 // =============================================================================
 
+class EnvGuard {
+    std::string name_;
+    std::string prev_;
+    bool hadPrev_{false};
+
+public:
+    EnvGuard(const char* name, const char* value) : name_(name) {
+        if (const char* existing = std::getenv(name)) {
+            prev_ = existing;
+            hadPrev_ = true;
+        }
+        setenv(name, value, 1);
+    }
+    ~EnvGuard() {
+        if (hadPrev_) {
+            setenv(name_.c_str(), prev_.c_str(), 1);
+        } else {
+            unsetenv(name_.c_str());
+        }
+    }
+    EnvGuard(const EnvGuard&) = delete;
+    EnvGuard& operator=(const EnvGuard&) = delete;
+};
+
 // RAII guard for InternalEventBus configuration
 class BusToggleGuard {
 public:
@@ -514,6 +538,14 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
     BusToggleGuard busGuard(false);
     PostIngestBatchGuard batchGuard(4);
 
+    // Ensure embed chunking policy is exercised through the PostIngestQueue -> embed_jobs path.
+    EnvGuard chunkStrategy("YAMS_EMBED_CHUNK_STRATEGY", "fixed");
+    EnvGuard chunkTarget("YAMS_EMBED_CHUNK_TARGET", "16");
+    EnvGuard chunkMin("YAMS_EMBED_CHUNK_MIN", "8");
+    EnvGuard chunkMax("YAMS_EMBED_CHUNK_MAX", "32");
+    EnvGuard chunkOverlap("YAMS_EMBED_CHUNK_OVERLAP", "0");
+    EnvGuard preserveSent("YAMS_EMBED_CHUNK_PRESERVE_SENTENCES", "0");
+
     WorkCoordinator coordinator;
     coordinator.start(2);
 
@@ -522,7 +554,14 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
     auto extractor = std::make_shared<StubExtractor>();
     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors{extractor};
 
-    const std::string payload = "hello batch";
+    const std::string payload = []() {
+        std::string out;
+        out.reserve(2048);
+        for (int i = 0; i < 256; ++i) {
+            out += "0123456789abcdef";
+        }
+        return out;
+    }();
     std::vector<metadata::DocumentInfo> docs;
     docs.reserve(8);
     for (int i = 0; i < 8; ++i) {
@@ -581,13 +620,34 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
     // The important thing is that all documents were processed successfully
 
     std::size_t jobCount = 0;
+    std::size_t docsWithPreparedChunks = 0;
+    std::size_t docsWithMultipleChunks = 0;
     InternalEventBus::EmbedJob job;
     while (embedChannel->try_pop(job)) {
         jobCount++;
+
+        for (const auto& doc : job.preparedDocs) {
+            if (doc.chunks.empty()) {
+                continue;
+            }
+            docsWithPreparedChunks++;
+            if (doc.chunks.size() >= 2) {
+                docsWithMultipleChunks++;
+            }
+            for (const auto& chunk : doc.chunks) {
+                CHECK_FALSE(chunk.chunkId.empty());
+                CHECK_FALSE(chunk.content.empty());
+            }
+        }
     }
 
     // PostIngestQueue should enqueue embedding jobs for successfully extracted documents.
     REQUIRE(jobCount > 0);
+
+    // Phase 2: embed jobs should include prepared doc chunks for at least some docs.
+    REQUIRE(docsWithPreparedChunks > 0);
+    // With fixed chunking target=16 and a large payload, at least one doc should have >1 chunk.
+    REQUIRE(docsWithMultipleChunks > 0);
 
     queue.reset();
     coordinator.stop();
