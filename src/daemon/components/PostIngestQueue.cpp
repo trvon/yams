@@ -2129,7 +2129,23 @@ void PostIngestQueue::initializeGradientLimiters() {
         } else {
             stageMax = static_cast<double>(kConcurrentFns[i - 1]());
         }
+
+        // Some stage caps use 0 as "unset" (rather than "disabled"). A maxLimit of 0 would
+        // invert the clamp bounds (minLimit > maxLimit) and crash in libstdc++ debug builds.
+        if (stageMax <= 0.0) {
+            stageMax = globalMax;
+        }
+
         cfg.maxLimit = std::min(globalMax, stageMax);
+
+        // Defensive: guarantee valid clamp bounds and a consistent initial limit.
+        if (cfg.maxLimit < cfg.minLimit) {
+            cfg.maxLimit = cfg.minLimit;
+        }
+        if (cfg.initialLimit > cfg.maxLimit) {
+            cfg.initialLimit = cfg.maxLimit;
+        }
+
         limiters_[i] = std::make_unique<GradientLimiter>(kLimiterNames[i], cfg);
     }
 

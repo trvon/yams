@@ -136,6 +136,17 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
     constexpr const char kMIGraphXModelCacheDirKey[] = "migraphx_model_cache_dir";
     constexpr const char kOrtMIGraphXModelCachePathEnv[] = "ORT_MIGRAPHX_MODEL_CACHE_PATH";
 
+    if (detail::envBool("YAMS_ONNX_FORCE_CPU", false) ||
+        detail::envBool("YAMS_ONNX_DISABLE_GPU", false)) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true)) {
+            spdlog::info("[ONNX] GPU execution providers disabled via env; using CPU");
+        }
+        (void)opts;
+        (void)modelCacheDir;
+        return "cpu";
+    }
+
     std::vector<std::string> providers;
     try {
         providers = Ort::GetAvailableProviders();

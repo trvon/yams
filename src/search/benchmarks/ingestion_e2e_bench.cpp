@@ -305,6 +305,9 @@ struct QueueSnapshot {
     uint64_t embed_queued = 0;
     uint64_t embed_consumed = 0;
     uint64_t embed_dropped = 0;
+    uint64_t embed_prepared_docs_queued = 0;
+    uint64_t embed_prepared_chunks_queued = 0;
+    uint64_t embed_hash_only_docs_queued = 0;
     uint64_t fts5_queued = 0;
     uint64_t fts5_consumed = 0;
     uint64_t fts5_dropped = 0;
@@ -322,9 +325,12 @@ struct QueueSnapshot {
               {"post_ingest", post_ingest}}},
             {"counters",
              {{"embed",
-               {{"queued", embed_queued},
-                {"consumed", embed_consumed},
-                {"dropped", embed_dropped}}},
+                             {{"queued", embed_queued},
+                                {"consumed", embed_consumed},
+                                {"dropped", embed_dropped},
+                                {"prepared_docs_queued", embed_prepared_docs_queued},
+                                {"prepared_chunks_queued", embed_prepared_chunks_queued},
+                                {"hash_only_docs_queued", embed_hash_only_docs_queued}}},
               {"fts5",
                {{"queued", fts5_queued}, {"consumed", fts5_consumed}, {"dropped", fts5_dropped}}},
               {"post",
@@ -483,6 +489,9 @@ QueueSnapshot captureQueueSnapshot() {
     snap.embed_queued = bus.embedQueued();
     snap.embed_consumed = bus.embedConsumed();
     snap.embed_dropped = bus.embedDropped();
+    snap.embed_prepared_docs_queued = bus.embedPreparedDocsQueued();
+    snap.embed_prepared_chunks_queued = bus.embedPreparedChunksQueued();
+    snap.embed_hash_only_docs_queued = bus.embedHashOnlyDocsQueued();
 
     snap.fts5_queued = bus.fts5Queued();
     snap.fts5_consumed = bus.fts5Consumed();

@@ -344,11 +344,48 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         if (abiHost_) {
             // Trust from env
             if (const char* env = std::getenv("YAMS_PLUGIN_DIR")) {
-                std::filesystem::path penv(env);
-                if (!penv.empty()) {
-                    if (auto tr = abiHost_->trustAdd(penv); !tr) {
-                        spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR {}: {}", penv.string(),
-                                     tr.error().message);
+                try {
+                    std::string raw(env);
+                    // Support multiple roots separated by ':' (POSIX) or ';' (Windows/INI style).
+                    // This is useful for benchmarks that want to pin to builddir plugins.
+                    std::vector<std::string> parts;
+                    parts.reserve(4);
+                    std::string cur;
+                    for (char ch : raw) {
+                        if (ch == ':' || ch == ';') {
+                            if (!cur.empty()) {
+                                parts.push_back(cur);
+                                cur.clear();
+                            }
+                            continue;
+                        }
+                        cur.push_back(ch);
+                    }
+                    if (!cur.empty()) {
+                        parts.push_back(cur);
+                    }
+
+                    if (parts.empty()) {
+                        parts.push_back(raw);
+                    }
+
+                    for (const auto& p : parts) {
+                        std::filesystem::path penv(p);
+                        if (penv.empty()) {
+                            continue;
+                        }
+                        if (auto tr = abiHost_->trustAdd(penv); !tr) {
+                            spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR {}: {}",
+                                         penv.string(), tr.error().message);
+                        }
+                    }
+                } catch (...) {
+                    std::filesystem::path penv(env);
+                    if (!penv.empty()) {
+                        if (auto tr = abiHost_->trustAdd(penv); !tr) {
+                            spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR {}: {}",
+                                         penv.string(), tr.error().message);
+                        }
                     }
                 }
             }

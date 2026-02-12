@@ -11,6 +11,7 @@
 #include <spdlog/spdlog.h>
 #include <filesystem>
 #include <mutex>
+#include <sstream>
 #include <boost/asio/post.hpp>
 #include <boost/asio/thread_pool.hpp>
 
@@ -928,9 +929,21 @@ private:
                 embeddingDim_ = hidden_dim;
             }
 
-            if ((b0 > 0 && static_cast<size_t>(b0) != B) ||
-                (hidden_dim > 0 && d2 > 0 && DD != hidden_dim))
-                return Error{ErrorCode::InvalidData, "Output shape mismatch"};
+            if ((b0 > 0 && static_cast<size_t>(b0) < B) ||
+                (hidden_dim > 0 && d2 > 0 && DD != hidden_dim)) {
+                std::ostringstream oss;
+                oss << "Output shape mismatch: expected [B,S,D] with B=" << B;
+                if (hidden_dim > 0) {
+                    oss << " D=" << hidden_dim;
+                }
+                oss << ", got [" << b0 << "," << s1 << "," << d2 << "]";
+                return Error{ErrorCode::InvalidData, oss.str()};
+            }
+            if (b0 > 0 && static_cast<size_t>(b0) > B) {
+                spdlog::debug(
+                    "[ONNX] Provider returned padded batch output: requested_B={} output_B={} (using first B)",
+                    B, b0);
+            }
             const float* data = out.GetTensorData<float>();
             result.resize(B, std::vector<float>(hidden_dim, 0.0f));
             for (size_t b = 0; b < B; ++b) {
@@ -991,9 +1004,21 @@ private:
                 embeddingDim_ = hidden_dim;
             }
 
-            if ((b0 > 0 && static_cast<size_t>(b0) != B) ||
-                (hidden_dim > 0 && d1 > 0 && DD != hidden_dim))
-                return Error{ErrorCode::InvalidData, "Output shape mismatch"};
+            if ((b0 > 0 && static_cast<size_t>(b0) < B) ||
+                (hidden_dim > 0 && d1 > 0 && DD != hidden_dim)) {
+                std::ostringstream oss;
+                oss << "Output shape mismatch: expected [B,D] with B=" << B;
+                if (hidden_dim > 0) {
+                    oss << " D=" << hidden_dim;
+                }
+                oss << ", got [" << b0 << "," << d1 << "]";
+                return Error{ErrorCode::InvalidData, oss.str()};
+            }
+            if (b0 > 0 && static_cast<size_t>(b0) > B) {
+                spdlog::debug(
+                    "[ONNX] Provider returned padded batch output: requested_B={} output_B={} (using first B)",
+                    B, b0);
+            }
             const float* data = out.GetTensorData<float>();
             result.resize(B);
             for (size_t b = 0; b < B; ++b) {
@@ -1095,16 +1120,21 @@ private:
                 if (j.contains("normalize_embeddings") && j["normalize_embeddings"].is_boolean()) {
                     normalize_ = j["normalize_embeddings"].get<bool>();
                 }
-                if (j.contains("embedding_dimension") &&
-                    j["embedding_dimension"].is_number_integer()) {
-                    embeddingDim_ = static_cast<size_t>(j["embedding_dimension"].get<int>());
-                }
-                // Hidden size often present in HF config (standard models use hidden_size,
-                // Nomic models use n_embd)
-                if (j.contains("hidden_size") && j["hidden_size"].is_number_integer()) {
-                    embeddingDim_ = static_cast<size_t>(j["hidden_size"].get<int>());
-                } else if (j.contains("n_embd") && j["n_embd"].is_number_integer()) {
-                    embeddingDim_ = static_cast<size_t>(j["n_embd"].get<int>());
+                // Only use config hints for embedding dimension when we could not infer it from
+                // the ONNX graph output shape. The ONNX output tensor is authoritative.
+                if (embeddingDim_ == 0) {
+                    if (j.contains("embedding_dimension") &&
+                        j["embedding_dimension"].is_number_integer()) {
+                        embeddingDim_ =
+                            static_cast<size_t>(j["embedding_dimension"].get<int>());
+                    }
+                    // Hidden size often present in HF config (standard models use hidden_size,
+                    // Nomic models use n_embd)
+                    if (j.contains("hidden_size") && j["hidden_size"].is_number_integer()) {
+                        embeddingDim_ = static_cast<size_t>(j["hidden_size"].get<int>());
+                    } else if (j.contains("n_embd") && j["n_embd"].is_number_integer()) {
+                        embeddingDim_ = static_cast<size_t>(j["n_embd"].get<int>());
+                    }
                 }
                 // Nomic-specific hints via architectures
                 try {
