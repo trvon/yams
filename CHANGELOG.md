@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Embedding dim hint precedence**: ONNX plugin no longer lets stale config hints override graph-inferred embedding dimensions when model metadata is available, reducing startup/runtime mismatches.
 - **GPU escape hatch for stability triage**: Added ONNX env controls to force CPU execution (`YAMS_ONNX_FORCE_CPU=1` / `YAMS_ONNX_DISABLE_GPU=1`) for benchmark/repro stability when GPU EPs are unstable.
 - **Gradient limiter clamp safety**: Prevented invalid limiter bounds (`minLimit > maxLimit`) in post-ingest stage limiter setup when a stage cap resolves to unset/zero, fixing debug-build aborts from `std::clamp` assertions during title stage completion.
+- **Snapshot propagation consistency across add paths**: `yams add` now propagates one effective snapshot ID per invocation across file, stdin, and directory ingest paths (daemon + local fallback), and preserves snapshot label/id when daemon directory ingest is translated to indexing requests.
+- **Non-directory snapshot persistence parity**: File/stdin document stores now upsert first-class `tree_snapshots` records (with label/collection metadata) so snapshot timelines no longer depend only on per-document tags.
 
 - **ONNX dynamic tensor padding**: Pads input tensors to the aligned actual token length instead of the model's `max_seq_len` (512). Short texts now skip hundreds of zero-padded positions, yielding **~70-85x throughput improvement** for short inputs (93 texts/sec vs 1.6 texts/sec on CPU with `nomic-embed-text-v1.5`). Enabled by default; disable with `YAMS_ONNX_DYNAMIC_PADDING=0`. Sequence lengths are 8-byte aligned to balance SIMD efficiency with padding reduction.
 - **ROCm / MIGraphX compiled-model caching**: Enable save/load of compiled MIGraphX artifacts to avoid paying multi-minute `compile_program` costs when sessions are recreated (e.g., after scale-down/eviction). Defaults to caching hashed `*.mxr` artifacts under the model directory. Configure with `YAMS_MIGRAPHX_COMPILED_PATH` (directory; if a `.mxr` path is provided, its parent directory is used), `YAMS_MIGRAPHX_SAVE_COMPILED`, and `YAMS_MIGRAPHX_LOAD_COMPILED`.
@@ -37,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ONNX ROCm diagnostic output**: GPU diagnostic now reports cold vs warm embedding timing to distinguish first-run compilation from steady-state inference.
 
 ### Changed
+- **Benchmark reporting terminology**: Normalized benchmark docs to use neutral **retrieval result** wording (instead of subjective "significant" labels), and explicitly tagged the current baseline as the SciFact benchmark result.
+
 - **Post-ingest embedding fan-out (phased rollout)**:
   - **Phase 1**: Added centralized embedding selection policy (strategy + mode + caps/boosts) via `ConfigResolver` with config/env precedence.
   - **Phase 2**: Moved embed preparation upstream so post-ingest can queue prepared embed payloads; embedding service consumes prepared-doc fast-path.

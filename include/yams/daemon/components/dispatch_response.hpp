@@ -291,11 +291,13 @@ inline ListResponse makeListResponse(uint64_t totalCount, std::vector<ListEntry>
 }
 
 inline SearchResponse makeSearchResponse(uint64_t totalCount, std::chrono::milliseconds elapsed,
-                                         std::vector<SearchResult>&& results) {
+                                         std::vector<SearchResult>&& results,
+                                         std::string traceId = {}) {
     SearchResponse resp;
     resp.totalCount = totalCount;
     resp.elapsed = elapsed;
     resp.results = std::move(results);
+    resp.traceId = std::move(traceId);
     return resp;
 }
 

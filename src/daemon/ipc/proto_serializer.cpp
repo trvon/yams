@@ -1028,6 +1028,7 @@ template <> struct ProtoBinding<SearchResponse> {
         auto* o = env.mutable_search_response();
         o->set_total_count(static_cast<uint64_t>(r.totalCount));
         o->set_elapsed_ms(static_cast<int64_t>(r.elapsed.count()));
+        o->set_trace_id(yams::common::sanitizeUtf8(r.traceId));
         for (const auto& s : r.results) {
             auto* pr = o->add_results();
             pr->set_id(yams::common::sanitizeUtf8(s.id));
@@ -1043,6 +1044,7 @@ template <> struct ProtoBinding<SearchResponse> {
         const auto& i = env.search_response();
         r.totalCount = i.total_count();
         r.elapsed = std::chrono::milliseconds{i.elapsed_ms()};
+        r.traceId = i.trace_id();
         r.results.reserve(i.results_size());
         for (const auto& pr : i.results()) {
             SearchResult sr{};

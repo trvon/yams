@@ -231,8 +231,10 @@ public:
             spdlog::info("[IndexingService] addDirectory: collected {} candidate files under '{}'",
                          entries.size(), req.directoryPath);
 
-            // Generate automatic snapshot ID BEFORE processing files so each file gets tagged
-            std::string snapshotId = yams::core::generateSnapshotId();
+            // Use caller-provided snapshot ID when available; otherwise generate one.
+            // Generate before processing files so each stored file is tagged consistently.
+            std::string snapshotId =
+                req.snapshotId.empty() ? yams::core::generateSnapshotId() : req.snapshotId;
             spdlog::info("[IndexingService] Generated snapshot ID: {}", snapshotId);
 
             const std::size_t backlog = entries.size();

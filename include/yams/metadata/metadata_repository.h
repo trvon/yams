@@ -442,6 +442,10 @@ public:
     // Search history operations
     Result<int64_t> insertSearchHistory(const SearchHistoryEntry& entry) override;
     Result<std::vector<SearchHistoryEntry>> getRecentSearches(int limit = 50) override;
+    Result<int64_t> insertFeedbackEvent(const FeedbackEvent& event);
+    Result<std::vector<FeedbackEvent>> getFeedbackEventsByTrace(const std::string& traceId,
+                                                                int limit = 100);
+    Result<std::vector<FeedbackEvent>> getRecentFeedbackEvents(int limit = 100);
 
     // Saved queries operations
     Result<int64_t> insertSavedQuery(const SavedQuery& query) override;

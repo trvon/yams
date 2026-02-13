@@ -710,6 +710,30 @@ public:
                     (void)ctx_.metadataRepo->setMetadata(docId, k, metadata::MetadataValue(v));
                 }
 
+                // Persist a first-class snapshot record for non-directory adds.
+                // This ensures snapshots created via file/stdin ingestion are visible
+                // in tree_snapshots-backed views and not only derivable from document tags.
+                metadata::TreeSnapshotRecord snapshotRecord;
+                snapshotRecord.snapshotId = snapshotId;
+                snapshotRecord.ingestDocumentId = docId;
+                snapshotRecord.createdTime =
+                    std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch())
+                        .count();
+                snapshotRecord.fileCount = 1;
+                snapshotRecord.totalBytes = info.fileSize;
+                snapshotRecord.metadata["directory_path"] = info.filePath;
+                if (!req.snapshotLabel.empty()) {
+                    snapshotRecord.metadata["snapshot_label"] = req.snapshotLabel;
+                }
+                if (!req.collection.empty()) {
+                    snapshotRecord.metadata["collection"] = req.collection;
+                }
+                auto snapshotUpsert = ctx_.metadataRepo->upsertTreeSnapshot(snapshotRecord);
+                if (!snapshotUpsert) {
+                    spdlog::warn("DocumentService: failed to upsert snapshot '{}' record: {}",
+                                 snapshotId, snapshotUpsert.error().message);
+                }
+
                 // Update path tree for this document (best-effort)
                 try {
                     auto treeRes = ctx_.metadataRepo->upsertPathTreeForDocument(

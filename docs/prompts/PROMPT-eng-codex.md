@@ -107,6 +107,32 @@ yams search "$TASK" --limit 20
 yams search "task=$TASK" --type keyword --limit 20
 ```
 
+### 1.5) YAMS-First Retrieval Behavior (Control-Loop Friendly)
+
+Use this order whenever you need content for reasoning:
+
+1. `yams search`/`yams grep` to discover candidates
+2. `yams get` (or MCP `get`) to read selected artifacts
+3. Only then use local file reads if needed for implementation detail
+
+Behavior rules:
+
+- Prefer YAMS retrieval over ad-hoc local search/cat for knowledge lookup.
+- Do not mark chunks as "rejected" unless explicitly provided by user/model feedback.
+- Treat `served - used` as `not_used` (low-confidence negative), not hard rejection.
+
+Episode signal policy (implicit feedback):
+
+- High-confidence positive episode: `search -> get/read -> no immediate reformulation search`.
+- Negative signal: rapid reformulation loops, repeated failed searches, or abandon without `get/read`.
+- These are weak-supervision signals for tuning, not ground truth.
+
+Structured reporting (when retrieval is used):
+
+- Include `UsedContext: <chunk_ids or hashes>` when known.
+- Include `Citations: <artifact names/hashes/paths>`; if none, write `Citations: none`.
+- Preserve `trace_id` in logs/output paths when available for later attribution.
+
 ### 2) Start Work (Index Baseline + Claim)
 
 ```bash
@@ -168,6 +194,12 @@ INDEXED:
 
 NEXT:
 - <next step>
+
+USED_CONTEXT:
+- <chunk_ids/hashes if known; else "unknown">
+
+CITATIONS:
+- <artifact names/hashes/paths or "none">
 ```
 
 ## PR Checklist

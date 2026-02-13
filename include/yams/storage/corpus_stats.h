@@ -75,9 +75,15 @@ struct CorpusStats {
     [[nodiscard]] bool isSmall() const noexcept { return docCount < 1000; }
     [[nodiscard]] bool isLarge() const noexcept { return docCount >= 10000; }
 
-    // Scientific corpus detection (prose without path/tag structure, like benchmarks)
+    // Scientific corpus detection (benchmark-like prose corpora with weak structure)
+    //
+    // Historical note: pathDepthAvg alone can be misleading when absolute paths are
+    // indexed (depth appears high even for flat datasets). We therefore accept
+    // either explicitly flat paths OR a low-structure corpus signature.
     [[nodiscard]] bool isScientific() const noexcept {
-        return isProseDominant() && pathDepthAvg < 1.5 && tagCoverage < 0.1;
+        const bool flatPaths = pathDepthAvg < 1.5;
+        const bool lowStructure = tagCoverage < 0.1 && symbolDensity < 0.1;
+        return isProseDominant() && (flatPaths || lowStructure);
     }
 
     /**

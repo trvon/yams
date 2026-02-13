@@ -264,6 +264,7 @@ struct MCPSearchResponse {
     size_t total = 0;
     std::string type;
     uint64_t executionTimeMs = 0;
+    std::string traceId;
     std::vector<std::string> paths;
 
     struct Result {

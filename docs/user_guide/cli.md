@@ -243,6 +243,8 @@ Description:
 - Rich metadata support for tagging, naming, and custom properties.
 - Content is automatically indexed for full-text and fuzzy search.
 - **Automatic snapshots (PBI-043):** Every `yams add` operation automatically creates a snapshot with a timestamp-based ID (e.g., `2025-10-01T14:30:00.123Z`). A Merkle tree is built and stored for efficient diff operations.
+- **Invocation-level snapshot consistency:** A single `yams add` command invocation reuses one snapshot ID across all provided inputs (multiple files, stdin, and directories) unless `--snapshot-id` is explicitly set.
+- **Snapshot listing parity:** Non-directory adds (single file/stdin) are also persisted into `tree_snapshots`, so `yams list --snapshots` reflects both directory and non-directory snapshot operations.
 - Trees enable fast `yams diff` operations using O(log n) subtree matching.
 - **Git integration:** When run in a git repository, snapshot metadata includes the current commit hash and branch name.
 

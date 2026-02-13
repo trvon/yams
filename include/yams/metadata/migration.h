@@ -227,6 +227,9 @@ private:
 
     // Version 27: Partial index for metadata value aggregations
     static Migration optimizeValueCountsQuery();
+
+    // Version 28: Append-only feedback event log for retrieval control loop
+    static Migration createFeedbackEventsSchema();
 };
 
 /**

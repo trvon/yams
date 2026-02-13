@@ -650,6 +650,47 @@ template <> struct EntityTraits<SearchHistoryEntry> {
 };
 
 /**
+ * @brief EntityTraits specialization for FeedbackEvent
+ */
+template <> struct EntityTraits<FeedbackEvent> {
+    static constexpr std::string_view table = "feedback_events";
+    static constexpr std::string_view primary_key = "id";
+
+    using columns_tuple =
+        std::tuple<Column<int64_t, FeedbackEvent, false, true, true>, // id
+                   Column<std::string, FeedbackEvent>,                 // event_id
+                   Column<std::string, FeedbackEvent>,                 // trace_id
+                   Column<std::chrono::sys_seconds, FeedbackEvent>,    // created_at
+                   Column<std::string, FeedbackEvent>,                 // source
+                   Column<std::string, FeedbackEvent>,                 // event_type
+                   Column<std::string, FeedbackEvent, true>            // payload_json
+                   >;
+
+    static constexpr columns_tuple columns{
+        Column<int64_t, FeedbackEvent, false, true, true>{"id", &FeedbackEvent::id},
+        Column<std::string, FeedbackEvent>{"event_id", &FeedbackEvent::eventId},
+        Column<std::string, FeedbackEvent>{"trace_id", &FeedbackEvent::traceId},
+        Column<std::chrono::sys_seconds, FeedbackEvent>{"created_at", &FeedbackEvent::createdAt},
+        Column<std::string, FeedbackEvent>{"source", &FeedbackEvent::source},
+        Column<std::string, FeedbackEvent>{"event_type", &FeedbackEvent::eventType},
+        Column<std::string, FeedbackEvent, true>{"payload_json", &FeedbackEvent::payloadJson}};
+
+    static FeedbackEvent extract(const Statement& stmt, int startCol = 0) {
+        FeedbackEvent event;
+        event.id = stmt.getInt64(startCol + 0);
+        event.eventId = stmt.getString(startCol + 1);
+        event.traceId = stmt.getString(startCol + 2);
+        event.createdAt = stmt.getTime(startCol + 3);
+        event.source = stmt.getString(startCol + 4);
+        event.eventType = stmt.getString(startCol + 5);
+        if (!stmt.isNull(startCol + 6)) {
+            event.payloadJson = stmt.getString(startCol + 6);
+        }
+        return event;
+    }
+};
+
+/**
  * @brief EntityTraits specialization for SavedQuery
  */
 template <> struct EntityTraits<SavedQuery> {

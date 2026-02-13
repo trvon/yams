@@ -2195,6 +2195,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     out.total = r.totalCount;
     out.type = "daemon";
     out.executionTimeMs = r.elapsed.count();
+    out.traceId = r.traceId;
     // When pathsOnly was requested by the MCP client, populate the 'paths' field
     // to mirror CLI behavior and make it easy for clients to consume.
     if (req.pathsOnly) {

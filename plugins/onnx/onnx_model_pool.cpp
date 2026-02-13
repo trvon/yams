@@ -91,6 +91,24 @@ namespace yams::daemon {
 
 namespace fs = std::filesystem;
 
+namespace {
+
+bool envTruthy(const char* value) {
+    if (!value || !*value) {
+        return false;
+    }
+    std::string v(value);
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
+
+bool allowGpuAutoUnload() {
+    return envTruthy(std::getenv("YAMS_ONNX_GPU_AUTO_UNLOAD"));
+}
+
+} // namespace
+
 // ============================================================================
 // OnnxModelSession Implementation
 // ============================================================================
@@ -1821,6 +1839,11 @@ Result<void> OnnxModelPool::unloadModel(const std::string& modelName) {
     }
 
     if (it->second.pool) {
+        auto stats = it->second.pool->getStats();
+        if (stats.inUseResources > 0) {
+            return Error{ErrorCode::OperationInProgress,
+                         "Cannot unload model with in-use sessions: " + modelName};
+        }
         it->second.pool->shutdown();
         it->second.pool.reset();
 
@@ -1984,6 +2007,11 @@ Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
 }
 
 void OnnxModelPool::evictLRU(size_t numToEvict) {
+    if (runtimeGpuEnabled_ && !allowGpuAutoUnload()) {
+        spdlog::debug("Skipping LRU model eviction on GPU path (set YAMS_ONNX_GPU_AUTO_UNLOAD=1 to enable)");
+        return;
+    }
+
     // Find least recently used models that are not hot
     std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>> candidates;
 
@@ -2002,6 +2030,12 @@ void OnnxModelPool::evictLRU(size_t numToEvict) {
         const auto& modelName = candidates[i].first;
         auto it = models_.find(modelName);
         if (it != models_.end() && it->second.pool) {
+            auto stats = it->second.pool->getStats();
+            if (stats.inUseResources > 0) {
+                spdlog::debug("Skipping LRU eviction for model '{}' (in_use={})", modelName,
+                              stats.inUseResources);
+                continue;
+            }
             spdlog::info("Evicting model due to LRU: {}", modelName);
             it->second.pool->shutdown();
             it->second.pool.reset();
@@ -2065,12 +2099,20 @@ size_t OnnxModelPool::getMemoryUsage() const {
 }
 
 void OnnxModelPool::performMaintenance() {
+    if (runtimeGpuEnabled_ && !allowGpuAutoUnload()) {
+        return;
+    }
+
     std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     auto now = std::chrono::steady_clock::now();
 
     for (auto& [name, entry] : models_) {
         if (entry.pool && !entry.isHot) {
+            auto stats = entry.pool->getStats();
+            if (stats.inUseResources > 0) {
+                continue;
+            }
             // Check if model has been idle too long
             auto idleTime = now - entry.lastAccess;
             if (idleTime > config_.modelIdleTimeout) {

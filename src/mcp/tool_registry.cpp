@@ -147,6 +147,7 @@ MCPSearchResponse MCPSearchResponse::fromJson(const json& j) {
     resp.total = j.value("total", size_t{0});
     resp.type = j.value("type", std::string{});
     resp.executionTimeMs = j.value("execution_time_ms", uint64_t{0});
+    resp.traceId = j.value("trace_id", std::string{});
 
     detail::readStringArray(j, "paths", resp.paths);
 
@@ -195,6 +196,8 @@ json MCPSearchResponse::toJson() const {
     j["total"] = total;
     j["type"] = type;
     j["execution_time_ms"] = executionTimeMs;
+    if (!traceId.empty())
+        j["trace_id"] = traceId;
 
     if (!paths.empty()) {
         j["paths"] = paths;

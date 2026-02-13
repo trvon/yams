@@ -3392,6 +3392,7 @@ struct SearchResponse {
     std::vector<SearchResult> results;
     size_t totalCount = 0;
     std::chrono::milliseconds elapsed{0};
+    std::string traceId;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -3400,7 +3401,7 @@ struct SearchResponse {
         for (const auto& result : results) {
             result.serialize(ser);
         }
-        ser << static_cast<uint64_t>(totalCount) << elapsed;
+        ser << static_cast<uint64_t>(totalCount) << elapsed << traceId;
     }
 
     template <typename Deserializer>
@@ -3429,6 +3430,11 @@ struct SearchResponse {
         if (!elapsedResult)
             return elapsedResult.error();
         res.elapsed = elapsedResult.value();
+
+        auto traceIdResult = deser.readString();
+        if (!traceIdResult)
+            return traceIdResult.error();
+        res.traceId = std::move(traceIdResult.value());
 
         return res;
     }

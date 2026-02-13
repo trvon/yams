@@ -153,6 +153,8 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
         serviceReq.includePatterns = req.includePatterns;
         serviceReq.excludePatterns = req.excludePatterns;
         serviceReq.recursive = true;
+        serviceReq.snapshotId = req.snapshotId;
+        serviceReq.snapshotLabel = req.snapshotLabel;
         serviceReq.sessionId = req.sessionId; // Session-isolated memory (PBI-082)
         serviceReq.noEmbeddings = req.noEmbeddings;
         serviceReq.noGitignore = req.noGitignore; // Gitignore handling

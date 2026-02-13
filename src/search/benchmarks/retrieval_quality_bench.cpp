@@ -1148,6 +1148,20 @@ struct BenchFixture {
         uint64_t lastKgInFlight = 0, lastSymbolInFlight = 0, lastEntityInFlight = 0;
         uint64_t lastExtractionInFlight = 0;
 
+        auto ingestionLooksCompleteFromLastObserved = [&]() -> bool {
+            const bool targetReached =
+                (lastIndexedDocCount >= static_cast<uint64_t>(corpusSize)) ||
+                (lastDocCount >= static_cast<uint64_t>(corpusSize));
+            const bool allQueuesDrained =
+                (lastDepth == 0 && lastExtractionInFlight == 0 && lastKgInFlight == 0 &&
+                 lastSymbolInFlight == 0 && lastEntityInFlight == 0 && lastEmbedQueued == 0 &&
+                 lastEmbedInFlight == 0);
+            const bool extractionOrPostDone =
+                (lastContentExtracted >= static_cast<uint64_t>(corpusSize)) ||
+                (lastPostProcessed >= static_cast<uint64_t>(corpusSize));
+            return targetReached && allQueuesDrained && extractionOrPostDone;
+        };
+
         while (true) {
             auto now = std::chrono::steady_clock::now();
             auto timeSinceProgress =
@@ -1164,6 +1178,57 @@ struct BenchFixture {
 
             // Check for stall (no progress for progressTimeoutSec)
             if (timeSinceProgress > progressTimeoutSec) {
+                if (ingestionLooksCompleteFromLastObserved()) {
+                    spdlog::warn("Ingestion progress timeout reached, but last observed metrics "
+                                 "already indicate completion; accepting completion.");
+                    completed = true;
+                    break;
+                }
+
+                // Status polls may intermittently fail even when work is done; perform one
+                // final verification poll before classifying as stalled.
+                auto finalVerify = yams::cli::run_sync(client->status(), 10s);
+                if (finalVerify) {
+                    const auto& counts = finalVerify.value().requestCounts;
+                    auto get = [&](const std::string& key) -> uint64_t {
+                        auto it = counts.find(key);
+                        return (it == counts.end()) ? 0ULL : it->second;
+                    };
+
+                    const uint64_t docsTotal = get("documents_total");
+                    const uint64_t docsIndexed = get("documents_indexed");
+                    const uint64_t extracted = get("documents_content_extracted");
+                    const uint64_t postQueued = get("post_ingest_queued");
+                    const uint64_t postInFlight = get("post_ingest_inflight");
+                    const uint64_t postProcessed = get("post_ingest_processed");
+                    const uint64_t extractionInFlight = get("extraction_inflight");
+                    const uint64_t kgInFlight = get("kg_inflight");
+                    const uint64_t symbolInFlight = get("symbol_inflight");
+                    const uint64_t entityInFlight = get("entity_inflight");
+                    const uint64_t embedQueued = get("embed_svc_queued");
+                    const uint64_t embedInFlight = get("embed_in_flight");
+
+                    const bool targetReached =
+                        (docsIndexed >= static_cast<uint64_t>(corpusSize)) ||
+                        (docsTotal >= static_cast<uint64_t>(corpusSize));
+                    const bool allQueuesDrained =
+                        (postQueued == 0 && postInFlight == 0 && extractionInFlight == 0 &&
+                         kgInFlight == 0 && symbolInFlight == 0 && entityInFlight == 0 &&
+                         embedQueued == 0 && embedInFlight == 0);
+                    const bool extractionOrPostDone =
+                        (extracted >= static_cast<uint64_t>(corpusSize)) ||
+                        (postProcessed >= static_cast<uint64_t>(corpusSize));
+
+                    if (targetReached && allQueuesDrained && extractionOrPostDone) {
+                        spdlog::warn("Ingestion progress timeout reached but final verification "
+                                     "shows completion (docs_total={}, docs_indexed={}, "
+                                     "extracted={}, post_processed={}); accepting completion.",
+                                     docsTotal, docsIndexed, extracted, postProcessed);
+                        completed = true;
+                        break;
+                    }
+                }
+
                 spdlog::error(
                     "Ingestion stalled - no progress for {}s (docs: total={} indexed={} target={} "
                     "queue={}, inflight: extract={} kg={} symbol={} entity={} extracted={} "
@@ -1318,22 +1383,68 @@ struct BenchFixture {
                 summaryLog << "Target: " << corpusSize << " documents" << std::endl;
             }
 
-            deadline =
-                std::chrono::steady_clock::now() + 1800s; // 30 minute timeout for large corpus
+            auto embedProgressTimeoutSec = std::chrono::seconds(600);
+            if (const char* env = std::getenv("YAMS_BENCH_EMBED_PROGRESS_TIMEOUT")) {
+                embedProgressTimeoutSec = std::chrono::seconds(std::stoi(env));
+            }
+            auto embedMaxWaitSec = std::chrono::seconds(7200); // 2h hard cap (configurable)
+            if (const char* env = std::getenv("YAMS_BENCH_EMBED_MAX_WAIT")) {
+                embedMaxWaitSec = std::chrono::seconds(std::stoi(env));
+            }
             uint64_t lastVectorCount = 0;
+            uint64_t lastEmbedQueuedObserved = 0;
+            uint64_t lastEmbedInFlightObserved = 0;
+            uint64_t lastEmbedDroppedObserved = 0;
+            bool seenEmbedMetrics = false;
             int stableCount = 0;
             uint64_t embedDropped = 0;
             bool embeddingDrainSatisfied = false;
             auto embedStartTime = std::chrono::steady_clock::now();
+            auto lastEmbedProgressTime = embedStartTime;
+            uint64_t lastObservedVectorCount = 0;
+            uint64_t lastObservedEmbedQueued = 0;
+            uint64_t lastObservedEmbedInFlight = 0;
+            uint64_t lastObservedEmbedDropped = 0;
 
-            // Phase 1: Wait for embedding queue to drain and vectors to reach target
-            // We need vectors >= corpusSize AND queue/in-flight drained for complete coverage
-            // Note: Each document may produce multiple chunk vectors, so we wait for stability
-            while (std::chrono::steady_clock::now() < deadline) {
+            // Phase 1: Wait for embedding queue to drain and vectors to reach target.
+            // Uses progress-based stall detection (like ingestion wait) to avoid failing while
+            // work is still actively progressing on large corpora/slow accelerators.
+            while (true) {
                 auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - embedStartTime);
+                auto sinceProgress =
+                    std::chrono::duration_cast<std::chrono::seconds>(now - lastEmbedProgressTime);
+
+                if (embedMaxWaitSec.count() > 0 && elapsed > embedMaxWaitSec) {
+                    throw std::runtime_error(
+                        "Embedding wait exceeded hard limit (" +
+                        std::to_string(embedMaxWaitSec.count()) +
+                        "s) before benchmark queries (embed_svc_queued=" +
+                        std::to_string(lastObservedEmbedQueued) +
+                        ", embed_in_flight=" + std::to_string(lastObservedEmbedInFlight) +
+                        ", vectors=" + std::to_string(lastObservedVectorCount) +
+                        ", dropped=" + std::to_string(lastObservedEmbedDropped) +
+                        "). Increase YAMS_BENCH_EMBED_MAX_WAIT or tune embedding concurrency.");
+                }
+
+                if (sinceProgress > embedProgressTimeoutSec) {
+                    throw std::runtime_error(
+                        "Embedding wait stalled for " +
+                        std::to_string(embedProgressTimeoutSec.count()) +
+                        "s before benchmark queries (embed_svc_queued=" +
+                        std::to_string(lastObservedEmbedQueued) +
+                        ", embed_in_flight=" + std::to_string(lastObservedEmbedInFlight) +
+                        ", vectors=" + std::to_string(lastObservedVectorCount) +
+                        ", dropped=" + std::to_string(lastObservedEmbedDropped) +
+                        "). Increase timeout/concurrency or investigate model/provider stalls.");
+                }
+
                 if (now >= embedHeartbeatAt) {
                     embedHeartbeatAt = now + std::chrono::seconds(5);
-                    spdlog::info("Embed wait heartbeat: polling daemon status");
+                    spdlog::info("Embed wait heartbeat: elapsed={}s since_progress={}s "
+                                 "last_vectors={} queue={} in_flight={}",
+                                 elapsed.count(), sinceProgress.count(), lastObservedVectorCount,
+                                 lastObservedEmbedQueued, lastObservedEmbedInFlight);
                 }
                 auto statusResult = yams::cli::run_sync(client->status(), 5s);
                 if (statusResult) {
@@ -1370,9 +1481,32 @@ struct BenchFixture {
                         embedDropped = itD->second;
                     }
 
+                    lastObservedVectorCount = vectorCount;
+                    lastObservedEmbedQueued = embedQueued;
+                    lastObservedEmbedInFlight = embedInFlight;
+                    lastObservedEmbedDropped = embedDropped;
+
                     const bool haveQueueMetrics =
                         (itQ != statusResult.value().requestCounts.end()) ||
                         (itInFlight != statusResult.value().requestCounts.end());
+
+                    bool metricsChanged = false;
+                    if (!seenEmbedMetrics) {
+                        seenEmbedMetrics = true;
+                        metricsChanged = true;
+                    }
+                    if (vectorCount != lastVectorCount || embedQueued != lastEmbedQueuedObserved ||
+                        embedInFlight != lastEmbedInFlightObserved ||
+                        embedDropped != lastEmbedDroppedObserved) {
+                        metricsChanged = true;
+                    }
+
+                    if (metricsChanged) {
+                        lastEmbedProgressTime = now;
+                        stableCount = 0;
+                    } else {
+                        stableCount++;
+                    }
 
                     if (vectorCount != lastVectorCount) {
                         double coverage = corpusSize > 0 ? (vectorCount * 100.0 / corpusSize) : 0;
@@ -1395,10 +1529,11 @@ struct BenchFixture {
                         }
 
                         lastVectorCount = vectorCount;
-                        stableCount = 0;
-                    } else {
-                        stableCount++;
                     }
+
+                    lastEmbedQueuedObserved = embedQueued;
+                    lastEmbedInFlightObserved = embedInFlight;
+                    lastEmbedDroppedObserved = embedDropped;
 
                     // Success condition: vectors >= corpusSize AND queue drained AND no in-flight
                     // This ensures all chunks are embedded before running queries

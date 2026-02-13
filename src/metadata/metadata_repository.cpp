@@ -1869,6 +1869,30 @@ Result<std::vector<SearchHistoryEntry>> MetadataRepository::getRecentSearches(in
         });
 }
 
+Result<int64_t> MetadataRepository::insertFeedbackEvent(const FeedbackEvent& event) {
+    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+        repository::CrudOps<FeedbackEvent> ops;
+        return ops.insert(db, event);
+    });
+}
+
+Result<std::vector<FeedbackEvent>>
+MetadataRepository::getFeedbackEventsByTrace(const std::string& traceId, int limit) {
+    return executeQuery<std::vector<FeedbackEvent>>(
+        [&](Database& db) -> Result<std::vector<FeedbackEvent>> {
+            repository::CrudOps<FeedbackEvent> ops;
+            return ops.query(db, "trace_id = ? ORDER BY created_at DESC", traceId, limit);
+        });
+}
+
+Result<std::vector<FeedbackEvent>> MetadataRepository::getRecentFeedbackEvents(int limit) {
+    return executeQuery<std::vector<FeedbackEvent>>(
+        [&](Database& db) -> Result<std::vector<FeedbackEvent>> {
+            repository::CrudOps<FeedbackEvent> ops;
+            return ops.getAllOrdered(db, "created_at DESC", limit);
+        });
+}
+
 // Saved queries operations (refactored with YAMS_TRY - ADR-0004 Phase 2)
 Result<int64_t> MetadataRepository::insertSavedQuery(const SavedQuery& query) {
     return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {

@@ -192,6 +192,7 @@ private:
         size_t totalCount{0};
         int64_t elapsedMs{0};
         std::string method{"search"};
+        std::string traceId;
     };
 
     bool shouldShowSpinner() const {
@@ -247,6 +248,8 @@ private:
             output["method"] = ctx.method;
             output["total_results"] = deduplicated.size();
             output["execution_time_ms"] = ctx.elapsedMs;
+            if (!ctx.traceId.empty())
+                output["trace_id"] = ctx.traceId;
 
             nlohmann::json results = nlohmann::json::array();
             for (const auto& item : deduplicated) {
@@ -287,6 +290,10 @@ private:
             std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
             emitTagHint();
             return Result<void>();
+        }
+
+        if (verbose_ && !ctx.traceId.empty()) {
+            std::cout << ui::colorize("trace_id: " + ctx.traceId, ui::Ansi::DIM) << "\n\n";
         }
 
         if (!groupVersions_) {
@@ -1148,6 +1155,7 @@ public:
                 ctx.totalCount = resp.totalCount;
                 ctx.elapsedMs = resp.elapsed.count();
                 ctx.method = "daemon";
+                ctx.traceId = resp.traceId;
 
                 return renderResults(items, ctx);
             };
@@ -1667,6 +1675,7 @@ public:
             ctx.totalCount = resp.totalCount;
             ctx.elapsedMs = resp.elapsed.count();
             ctx.method = "daemon";
+            ctx.traceId = resp.traceId;
 
             return renderResults(items, ctx);
         };

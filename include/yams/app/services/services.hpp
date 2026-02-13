@@ -906,6 +906,7 @@ struct AddDirectoryRequest {
     bool verify{false};
     // Optional: verify indexes (FTS/vector) presence when enabled
     bool verifyIndexes{false};
+    std::string snapshotId;    // Optional snapshot identifier to apply to this add operation
     std::string snapshotLabel; // Optional human-friendly label for automatic snapshot
 
     // Session-isolated memory (PBI-082)
