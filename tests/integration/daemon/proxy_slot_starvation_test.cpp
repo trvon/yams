@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "test_daemon_harness.h"
+#include "../../common/env_compat.h"
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>

@@ -1797,6 +1797,44 @@ json MCPServer::listTools() {
 
     json out = toolRegistry_->listTools();
 
+    // Protocol-aware shaping for interoperability with strict clients.
+    // - annotations were introduced in 2024-11-05
+    // - title in tool metadata became available in 2025-03-26
+    const bool supportsAnnotations = negotiatedProtocolVersion_ >= "2024-11-05";
+    const bool supportsTitle = negotiatedProtocolVersion_ >= "2025-03-26";
+
+    // Optional compatibility mode: hide dotted tool names from tools/list.
+    // This is useful for clients that validate tool names with a strict regex.
+    const bool hideDottedToolNames = envTruthy(std::getenv("YAMS_MCP_RENAME_DOTTED_TOOLS"));
+
+    if (out.is_object() && out.contains("tools") && out["tools"].is_array()) {
+        json shapedTools = json::array();
+        shapedTools.get_ref<json::array_t&>().reserve(out["tools"].size());
+
+        for (auto& tool : out["tools"]) {
+            if (!tool.is_object()) {
+                continue;
+            }
+            if (hideDottedToolNames && tool.contains("name") && tool["name"].is_string()) {
+                const auto name = tool["name"].get<std::string>();
+                if (name.find('.') != std::string::npos) {
+                    continue;
+                }
+            }
+
+            if (!supportsAnnotations) {
+                tool.erase("annotations");
+            }
+            if (!supportsTitle) {
+                tool.erase("title");
+            }
+
+            shapedTools.push_back(std::move(tool));
+        }
+
+        out["tools"] = std::move(shapedTools);
+    }
+
     // MCP Apps: when UI is negotiated, link select tools to UI resources.
     // Tests currently expect nested `_meta.ui.resourceUri`.
     if (mcpAppsSupported_.load() && out.is_object() && out.contains("tools") &&
@@ -4592,9 +4630,8 @@ void MCPServer::initializeToolRegistry() {
     // Non-daemon tool used for protocol feature validation.
     // This stays fully in-process so unit tests can exercise tool result shaping
     // (content + structuredContent gating by negotiated protocol version).
-    toolRegistry_->registerRawTool(
-        "mcp.echo",
-        [this](const json& args) mutable -> boost::asio::awaitable<json> {
+    auto makeEchoHandler = [this]() {
+        return [this](const json& args) mutable -> boost::asio::awaitable<json> {
             try {
                 std::string text;
                 if (args.is_object() && args.contains("text") && args["text"].is_string()) {
@@ -4620,9 +4657,21 @@ void MCPServer::initializeToolRegistry() {
                     json::array({content::text(std::string("Error: ") + e.what())}), std::nullopt,
                     true);
             }
-        },
+        };
+    };
+
+    toolRegistry_->registerRawTool(
+        "mcp.echo", makeEchoHandler(),
         json{{"type", "object"}, {"properties", {{"text", json{{"type", "string"}}}}}},
         "Echo input for MCP protocol testing", "Echo", readOnlyAnnotation);
+
+    // Optional strict-name compatibility alias for clients that reject dotted tool names.
+    if (envTruthy(std::getenv("YAMS_MCP_RENAME_DOTTED_TOOLS"))) {
+        toolRegistry_->registerRawTool(
+            "mcp_echo", makeEchoHandler(),
+            json{{"type", "object"}, {"properties", {{"text", json{{"type", "string"}}}}}},
+            "Echo input for MCP protocol testing", "Echo", readOnlyAnnotation);
+    }
 
     // Debug/compat mode: expose only a minimal tool surface.
     // Some MCP clients validate tool schemas strictly and will drop the entire tools/list

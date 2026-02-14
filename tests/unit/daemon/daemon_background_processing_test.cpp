@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -30,6 +31,22 @@ using namespace yams::daemon;
 
 namespace {
 
+int setEnvValue(const char* name, const char* value) {
+#if defined(_WIN32)
+    return _putenv_s(name, value);
+#else
+    return ::setenv(name, value, 1);
+#endif
+}
+
+int unsetEnvValue(const char* name) {
+#if defined(_WIN32)
+    return _putenv_s(name, "");
+#else
+    return ::unsetenv(name);
+#endif
+}
+
 // =============================================================================
 // Test Helpers
 // =============================================================================
@@ -45,13 +62,13 @@ public:
             prev_ = existing;
             hadPrev_ = true;
         }
-        setenv(name, value, 1);
+        (void)setEnvValue(name, value);
     }
     ~EnvGuard() {
         if (hadPrev_) {
-            setenv(name_.c_str(), prev_.c_str(), 1);
+            (void)setEnvValue(name_.c_str(), prev_.c_str());
         } else {
-            unsetenv(name_.c_str());
+            (void)unsetEnvValue(name_.c_str());
         }
     }
     EnvGuard(const EnvGuard&) = delete;

@@ -4,6 +4,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include "../common/env_compat.h"
 #include <yams/compat/unistd.h>
 #include <yams/daemon/daemon.h>
 

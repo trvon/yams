@@ -11,6 +11,7 @@
 
 #include "common/daemon_preflight.h"
 #include "common/daemon_test_fixture.h"
+#include "../../common/env_compat.h"
 
 using nlohmann::json;
 using yams::mcp::ITransport;

@@ -588,6 +588,7 @@ private:
     std::shared_ptr<api::IContentStore> contentStore_;
     std::shared_ptr<metadata::Database> database_;
     std::shared_ptr<metadata::ConnectionPool> connectionPool_;
+    std::shared_ptr<metadata::ConnectionPool> readConnectionPool_;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<GraphComponent> graphComponent_;

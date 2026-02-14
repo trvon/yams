@@ -20,6 +20,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "../common/env_compat.h"
 #include <benchmark/benchmark.h>
 
 #ifdef TRACY_ENABLE

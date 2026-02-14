@@ -5,6 +5,7 @@
 //       → OnnxConcurrencyRegistry → Embedding/Reranker services respect limits
 
 #include "test_daemon_harness.h"
+#include "../../common/env_compat.h"
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/cli/cli_sync.h>

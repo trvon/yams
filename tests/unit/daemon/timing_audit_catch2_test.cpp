@@ -17,6 +17,7 @@
 #include <thread>
 #include <vector>
 
+#include "../../common/env_compat.h"
 #include <yams/compat/unistd.h>
 
 using namespace yams::daemon;

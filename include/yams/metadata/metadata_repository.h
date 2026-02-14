@@ -402,7 +402,7 @@ public:
  */
 class MetadataRepository : public IMetadataRepository {
 public:
-    explicit MetadataRepository(ConnectionPool& pool);
+    explicit MetadataRepository(ConnectionPool& pool, ConnectionPool* readPool = nullptr);
     ~MetadataRepository()
         override; // Defined in cpp to allow unique_ptr<CorpusStats> with forward decl
 
@@ -681,6 +681,7 @@ public:
 
 private:
     ConnectionPool& pool_;
+    ConnectionPool* readPool_{nullptr};
     bool hasPathIndexing_{false};
     bool pathFtsAvailable_{false};
     std::shared_ptr<KnowledgeGraphStore> kgStore_; // PBI-043: tree diff KG integration
@@ -814,7 +815,9 @@ private:
     void invalidateQueryCache() const;
 
     // Helper method to handle nested Result from withConnection with retry for lock errors
-    template <typename T> Result<T> executeQuery(std::function<Result<T>(Database&)> func) {
+    template <typename T>
+    Result<T> executeQueryOnPool(ConnectionPool& pool, std::string_view route,
+                                 std::function<Result<T>(Database&)> func) {
         constexpr int kMaxRetries = 10;   // Increased for heavy concurrent load
         constexpr int kBaseDelayMs = 50;  // Higher base delay for better backoff
         constexpr int kMaxDelayMs = 3000; // Cap delay to prevent very long waits
@@ -823,12 +826,13 @@ private:
         thread_local std::mt19937 rng(std::random_device{}());
 
         for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
-            auto result = pool_.withConnection(func);
+            auto result = pool.withConnection(func);
             if (result.has_value()) {
                 if (attempt > 0) {
                     // Log successful retry at debug level
-                    spdlog::debug("MetadataRepository::executeQuery succeeded after {} retries",
-                                  attempt);
+                    spdlog::debug(
+                        "MetadataRepository::executeQueryOnPool route='{}' succeeded after {} retries",
+                        route, attempt);
                 }
                 if constexpr (std::is_void_v<T>) {
                     return Result<void>();
@@ -852,11 +856,13 @@ private:
                 // Always log operation context for constraint errors (helps debugging)
                 auto op = current_metadata_op();
                 if (isConstraintError || metadata_trace_enabled()) {
-                    spdlog::warn("MetadataRepository::executeQuery op='{}' error: {}",
-                                 op.empty() ? "(unknown)" : op, result.error().message);
+                    spdlog::warn(
+                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' error: {}",
+                        route, op.empty() ? "(unknown)" : op, result.error().message);
                 }
-                spdlog::error("MetadataRepository::executeQuery connection error: {}",
-                              result.error().message);
+                spdlog::error(
+                    "MetadataRepository::executeQueryOnPool route='{}' connection error: {}",
+                    route, result.error().message);
                 return Error{result.error()};
             }
 
@@ -869,7 +875,21 @@ private:
         }
 
         // Should never reach here, but satisfy compiler
-        return Error{ErrorCode::DatabaseError, "executeQuery: unexpected retry loop exit"};
+        return Error{ErrorCode::DatabaseError,
+                     "executeQueryOnPool: unexpected retry loop exit"};
+    }
+
+    template <typename T> Result<T> executeReadQuery(std::function<Result<T>(Database&)> func) {
+        ConnectionPool& readPool = (readPool_ != nullptr) ? *readPool_ : pool_;
+        return executeQueryOnPool<T>(readPool, "read", std::move(func));
+    }
+
+    template <typename T> Result<T> executeWriteQuery(std::function<Result<T>(Database&)> func) {
+        return executeQueryOnPool<T>(pool_, "write", std::move(func));
+    }
+
+    template <typename T> Result<T> executeQuery(std::function<Result<T>(Database&)> func) {
+        return executeWriteQuery<T>(std::move(func));
     }
 };
 

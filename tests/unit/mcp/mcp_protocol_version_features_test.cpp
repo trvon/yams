@@ -15,6 +15,8 @@
 #include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/mcp/mcp_server.h>
+#include <cstdlib>
+#include <string>
 
 using namespace yams::mcp;
 using json = nlohmann::json;
@@ -32,6 +34,55 @@ public:
     yams::mcp::TransportState getState() const override {
         return yams::mcp::TransportState::Disconnected;
     }
+};
+
+class EnvGuard {
+public:
+    EnvGuard(const char* key, const char* value) : key_(key) {
+        const char* prev = std::getenv(key_);
+        if (prev) {
+            hadPrev_ = true;
+            prev_ = prev;
+        }
+        setValue(value);
+    }
+
+    ~EnvGuard() {
+        if (hadPrev_) {
+            setValue(prev_.c_str());
+        } else {
+            clearValue();
+        }
+    }
+
+private:
+    void setValue(const char* value) const {
+#if defined(_WIN32)
+        if (value) {
+            _putenv_s(key_, value);
+        } else {
+            _putenv_s(key_, "");
+        }
+#else
+        if (value) {
+            setenv(key_, value, 1);
+        } else {
+            unsetenv(key_);
+        }
+#endif
+    }
+
+    void clearValue() const {
+#if defined(_WIN32)
+        _putenv_s(key_, "");
+#else
+        unsetenv(key_);
+#endif
+    }
+
+    const char* key_;
+    bool hadPrev_ = false;
+    std::string prev_;
 };
 
 } // namespace
@@ -296,6 +347,93 @@ TEST_CASE("MCP 2024-11-05 - supports structuredContent in tool results",
     REQUIRE(toolResult["result"]["structuredContent"].is_object());
     CHECK(toolResult["result"]["structuredContent"].value("type", "") == "tool_result");
     CHECK(toolResult["result"]["structuredContent"].contains("data"));
+}
+
+// ============================================================================
+// Version 2024-10-07 Specific Features
+// ============================================================================
+
+TEST_CASE("MCP 2024-10-07 - tools/list omits post-version metadata fields",
+          "[mcp][protocol][2024-10-07][features][tools-list-shaping][catch2]") {
+    auto transport = std::make_unique<NullTransport>();
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
+
+    json initRequest = {{"jsonrpc", "2.0"},
+                        {"id", 1},
+                        {"method", "initialize"},
+                        {"params",
+                         {{"protocolVersion", "2024-10-07"},
+                          {"clientInfo", {{"name", "test"}, {"version", "1.0"}}},
+                          {"capabilities", json::object()}}}};
+
+    auto initResponse = server->handleRequestPublic(initRequest);
+    REQUIRE(initResponse.has_value());
+
+    json toolsRequest = {
+        {"jsonrpc", "2.0"}, {"id", 2}, {"method", "tools/list"}, {"params", json::object()}};
+    auto toolsResponse = server->handleRequestPublic(toolsRequest);
+    REQUIRE(toolsResponse.has_value());
+
+    const auto& tools = toolsResponse.value()["result"]["tools"];
+    REQUIRE(tools.is_array());
+    REQUIRE_FALSE(tools.empty());
+
+    for (const auto& tool : tools) {
+        CHECK_FALSE(tool.contains("annotations"));
+        CHECK_FALSE(tool.contains("title"));
+    }
+}
+
+TEST_CASE("MCP strict-name compat - hides dotted tools and exposes underscore alias",
+          "[mcp][protocol][compat][tool-name][catch2]") {
+    EnvGuard renameGuard("YAMS_MCP_RENAME_DOTTED_TOOLS", "1");
+
+    auto transport = std::make_unique<NullTransport>();
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
+
+    json initRequest = {{"jsonrpc", "2.0"},
+                        {"id", 1},
+                        {"method", "initialize"},
+                        {"params",
+                         {{"protocolVersion", "2025-11-25"},
+                          {"clientInfo", {{"name", "test"}, {"version", "1.0"}}},
+                          {"capabilities", json::object()}}}};
+
+    auto initResponse = server->handleRequestPublic(initRequest);
+    REQUIRE(initResponse.has_value());
+
+    json toolsRequest = {
+        {"jsonrpc", "2.0"}, {"id", 2}, {"method", "tools/list"}, {"params", json::object()}};
+    auto toolsResponse = server->handleRequestPublic(toolsRequest);
+    REQUIRE(toolsResponse.has_value());
+
+    const auto& tools = toolsResponse.value()["result"]["tools"];
+    REQUIRE(tools.is_array());
+
+    bool foundDotted = false;
+    bool foundAlias = false;
+    for (const auto& tool : tools) {
+        const std::string name = tool.value("name", "");
+        if (name == "mcp.echo") {
+            foundDotted = true;
+        }
+        if (name == "mcp_echo") {
+            foundAlias = true;
+        }
+    }
+    CHECK_FALSE(foundDotted);
+    CHECK(foundAlias);
+
+    // Alias should be callable.
+    json aliasCall = {{"jsonrpc", "2.0"},
+                      {"id", 3},
+                      {"method", "tools/call"},
+                      {"params", {{"name", "mcp_echo"}, {"arguments", {{"text", "hello"}}}}}};
+
+    auto aliasResponse = server->handleRequestPublic(aliasCall);
+    REQUIRE(aliasResponse.has_value());
+    REQUIRE(aliasResponse.value().contains("result"));
+    REQUIRE(aliasResponse.value()["result"].contains("content"));
 }
 
 // ============================================================================

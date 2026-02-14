@@ -348,7 +348,8 @@ void MetadataRepository::updateQueryCache(const std::string& key,
     std::atomic_store_explicit(&queryCacheSnapshot_, std::move(updated), std::memory_order_release);
 }
 
-MetadataRepository::MetadataRepository(ConnectionPool& pool) : pool_(pool) {
+MetadataRepository::MetadataRepository(ConnectionPool& pool, ConnectionPool* readPool)
+    : pool_(pool), readPool_(readPool) {
     // Ensure database schema is initialized
     auto initResult = pool_.withConnection([](Database& db) -> Result<void> {
         // Create migration manager and apply all migrations
@@ -545,7 +546,7 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
 
 Result<std::optional<DocumentInfo>> MetadataRepository::getDocument(int64_t id) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::getDocument");
-    return executeQuery<std::optional<DocumentInfo>>(
+    return executeReadQuery<std::optional<DocumentInfo>>(
         [&](Database& db) -> Result<std::optional<DocumentInfo>> {
             return getDocumentByCondition(db, "id = ?",
                                           [&](Statement& stmt) { return stmt.bind(1, id); });
@@ -588,7 +589,7 @@ MetadataRepository::getAllMetadataInternal(Database& db, int64_t documentId) {
 
 Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const std::string& hash) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::getDocumentByHash");
-    return executeQuery<std::optional<DocumentInfo>>(
+    return executeReadQuery<std::optional<DocumentInfo>>(
         [&](Database& db) -> Result<std::optional<DocumentInfo>> {
             return getDocumentByCondition(db, "sha256_hash = ?",
                                           [&](Statement& stmt) { return stmt.bind(1, hash); });
@@ -850,7 +851,7 @@ Result<void> MetadataRepository::insertContent(const DocumentContent& content) {
 }
 
 Result<std::optional<DocumentContent>> MetadataRepository::getContent(int64_t documentId) {
-    return executeQuery<std::optional<DocumentContent>>(
+    return executeReadQuery<std::optional<DocumentContent>>(
         [&](Database& db) -> Result<std::optional<DocumentContent>> {
             repository::CrudOps<DocumentContent> ops;
             return ops.getById(db, documentId);
@@ -1230,7 +1231,7 @@ Result<void> MetadataRepository::setMetadataBatch(
 
 Result<std::optional<MetadataValue>> MetadataRepository::getMetadata(int64_t documentId,
                                                                      const std::string& key) {
-    return executeQuery<std::optional<MetadataValue>>(
+    return executeReadQuery<std::optional<MetadataValue>>(
         [&](Database& db) -> Result<std::optional<MetadataValue>> {
             repository::CrudOps<repository::MetadataEntry> ops;
             YAMS_TRY_UNWRAP(entry,
@@ -1247,7 +1248,7 @@ Result<std::optional<MetadataValue>> MetadataRepository::getMetadata(int64_t doc
 
 Result<std::unordered_map<std::string, MetadataValue>>
 MetadataRepository::getAllMetadata(int64_t documentId) {
-    return executeQuery<std::unordered_map<std::string, MetadataValue>>(
+    return executeReadQuery<std::unordered_map<std::string, MetadataValue>>(
         [&](Database& db) -> Result<std::unordered_map<std::string, MetadataValue>> {
             repository::CrudOps<repository::MetadataEntry> ops;
             YAMS_TRY_UNWRAP(entries, ops.query(db, "document_id = ?", documentId));
@@ -1268,7 +1269,7 @@ MetadataRepository::getMetadataForDocuments(std::span<const int64_t> documentIds
     if (documentIds.empty())
         return std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>{};
 
-    return executeQuery<
+    return executeReadQuery<
         std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>(
         [&](Database& db)
             -> Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>> {
@@ -1449,7 +1450,7 @@ MetadataRepository::getMetadataValueCounts(const std::vector<std::string>& keys,
 
     // Cache miss - execute query
     auto queryResult =
-        executeQuery<std::unordered_map<std::string, std::vector<MetadataValueCount>>>(
+        executeReadQuery<std::unordered_map<std::string, std::vector<MetadataValueCount>>>(
             [&](Database& db)
                 -> Result<std::unordered_map<std::string, std::vector<MetadataValueCount>>> {
                 const bool needsDocumentJoin = requiresDocumentJoin(options);
@@ -1839,7 +1840,7 @@ Result<int64_t> MetadataRepository::insertRelationship(const DocumentRelationshi
 }
 
 Result<std::vector<DocumentRelationship>> MetadataRepository::getRelationships(int64_t documentId) {
-    return executeQuery<std::vector<DocumentRelationship>>(
+    return executeReadQuery<std::vector<DocumentRelationship>>(
         [&](Database& db) -> Result<std::vector<DocumentRelationship>> {
             repository::CrudOps<DocumentRelationship> ops;
             return ops.query(db, "parent_id = ? OR child_id = ?", documentId, documentId);
@@ -1862,7 +1863,7 @@ Result<int64_t> MetadataRepository::insertSearchHistory(const SearchHistoryEntry
 }
 
 Result<std::vector<SearchHistoryEntry>> MetadataRepository::getRecentSearches(int limit) {
-    return executeQuery<std::vector<SearchHistoryEntry>>(
+    return executeReadQuery<std::vector<SearchHistoryEntry>>(
         [&](Database& db) -> Result<std::vector<SearchHistoryEntry>> {
             repository::CrudOps<SearchHistoryEntry> ops;
             return ops.getAllOrdered(db, "query_time DESC", limit);
@@ -1878,7 +1879,7 @@ Result<int64_t> MetadataRepository::insertFeedbackEvent(const FeedbackEvent& eve
 
 Result<std::vector<FeedbackEvent>>
 MetadataRepository::getFeedbackEventsByTrace(const std::string& traceId, int limit) {
-    return executeQuery<std::vector<FeedbackEvent>>(
+    return executeReadQuery<std::vector<FeedbackEvent>>(
         [&](Database& db) -> Result<std::vector<FeedbackEvent>> {
             repository::CrudOps<FeedbackEvent> ops;
             return ops.query(db, "trace_id = ? ORDER BY created_at DESC", traceId, limit);
@@ -1886,7 +1887,7 @@ MetadataRepository::getFeedbackEventsByTrace(const std::string& traceId, int lim
 }
 
 Result<std::vector<FeedbackEvent>> MetadataRepository::getRecentFeedbackEvents(int limit) {
-    return executeQuery<std::vector<FeedbackEvent>>(
+    return executeReadQuery<std::vector<FeedbackEvent>>(
         [&](Database& db) -> Result<std::vector<FeedbackEvent>> {
             repository::CrudOps<FeedbackEvent> ops;
             return ops.getAllOrdered(db, "created_at DESC", limit);
@@ -1902,7 +1903,7 @@ Result<int64_t> MetadataRepository::insertSavedQuery(const SavedQuery& query) {
 }
 
 Result<std::optional<SavedQuery>> MetadataRepository::getSavedQuery(int64_t id) {
-    return executeQuery<std::optional<SavedQuery>>(
+    return executeReadQuery<std::optional<SavedQuery>>(
         [&](Database& db) -> Result<std::optional<SavedQuery>> {
             repository::CrudOps<SavedQuery> ops;
             return ops.getById(db, id);
@@ -1910,7 +1911,7 @@ Result<std::optional<SavedQuery>> MetadataRepository::getSavedQuery(int64_t id) 
 }
 
 Result<std::vector<SavedQuery>> MetadataRepository::getAllSavedQueries() {
-    return executeQuery<std::vector<SavedQuery>>(
+    return executeReadQuery<std::vector<SavedQuery>>(
         [&](Database& db) -> Result<std::vector<SavedQuery>> {
             repository::CrudOps<SavedQuery> ops;
             return ops.getAllOrdered(db, "use_count DESC, last_used DESC");
@@ -2205,7 +2206,7 @@ MetadataRepository::removeFromIndexByHashBatch(const std::vector<std::string>& h
 }
 
 Result<std::vector<int64_t>> MetadataRepository::getAllFts5IndexedDocumentIds() {
-    return executeQuery<std::vector<int64_t>>([&](Database& db) -> Result<std::vector<int64_t>> {
+    return executeReadQuery<std::vector<int64_t>>([&](Database& db) -> Result<std::vector<int64_t>> {
         // First check if FTS5 is available
         auto fts5Result = db.hasFTS5();
         if (!fts5Result)
@@ -2719,7 +2720,7 @@ Result<SearchResults>
 MetadataRepository::search(const std::string& query, int limit, int offset,
                            const std::optional<std::vector<int64_t>>& docIds) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::search");
-    return executeQuery<SearchResults>([&](Database& db) -> Result<SearchResults> {
+    return executeReadQuery<SearchResults>([&](Database& db) -> Result<SearchResults> {
         YAMS_ZONE_SCOPED_N("MetadataRepo::search::FTS5Query");
         SearchResults results;
         results.query = query;
@@ -3054,7 +3055,7 @@ MetadataRepository::findDocumentByExactPath(const std::string& path) {
     if (auto cached = lookupPathCache(derived.normalizedPath))
         return cached;
 
-    return executeQuery<std::optional<DocumentInfo>>(
+    return executeReadQuery<std::optional<DocumentInfo>>(
         [&](Database& db) -> Result<std::optional<DocumentInfo>> {
             using yams::metadata::sql::QuerySpec;
             QuerySpec spec{};
@@ -3089,7 +3090,7 @@ MetadataRepository::findDocumentByExactPath(const std::string& path) {
 Result<std::vector<DocumentInfo>>
 MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::queryDocuments");
-    return executeQuery<std::vector<DocumentInfo>>(
+    return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             const bool joinFtsForContains = options.containsFragment && options.containsUsesFts &&
                                             !options.containsFragment->empty() && pathFtsAvailable_;
@@ -3430,7 +3431,7 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
 
 Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsByHashPrefix(const std::string& hashPrefix, std::size_t limit) {
-    return executeQuery<std::vector<DocumentInfo>>(
+    return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             if (hashPrefix.empty()) {
                 return std::vector<DocumentInfo>{};
@@ -3455,7 +3456,7 @@ MetadataRepository::findDocumentsByHashPrefix(const std::string& hashPrefix, std
 
 Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsByExtension(const std::string& extension) {
-    return executeQuery<std::vector<DocumentInfo>>(
+    return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             sql::QuerySpec spec{};
             spec.table = "documents";
@@ -3471,7 +3472,7 @@ MetadataRepository::findDocumentsByExtension(const std::string& extension) {
 
 Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsModifiedSince(std::chrono::system_clock::time_point since) {
-    return executeQuery<std::vector<DocumentInfo>>(
+    return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             using yams::metadata::sql::QuerySpec;
             auto sinceUnix =
@@ -3490,7 +3491,7 @@ MetadataRepository::findDocumentsModifiedSince(std::chrono::system_clock::time_p
 
 // Statistics
 Result<int64_t> MetadataRepository::getDocumentCount() {
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+    return executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         repository::CrudOps<DocumentInfo> ops;
         return ops.count(db);
     });
@@ -3499,7 +3500,7 @@ Result<int64_t> MetadataRepository::getDocumentCount() {
 Result<int64_t> MetadataRepository::getIndexedDocumentCount() {
     // Returns count of documents that have been FTS5 indexed and have content extracted
     // This represents "search-ready" documents, NOT embedding status
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+    return executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         auto stmtResult = db.prepare(R"(
             SELECT COUNT(*)
             FROM documents
@@ -3516,14 +3517,14 @@ Result<int64_t> MetadataRepository::getIndexedDocumentCount() {
 }
 
 Result<int64_t> MetadataRepository::getContentExtractedDocumentCount() {
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+    return executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         repository::CrudOps<DocumentInfo> ops;
         return ops.count(db, "content_extracted = 1");
     });
 }
 
 Result<int64_t> MetadataRepository::getDocumentCountByExtractionStatus(ExtractionStatus status) {
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+    return executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         repository::CrudOps<DocumentInfo> ops;
         return ops.count(db, "extraction_status = ?", ExtractionStatusUtils::toString(status));
     });
@@ -3578,7 +3579,7 @@ MetadataRepository::batchGetDocumentsByHash(const std::vector<std::string>& hash
         return std::unordered_map<std::string, DocumentInfo>{};
     }
 
-    return executeQuery<std::unordered_map<std::string, DocumentInfo>>(
+    return executeReadQuery<std::unordered_map<std::string, DocumentInfo>>(
         [&](Database& db) -> Result<std::unordered_map<std::string, DocumentInfo>> {
             std::string sql = "SELECT id, file_path, file_name, file_extension, file_size, "
                               "sha256_hash, mime_type, created_time, modified_time, indexed_time, "
@@ -3645,7 +3646,7 @@ MetadataRepository::batchGetContent(const std::vector<int64_t>& documentIds) {
         return std::unordered_map<int64_t, DocumentContent>{};
     }
 
-    return executeQuery<std::unordered_map<int64_t, DocumentContent>>(
+    return executeReadQuery<std::unordered_map<int64_t, DocumentContent>>(
         [&](Database& db) -> Result<std::unordered_map<int64_t, DocumentContent>> {
             std::string sql =
                 "SELECT document_id, content_text, content_length, extraction_method, language "
@@ -3700,7 +3701,7 @@ MetadataRepository::batchGetContent(const std::vector<int64_t>& documentIds) {
 
 Result<std::unordered_map<std::string, int64_t>>
 MetadataRepository::getDocumentCountsByExtension() {
-    return executeQuery<std::unordered_map<std::string, int64_t>>(
+    return executeReadQuery<std::unordered_map<std::string, int64_t>>(
         [&](Database& db) -> Result<std::unordered_map<std::string, int64_t>> {
             using yams::metadata::sql::QuerySpec;
             QuerySpec spec{};
@@ -3753,8 +3754,8 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
     }
 
     // Cache miss or stale - compute fresh stats
-    auto result =
-        executeQuery<storage::CorpusStats>([&](Database& db) -> Result<storage::CorpusStats> {
+    auto result = executeReadQuery<storage::CorpusStats>(
+        [&](Database& db) -> Result<storage::CorpusStats> {
             storage::CorpusStats stats;
 
             // 1. Basic document metrics: count, total size, avg size, path depth
@@ -4012,7 +4013,7 @@ void MetadataRepository::addSymSpellTerm(std::string_view term, int64_t frequenc
 // =============================================================================
 
 Result<float> MetadataRepository::getTermIDF(const std::string& term) {
-    return executeQuery<float>([&](Database& db) -> Result<float> {
+    return executeReadQuery<float>([&](Database& db) -> Result<float> {
         // Get total document count from corpus stats
         auto corpusStmt = db.prepare("SELECT total_documents FROM corpus_term_stats WHERE id = 1");
         if (!corpusStmt)
@@ -4066,7 +4067,7 @@ MetadataRepository::getTermIDFBatch(const std::vector<std::string>& terms) {
         return std::unordered_map<std::string, float>{};
     }
 
-    return executeQuery<std::unordered_map<std::string, float>>(
+    return executeReadQuery<std::unordered_map<std::string, float>>(
         [&](Database& db) -> Result<std::unordered_map<std::string, float>> {
             std::unordered_map<std::string, float> result;
 
@@ -4198,7 +4199,7 @@ Result<void> MetadataRepository::updateCorpusTermStats() {
 }
 
 Result<int64_t> MetadataRepository::getCorpusDocumentCount() {
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+    return executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         auto stmt = db.prepare("SELECT total_documents FROM corpus_term_stats WHERE id = 1");
         if (!stmt)
             return stmt.error();
@@ -4693,7 +4694,7 @@ void MetadataRepository::refreshAllConnections() {
 
 Result<std::optional<PathTreeNode>>
 MetadataRepository::findPathTreeNode(int64_t parentId, std::string_view pathSegment) {
-    return executeQuery<std::optional<PathTreeNode>>(
+    return executeReadQuery<std::optional<PathTreeNode>>(
         [&](Database& db) -> Result<std::optional<PathTreeNode>> {
             const bool parentIsNull = parentId == kPathTreeNullParent;
             const char* sql =
@@ -4878,7 +4879,7 @@ MetadataRepository::findPathTreeNodeByFullPath(std::string_view fullPath) {
     if (fullPath.empty())
         return std::optional<PathTreeNode>{};
 
-    return executeQuery<std::optional<PathTreeNode>>(
+    return executeReadQuery<std::optional<PathTreeNode>>(
         [&](Database& db) -> Result<std::optional<PathTreeNode>> {
             auto stmtResult = db.prepare("SELECT node_id, parent_id, path_segment, full_path, "
                                          "doc_count, centroid_weight, centroid "
@@ -4912,7 +4913,7 @@ MetadataRepository::findPathTreeNodeByFullPath(std::string_view fullPath) {
 
 Result<std::vector<PathTreeNode>>
 MetadataRepository::listPathTreeChildren(std::string_view fullPath, std::size_t limit) {
-    return executeQuery<std::vector<PathTreeNode>>(
+    return executeReadQuery<std::vector<PathTreeNode>>(
         [&](Database& db) -> Result<std::vector<PathTreeNode>> {
             bool isRoot = fullPath.empty() || fullPath == "/";
             int64_t parentId = kPathTreeNullParent;
@@ -5354,7 +5355,7 @@ MetadataRepository::getTreeSnapshot(std::string_view snapshotId) {
 }
 
 Result<std::vector<TreeSnapshotRecord>> MetadataRepository::listTreeSnapshots(int limit) {
-    return executeQuery<std::vector<TreeSnapshotRecord>>(
+    return executeReadQuery<std::vector<TreeSnapshotRecord>>(
         [limit](Database& db) -> Result<std::vector<TreeSnapshotRecord>> {
             const char* sql = R"(
             SELECT snapshot_id, directory_path, snapshot_label, 
@@ -5540,7 +5541,7 @@ Result<void> MetadataRepository::appendTreeChanges(int64_t diffId,
 
 Result<std::vector<TreeChangeRecord>>
 MetadataRepository::listTreeChanges(const TreeDiffQuery& query) {
-    return executeQuery<std::vector<TreeChangeRecord>>(
+    return executeReadQuery<std::vector<TreeChangeRecord>>(
         [&](Database& db) -> Result<std::vector<TreeChangeRecord>> {
             using yams::metadata::sql::QuerySpec;
             QuerySpec spec{};
@@ -5883,7 +5884,7 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
     YAMS_ZONE_SCOPED_N("MetadataRepo::fuzzySearch");
     (void)minSimilarity; // SymSpell uses edit distance, not similarity threshold
 
-    return executeQuery<SearchResults>([&](Database& db) -> Result<SearchResults> {
+    return executeReadQuery<SearchResults>([&](Database& db) -> Result<SearchResults> {
         SearchResults results;
         results.query = query;
 
@@ -6071,7 +6072,7 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
 // Snapshot operations (collections use generic metadata query via getMetadataValueCounts)
 Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsBySnapshot(const std::string& snapshotId) {
-    return executeQuery<std::vector<DocumentInfo>>(
+    return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             auto stmtResult = db.prepare(R"(
             SELECT DISTINCT d.id, d.file_path, d.file_name, d.file_extension, d.file_size,
@@ -6109,7 +6110,7 @@ MetadataRepository::findDocumentsBySnapshot(const std::string& snapshotId) {
 
 Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsBySnapshotLabel(const std::string& snapshotLabel) {
-    return executeQuery<std::vector<DocumentInfo>>(
+    return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             auto stmtResult = db.prepare(R"(
             SELECT DISTINCT d.id, d.file_path, d.file_name, d.file_extension, d.file_size,
@@ -6161,7 +6162,7 @@ Result<std::vector<std::string>> MetadataRepository::getSnapshots() {
     }
 
     // Cache miss - query database
-    auto result = executeQuery<std::vector<std::string>>(
+    auto result = executeReadQuery<std::vector<std::string>>(
         [&](Database& db) -> Result<std::vector<std::string>> {
             using yams::metadata::sql::QuerySpec;
             QuerySpec spec{};
@@ -6222,7 +6223,7 @@ Result<std::vector<std::string>> MetadataRepository::getSnapshotLabels() {
     }
 
     // Cache miss - query database
-    auto result = executeQuery<std::vector<std::string>>(
+    auto result = executeReadQuery<std::vector<std::string>>(
         [&](Database& db) -> Result<std::vector<std::string>> {
             using yams::metadata::sql::QuerySpec;
             QuerySpec spec{};
@@ -6268,7 +6269,7 @@ Result<std::vector<std::string>> MetadataRepository::getSnapshotLabels() {
 }
 
 Result<SnapshotInfo> MetadataRepository::getSnapshotInfo(const std::string& snapshotId) {
-    return executeQuery<SnapshotInfo>([&snapshotId](Database& db) -> Result<SnapshotInfo> {
+    return executeReadQuery<SnapshotInfo>([&snapshotId](Database& db) -> Result<SnapshotInfo> {
         // Query documents with this snapshot_id and aggregate info
         const char* sql = R"(
             SELECT
@@ -6360,7 +6361,7 @@ MetadataRepository::batchGetSnapshotInfo(const std::vector<std::string>& snapsho
         return std::unordered_map<std::string, SnapshotInfo>{};
     }
 
-    return executeQuery<std::unordered_map<std::string, SnapshotInfo>>(
+    return executeReadQuery<std::unordered_map<std::string, SnapshotInfo>>(
         [&snapshotIds](Database& db) -> Result<std::unordered_map<std::string, SnapshotInfo>> {
             // Build placeholders for IN clause
             std::string placeholders;
@@ -6437,7 +6438,7 @@ MetadataRepository::batchGetSnapshotInfo(const std::vector<std::string>& snapsho
 
 Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsBySessionId(const std::string& sessionId) {
-    return executeQuery<std::vector<DocumentInfo>>(
+    return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             auto stmtResult = db.prepare(R"(
             SELECT DISTINCT d.id, d.file_path, d.file_name, d.file_extension, d.file_size,
@@ -6474,7 +6475,7 @@ MetadataRepository::findDocumentsBySessionId(const std::string& sessionId) {
 }
 
 Result<int64_t> MetadataRepository::countDocumentsBySessionId(const std::string& sessionId) {
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+    return executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         auto stmtResult = db.prepare(R"(
             SELECT COUNT(DISTINCT document_id)
             FROM metadata
@@ -6556,7 +6557,7 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
         return std::vector<DocumentInfo>();
     }
 
-    return executeQuery<std::vector<DocumentInfo>>(
+    return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             // Support both legacy tag storage (key="tag", value="<name>")
             // and normalized storage (key="tag:<name>").
@@ -6657,7 +6658,7 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
 }
 
 Result<std::vector<std::string>> MetadataRepository::getDocumentTags(int64_t documentId) {
-    return executeQuery<std::vector<std::string>>(
+    return executeReadQuery<std::vector<std::string>>(
         [&](Database& db) -> Result<std::vector<std::string>> {
             auto stmtResult = db.prepare(R"(
                 SELECT key
@@ -6700,7 +6701,7 @@ MetadataRepository::batchGetDocumentTags(std::span<const int64_t> documentIds) {
         return std::unordered_map<int64_t, std::vector<std::string>>{};
     }
 
-    return executeQuery<std::unordered_map<int64_t, std::vector<std::string>>>(
+    return executeReadQuery<std::unordered_map<int64_t, std::vector<std::string>>>(
         [&](Database& db) -> Result<std::unordered_map<int64_t, std::vector<std::string>>> {
             std::string query =
                 "SELECT document_id, key FROM metadata WHERE key LIKE 'tag:%' AND document_id IN (";
@@ -6758,7 +6759,7 @@ Result<std::vector<std::string>> MetadataRepository::getAllTags() {
     }
 
     // Cache miss - query database
-    auto result = executeQuery<std::vector<std::string>>(
+    auto result = executeReadQuery<std::vector<std::string>>(
         [&](Database& db) -> Result<std::vector<std::string>> {
             using yams::metadata::sql::QuerySpec;
             QuerySpec spec{};

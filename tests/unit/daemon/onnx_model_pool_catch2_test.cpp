@@ -574,6 +574,54 @@ TEST_CASE_METHOD(OnnxModelPoolFixture,
     }
 }
 
+TEST_CASE_METHOD(OnnxModelPoolFixture,
+                 "OnnxModelPool: MIGraphX learned cap survives session reacquire",
+                 "[daemon][.slow][.requires_model][migraphx][regression]") {
+    auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found. Download with: yams model --download " +
+             modelName);
+    }
+
+    unsetenv("YAMS_TEST_MODE");
+
+    config_.maxMemoryGB = 4;
+    config_.modelIdleTimeout = std::chrono::seconds(60);
+    pool_ = std::make_unique<OnnxModelPool>(config_);
+    REQUIRE(pool_->initialize());
+
+    auto runOversized = [&](const std::string& marker, size_t batchSize) {
+        auto h = pool_->acquireModel(modelName, 60s);
+        REQUIRE(h);
+
+        auto& session = *h.value();
+        auto& mutableSession = const_cast<OnnxModelSession&>(session);
+        const auto provider = mutableSession.getExecutionProvider();
+        if (provider.find("migraphx") == std::string::npos) {
+            SKIP("MIGraphX provider not active (provider='" + provider + "')");
+        }
+
+        std::vector<std::string> texts;
+        texts.reserve(batchSize);
+        for (size_t i = 0; i < batchSize; ++i) {
+            texts.push_back(marker + " #" + std::to_string(i));
+        }
+
+        auto r = mutableSession.generateBatchEmbeddings(texts);
+        REQUIRE(r);
+        REQUIRE(r.value().size() == texts.size());
+        for (const auto& emb : r.value()) {
+            REQUIRE(!emb.empty());
+        }
+    };
+
+    // First run learns cap on one acquired session.
+    runOversized("migraphx session-1", 16);
+
+    // Reacquire a session and verify oversized batch still succeeds.
+    runOversized("migraphx session-2", 24);
+}
+
 // Test pool stats after real usage
 TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: pool stats after real usage",
                  "[daemon][.slow][.requires_model]") {

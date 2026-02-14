@@ -14,6 +14,15 @@
 #include <sstream>
 #include <boost/asio/post.hpp>
 #include <boost/asio/thread_pool.hpp>
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+#include <sys/stat.h>
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 
 // GPU execution provider headers - conditionally included based on Conan build options
 // Note: Prebuilt ONNX Runtime binaries from GitHub releases use the C API for providers.
@@ -105,6 +114,152 @@ bool envTruthy(const char* value) {
 
 bool allowGpuAutoUnload() {
     return envTruthy(std::getenv("YAMS_ONNX_GPU_AUTO_UNLOAD"));
+}
+
+int envIntOr(const char* name, int fallback) {
+    if (const char* value = std::getenv(name)) {
+        try {
+            return std::stoi(value);
+        } catch (...) {
+        }
+    }
+    return fallback;
+}
+
+bool migraphxProcessLockEnabled() {
+    if (const char* v = std::getenv("YAMS_MIGRAPHX_PROCESS_LOCK")) {
+        return envTruthy(v);
+    }
+    return true;
+}
+
+std::filesystem::path resolveMigraphxProcessLockPath() {
+    if (const char* configured = std::getenv("YAMS_MIGRAPHX_LOCK_PATH"); configured &&
+        *configured) {
+        std::filesystem::path path(configured);
+        if (path.extension() == ".lock") {
+            return path;
+        }
+        const int deviceId = envIntOr("YAMS_MIGRAPHX_DEVICE_ID", 0);
+        return path / ("migraphx-device-" + std::to_string(deviceId) + ".lock");
+    }
+
+    const int deviceId = envIntOr("YAMS_MIGRAPHX_DEVICE_ID", 0);
+    return std::filesystem::temp_directory_path() /
+           ("yams-migraphx-device-" + std::to_string(deviceId) + ".lock");
+}
+
+class ScopedProcessFileLock {
+public:
+    explicit ScopedProcessFileLock(const std::filesystem::path& path) : path_(path) {
+        std::error_code ec;
+        auto parent = path_.parent_path();
+        if (!parent.empty()) {
+            std::filesystem::create_directories(parent, ec);
+        }
+
+#ifdef _WIN32
+        fd_ = _open(path_.string().c_str(), _O_CREAT | _O_RDWR | _O_BINARY, _S_IREAD | _S_IWRITE);
+        if (fd_ < 0) {
+            return;
+        }
+        hFile_ = reinterpret_cast<HANDLE>(_get_osfhandle(fd_));
+        if (hFile_ == INVALID_HANDLE_VALUE) {
+            _close(fd_);
+            fd_ = -1;
+            return;
+        }
+        OVERLAPPED overlapped = {0};
+        if (!LockFileEx(hFile_, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped)) {
+            _close(fd_);
+            fd_ = -1;
+            hFile_ = INVALID_HANDLE_VALUE;
+            return;
+        }
+#else
+        fd_ = ::open(path_.c_str(), O_CREAT | O_RDWR, 0644);
+        if (fd_ < 0) {
+            return;
+        }
+        if (::flock(fd_, LOCK_EX) != 0) {
+            ::close(fd_);
+            fd_ = -1;
+            return;
+        }
+#endif
+    }
+
+    ScopedProcessFileLock(const ScopedProcessFileLock&) = delete;
+    ScopedProcessFileLock& operator=(const ScopedProcessFileLock&) = delete;
+
+    bool locked() const { return fd_ >= 0; }
+
+    ~ScopedProcessFileLock() {
+        if (fd_ < 0) {
+            return;
+        }
+#ifdef _WIN32
+        if (hFile_ != INVALID_HANDLE_VALUE) {
+            OVERLAPPED overlapped = {0};
+            (void)UnlockFileEx(hFile_, 0, 1, 0, &overlapped);
+        }
+        _close(fd_);
+#else
+        (void)::flock(fd_, LOCK_UN);
+        ::close(fd_);
+#endif
+    }
+
+private:
+    std::filesystem::path path_;
+    int fd_{-1};
+#ifdef _WIN32
+    HANDLE hFile_{INVALID_HANDLE_VALUE};
+#endif
+};
+
+size_t& migraphxProcessLockDepth() {
+    static thread_local size_t depth = 0;
+    return depth;
+}
+
+std::string providerBatchLimitKey(const std::string& modelName, const std::string& provider) {
+    std::string providerLower = provider;
+    std::transform(providerLower.begin(), providerLower.end(), providerLower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return modelName + "|" + providerLower;
+}
+
+std::recursive_mutex& sharedBatchLimitMutex() {
+    static auto* mu = new std::recursive_mutex();
+    return *mu;
+}
+
+std::unordered_map<std::string, size_t>& sharedBatchLimitMap() {
+    static auto* caps = new std::unordered_map<std::string, size_t>();
+    return *caps;
+}
+
+size_t loadSharedBatchLimit(const std::string& modelName, const std::string& provider) {
+    const std::string key = providerBatchLimitKey(modelName, provider);
+    std::lock_guard<std::recursive_mutex> lock(sharedBatchLimitMutex());
+    const auto& caps = sharedBatchLimitMap();
+    const auto it = caps.find(key);
+    return (it == caps.end()) ? 0 : it->second;
+}
+
+size_t mergeSharedBatchLimit(const std::string& modelName, const std::string& provider,
+                             size_t observedCap) {
+    if (observedCap == 0) {
+        return 0;
+    }
+    const std::string key = providerBatchLimitKey(modelName, provider);
+    std::lock_guard<std::recursive_mutex> lock(sharedBatchLimitMutex());
+    auto& caps = sharedBatchLimitMap();
+    const auto it = caps.find(key);
+    const size_t merged = (it == caps.end()) ? observedCap : std::min(it->second, observedCap);
+    caps[key] = merged;
+    return merged;
 }
 
 } // namespace
@@ -335,6 +490,7 @@ public:
         const bool usesMigraphxProvider = providerLower.find("migraphx") != std::string::npos;
 
         std::unique_lock<std::recursive_mutex> migraphxLoadLock;
+        std::unique_ptr<ScopedProcessFileLock> migraphxProcessLoadLock;
         if (usesMigraphxProvider) {
             // ROCm/HSA provider initialization and first session materialization can race when
             // multiple sessions for the same model are created concurrently. Serialize MIGraphX
@@ -342,6 +498,18 @@ public:
             static std::recursive_mutex* g_migraphx_load_mutex = new std::recursive_mutex();
             migraphxLoadLock = std::unique_lock<std::recursive_mutex>(*g_migraphx_load_mutex);
             spdlog::debug("[ONNX] MIGraphX load gate acquired for '{}'", modelName_);
+
+            if (migraphxProcessLockEnabled()) {
+                const auto processLockPath = resolveMigraphxProcessLockPath();
+                migraphxProcessLoadLock = std::make_unique<ScopedProcessFileLock>(processLockPath);
+                if (migraphxProcessLoadLock->locked()) {
+                    spdlog::debug("[ONNX] MIGraphX process load lock acquired: {}",
+                                  processLockPath.string());
+                } else {
+                    spdlog::warn("[ONNX] Failed to acquire MIGraphX process load lock: {}",
+                                 processLockPath.string());
+                }
+            }
         }
 
         try {
@@ -656,16 +824,59 @@ private:
         actualExecutionProvider_ = onnx_util::appendGpuProvider(*sessionOptions_, cacheDir);
     }
 
-    std::unique_lock<std::recursive_mutex> acquireMigraphxInferenceLock() const {
+    struct MigraphxInferenceGuard {
+        std::unique_lock<std::recursive_mutex> threadLock;
+        std::unique_ptr<ScopedProcessFileLock> processLock;
+        bool depthIncremented{false};
+
+        MigraphxInferenceGuard() = default;
+        MigraphxInferenceGuard(const MigraphxInferenceGuard&) = delete;
+        MigraphxInferenceGuard& operator=(const MigraphxInferenceGuard&) = delete;
+        MigraphxInferenceGuard(MigraphxInferenceGuard&&) noexcept = default;
+        MigraphxInferenceGuard& operator=(MigraphxInferenceGuard&&) noexcept = default;
+
+        ~MigraphxInferenceGuard() {
+            if (depthIncremented) {
+                auto& depth = migraphxProcessLockDepth();
+                if (depth > 0) {
+                    --depth;
+                }
+            }
+        }
+    };
+
+    MigraphxInferenceGuard acquireMigraphxInferenceLock() const {
+        MigraphxInferenceGuard guard;
         std::string providerLower = actualExecutionProvider_;
         std::transform(providerLower.begin(), providerLower.end(), providerLower.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         const bool usesMigraphxProvider = providerLower.find("migraphx") != std::string::npos;
         if (!usesMigraphxProvider) {
-            return std::unique_lock<std::recursive_mutex>{};
+            return guard;
         }
+
         static std::recursive_mutex* g_migraphx_infer_mutex = new std::recursive_mutex();
-        return std::unique_lock<std::recursive_mutex>(*g_migraphx_infer_mutex);
+        guard.threadLock = std::unique_lock<std::recursive_mutex>(*g_migraphx_infer_mutex);
+
+        if (!migraphxProcessLockEnabled()) {
+            return guard;
+        }
+
+        auto& depth = migraphxProcessLockDepth();
+        ++depth;
+        guard.depthIncremented = true;
+        if (depth > 1) {
+            return guard;
+        }
+
+        const auto processLockPath = resolveMigraphxProcessLockPath();
+        guard.processLock = std::make_unique<ScopedProcessFileLock>(processLockPath);
+        if (!guard.processLock->locked()) {
+            spdlog::warn("[ONNX] Failed to acquire MIGraphX process inference lock: {}",
+                         processLockPath.string());
+            guard.processLock.reset();
+        }
+        return guard;
     }
 
     // GenAI adapter (optional)
@@ -835,6 +1046,13 @@ private:
         if (texts.empty())
             return std::vector<std::vector<float>>{};
 
+        if (providerBatchLimit_.load(std::memory_order_relaxed) == 0) {
+            const size_t sharedCap = loadSharedBatchLimit(modelName_, actualExecutionProvider_);
+            if (sharedCap > 0) {
+                providerBatchLimit_.store(sharedCap, std::memory_order_relaxed);
+            }
+        }
+
         const size_t requestedBatchSize = texts.size();
         const size_t learnedBatchCap = providerBatchLimit_.load(std::memory_order_relaxed);
         if (learnedBatchCap > 0 && requestedBatchSize > learnedBatchCap) {
@@ -1003,6 +1221,20 @@ private:
                 embeddingDim_ = hidden_dim;
             }
 
+            if (b0 > 0 && static_cast<size_t>(b0) < B && (hidden_dim == 0 || DD == hidden_dim)) {
+                const size_t observedCap = static_cast<size_t>(b0);
+                const size_t mergedCap =
+                    mergeSharedBatchLimit(modelName_, actualExecutionProvider_, observedCap);
+                if (mergedCap > 0) {
+                    providerBatchLimit_.store(mergedCap, std::memory_order_relaxed);
+                }
+                spdlog::warn(
+                    "[ONNX] Provider returned smaller batch than requested: requested_B={} "
+                    "output_B={} (learned_cap={}), retrying via chunking",
+                    B, observedCap, mergedCap);
+                return runOnnxBatch(texts);
+            }
+
             if (hidden_dim > 0 && d2 > 0 && DD != hidden_dim) {
                 std::ostringstream oss;
                 oss << "Output shape mismatch: expected [B,S,D] with B=" << B;
@@ -1011,18 +1243,6 @@ private:
                 }
                 oss << ", got [" << b0 << "," << s1 << "," << d2 << "]";
                 return Error{ErrorCode::InvalidData, oss.str()};
-            }
-            if (b0 > 0 && static_cast<size_t>(b0) < B) {
-                const size_t observedCap = static_cast<size_t>(b0);
-                const size_t existingCap = providerBatchLimit_.load(std::memory_order_relaxed);
-                const size_t newCap =
-                    (existingCap == 0) ? observedCap : std::min(existingCap, observedCap);
-                providerBatchLimit_.store(newCap, std::memory_order_relaxed);
-                spdlog::warn(
-                    "[ONNX] Provider returned smaller batch than requested: requested_B={} "
-                    "output_B={} (learned_cap={}), retrying via chunking",
-                    B, observedCap, newCap);
-                return runOnnxBatch(texts);
             }
             if (b0 > 0 && static_cast<size_t>(b0) > B) {
                 spdlog::debug("[ONNX] Provider returned padded batch output: requested_B={} "
@@ -1089,6 +1309,20 @@ private:
                 embeddingDim_ = hidden_dim;
             }
 
+            if (b0 > 0 && static_cast<size_t>(b0) < B && (hidden_dim == 0 || DD == hidden_dim)) {
+                const size_t observedCap = static_cast<size_t>(b0);
+                const size_t mergedCap =
+                    mergeSharedBatchLimit(modelName_, actualExecutionProvider_, observedCap);
+                if (mergedCap > 0) {
+                    providerBatchLimit_.store(mergedCap, std::memory_order_relaxed);
+                }
+                spdlog::warn(
+                    "[ONNX] Provider returned smaller batch than requested: requested_B={} "
+                    "output_B={} (learned_cap={}), retrying via chunking",
+                    B, observedCap, mergedCap);
+                return runOnnxBatch(texts);
+            }
+
             if (hidden_dim > 0 && d1 > 0 && DD != hidden_dim) {
                 std::ostringstream oss;
                 oss << "Output shape mismatch: expected [B,D] with B=" << B;
@@ -1097,18 +1331,6 @@ private:
                 }
                 oss << ", got [" << b0 << "," << d1 << "]";
                 return Error{ErrorCode::InvalidData, oss.str()};
-            }
-            if (b0 > 0 && static_cast<size_t>(b0) < B) {
-                const size_t observedCap = static_cast<size_t>(b0);
-                const size_t existingCap = providerBatchLimit_.load(std::memory_order_relaxed);
-                const size_t newCap =
-                    (existingCap == 0) ? observedCap : std::min(existingCap, observedCap);
-                providerBatchLimit_.store(newCap, std::memory_order_relaxed);
-                spdlog::warn(
-                    "[ONNX] Provider returned smaller batch than requested: requested_B={} "
-                    "output_B={} (learned_cap={}), retrying via chunking",
-                    B, observedCap, newCap);
-                return runOnnxBatch(texts);
             }
             if (b0 > 0 && static_cast<size_t>(b0) > B) {
                 spdlog::debug("[ONNX] Provider returned padded batch output: requested_B={} "

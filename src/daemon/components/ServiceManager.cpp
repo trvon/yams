@@ -1082,6 +1082,10 @@ void ServiceManager::shutdown() {
 
     spdlog::info("[ServiceManager] Phase 7: Shutting down database");
     try {
+        if (readConnectionPool_) {
+            readConnectionPool_->shutdown();
+            readConnectionPool_.reset();
+        }
         if (connectionPool_) {
             connectionPool_->shutdown();
             connectionPool_.reset();
@@ -1552,11 +1556,58 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             spdlog::warn("Connection pool init failed: {} — continuing degraded",
                          poolInit.error().message);
         } else {
+            bool dualPoolEnabled = false;
+            if (const char* envDual = std::getenv("YAMS_DB_DUAL_POOL"); envDual && *envDual) {
+                std::string value(envDual);
+                std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+                dualPoolEnabled = (value != "0" && value != "false" && value != "off" &&
+                                   value != "no");
+            }
+
+            if (dualPoolEnabled) {
+                auto readCfg = dbPoolCfg;
+                if (const char* envReadMax = std::getenv("YAMS_DB_READ_POOL_MAX");
+                    envReadMax && *envReadMax) {
+                    try {
+                        auto v = static_cast<size_t>(std::stoul(envReadMax));
+                        if (v >= readCfg.minConnections)
+                            readCfg.maxConnections = v;
+                    } catch (...) {
+                    }
+                }
+
+                if (const char* envReadMin = std::getenv("YAMS_DB_READ_POOL_MIN");
+                    envReadMin && *envReadMin) {
+                    try {
+                        auto v = static_cast<size_t>(std::stoul(envReadMin));
+                        if (v > 0)
+                            readCfg.minConnections = v;
+                    } catch (...) {
+                    }
+                }
+
+                readConnectionPool_ =
+                    std::make_shared<metadata::ConnectionPool>(dbPath.string(), readCfg);
+                auto readPoolInit =
+                    init::record_duration("db_read_pool",
+                                          [&]() { return readConnectionPool_->initialize(); },
+                                          state_.initDurationsMs);
+                if (!readPoolInit) {
+                    spdlog::warn("Read connection pool init failed (falling back to single pool): {}",
+                                 readPoolInit.error().message);
+                    readConnectionPool_.reset();
+                } else {
+                    spdlog::info("Dual DB pool mode enabled (write/work + read-only)");
+                }
+            }
+
             auto repoRes = init::record_duration(
                 std::string(readiness::kMetadataRepo),
                 [&]() -> yams::Result<void> {
-                    metadataRepo_ =
-                        std::make_shared<metadata::MetadataRepository>(*connectionPool_);
+                    metadataRepo_ = std::make_shared<metadata::MetadataRepository>(
+                        *connectionPool_, readConnectionPool_.get());
                     state_.readiness.metadataRepoReady = true;
                     // Initialize component-owned metrics (sync with DB once at startup)
                     metadataRepo_->initializeCounters();
@@ -2919,7 +2970,31 @@ ServiceManager::co_initDatabase(boost::asio::any_io_executor exec,
         // Create connection pool and metadata repository
         yams::metadata::ConnectionPoolConfig dbCfg{};
         connectionPool_ = std::make_shared<yams::metadata::ConnectionPool>(dbPath.string(), dbCfg);
-        metadataRepo_ = std::make_shared<yams::metadata::MetadataRepository>(*connectionPool_);
+
+        bool dualPoolEnabled = false;
+        if (const char* envDual = std::getenv("YAMS_DB_DUAL_POOL"); envDual && *envDual) {
+            std::string value(envDual);
+            std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            dualPoolEnabled =
+                (value != "0" && value != "false" && value != "off" && value != "no");
+        }
+
+        if (dualPoolEnabled) {
+            auto readCfg = dbCfg;
+            readConnectionPool_ =
+                std::make_shared<yams::metadata::ConnectionPool>(dbPath.string(), readCfg);
+            auto readInit = readConnectionPool_->initialize();
+            if (!readInit) {
+                spdlog::warn("[ServiceManager::co_initDatabase] Read pool init failed (single-pool fallback): {}",
+                             readInit.error().message);
+                readConnectionPool_.reset();
+            }
+        }
+
+        metadataRepo_ = std::make_shared<yams::metadata::MetadataRepository>(
+            *connectionPool_, readConnectionPool_.get());
 
         // Mark readiness
         state_.readiness.databaseReady.store(true);

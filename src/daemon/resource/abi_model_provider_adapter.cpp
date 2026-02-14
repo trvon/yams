@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <sstream>
 #include <span>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
@@ -194,6 +195,18 @@ AbiModelProviderAdapter::generateBatchEmbeddingsFor(const std::string& modelName
                      modelName, texts.size(), static_cast<int>(st));
         return mapStatus(st, "generate_embedding_batch");
     }
+
+    if (out_batch != texts.size()) {
+        if (table_->free_embedding_batch)
+            table_->free_embedding_batch(table_->self, vecs, out_batch, out_dim);
+        std::ostringstream oss;
+        oss << "generate_embedding_batch_partial: requested_batch=" << texts.size()
+            << " returned_batch=" << out_batch << " model='" << modelName
+            << "' (retriable via smaller chunks)";
+        spdlog::warn("[ABI Adapter] {}", oss.str());
+        return Error{ErrorCode::ResourceExhausted, oss.str()};
+    }
+
     std::vector<std::vector<float>> result;
     try {
         result.resize(out_batch);

@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <filesystem>
 
+#include "../../common/env_compat.h"
 #include <yams/compat/unistd.h>
 
 namespace fs = std::filesystem;

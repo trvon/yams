@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include "../../../common/env_compat.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>

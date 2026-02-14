@@ -10,9 +10,11 @@
 ## Contents
 
 - [Executive Summary](#executive-summary)
+- [Benchmark Suite Guide](#benchmark-suite-guide)
 - [Test Environment Specifications](#test-environment-specifications)
 - [Performance Benchmarks](#performance-benchmarks)
-  - [Latest Release Runs (2026-02-12)](#latest-release-runs-2026-02-12)
+  - [Latest Release Runs (2026-01-25)](#latest-release-runs-2026-01-25)
+  - [Retrieval Result (SciFact benchmark, 2026-02-12)](#retrieval-result-scifact-benchmark-2026-02-12)
   - [Cryptographic Operations (SHA-256)](#1-cryptographic-operations-sha-256)
   - [Content Chunking (Rabin Fingerprinting)](#2-content-chunking-rabin-fingerprinting)
   - [Compression Performance (Zstandard)](#3-compression-performance-zstandard)

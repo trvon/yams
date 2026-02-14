@@ -3,6 +3,8 @@
 
 #include <cstdlib>
 
+#include "env_compat.h"
+
 #include <yams/common/test_utils.h>
 #include <yams/compat/unistd.h>
 

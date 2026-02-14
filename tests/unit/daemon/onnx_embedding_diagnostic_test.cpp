@@ -11,6 +11,8 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
 
+#include "../../common/env_compat.h"
+
 #include <atomic>
 #include <algorithm>
 #include <cmath>
