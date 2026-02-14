@@ -4,7 +4,7 @@ Product updates and occasional deep-dives.
 
 ## Subscribe
 
-- Email: `support@yamsmemory.ai` (subject: "Newsletter")
+- SourceHut list: https://lists.sr.ht/~trvon/newsletter
 - RSS (GitHub releases): https://github.com/trvon/yams/releases.atom
 
 ## What you'll get
