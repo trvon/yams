@@ -48,8 +48,7 @@ std::vector<uint8_t> run_handler_roundtrip(std::span<const uint8_t> payload,
 
     std::vector<uint8_t> request_data(payload.begin(), payload.end());
     auto fut = boost::asio::co_spawn(
-        io, handler.handle_request(std::move(request_data),
-                                   yams::compat::stop_token{}),
+        io, handler.handle_request(std::move(request_data), yams::compat::stop_token{}),
         boost::asio::use_future);
     io.run();
     return fut.get();
@@ -94,8 +93,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
                 continue;
             }
 
-            const auto payload = std::span<const uint8_t>(
-                frame.data() + MessageFramer::HEADER_SIZE, payload_size);
+            const auto payload =
+                std::span<const uint8_t>(frame.data() + MessageFramer::HEADER_SIZE, payload_size);
 
             RequestHandler::Config config;
             config.enable_streaming = (data[0] & 1) != 0;

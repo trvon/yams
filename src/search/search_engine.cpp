@@ -317,6 +317,10 @@ QueryIntent detectQueryIntent(const std::string& query) {
 }
 
 void applyIntentWeights(SearchEngineConfig& config, QueryIntent intent) {
+    if (!config.enableIntentAdaptiveWeighting) {
+        return;
+    }
+
     auto scale = [](float& weight, float factor) {
         weight = std::clamp(weight * factor, 0.0f, 1.0f);
     };
@@ -338,8 +342,8 @@ void applyIntentWeights(SearchEngineConfig& config, QueryIntent intent) {
             scale(config.kgWeight, 0.9f);
             break;
         case QueryIntent::Prose:
-            scale(config.textWeight, 1.2f);
-            scale(config.vectorWeight, 1.2f);
+            scale(config.textWeight, 1.25f);
+            scale(config.vectorWeight, 0.9f);
             scale(config.pathTreeWeight, 0.6f);
             scale(config.entityVectorWeight, 0.6f);
             scale(config.kgWeight, 0.8f);
@@ -433,7 +437,40 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
         float weight = getComponentWeight(comp.source);
         const double rank = static_cast<double>(comp.rank) + 1.0;
         double rrfScore = 1.0 / (k + rank);
-        double scoreBoost = 1.0 + std::clamp(static_cast<double>(comp.score), 0.0, 1.0);
+        double scoreScale = 1.0;
+        if (config_.enableFieldAwareWeightedRrf) {
+            scoreScale = 0.60;
+            switch (comp.source) {
+                case ComponentResult::Source::Text:
+                    scoreScale = 1.00;
+                    break;
+                case ComponentResult::Source::PathTree:
+                    scoreScale = 0.85;
+                    break;
+                case ComponentResult::Source::KnowledgeGraph:
+                    scoreScale = 0.80;
+                    break;
+                case ComponentResult::Source::Tag:
+                case ComponentResult::Source::Metadata:
+                    scoreScale = 0.65;
+                    break;
+                case ComponentResult::Source::Vector:
+                    scoreScale = 0.45;
+                    break;
+                case ComponentResult::Source::EntityVector:
+                    scoreScale = 0.35;
+                    break;
+                case ComponentResult::Source::Symbol:
+                    scoreScale = 0.75;
+                    break;
+                case ComponentResult::Source::Unknown:
+                    scoreScale = 0.60;
+                    break;
+            }
+        }
+
+        double scoreBoost =
+            1.0 + scoreScale * std::clamp(static_cast<double>(comp.score), 0.0, 1.0);
         return weight * rrfScore * scoreBoost;
     });
 }
@@ -1440,54 +1477,114 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFullText(const std
     }
 
     try {
+        auto appendResults = [&](const yams::metadata::SearchResults& searchResults,
+                                 float scorePenalty, bool dedupe,
+                                 std::unordered_set<std::string>* seenHashes) {
+            double minBm25 = 0.0;
+            double maxBm25 = 0.0;
+            bool bm25RangeInitialized = false;
+            for (const auto& sr : searchResults.results) {
+                double score = sr.score;
+                if (!bm25RangeInitialized) {
+                    minBm25 = score;
+                    maxBm25 = score;
+                    bm25RangeInitialized = true;
+                } else {
+                    minBm25 = std::min(minBm25, score);
+                    maxBm25 = std::max(maxBm25, score);
+                }
+            }
+
+            const size_t startRank = results.size();
+            for (size_t rank = 0; rank < searchResults.results.size(); ++rank) {
+                const auto& searchResult = searchResults.results[rank];
+                if (dedupe && seenHashes != nullptr &&
+                    seenHashes->contains(searchResult.document.sha256Hash)) {
+                    continue;
+                }
+
+                const auto& filePath = searchResult.document.filePath;
+                const auto& fileName = searchResult.document.fileName;
+
+                auto pruneCategory = magic::getPruneCategory(filePath);
+                bool isCodeFile = pruneCategory == magic::PruneCategory::BuildObject ||
+                                  pruneCategory == magic::PruneCategory::None;
+
+                float scoreMultiplier = isCodeFile ? 1.0f : 0.5f;
+                scoreMultiplier *= filenamePathBoost(query, filePath, fileName);
+                scoreMultiplier *= scorePenalty;
+
+                ComponentResult result;
+                result.documentHash = searchResult.document.sha256Hash;
+                result.filePath = filePath;
+                float rawScore = static_cast<float>(searchResult.score);
+                float normalizedScore =
+                    normalizedBm25Score(rawScore, config_.bm25NormDivisor, minBm25, maxBm25);
+                result.score = std::clamp(scoreMultiplier * normalizedScore, 0.0f, 1.0f);
+                result.source = ComponentResult::Source::Text;
+                result.rank = startRank + rank;
+                result.snippet = searchResult.snippet.empty()
+                                     ? std::nullopt
+                                     : std::optional<std::string>(searchResult.snippet);
+                result.debugInfo["score_multiplier"] = fmt::format("{:.3f}", scoreMultiplier);
+
+                if (seenHashes != nullptr) {
+                    seenHashes->insert(result.documentHash);
+                }
+                results.push_back(std::move(result));
+            }
+        };
+
         auto fts5Results = metadataRepo_->search(query, limit, 0);
         if (!fts5Results) {
             spdlog::debug("FTS5 search failed: {}", fts5Results.error().message);
             return results;
         }
 
-        double minBm25 = 0.0;
-        double maxBm25 = 0.0;
-        bool bm25RangeInitialized = false;
-        for (const auto& sr : fts5Results.value().results) {
-            double score = sr.score;
-            if (!bm25RangeInitialized) {
-                minBm25 = score;
-                maxBm25 = score;
-                bm25RangeInitialized = true;
-            } else {
-                minBm25 = std::min(minBm25, score);
-                maxBm25 = std::max(maxBm25, score);
+        std::unordered_set<std::string> seenHashes;
+        seenHashes.reserve(limit * 2);
+        appendResults(fts5Results.value(), 1.0f, true, &seenHashes);
+
+        if (config_.enableLexicalExpansion && results.size() < config_.lexicalExpansionMinHits) {
+            std::vector<std::string> tokens = tokenizeLower(query);
+            std::vector<std::string> expansionTerms;
+            expansionTerms.reserve(tokens.size());
+            std::unordered_set<std::string> uniqueTokens;
+            uniqueTokens.reserve(tokens.size());
+
+            for (const auto& token : tokens) {
+                if (token.size() < 3) {
+                    continue;
+                }
+                if (uniqueTokens.insert(token).second) {
+                    expansionTerms.push_back(token);
+                }
+                if (expansionTerms.size() >= 6) {
+                    break;
+                }
             }
-        }
 
-        for (size_t rank = 0; rank < fts5Results.value().results.size(); ++rank) {
-            const auto& searchResult = fts5Results.value().results[rank];
-            const auto& filePath = searchResult.document.filePath;
-            const auto& fileName = searchResult.document.fileName;
+            if (expansionTerms.size() >= 2) {
+                std::string expandedQuery;
+                expandedQuery.reserve(expansionTerms.size() * 8);
+                for (size_t i = 0; i < expansionTerms.size(); ++i) {
+                    if (i > 0) {
+                        expandedQuery += " OR ";
+                    }
+                    expandedQuery += expansionTerms[i];
+                }
 
-            auto pruneCategory = magic::getPruneCategory(filePath);
-            bool isCodeFile = pruneCategory == magic::PruneCategory::BuildObject ||
-                              pruneCategory == magic::PruneCategory::None;
-
-            float scoreMultiplier = isCodeFile ? 1.0f : 0.5f;
-            scoreMultiplier *= filenamePathBoost(query, filePath, fileName);
-
-            ComponentResult result;
-            result.documentHash = searchResult.document.sha256Hash;
-            result.filePath = filePath;
-            float rawScore = static_cast<float>(searchResult.score);
-            float normalizedScore =
-                normalizedBm25Score(rawScore, config_.bm25NormDivisor, minBm25, maxBm25);
-            result.score = std::clamp(scoreMultiplier * normalizedScore, 0.0f, 1.0f);
-            result.source = ComponentResult::Source::Text;
-            result.rank = rank;
-            result.snippet = searchResult.snippet.empty()
-                                 ? std::nullopt
-                                 : std::optional<std::string>(searchResult.snippet);
-            result.debugInfo["score_multiplier"] = fmt::format("{:.3f}", scoreMultiplier);
-
-            results.push_back(std::move(result));
+                auto expandedResults = metadataRepo_->search(expandedQuery, limit, 0);
+                if (expandedResults) {
+                    const float penalty =
+                        std::clamp(config_.lexicalExpansionScorePenalty, 0.1f, 1.0f);
+                    appendResults(expandedResults.value(), penalty, true, &seenHashes);
+                    spdlog::debug("queryFullText lexical expansion: base_hits={} expanded_hits={} "
+                                  "query='{}' expanded='{}'",
+                                  fts5Results.value().results.size(), results.size(), query,
+                                  expandedQuery);
+                }
+            }
         }
 
         spdlog::info("queryFullText: {} results for query '{}' (limit={})", results.size(),

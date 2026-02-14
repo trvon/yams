@@ -68,7 +68,7 @@ struct LatencyStats {
 };
 
 static std::int64_t percentileNearestRankMs(std::vector<std::int64_t> samples,
-                                           double percentile01) {
+                                            double percentile01) {
     if (samples.empty())
         return 0;
     if (percentile01 <= 0.0)
@@ -234,8 +234,7 @@ TEST_CASE("ONNX Diagnostic: GPU model load and embed",
         auto t0 = std::chrono::steady_clock::now();
         auto warm = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings(texts);
         auto t1 = std::chrono::steady_clock::now();
-        warmTotalMs +=
-            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        warmTotalMs += std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
         REQUIRE(warm);
     }
     UNSCOPED_INFO("  warm avg time: " << (warmTotalMs / kWarmIters) << " ms");
@@ -630,8 +629,8 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
 TEST_CASE("ONNX Diagnostic: MIGraphX config variants",
           "[daemon][onnx][diagnostic][.requires_model]") {
     auto providers = Ort::GetAvailableProviders();
-    const bool hasMIGraphX =
-        std::find(providers.begin(), providers.end(), "MIGraphXExecutionProvider") != providers.end();
+    const bool hasMIGraphX = std::find(providers.begin(), providers.end(),
+                                       "MIGraphXExecutionProvider") != providers.end();
     if (!hasMIGraphX) {
         SKIP("MIGraphXExecutionProvider not available (no ROCm / no MIGraphX EP)");
     }
@@ -742,9 +741,10 @@ TEST_CASE("ONNX Diagnostic: MIGraphX config variants",
                 if (row.error.empty()) {
                     row.warm = computeLatencyStatsMs(lat);
                     const double textsPerCall = static_cast<double>(texts.size());
-                    row.textsPerSec = row.warm.avgMs > 0
-                        ? (textsPerCall / static_cast<double>(row.warm.avgMs)) * 1000.0
-                        : 0.0;
+                    row.textsPerSec =
+                        row.warm.avgMs > 0
+                            ? (textsPerCall / static_cast<double>(row.warm.avgMs)) * 1000.0
+                            : 0.0;
                     row.ok = true;
                 }
             } catch (const std::exception& ex) {
@@ -765,32 +765,38 @@ TEST_CASE("ONNX Diagnostic: MIGraphX config variants",
     }
 
     // ---- Report ----
-    UNSCOPED_INFO("========================================================================================");
+    UNSCOPED_INFO(
+        "========================================================================================");
     UNSCOPED_INFO("  MIGraphX (ROCm) Config Variants Benchmark");
     UNSCOPED_INFO("  Load      = acquireModel() (session create / provider attach)");
     UNSCOPED_INFO("  FirstInfer = first generateBatchEmbeddings() (compile / graph init if any)");
     UNSCOPED_INFO("  Warm      = steady-state embedding latency over repeated calls");
-    UNSCOPED_INFO("========================================================================================");
-    UNSCOPED_INFO("  " << std::left << std::setw(28) << "Config" << std::setw(10) << "EP" << std::setw(10)
-                       << "Load" << std::setw(12) << "FirstInfer" << std::setw(10) << "Avg" << std::setw(10)
-                       << "p50" << std::setw(10) << "p95" << std::setw(12) << "texts/s"
+    UNSCOPED_INFO(
+        "========================================================================================");
+    UNSCOPED_INFO("  " << std::left << std::setw(28) << "Config" << std::setw(10) << "EP"
+                       << std::setw(10) << "Load" << std::setw(12) << "FirstInfer" << std::setw(10)
+                       << "Avg" << std::setw(10) << "p50" << std::setw(10) << "p95" << std::setw(12)
+                       << "texts/s"
                        << "Status");
     UNSCOPED_INFO("  " << std::string(92, '-'));
     for (const auto& r : results) {
         if (r.ok) {
             UNSCOPED_INFO("  " << std::left << std::setw(28) << r.label << std::setw(10)
-                               << (r.ep.empty() ? "?" : r.ep) << std::setw(10) << r.loadMs << std::setw(12)
-                               << r.firstInferMs << std::setw(10) << r.warm.avgMs << std::setw(10)
-                               << r.warm.p50Ms << std::setw(10) << r.warm.p95Ms << std::fixed
-                               << std::setprecision(1) << std::setw(12) << r.textsPerSec << "OK");
+                               << (r.ep.empty() ? "?" : r.ep) << std::setw(10) << r.loadMs
+                               << std::setw(12) << r.firstInferMs << std::setw(10) << r.warm.avgMs
+                               << std::setw(10) << r.warm.p50Ms << std::setw(10) << r.warm.p95Ms
+                               << std::fixed << std::setprecision(1) << std::setw(12)
+                               << r.textsPerSec << "OK");
         } else {
             UNSCOPED_INFO("  " << std::left << std::setw(28) << r.label << std::setw(10)
-                               << (r.ep.empty() ? "?" : r.ep) << std::setw(10) << r.loadMs << std::setw(12)
-                               << r.firstInferMs << std::setw(10) << "-" << std::setw(10) << "-" << std::setw(10)
-                               << "-" << std::setw(12) << "-" << "FAIL: " << r.error);
+                               << (r.ep.empty() ? "?" : r.ep) << std::setw(10) << r.loadMs
+                               << std::setw(12) << r.firstInferMs << std::setw(10) << "-"
+                               << std::setw(10) << "-" << std::setw(10) << "-" << std::setw(12)
+                               << "-" << "FAIL: " << r.error);
         }
     }
-    UNSCOPED_INFO("========================================================================================");
+    UNSCOPED_INFO(
+        "========================================================================================");
 
     // At minimum, CPU control should work.
     REQUIRE(!results.empty());

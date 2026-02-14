@@ -98,8 +98,8 @@ TEST_CASE("TunedParams: SCIENTIFIC parameters", "[unit][search_tuner][params]") 
     auto params = getTunedParams(TuningState::SCIENTIFIC);
 
     CHECK(params.rrfK == 12);
-    CHECK(params.textWeight == Approx(0.60f));
-    CHECK(params.vectorWeight == Approx(0.35f));
+    CHECK(params.textWeight == Approx(0.70f));
+    CHECK(params.vectorWeight == Approx(0.25f));
     CHECK(params.entityVectorWeight == Approx(0.00f));
     CHECK(params.pathTreeWeight == Approx(0.00f));
     CHECK(params.kgWeight == Approx(0.00f));
@@ -415,7 +415,8 @@ TEST_CASE("SearchTuner: priority order - SCIENTIFIC before PROSE", "[unit][searc
     CHECK(state == TuningState::SCIENTIFIC);
 }
 
-TEST_CASE("SearchTuner: SCIENTIFIC falls back to prose when structured", "[unit][search_tuner][edge]") {
+TEST_CASE("SearchTuner: SCIENTIFIC falls back to prose when structured",
+          "[unit][search_tuner][edge]") {
     CorpusStats stats;
     stats.docCount = 500;
     stats.codeRatio = 0.05f;

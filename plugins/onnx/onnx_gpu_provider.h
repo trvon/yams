@@ -85,11 +85,11 @@ inline std::string arenaExtendStrategyName(int v) {
     // ORT expects the string names for MIGraphX arena strategy.
     // See ORT's migraphx_execution_provider_info.cc mapping.
     switch (v) {
-    case 1:
-        return "kSameAsRequested";
-    case 0:
-    default:
-        return "kNextPowerOfTwo";
+        case 1:
+            return "kSameAsRequested";
+        case 0:
+        default:
+            return "kNextPowerOfTwo";
     }
 }
 
@@ -219,7 +219,8 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
             migraphx_opts["migraphx_fp8_enable"] = fp8 ? "1" : "0";
             migraphx_opts["migraphx_int8_enable"] = int8 ? "1" : "0";
             migraphx_opts["migraphx_exhaustive_tune"] = exhaustiveTune ? "1" : "0";
-            migraphx_opts["migraphx_arena_extend_strategy"] = detail::arenaExtendStrategyName(arenaExtend);
+            migraphx_opts["migraphx_arena_extend_strategy"] =
+                detail::arenaExtendStrategyName(arenaExtend);
 
             // Profile-aware VRAM budgeting. If YAMS_MIGRAPHX_MEM_LIMIT is set, it always wins.
             // Otherwise, set a conservative fraction of total VRAM (when detectable) so we
@@ -233,22 +234,23 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
                         gpu.vramBytes <=
                             static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
                         const double frac = detail::profileGpuMemFraction();
-                        uint64_t budget = static_cast<uint64_t>(
-                            static_cast<double>(gpu.vramBytes) * std::clamp(frac, 0.0, 1.0));
+                        uint64_t budget = static_cast<uint64_t>(static_cast<double>(gpu.vramBytes) *
+                                                                std::clamp(frac, 0.0, 1.0));
                         constexpr uint64_t kMinBudgetBytes = 256ull * 1024ull * 1024ull;
                         budget = std::clamp(budget, kMinBudgetBytes, gpu.vramBytes);
                         migraphx_opts["migraphx_mem_limit"] =
                             std::to_string(static_cast<size_t>(budget));
-                        spdlog::debug(
-                            "[ONNX] MIGraphX mem budget: {:.0f}% of VRAM ({} bytes / {} bytes) [profile_scale={:.2f}]",
-                            frac * 100.0, budget, gpu.vramBytes,
-                            yams::daemon::TuneAdvisor::profileScale());
+                        spdlog::debug("[ONNX] MIGraphX mem budget: {:.0f}% of VRAM ({} bytes / {} "
+                                      "bytes) [profile_scale={:.2f}]",
+                                      frac * 100.0, budget, gpu.vramBytes,
+                                      yams::daemon::TuneAdvisor::profileScale());
                     }
                 }
             }
 
             // Optional INT8 calibration settings
-            const bool useNativeCalTable = detail::envBool("YAMS_MIGRAPHX_USE_NATIVE_CAL_TABLE", false);
+            const bool useNativeCalTable =
+                detail::envBool("YAMS_MIGRAPHX_USE_NATIVE_CAL_TABLE", false);
             if (useNativeCalTable) {
                 migraphx_opts["migraphx_int8_use_native_calibration_table"] = "1";
             }
@@ -270,7 +272,8 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
                 std::filesystem::path p(compiledPath);
                 cacheDir = (p.extension() == ".mxr") ? p.parent_path() : p;
             } else if (!modelCacheDir.empty()) {
-                // modelCacheDir is typically the model directory (e.g., ~/.local/share/yams/models/<name>).
+                // modelCacheDir is typically the model directory (e.g.,
+                // ~/.local/share/yams/models/<name>).
                 cacheDir = std::filesystem::path(modelCacheDir);
             }
 
@@ -291,7 +294,8 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
                 if (!std::getenv(kOrtMIGraphXModelCachePathEnv) && !cacheDirStr.empty()) {
                     // Unreachable due to setEnvIfAbsent, but keep logic simple.
                     // (If setenv failed, getenv would still be null.)
-                    spdlog::warn("[ONNX] Failed to set ORT_MIGRAPHX_MODEL_CACHE_PATH; caching may fail");
+                    spdlog::warn(
+                        "[ONNX] Failed to set ORT_MIGRAPHX_MODEL_CACHE_PATH; caching may fail");
                 } else {
                     spdlog::debug("[ONNX] ORT_MIGRAPHX_MODEL_CACHE_PATH={}", cacheDirStr);
                 }
@@ -306,20 +310,20 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
                     spdlog::debug("[ONNX] MIGraphX will save compiled artifact under: {}",
                                   cacheDirStr);
                 }
-                spdlog::debug(
-                    "[ONNX] MIGraphX cache config: migraphx_model_cache_dir='{}' ORT_MIGRAPHX_MODEL_CACHE_PATH='{}'",
-                    migraphx_opts[kMIGraphXModelCacheDirKey],
-                    (std::getenv(kOrtMIGraphXModelCachePathEnv)
-                         ? std::getenv(kOrtMIGraphXModelCachePathEnv)
-                         : "(unset)"));
+                spdlog::debug("[ONNX] MIGraphX cache config: migraphx_model_cache_dir='{}' "
+                              "ORT_MIGRAPHX_MODEL_CACHE_PATH='{}'",
+                              migraphx_opts[kMIGraphXModelCacheDirKey],
+                              (std::getenv(kOrtMIGraphXModelCachePathEnv)
+                                   ? std::getenv(kOrtMIGraphXModelCachePathEnv)
+                                   : "(unset)"));
             }
 
             opts.AppendExecutionProvider(kProviderMIGraphX, migraphx_opts);
             static std::atomic<bool> logged_migraphx{false};
             if (!logged_migraphx.exchange(true)) {
-                spdlog::info(
-                    "[ONNX] MIGraphX execution provider enabled (AMD GPU via ROCm) (device_id={}, fp16={}, fp8={}, int8={}, exhaustive_tune={})",
-                    deviceId, fp16, fp8, int8, exhaustiveTune);
+                spdlog::info("[ONNX] MIGraphX execution provider enabled (AMD GPU via ROCm) "
+                             "(device_id={}, fp16={}, fp8={}, int8={}, exhaustive_tune={})",
+                             deviceId, fp16, fp8, int8, exhaustiveTune);
             } else {
                 spdlog::debug("[ONNX] MIGraphX execution provider attached (pooled session)");
             }

@@ -41,10 +41,24 @@ namespace {
 constexpr int kRequestTimeoutMs = 5000;
 constexpr int kBodyTimeoutMs = 15000;
 
-// Helper: wait until post-ingest queue drains (queued==0 && inflight==0) or timeout
-void waitForPostIngestQuiescent(const fs::path& socket, const fs::path& dataDir,
+struct BarrierStats {
+    std::uint64_t lastPostIngestQueued{0};
+    std::uint64_t lastPostIngestInflight{0};
+    std::uint64_t lastPostIngestDrained{0};
+    std::uint64_t lastIndexVisible{0};
+    std::uint32_t statusPolls{0};
+    std::uint32_t statusErrors{0};
+    std::uint32_t snapshotPolls{0};
+    std::size_t lastSnapshotCount{0};
+    std::size_t lastDocsByLabelCount{0};
+};
+
+// Helper: wait until post-ingest queue drains (queued==0 && inflight==0) or timeout.
+// Returns true when condition is observed; false on timeout.
+bool waitForPostIngestQuiescent(const fs::path& socket, const fs::path& dataDir,
                                 std::chrono::milliseconds timeout,
-                                std::chrono::milliseconds poll = 50ms) {
+                                std::chrono::milliseconds poll = 50ms,
+                                BarrierStats* stats = nullptr) {
     yams::daemon::ClientConfig cfg;
     cfg.socketPath = socket;
     cfg.dataDir = dataDir;
@@ -63,6 +77,11 @@ void waitForPostIngestQuiescent(const fs::path& socket, const fs::path& dataDir,
                 co_return;
             },
             boost::asio::detached);
+
+        if (stats) {
+            stats->statusPolls++;
+        }
+
         if (fut.wait_for(1500ms) == std::future_status::ready) {
             auto res = fut.get();
             if (res) {
@@ -72,12 +91,90 @@ void waitForPostIngestQuiescent(const fs::path& socket, const fs::path& dataDir,
                     return (it == s.requestCounts.end()) ? 0ull
                                                          : static_cast<std::uint64_t>(it->second);
                 };
-                if (getU64("post_ingest_queued") == 0 && getU64("post_ingest_inflight") == 0)
-                    return;
+
+                const auto queued = getU64("post_ingest_queued");
+                const auto inflight = getU64("post_ingest_inflight");
+                const auto drained = getU64("post_ingest_drained");
+                const auto indexVisible = getU64("index_visible");
+                if (stats) {
+                    stats->lastPostIngestQueued = queued;
+                    stats->lastPostIngestInflight = inflight;
+                    stats->lastPostIngestDrained = drained;
+                    stats->lastIndexVisible = indexVisible;
+                }
+
+                if (queued == 0 && inflight == 0)
+                    return true;
+            } else if (stats) {
+                stats->statusErrors++;
             }
+        } else if (stats) {
+            stats->statusErrors++;
         }
         std::this_thread::sleep_for(poll);
     }
+
+    return false;
+}
+
+template <typename MetadataRepoT>
+bool waitForSnapshotVisible(MetadataRepoT* repo, const std::string& snapshotId,
+                            const std::string& snapshotLabel, std::size_t minDocsByLabel,
+                            std::chrono::milliseconds timeout,
+                            std::chrono::milliseconds poll = 25ms, BarrierStats* stats = nullptr) {
+    if (!repo || snapshotId.empty()) {
+        return false;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (stats) {
+            stats->snapshotPolls++;
+        }
+
+        auto snaps = repo->listTreeSnapshots(256);
+        if (snaps) {
+            auto records = snaps.value();
+            std::sort(records.begin(), records.end(), [](const auto& lhs, const auto& rhs) {
+                if (lhs.createdTime != rhs.createdTime)
+                    return lhs.createdTime > rhs.createdTime;
+                return lhs.snapshotId > rhs.snapshotId;
+            });
+
+            if (stats) {
+                stats->lastSnapshotCount = records.size();
+            }
+
+            auto it = std::find_if(records.begin(), records.end(),
+                                   [&](const auto& rec) { return rec.snapshotId == snapshotId; });
+            if (it != records.end()) {
+                bool labelOk = true;
+                if (!snapshotLabel.empty()) {
+                    auto labelIt = it->metadata.find("snapshot_label");
+                    labelOk = (labelIt != it->metadata.end() && labelIt->second == snapshotLabel);
+                }
+
+                std::size_t docsByLabelCount = 0;
+                if (minDocsByLabel > 0 && !snapshotLabel.empty()) {
+                    auto docsByLabel = repo->findDocumentsBySnapshotLabel(snapshotLabel);
+                    if (docsByLabel) {
+                        docsByLabelCount = docsByLabel.value().size();
+                    }
+                    if (stats) {
+                        stats->lastDocsByLabelCount = docsByLabelCount;
+                    }
+                }
+
+                if (labelOk && docsByLabelCount >= minDocsByLabel) {
+                    return true;
+                }
+            }
+        }
+
+        std::this_thread::sleep_for(poll);
+    }
+
+    return false;
 }
 
 } // namespace
@@ -177,7 +274,13 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AddViaDaemonAndListGetGrep"
     REQUIRE(addRes);
     REQUIRE_FALSE(addRes.value().hash.empty());
 
-    waitForPostIngestQuiescent(socketPath_, storageDir_, 5000ms);
+    BarrierStats barrierStats;
+    const bool quiescent =
+        waitForPostIngestQuiescent(socketPath_, storageDir_, 5000ms, 50ms, &barrierStats);
+    CAPTURE(barrierStats.statusPolls, barrierStats.statusErrors, barrierStats.lastPostIngestQueued,
+            barrierStats.lastPostIngestInflight, barrierStats.lastPostIngestDrained,
+            barrierStats.lastIndexVisible);
+    REQUIRE(quiescent);
 
     // 3) List via RetrievalService
     RetrievalService rsvc;
@@ -271,7 +374,13 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "SearchPersistsRetrievalServ
     auto addRes = ing.addViaDaemon(addOpts);
     REQUIRE(addRes);
 
-    waitForPostIngestQuiescent(socketPath_, storageDir_, 5000ms);
+    BarrierStats barrierStats;
+    const bool quiescent =
+        waitForPostIngestQuiescent(socketPath_, storageDir_, 5000ms, 50ms, &barrierStats);
+    CAPTURE(barrierStats.statusPolls, barrierStats.statusErrors, barrierStats.lastPostIngestQueued,
+            barrierStats.lastPostIngestInflight, barrierStats.lastPostIngestDrained,
+            barrierStats.lastIndexVisible);
+    REQUIRE(quiescent);
 
     yams::daemon::ClientConfig cfg;
     cfg.socketPath = socketPath_;
@@ -790,7 +899,8 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
     REQUIRE(ctx.metadataRepo != nullptr);
 
     const std::string snapshotId =
-        "it-snap-nondir-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        "it-snap-nondir-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     const std::string snapshotLabel = "it-snapshot-nondir";
 
     auto doc1 = fixtures_->createTextFixture("snapshot/non_dir/one.txt", "snapshot one", {"snap"});
@@ -829,9 +939,8 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
 
     auto snaps = ctx.metadataRepo->listTreeSnapshots(200);
     REQUIRE(snaps);
-    auto it = std::find_if(snaps.value().begin(), snaps.value().end(), [&](const auto& rec) {
-        return rec.snapshotId == snapshotId;
-    });
+    auto it = std::find_if(snaps.value().begin(), snaps.value().end(),
+                           [&](const auto& rec) { return rec.snapshotId == snapshotId; });
     REQUIRE(it != snaps.value().end());
     CHECK(it->metadata.count("snapshot_label") > 0);
     CHECK(it->metadata.at("snapshot_label") == snapshotLabel);
@@ -855,7 +964,8 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
     REQUIRE(ctx.metadataRepo != nullptr);
 
     const std::string snapshotId =
-        "it-snap-dir-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        "it-snap-dir-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     const std::string snapshotLabel = "it-snapshot-directory";
 
     fs::create_directories(fixtures_->root() / "snapshot" / "dir_add");
@@ -872,15 +982,28 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
     dirOpts.timeoutMs = kRequestTimeoutMs;
     dirOpts.snapshotId = snapshotId;
     dirOpts.snapshotLabel = snapshotLabel;
+    dirOpts.waitForProcessing = true;
+    dirOpts.waitTimeoutSeconds = 10;
     REQUIRE(ing.addViaDaemon(dirOpts));
 
-    waitForPostIngestQuiescent(socketPath_, storageDir_, 5000ms);
+    BarrierStats barrierStats;
+    const bool quiescent =
+        waitForPostIngestQuiescent(socketPath_, storageDir_, 5000ms, 50ms, &barrierStats);
+    CAPTURE(barrierStats.statusPolls, barrierStats.statusErrors, barrierStats.lastPostIngestQueued,
+            barrierStats.lastPostIngestInflight, barrierStats.lastPostIngestDrained,
+            barrierStats.lastIndexVisible);
+    REQUIRE(quiescent);
+
+    const bool snapshotVisible = waitForSnapshotVisible(
+        ctx.metadataRepo.get(), snapshotId, snapshotLabel, 0, 5000ms, 25ms, &barrierStats);
+    CAPTURE(barrierStats.snapshotPolls, barrierStats.lastSnapshotCount,
+            barrierStats.lastDocsByLabelCount);
+    REQUIRE(snapshotVisible);
 
     auto snaps = ctx.metadataRepo->listTreeSnapshots(200);
     REQUIRE(snaps);
-    auto it = std::find_if(snaps.value().begin(), snaps.value().end(), [&](const auto& rec) {
-        return rec.snapshotId == snapshotId;
-    });
+    auto it = std::find_if(snaps.value().begin(), snaps.value().end(),
+                           [&](const auto& rec) { return rec.snapshotId == snapshotId; });
     REQUIRE(it != snaps.value().end());
     CHECK(it->metadata.count("snapshot_label") > 0);
     CHECK(it->metadata.at("snapshot_label") == snapshotLabel);

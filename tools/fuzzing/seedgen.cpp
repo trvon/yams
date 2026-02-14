@@ -57,7 +57,8 @@ bool writeFile(const fs::path& path, std::span<const uint8_t> bytes) {
     if (!out.is_open()) {
         return false;
     }
-    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    out.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
     return static_cast<bool>(out);
 }
 

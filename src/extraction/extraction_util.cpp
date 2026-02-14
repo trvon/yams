@@ -11,9 +11,9 @@ namespace yams::extraction::util {
 namespace {
 
 std::optional<std::string> extractTextFromBytes(const std::vector<std::byte>& bytes,
-                                               const std::string& mime,
-                                               const std::string& extension,
-                                               const ContentExtractorList& extractors) {
+                                                const std::string& mime,
+                                                const std::string& extension,
+                                                const ContentExtractorList& extractors) {
     // Normalize extension for factory lookup
     std::string normalizedExt = extension;
     if (!normalizedExt.empty() && normalizedExt[0] != '.') {
@@ -35,8 +35,7 @@ std::optional<std::string> extractTextFromBytes(const std::vector<std::byte>& by
                         std::span<const std::byte>(bytes.data(), bytes.size()), cfg);
                     if (result && result.value().isSuccess() && !result.value().text.empty()) {
                         spdlog::debug("Extracted {} bytes via {} for extension {}",
-                                      result.value().text.size(), extractor->name(),
-                                      normalizedExt);
+                                      result.value().text.size(), extractor->name(), normalizedExt);
                         return result.value().text;
                     }
                 }
@@ -110,8 +109,7 @@ std::optional<std::string> extractDocumentText(std::shared_ptr<yams::api::IConte
 std::optional<ExtractedTextAndBytes>
 extractDocumentTextAndBytes(std::shared_ptr<yams::api::IContentStore> store,
                             const std::string& hash, const std::string& mime,
-                            const std::string& extension,
-                            const ContentExtractorList& extractors) {
+                            const std::string& extension, const ContentExtractorList& extractors) {
     if (!store) {
         return std::nullopt;
     }

@@ -329,6 +329,21 @@ public:
             return Result<void>();
         }
 
+        auto providerLower = actualExecutionProvider_;
+        std::transform(providerLower.begin(), providerLower.end(), providerLower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const bool usesMigraphxProvider = providerLower.find("migraphx") != std::string::npos;
+
+        std::unique_lock<std::recursive_mutex> migraphxLoadLock;
+        if (usesMigraphxProvider) {
+            // ROCm/HSA provider initialization and first session materialization can race when
+            // multiple sessions for the same model are created concurrently. Serialize MIGraphX
+            // load paths to avoid non-deterministic GPU faults during startup.
+            static std::recursive_mutex* g_migraphx_load_mutex = new std::recursive_mutex();
+            migraphxLoadLock = std::unique_lock<std::recursive_mutex>(*g_migraphx_load_mutex);
+            spdlog::debug("[ONNX] MIGraphX load gate acquired for '{}'", modelName_);
+        }
+
         try {
 #ifdef YAMS_ENABLE_ONNX_GENAI
             if (genai_) {
@@ -641,6 +656,18 @@ private:
         actualExecutionProvider_ = onnx_util::appendGpuProvider(*sessionOptions_, cacheDir);
     }
 
+    std::unique_lock<std::recursive_mutex> acquireMigraphxInferenceLock() const {
+        std::string providerLower = actualExecutionProvider_;
+        std::transform(providerLower.begin(), providerLower.end(), providerLower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const bool usesMigraphxProvider = providerLower.find("migraphx") != std::string::npos;
+        if (!usesMigraphxProvider) {
+            return std::unique_lock<std::recursive_mutex>{};
+        }
+        static std::recursive_mutex* g_migraphx_infer_mutex = new std::recursive_mutex();
+        return std::unique_lock<std::recursive_mutex>(*g_migraphx_infer_mutex);
+    }
+
     // GenAI adapter (optional)
 #ifdef YAMS_ENABLE_ONNX_GENAI
     std::unique_ptr<OnnxGenAIAdapter> genai_;
@@ -652,6 +679,8 @@ private:
 
     // Helper that performs tokenization + ONNX run + pooling for single input
     Result<std::vector<float>> runOnnx(const std::string& t) {
+        auto migraphxInferenceLock = acquireMigraphxInferenceLock();
+
         const size_t seq_len = maxSequenceLength_ > 0 ? maxSequenceLength_ : 512;
         auto tokens = preprocessor_.tokenize(t);
         tokens = preprocessor_.truncateTokens(tokens, seq_len);
@@ -801,8 +830,35 @@ private:
 
     // Helper that performs batched tokenization + single ONNX run + pooling
     Result<std::vector<std::vector<float>>> runOnnxBatch(const std::vector<std::string>& texts) {
+        auto migraphxInferenceLock = acquireMigraphxInferenceLock();
+
         if (texts.empty())
             return std::vector<std::vector<float>>{};
+
+        const size_t requestedBatchSize = texts.size();
+        const size_t learnedBatchCap = providerBatchLimit_.load(std::memory_order_relaxed);
+        if (learnedBatchCap > 0 && requestedBatchSize > learnedBatchCap) {
+            std::vector<std::vector<float>> merged;
+            merged.reserve(requestedBatchSize);
+            for (size_t offset = 0; offset < requestedBatchSize; offset += learnedBatchCap) {
+                const size_t count =
+                    std::min(learnedBatchCap, static_cast<size_t>(requestedBatchSize - offset));
+                std::vector<std::string> chunk;
+                chunk.reserve(count);
+                for (size_t i = 0; i < count; ++i) {
+                    chunk.push_back(texts[offset + i]);
+                }
+                auto chunkResult = runOnnxBatch(chunk);
+                if (!chunkResult) {
+                    return chunkResult.error();
+                }
+                auto& vectors = chunkResult.value();
+                merged.insert(merged.end(), std::make_move_iterator(vectors.begin()),
+                              std::make_move_iterator(vectors.end()));
+            }
+            return merged;
+        }
+
         const size_t seq_len = maxSequenceLength_ > 0 ? maxSequenceLength_ : 512;
 
         // Pass 1: tokenize + truncate (no padding yet)
@@ -947,8 +1003,7 @@ private:
                 embeddingDim_ = hidden_dim;
             }
 
-            if ((b0 > 0 && static_cast<size_t>(b0) < B) ||
-                (hidden_dim > 0 && d2 > 0 && DD != hidden_dim)) {
+            if (hidden_dim > 0 && d2 > 0 && DD != hidden_dim) {
                 std::ostringstream oss;
                 oss << "Output shape mismatch: expected [B,S,D] with B=" << B;
                 if (hidden_dim > 0) {
@@ -957,10 +1012,22 @@ private:
                 oss << ", got [" << b0 << "," << s1 << "," << d2 << "]";
                 return Error{ErrorCode::InvalidData, oss.str()};
             }
+            if (b0 > 0 && static_cast<size_t>(b0) < B) {
+                const size_t observedCap = static_cast<size_t>(b0);
+                const size_t existingCap = providerBatchLimit_.load(std::memory_order_relaxed);
+                const size_t newCap =
+                    (existingCap == 0) ? observedCap : std::min(existingCap, observedCap);
+                providerBatchLimit_.store(newCap, std::memory_order_relaxed);
+                spdlog::warn(
+                    "[ONNX] Provider returned smaller batch than requested: requested_B={} "
+                    "output_B={} (learned_cap={}), retrying via chunking",
+                    B, observedCap, newCap);
+                return runOnnxBatch(texts);
+            }
             if (b0 > 0 && static_cast<size_t>(b0) > B) {
-                spdlog::debug(
-                    "[ONNX] Provider returned padded batch output: requested_B={} output_B={} (using first B)",
-                    B, b0);
+                spdlog::debug("[ONNX] Provider returned padded batch output: requested_B={} "
+                              "output_B={} (using first B)",
+                              B, b0);
             }
             const float* data = out.GetTensorData<float>();
             result.resize(B, std::vector<float>(hidden_dim, 0.0f));
@@ -1022,8 +1089,7 @@ private:
                 embeddingDim_ = hidden_dim;
             }
 
-            if ((b0 > 0 && static_cast<size_t>(b0) < B) ||
-                (hidden_dim > 0 && d1 > 0 && DD != hidden_dim)) {
+            if (hidden_dim > 0 && d1 > 0 && DD != hidden_dim) {
                 std::ostringstream oss;
                 oss << "Output shape mismatch: expected [B,D] with B=" << B;
                 if (hidden_dim > 0) {
@@ -1032,10 +1098,22 @@ private:
                 oss << ", got [" << b0 << "," << d1 << "]";
                 return Error{ErrorCode::InvalidData, oss.str()};
             }
+            if (b0 > 0 && static_cast<size_t>(b0) < B) {
+                const size_t observedCap = static_cast<size_t>(b0);
+                const size_t existingCap = providerBatchLimit_.load(std::memory_order_relaxed);
+                const size_t newCap =
+                    (existingCap == 0) ? observedCap : std::min(existingCap, observedCap);
+                providerBatchLimit_.store(newCap, std::memory_order_relaxed);
+                spdlog::warn(
+                    "[ONNX] Provider returned smaller batch than requested: requested_B={} "
+                    "output_B={} (learned_cap={}), retrying via chunking",
+                    B, observedCap, newCap);
+                return runOnnxBatch(texts);
+            }
             if (b0 > 0 && static_cast<size_t>(b0) > B) {
-                spdlog::debug(
-                    "[ONNX] Provider returned padded batch output: requested_B={} output_B={} (using first B)",
-                    B, b0);
+                spdlog::debug("[ONNX] Provider returned padded batch output: requested_B={} "
+                              "output_B={} (using first B)",
+                              B, b0);
             }
             const float* data = out.GetTensorData<float>();
             result.resize(B);
@@ -1081,6 +1159,7 @@ private:
     bool isLoaded_ = false;
     bool test_mode_ = false;
     bool dynamicPaddingEnabled_ = true; // controlled by YAMS_ONNX_DYNAMIC_PADDING
+    std::atomic<size_t> providerBatchLimit_{0};
 
     enum class Pooling { MEAN, CLS, MAX };
     Pooling pooling_mode_ = Pooling::MEAN;
@@ -1143,8 +1222,7 @@ private:
                 if (embeddingDim_ == 0) {
                     if (j.contains("embedding_dimension") &&
                         j["embedding_dimension"].is_number_integer()) {
-                        embeddingDim_ =
-                            static_cast<size_t>(j["embedding_dimension"].get<int>());
+                        embeddingDim_ = static_cast<size_t>(j["embedding_dimension"].get<int>());
                     }
                     // Hidden size often present in HF config (standard models use hidden_size,
                     // Nomic models use n_embd)
@@ -2008,7 +2086,8 @@ Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
 
 void OnnxModelPool::evictLRU(size_t numToEvict) {
     if (runtimeGpuEnabled_ && !allowGpuAutoUnload()) {
-        spdlog::debug("Skipping LRU model eviction on GPU path (set YAMS_ONNX_GPU_AUTO_UNLOAD=1 to enable)");
+        spdlog::debug(
+            "Skipping LRU model eviction on GPU path (set YAMS_ONNX_GPU_AUTO_UNLOAD=1 to enable)");
         return;
     }
 

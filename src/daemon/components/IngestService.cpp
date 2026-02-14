@@ -169,6 +169,9 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
         } else {
             spdlog::info("Successfully stored directory from ingest queue: {}", req.path);
             const auto& serviceResp = result.value();
+            if (sm && !serviceResp.snapshotId.empty()) {
+                sm->onSnapshotPersisted();
+            }
 
             if (sm && sm->getPostIngestQueue()) {
                 constexpr std::size_t kBatchSize = 128;

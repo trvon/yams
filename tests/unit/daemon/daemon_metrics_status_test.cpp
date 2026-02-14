@@ -580,12 +580,28 @@ TEST_CASE("ServiceManager: Search load metrics", "[daemon][metrics][search]") {
 
     SECTION("Search load metrics return valid structure") {
         auto metrics = svc.getSearchLoadMetrics();
-        // Before search engine is built, metrics should still return valid values
-        // (active=1 if engine exists, 0 otherwise)
-        REQUIRE(metrics.active <= 1); // 0 or 1
-        REQUIRE(metrics.queued == 0); // No queue in synchronous model
-        // concurrencyLimit is 1 when engine exists, 0 otherwise
-        REQUIRE(metrics.concurrencyLimit <= 1); // 0 or 1
+        REQUIRE(metrics.active == 0);
+        REQUIRE(metrics.queued == 0);
+        REQUIRE(metrics.concurrencyLimit > 0);
+    }
+
+    SECTION("Search lifecycle counters update load metrics") {
+        svc.onSearchRequestQueued();
+        auto queued = svc.getSearchLoadMetrics();
+        REQUIRE(queued.queued == 1);
+        REQUIRE(queued.active == 0);
+
+        const auto cap = queued.concurrencyLimit;
+        REQUIRE(svc.tryStartSearchRequest(cap));
+
+        auto started = svc.getSearchLoadMetrics();
+        REQUIRE(started.queued == 0);
+        REQUIRE(started.active == 1);
+
+        svc.onSearchRequestFinished();
+        auto finished = svc.getSearchLoadMetrics();
+        REQUIRE(finished.active == 0);
+        REQUIRE(finished.queued == 0);
     }
 }
 

@@ -251,7 +251,12 @@ void TuningManager::tick_once() {
     if (!sm_ || !state_)
         return;
 
-    // Don't perform tuning until services are at least partially ready,
+    // Resource governor must keep running during startup so pressure/readiness
+    // state remains current even before all metadata services are ready.
+    auto& governor = ResourceGovernor::instance();
+    ResourceSnapshot govSnap = governor.tick(sm_);
+
+    // Don't perform adaptive tuning until services are at least partially ready,
     // to avoid acting on default PoolManager configs.
     if (!state_->readiness.metadataRepoReady.load()) {
         return;
@@ -265,9 +270,6 @@ void TuningManager::tick_once() {
     // =========================================================================
     // Resource Governor: collect metrics and respond to memory pressure
     // =========================================================================
-    auto& governor = ResourceGovernor::instance();
-    ResourceSnapshot govSnap = governor.tick(sm_);
-
     // Dynamically clamp ONNX concurrency to governor caps (keeps global pools aligned)
     try {
         auto& registry = OnnxConcurrencyRegistry::instance();

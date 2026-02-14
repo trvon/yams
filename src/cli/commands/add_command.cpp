@@ -646,8 +646,7 @@ public:
                             spdlog::warn("Daemon add failed for file '{}': {}",
                                          singleFiles[i].string(), msg);
                             resumeProgress();
-                            daemonFailures.emplace_back(singleFiles[i],
-                                                        Error{err.code, msg});
+                            daemonFailures.emplace_back(singleFiles[i], Error{err.code, msg});
                         }
                         if (daemonSpinner.enabled()) {
                             daemonSpinner.setCounts(completedRequests, totalDaemonRequests);
@@ -807,8 +806,8 @@ private:
         size_t ok = 0, failed = 0;
         for (const auto& p : paths) {
             if (p.string() == "-") {
-                auto r =
-                    storeFromStdinWithServices(*appContext, effectiveSnapshotId, effectiveSnapshotLabel);
+                auto r = storeFromStdinWithServices(*appContext, effectiveSnapshotId,
+                                                    effectiveSnapshotLabel);
                 if (r) {
                     ok++;
                 } else {
@@ -822,8 +821,8 @@ private:
                 continue;
             }
             if (std::filesystem::is_directory(p)) {
-                auto r =
-                    storeDirectoryWithServices(*appContext, p, effectiveSnapshotId, effectiveSnapshotLabel);
+                auto r = storeDirectoryWithServices(*appContext, p, effectiveSnapshotId,
+                                                    effectiveSnapshotLabel);
                 if (r) {
                     ok++;
                 } else {

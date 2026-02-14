@@ -170,7 +170,7 @@ public:
      * @brief Resolve embedding chunk-selection policy from config with env overrides.
      *
      * Config keys:
-    * - embeddings.selection.strategy = ranked|intro_headings
+     * - embeddings.selection.strategy = ranked|intro_headings
      * - embeddings.selection.mode = full|budgeted|adaptive
      * - embeddings.selection.max_chunks_per_doc = int
      * - embeddings.selection.max_chars_per_doc = int
@@ -178,7 +178,7 @@ public:
      * - embeddings.selection.intro_boost = float
      *
      * Environment overrides:
-    * - YAMS_EMBED_SELECTION_STRATEGY
+     * - YAMS_EMBED_SELECTION_STRATEGY
      * - YAMS_EMBED_SELECTION_MODE
      * - YAMS_EMBED_MAX_CHUNKS_PER_DOC
      * - YAMS_EMBED_MAX_CHARS_PER_DOC

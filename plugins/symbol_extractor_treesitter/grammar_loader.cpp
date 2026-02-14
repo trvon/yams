@@ -175,8 +175,7 @@ GrammarLoader::loadGrammar(std::string_view language) {
     const auto* spec = findSpec(language);
     if (!spec) {
         return tl::unexpected(GrammarLoadError{
-            GrammarLoadError::NOT_FOUND,
-            fmt::format("Language '{}' not supported", language)});
+            GrammarLoadError::NOT_FOUND, fmt::format("Language '{}' not supported", language)});
     }
 
     auto candidates = getLibraryCandidates(language);
@@ -323,13 +322,13 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
         }
 
 #ifdef __APPLE__
-    std::string lib_name = fmt::format("libtree-sitter-{}.dylib", language);
+        std::string lib_name = fmt::format("libtree-sitter-{}.dylib", language);
         std::string flags = "-dynamiclib";
 #elif defined(_WIN32)
-    std::string lib_name = fmt::format("tree-sitter-{}.dll", language);
+        std::string lib_name = fmt::format("tree-sitter-{}.dll", language);
         std::string flags = "-shared";
 #else
-    std::string lib_name = fmt::format("libtree-sitter-{}.so", language);
+        std::string lib_name = fmt::format("libtree-sitter-{}.so", language);
         std::string flags = "-shared -fPIC";
 #endif
 

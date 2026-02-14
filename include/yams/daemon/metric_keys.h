@@ -101,6 +101,9 @@ constexpr std::string_view kSearchConcurrencyLimit = "search_concurrency_limit";
 
 // Ingestion metrics
 constexpr std::string_view kDeferredQueueDepth = "deferred_queue_depth";
+constexpr std::string_view kSnapshotPersisted = "snapshot_persisted";
+constexpr std::string_view kPostIngestDrained = "post_ingest_drained";
+constexpr std::string_view kIndexVisible = "index_visible";
 
 // Storage metrics
 constexpr std::string_view kStorageLogicalBytes = "storage_logical_bytes";

@@ -734,8 +734,9 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         if (job.skipExisting) {
             auto hasEmbedRes = meta_->hasDocumentEmbeddingByHash(pd.hash);
             if (hasEmbedRes && hasEmbedRes.value()) {
-                spdlog::debug("EmbeddingService: skipExisting=true, already embedded (prepared): {}",
-                              pd.hash);
+                spdlog::debug(
+                    "EmbeddingService: skipExisting=true, already embedded (prepared): {}",
+                    pd.hash);
                 skipped++;
                 continue;
             }
@@ -879,15 +880,13 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
         for (const auto& c : pd->chunks) {
             totalChunkChars += static_cast<uint64_t>(c.content.size());
-            allChunks.push_back(
-                {docIdx, c.chunkId, c.content, c.startOffset, c.endOffset, true});
+            allChunks.push_back({docIdx, c.chunkId, c.content, c.startOffset, c.endOffset, true});
         }
     }
 
     // Chunk any remaining docs the legacy way.
-    const bool needChunker =
-        std::any_of(docHasPreparedChunks.begin(), docHasPreparedChunks.end(),
-                    [](bool v) { return !v; });
+    const bool needChunker = std::any_of(docHasPreparedChunks.begin(), docHasPreparedChunks.end(),
+                                         [](bool v) { return !v; });
 
     std::unique_ptr<yams::vector::DocumentChunker> chunker;
     if (needChunker) {
@@ -932,8 +931,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                 std::string chunkId = c.chunk_id.empty()
                                           ? yams::vector::utils::generateChunkId(doc.hash, i)
                                           : c.chunk_id;
-                allChunks.push_back({docIdx, chunkId, std::move(c.content), c.start_offset,
-                                     c.end_offset, false});
+                allChunks.push_back(
+                    {docIdx, chunkId, std::move(c.content), c.start_offset, c.end_offset, false});
                 totalChunkChars += static_cast<uint64_t>(allChunks.back().content.size());
             }
         }
@@ -959,14 +958,12 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             }
             std::string firstLine = text.substr(0, lineEnd);
             firstLine.erase(firstLine.begin(),
-                            std::find_if(firstLine.begin(), firstLine.end(), [](unsigned char ch) {
-                                return !std::isspace(ch);
-                            }));
-            firstLine.erase(
-                std::find_if(firstLine.rbegin(), firstLine.rend(), [](unsigned char ch) {
-                    return !std::isspace(ch);
-                }).base(),
-                firstLine.end());
+                            std::find_if(firstLine.begin(), firstLine.end(),
+                                         [](unsigned char ch) { return !std::isspace(ch); }));
+            firstLine.erase(std::find_if(firstLine.rbegin(), firstLine.rend(),
+                                         [](unsigned char ch) { return !std::isspace(ch); })
+                                .base(),
+                            firstLine.end());
             if (firstLine.empty()) {
                 return false;
             }
@@ -1026,8 +1023,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                 if (effectiveMaxChunks > 0) {
                     effectiveMaxChunks = std::min<std::size_t>(
                         std::max<std::size_t>(effectiveMaxChunks, 4u),
-                        std::max<std::size_t>(effectiveMaxChunks,
-                                              4u + (localChunkCount / 12u)));
+                        std::max<std::size_t>(effectiveMaxChunks, 4u + (localChunkCount / 12u)));
                 }
                 if (effectiveMaxChars > 0) {
                     effectiveMaxChars =
@@ -1098,10 +1094,9 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                 scored.push_back(ScoredChunk{score, idx});
             }
 
-            std::stable_sort(scored.begin(), scored.end(),
-                             [](const ScoredChunk& a, const ScoredChunk& b) {
-                                 return a.score > b.score;
-                             });
+            std::stable_sort(
+                scored.begin(), scored.end(),
+                [](const ScoredChunk& a, const ScoredChunk& b) { return a.score > b.score; });
 
             std::size_t selectedCount = 0;
             std::size_t selectedChars = 0;
@@ -1139,14 +1134,15 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             allChunks = std::move(selectedChunks);
             totalChunkChars = totalSelectedChars;
             if (timingEnabled || poolDebug) {
-                spdlog::info(
-                    "[EmbeddingService] chunk_selection mode={} selected_chunks={} dropped_chunks={} "
-                    "max_chunks_per_doc={} max_chars_per_doc={} selected_chars={}",
-                    selectionCfg.mode == ConfigResolver::EmbeddingSelectionPolicy::Mode::Budgeted
-                        ? "budgeted"
-                        : "adaptive",
-                    allChunks.size(), droppedChunks, selectionCfg.maxChunksPerDoc,
-                    selectionCfg.maxCharsPerDoc, totalChunkChars);
+                spdlog::info("[EmbeddingService] chunk_selection mode={} selected_chunks={} "
+                             "dropped_chunks={} "
+                             "max_chunks_per_doc={} max_chars_per_doc={} selected_chars={}",
+                             selectionCfg.mode ==
+                                     ConfigResolver::EmbeddingSelectionPolicy::Mode::Budgeted
+                                 ? "budgeted"
+                                 : "adaptive",
+                             allChunks.size(), droppedChunks, selectionCfg.maxChunksPerDoc,
+                             selectionCfg.maxCharsPerDoc, totalChunkChars);
             }
         }
     }

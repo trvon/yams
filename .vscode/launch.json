@@ -2,112 +2,140 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug: yams-daemon (Installed - Windows)",
-      "type": "cppvsdbg",
+      "name": "Debug: yams-daemon (builddir - Repro GPU)",
+      "type": "cppdbg",
       "request": "launch",
-      "program": "${env:LOCALAPPDATA}\\Programs\\yams\\bin\\yams-daemon.exe",
+      "program": "${workspaceFolder}/builddir/src/daemon/yams-daemon",
       "args": [
         "--foreground",
-        "--log-level",
-        "debug"
-      ],
-      "cwd": "${env:LOCALAPPDATA}\\yams",
-      "environment": [
-        {
-          "name": "YAMS_LOG_LEVEL",
-          "value": "debug"
-        }
-      ],
-      "stopAtEntry": false,
-      "console": "integratedTerminal",
-      "symbolSearchPath": "${workspaceFolder}\\build\\release"
-    },
-    {
-      "name": "Debug: yams-daemon (builddir - Debug)",
-      "type": "cppvsdbg",
-      "request": "launch",
-      "program": "${workspaceFolder}\\builddir\\src\\daemon\\yams-daemon.exe",
-      "args": [
-        "--foreground",
+        "--socket",
+        "${input:yamsDaemonSocket}",
         "--log-level",
         "debug"
       ],
       "cwd": "${workspaceFolder}",
-      "preLaunchTask": "meson-build-debug",
+      "preLaunchTask": "build (Debug)",
       "environment": [
         {
           "name": "YAMS_LOG_LEVEL",
           "value": "debug"
+        },
+        {
+          "name": "YAMS_ONNX_FORCE_CPU",
+          "value": "0"
+        },
+        {
+          "name": "YAMS_DAEMON_SOCKET",
+          "value": "${input:yamsDaemonSocket}"
         }
       ],
       "stopAtEntry": false,
-      "console": "integratedTerminal"
+      "externalConsole": false,
+      "linux": {
+        "MIMode": "gdb",
+        "miDebuggerPath": "/usr/bin/gdb"
+      },
+      "osx": {
+        "MIMode": "lldb"
+      },
+      "windows": {
+        "program": "${workspaceFolder}\\builddir\\src\\daemon\\yams-daemon.exe"
+      }
     },
     {
-      "name": "Debug: yams-daemon (build/release - Release)",
-      "type": "cppvsdbg",
+      "name": "Debug: yams-daemon (builddir - Control CPU)",
+      "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}\\build\\release\\src\\daemon\\yams-daemon.exe",
+      "program": "${workspaceFolder}/builddir/src/daemon/yams-daemon",
       "args": [
         "--foreground",
+        "--socket",
+        "${input:yamsDaemonSocket}",
         "--log-level",
-        "${input:yamsLogLevel}"
+        "debug"
       ],
       "cwd": "${workspaceFolder}",
-      "preLaunchTask": "meson-build-release",
+      "preLaunchTask": "build (Debug)",
       "environment": [
         {
           "name": "YAMS_LOG_LEVEL",
-          "value": "${input:yamsLogLevel}"
-        }
-      ],
-      "stopAtEntry": false,
-      "console": "integratedTerminal"
-    },
-    {
-      "name": "Debug: yams-cli (builddir - Debug)",
-      "type": "cppvsdbg",
-      "request": "launch",
-      "program": "${workspaceFolder}\\builddir\\tools\\yams-cli\\yams-cli.exe",
-      "args": [
-        "${input:yamsCliArguments}"
-      ],
-      "cwd": "${workspaceFolder}",
-      "preLaunchTask": "meson-build-debug",
-      "environment": [
+          "value": "debug"
+        },
         {
-          "name": "YAMS_LOG_LEVEL",
-          "value": "${input:yamsLogLevel}"
-        }
-      ],
-      "stopAtEntry": false,
-      "console": "integratedTerminal"
-    },
-    {
-      "name": "Debug: yams-cli (build/release - Release)",
-      "type": "cppvsdbg",
-      "request": "launch",
-      "program": "${workspaceFolder}\\build\\release\\tools\\yams-cli\\yams-cli.exe",
-      "args": [
-        "${input:yamsCliArguments}"
-      ],
-      "cwd": "${workspaceFolder}",
-      "preLaunchTask": "meson-build-release",
-      "environment": [
+          "name": "YAMS_ONNX_FORCE_CPU",
+          "value": "1"
+        },
         {
-          "name": "YAMS_LOG_LEVEL",
-          "value": "${input:yamsLogLevel}"
+          "name": "YAMS_ONNX_DISABLE_GPU",
+          "value": "1"
+        },
+        {
+          "name": "YAMS_DAEMON_SOCKET",
+          "value": "${input:yamsDaemonSocket}"
         }
       ],
       "stopAtEntry": false,
-      "console": "integratedTerminal"
+      "externalConsole": false,
+      "linux": {
+        "MIMode": "gdb",
+        "miDebuggerPath": "/usr/bin/gdb"
+      },
+      "osx": {
+        "MIMode": "lldb"
+      },
+      "windows": {
+        "program": "${workspaceFolder}\\builddir\\src\\daemon\\yams-daemon.exe"
+      }
     },
     {
-      "name": "Attach to yams-daemon",
-      "type": "cppvsdbg",
+      "name": "Attach: yams-daemon (LLDB)",
+      "type": "cppdbg",
       "request": "attach",
+      "program": "${workspaceFolder}/builddir/src/daemon/yams-daemon",
       "processId": "${command:pickProcess}",
-      "cwd": "${workspaceFolder}"
+      "linux": {
+        "MIMode": "gdb",
+        "miDebuggerPath": "/usr/bin/gdb"
+      },
+      "osx": {
+        "MIMode": "lldb"
+      },
+      "windows": {
+        "program": "${workspaceFolder}\\builddir\\src\\daemon\\yams-daemon.exe"
+      }
+    },
+    {
+      "name": "Debug: yams-cli (builddir)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/builddir/tools/yams-cli/yams-cli",
+      "args": [
+        "${input:yamsCliArguments}"
+      ],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "build (Debug)",
+      "environment": [
+        {
+          "name": "YAMS_LOG_LEVEL",
+          "value": "${input:yamsLogLevel}"
+        },
+        {
+          "name": "YAMS_DAEMON_SOCKET",
+          "value": "${input:yamsDaemonSocket}"
+        }
+      ],
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "linux": {
+        "MIMode": "gdb",
+        "miDebuggerPath": "/usr/bin/gdb"
+      },
+      "osx": {
+        "MIMode": "lldb"
+      },
+      "windows": {
+        "program": "${workspaceFolder}\\builddir\\tools\\yams-cli\\yams-cli.exe"
+      }
     }
   ],
   "inputs": [
@@ -123,6 +151,12 @@
         "error"
       ],
       "default": "debug"
+    },
+    {
+      "id": "yamsDaemonSocket",
+      "type": "promptString",
+      "description": "Daemon socket path used for debug sessions",
+      "default": "/tmp/yams-daemon-debug.sock"
     },
     {
       "id": "yamsCliArguments",

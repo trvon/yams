@@ -274,7 +274,8 @@ ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelecti
         std::string value = raw;
         std::transform(value.begin(), value.end(), value.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (value == "intro_headings" || value == "intro+headings" || value == "intro_headings_only") {
+        if (value == "intro_headings" || value == "intro+headings" ||
+            value == "intro_headings_only") {
             return EmbeddingSelectionPolicy::Strategy::IntroHeadings;
         }
         return EmbeddingSelectionPolicy::Strategy::Ranked;

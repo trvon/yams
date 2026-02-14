@@ -33,7 +33,7 @@ static QueryParserConfig configFromBytes(const uint8_t* data, size_t size) {
     auto b = [&](size_t i, uint8_t def = 0) -> uint8_t { return (i < size) ? data[i] : def; };
 
     cfg.defaultOperator = (b(0) & 1) ? QueryParserConfig::DefaultOperator::Or
-                                    : QueryParserConfig::DefaultOperator::And;
+                                     : QueryParserConfig::DefaultOperator::And;
     cfg.allowLeadingWildcard = (b(1) & 1) != 0;
     cfg.enablePositionIncrements = (b(2) & 1) != 0;
     cfg.autoGeneratePhraseQueries = (b(3) & 1) != 0;

@@ -28,7 +28,6 @@ std::optional<std::string> extractDocumentText(std::shared_ptr<yams::api::IConte
 std::optional<ExtractedTextAndBytes>
 extractDocumentTextAndBytes(std::shared_ptr<yams::api::IContentStore> store,
                             const std::string& hash, const std::string& mime,
-                            const std::string& extension,
-                            const ContentExtractorList& extractors);
+                            const std::string& extension, const ContentExtractorList& extractors);
 
 } // namespace yams::extraction::util

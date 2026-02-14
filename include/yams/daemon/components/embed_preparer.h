@@ -18,8 +18,7 @@ struct EmbedSourceDoc {
 };
 
 std::optional<InternalEventBus::EmbedPreparedDoc>
-prepareEmbedPreparedDoc(const EmbedSourceDoc& src,
-                        yams::vector::DocumentChunker& chunker,
+prepareEmbedPreparedDoc(const EmbedSourceDoc& src, yams::vector::DocumentChunker& chunker,
                         const ConfigResolver::EmbeddingSelectionPolicy& selectionPolicy);
 
 } // namespace yams::daemon::embed

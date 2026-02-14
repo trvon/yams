@@ -125,13 +125,12 @@ TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy supports all embed str
         {"markdown", yams::vector::ChunkingStrategy::MARKDOWN_AWARE},
     };
 
-    const std::string sample =
-        "# Title\n\n"
-        "Intro paragraph with enough text to chunk reasonably. "
-        "Second sentence here. Third sentence here.\n\n"
-        "## Section\n"
-        "- bullet one\n- bullet two\n\n"
-        "Final paragraph.";
+    const std::string sample = "# Title\n\n"
+                               "Intro paragraph with enough text to chunk reasonably. "
+                               "Second sentence here. Third sentence here.\n\n"
+                               "## Section\n"
+                               "- bullet one\n- bullet two\n\n"
+                               "Final paragraph.";
 
     for (const auto& tc : cases) {
         DYNAMIC_SECTION("strategy=" << tc.value) {
@@ -160,9 +159,8 @@ TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy reads from config file
           "[daemon][components][config][chunking][catch2]") {
     ConfigResolverFixture fx;
 
-    auto configPath = fx.writeToml(
-        "config.toml",
-        R"TOML(
+    auto configPath = fx.writeToml("config.toml",
+                                   R"TOML(
 [embeddings.chunking]
 strategy = "fixed"
 target = 256

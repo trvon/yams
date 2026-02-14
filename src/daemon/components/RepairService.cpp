@@ -503,11 +503,9 @@ RepairService::backgroundLoop(std::shared_ptr<ShutdownState> shutdownState) {
                 (void)statusRes;
             }
 
-            InternalEventBus::EmbedJob job{missingEmbeddings,
-                                           static_cast<uint32_t>(shutdownState->config.maxBatch),
-                                           true,
-                                           std::string{},
-                                           std::vector<InternalEventBus::EmbedPreparedDoc>{}};
+            InternalEventBus::EmbedJob job{
+                missingEmbeddings, static_cast<uint32_t>(shutdownState->config.maxBatch), true,
+                std::string{}, std::vector<InternalEventBus::EmbedPreparedDoc>{}};
             const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
             static std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedQ =
                 InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
@@ -1640,11 +1638,9 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         size_t end = std::min(i + batchSize, hashes.size());
         std::vector<std::string> batch(hashes.begin() + i, hashes.begin() + end);
 
-        InternalEventBus::EmbedJob job{batch,
-                           static_cast<uint32_t>(batchSize),
-                           true,
-                           req.embeddingModel,
-                           std::vector<InternalEventBus::EmbedPreparedDoc>{}};
+        InternalEventBus::EmbedJob job{batch, static_cast<uint32_t>(batchSize), true,
+                                       req.embeddingModel,
+                                       std::vector<InternalEventBus::EmbedPreparedDoc>{}};
 
         // Retry push with backoff (synchronous version for on-demand repair)
         int retries = 0;

@@ -173,6 +173,46 @@ public:
         std::uint32_t concurrencyLimit{0};
     };
     SearchLoadMetrics getSearchLoadMetrics() const;
+    void onSearchRequestQueued() { searchQueued_.fetch_add(1, std::memory_order_relaxed); }
+    bool tryStartSearchRequest(std::uint32_t concurrencyCap) {
+        std::uint32_t queued = searchQueued_.load(std::memory_order_relaxed);
+        while (queued > 0 && !searchQueued_.compare_exchange_weak(queued, queued - 1,
+                                                                  std::memory_order_relaxed)) {
+        }
+        if (concurrencyCap == 0) {
+            searchActive_.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        std::uint32_t active = searchActive_.load(std::memory_order_relaxed);
+        while (true) {
+            if (active >= concurrencyCap) {
+                return false;
+            }
+            if (searchActive_.compare_exchange_weak(active, active + 1,
+                                                    std::memory_order_relaxed)) {
+                return true;
+            }
+        }
+    }
+    void onSearchRequestFinished() {
+        std::uint32_t active = searchActive_.load(std::memory_order_relaxed);
+        while (active > 0 && !searchActive_.compare_exchange_weak(active, active - 1,
+                                                                  std::memory_order_relaxed)) {
+        }
+    }
+    void onSearchRequestRejected() {
+        std::uint32_t queued = searchQueued_.load(std::memory_order_relaxed);
+        while (queued > 0 && !searchQueued_.compare_exchange_weak(queued, queued - 1,
+                                                                  std::memory_order_relaxed)) {
+        }
+    }
+    std::uint32_t getSearchActiveRequests() const {
+        return searchActive_.load(std::memory_order_relaxed);
+    }
+    void onSnapshotPersisted() { snapshotsPersisted_.fetch_add(1, std::memory_order_relaxed); }
+    std::uint64_t getSnapshotsPersistedCount() const {
+        return snapshotsPersisted_.load(std::memory_order_relaxed);
+    }
     struct IngestMetricsSnapshot {
         std::size_t queued;
         std::size_t active;
@@ -581,6 +621,9 @@ private:
     std::atomic<std::size_t> ingestQueued_{0};
     std::atomic<std::size_t> ingestActive_{0};
     std::atomic<std::size_t> ingestWorkerTarget_{1};
+    std::atomic<std::uint32_t> searchActive_{0};
+    std::atomic<std::uint32_t> searchQueued_{0};
+    std::atomic<std::uint64_t> snapshotsPersisted_{0};
 
     bool embeddingPreloadOnStartup_{false};
 

@@ -503,14 +503,14 @@ template <> struct EntityTraits<DocumentInfo> {
 
     // Core columns for basic CRUD (not all columns - complex ones use custom extraction)
     using columns_tuple = std::tuple<Column<int64_t, DocumentInfo, false, true, true>, // id
-                                     Column<std::string, DocumentInfo>,              // file_path
-                                     Column<std::string, DocumentInfo>,              // file_name
-                                     Column<std::string, DocumentInfo>,              // file_extension
-                                     Column<int64_t, DocumentInfo>,                  // file_size
-                                     Column<std::string, DocumentInfo>,              // sha256_hash
-                                     Column<std::string, DocumentInfo>,              // mime_type
-                                     Column<std::string, DocumentInfo>,              // path_prefix
-                                     Column<int, DocumentInfo>                       // path_depth
+                                     Column<std::string, DocumentInfo>,                // file_path
+                                     Column<std::string, DocumentInfo>,                // file_name
+                                     Column<std::string, DocumentInfo>, // file_extension
+                                     Column<int64_t, DocumentInfo>,     // file_size
+                                     Column<std::string, DocumentInfo>, // sha256_hash
+                                     Column<std::string, DocumentInfo>, // mime_type
+                                     Column<std::string, DocumentInfo>, // path_prefix
+                                     Column<int, DocumentInfo>          // path_depth
                                      >;
 
     static constexpr columns_tuple columns{
@@ -583,19 +583,19 @@ template <> struct EntityTraits<DocumentContent> {
     static constexpr std::string_view table = "document_content";
     static constexpr std::string_view primary_key = "document_id";
 
-    using columns_tuple =
-        std::tuple<Column<int64_t, DocumentContent, false, true>, // document_id
-                   Column<std::string, DocumentContent>,          // content_text
-                   Column<int64_t, DocumentContent>,              // content_length
-                   Column<std::string, DocumentContent>,          // extraction_method
-                   Column<std::string, DocumentContent>           // language
-                   >;
+    using columns_tuple = std::tuple<Column<int64_t, DocumentContent, false, true>, // document_id
+                                     Column<std::string, DocumentContent>,          // content_text
+                                     Column<int64_t, DocumentContent>,     // content_length
+                                     Column<std::string, DocumentContent>, // extraction_method
+                                     Column<std::string, DocumentContent>  // language
+                                     >;
 
     static constexpr columns_tuple columns{
         Column<int64_t, DocumentContent, false, true>{"document_id", &DocumentContent::documentId},
         Column<std::string, DocumentContent>{"content_text", &DocumentContent::contentText},
         Column<int64_t, DocumentContent>{"content_length", &DocumentContent::contentLength},
-        Column<std::string, DocumentContent>{"extraction_method", &DocumentContent::extractionMethod},
+        Column<std::string, DocumentContent>{"extraction_method",
+                                             &DocumentContent::extractionMethod},
         Column<std::string, DocumentContent>{"language", &DocumentContent::language}};
 
     static DocumentContent extract(const Statement& stmt, int startCol = 0) {
@@ -618,11 +618,11 @@ template <> struct EntityTraits<SearchHistoryEntry> {
 
     using columns_tuple =
         std::tuple<Column<int64_t, SearchHistoryEntry, false, true, true>, // id
-                   Column<std::string, SearchHistoryEntry>,              // query
-                   Column<std::chrono::sys_seconds, SearchHistoryEntry>, // query_time
-                   Column<int64_t, SearchHistoryEntry>,                  // results_count
-                   Column<int64_t, SearchHistoryEntry>,                  // execution_time_ms
-                   Column<std::string, SearchHistoryEntry, true>         // user_context
+                   Column<std::string, SearchHistoryEntry>,                // query
+                   Column<std::chrono::sys_seconds, SearchHistoryEntry>,   // query_time
+                   Column<int64_t, SearchHistoryEntry>,                    // results_count
+                   Column<int64_t, SearchHistoryEntry>,                    // execution_time_ms
+                   Column<std::string, SearchHistoryEntry, true>           // user_context
                    >;
 
     static constexpr columns_tuple columns{
@@ -633,7 +633,8 @@ template <> struct EntityTraits<SearchHistoryEntry> {
         Column<int64_t, SearchHistoryEntry>{"results_count", &SearchHistoryEntry::resultsCount},
         Column<int64_t, SearchHistoryEntry>{"execution_time_ms",
                                             &SearchHistoryEntry::executionTimeMs},
-        Column<std::string, SearchHistoryEntry, true>{"user_context", &SearchHistoryEntry::userContext}};
+        Column<std::string, SearchHistoryEntry, true>{"user_context",
+                                                      &SearchHistoryEntry::userContext}};
 
     static SearchHistoryEntry extract(const Statement& stmt, int startCol = 0) {
         SearchHistoryEntry entry;
@@ -656,15 +657,14 @@ template <> struct EntityTraits<FeedbackEvent> {
     static constexpr std::string_view table = "feedback_events";
     static constexpr std::string_view primary_key = "id";
 
-    using columns_tuple =
-        std::tuple<Column<int64_t, FeedbackEvent, false, true, true>, // id
-                   Column<std::string, FeedbackEvent>,                 // event_id
-                   Column<std::string, FeedbackEvent>,                 // trace_id
-                   Column<std::chrono::sys_seconds, FeedbackEvent>,    // created_at
-                   Column<std::string, FeedbackEvent>,                 // source
-                   Column<std::string, FeedbackEvent>,                 // event_type
-                   Column<std::string, FeedbackEvent, true>            // payload_json
-                   >;
+    using columns_tuple = std::tuple<Column<int64_t, FeedbackEvent, false, true, true>, // id
+                                     Column<std::string, FeedbackEvent>,                // event_id
+                                     Column<std::string, FeedbackEvent>,                // trace_id
+                                     Column<std::chrono::sys_seconds, FeedbackEvent>, // created_at
+                                     Column<std::string, FeedbackEvent>,              // source
+                                     Column<std::string, FeedbackEvent>,              // event_type
+                                     Column<std::string, FeedbackEvent, true> // payload_json
+                                     >;
 
     static constexpr columns_tuple columns{
         Column<int64_t, FeedbackEvent, false, true, true>{"id", &FeedbackEvent::id},
@@ -698,12 +698,12 @@ template <> struct EntityTraits<SavedQuery> {
     static constexpr std::string_view primary_key = "id";
 
     using columns_tuple = std::tuple<Column<int64_t, SavedQuery, false, true, true>, // id
-                                     Column<std::string, SavedQuery>,              // name
-                                     Column<std::string, SavedQuery>,              // query
-                                     Column<std::string, SavedQuery, true>,         // description
-                                     Column<std::chrono::sys_seconds, SavedQuery>, // created_time
-                                     Column<std::chrono::sys_seconds, SavedQuery>, // last_used
-                                     Column<int64_t, SavedQuery>                   // use_count
+                                     Column<std::string, SavedQuery>,                // name
+                                     Column<std::string, SavedQuery>,                // query
+                                     Column<std::string, SavedQuery, true>,          // description
+                                     Column<std::chrono::sys_seconds, SavedQuery>,   // created_time
+                                     Column<std::chrono::sys_seconds, SavedQuery>,   // last_used
+                                     Column<int64_t, SavedQuery>                     // use_count
                                      >;
 
     static constexpr columns_tuple columns{
@@ -757,16 +757,17 @@ template <> struct EntityTraits<DocumentRelationship> {
     using columns_tuple =
         std::tuple<Column<int64_t, DocumentRelationship, false, true, true>, // id
                    Column<int64_t, DocumentRelationship, true>,              // parent_id
-                   Column<int64_t, DocumentRelationship>,                 // child_id
-                   Column<std::string, DocumentRelationship>,             // relationship_type
-                   Column<std::chrono::sys_seconds, DocumentRelationship> // created_time
+                   Column<int64_t, DocumentRelationship>,                    // child_id
+                   Column<std::string, DocumentRelationship>,                // relationship_type
+                   Column<std::chrono::sys_seconds, DocumentRelationship>    // created_time
                    >;
 
     static constexpr columns_tuple columns{
         Column<int64_t, DocumentRelationship, false, true, true>{"id", &DocumentRelationship::id},
         Column<int64_t, DocumentRelationship, true>{"parent_id", &DocumentRelationship::parentId},
         Column<int64_t, DocumentRelationship>{"child_id", &DocumentRelationship::childId},
-        Column<std::string, DocumentRelationship>{"relationship_type", nullptr}, // extract handles this
+        Column<std::string, DocumentRelationship>{"relationship_type",
+                                                  nullptr}, // extract handles this
         Column<std::chrono::sys_seconds, DocumentRelationship>{"created_time",
                                                                &DocumentRelationship::createdTime}};
 
@@ -818,9 +819,9 @@ template <> struct EntityTraits<MetadataEntry> {
     static constexpr std::string_view primary_key = "document_id"; // Part of composite PK
 
     using columns_tuple = std::tuple<Column<int64_t, MetadataEntry, false, true>, // document_id
-                                     Column<std::string, MetadataEntry>, // key
-                                     Column<std::string, MetadataEntry>, // value
-                                     Column<std::string, MetadataEntry>  // value_type
+                                     Column<std::string, MetadataEntry>,          // key
+                                     Column<std::string, MetadataEntry>,          // value
+                                     Column<std::string, MetadataEntry>           // value_type
                                      >;
 
     static constexpr columns_tuple columns{

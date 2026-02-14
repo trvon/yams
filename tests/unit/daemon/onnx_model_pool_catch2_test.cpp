@@ -515,6 +515,65 @@ TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: concurrent batch embeddin
     CHECK(failures == 0);
 }
 
+// Regression: some MIGraphX builds can return a fixed output batch size smaller than requested
+// (e.g. output_B=2 for requested_B=8/16). Ensure OnnxModelSession adapts by chunking instead of
+// surfacing shape-mismatch errors.
+TEST_CASE_METHOD(OnnxModelPoolFixture,
+                 "OnnxModelPool: MIGraphX oversized batch adapts without shape mismatch",
+                 "[daemon][.slow][.requires_model][migraphx]") {
+    auto modelName = testModelName();
+    if (!checkModelAvailable(modelName)) {
+        SKIP("Model " + modelName + " not found. Download with: yams model --download " +
+             modelName);
+    }
+
+    // Disable mock mode for real model tests
+    unsetenv("YAMS_TEST_MODE");
+
+    config_.maxMemoryGB = 4;
+    config_.modelIdleTimeout = std::chrono::seconds(60);
+    pool_ = std::make_unique<OnnxModelPool>(config_);
+    REQUIRE(pool_->initialize());
+
+    auto h = pool_->acquireModel(modelName, 60s);
+    REQUIRE(h);
+
+    auto& session = *h.value();
+    auto& mutableSession = const_cast<OnnxModelSession&>(session);
+    const auto provider = mutableSession.getExecutionProvider();
+    if (provider.find("migraphx") == std::string::npos) {
+        SKIP("MIGraphX provider not active (provider='" + provider + "')");
+    }
+
+    // First large batch should either run directly or learn provider batch cap and chunk.
+    std::vector<std::string> batch16;
+    batch16.reserve(16);
+    for (int i = 0; i < 16; ++i) {
+        batch16.push_back("migraphx regression text #" + std::to_string(i));
+    }
+
+    auto r16 = mutableSession.generateBatchEmbeddings(batch16);
+    REQUIRE(r16);
+    REQUIRE(r16.value().size() == batch16.size());
+    for (const auto& emb : r16.value()) {
+        REQUIRE(!emb.empty());
+    }
+
+    // Run a second oversized batch to verify learned-cap path is stable across calls.
+    std::vector<std::string> batch33;
+    batch33.reserve(33);
+    for (int i = 0; i < 33; ++i) {
+        batch33.push_back("migraphx regression follow-up #" + std::to_string(i));
+    }
+
+    auto r33 = mutableSession.generateBatchEmbeddings(batch33);
+    REQUIRE(r33);
+    REQUIRE(r33.value().size() == batch33.size());
+    for (const auto& emb : r33.value()) {
+        REQUIRE(!emb.empty());
+    }
+}
+
 // Test pool stats after real usage
 TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: pool stats after real usage",
                  "[daemon][.slow][.requires_model]") {

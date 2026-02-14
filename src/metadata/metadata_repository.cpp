@@ -5360,7 +5360,7 @@ Result<std::vector<TreeSnapshotRecord>> MetadataRepository::listTreeSnapshots(in
             SELECT snapshot_id, directory_path, snapshot_label, 
                    git_commit, git_branch, git_remote, files_count, created_at
             FROM tree_snapshots
-            ORDER BY created_at DESC
+                 ORDER BY created_at DESC, snapshot_id DESC
             LIMIT ?
         )";
 
@@ -6081,7 +6081,7 @@ MetadataRepository::findDocumentsBySnapshot(const std::string& snapshotId) {
             FROM documents d
             JOIN metadata m ON d.id = m.document_id
             WHERE m.key = 'snapshot_id' AND m.value = ?
-            ORDER BY d.indexed_time DESC
+            ORDER BY d.indexed_time DESC, d.id DESC
         )");
 
             if (!stmtResult)
@@ -6119,7 +6119,7 @@ MetadataRepository::findDocumentsBySnapshotLabel(const std::string& snapshotLabe
             FROM documents d
             JOIN metadata m ON d.id = m.document_id
             WHERE m.key = 'snapshot_label' AND m.value = ?
-            ORDER BY d.indexed_time DESC
+            ORDER BY d.indexed_time DESC, d.id DESC
         )");
 
             if (!stmtResult)

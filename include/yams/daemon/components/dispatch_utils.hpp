@@ -19,6 +19,7 @@
 #include <yams/core/types.h>
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/PluginHostFsm.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
@@ -190,6 +191,21 @@ ensure_model_loaded(ServiceManager* sm, std::shared_ptr<IModelProvider> provider
         co_return yams::Error{yams::ErrorCode::InvalidData, "Model name required"};
     if (provider->isModelLoaded(model))
         co_return yams::Result<void>();
+
+    std::uint64_t estimatedModelBytes = 0;
+    try {
+        auto info = provider->getModelInfo(model);
+        if (info) {
+            estimatedModelBytes = static_cast<std::uint64_t>(info.value().memoryUsageBytes);
+        }
+    } catch (...) {
+    }
+
+    if (!ResourceGovernor::instance().canLoadModel(estimatedModelBytes)) {
+        co_return yams::Error{yams::ErrorCode::ResourceExhausted,
+                              "Model load denied by resource governor"};
+    }
+
     auto run_load = [provider, model, optionsJson]() -> yams::Result<void> {
         try {
             if (!optionsJson.empty())

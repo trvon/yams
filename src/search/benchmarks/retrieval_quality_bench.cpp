@@ -1149,9 +1149,8 @@ struct BenchFixture {
         uint64_t lastExtractionInFlight = 0;
 
         auto ingestionLooksCompleteFromLastObserved = [&]() -> bool {
-            const bool targetReached =
-                (lastIndexedDocCount >= static_cast<uint64_t>(corpusSize)) ||
-                (lastDocCount >= static_cast<uint64_t>(corpusSize));
+            const bool targetReached = (lastIndexedDocCount >= static_cast<uint64_t>(corpusSize)) ||
+                                       (lastDocCount >= static_cast<uint64_t>(corpusSize));
             const bool allQueuesDrained =
                 (lastDepth == 0 && lastExtractionInFlight == 0 && lastKgInFlight == 0 &&
                  lastSymbolInFlight == 0 && lastEntityInFlight == 0 && lastEmbedQueued == 0 &&
@@ -1208,9 +1207,8 @@ struct BenchFixture {
                     const uint64_t embedQueued = get("embed_svc_queued");
                     const uint64_t embedInFlight = get("embed_in_flight");
 
-                    const bool targetReached =
-                        (docsIndexed >= static_cast<uint64_t>(corpusSize)) ||
-                        (docsTotal >= static_cast<uint64_t>(corpusSize));
+                    const bool targetReached = (docsIndexed >= static_cast<uint64_t>(corpusSize)) ||
+                                               (docsTotal >= static_cast<uint64_t>(corpusSize));
                     const bool allQueuesDrained =
                         (postQueued == 0 && postInFlight == 0 && extractionInFlight == 0 &&
                          kgInFlight == 0 && symbolInFlight == 0 && entityInFlight == 0 &&
@@ -1411,7 +1409,8 @@ struct BenchFixture {
             // work is still actively progressing on large corpora/slow accelerators.
             while (true) {
                 auto now = std::chrono::steady_clock::now();
-                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - embedStartTime);
+                auto elapsed =
+                    std::chrono::duration_cast<std::chrono::seconds>(now - embedStartTime);
                 auto sinceProgress =
                     std::chrono::duration_cast<std::chrono::seconds>(now - lastEmbedProgressTime);
 
@@ -1627,11 +1626,13 @@ struct BenchFixture {
                     const bool queueDrained = (finalEmbedQueued == 0 && finalEmbedInFlight == 0);
                     if (!queueDrained) {
                         throw std::runtime_error(
-                            "Embedding drain not reached before benchmark queries (embed_svc_queued=" +
+                            "Embedding drain not reached before benchmark queries "
+                            "(embed_svc_queued=" +
                             std::to_string(finalEmbedQueued) +
                             ", embed_in_flight=" + std::to_string(finalEmbedInFlight) +
                             ", vectors=" + std::to_string(finalVectorCount) +
-                            "). Increase timeout/concurrency or reduce corpus size to obtain valid results.");
+                            "). Increase timeout/concurrency or reduce corpus size to obtain valid "
+                            "results.");
                     }
 
                     // Queue may only be fully drained on the final status check.
@@ -1671,9 +1672,9 @@ struct BenchFixture {
                 spdlog::warn("Final status check failed after embedding wait: {}",
                              finalStatus.error().message);
                 if (!embeddingDrainSatisfied) {
-                    throw std::runtime_error(
-                        "Final status check failed after embedding wait; cannot verify embedding drain. "
-                        "Benchmark results would be unreliable.");
+                    throw std::runtime_error("Final status check failed after embedding wait; "
+                                             "cannot verify embedding drain. "
+                                             "Benchmark results would be unreliable.");
                 }
             }
         } else {

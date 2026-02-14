@@ -78,9 +78,12 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     drainQueue(postIngestTasks);
 
     // Ensure optional subsystems don't trigger heavy init in this unit test.
-    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::optional<std::string>{"1"});
-    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", std::optional<std::string>{"1"});
-    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
     yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
                                                 std::optional<std::string>{"1"});
 

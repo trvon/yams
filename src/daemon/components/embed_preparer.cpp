@@ -22,12 +22,11 @@ bool looksLikeHeading(const std::string& text) {
     }
     std::string firstLine = text.substr(0, lineEnd);
     firstLine.erase(firstLine.begin(),
-                    std::find_if(firstLine.begin(), firstLine.end(), [](unsigned char ch) {
-                        return !std::isspace(ch);
-                    }));
-    firstLine.erase(std::find_if(firstLine.rbegin(), firstLine.rend(), [](unsigned char ch) {
-                        return !std::isspace(ch);
-                    }).base(),
+                    std::find_if(firstLine.begin(), firstLine.end(),
+                                 [](unsigned char ch) { return !std::isspace(ch); }));
+    firstLine.erase(std::find_if(firstLine.rbegin(), firstLine.rend(),
+                                 [](unsigned char ch) { return !std::isspace(ch); })
+                        .base(),
                     firstLine.end());
 
     if (firstLine.empty()) {
@@ -84,11 +83,13 @@ prepareEmbedPreparedDoc(const EmbedSourceDoc& src, yams::vector::DocumentChunker
         return doc;
     }
 
-    const bool fullMode = selectionPolicy.mode == ConfigResolver::EmbeddingSelectionPolicy::Mode::Full;
+    const bool fullMode =
+        selectionPolicy.mode == ConfigResolver::EmbeddingSelectionPolicy::Mode::Full;
     std::size_t effectiveMaxChunks = fullMode ? 0u : selectionPolicy.maxChunksPerDoc;
     std::size_t effectiveMaxChars = fullMode ? 0u : selectionPolicy.maxCharsPerDoc;
 
-    if (!fullMode && selectionPolicy.mode == ConfigResolver::EmbeddingSelectionPolicy::Mode::Adaptive) {
+    if (!fullMode &&
+        selectionPolicy.mode == ConfigResolver::EmbeddingSelectionPolicy::Mode::Adaptive) {
         const std::size_t localChunkCount = chunks.size();
         if (effectiveMaxChunks > 0) {
             effectiveMaxChunks = std::min<std::size_t>(
@@ -103,7 +104,8 @@ prepareEmbedPreparedDoc(const EmbedSourceDoc& src, yams::vector::DocumentChunker
 
     std::vector<ScoredChunk> scored;
     scored.reserve(chunks.size());
-    if (selectionPolicy.strategy == ConfigResolver::EmbeddingSelectionPolicy::Strategy::IntroHeadings) {
+    if (selectionPolicy.strategy ==
+        ConfigResolver::EmbeddingSelectionPolicy::Strategy::IntroHeadings) {
         // Preserve original order; selection loop below will filter.
         for (std::size_t rank = 0; rank < chunks.size(); ++rank) {
             scored.push_back(ScoredChunk{0.0, rank});
@@ -128,9 +130,9 @@ prepareEmbedPreparedDoc(const EmbedSourceDoc& src, yams::vector::DocumentChunker
             scored.push_back(ScoredChunk{score, rank});
         }
 
-        std::stable_sort(scored.begin(), scored.end(), [](const ScoredChunk& a, const ScoredChunk& b) {
-            return a.score > b.score;
-        });
+        std::stable_sort(
+            scored.begin(), scored.end(),
+            [](const ScoredChunk& a, const ScoredChunk& b) { return a.score > b.score; });
     }
 
     std::size_t selectedCount = 0;
@@ -156,8 +158,9 @@ prepareEmbedPreparedDoc(const EmbedSourceDoc& src, yams::vector::DocumentChunker
         }
 
         InternalEventBus::EmbedPreparedChunk out;
-        out.chunkId = chunks[idx].chunk_id.empty() ? yams::vector::utils::generateChunkId(src.hash, idx)
-                                                   : chunks[idx].chunk_id;
+        out.chunkId = chunks[idx].chunk_id.empty()
+                          ? yams::vector::utils::generateChunkId(src.hash, idx)
+                          : chunks[idx].chunk_id;
         out.content = std::move(chunks[idx].content);
         out.startOffset = chunks[idx].start_offset;
         out.endOffset = chunks[idx].end_offset;
@@ -171,8 +174,9 @@ prepareEmbedPreparedDoc(const EmbedSourceDoc& src, yams::vector::DocumentChunker
     if (doc.chunks.empty()) {
         const auto idx = 0u;
         InternalEventBus::EmbedPreparedChunk out;
-        out.chunkId = chunks[idx].chunk_id.empty() ? yams::vector::utils::generateChunkId(src.hash, idx)
-                                                   : chunks[idx].chunk_id;
+        out.chunkId = chunks[idx].chunk_id.empty()
+                          ? yams::vector::utils::generateChunkId(src.hash, idx)
+                          : chunks[idx].chunk_id;
         out.content = std::move(chunks[idx].content);
         out.startOffset = chunks[idx].start_offset;
         out.endOffset = chunks[idx].end_offset;

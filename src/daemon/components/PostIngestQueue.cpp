@@ -943,8 +943,8 @@ void PostIngestQueue::processMetadataStage(
             if (tagsOverride) {
                 tags = *tagsOverride;
             }
-            dispatchToKgChannel(hash, docId, filePath.empty() ? fileName : filePath, std::move(tags),
-                                nullptr);
+            dispatchToKgChannel(hash, docId, filePath.empty() ? fileName : filePath,
+                                std::move(tags), nullptr);
 
             // Dispatch symbol extraction for code files (if plugin supports this extension)
             {
@@ -1064,7 +1064,6 @@ PostIngestQueue::prepareMetadataEntry(
     }
 
     return prepared;
-
 }
 
 std::string PostIngestQueue::deriveTitle(const std::string& text, const std::string& fileName,
@@ -2363,8 +2362,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         InternalEventBus::EmbedJob job;
         job.preparedDocs = std::move(embedPreparedBatch);
         job.hashes = std::move(embedHashBatch);
-        job.batchSize =
-            static_cast<uint32_t>(job.preparedDocs.size() + job.hashes.size());
+        job.batchSize = static_cast<uint32_t>(job.preparedDocs.size() + job.hashes.size());
         job.hashes.reserve(job.hashes.size() + job.preparedDocs.size());
         for (const auto& doc : job.preparedDocs) {
             job.hashes.push_back(doc.hash);
@@ -2401,7 +2399,8 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
 
     const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
     const auto chunkPolicy = ConfigResolver::resolveEmbeddingChunkingPolicy();
-    auto embedChunker = yams::vector::createChunker(chunkPolicy.strategy, chunkPolicy.config, nullptr);
+    auto embedChunker =
+        yams::vector::createChunker(chunkPolicy.strategy, chunkPolicy.config, nullptr);
 
     auto makePreparedDoc = [&](const PreparedMetadataEntry& prepared)
         -> std::optional<InternalEventBus::EmbedPreparedDoc> {
@@ -2437,8 +2436,8 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
 
     for (const auto& prepared : successes) {
         if (embedQ && embedStageActive && prepared.shouldDispatchEmbed) {
-            if (auto preparedDoc = makePreparedDoc(prepared); preparedDoc &&
-                                                   !preparedDoc->chunks.empty()) {
+            if (auto preparedDoc = makePreparedDoc(prepared);
+                preparedDoc && !preparedDoc->chunks.empty()) {
                 embedPreparedBatch.push_back(std::move(*preparedDoc));
             } else {
                 // Fallback: queue by hash.

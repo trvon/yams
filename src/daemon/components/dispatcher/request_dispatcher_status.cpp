@@ -130,6 +130,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.requestCounts[std::string(metrics::kDeferredQueueDepth)] = snap->deferredQueueDepth;
             res.requestCounts[std::string(metrics::kPostIngestInflight)] = snap->postIngestInflight;
             res.requestCounts[std::string(metrics::kPostIngestCapacity)] = snap->postIngestCapacity;
+            res.requestCounts[std::string(metrics::kPostIngestDrained)] =
+                (snap->postIngestQueued == 0 && snap->postIngestInflight == 0) ? 1 : 0;
             // KG backpressure observability
             res.requestCounts[std::string(metrics::kPostIngestBackpressureRejects)] =
                 static_cast<size_t>(snap->postIngestBackpressureRejects);
@@ -394,6 +396,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             // Vector count from cached metrics (for benchmarks/tools waiting for embeddings)
             res.requestCounts[std::string(metrics::kVectorCount)] =
                 static_cast<size_t>(snap->vectorRowsExact);
+            res.requestCounts[std::string(metrics::kIndexVisible)] =
+                (snap->documentsIndexed > 0) ? 1 : 0;
+            if (serviceManager_) {
+                res.requestCounts[std::string(metrics::kSnapshotPersisted)] =
+                    static_cast<size_t>(serviceManager_->getSnapshotsPersistedCount());
+            }
         } else {
             auto uptime = std::chrono::steady_clock::now() - state_->stats.startTime;
             res.running = true;

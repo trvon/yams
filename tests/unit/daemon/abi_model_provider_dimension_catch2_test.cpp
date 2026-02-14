@@ -11,6 +11,7 @@
 
 #include <cstdlib>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,7 @@ struct MockProviderContext {
     size_t outputDim = 384;
     std::vector<float> nextEmbedding;
     bool simulateDimensionMismatch = false;
+    size_t maxOutputBatch = 0; // 0 = no cap
 };
 
 // Mock implementation of plugin functions
@@ -65,10 +67,14 @@ yams_status_t mock_generate_embedding_batch(void* self, const char* model_id,
         return YAMS_ERR_INVALID_ARG;
     }
     // Allocate batch embeddings
-    *out_batch = batch_size;
+    if (ctx->maxOutputBatch > 0 && batch_size > ctx->maxOutputBatch) {
+        *out_batch = ctx->maxOutputBatch;
+    } else {
+        *out_batch = batch_size;
+    }
     *out_dim = ctx->outputDim;
-    *out_vecs = static_cast<float*>(malloc(batch_size * ctx->outputDim * sizeof(float)));
-    for (size_t i = 0; i < batch_size * ctx->outputDim; ++i) {
+    *out_vecs = static_cast<float*>(malloc((*out_batch) * ctx->outputDim * sizeof(float)));
+    for (size_t i = 0; i < (*out_batch) * ctx->outputDim; ++i) {
         (*out_vecs)[i] = static_cast<float>(i % ctx->outputDim) * 0.01f;
     }
     return YAMS_OK;
@@ -404,5 +410,54 @@ TEST_CASE_METHOD(AbiModelProviderDimensionFixture, "AbiModelProvider: large batc
     CHECK(result.value().size() == 100);
     for (const auto& emb : result.value()) {
         CHECK(emb.size() == 384);
+    }
+}
+
+TEST_CASE_METHOD(AbiModelProviderDimensionFixture,
+                 "AbiModelProvider: provider partial batch output handled safely",
+                 "[daemon][abi][regression]") {
+    mockContext_->outputDim = 768;
+    mockContext_->maxOutputBatch = 2;
+
+    std::vector<std::string> texts = {"text1", "text2", "text3", "text4"};
+    auto result = adapter_->generateBatchEmbeddings(texts);
+
+    REQUIRE(result);
+    REQUIRE(result.value().size() == 2);
+    for (const auto& emb : result.value()) {
+        CHECK(emb.size() == 768);
+    }
+}
+
+TEST_CASE_METHOD(AbiModelProviderDimensionFixture,
+                 "AbiModelProvider: deterministic fuzz-style partial batch invariants",
+                 "[daemon][abi][regression][fuzz-lite]") {
+    std::mt19937 rng(0x5A17BEEF);
+    std::uniform_int_distribution<size_t> dimDist(1, 1024);
+    std::uniform_int_distribution<size_t> batchDist(1, 64);
+
+    for (int iter = 0; iter < 100; ++iter) {
+        const size_t requestedBatch = batchDist(rng);
+        const size_t outputDim = dimDist(rng);
+        std::uniform_int_distribution<size_t> capDist(1, requestedBatch);
+        const size_t cap = capDist(rng);
+
+        mockContext_->outputDim = outputDim;
+        mockContext_->maxOutputBatch = cap;
+
+        std::vector<std::string> texts;
+        texts.reserve(requestedBatch);
+        for (size_t i = 0; i < requestedBatch; ++i) {
+            texts.push_back("seeded-text-" + std::to_string(iter) + "-" + std::to_string(i));
+        }
+
+        auto result = adapter_->generateBatchEmbeddings(texts);
+        INFO("iter=" << iter << " requestedBatch=" << requestedBatch << " cap=" << cap
+                     << " outputDim=" << outputDim);
+        REQUIRE(result);
+        REQUIRE(result.value().size() == cap);
+        for (const auto& emb : result.value()) {
+            CHECK(emb.size() == outputDim);
+        }
     }
 }

@@ -305,7 +305,14 @@ ResourceSnapshot ResourceGovernor::tick(ServiceManager* sm) {
         }
     }
 
-    snap.level = newLevel;
+    // Keep snapshot level consistent with getPressureLevel() semantics.
+    // During startup grace, getPressureLevel() caps values above Warning.
+    // Export the same effective level in snapshots to avoid observable mismatch.
+    if (startupGraceActive() && newLevel > ResourcePressureLevel::Warning) {
+        snap.level = ResourcePressureLevel::Warning;
+    } else {
+        snap.level = newLevel;
+    }
 
     // Update stored snapshot
     {

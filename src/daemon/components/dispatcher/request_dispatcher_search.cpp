@@ -10,6 +10,7 @@
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/profiling.h>
@@ -20,6 +21,31 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
     YAMS_ZONE_SCOPED_N("handleSearchRequest");
     try {
         const std::string traceId = yams::core::generateUUID();
+        if (serviceManager_) {
+            serviceManager_->onSearchRequestQueued();
+        }
+
+        struct SearchRequestLifecycle {
+            ServiceManager* sm{nullptr};
+            bool started{false};
+            ~SearchRequestLifecycle() {
+                if (!sm)
+                    return;
+                if (started) {
+                    sm->onSearchRequestFinished();
+                } else {
+                    sm->onSearchRequestRejected();
+                }
+            }
+        } lifecycle{serviceManager_, false};
+
+        const uint32_t searchCap = ResourceGovernor::instance().maxSearchConcurrency();
+        if (serviceManager_ && !serviceManager_->tryStartSearchRequest(searchCap)) {
+            co_return ErrorResponse{ErrorCode::ResourceExhausted,
+                                    "Search concurrency limit reached; retry shortly"};
+        }
+        lifecycle.started = true;
+
         spdlog::debug("[RequestDispatcher] Received SearchRequest with {} pathPatterns: {}",
                       req.pathPatterns.size(),
                       fmt::format("{}", fmt::join(req.pathPatterns, ", ")));
@@ -114,8 +140,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
 
             auto ins = appContext.metadataRepo->insertFeedbackEvent(event);
             if (!ins) {
-                spdlog::warn("Failed to persist retrieval_served feedback event for trace_id={} : {}",
-                             traceId, ins.error().message);
+                spdlog::warn(
+                    "Failed to persist retrieval_served feedback event for trace_id={} : {}",
+                    traceId, ins.error().message);
             }
         }
 

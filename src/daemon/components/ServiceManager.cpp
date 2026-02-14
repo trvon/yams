@@ -66,6 +66,7 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/PoolManager.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -96,6 +97,18 @@ namespace {
 // Convenience alias for ConfigResolver timeouts
 inline int read_timeout_ms(const char* envName, int defaultMs, int minMs) {
     return yams::daemon::ConfigResolver::readTimeoutMs(envName, defaultMs, minMs);
+}
+
+inline void setOnnxShutdownMarker(bool enabled) {
+#ifdef _WIN32
+    _putenv_s("YAMS_ONNX_SHUTDOWN_IN_PROGRESS", enabled ? "1" : "");
+#else
+    if (enabled) {
+        ::setenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS", "1", 1);
+    } else {
+        ::unsetenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS");
+    }
+#endif
 }
 
 // Template-based plugin adoption helper to reduce code duplication
@@ -523,7 +536,7 @@ ServiceManager::~ServiceManager() {
 
 yams::Result<void> ServiceManager::initialize() {
     // Clear any stale shutdown marker from prior daemon lifecycles in this process.
-    ::unsetenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS");
+    setOnnxShutdownMarker(false);
 
     // Validate data directory synchronously to fail fast if unwritable
     namespace fs = std::filesystem;
@@ -778,7 +791,7 @@ void ServiceManager::shutdown() {
     auto shutdownStart = std::chrono::steady_clock::now();
 
     // Signal plugin providers to fast-fail long acquire paths while shutdown drains work.
-    ::setenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS", "1", 1);
+    setOnnxShutdownMarker(true);
 
     // Hold components that must outlive WorkCoordinator shutdown.
     // We move these out of member storage during early shutdown phases to prevent
@@ -1168,7 +1181,7 @@ void ServiceManager::shutdown() {
         spdlog::warn("[ServiceManager] Failed to dispatch ServiceManagerStoppedEvent");
     }
 
-    ::unsetenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS");
+    setOnnxShutdownMarker(false);
 }
 
 // Single-attempt vector database initialization. Safe to call multiple times; only
@@ -2718,17 +2731,16 @@ size_t ServiceManager::getWorkerQueueDepth() const {
 ServiceManager::SearchLoadMetrics ServiceManager::getSearchLoadMetrics() const {
     SearchLoadMetrics metrics;
 
+    metrics.active = searchActive_.load(std::memory_order_relaxed);
+    metrics.queued = searchQueued_.load(std::memory_order_relaxed);
+    metrics.concurrencyLimit = ResourceGovernor::instance().maxSearchConcurrency();
+
     // Get search engine statistics if available
     auto engine = getSearchEngineSnapshot();
     if (engine) {
         const auto& stats = engine->getStatistics();
 
         // Map SearchEngine::Statistics to SearchLoadMetrics
-        // Note: SearchEngine is synchronous, so "active" and "queued" are conceptual
-        // "active" = 1 if engine is available and serving queries
-        // "queued" = 0 (no queue in synchronous model)
-        metrics.active = 1; // Engine is available
-        metrics.queued = 0; // No queue in synchronous model
         metrics.executed = stats.totalQueries.load();
         metrics.avgLatencyUs = stats.avgQueryTimeMicros.load();
 
@@ -2741,8 +2753,8 @@ ServiceManager::SearchLoadMetrics ServiceManager::getSearchLoadMetrics() const {
             metrics.cacheHitRate = 0.0;
         }
 
-        // Concurrency limit is not applicable in new model, set to 1 (synchronous)
-        metrics.concurrencyLimit = 1;
+    } else {
+        metrics.cacheHitRate = 0.0;
     }
 
     return metrics;
