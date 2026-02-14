@@ -1,7 +1,7 @@
 # YAMS Performance Benchmark Report
 
-**Generated**: 2026-01-26
-**YAMS Version**: 0.8.0-dev (`027fdc0`)
+**Generated**: 2026-02-12
+**YAMS Version**: 0.9.0-dev (`11ba59f4`)
 **Test Environment**: macOS 26.2 (Apple Silicon M3 Max, 16 cores, 48GB RAM)
 **Build Configuration**: Release build
 
@@ -12,7 +12,7 @@
 - [Executive Summary](#executive-summary)
 - [Test Environment Specifications](#test-environment-specifications)
 - [Performance Benchmarks](#performance-benchmarks)
-  - [Latest Release Runs (2026-01-25)](#latest-release-runs-2026-01-25)
+  - [Latest Release Runs (2026-02-12)](#latest-release-runs-2026-02-12)
   - [Cryptographic Operations (SHA-256)](#1-cryptographic-operations-sha-256)
   - [Content Chunking (Rabin Fingerprinting)](#2-content-chunking-rabin-fingerprinting)
   - [Compression Performance (Zstandard)](#3-compression-performance-zstandard)
@@ -22,7 +22,20 @@
 
 This report focuses on benchmark changes that are easy to interpret and compare across runs (primarily ingestion + metadata + IPC framing). Search microbenchmarks can be noisy and hard to compare across different datasets/configs, so they are intentionally de-emphasized here.
 
-**Current Baseline (Release, 2026-01-26)**:
+> Note: For benchmarks that report percentiles, the “Throughput” values in the tables are the p50 numbers.
+
+**Current Baseline (Release, 2026-02-12)**:
+
+| Benchmark | Throughput | Notes |
+|-----------|------------|-------|
+| `Ingestion_SmallDocument` | 4,329 ops/s | 1 KB document |
+| `Ingestion_MediumDocument` | 307 ops/s | 100 KB document |
+| `Metadata_SingleUpdate` | 15,232 ops/s | 1,000 docs |
+| `Metadata_BulkUpdate(500)` | 181,818 ops/s | 500 updates/batch |
+| `IPC StreamingFramer_32x10` | 16,579 ops/s | 256 B chunks |
+| `IPC UnaryFramer_8KB` | 50,000 ops/s | 8 KB payload |
+
+**Previous Baseline (Release, 2026-01-26)**:
 
 | Benchmark | Throughput | Notes |
 |-----------|------------|-------|
@@ -62,7 +75,7 @@ This report focuses on benchmark changes that are easy to interpret and compare 
 
 ### Available Benchmark Executables
 
-Located in `build/release/builddir/tests/benchmarks/`:
+Located in `build/release/tests/benchmarks/` (when the Release build is configured with `-Dbuild-tests=true`):
 - `yams_api_benchmarks` - API ingestion and metadata operations (writes `bench_results/api_*`)
 - `yams_search_benchmarks` - Search + query parsing (writes `bench_results/search_*`)
 - `ipc_stream_bench` - IPC streaming performance (writes `bench_results/ipc_stream_*`)
@@ -76,7 +89,7 @@ Located in `build/release/builddir/tests/benchmarks/`:
 
 ## Performance Benchmarks
 
-### Latest Release Runs (2026-01-26)
+### Latest Release Runs (2026-02-12)
 
 #### Quick Links
 - [API Benchmarks](#api-benchmarks)
@@ -85,25 +98,25 @@ Located in `build/release/builddir/tests/benchmarks/`:
 
 #### Run Commands
 ```bash
-cd build/release/builddir
+cd build/release
 
 # API
-./tests/benchmarks/yams_api_benchmarks --iterations 5
+./tests/benchmarks/yams_api_benchmarks --iterations 5 --quiet
 
 # IPC streaming
-./tests/benchmarks/ipc_stream_bench --benchmark_min_time=0.05
+./tests/benchmarks/ipc_stream_bench --iterations 8 --quiet
 ```
 
 #### API Benchmarks
 
-(From `build/release/builddir/tests/benchmarks/yams_api_benchmarks`, `--iterations 5`)
+(From `build/release/tests/benchmarks/yams_api_benchmarks`, `--iterations 5`)
 
 | Benchmark | Latency | Throughput |
 |-----------|---------|------------|
-| Ingestion_SmallDocument | 0.25 ms | 4,078 ops/sec |
-| Ingestion_MediumDocument | 3.34 ms | 300 ops/sec |
-| Metadata_SingleUpdate | 0.04 ms | 25,510 ops/sec |
-| Metadata_BulkUpdate | 4.20 ms | 119,002 ops/sec |
+| Ingestion_SmallDocument | 0.23 ms | 4,329 ops/sec |
+| Ingestion_MediumDocument | 3.26 ms | 307 ops/sec |
+| Metadata_SingleUpdate | 6.57 ms | 15,232 ops/sec |
+| Metadata_BulkUpdate | 2.75 ms | 181,818 ops/sec |
 
 #### Search Benchmarks
 
@@ -115,12 +128,12 @@ Search benchmarks are intentionally not included in the “improvements” summa
 
 #### IPC Streaming Benchmarks
 
-(From `build/release/builddir/tests/benchmarks/ipc_stream_bench`, `--benchmark_min_time=0.05`)
+(From `build/release/tests/benchmarks/ipc_stream_bench`, `--iterations 8`)
 
 | Benchmark | Latency | Throughput |
 |-----------|---------|------------|
-| StreamingFramer_32x10_256B | 0.66 ms | 16,548 ops/sec |
-| StreamingFramer_64x6_512B | 1.23 ms | 5,681 ops/sec |
+| StreamingFramer_32x10_256B | 0.66 ms | 16,579 ops/sec |
+| StreamingFramer_64x6_512B | 1.27 ms | 5,531 ops/sec |
 | UnaryFramer_Success_8KB | 0.02 ms | 50,000 ops/sec |
 
 #### Retrieval Quality Benchmark
@@ -251,16 +264,13 @@ Skipped in this run (release benchmarks focused on ingestion, metadata, and IPC 
 
 **For Release Build Benchmarks** (recommended):
 ```bash
-# Configure and build release version
-cd build/release
-conan install ../.. -s build_type=Release --build=missing
-meson setup builddir -Dbuildtype=release -Dbuild-tests=true
-meson compile
+# Configure and build release version (with tests enabled so benchmark executables are built)
+./setup.sh Release --with-tests
+meson compile -C build/release
 
 # Run benchmarks
-./builddir/tests/benchmarks/yams_api_benchmarks --benchmark_format=json
-./builddir/tests/benchmarks/yams_search_benchmarks --benchmark_format=json
-./builddir/tests/benchmarks/tree_diff_benchmarks --benchmark_format=json
+./build/release/tests/benchmarks/yams_api_benchmarks --iterations 5
+./build/release/tests/benchmarks/ipc_stream_bench --iterations 8
 ```
 
 **For Debug Build** (current):

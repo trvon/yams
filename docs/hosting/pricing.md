@@ -7,7 +7,7 @@ title: Pricing (Preview)
 Preview pricing approach; details may change before beta/GA.
 
 !!! note
-    Status: Private preview. If you’d like to help us shape pricing and quotas, please join the [Early Access](early-access.md) list.
+    Status: Private preview. If you’d like to help us shape pricing and quotas, contact us to join early access.
 
 ---
 
@@ -67,7 +67,7 @@ Exact caps will be shared in your invite.
 - Preview credits or extended free usage
 - Migration guidance (self‑hosted ↔ managed)
 
-Join via [Early Access](early-access.md).
+Join early access by contacting support.
 
 ---
 
@@ -92,7 +92,7 @@ Join via [Early Access](early-access.md).
 
 ## Next steps
 
-- Join the [Early Access](early-access.md) list.
-- Read the [Hosting Overview](README.md) or see [Self‑hosting](self_hosting.md).
+- Join early access by contacting support.
+- See [Self‑hosting](self_hosting.md).
 
 We’ll update this page as we finalize numbers.

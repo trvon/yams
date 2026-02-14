@@ -45,7 +45,7 @@ yams doctor
 | CLI Reference | [cli.md](./cli.md) | All commands and options |
 | MCP Server | [mcp.md](./mcp.md) | Model Context Protocol integration |
 | Embeddings | [embeddings.md](./embeddings.md) | Vector search and model setup |
-| Tutorials | [tutorials/](./tutorials/) | Task-oriented guides |
+| Tutorials | [tutorials](./tutorials/README.md) | Task-oriented guides |
 | Operations | [../admin/operations.md](../admin/operations.md) | Tuning, maintenance, configuration |
 
 ## Key Commands

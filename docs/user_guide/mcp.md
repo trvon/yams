@@ -84,7 +84,7 @@ YAMS exposes basic prompt templates via `prompts/list` and `prompts/get`. In add
 - prompts/get returns the template content as a single assistant text message.
 
 Tips:
-- To seed prompts, copy examples from the repo's `docs/prompts` into your prompts dir or provide a gist/raw URL for users to download.^
+- To seed prompts, copy examples from the repo's `docs/prompts` into your prompts dir or provide a gist/raw URL for users to download.
 - Future: `yams init prompts` can be wired to fetch/populate a starter set.
 
 ## Readiness and Initialization
@@ -228,17 +228,7 @@ List stored documents with filtering.
 
 Restore documents from a collection or snapshot.
 
-**Parameters:**
-- `collection`: Collection name (optional)
-- `snapshot_id`: Snapshot ID (optional)
-- `snapshot_label`: Snapshot label (optional)
-- `output_directory`: Output directory (required)
-- `layout_template`: Layout template (default: `{path}`)
-- `include_patterns`: Only restore matching patterns
-- `exclude_patterns`: Exclude matching patterns
-- `overwrite`: Overwrite existing files (default: false)
-- `create_dirs`: Create parent directories (default: true)
-- `dry_run`: Preview without writing (default: false)
+For the full parameter list and examples, see the API reference: `../api/mcp_tools.md#restore`.
 
 ## Hot/Cold Modes
 
@@ -477,7 +467,7 @@ yams serve --verbose 2>debug.log
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | yams serve --verbose
 ```
 
-See [include/yams/mcp/mcp_server.h](../../include/yams/mcp/mcp_server.h) for protocol implementation details.
+See the repo `include/yams/mcp/mcp_server.h` for protocol implementation details.
 
 ### Server doesn't respond to Ctrl+C
 
@@ -551,5 +541,3 @@ For more information:
 - [CLI Reference](cli.md) - Complete command-line documentation
 - [API Documentation](../api/mcp_tools.md) - Detailed tool schemas
 - [GitHub Issues](https://github.com/trvon/yams/issues) - Report problems or request features
-
-

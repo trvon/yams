@@ -130,7 +130,7 @@ Focus: **Stability, polish, and production readiness**
 
 | Version | Highlights | Changelog |
 |---------|------------|-----------|
-| **v0.8** | Auto-init for containers, git-based versioning, multi-qa-MiniLM model, consistent 384-dim embeddings | [v0.8](../CHANGELOG.md) |
+| **v0.8** | Auto-init for containers, git-based versioning, multi-qa-MiniLM model, consistent 384-dim embeddings | (see repo `CHANGELOG.md`) |
 | **v0.7** | WorkCoordinator thread pool, hierarchical embeddings, KG-boosted search, tree-sitter symbol extraction, grep SIMD optimizations, parallel post-processing | [v0.7](changelogs/v0.7.md) |
 | **v0.6** | Protobuf IPC, connection FSM, tuning profiles, RRF fusion, post-ingest pipeline, plugin system v0.1 | [v0.6](changelogs/v0.6.md) |
 | **v0.5** | Service architecture, HNSW index, daemon pooling, repair coordinator, PDF extraction | [v0.5](changelogs/v0.5.md) |
@@ -147,4 +147,4 @@ Focus: **Stability, polish, and production readiness**
 2. **For larger items**: include evaluation plan and acceptance criteria
 3. **Keep changes incremental** and testable
 
-See [CONTRIBUTING.md](../CONTRIBUTING.md) for development setup.
+See the repo `CONTRIBUTING.md` for development setup.

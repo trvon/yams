@@ -31,7 +31,7 @@ SURFACE_PATTERNS = [
 CHANGE_TOKENS = [
     "CHANGELOG.md",
     "docs/CHANGELOG.md",
-    "docs/pbi/pbi-008-01-kernel-stability-program.md",
+    # docs/pbi is gitignored; keep changelog-based acknowledgements only.
 ]
 
 VERSION_FILE = "docs/spec/interface_versions.json"

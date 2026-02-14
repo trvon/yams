@@ -3,6 +3,7 @@
 # Unified build script for YAMS
 #
 # Usage: ./setup.sh [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan]
+#        ./setup.sh Release --with-tests
 #   build_type: Release (default), Debug, Profiling, or Fuzzing (TODO)
 #   --coverage: Enable code coverage instrumentation (Debug builds only)
 #   --tsan: Enable ThreadSanitizer for race detection (default for Debug builds)
@@ -44,6 +45,7 @@ set -euo pipefail
 ENABLE_COVERAGE=false
 ENABLE_TSAN="${ENABLE_TSAN:-}"  # Preserve environment variable if set
 BUILD_TYPE_INPUT=""
+ENABLE_RELEASE_TESTS=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -59,6 +61,11 @@ while [[ $# -gt 0 ]]; do
       ENABLE_TSAN=false
       shift
       ;;
+    --with-tests)
+      # Force building tests/benchmarks even in Release builds.
+      ENABLE_RELEASE_TESTS=true
+      shift
+      ;;
     Debug|Release|Profiling|Fuzzing|debug|release|profiling|fuzzing)
       if [[ -n "${BUILD_TYPE_INPUT}" ]]; then
         echo "Error: Build type specified multiple times" >&2
@@ -68,7 +75,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      echo "Usage: $0 [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan]" >&2
+      echo "Usage: $0 [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan] [--with-tests]" >&2
       exit 1
       ;;
   esac
@@ -365,6 +372,9 @@ echo "C++ Std:           ${MESON_CPPSTD} (Conan: ${CPPSTD})"
 if [[ "${LIBCXX_HARDENING}" != "none" ]]; then
   echo "libc++ Hardening:  ${LIBCXX_HARDENING}"
 fi
+if [[ "${ENABLE_RELEASE_TESTS}" == "true" ]]; then
+  echo "Release Tests:     enabled (--with-tests)"
+fi
 
 echo "--- Exporting custom Conan recipes... ---"
 # qpdf export removed - PDF plugin will be updated in separate PBI
@@ -390,8 +400,15 @@ fi
 
 # Enable tests and benchmarks for Debug builds in Conan (needed for Catch2/gtest/benchmark dependencies)
 if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
-  CONAN_ARGS+=(-o build_tests=True)
-  CONAN_ARGS+=(-o build_benchmarks=True)
+  CONAN_ARGS+=(-o "&:build_tests=True")
+  CONAN_ARGS+=(-o "&:build_benchmarks=True")
+fi
+
+# Optionally enable tests/benchmarks dependencies in Conan for Release builds.
+# This is required to build standalone benchmark executables under tests/benchmarks.
+if [[ "${BUILD_TYPE}" == "Release" ]] && [[ "${ENABLE_RELEASE_TESTS}" == "true" ]]; then
+  CONAN_ARGS+=(-o "&:build_tests=True")
+  CONAN_ARGS+=(-o "&:build_benchmarks=True")
 fi
 
 # Enable Tracy profiling for profiling builds
@@ -669,6 +686,14 @@ if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true"
     "-Denable-vector-tests=true"
   )
   echo "Vector/embedding tests enabled for ${BUILD_TYPE} build"
+fi
+
+# Optionally enable tests in Release builds for benchmark executables.
+if [[ "${BUILD_TYPE}" == "Release" ]] && [[ "${ENABLE_RELEASE_TESTS}" == "true" ]]; then
+  MESON_OPTIONS+=(
+    "-Dbuild-tests=true"
+  )
+  echo "Tests enabled for Release build (benchmarks under tests/benchmarks will be built)"
 fi
 
 MESON_OPTIONS+=("-Denable-tsan=${ENABLE_TSAN}")
