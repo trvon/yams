@@ -209,6 +209,7 @@ TEST_CASE("MCP DTO parsing - ListDocumentsRequest accepts string/array for tags"
     {
         const auto r = MCPListDocumentsRequest::fromJson(json{{"pattern", "*.md"}});
         CHECK(r.tags.empty());
+        CHECK_FALSE(r.matchAllTags);
     }
 
     {
@@ -221,6 +222,18 @@ TEST_CASE("MCP DTO parsing - ListDocumentsRequest accepts string/array for tags"
         const auto r = MCPListDocumentsRequest::fromJson(
             json{{"pattern", "*.md"}, {"tags", json::array({"t1", 1, "t2", false})}});
         CHECK(r.tags == std::vector<std::string>{"t1", "t2"});
+    }
+
+    {
+        const auto r = MCPListDocumentsRequest::fromJson(json{
+            {"pattern", "*.md"}, {"tags", json::array({"t1", "t2"})}, {"match_all_tags", true}});
+        CHECK(r.tags == std::vector<std::string>{"t1", "t2"});
+        CHECK(r.matchAllTags);
+
+        const auto j = r.toJson();
+        REQUIRE(j.contains("match_all_tags"));
+        CHECK(j["match_all_tags"].is_boolean());
+        CHECK(j["match_all_tags"].get<bool>());
     }
 }
 

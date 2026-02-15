@@ -15,6 +15,7 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/thread_pool.hpp>
 #ifdef _WIN32
+#include <fcntl.h>
 #include <io.h>
 #include <windows.h>
 #include <sys/stat.h>
@@ -134,8 +135,8 @@ bool migraphxProcessLockEnabled() {
 }
 
 std::filesystem::path resolveMigraphxProcessLockPath() {
-    if (const char* configured = std::getenv("YAMS_MIGRAPHX_LOCK_PATH"); configured &&
-        *configured) {
+    if (const char* configured = std::getenv("YAMS_MIGRAPHX_LOCK_PATH");
+        configured && *configured) {
         std::filesystem::path path(configured);
         if (path.extension() == ".lock") {
             return path;

@@ -426,6 +426,8 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, GraphRepairRequest>, std::is_same<Req, GraphValidateRequest>,
             // Graph query operations
             std::is_same<Req, GraphQueryRequest>,
+            // KG ingest operations
+            std::is_same<Req, KgIngestRequest>,
             // Cat operations
             std::is_same<Req, CatRequest>,
             // Generic metadata value counts query (MCP client mode)

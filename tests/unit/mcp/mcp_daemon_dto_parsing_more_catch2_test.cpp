@@ -527,6 +527,28 @@ TEST_CASE("MCP DTO parsing - GraphRequest relation_filters and tolerant numeric 
         CHECK(r.offset == 2u);
         CHECK(r.relationFilters == std::vector<std::string>{"imports", "calls"});
     }
+
+    {
+        const auto r = MCPGraphRequest::fromJson(json{{"include_properties", true}});
+        CHECK(r.includeNodeProperties);
+        CHECK(r.includeEdgeProperties);
+    }
+
+    {
+        const auto r = MCPGraphRequest::fromJson(json{
+            {"action", "ingest"},
+            {"nodes",
+             json::array(
+                 {json{{"node_key", "token:John.3.16:1"}, {"type", "token"}, {"label", "λόγος"}}})},
+            {"edges", json::array({json{{"src_node_key", "token:John.3.16:1"},
+                                        {"dst_node_key", "strongs:G3056"},
+                                        {"relation", "HAS_STRONGS"}}})},
+            {"aliases", json::array({json{{"node_key", "strongs:G3056"}, {"alias", "logos"}}})}});
+        CHECK(r.action == "ingest");
+        CHECK(r.nodes.size() == 1);
+        CHECK(r.edges.size() == 1);
+        CHECK(r.aliases.size() == 1);
+    }
 }
 
 TEST_CASE("MCP DTO parsing - GraphResponse optional emission", "[mcp][dto][graph][catch2]") {
@@ -549,5 +571,21 @@ TEST_CASE("MCP DTO parsing - GraphResponse optional emission", "[mcp][dto][graph
         const auto j = r.toJson();
         CHECK(j["node_type_counts"] == json{{"binary.function", 2}});
         CHECK(j["warning"] == "kg disabled");
+    }
+
+    {
+        MCPGraphResponse r;
+        r.action = "ingest";
+        r.nodesInserted = 2;
+        r.edgesInserted = 1;
+        r.success = true;
+
+        const auto j = r.toJson();
+        CHECK(j["action"] == "ingest");
+        CHECK(j["nodes_inserted"] == 2);
+        CHECK(j["edges_inserted"] == 1);
+        CHECK(j["success"] == true);
+        CHECK_FALSE(j.contains("origin"));
+        CHECK_FALSE(j.contains("connected_nodes"));
     }
 }

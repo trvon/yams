@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.8.3] - Unreleased
 
 ### Fixed
+- **MCP download retrievability contract**: `download` no longer returns a non-retrievable hash when post-index ingest fails. On ingest failure, response now sets `indexed=false` and clears `hash` to prevent follow-up `get/cat` calls from hammering daemon CAS with repeated "File not found" lookups.
 - **Stuck-doc recovery enqueue**: Fixed repair stuck-document recovery enqueueing `PostIngestTask`s to an unused InternalEventBus channel. Recovery now enqueues to `post_ingest` (consumed by PostInestQueue), so re-extraction actually runs.
 - **Doctor FTS5 reindex SQLite TOOBIG**: Added best-effort truncation retry for oversized extracted text and report `truncated=<n>` in output.
 
@@ -39,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ONNX ROCm diagnostic output**: GPU diagnostic now reports cold vs warm embedding timing to distinguish first-run compilation from steady-state inference.
 
 ### Changed
+- **Balanced/base daemon scaling defaults**: Updated no-env defaults for multi-client stability and fairness: `YAMS_IO_THREADS` default `2 -> 6`, `YAMS_CONN_SLOTS_MIN` default `64 -> 256`, `YAMS_SERVER_MAX_INFLIGHT` default `2048 -> 256`, `YAMS_SERVER_QUEUE_BYTES_CAP` default `256MiB -> 128MiB`, `YAMS_IPC_TIMEOUT_MS` default `5000 -> 15000`, `YAMS_MAX_IDLE_TIMEOUTS` default `3 -> 12`, and server writer budget fallback now defaults to `8MiB` per turn.
+- **MCP graph tool consolidation**: Unified KG ingest under `graph` via `action="ingest"` and removed separate `kg_ingest` tool exposure to keep the MCP tool surface smaller and cleaner.
 - **Benchmark reporting terminology**: Normalized benchmark docs to use neutral **retrieval result** wording (instead of subjective "significant" labels), and explicitly tagged the current baseline as the SciFact benchmark result.
 
 - **Post-ingest embedding fan-out (phased rollout)**:

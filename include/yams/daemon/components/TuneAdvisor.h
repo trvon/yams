@@ -316,7 +316,7 @@ public:
             } catch (...) {
             }
         }
-        return static_cast<std::size_t>(256);
+        return static_cast<std::size_t>(64);
     }
 
     // Per-request queued frames cap (server). Default 1024.
@@ -1559,7 +1559,7 @@ public:
         requestQueueTimeoutMsOverride_.store(v, std::memory_order_relaxed);
     }
 
-    /// Number of dedicated I/O threads (default 6)
+    /// Number of dedicated I/O threads (default 10)
     /// Environment: YAMS_IO_THREADS
     static uint32_t ioThreadCount() {
         uint32_t ov = ioThreadCountOverride_.load(std::memory_order_relaxed);
@@ -1573,10 +1573,37 @@ public:
             } catch (...) {
             }
         }
-        return 6;
+        return 10;
     }
     static void setIoThreadCount(uint32_t v) {
         ioThreadCountOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    /// Main-socket absolute connection lifetime in seconds (default 300).
+    /// 0 disables lifetime-based forced close.
+    /// Environment: YAMS_CONNECTION_LIFETIME_S
+    static uint32_t connectionLifetimeSeconds() {
+        int32_t ov = connectionLifetimeSecondsOverride_.load(std::memory_order_relaxed);
+        if (ov >= 0)
+            return static_cast<uint32_t>(ov);
+        if (const char* s = std::getenv("YAMS_CONNECTION_LIFETIME_S")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v <= 86400)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 300;
+    }
+    static void setConnectionLifetimeSeconds(uint32_t v) {
+        if (v <= 86400) {
+            connectionLifetimeSecondsOverride_.store(static_cast<int32_t>(v),
+                                                     std::memory_order_relaxed);
+        }
+    }
+    static void resetConnectionLifetimeSecondsOverride() {
+        connectionLifetimeSecondsOverride_.store(-1, std::memory_order_relaxed);
     }
 
     /// Whether to enable priority queuing (default true)
@@ -2487,6 +2514,7 @@ private:
     static inline std::atomic<uint32_t> queueLowWatermarkOverride_{0};
     static inline std::atomic<uint32_t> requestQueueTimeoutMsOverride_{0};
     static inline std::atomic<uint32_t> ioThreadCountOverride_{0};
+    static inline std::atomic<int32_t> connectionLifetimeSecondsOverride_{-1};
     static inline std::atomic<int> enablePriorityQueueOverride_{-1};
     static inline std::atomic<uint32_t> maxIdleTimeoutsOverride_{0};
     static inline std::atomic<uint32_t> streamChunkTimeoutMsOverride_{0};

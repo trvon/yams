@@ -6,6 +6,8 @@
 #include <yams/mcp/mcp_server.h>
 
 #include <nlohmann/json.hpp>
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -74,6 +76,42 @@ bool hasProp(const json& props, const std::string& name) {
     return props.is_object() && props.contains(name);
 }
 
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const std::string& value) : name_(name) {
+        if (const char* old = std::getenv(name_)) {
+            hadOld_ = true;
+            oldValue_ = old;
+        }
+#if defined(_WIN32)
+        _putenv_s(name_, value.c_str());
+#else
+        setenv(name_, value.c_str(), 1);
+#endif
+    }
+
+    ~ScopedEnvVar() {
+        if (hadOld_) {
+#if defined(_WIN32)
+            _putenv_s(name_, oldValue_.c_str());
+#else
+            setenv(name_, oldValue_.c_str(), 1);
+#endif
+        } else {
+#if defined(_WIN32)
+            _putenv_s(name_, "");
+#else
+            unsetenv(name_);
+#endif
+        }
+    }
+
+private:
+    const char* name_;
+    bool hadOld_ = false;
+    std::string oldValue_;
+};
+
 } // namespace
 
 // ============================================================================
@@ -134,6 +172,7 @@ TEST_CASE("MCP Schema - SearchDocuments has ergonomic and context params",
 
     // Tag filtering (YAMS extension)
     CHECK(hasProp(*props, "tags"));
+    CHECK(hasProp(*props, "match_all_tags"));
 }
 
 TEST_CASE("MCP Schema - GrepDocuments has expected grep options", "[mcp][schema][grep][catch2]") {
@@ -193,6 +232,9 @@ TEST_CASE("MCP Schema - Graph tool has CLI parity params", "[mcp][schema][graph]
     auto props = toolProps(*t);
     REQUIRE(props.has_value());
 
+    // Unified mode selector
+    CHECK(hasProp(*props, "action"));
+
     // Target selection
     CHECK(hasProp(*props, "hash"));
     CHECK(hasProp(*props, "name"));
@@ -214,6 +256,14 @@ TEST_CASE("MCP Schema - Graph tool has CLI parity params", "[mcp][schema][graph]
     // Output control
     CHECK(hasProp(*props, "include_properties"));
     CHECK(hasProp(*props, "scope_snapshot"));
+
+    // Ingest mode inputs
+    CHECK(hasProp(*props, "nodes"));
+    CHECK(hasProp(*props, "edges"));
+    CHECK(hasProp(*props, "aliases"));
+    CHECK(hasProp(*props, "document_hash"));
+    CHECK(hasProp(*props, "skip_existing_nodes"));
+    CHECK(hasProp(*props, "skip_existing_edges"));
 }
 
 TEST_CASE("MCP Schema - UpdateMetadata supports name or hash and multiple pairs",
@@ -256,6 +306,7 @@ TEST_CASE("MCP Schema - ListDocuments supports filters and sorting",
     CHECK(hasProp(*props, "pattern"));
     CHECK(hasProp(*props, "name"));
     CHECK(hasProp(*props, "tags"));
+    CHECK(hasProp(*props, "match_all_tags"));
 
     // Recency
     CHECK(hasProp(*props, "recent"));
@@ -312,4 +363,65 @@ TEST_CASE("MCP Schema - ListSnapshots has withLabels", "[mcp][schema][snapshots]
     REQUIRE(props.has_value());
 
     CHECK(hasProp(*props, "with_labels"));
+}
+
+TEST_CASE("MCP Download - relative staging config does not hard-fail in unwritable cwd",
+          "[mcp][download][hardening][catch2]") {
+    namespace fs = std::filesystem;
+
+    auto server = ServerUnderTest::make();
+
+    const auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const fs::path root = fs::temp_directory_path() / ("yams_mcp_dl_hardening_" + unique);
+    const fs::path xdgCfg = root / "xdg_config";
+    const fs::path cfgDir = xdgCfg / "yams";
+    std::error_code ec;
+    fs::create_directories(cfgDir, ec);
+    REQUIRE_FALSE(ec);
+
+    // Deliberately relative path to mirror user-reported failure mode.
+    {
+        std::ofstream out(cfgDir / "config.toml", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "[storage]\n";
+        out << "staging_dir = \"staging\"\n";
+    }
+
+    ScopedEnvVar cfgHome("XDG_CONFIG_HOME", xdgCfg.string());
+    ScopedEnvVar verbose("YAMS_POOL_VERBOSE", "1");
+
+    const fs::path oldCwd = fs::current_path();
+    bool changed = false;
+    try {
+        fs::current_path(fs::path("/"));
+        changed = true;
+    } catch (...) {
+        // If this platform disallows changing cwd to '/', skip this edge-case assertion.
+        SKIP("Could not switch cwd to '/' for unwritable-cwd staging hardening test");
+    }
+
+    auto restoreCwd = [&]() {
+        if (changed) {
+            std::error_code ignored;
+            fs::current_path(oldCwd, ignored);
+        }
+    };
+
+    auto res =
+        server->callToolPublic("download", json{{"url", "http://127.0.0.1:1/yams-mcp-hardening"},
+                                                {"post_index", false},
+                                                {"store_only", true},
+                                                {"timeout_ms", 1000},
+                                                {"follow_redirects", false}});
+
+    restoreCwd();
+
+    REQUIRE(res.is_object());
+    REQUIRE(res.contains("error"));
+    const auto msg = res["error"].value("message", std::string{});
+    const bool hasStagingFailure = msg.find("Failed to create staging dir") != std::string::npos;
+    CHECK_FALSE(hasStagingFailure);
+
+    std::error_code cleanup_ec;
+    fs::remove_all(root, cleanup_ec);
 }

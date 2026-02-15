@@ -267,6 +267,38 @@ TEST_CASE("Model eviction threshold override precedence", "[daemon][tune][adviso
     }
 }
 
+TEST_CASE("Connection lifetime seconds env var", "[daemon][tune][advisor][catch2]") {
+    TuneAdvisor::resetConnectionLifetimeSecondsOverride();
+
+    SECTION("Default value is 300 seconds") {
+        CHECK(TuneAdvisor::connectionLifetimeSeconds() == 300);
+    }
+
+    SECTION("Valid env var overrides default") {
+        EnvGuard envGuard("YAMS_CONNECTION_LIFETIME_S", "1800");
+        CHECK(TuneAdvisor::connectionLifetimeSeconds() == 1800);
+    }
+
+    SECTION("Zero env var disables lifetime enforcement") {
+        EnvGuard envGuard("YAMS_CONNECTION_LIFETIME_S", "0");
+        CHECK(TuneAdvisor::connectionLifetimeSeconds() == 0);
+    }
+
+    SECTION("Out-of-range env var falls back to default") {
+        EnvGuard envGuard("YAMS_CONNECTION_LIFETIME_S", "90000");
+        CHECK(TuneAdvisor::connectionLifetimeSeconds() == 300);
+    }
+
+    SECTION("Programmatic setter overrides env") {
+        EnvGuard envGuard("YAMS_CONNECTION_LIFETIME_S", "1800");
+        TuneAdvisor::setConnectionLifetimeSeconds(42);
+        CHECK(TuneAdvisor::connectionLifetimeSeconds() == 42);
+        TuneAdvisor::resetConnectionLifetimeSecondsOverride();
+    }
+
+    TuneAdvisor::resetConnectionLifetimeSecondsOverride();
+}
+
 // =============================================================================
 // Threshold Ordering Invariant Tests
 // =============================================================================

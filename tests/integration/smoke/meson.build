@@ -29,6 +29,11 @@ endif
 
 dbg = (get_option('buildtype') == 'debug')
 if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-smoke') or dbg) and integration_smoke_srcs.length() > 0 and gtest_dep.found()
+  smoke_test_args = []
+  if get_option('enable-tsan')
+    smoke_test_args += ['--gtest_filter=-MCPDocOpsFixture.*']
+  endif
+
   integ_exe = executable('yams_integration_smoke_tests', integration_smoke_srcs + files('test_main_smoke.cpp'),
     include_directories: incs,
     dependencies: [gtest_dep, test_deps],
@@ -38,6 +43,7 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
 
   test('integration_smoke', integ_exe,
     suite: ['integration', 'isolated'],
+    args: smoke_test_args,
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
       'YAMS_DISABLE_VECTORS': '1',

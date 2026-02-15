@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <yams/cli/cli_sync.h>
 #include <yams/cli/daemon_helpers.h>
@@ -64,6 +67,32 @@ Result<void> wait_for_daemon_ready(const std::filesystem::path& socketPath) {
     }
     return Error{yams::ErrorCode::Timeout,
                  std::string("daemon never reached ready state: ") + statusErr};
+}
+
+std::optional<json> extract_tool_data(const json& toolResult) {
+    if (toolResult.contains("structuredContent") && toolResult["structuredContent"].is_object()) {
+        const auto& sc = toolResult["structuredContent"];
+        if (sc.value("type", std::string{}) == "tool_result" && sc.contains("data") &&
+            sc["data"].is_object()) {
+            return sc["data"];
+        }
+    }
+    if (toolResult.contains("result") && toolResult["result"].is_object()) {
+        const auto& r = toolResult["result"];
+        if (r.contains("structuredContent") && r["structuredContent"].is_object()) {
+            const auto& sc = r["structuredContent"];
+            if (sc.value("type", std::string{}) == "tool_result" && sc.contains("data") &&
+                sc["data"].is_object()) {
+                return sc["data"];
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+bool contains_subpath(const std::vector<std::string>& values, const std::string& needle) {
+    return std::any_of(values.begin(), values.end(),
+                       [&](const auto& value) { return value.find(needle) != std::string::npos; });
 }
 } // namespace
 
@@ -272,6 +301,107 @@ TEST_F(MCPDocOpsFixture, DocOpsRoundTrip) {
     ASSERT_TRUE(listGone.is_object());
 
     // Daemon cleanup handled by fixture TearDown()
+}
+
+TEST_F(MCPDocOpsFixture, SearchAndListTagFiltering) {
+    using namespace std::chrono_literals;
+    using nlohmann::json;
+
+    ASSERT_TRUE(startDaemon());
+    ASSERT_TRUE(wait_for_daemon_ready(socketPath())) << "daemon readiness wait failed";
+
+    auto transport = std::make_unique<NullTransport>();
+    MCPServer server(std::move(transport));
+    server.setDaemonClientSocketPathForTest(socketPath());
+
+    const std::string redName = "mcp_tag_filter_red.txt";
+    const std::string blueName = "mcp_tag_filter_blue.txt";
+    const std::string queryToken = "mcp-tag-filter-token";
+
+    auto addRed = server.callToolPublic(
+        "add", json{{"content", "red content " + queryToken}, {"name", redName}});
+    ASSERT_TRUE(addRed.is_object()) << addRed.dump();
+    ASSERT_FALSE(addRed.contains("error")) << addRed.dump();
+
+    auto addBlue = server.callToolPublic(
+        "add", json{{"content", "blue content " + queryToken}, {"name", blueName}});
+    ASSERT_TRUE(addBlue.is_object()) << addBlue.dump();
+    ASSERT_FALSE(addBlue.contains("error")) << addBlue.dump();
+
+    auto tagRed = server.callToolPublic(
+        "update",
+        json{{"name", redName}, {"type", "tags"}, {"tags", json::array({"team-red", "group-a"})}});
+    ASSERT_TRUE(tagRed.is_object()) << tagRed.dump();
+    ASSERT_FALSE(tagRed.contains("error")) << tagRed.dump();
+
+    auto tagBlue =
+        server.callToolPublic("update", json{{"name", blueName},
+                                             {"type", "tags"},
+                                             {"tags", json::array({"team-blue", "group-a"})}});
+    ASSERT_TRUE(tagBlue.is_object()) << tagBlue.dump();
+    ASSERT_FALSE(tagBlue.contains("error")) << tagBlue.dump();
+
+    auto listRedOnly = server.callToolPublic("list", json{{"tags", json::array({"team-red"})},
+                                                          {"match_all_tags", true},
+                                                          {"paths_only", false},
+                                                          {"limit", 20}});
+    ASSERT_TRUE(listRedOnly.is_object()) << listRedOnly.dump();
+    ASSERT_FALSE(listRedOnly.contains("error")) << listRedOnly.dump();
+    auto listRedData = extract_tool_data(listRedOnly);
+    ASSERT_TRUE(listRedData.has_value()) << listRedOnly.dump();
+    ASSERT_TRUE(listRedData->contains("documents"));
+
+    std::vector<std::string> listedNames;
+    for (const auto& doc : (*listRedData)["documents"]) {
+        listedNames.push_back(doc.value("name", std::string{}));
+    }
+    EXPECT_TRUE(contains_subpath(listedNames, redName)) << listRedOnly.dump();
+    EXPECT_FALSE(contains_subpath(listedNames, blueName)) << listRedOnly.dump();
+
+    auto listImpossible =
+        server.callToolPublic("list", json{{"tags", json::array({"team-red", "team-blue"})},
+                                           {"match_all_tags", true},
+                                           {"paths_only", false},
+                                           {"limit", 20}});
+    ASSERT_TRUE(listImpossible.is_object()) << listImpossible.dump();
+    ASSERT_FALSE(listImpossible.contains("error")) << listImpossible.dump();
+    auto listImpossibleData = extract_tool_data(listImpossible);
+    ASSERT_TRUE(listImpossibleData.has_value()) << listImpossible.dump();
+    ASSERT_TRUE(listImpossibleData->contains("documents"));
+    EXPECT_TRUE((*listImpossibleData)["documents"].empty()) << listImpossible.dump();
+
+    auto searchRedOnly = server.callToolPublic("search", json{{"query", queryToken},
+                                                              {"type", "keyword"},
+                                                              {"tags", json::array({"team-red"})},
+                                                              {"match_all_tags", true},
+                                                              {"paths_only", true},
+                                                              {"limit", 20}});
+    ASSERT_TRUE(searchRedOnly.is_object()) << searchRedOnly.dump();
+    ASSERT_FALSE(searchRedOnly.contains("error")) << searchRedOnly.dump();
+    auto searchRedData = extract_tool_data(searchRedOnly);
+    ASSERT_TRUE(searchRedData.has_value()) << searchRedOnly.dump();
+    ASSERT_TRUE(searchRedData->contains("paths"));
+
+    std::vector<std::string> redPaths;
+    for (const auto& p : (*searchRedData)["paths"]) {
+        redPaths.push_back(p.get<std::string>());
+    }
+    EXPECT_TRUE(contains_subpath(redPaths, redName)) << searchRedOnly.dump();
+    EXPECT_FALSE(contains_subpath(redPaths, blueName)) << searchRedOnly.dump();
+
+    auto searchImpossible =
+        server.callToolPublic("search", json{{"query", queryToken},
+                                             {"type", "keyword"},
+                                             {"tags", json::array({"team-red", "team-blue"})},
+                                             {"match_all_tags", true},
+                                             {"paths_only", true},
+                                             {"limit", 20}});
+    ASSERT_TRUE(searchImpossible.is_object()) << searchImpossible.dump();
+    ASSERT_FALSE(searchImpossible.contains("error")) << searchImpossible.dump();
+    auto searchImpossibleData = extract_tool_data(searchImpossible);
+    ASSERT_TRUE(searchImpossibleData.has_value()) << searchImpossible.dump();
+    ASSERT_TRUE(searchImpossibleData->contains("paths"));
+    EXPECT_TRUE((*searchImpossibleData)["paths"].empty()) << searchImpossible.dump();
 }
 
 // Pagination and dry-run behaviors should be accepted and return structured JSON.

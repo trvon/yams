@@ -2644,6 +2644,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     yams::downloader::DownloaderConfig cfg{};
 
     // Read config and resolve storage path to match CLI behavior
+    std::filesystem::path resolvedDataRoot;
     try {
         namespace fs = std::filesystem;
 
@@ -2730,6 +2731,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 dataRoot = fs::current_path() / "yams_data";
             }
         }
+        resolvedDataRoot = dataRoot;
 
         // Allow explicit overrides via [storage] objects_dir/staging_dir
         fs::path objectsDir;
@@ -2747,6 +2749,16 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             objectsDir = dataRoot / "storage" / "objects";
         if (stagingDir.empty())
             stagingDir = dataRoot / "storage" / "staging";
+
+        // Relative storage paths in config are resolved against data root.
+        if (!resolvedDataRoot.empty()) {
+            if (!objectsDir.empty() && objectsDir.is_relative()) {
+                objectsDir = resolvedDataRoot / objectsDir;
+            }
+            if (!stagingDir.empty() && stagingDir.is_relative()) {
+                stagingDir = resolvedDataRoot / stagingDir;
+            }
+        }
         storage.objectsDir = std::move(objectsDir);
         storage.stagingDir = std::move(stagingDir);
 
@@ -2775,8 +2787,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 namespace fs = std::filesystem;
                 storage.objectsDir = fs::path(s.contentStoreRoot);
                 if (storage.stagingDir.empty()) {
-                    storage.stagingDir =
-                        fs::path(s.contentStoreRoot).parent_path() / "staging" / "downloader";
+                    storage.stagingDir = fs::path(s.contentStoreRoot).parent_path() / "staging";
                 }
                 if (verbose) {
                     spdlog::debug("[MCP] download: using daemon content store root for CAS: '{}'",
@@ -2803,19 +2814,46 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             // Prefer XDG_STATE_HOME, then HOME, then /tmp
             fs::path staging;
             if (const char* xdgState = std::getenv("XDG_STATE_HOME")) {
-                staging = fs::path(xdgState) / "yams" / "staging" / "downloader";
+                staging = fs::path(xdgState) / "yams" / "staging";
             } else if (const char* homeEnv = std::getenv("HOME")) {
-                staging =
-                    fs::path(homeEnv) / ".local" / "state" / "yams" / "staging" / "downloader";
+                staging = fs::path(homeEnv) / ".local" / "state" / "yams" / "staging";
             } else {
-                staging = fs::path("/tmp") / "yams" / "staging" / "downloader";
+                staging = fs::path("/tmp") / "yams" / "staging";
             }
             storage.stagingDir = staging;
         }
+
+        // Resolve late relative staging path against data root if available.
+        if (storage.stagingDir.is_relative() && !resolvedDataRoot.empty()) {
+            storage.stagingDir = resolvedDataRoot / storage.stagingDir;
+        }
+
         if (!ensure_dir(storage.stagingDir)) {
-            co_return Error{ErrorCode::InternalError,
-                            std::string("Failed to create staging dir: ") +
-                                storage.stagingDir.string()};
+            // Harden against invalid/unwritable config by falling back to a known writable root.
+            fs::path fallbackStaging;
+            if (!resolvedDataRoot.empty()) {
+                fallbackStaging = resolvedDataRoot / "storage" / "staging";
+            }
+            if (fallbackStaging.empty()) {
+                if (const char* xdgState = std::getenv("XDG_STATE_HOME"); xdgState && *xdgState) {
+                    fallbackStaging = fs::path(xdgState) / "yams" / "staging";
+                } else if (const char* homeEnv = std::getenv("HOME"); homeEnv && *homeEnv) {
+                    fallbackStaging = fs::path(homeEnv) / ".local" / "state" / "yams" / "staging";
+                } else {
+                    fallbackStaging = fs::path("/tmp") / "yams" / "staging";
+                }
+            }
+            if (!ensure_dir(fallbackStaging)) {
+                co_return Error{ErrorCode::InternalError,
+                                std::string("Failed to create staging dir: ") +
+                                    storage.stagingDir.string()};
+            }
+            if (verbose) {
+                spdlog::warn("[MCP] download: configured staging dir '{}' is not writable; "
+                             "falling back to '{}'",
+                             storage.stagingDir.string(), fallbackStaging.string());
+            }
+            storage.stagingDir = std::move(fallbackStaging);
         }
 
         // Optionally ensure objectsDir if provided
@@ -3485,6 +3523,7 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
         }
     }
     daemon_req.tags = req.tags;
+    daemon_req.matchAllTags = req.matchAllTags;
     // Inject instance tag for session-scoped list
     if (req.useSession && !instanceId_.empty()) {
         daemon_req.tags.push_back("inst:" + instanceId_);
@@ -3526,6 +3565,8 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     list_opts.limit = daemon_req.limit;
     list_opts.offset = daemon_req.offset;
     list_opts.namePattern = daemon_req.namePattern;
+    list_opts.tags = daemon_req.tags;
+    list_opts.matchAllTags = daemon_req.matchAllTags;
     list_opts.sortBy = daemon_req.sortBy;
     list_opts.reverse = daemon_req.reverse;
     list_opts.sessionId = __session;
@@ -4523,6 +4564,11 @@ MCPServer::handleSessionWatch(const MCPSessionWatchRequest& req) {
 
 boost::asio::awaitable<Result<MCPGraphResponse>>
 MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
+    // Dispatch ingest action to the dedicated handler
+    if (req.action == "ingest") {
+        co_return co_await handleKgIngest(req);
+    }
+
     if (auto ensure = ensureDaemonClient(); !ensure) {
         co_return ensure.error();
     }
@@ -4625,6 +4671,72 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
     out.queryTimeMs = resp.queryTimeMs;
     out.kgAvailable = resp.kgAvailable;
     out.warning = resp.warning;
+
+    co_return out;
+}
+
+boost::asio::awaitable<Result<MCPGraphResponse>>
+MCPServer::handleKgIngest(const MCPGraphRequest& req) {
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
+
+    // Translate MCP DTO → daemon KgIngestRequest
+    yams::daemon::KgIngestRequest dreq;
+    dreq.documentHash = req.documentHash;
+    dreq.skipExistingNodes = req.skipExistingNodes;
+    dreq.skipExistingEdges = req.skipExistingEdges;
+
+    dreq.nodes.reserve(req.nodes.size());
+    for (const auto& n : req.nodes) {
+        yams::daemon::KgIngestNode dn;
+        dn.nodeKey = n.nodeKey;
+        dn.label = n.label;
+        dn.type = n.type;
+        if (!n.properties.is_null())
+            dn.properties = n.properties.dump();
+        dreq.nodes.push_back(std::move(dn));
+    }
+
+    dreq.edges.reserve(req.edges.size());
+    for (const auto& e : req.edges) {
+        yams::daemon::KgIngestEdge de;
+        de.srcNodeKey = e.srcNodeKey;
+        de.dstNodeKey = e.dstNodeKey;
+        de.relation = e.relation;
+        de.weight = e.weight;
+        if (!e.properties.is_null())
+            de.properties = e.properties.dump();
+        dreq.edges.push_back(std::move(de));
+    }
+
+    dreq.aliases.reserve(req.aliases.size());
+    for (const auto& a : req.aliases) {
+        yams::daemon::KgIngestAlias da;
+        da.nodeKey = a.nodeKey;
+        da.alias = a.alias;
+        da.source = a.source;
+        da.confidence = a.confidence;
+        dreq.aliases.push_back(std::move(da));
+    }
+
+    auto res = co_await daemon_client_->call<yams::daemon::KgIngestRequest>(dreq);
+    if (!res) {
+        co_return res.error();
+    }
+
+    const auto& resp = res.value();
+
+    MCPGraphResponse out;
+    out.action = "ingest";
+    out.nodesInserted = resp.nodesInserted;
+    out.nodesSkipped = resp.nodesSkipped;
+    out.edgesInserted = resp.edgesInserted;
+    out.edgesSkipped = resp.edgesSkipped;
+    out.aliasesInserted = resp.aliasesInserted;
+    out.aliasesSkipped = resp.aliasesSkipped;
+    out.errors = resp.errors;
+    out.success = resp.success;
 
     co_return out;
 }
@@ -4801,6 +4913,10 @@ void MCPServer::initializeToolRegistry() {
                {{"type", "array"},
                 {"items", {{"type", "string"}}},
                 {"description", "Filter by tags (YAMS extension)"}}},
+              {"match_all_tags",
+               {{"type", "boolean"},
+                {"description", "Require all tags to match (AND logic)"},
+                {"default", false}}},
               {"cwd",
                {{"type", "string"},
                 {"description",
@@ -5062,6 +5178,10 @@ void MCPServer::initializeToolRegistry() {
                 {{"type", "array"},
                  {"items", {{"type", "string"}}},
                  {"description", "Filter by tags"}}},
+               {"match_all_tags",
+                {{"type", "boolean"},
+                 {"description", "Require all tags to match (AND logic)"},
+                 {"default", false}}},
                {"recent", {{"type", "integer"}, {"description", "Show N most recent documents"}}},
                {"paths_only",
                 {{"type", "boolean"},
@@ -5293,7 +5413,14 @@ void MCPServer::initializeToolRegistry() {
             "graph", [this](const MCPGraphRequest& req) { return handleGraphQuery(req); },
             json{{"type", "object"},
                  {"properties",
-                  {{"hash", {{"type", "string"}, {"description", "Document hash to query from"}}},
+                  {{"action",
+                    {{"type", "string"},
+                     {"description", "Operation: 'query' (default) to traverse/explore the graph, "
+                                     "'ingest' to insert nodes/edges/aliases"},
+                     {"enum", json::array({"query", "ingest"})},
+                     {"default", "query"}}},
+                   // ── Query parameters ──
+                   {"hash", {{"type", "string"}, {"description", "Document hash to query from"}}},
                    {"name", {{"type", "string"}, {"description", "Document name to query from"}}},
                    {"node_key",
                     {{"type", "string"},
@@ -5332,9 +5459,80 @@ void MCPServer::initializeToolRegistry() {
                      {"description", "Include node and edge properties"},
                      {"default", false}}},
                    {"scope_snapshot",
-                    {{"type", "string"}, {"description", "Scope results to specific snapshot"}}}}}},
-            "Query the knowledge graph to explore relationships between documents and entities",
-            "Query Knowledge Graph", readOnlyAnnotation);
+                    {{"type", "string"}, {"description", "Scope results to specific snapshot"}}},
+                   // ── Ingest parameters (used when action == "ingest") ──
+                   {"nodes",
+                    {{"type", "array"},
+                     {"description", "Nodes to ingest (action=ingest)"},
+                     {"items",
+                      {{"type", "object"},
+                       {"properties",
+                        {{"node_key",
+                          {{"type", "string"},
+                           {"description",
+                            "Unique logical key (e.g., 'strongs:H1234', 'lemma:λόγος')"}}},
+                         {"label", {{"type", "string"}, {"description", "Human-readable name"}}},
+                         {"type",
+                          {{"type", "string"},
+                           {"description",
+                            "Node type (e.g., 'token', 'strongs', 'lemma', 'verse')"}}},
+                         {"properties",
+                          {{"type", "object"},
+                           {"description", "Arbitrary properties as JSON object"}}}}},
+                       {"required", json::array({"node_key", "type"})}}}}},
+                   {"edges",
+                    {{"type", "array"},
+                     {"description", "Edges/relationships to ingest (action=ingest)"},
+                     {"items",
+                      {{"type", "object"},
+                       {"properties",
+                        {{"src_node_key", {{"type", "string"}, {"description", "Source node key"}}},
+                         {"dst_node_key",
+                          {{"type", "string"}, {"description", "Destination node key"}}},
+                         {"relation",
+                          {{"type", "string"},
+                           {"description",
+                            "Relation type (e.g., 'HAS_STRONGS', 'HAS_LEMMA', 'CONTAINS')"}}},
+                         {"weight",
+                          {{"type", "number"}, {"description", "Edge weight"}, {"default", 1.0}}},
+                         {"properties",
+                          {{"type", "object"}, {"description", "Arbitrary edge properties"}}}}},
+                       {"required", json::array({"src_node_key", "dst_node_key", "relation"})}}}}},
+                   {"aliases",
+                    {{"type", "array"},
+                     {"description", "Aliases/surface forms to ingest (action=ingest)"},
+                     {"items",
+                      {{"type", "object"},
+                       {"properties",
+                        {{"node_key",
+                          {{"type", "string"}, {"description", "Node key to attach alias to"}}},
+                         {"alias",
+                          {{"type", "string"}, {"description", "Surface form / alias text"}}},
+                         {"source",
+                          {{"type", "string"},
+                           {"description", "Origin system (e.g., 'symphony', 'manual')"}}},
+                         {"confidence",
+                          {{"type", "number"},
+                           {"description", "Confidence [0,1]"},
+                           {"default", 1.0}}}}},
+                       {"required", json::array({"node_key", "alias"})}}}}},
+                   {"document_hash",
+                    {{"type", "string"},
+                     {"description",
+                      "Associate ingested entities with this document (action=ingest)"}}},
+                   {"skip_existing_nodes",
+                    {{"type", "boolean"},
+                     {"description", "Skip nodes that already exist by node_key (action=ingest)"},
+                     {"default", true}}},
+                   {"skip_existing_edges",
+                    {{"type", "boolean"},
+                     {"description",
+                      "Skip edges that already exist by src/dst/relation (action=ingest)"},
+                     {"default", true}}}}}},
+            "Query or mutate the knowledge graph. Use action='query' (default) to explore "
+            "relationships, or action='ingest' to bulk-insert nodes, edges, and aliases "
+            "(e.g., token-to-Strong's/lemma graphs).",
+            "Knowledge Graph", addAnnotation);
     }
 #endif
         }

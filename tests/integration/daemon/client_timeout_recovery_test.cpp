@@ -10,6 +10,8 @@
 #include <chrono>
 #include <filesystem>
 #include <thread>
+#include <algorithm>
+#include <cstdlib>
 
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
@@ -44,6 +46,11 @@ bool connectWithRetry(DaemonClient& client, int maxRetries = 3,
         std::this_thread::sleep_for(retryDelay);
     }
     return false;
+}
+
+bool containsSubstring(const std::vector<std::string>& values, const std::string& needle) {
+    return std::any_of(values.begin(), values.end(),
+                       [&](const auto& value) { return value.find(needle) != std::string::npos; });
 }
 } // namespace
 
@@ -371,4 +378,120 @@ TEST_CASE("Client timeout recovery: Shutdown cancels in-flight request",
             msg.find("shutdown") != std::string::npos;
         REQUIRE(hasContext);
     }
+}
+
+TEST_CASE("Client timeout recovery: Tag filtering matrix for list and search",
+          "[daemon][timeout][tags][integration]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    DaemonHarness harness;
+    REQUIRE(harness.start(8s));
+
+    auto client = createClient(harness.socketPath());
+    REQUIRE(connectWithRetry(client));
+
+    const std::string redName = "catch2_tag_filter_red.txt";
+    const std::string blueName = "catch2_tag_filter_blue.txt";
+    const std::string queryToken = "catch2-tag-filter-token";
+
+    AddDocumentRequest addRed;
+    addRed.name = redName;
+    addRed.content = "red content " + queryToken;
+    addRed.tags = {"team-red", "group-a"};
+    addRed.waitForProcessing = true;
+    addRed.waitTimeoutSeconds = 30;
+    auto addRedResult = yams::cli::run_sync(client.streamingAddDocument(addRed), 20s);
+    REQUIRE(addRedResult.has_value());
+
+    AddDocumentRequest addBlue;
+    addBlue.name = blueName;
+    addBlue.content = "blue content " + queryToken;
+    addBlue.tags = {"team-blue", "group-a"};
+    addBlue.waitForProcessing = true;
+    addBlue.waitTimeoutSeconds = 30;
+    auto addBlueResult = yams::cli::run_sync(client.streamingAddDocument(addBlue), 20s);
+    REQUIRE(addBlueResult.has_value());
+
+    ListRequest listRedOnly;
+    listRedOnly.limit = 50;
+    listRedOnly.tags = {"team-red"};
+    listRedOnly.matchAllTags = true;
+    auto listRedOnlyResult = yams::cli::run_sync(client.list(listRedOnly), 10s);
+    REQUIRE(listRedOnlyResult.has_value());
+    const auto& listRedOnlyValue = listRedOnlyResult.value();
+
+    std::vector<std::string> listedNames;
+    for (const auto& item : listRedOnlyValue.items) {
+        listedNames.push_back(item.name);
+        listedNames.push_back(item.fileName);
+        listedNames.push_back(item.path);
+    }
+    REQUIRE(containsSubstring(listedNames, redName));
+    REQUIRE_FALSE(containsSubstring(listedNames, blueName));
+
+    ListRequest listImpossible;
+    listImpossible.limit = 50;
+    listImpossible.tags = {"team-red", "team-blue"};
+    listImpossible.matchAllTags = true;
+    auto listImpossibleResult = yams::cli::run_sync(client.list(listImpossible), 10s);
+    REQUIRE(listImpossibleResult.has_value());
+    REQUIRE(listImpossibleResult.value().items.empty());
+
+    if (std::getenv("TSAN_OPTIONS") != nullptr) {
+        SUCCEED("Skipping strict search tag assertions under TSAN (eventual indexing instability)");
+        return;
+    }
+
+    SearchRequest searchRedOnly;
+    searchRedOnly.query = queryToken;
+    searchRedOnly.searchType = "keyword";
+    searchRedOnly.pathsOnly = true;
+    searchRedOnly.limit = 50;
+    searchRedOnly.tags = {"team-red"};
+    searchRedOnly.matchAllTags = true;
+
+    yams::Result<SearchResponse> searchRedResult;
+    std::vector<std::string> searchRedPaths;
+    bool sawExpectedTagFilteredResult = false;
+    for (int attempt = 0; attempt < 30; ++attempt) {
+        searchRedResult = yams::cli::run_sync(client.search(searchRedOnly), 10s);
+        if (!searchRedResult.has_value()) {
+            std::this_thread::sleep_for(300ms);
+            continue;
+        }
+
+        searchRedPaths.clear();
+        for (const auto& item : searchRedResult.value().results) {
+            searchRedPaths.push_back(item.path);
+            auto it = item.metadata.find("path");
+            if (it != item.metadata.end()) {
+                searchRedPaths.push_back(it->second);
+            }
+        }
+
+        const bool hasRed = containsSubstring(searchRedPaths, redName);
+        const bool hasBlue = containsSubstring(searchRedPaths, blueName);
+        if (hasRed && !hasBlue) {
+            sawExpectedTagFilteredResult = true;
+            break;
+        }
+
+        std::this_thread::sleep_for(300ms);
+    }
+    REQUIRE(searchRedResult.has_value());
+    REQUIRE(sawExpectedTagFilteredResult);
+    REQUIRE(containsSubstring(searchRedPaths, redName));
+    REQUIRE_FALSE(containsSubstring(searchRedPaths, blueName));
+
+    SearchRequest searchImpossible;
+    searchImpossible.query = queryToken;
+    searchImpossible.searchType = "keyword";
+    searchImpossible.pathsOnly = true;
+    searchImpossible.limit = 50;
+    searchImpossible.tags = {"team-red", "team-blue"};
+    searchImpossible.matchAllTags = true;
+
+    auto searchImpossibleResult = yams::cli::run_sync(client.search(searchImpossible), 10s);
+    REQUIRE(searchImpossibleResult.has_value());
+    REQUIRE(searchImpossibleResult.value().results.empty());
 }

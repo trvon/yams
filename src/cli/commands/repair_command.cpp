@@ -128,6 +128,8 @@ public:
         }
         // Repair can take a long time — generous timeout
         cfg.requestTimeout = std::chrono::milliseconds(600000);
+        cfg.headerTimeout = std::chrono::milliseconds(600000);
+        cfg.bodyTimeout = std::chrono::milliseconds(600000);
 
         auto leaseRes = acquire_cli_daemon_client_shared(cfg);
         if (!leaseRes) {
