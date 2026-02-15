@@ -305,7 +305,8 @@ public:
     }
 
     // -------- Server-side IPC/mux controls (centralized) --------
-    // Max inflight requests per connection (server). Default aligns with handler default (2048).
+    // Max inflight requests per connection (server). Default tuned for fairness under
+    // multi-client load.
     static std::size_t serverMaxInflightPerConn() {
         if (const char* s = std::getenv("YAMS_SERVER_MAX_INFLIGHT")) {
             try {
@@ -315,7 +316,7 @@ public:
             } catch (...) {
             }
         }
-        return static_cast<std::size_t>(2048);
+        return static_cast<std::size_t>(256);
     }
 
     // Per-request queued frames cap (server). Default 1024.
@@ -331,7 +332,7 @@ public:
         return static_cast<std::size_t>(1024);
     }
 
-    // Total queued bytes per connection cap (server). Default 256 MiB.
+    // Total queued bytes per connection cap (server). Default 128 MiB.
     static std::size_t serverQueueBytesCap() {
         if (const char* s = std::getenv("YAMS_SERVER_QUEUE_BYTES_CAP")) {
             try {
@@ -341,10 +342,11 @@ public:
             } catch (...) {
             }
         }
-        return static_cast<std::size_t>(256ull * 1024ull * 1024ull);
+        return static_cast<std::size_t>(128ull * 1024ull * 1024ull);
     }
 
-    // Server writer budget per turn (bytes). Falls back to client/general writer budget if unset.
+    // Server writer budget per turn (bytes). Falls back to 8 MiB default for balanced
+    // throughput if unset.
     static std::size_t serverWriterBudgetBytesPerTurn() {
         if (const char* s = std::getenv("YAMS_SERVER_WRITER_BUDGET_BYTES")) {
             try {
@@ -354,7 +356,7 @@ public:
             } catch (...) {
             }
         }
-        return static_cast<std::size_t>(writerBudgetBytesPerTurn());
+        return static_cast<std::size_t>(8ull * 1024ull * 1024ull);
     }
 
     // Server writer maximum budget clamp per turn (bytes). Centralized here for consistency.
@@ -852,12 +854,12 @@ public:
     // Override store for IPC timeout (ms)
     static inline std::atomic<uint32_t> ipcTimeoutMsOverride_{0};
 
-    // IPC timeouts (ms) for read/write operations. Default 5000ms; env: YAMS_IPC_TIMEOUT_MS.
+    // IPC timeouts (ms) for read/write operations. Default 15000ms; env: YAMS_IPC_TIMEOUT_MS.
     static uint32_t ipcTimeoutMs() {
         uint32_t ov = ipcTimeoutMsOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
-        uint32_t def = 5000;
+        uint32_t def = 15000;
         if (const char* s = std::getenv("YAMS_IPC_TIMEOUT_MS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
@@ -1212,13 +1214,13 @@ public:
     }
 
     // -------- Connection slot dynamic sizing (PBI-085) --------
-    // Minimum connection slots (floor for dynamic resizing). Default 64.
+    // Minimum connection slots (floor for dynamic resizing). Default 256.
     // Environment: YAMS_CONN_SLOTS_MIN (range 1..1024)
     static uint32_t connectionSlotsMin() {
         uint32_t ov = connectionSlotsMinOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
-        uint32_t def = 64;
+        uint32_t def = 256;
         if (const char* s = std::getenv("YAMS_CONN_SLOTS_MIN")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
@@ -1557,7 +1559,7 @@ public:
         requestQueueTimeoutMsOverride_.store(v, std::memory_order_relaxed);
     }
 
-    /// Number of dedicated I/O threads (default 2)
+    /// Number of dedicated I/O threads (default 6)
     /// Environment: YAMS_IO_THREADS
     static uint32_t ioThreadCount() {
         uint32_t ov = ioThreadCountOverride_.load(std::memory_order_relaxed);
@@ -1571,7 +1573,7 @@ public:
             } catch (...) {
             }
         }
-        return 2;
+        return 6;
     }
     static void setIoThreadCount(uint32_t v) {
         ioThreadCountOverride_.store(v, std::memory_order_relaxed);
@@ -1609,7 +1611,7 @@ public:
             } catch (...) {
             }
         }
-        return 3;
+        return 12;
     }
     static void setMaxIdleTimeouts(uint32_t v) {
         maxIdleTimeoutsOverride_.store(v, std::memory_order_relaxed);

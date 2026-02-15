@@ -411,6 +411,7 @@ MCPDownloadResponse MCPDownloadResponse::fromJson(const json& j) {
     resp.storedPath = j.value("stored_path", std::string{});
     resp.sizeBytes = j.value("size_bytes", uint64_t{0});
     resp.success = j.value("success", false);
+    resp.indexed = j.value("indexed", false);
     if (j.contains("http_status")) {
         resp.httpStatus = j["http_status"].get<int>();
     }
@@ -437,7 +438,8 @@ json MCPDownloadResponse::toJson() const {
            {"hash", hash},
            {"stored_path", storedPath},
            {"size_bytes", sizeBytes},
-           {"success", success}};
+           {"success", success},
+           {"indexed", indexed}};
     if (httpStatus)
         j["http_status"] = *httpStatus;
     if (etag)

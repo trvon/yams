@@ -178,6 +178,30 @@ TEST_CASE("MCP DTO parsing - DownloadRequest metadata stringifies values",
     CHECK(r.metadata.at("obj") == json{{"k", 1}}.dump());
 }
 
+TEST_CASE("MCP DTO parsing - DownloadResponse preserves indexed flag",
+          "[mcp][dto][download][catch2]") {
+    using yams::mcp::MCPDownloadResponse;
+
+    {
+        const auto r = MCPDownloadResponse::fromJson(
+            json{{"url", "https://e"}, {"success", true}, {"indexed", true}});
+        CHECK(r.success);
+        CHECK(r.indexed);
+    }
+
+    {
+        MCPDownloadResponse resp;
+        resp.url = "https://e";
+        resp.success = true;
+        resp.indexed = false;
+
+        const auto j = resp.toJson();
+        REQUIRE(j.contains("indexed"));
+        CHECK(j["indexed"].is_boolean());
+        CHECK_FALSE(j["indexed"].get<bool>());
+    }
+}
+
 TEST_CASE("MCP DTO parsing - ListDocumentsRequest accepts string/array for tags",
           "[mcp][dto][list][catch2]") {
     using yams::mcp::MCPListDocumentsRequest;

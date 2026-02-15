@@ -2765,6 +2765,29 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     cfg.resume = dreq.resume;
     cfg.storeOnly = dreq.storeOnly;
 
+    // Align downloader CAS root with daemon content store root so returned hashes are
+    // retrievable by daemon get/cat operations.
+    try {
+        auto sres = co_await daemon_client_->status();
+        if (sres) {
+            const auto& s = sres.value();
+            if (!s.contentStoreRoot.empty()) {
+                namespace fs = std::filesystem;
+                storage.objectsDir = fs::path(s.contentStoreRoot);
+                if (storage.stagingDir.empty()) {
+                    storage.stagingDir =
+                        fs::path(s.contentStoreRoot).parent_path() / "staging" / "downloader";
+                }
+                if (verbose) {
+                    spdlog::debug("[MCP] download: using daemon content store root for CAS: '{}'",
+                                  storage.objectsDir.string());
+                }
+            }
+        }
+    } catch (...) {
+        // Best-effort alignment only; fall back to config/env-derived storage roots.
+    }
+
     // Resolve and ensure staging directory exists to avoid regression
     try {
         namespace fs = std::filesystem;
@@ -3020,6 +3043,10 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             spdlog::error("[MCP] post-index: daemon add failed for path='{}' error='{}'",
                           addReq.path, addres.error().message);
             mcp_response.indexed = false;
+            // Do not expose downloader-local hash as retrievable when indexing failed.
+            // Agents commonly follow download -> get(hash); returning a non-indexed hash causes
+            // repeated "File not found" lookups in daemon CAS.
+            mcp_response.hash.clear();
         } else {
             mcp_response.indexed = true;
             const auto& addok = addres.value();
