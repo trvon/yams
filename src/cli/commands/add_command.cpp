@@ -35,7 +35,6 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
-#include <yams/core/uuid.h>
 // Async helpers for interim non-blocking daemon operations
 #include <future>
 #include <boost/asio/awaitable.hpp>
@@ -489,9 +488,6 @@ public:
                     return Error{ErrorCode::InvalidArgument,
                                  "Snapshot identifiers exceed maximum length"};
                 }
-                if (sanitizedSnapshotId.empty()) {
-                    sanitizedSnapshotId = yams::core::generateSnapshotId();
-                }
                 std::string sanitizedMimeType = trimCopy(mimeType_);
                 if (sanitizedMimeType.size() > kMaxMimeTypeLength) {
                     return Error{ErrorCode::InvalidArgument, "MIME type exceeds maximum length"};
@@ -781,33 +777,16 @@ private:
             paths.push_back(std::filesystem::path("-"));
         }
 
-        std::string effectiveSnapshotId = trimCopy(snapshotId_);
-        std::string effectiveSnapshotLabel = trimCopy(snapshotLabel_);
-        if (hasUnsupportedControlChars(effectiveSnapshotId) ||
-            hasUnsupportedControlChars(effectiveSnapshotLabel)) {
-            return Error{ErrorCode::InvalidArgument,
-                         "Snapshot identifiers cannot contain control characters"};
-        }
-        if (effectiveSnapshotId.size() > kMaxSnapshotLength ||
-            effectiveSnapshotLabel.size() > kMaxSnapshotLength) {
-            return Error{ErrorCode::InvalidArgument, "Snapshot identifiers exceed maximum length"};
-        }
-        if (effectiveSnapshotId.empty()) {
-            effectiveSnapshotId = yams::core::generateSnapshotId();
-        }
-
         // If stdin only
         if (paths.size() == 1 && paths[0].string() == "-") {
-            return storeFromStdinWithServices(*appContext, effectiveSnapshotId,
-                                              effectiveSnapshotLabel);
+            return storeFromStdinWithServices(*appContext);
         }
 
         // Iterate and process each path
         size_t ok = 0, failed = 0;
         for (const auto& p : paths) {
             if (p.string() == "-") {
-                auto r = storeFromStdinWithServices(*appContext, effectiveSnapshotId,
-                                                    effectiveSnapshotLabel);
+                auto r = storeFromStdinWithServices(*appContext);
                 if (r) {
                     ok++;
                 } else {
@@ -821,16 +800,14 @@ private:
                 continue;
             }
             if (std::filesystem::is_directory(p)) {
-                auto r = storeDirectoryWithServices(*appContext, p, effectiveSnapshotId,
-                                                    effectiveSnapshotLabel);
+                auto r = storeDirectoryWithServices(*appContext, p);
                 if (r) {
                     ok++;
                 } else {
                     failed++;
                 }
             } else {
-                auto r = storeFileWithServices(*appContext, p, effectiveSnapshotId,
-                                               effectiveSnapshotLabel);
+                auto r = storeFileWithServices(*appContext, p);
                 if (r) {
                     ok++;
                 } else {
@@ -845,9 +822,7 @@ private:
         return Result<void>();
     }
 
-    Result<void> storeFromStdinWithServices(const app::services::AppContext& appContext,
-                                            const std::string& effectiveSnapshotId,
-                                            const std::string& effectiveSnapshotLabel) {
+    Result<void> storeFromStdinWithServices(const app::services::AppContext& appContext) {
         auto documentService = app::services::makeDocumentService(appContext);
         if (!documentService) {
             return Error{ErrorCode::NotInitialized, "Failed to create document service"};
@@ -868,8 +843,8 @@ private:
         req.tags = tags_;
         req.noEmbeddings = noEmbeddings_;
         req.collection = collection_;
-        req.snapshotId = effectiveSnapshotId;
-        req.snapshotLabel = effectiveSnapshotLabel;
+        req.snapshotId = snapshotId_;
+        req.snapshotLabel = snapshotLabel_;
         req.sessionId = getActiveSessionId(cli_, bypassSession_);
 
         // Parse metadata key=value pairs
@@ -905,9 +880,7 @@ private:
     }
 
     Result<void> storeFileWithServices(const app::services::AppContext& appContext,
-                                       const std::filesystem::path& filePath,
-                                       const std::string& effectiveSnapshotId,
-                                       const std::string& effectiveSnapshotLabel) {
+                                       const std::filesystem::path& filePath) {
         auto documentService = app::services::makeDocumentService(appContext);
         if (!documentService) {
             return Error{ErrorCode::NotInitialized, "Failed to create document service"};
@@ -919,8 +892,8 @@ private:
         req.tags = tags_;
         req.noEmbeddings = noEmbeddings_;
         req.collection = collection_;
-        req.snapshotId = effectiveSnapshotId;
-        req.snapshotLabel = effectiveSnapshotLabel;
+        req.snapshotId = snapshotId_;
+        req.snapshotLabel = snapshotLabel_;
         req.sessionId = getActiveSessionId(cli_, bypassSession_);
 
         // Parse metadata key=value pairs
@@ -956,9 +929,7 @@ private:
     }
 
     Result<void> storeDirectoryWithServices(const app::services::AppContext& appContext,
-                                            const std::filesystem::path& dirPath,
-                                            const std::string& effectiveSnapshotId,
-                                            const std::string& effectiveSnapshotLabel) {
+                                            const std::filesystem::path& dirPath) {
         if (!recursive_) {
             return Error{ErrorCode::InvalidArgument, "Directory specified but --recursive not set"};
         }
@@ -978,8 +949,6 @@ private:
         req.recursive = recursive_;
         req.verify = verify_;
         req.noEmbeddings = noEmbeddings_;
-        req.snapshotId = effectiveSnapshotId;
-        req.snapshotLabel = effectiveSnapshotLabel;
 
         // Session-isolated memory (PBI-082): tag documents with active session
         req.sessionId = getActiveSessionId(cli_, bypassSession_);

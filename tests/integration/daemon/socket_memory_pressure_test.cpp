@@ -18,6 +18,7 @@
 
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
+#include "test_helpers_catch2.h"
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
@@ -134,6 +135,9 @@ TEST_CASE("Socket memory pressure - concurrent idle connections",
           "[daemon][socket][memory-pressure][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
+    ScopedEnvVar ipcTimeoutEnv{"YAMS_IPC_TIMEOUT_MS", std::string{"1000"}};
+    ScopedEnvVar maxIdleEnv{"YAMS_MAX_IDLE_TIMEOUTS", std::string{"3"}};
+
     DaemonHarness harness;
     REQUIRE(harness.start());
 
@@ -161,9 +165,10 @@ TEST_CASE("Socket memory pressure - concurrent idle connections",
         clients.push_back(std::move(client));
     }
 
-    // Let all connections idle past timeout threshold (3x 2s read timeout = 6s)
+    // Let all connections idle past timeout threshold
+    // (3x 1s read timeout via env = ~3s)
     INFO("Idling connections to trigger timeout cleanup...");
-    std::this_thread::sleep_for(7s);
+    std::this_thread::sleep_for(4s);
 
     // Try to use connections after idle timeout
     int successfulReconnects = 0;
@@ -230,6 +235,9 @@ TEST_CASE("Socket memory pressure - native_handle safety",
           "[daemon][socket][memory-pressure][crash]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
+    ScopedEnvVar ipcTimeoutEnv{"YAMS_IPC_TIMEOUT_MS", std::string{"1000"}};
+    ScopedEnvVar maxIdleEnv{"YAMS_MAX_IDLE_TIMEOUTS", std::string{"3"}};
+
     DaemonHarness harness;
     REQUIRE(harness.start());
 
@@ -256,7 +264,7 @@ TEST_CASE("Socket memory pressure - native_handle safety",
         // Let connection idle to trigger the timeout path that logs the fd
         // From crash log line 371: "Closing idle connection after {} consecutive read timeouts
         // (fd={})"
-        std::this_thread::sleep_for(7s);
+        std::this_thread::sleep_for(4s);
 
         // Try to reconnect - daemon should be stable
         // Use retry logic since reconnecting after idle timeout may need time

@@ -291,6 +291,9 @@ Result<void> YamsDaemon::start() {
     spdlog::info("[Startup] Phase: SocketServer Start");
     SocketServer::Config socketConfig;
     socketConfig.socketPath = config_.socketPath;
+    // Defer read/write timeout selection to SocketServer/TuneAdvisor so
+    // YAMS_IPC_TIMEOUT_MS is honored by default.
+    socketConfig.connectionTimeout = std::chrono::milliseconds(0);
     // Derive maxConnections from TuneAdvisor (env/config) with a sane computed fallback.
     // Priority:
     //  1) YAMS_MAX_ACTIVE_CONN via TuneAdvisor::maxActiveConn()

@@ -13,8 +13,10 @@
 
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
+#include "test_helpers_catch2.h"
 #include <yams/cli/cli_sync.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/SocketServer.h>
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
@@ -80,6 +82,53 @@ TEST_CASE("Client timeout recovery: Immediate EOF detection and retry",
         }
         REQUIRE(result2.has_value());
     }
+}
+
+TEST_CASE("Client timeout recovery: Honors YAMS_IPC_TIMEOUT_MS for idle reap",
+          "[daemon][timeout][integration]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    ScopedEnvVar ipcTimeoutEnv{"YAMS_IPC_TIMEOUT_MS", std::string{"1000"}};
+    ScopedEnvVar maxIdleEnv{"YAMS_MAX_IDLE_TIMEOUTS", std::string{"1"}};
+
+    DaemonHarness harness;
+    REQUIRE(harness.start(5s));
+
+    auto idleClient = createClient(harness.socketPath());
+    REQUIRE(connectWithRetry(idleClient));
+
+    auto warmIdle = yams::cli::run_sync(idleClient.status(), 2s);
+    REQUIRE(warmIdle.has_value());
+
+    auto* socketServer = harness.daemon()->getSocketServer();
+    REQUIRE(socketServer != nullptr);
+
+    std::this_thread::sleep_for(2500ms);
+
+    bool observedIdleReap = false;
+    auto deadline = std::chrono::steady_clock::now() + 4s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (socketServer->activeConnections() == 0) {
+            observedIdleReap = true;
+            break;
+        }
+        std::this_thread::sleep_for(200ms);
+    }
+
+    REQUIRE(observedIdleReap);
+
+    yams::Result<yams::daemon::ListResponse> resultAfterIdle;
+    ListRequest req;
+    req.limit = 10;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        resultAfterIdle = yams::cli::run_sync(idleClient.list(req), 5s);
+        if (resultAfterIdle.has_value()) {
+            break;
+        }
+        std::this_thread::sleep_for(200ms);
+    }
+
+    REQUIRE(resultAfterIdle.has_value());
 }
 
 TEST_CASE("Client timeout recovery: Streaming request connection handling",

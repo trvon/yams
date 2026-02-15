@@ -4,9 +4,6 @@
 #include <future>
 #include <sstream>
 #include <thread>
-#include <boost/asio/steady_timer.hpp>
-#include <boost/asio/this_coro.hpp>
-#include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/crypto/hasher.h>
@@ -473,7 +470,6 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                         response.hash = "";
                     }
                     response.message = "Queued for deferred processing (system under pressure).";
-                    response.extractionStatus = "accepted_async";
                     co_return response;
                 } else {
                     co_return ErrorResponse{ErrorCode::ResourceExhausted,
@@ -503,93 +499,6 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             }
 
             // For directories or if daemon not ready, use async queue
-            // Deterministic mode for directory adds: when waitForProcessing=true,
-            // complete ingestion synchronously and only return after snapshot metadata
-            // is durably visible (or explicit timeout).
-            if ((isDir || req.recursive) && req.waitForProcessing) {
-                if (!daemonReady) {
-                    co_return ErrorResponse{
-                        ErrorCode::InvalidState,
-                        "Daemon is not ready for synchronous directory ingestion"};
-                }
-
-                auto appContext = serviceManager_->getAppContext();
-                auto indexingService = app::services::makeIndexingService(appContext);
-                app::services::AddDirectoryRequest serviceReq;
-                serviceReq.directoryPath = req.path;
-                serviceReq.collection = req.collection;
-                serviceReq.tags = req.tags;
-                serviceReq.includePatterns = req.includePatterns;
-                serviceReq.excludePatterns = req.excludePatterns;
-                for (const auto& [key, value] : req.metadata) {
-                    serviceReq.metadata[key] = value;
-                }
-                serviceReq.recursive = true;
-                serviceReq.snapshotId = req.snapshotId;
-                serviceReq.snapshotLabel = req.snapshotLabel;
-                serviceReq.sessionId = req.sessionId;
-                serviceReq.noEmbeddings = req.noEmbeddings;
-                serviceReq.noGitignore = req.noGitignore;
-
-                auto result = co_await yams::daemon::dispatch::offload_to_worker(
-                    serviceManager_,
-                    [indexingService, serviceReq = std::move(serviceReq)]() mutable {
-                        return indexingService->addDirectory(serviceReq);
-                    });
-                if (!result) {
-                    co_return ErrorResponse{result.error().code, result.error().message};
-                }
-
-                const auto& serviceResp = result.value();
-                AddDocumentResponse response;
-                response.path = req.path.empty() ? req.name : req.path;
-                response.documentsAdded = serviceResp.filesIndexed;
-                response.documentsSkipped = serviceResp.filesSkipped;
-                response.snapshotId = serviceResp.snapshotId;
-                response.snapshotLabel = serviceResp.snapshotLabel;
-                response.extractionStatus = "success";
-
-                bool snapshotVisible = response.snapshotId.empty();
-                auto* repo = serviceManager_ ? serviceManager_->getMetadataRepo().get() : nullptr;
-                if (!snapshotVisible && repo) {
-                    const auto timeoutSeconds =
-                        req.waitTimeoutSeconds > 0 ? req.waitTimeoutSeconds : 30;
-                    const auto deadline =
-                        std::chrono::steady_clock::now() + std::chrono::seconds(timeoutSeconds);
-                    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-
-                    while (std::chrono::steady_clock::now() < deadline) {
-                        auto snaps = repo->listTreeSnapshots(256);
-                        if (snaps) {
-                            auto it = std::find_if(snaps.value().begin(), snaps.value().end(),
-                                                   [&](const auto& rec) {
-                                                       return rec.snapshotId == response.snapshotId;
-                                                   });
-                            if (it != snaps.value().end()) {
-                                snapshotVisible = true;
-                                break;
-                            }
-                        }
-
-                        timer.expires_after(std::chrono::milliseconds(25));
-                        co_await timer.async_wait(boost::asio::use_awaitable);
-                    }
-                }
-
-                if (!snapshotVisible) {
-                    co_return ErrorResponse{ErrorCode::Timeout,
-                                            "Directory ingestion completed but snapshot metadata "
-                                            "was not visible before timeout"};
-                }
-
-                if (serviceManager_ && !response.snapshotId.empty()) {
-                    serviceManager_->onSnapshotPersisted();
-                }
-
-                response.message = "Directory ingestion completed synchronously.";
-                co_return response;
-            }
-
             if (isDir || req.recursive || !daemonReady) {
                 auto channel =
                     InternalEventBus::instance()
@@ -626,7 +535,6 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                         response.message =
                             "Ingestion accepted for asynchronous processing (daemon initializing).";
                     }
-                    response.extractionStatus = "accepted_async";
                     co_return response;
                 } else {
                     co_return ErrorResponse{ErrorCode::ResourceExhausted,
