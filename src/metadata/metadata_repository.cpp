@@ -4491,7 +4491,7 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
 }
 
 Result<bool> MetadataRepository::hasDocumentEmbeddingByHash(const std::string& hash) {
-    return executeQuery<bool>([&](Database& db) -> Result<bool> {
+    return executeReadQuery<bool>([&](Database& db) -> Result<bool> {
         auto stmtResult = db.prepare(R"(
             SELECT COALESCE(des.has_embedding, 0)
             FROM documents d

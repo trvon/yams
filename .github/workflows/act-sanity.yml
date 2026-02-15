@@ -1,0 +1,94 @@
+name: Act Sanity
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.actrc'
+      - 'packaging/windows/**'
+      - 'scripts/act/**'
+      - 'docs/ci/local-act.md'
+
+permissions:
+  contents: read
+
+jobs:
+  workflow-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=v1.7.7
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/${VERSION}/actionlint_${VERSION#v}_linux_amd64.tar.gz" \
+            | tar -xz actionlint
+          sudo mv actionlint /usr/local/bin/actionlint
+          actionlint -version
+
+      - name: Lint GitHub workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          actionlint -color
+
+  windows-script-sanity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse PowerShell packaging scripts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = Get-ChildItem -Path 'packaging/windows' -Filter '*.ps1' -File
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              Write-Host "Parse errors in $($file.FullName)"
+              $errors | ForEach-Object { Write-Host $_.ToString() }
+              exit 1
+            }
+          }
+          Write-Host "PowerShell parse check passed for packaging/windows/*.ps1"
+
+      - name: Validate key packaging hardening invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q "run_id:" .github/workflows/publish-repos.yml
+          grep -q "workflow_run.id" .github/workflows/publish-repos.yml
+          grep -q -- "--content-type" .github/workflows/publish-repos.yml
+          grep -q "Get-MsiProperty" packaging/windows/generate-winget-manifest.ps1
+          grep -q "ProductCode: '\$productCode'" packaging/windows/generate-winget-manifest.ps1
+
+  windows-hosted-smoke:
+    if: github.actor != 'nektos/act'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse PowerShell packaging scripts (hosted Windows)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = Get-ChildItem -Path 'packaging/windows' -Filter '*.ps1' -File
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              Write-Host "Parse errors in $($file.FullName)"
+              $errors | ForEach-Object { Write-Host $_.ToString() }
+              exit 1
+            }
+          }
+          Write-Host "PowerShell parse check passed on windows-latest"

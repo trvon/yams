@@ -72,6 +72,14 @@ jobs:
           fetch-depth: 0
           submodules: false  # Manual submodule init below (some use SSH URLs)
 
+      - name: Skip non-linux-x86_64 matrix entries under act
+        if: github.actor == 'nektos/act' && matrix.suffix != 'linux-x86_64'
+        shell: bash
+        run: |
+          echo "Skipping matrix entry '${{ matrix.suffix }}' under act."
+          echo "Act provides Linux container execution only; keep local runs deterministic on linux-x86_64."
+          exit 0
+
       - name: Free disk space (Linux)
         if: runner.os == 'Linux'
         uses: jlumbroso/free-disk-space@main

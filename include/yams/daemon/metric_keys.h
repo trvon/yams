@@ -99,6 +99,31 @@ constexpr std::string_view kSearchCacheHitRatePct = "search_cache_hit_rate_pct";
 constexpr std::string_view kSearchAvgLatencyUs = "search_avg_latency_us";
 constexpr std::string_view kSearchConcurrencyLimit = "search_concurrency_limit";
 
+// Route-separated DB pool metrics (write/work vs read)
+constexpr std::string_view kDbWritePoolAvailable = "db_write_pool_available";
+constexpr std::string_view kDbWritePoolTotalConnections = "db_write_pool_total_connections";
+constexpr std::string_view kDbWritePoolAvailableConnections =
+	"db_write_pool_available_connections";
+constexpr std::string_view kDbWritePoolActiveConnections = "db_write_pool_active_connections";
+constexpr std::string_view kDbWritePoolWaitingRequests = "db_write_pool_waiting_requests";
+constexpr std::string_view kDbWritePoolMaxObservedWaiting =
+	"db_write_pool_max_observed_waiting";
+constexpr std::string_view kDbWritePoolTotalWaitMicros = "db_write_pool_total_wait_micros";
+constexpr std::string_view kDbWritePoolTimeoutCount = "db_write_pool_timeout_count";
+constexpr std::string_view kDbWritePoolFailedAcquisitions =
+	"db_write_pool_failed_acquisitions";
+
+constexpr std::string_view kDbReadPoolAvailable = "db_read_pool_available";
+constexpr std::string_view kDbReadPoolTotalConnections = "db_read_pool_total_connections";
+constexpr std::string_view kDbReadPoolAvailableConnections =
+	"db_read_pool_available_connections";
+constexpr std::string_view kDbReadPoolActiveConnections = "db_read_pool_active_connections";
+constexpr std::string_view kDbReadPoolWaitingRequests = "db_read_pool_waiting_requests";
+constexpr std::string_view kDbReadPoolMaxObservedWaiting = "db_read_pool_max_observed_waiting";
+constexpr std::string_view kDbReadPoolTotalWaitMicros = "db_read_pool_total_wait_micros";
+constexpr std::string_view kDbReadPoolTimeoutCount = "db_read_pool_timeout_count";
+constexpr std::string_view kDbReadPoolFailedAcquisitions = "db_read_pool_failed_acquisitions";
+
 // Ingestion metrics
 constexpr std::string_view kDeferredQueueDepth = "deferred_queue_depth";
 constexpr std::string_view kSnapshotPersisted = "snapshot_persisted";

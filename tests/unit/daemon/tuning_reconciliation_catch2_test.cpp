@@ -222,6 +222,53 @@ TEST_CASE("Post-ingest budget distribution correctness", "[daemon][tune][reconci
     }
 }
 
+TEST_CASE("Contention-aware budget adjustment logic",
+          "[daemon][tune][reconciliation][contention][catch2]") {
+    SECTION("Severe contention drops budget aggressively") {
+        const int32_t adjust = TuningManager::testing_computeContentionBudgetAdjustment(
+            /*waitingRequests=*/3,
+            /*waitMicrosDelta=*/25000,
+            /*timeoutDelta=*/1,
+            /*failedDelta=*/0,
+            /*processedDelta=*/6,
+            /*healthyTicks=*/0);
+        CHECK(adjust == -2);
+    }
+
+    SECTION("Moderate contention applies gentle reduction") {
+        const int32_t adjust = TuningManager::testing_computeContentionBudgetAdjustment(
+            /*waitingRequests=*/2,
+            /*waitMicrosDelta=*/9000,
+            /*timeoutDelta=*/0,
+            /*failedDelta=*/0,
+            /*processedDelta=*/6,
+            /*healthyTicks=*/0);
+        CHECK(adjust == -1);
+    }
+
+    SECTION("Healthy sustained throughput allows gradual increase") {
+        const int32_t adjust = TuningManager::testing_computeContentionBudgetAdjustment(
+            /*waitingRequests=*/0,
+            /*waitMicrosDelta=*/500,
+            /*timeoutDelta=*/0,
+            /*failedDelta=*/0,
+            /*processedDelta=*/6,
+            /*healthyTicks=*/2);
+        CHECK(adjust == 1);
+    }
+
+    SECTION("Insufficient healthy history keeps budget steady") {
+        const int32_t adjust = TuningManager::testing_computeContentionBudgetAdjustment(
+            /*waitingRequests=*/0,
+            /*waitMicrosDelta=*/500,
+            /*timeoutDelta=*/0,
+            /*failedDelta=*/0,
+            /*processedDelta=*/6,
+            /*healthyTicks=*/1);
+        CHECK(adjust == 0);
+    }
+}
+
 // =============================================================================
 // Group A2: Active mask filtering
 // =============================================================================

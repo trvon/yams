@@ -935,6 +935,32 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.dbMigrationErrors = dbStats.migrationErrors.load();
                 out.dbRepositoryInitErrors = dbStats.repositoryInitErrors.load();
             }
+
+            if (auto writePool = services_->getWriteConnectionPool()) {
+                const auto stats = writePool->getStats();
+                out.dbWritePoolAvailable = true;
+                out.dbWritePoolTotalConnections = stats.totalConnections;
+                out.dbWritePoolAvailableConnections = stats.availableConnections;
+                out.dbWritePoolActiveConnections = stats.activeConnections;
+                out.dbWritePoolWaitingRequests = stats.waitingRequests;
+                out.dbWritePoolMaxObservedWaiting = stats.maxObservedWaiting;
+                out.dbWritePoolTotalWaitMicros = stats.totalWaitMicros;
+                out.dbWritePoolTimeoutCount = stats.timeoutCount;
+                out.dbWritePoolFailedAcquisitions = stats.failedAcquisitions;
+            }
+
+            if (auto readPool = services_->getReadConnectionPool()) {
+                const auto stats = readPool->getStats();
+                out.dbReadPoolAvailable = true;
+                out.dbReadPoolTotalConnections = stats.totalConnections;
+                out.dbReadPoolAvailableConnections = stats.availableConnections;
+                out.dbReadPoolActiveConnections = stats.activeConnections;
+                out.dbReadPoolWaitingRequests = stats.waitingRequests;
+                out.dbReadPoolMaxObservedWaiting = stats.maxObservedWaiting;
+                out.dbReadPoolTotalWaitMicros = stats.totalWaitMicros;
+                out.dbReadPoolTimeoutCount = stats.timeoutCount;
+                out.dbReadPoolFailedAcquisitions = stats.failedAcquisitions;
+            }
         }
     } catch (...) {
     }

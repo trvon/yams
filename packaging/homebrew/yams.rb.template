@@ -2,7 +2,7 @@ class Yams < Formula
   desc "Yet Another Memory System - High-performance content-addressed storage"
   homepage "https://github.com/trvon/yams"
   version "__VERSION__"
-  license "MIT"
+  license "GPL-3.0-or-later"
 
   if Hardware::CPU.arm?
     url "https://github.com/trvon/yams/releases/download/v#{version}/yams-#{version}-macos-arm64.zip"

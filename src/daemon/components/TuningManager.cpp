@@ -43,6 +43,14 @@ void TuningManager::start() {
     slotHighTicks_ = slotLowTicks_ = 0;
     previousPressureLevel_ = 0;
     previousEmbedDropped_ = 0;
+    previousPostProcessed_ = 0;
+    previousWriteWaitMicros_ = 0;
+    previousReadWaitMicros_ = 0;
+    previousWriteTimeoutCount_ = 0;
+    previousReadTimeoutCount_ = 0;
+    previousWriteFailedAcquisitions_ = 0;
+    previousReadFailedAcquisitions_ = 0;
+    contentionHealthyTicks_ = 0;
 
     // Seed FsmMetricsRegistry with initial ResourceGovernor data immediately
     // so status requests have valid data before the first async tick completes.
@@ -215,6 +223,35 @@ uint32_t TuningManager::testing_computeEmbedScaleBias(std::size_t embedQueued,
                                                       std::size_t postQueued,
                                                       std::size_t embedInFlight) {
     return computeEmbedScaleBias(embedQueued, embedDroppedDelta, postQueued, embedInFlight);
+}
+
+int32_t TuningManager::computeContentionBudgetAdjustment(std::size_t waitingRequests,
+                                                         std::uint64_t waitMicrosDelta,
+                                                         std::size_t timeoutDelta,
+                                                         std::size_t failedDelta,
+                                                         std::size_t processedDelta,
+                                                         std::uint32_t healthyTicks) {
+    if (timeoutDelta > 0 || failedDelta > 0) {
+        return -2;
+    }
+    if (waitingRequests >= 2 || waitMicrosDelta >= 20000) {
+        return -1;
+    }
+    if (waitingRequests == 0 && waitMicrosDelta <= 1000 && processedDelta >= 4 &&
+        healthyTicks >= 2) {
+        return 1;
+    }
+    return 0;
+}
+
+int32_t TuningManager::testing_computeContentionBudgetAdjustment(std::size_t waitingRequests,
+                                                                 std::uint64_t waitMicrosDelta,
+                                                                 std::size_t timeoutDelta,
+                                                                 std::size_t failedDelta,
+                                                                 std::size_t processedDelta,
+                                                                 std::uint32_t healthyTicks) {
+    return computeContentionBudgetAdjustment(waitingRequests, waitMicrosDelta, timeoutDelta,
+                                             failedDelta, processedDelta, healthyTicks);
 }
 
 void TuningManager::configureOnnxConcurrencyRegistry() {
@@ -477,6 +514,80 @@ void TuningManager::tick_once() {
             // Cap scaled budget to hardware concurrency to avoid oversubscription
             uint32_t hwCap = TuneAdvisor::hardwareConcurrency();
             uint32_t totalBudget = std::min<uint32_t>(hwCap, baseBudget + scaleBias);
+
+            std::size_t processedDelta = 0;
+            {
+                const auto processedNow = pq->processed();
+                if (processedNow >= previousPostProcessed_) {
+                    processedDelta = processedNow - previousPostProcessed_;
+                } else {
+                    processedDelta = processedNow;
+                }
+                previousPostProcessed_ = processedNow;
+            }
+
+            std::size_t waitingRequests = 0;
+            std::uint64_t waitMicrosDelta = 0;
+            std::size_t timeoutDelta = 0;
+            std::size_t failedDelta = 0;
+
+            if (auto writePool = sm_->getWriteConnectionPool()) {
+                const auto stats = writePool->getStats();
+                waitingRequests += stats.waitingRequests;
+                waitMicrosDelta += (stats.totalWaitMicros >= previousWriteWaitMicros_)
+                                       ? (stats.totalWaitMicros - previousWriteWaitMicros_)
+                                       : stats.totalWaitMicros;
+                timeoutDelta += (stats.timeoutCount >= previousWriteTimeoutCount_)
+                                    ? (stats.timeoutCount - previousWriteTimeoutCount_)
+                                    : stats.timeoutCount;
+                failedDelta += (stats.failedAcquisitions >= previousWriteFailedAcquisitions_)
+                                   ? (stats.failedAcquisitions - previousWriteFailedAcquisitions_)
+                                   : stats.failedAcquisitions;
+                previousWriteWaitMicros_ = stats.totalWaitMicros;
+                previousWriteTimeoutCount_ = stats.timeoutCount;
+                previousWriteFailedAcquisitions_ = stats.failedAcquisitions;
+            }
+
+            if (auto readPool = sm_->getReadConnectionPool()) {
+                const auto stats = readPool->getStats();
+                waitingRequests += stats.waitingRequests;
+                waitMicrosDelta += (stats.totalWaitMicros >= previousReadWaitMicros_)
+                                       ? (stats.totalWaitMicros - previousReadWaitMicros_)
+                                       : stats.totalWaitMicros;
+                timeoutDelta += (stats.timeoutCount >= previousReadTimeoutCount_)
+                                    ? (stats.timeoutCount - previousReadTimeoutCount_)
+                                    : stats.timeoutCount;
+                failedDelta += (stats.failedAcquisitions >= previousReadFailedAcquisitions_)
+                                   ? (stats.failedAcquisitions - previousReadFailedAcquisitions_)
+                                   : stats.failedAcquisitions;
+                previousReadWaitMicros_ = stats.totalWaitMicros;
+                previousReadTimeoutCount_ = stats.timeoutCount;
+                previousReadFailedAcquisitions_ = stats.failedAcquisitions;
+            }
+
+            const bool healthyWindow = (waitingRequests == 0 && waitMicrosDelta <= 1000 &&
+                                        timeoutDelta == 0 && failedDelta == 0 &&
+                                        processedDelta >= 4);
+            if (healthyWindow) {
+                contentionHealthyTicks_ = std::min<std::uint32_t>(contentionHealthyTicks_ + 1,
+                                                                  1000u);
+            } else {
+                contentionHealthyTicks_ = 0;
+            }
+
+            const int32_t contentionAdjust =
+                computeContentionBudgetAdjustment(waitingRequests, waitMicrosDelta, timeoutDelta,
+                                                 failedDelta, processedDelta,
+                                                 contentionHealthyTicks_);
+            if (contentionAdjust < 0) {
+                const uint32_t drop = static_cast<uint32_t>(-contentionAdjust);
+                totalBudget = (totalBudget > 2u) ? std::max<uint32_t>(2u, totalBudget - drop) : 2u;
+                contentionHealthyTicks_ = 0;
+            } else if (contentionAdjust > 0) {
+                totalBudget =
+                    std::min<uint32_t>(hwCap, totalBudget + static_cast<uint32_t>(contentionAdjust));
+                contentionHealthyTicks_ = 0;
+            }
 
             const uint64_t dbLockErrors = TuneAdvisor::getAndResetDbLockErrors();
             const uint32_t lockThreshold = TuneAdvisor::dbLockErrorThreshold();

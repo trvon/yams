@@ -222,6 +222,48 @@ TEST_CASE("MetadataRepository: dual-pool session count read route isolation",
     std::filesystem::remove(dbPath, ec);
 }
 
+TEST_CASE("MetadataRepository: dual-pool embedding-hash read route isolation",
+          "[unit][metadata][repository][dual-pool]") {
+    auto dbPath = tempDbPath("metadata_repo_dual_pool_embedding_hash_");
+
+    ConnectionPoolConfig writeCfg;
+    writeCfg.minConnections = 1;
+    writeCfg.maxConnections = 2;
+
+    ConnectionPoolConfig readCfg;
+    readCfg.minConnections = 1;
+    readCfg.maxConnections = 2;
+
+    auto writePool = std::make_unique<ConnectionPool>(dbPath.string(), writeCfg);
+    auto readPool = std::make_unique<ConnectionPool>(dbPath.string(), readCfg);
+
+    REQUIRE(writePool->initialize().has_value());
+    REQUIRE(readPool->initialize().has_value());
+
+    auto repository = std::make_unique<MetadataRepository>(*writePool, readPool.get());
+
+    auto doc = makeDocumentWithPath("/tmp/dual-pool-embed-hash.txt", "dual-pool-embed-hash");
+    auto insertResult = repository->insertDocument(doc);
+    REQUIRE(insertResult.has_value());
+
+    auto readOk = repository->hasDocumentEmbeddingByHash("dual-pool-embed-hash");
+    REQUIRE(readOk.has_value());
+    REQUIRE_FALSE(readOk.value());
+
+    readPool->shutdown();
+
+    auto readAfterShutdown = repository->hasDocumentEmbeddingByHash("dual-pool-embed-hash");
+    REQUIRE_FALSE(readAfterShutdown.has_value());
+
+    repository.reset();
+    writePool->shutdown();
+    writePool.reset();
+    readPool.reset();
+
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
 TEST_CASE("MetadataRepository: getMetadataValueCounts with filters",
           "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;

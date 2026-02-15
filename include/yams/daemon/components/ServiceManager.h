@@ -173,6 +173,12 @@ public:
         std::uint32_t concurrencyLimit{0};
     };
     SearchLoadMetrics getSearchLoadMetrics() const;
+    std::shared_ptr<metadata::ConnectionPool> getWriteConnectionPool() const {
+        return connectionPool_;
+    }
+    std::shared_ptr<metadata::ConnectionPool> getReadConnectionPool() const {
+        return readConnectionPool_;
+    }
     void onSearchRequestQueued() { searchQueued_.fetch_add(1, std::memory_order_relaxed); }
     bool tryStartSearchRequest(std::uint32_t concurrencyCap) {
         std::uint32_t queued = searchQueued_.load(std::memory_order_relaxed);

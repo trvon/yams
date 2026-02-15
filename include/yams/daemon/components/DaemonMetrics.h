@@ -247,6 +247,27 @@ struct MetricsSnapshot {
     uint64_t dbMigrationErrors{0};
     uint64_t dbRepositoryInitErrors{0};
 
+    // Route-separated DB pool telemetry (write/work vs read)
+    bool dbWritePoolAvailable{false};
+    std::size_t dbWritePoolTotalConnections{0};
+    std::size_t dbWritePoolAvailableConnections{0};
+    std::size_t dbWritePoolActiveConnections{0};
+    std::size_t dbWritePoolWaitingRequests{0};
+    std::size_t dbWritePoolMaxObservedWaiting{0};
+    std::uint64_t dbWritePoolTotalWaitMicros{0};
+    std::size_t dbWritePoolTimeoutCount{0};
+    std::size_t dbWritePoolFailedAcquisitions{0};
+
+    bool dbReadPoolAvailable{false};
+    std::size_t dbReadPoolTotalConnections{0};
+    std::size_t dbReadPoolAvailableConnections{0};
+    std::size_t dbReadPoolActiveConnections{0};
+    std::size_t dbReadPoolWaitingRequests{0};
+    std::size_t dbReadPoolMaxObservedWaiting{0};
+    std::uint64_t dbReadPoolTotalWaitMicros{0};
+    std::size_t dbReadPoolTimeoutCount{0};
+    std::size_t dbReadPoolFailedAcquisitions{0};
+
     // WorkCoordinator metrics
     std::size_t workCoordinatorActiveWorkers{0};
     bool workCoordinatorRunning{false};

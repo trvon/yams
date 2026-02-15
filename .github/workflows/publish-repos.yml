@@ -19,16 +19,31 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout (shallow)
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1
           submodules: false # Publishing does not require submodule contents
 
-      - name: Download release artifacts (apt/yum + manifest)
-        uses: actions/download-artifact@v4
+      - name: Download artifacts from triggering Release run
+        if: github.event_name == 'workflow_run'
+        uses: dawidd6/action-download-artifact@v6
         with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          repo: ${{ github.repository }}
+          run_id: ${{ github.event.workflow_run.id }}
           path: repo-artifacts
-        # All artifacts from release run will be downloaded; we filter below.
+          if_no_artifact_found: warn
+
+      - name: Download artifacts from latest successful Release run (manual)
+        if: github.event_name == 'workflow_dispatch'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          repo: ${{ github.repository }}
+          workflow: release.yml
+          workflow_conclusion: success
+          path: repo-artifacts
+          if_no_artifact_found: warn
 
       - name: Prepare upload set
         id: prep
@@ -52,8 +67,8 @@ jobs:
             gh release download "$TAG" --pattern latest.json --dir . || echo "No latest.json asset yet"
           fi
           # Summaries
-          echo "HAS_APT=$([ -d aptrepo ] && echo 1 || echo 0)" >> $GITHUB_OUTPUT
-          echo "HAS_YUM=$([ -d yumrepo ] && echo 1 || echo 0)" >> $GITHUB_OUTPUT
+          echo "HAS_APT=$([ -d aptrepo ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
+          echo "HAS_YUM=$([ -d yumrepo ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -75,8 +90,18 @@ jobs:
           upload_file() {
             local src="$1"; shift
             local key="$1"; shift
+            local ct="application/octet-stream"
+            case "$key" in
+              *.json) ct="application/json" ;;
+              *.txt) ct="text/plain" ;;
+              *.xml) ct="application/xml" ;;
+              *.gz) ct="application/gzip" ;;
+              *.deb) ct="application/vnd.debian.binary-package" ;;
+              *.rpm) ct="application/x-rpm" ;;
+              *.asc) ct="application/pgp-signature" ;;
+            esac
             echo "-- Upload $key" >&2
-            npx wrangler r2 object put "yams-repository/$key" --file "$src"
+            npx wrangler r2 object put "yams-repository/$key" --file "$src" --content-type "$ct"
           }
           if [ -d aptrepo ]; then
             find aptrepo -type f -print0 | while IFS= read -r -d '' f; do

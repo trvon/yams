@@ -51,6 +51,12 @@ public:
                                                   uint64_t embedDroppedDelta,
                                                   std::size_t postQueued,
                                                   std::size_t embedInFlight);
+    static int32_t testing_computeContentionBudgetAdjustment(std::size_t waitingRequests,
+                                                             std::uint64_t waitMicrosDelta,
+                                                             std::size_t timeoutDelta,
+                                                             std::size_t failedDelta,
+                                                             std::size_t processedDelta,
+                                                             std::uint32_t healthyTicks);
 
 private:
     boost::asio::awaitable<void> tuningLoop();
@@ -61,6 +67,12 @@ private:
                                         const std::array<bool, 6>& active);
     static uint32_t computeEmbedScaleBias(std::size_t embedQueued, uint64_t embedDroppedDelta,
                                           std::size_t postQueued, std::size_t embedInFlight);
+    static int32_t computeContentionBudgetAdjustment(std::size_t waitingRequests,
+                                                     std::uint64_t waitMicrosDelta,
+                                                     std::size_t timeoutDelta,
+                                                     std::size_t failedDelta,
+                                                     std::size_t processedDelta,
+                                                     std::uint32_t healthyTicks);
 
     ServiceManager* sm_;
     StateComponent* state_;
@@ -108,6 +120,16 @@ private:
 
     // Track cumulative bus drop counter to derive per-tick delta.
     uint64_t previousEmbedDropped_{0};
+
+    // Track previous counters for contention-aware post-ingest budget tuning.
+    std::size_t previousPostProcessed_{0};
+    std::uint64_t previousWriteWaitMicros_{0};
+    std::uint64_t previousReadWaitMicros_{0};
+    std::size_t previousWriteTimeoutCount_{0};
+    std::size_t previousReadTimeoutCount_{0};
+    std::size_t previousWriteFailedAcquisitions_{0};
+    std::size_t previousReadFailedAcquisitions_{0};
+    std::uint32_t contentionHealthyTicks_{0};
 };
 
 } // namespace yams::daemon

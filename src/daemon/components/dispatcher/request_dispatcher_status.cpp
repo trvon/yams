@@ -382,6 +382,45 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 res.requestCounts[std::string(metrics::kPhysicalTotalBytes)] =
                     static_cast<size_t>(snap->physicalTotalBytes);
 
+            // Route-separated DB pool telemetry for contention attribution
+            res.requestCounts[std::string(metrics::kDbWritePoolAvailable)] =
+                snap->dbWritePoolAvailable ? 1 : 0;
+            res.requestCounts[std::string(metrics::kDbWritePoolTotalConnections)] =
+                snap->dbWritePoolTotalConnections;
+            res.requestCounts[std::string(metrics::kDbWritePoolAvailableConnections)] =
+                snap->dbWritePoolAvailableConnections;
+            res.requestCounts[std::string(metrics::kDbWritePoolActiveConnections)] =
+                snap->dbWritePoolActiveConnections;
+            res.requestCounts[std::string(metrics::kDbWritePoolWaitingRequests)] =
+                snap->dbWritePoolWaitingRequests;
+            res.requestCounts[std::string(metrics::kDbWritePoolMaxObservedWaiting)] =
+                snap->dbWritePoolMaxObservedWaiting;
+            res.requestCounts[std::string(metrics::kDbWritePoolTotalWaitMicros)] =
+                static_cast<size_t>(snap->dbWritePoolTotalWaitMicros);
+            res.requestCounts[std::string(metrics::kDbWritePoolTimeoutCount)] =
+                snap->dbWritePoolTimeoutCount;
+            res.requestCounts[std::string(metrics::kDbWritePoolFailedAcquisitions)] =
+                snap->dbWritePoolFailedAcquisitions;
+
+            res.requestCounts[std::string(metrics::kDbReadPoolAvailable)] =
+                snap->dbReadPoolAvailable ? 1 : 0;
+            res.requestCounts[std::string(metrics::kDbReadPoolTotalConnections)] =
+                snap->dbReadPoolTotalConnections;
+            res.requestCounts[std::string(metrics::kDbReadPoolAvailableConnections)] =
+                snap->dbReadPoolAvailableConnections;
+            res.requestCounts[std::string(metrics::kDbReadPoolActiveConnections)] =
+                snap->dbReadPoolActiveConnections;
+            res.requestCounts[std::string(metrics::kDbReadPoolWaitingRequests)] =
+                snap->dbReadPoolWaitingRequests;
+            res.requestCounts[std::string(metrics::kDbReadPoolMaxObservedWaiting)] =
+                snap->dbReadPoolMaxObservedWaiting;
+            res.requestCounts[std::string(metrics::kDbReadPoolTotalWaitMicros)] =
+                static_cast<size_t>(snap->dbReadPoolTotalWaitMicros);
+            res.requestCounts[std::string(metrics::kDbReadPoolTimeoutCount)] =
+                snap->dbReadPoolTimeoutCount;
+            res.requestCounts[std::string(metrics::kDbReadPoolFailedAcquisitions)] =
+                snap->dbReadPoolFailedAcquisitions;
+
             // Document/vector counters from cached metrics (no live DB queries on hot path!).
             // Always include these keys, even when 0, so clients/benchmarks can distinguish
             // "zero" from "missing" and avoid fragile presence checks.
@@ -761,6 +800,44 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 response.vectorIndexSize = snap->vectorDbSizeBytes;
                 if (snap->vectorRowsExact > 0)
                     response.additionalStats["vector_rows"] = std::to_string(snap->vectorRowsExact);
+
+                response.additionalStats[std::string(metrics::kDbWritePoolAvailable)] =
+                    std::to_string(static_cast<size_t>(snap->dbWritePoolAvailable ? 1 : 0));
+                response.additionalStats[std::string(metrics::kDbWritePoolTotalConnections)] =
+                    std::to_string(snap->dbWritePoolTotalConnections);
+                response.additionalStats[std::string(metrics::kDbWritePoolAvailableConnections)] =
+                    std::to_string(snap->dbWritePoolAvailableConnections);
+                response.additionalStats[std::string(metrics::kDbWritePoolActiveConnections)] =
+                    std::to_string(snap->dbWritePoolActiveConnections);
+                response.additionalStats[std::string(metrics::kDbWritePoolWaitingRequests)] =
+                    std::to_string(snap->dbWritePoolWaitingRequests);
+                response.additionalStats[std::string(metrics::kDbWritePoolMaxObservedWaiting)] =
+                    std::to_string(snap->dbWritePoolMaxObservedWaiting);
+                response.additionalStats[std::string(metrics::kDbWritePoolTotalWaitMicros)] =
+                    std::to_string(snap->dbWritePoolTotalWaitMicros);
+                response.additionalStats[std::string(metrics::kDbWritePoolTimeoutCount)] =
+                    std::to_string(snap->dbWritePoolTimeoutCount);
+                response.additionalStats[std::string(metrics::kDbWritePoolFailedAcquisitions)] =
+                    std::to_string(snap->dbWritePoolFailedAcquisitions);
+
+                response.additionalStats[std::string(metrics::kDbReadPoolAvailable)] =
+                    std::to_string(static_cast<size_t>(snap->dbReadPoolAvailable ? 1 : 0));
+                response.additionalStats[std::string(metrics::kDbReadPoolTotalConnections)] =
+                    std::to_string(snap->dbReadPoolTotalConnections);
+                response.additionalStats[std::string(metrics::kDbReadPoolAvailableConnections)] =
+                    std::to_string(snap->dbReadPoolAvailableConnections);
+                response.additionalStats[std::string(metrics::kDbReadPoolActiveConnections)] =
+                    std::to_string(snap->dbReadPoolActiveConnections);
+                response.additionalStats[std::string(metrics::kDbReadPoolWaitingRequests)] =
+                    std::to_string(snap->dbReadPoolWaitingRequests);
+                response.additionalStats[std::string(metrics::kDbReadPoolMaxObservedWaiting)] =
+                    std::to_string(snap->dbReadPoolMaxObservedWaiting);
+                response.additionalStats[std::string(metrics::kDbReadPoolTotalWaitMicros)] =
+                    std::to_string(snap->dbReadPoolTotalWaitMicros);
+                response.additionalStats[std::string(metrics::kDbReadPoolTimeoutCount)] =
+                    std::to_string(snap->dbReadPoolTimeoutCount);
+                response.additionalStats[std::string(metrics::kDbReadPoolFailedAcquisitions)] =
+                    std::to_string(snap->dbReadPoolFailedAcquisitions);
 
                 // Compute storage/db sizes (best-effort, inexpensive on request)
                 try {

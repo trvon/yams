@@ -1,4 +1,8 @@
 -P ubuntu-latest=catthehacker/ubuntu:act-latest
+-P ubuntu-24.04=catthehacker/ubuntu:act-latest
 -P ubuntu-24.04-arm=catthehacker/ubuntu:24.04
 # Simulate macOS runners with a Linux image so matrix doesn’t error out.
 -P macos-15=catthehacker/ubuntu:act-latest
+# Simulate Windows runner labels with Linux containers for workflow plumbing checks only.
+# This does NOT provide real Windows kernel/tooling behavior.
+-P windows-latest=catthehacker/ubuntu:act-latest

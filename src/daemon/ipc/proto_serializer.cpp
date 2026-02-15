@@ -1857,20 +1857,26 @@ template <> struct ProtoBinding<GetStatsResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kGetStatsResponse;
     static void set(Envelope& env, const GetStatsResponse& r) {
         auto* o = env.mutable_get_stats_response();
-        // Best-effort: provide JSON string and smuggle selected additionalStats keys inside it
+        // Best-effort: provide JSON string and preserve additionalStats keys inside it
         std::string jstr = "{}";
         if (auto it = r.additionalStats.find("json"); it != r.additionalStats.end())
             jstr = it->second;
         nlohmann::json j = nlohmann::json::parse(jstr, nullptr, false);
         if (j.is_discarded())
             j = nlohmann::json::object();
-        if (auto pit = r.additionalStats.find("plugins_json"); pit != r.additionalStats.end()) {
-            // Try to embed as JSON; fallback to string
-            nlohmann::json pj = nlohmann::json::parse(pit->second, nullptr, false);
-            if (!pj.is_discarded())
-                j["plugins_json"] = pj;
-            else
-                j["plugins_json"] = pit->second;
+        for (const auto& [key, value] : r.additionalStats) {
+            if (key == "json")
+                continue;
+            if (key == "plugins_json") {
+                // Preserve historical behavior: embed plugin list as JSON when possible.
+                nlohmann::json pj = nlohmann::json::parse(value, nullptr, false);
+                if (!pj.is_discarded())
+                    j[key] = pj;
+                else
+                    j[key] = value;
+                continue;
+            }
+            j[key] = value;
         }
         o->set_json(j.dump());
         // Populate numeric fields alongside JSON so non-JSON clients don't see zeros
@@ -1885,14 +1891,17 @@ template <> struct ProtoBinding<GetStatsResponse> {
         const auto& g = env.get_stats_response();
         if (!g.json().empty()) {
             r.additionalStats["json"] = g.json();
-            // Extract embedded plugins_json if present
+            // Extract all embedded additional stats
             nlohmann::json j = nlohmann::json::parse(g.json(), nullptr, false);
-            if (!j.is_discarded() && j.contains("plugins_json")) {
-                const auto& v = j["plugins_json"];
-                if (v.is_string())
-                    r.additionalStats["plugins_json"] = v.get<std::string>();
-                else
-                    r.additionalStats["plugins_json"] = v.dump();
+            if (!j.is_discarded() && j.is_object()) {
+                for (auto it = j.begin(); it != j.end(); ++it) {
+                    const auto& key = it.key();
+                    const auto& value = it.value();
+                    if (value.is_string())
+                        r.additionalStats[key] = value.get<std::string>();
+                    else
+                        r.additionalStats[key] = value.dump();
+                }
             }
         }
         // Also hydrate numeric fields for non-JSON consumers
