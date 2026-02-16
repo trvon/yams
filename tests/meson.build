@@ -954,6 +954,7 @@ if catch2_dep.found()
     test('onnx_embedding_diagnostic', catch2_onnx_embedding_diag_exe,
       suite: ['catch2', 'unit', 'daemon', 'onnx', 'diagnostic'],
       env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      args: ['--allow-running-no-tests'],
       timeout: 120,
     )
   endif

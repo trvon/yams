@@ -120,10 +120,10 @@ Result<void> SocketServer::start() {
             }
         }
 #endif
-        if (!ioCoordinator_ || !ioCoordinator_->isRunning()) {
+        if (!ioCoordinator_) {
             running_ = false;
             return Error{ErrorCode::InvalidState,
-                         "IOCoordinator must be started before SocketServer"};
+                         "IOCoordinator must be available before SocketServer"};
         }
         if (!coordinator_ || !coordinator_->isRunning()) {
             running_ = false;
@@ -133,33 +133,11 @@ Result<void> SocketServer::start() {
 
         auto io_context = ioCoordinator_->getIOContext();
 
-        // Create acceptor on the io_context executor to avoid TSan race with
-        // worker threads already running io_context->run(). The kqueue_reactor
-        // descriptor allocation must be synchronized with event processing.
-        std::exception_ptr acceptorException;
-        std::string sockPathStr = sockPath.string();
-
-        std::promise<void> acceptorReady;
-        auto acceptorFuture = acceptorReady.get_future();
-
-        boost::asio::post(
-            *io_context, [this, io_context, &sockPathStr, &acceptorException, &acceptorReady]() {
-                try {
-                    acceptor_ = std::make_unique<local::acceptor>(*io_context);
-                    local::endpoint endpoint(sockPathStr);
-                    acceptor_->open(endpoint.protocol());
-                    acceptor_->bind(endpoint);
-                    acceptor_->listen(boost::asio::socket_base::max_listen_connections);
-                } catch (...) {
-                    acceptorException = std::current_exception();
-                }
-                acceptorReady.set_value();
-            });
-
-        acceptorFuture.get();
-        if (acceptorException) {
-            std::rethrow_exception(acceptorException);
-        }
+        acceptor_ = std::make_unique<local::acceptor>(*io_context);
+        local::endpoint endpoint(sockPath.string());
+        acceptor_->open(endpoint.protocol());
+        acceptor_->bind(endpoint);
+        acceptor_->listen(boost::asio::socket_base::max_listen_connections);
 
 #ifndef _WIN32
         // Set socket permissions on Unix (Windows Unix sockets don't support filesystem
@@ -250,33 +228,15 @@ Result<void> SocketServer::start() {
 #endif
 
             {
-                std::promise<void> proxyReady;
-                auto proxyFut = proxyReady.get_future();
-                std::exception_ptr proxyExc;
-                std::string proxyPathStr = proxySockPath.string();
-
-                boost::asio::post(*io_context, [this, io_context, &proxyPathStr, &proxyExc,
-                                                &proxyReady]() {
-                    try {
-                        proxyAcceptor_ = std::make_unique<local::acceptor>(*io_context);
-                        local::endpoint ep(proxyPathStr);
-                        proxyAcceptor_->open(ep.protocol());
-                        proxyAcceptor_->bind(ep);
-                        proxyAcceptor_->listen(boost::asio::socket_base::max_listen_connections);
-                    } catch (...) {
-                        proxyExc = std::current_exception();
-                    }
-                    proxyReady.set_value();
-                });
-
-                proxyFut.get();
-                if (proxyExc) {
-                    try {
-                        std::rethrow_exception(proxyExc);
-                    } catch (const std::exception& e) {
-                        spdlog::warn("Failed to start proxy acceptor: {}", e.what());
-                        goto skip_proxy;
-                    }
+                try {
+                    proxyAcceptor_ = std::make_unique<local::acceptor>(*io_context);
+                    local::endpoint ep(proxySockPath.string());
+                    proxyAcceptor_->open(ep.protocol());
+                    proxyAcceptor_->bind(ep);
+                    proxyAcceptor_->listen(boost::asio::socket_base::max_listen_connections);
+                } catch (const std::exception& e) {
+                    spdlog::warn("Failed to start proxy acceptor: {}", e.what());
+                    goto skip_proxy;
                 }
 
 #ifndef _WIN32
@@ -963,17 +923,18 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
             // Use async_initiate to race connection handler against lifetime timer
             // (replaces experimental::awaitable_operators)
             auto executor = sock->get_executor();
+            auto connection_strand = boost::asio::make_strand(executor);
             auto lifetime = config_.maxConnectionLifetime;
             auto created_at = tracked_socket->created_at(); // Thread-safe read
 
             bool timedOut =
                 co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
                                                      void(std::exception_ptr, bool)>(
-                    [this, handler, sock, token, conn_token, executor, lifetime,
+                    [this, handler, sock, token, conn_token, executor, connection_strand, lifetime,
                      created_at](auto completion_handler) mutable {
                         // Shared state for race coordination
                         auto completed = std::make_shared<std::atomic<bool>>(false);
-                        auto timer = std::make_shared<boost::asio::steady_timer>(executor);
+                        auto timer = std::make_shared<boost::asio::steady_timer>(connection_strand);
                         timer->expires_after(lifetime);
 
                         using HandlerT = std::decay_t<decltype(completion_handler)>;
@@ -983,8 +944,8 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
 
                         // Set up lifetime timer
                         timer->async_wait([this, completed, handlerPtr, completion_exec, conn_token,
-                                           created_at,
-                                           lifetime](const boost::system::error_code& ec) mutable {
+                                           created_at, lifetime,
+                                           sock](const boost::system::error_code& ec) mutable {
                             if (ec == boost::asio::error::operation_aborted)
                                 return; // Cancelled by handler completion
                             if (!completed->exchange(true, std::memory_order_acq_rel)) {
@@ -1001,6 +962,30 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                                 spdlog::warn("[conn={}] Connection lifetime exceeded (age={}s, "
                                              "limit={}s) - forcing close",
                                              conn_token, age_s, lifetime.count());
+                                // Cancel pending async ops so the detached coroutine's
+                                // async_read completes with operation_aborted.  Do NOT
+                                // close() here — closing from the timer callback while
+                                // the coroutine may be mid-resume on another IO thread
+                                // causes a double kqueue_reactor::deregister_descriptor
+                                // → SIGSEGV.
+                                //
+                                // cancel() is safe to call from any completion handler
+                                // on the same io_context (it uses internal locking on
+                                // the descriptor state).  The coroutine will observe
+                                // the read error (operation_aborted), exit its loop,
+                                // and close the socket itself.
+                                //
+                                // shutdown(both) ensures that even if the inner idle
+                                // timer wins the race (swallowing the cancel), the
+                                // *next* async_read returns EOF so the coroutine exits
+                                // promptly rather than lingering for idle-timeout cycles.
+                                if (sock && sock->is_open()) {
+                                    boost::system::error_code shutdown_ec;
+                                    sock->shutdown(boost::asio::socket_base::shutdown_both,
+                                                   shutdown_ec);
+                                    boost::system::error_code cancel_ec;
+                                    sock->cancel(cancel_ec);
+                                }
                                 boost::asio::post(
                                     completion_exec, [h = std::move(*handlerPtr)]() mutable {
                                         std::move(h)(std::exception_ptr{}, true); // timedOut = true
@@ -1010,7 +995,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
 
                         // Spawn connection handler
                         boost::asio::co_spawn(
-                            executor,
+                            connection_strand,
                             [handler, sock, token, conn_token, timer, completed, handlerPtr,
                              completion_exec]() mutable -> boost::asio::awaitable<void> {
                                 co_await handler->handle_connection(sock, token, conn_token);
@@ -1030,8 +1015,19 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                     boost::asio::use_awaitable);
 
             if (timedOut) {
-                boost::system::error_code ec;
-                sock->close(ec);
+                // The timer callback cancelled pending I/O via cancel().
+                // The detached coroutine owns socket close: it will see the
+                // operation_aborted error and close the socket in its error
+                // path.  Do NOT close here — the coroutine may still be
+                // mid-resume on another IO thread, and concurrent close()
+                // on a Boost.Asio socket triggers a double
+                // kqueue_reactor::deregister_descriptor → SIGSEGV.
+                //
+                // If the coroutine exits without closing (e.g. exception),
+                // the shared_ptr<socket> destructor handles final cleanup.
+                spdlog::debug("[conn={}] Lifetime expired; socket cleanup "
+                              "delegated to coroutine",
+                              conn_token);
             }
         } else {
             co_await handler->handle_connection(sock, token, conn_token);

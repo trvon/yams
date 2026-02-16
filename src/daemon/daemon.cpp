@@ -270,8 +270,10 @@ Result<void> YamsDaemon::start() {
     spdlog::info("[Startup] Phase: FSM BootstrappedEvent");
     lifecycleFsm_.dispatch(BootstrappedEvent{});
 
-    // Start dedicated IOCoordinator BEFORE accepting connections to prevent IPC starvation
-    spdlog::info("[Startup] Phase: IOCoordinator Start");
+    // Create dedicated IOCoordinator before socket server wiring.
+    // Start threads only after acceptors are initialized to avoid kqueue-reactor
+    // descriptor registration races under TSAN.
+    spdlog::info("[Startup] Phase: IOCoordinator Prepare");
     try {
         IOCoordinator::Config ioCfg;
         ioCfg.num_threads = static_cast<size_t>(TuneAdvisor::ioThreadCount());
@@ -279,13 +281,12 @@ Result<void> YamsDaemon::start() {
             ioCfg.num_threads = 2;
         }
         ioCoordinator_ = std::make_unique<IOCoordinator>(ioCfg);
-        ioCoordinator_->start();
     } catch (const std::exception& e) {
         running_ = false;
         return Error{ErrorCode::InternalError,
-                     std::string("Failed to start IOCoordinator: ") + e.what()};
+                     std::string("Failed to prepare IOCoordinator: ") + e.what()};
     }
-    spdlog::info("[Startup] Phase: IOCoordinator Start OK");
+    spdlog::info("[Startup] Phase: IOCoordinator Prepare OK");
 
     // Start integrated socket server ASAP so status requests work during initialization
     spdlog::info("[Startup] Phase: SocketServer Start");
@@ -362,6 +363,35 @@ Result<void> YamsDaemon::start() {
                      "Failed to start socket server: " + result.error().message};
     }
     spdlog::info("[Startup] Phase: SocketServer Start OK");
+
+    // Start dedicated IOCoordinator after socket acceptors are initialized.
+    // This avoids reactor descriptor registration races while preserving runtime
+    // I/O isolation from CPU-bound work.
+    spdlog::info("[Startup] Phase: IOCoordinator Start");
+    try {
+        ioCoordinator_->start();
+    } catch (const std::exception& e) {
+        running_ = false;
+        try {
+            if (socketServer_) {
+                (void)socketServer_->stop();
+            }
+        } catch (...) {
+        }
+        if (ioCoordinator_) {
+            try {
+                ioCoordinator_->stop();
+                ioCoordinator_->join();
+            } catch (...) {
+            }
+            ioCoordinator_.reset();
+        }
+        serviceManager_->shutdown();
+        lifecycleManager_->shutdown();
+        return Error{ErrorCode::InternalError,
+                     std::string("Failed to start IOCoordinator: ") + e.what()};
+    }
+    spdlog::info("[Startup] Phase: IOCoordinator Start OK");
 
     // Provide SocketServer to DaemonMetrics after start() so proxy socket path is available.
     {
@@ -480,9 +510,22 @@ void YamsDaemon::runLoop() {
             initHandled_.store(true, std::memory_order_release);
 
             if (snapshot.state == ServiceManagerState::Ready) {
-                spdlog::info(
-                    "[InitWaiter] ServiceManager reached Ready state, dispatching HealthyEvent");
-                lifecycleFsm_.dispatch(HealthyEvent{});
+                const bool providerExpected = config_.enableModelProvider;
+                const bool providerReady =
+                    state_.readiness.modelProviderReady.load(std::memory_order_acquire);
+                if (providerExpected && !providerReady) {
+                    const std::string reason =
+                        "Model provider unavailable; embeddings disabled until provider recovery";
+                    spdlog::warn("[InitWaiter] ServiceManager ready but model provider missing; "
+                                 "dispatching DegradedEvent");
+                    lifecycleFsm_.setSubsystemDegraded("model_provider", true, reason);
+                    lifecycleFsm_.dispatch(DegradedEvent{});
+                } else {
+                    lifecycleFsm_.setSubsystemDegraded("model_provider", false);
+                    spdlog::info("[InitWaiter] ServiceManager reached Ready state, dispatching "
+                                 "HealthyEvent");
+                    lifecycleFsm_.dispatch(HealthyEvent{});
+                }
                 try {
                     std::shared_ptr<DaemonMetrics> m;
                     {

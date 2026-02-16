@@ -19,9 +19,7 @@
 #include <yams/core/types.h>
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/PluginHostFsm.h>
-#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
-#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/resource/external_plugin_host.h>
@@ -60,68 +58,43 @@ offload_to_worker(ServiceManager* sm, Fn&& fn) {
     using ResultType = std::remove_cvref_t<RawResult>;
     static_assert(!std::is_void_v<ResultType>, "offload_to_worker requires non-void result type");
 
+    // Get WorkCoordinator from ServiceManager
     WorkCoordinator* coordinator = sm ? sm->getWorkCoordinator() : nullptr;
-    if (!coordinator || !coordinator->isRunning()) {
-        spdlog::debug("offload_to_worker: WorkCoordinator unavailable, sync exec");
+    if (!coordinator) {
+        // Fallback to synchronous execution if no coordinator available
+        spdlog::debug("offload_to_worker: no WorkCoordinator, executing synchronously");
         co_return fn();
     }
 
+    // Use async_initiate to create a proper async operation without experimental features.
+    // This posts work to the WorkCoordinator, then posts completion back to caller's executor.
     auto work_executor = coordinator->getExecutor();
-    auto ioCtx = coordinator->getIOContext();
-    if (!ioCtx || ioCtx->stopped()) {
-        spdlog::warn("offload_to_worker: io_context stopped, sync exec");
-        co_return fn();
-    }
-
-    // Use a shared_ptr to track if work has started executing
-    auto work_started = std::make_shared<std::atomic<bool>>(false);
-    auto work_done = std::make_shared<std::atomic<bool>>(false);
 
     co_return co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
                                                    void(std::exception_ptr, ResultType)>(
-        [work_executor, ioCtx, work_started, work_done](auto handler, auto f) mutable {
-            if (ioCtx->stopped()) {
-                auto completion_executor = boost::asio::get_associated_executor(handler);
-                boost::asio::post(completion_executor,
-                                  [handler = std::move(handler), f = std::move(f)]() mutable {
-                                      std::exception_ptr ep;
-                                      ResultType result{};
-                                      try {
-                                          result = f();
-                                      } catch (...) {
-                                          ep = std::current_exception();
-                                      }
-                                      std::move(handler)(ep, std::move(result));
-                                  });
-                return;
-            }
-            boost::asio::post(work_executor, [handler = std::move(handler), f = std::move(f),
-                                              work_started, work_done]() mutable {
-                work_started->store(true, std::memory_order_release);
-                std::exception_ptr ep;
-                ResultType result{};
-                try {
-                    result = f();
-                } catch (const std::exception& e) {
-                    spdlog::error("offload_to_worker: exception: {}", e.what());
-                    ep = std::current_exception();
-                } catch (...) {
-                    spdlog::error("offload_to_worker: unknown exception");
-                    ep = std::current_exception();
-                }
-                work_done->store(true, std::memory_order_release);
-                auto completion_executor = boost::asio::get_associated_executor(handler);
-                boost::asio::post(completion_executor, [handler = std::move(handler), ep,
-                                                        result = std::move(result)]() mutable {
-                    std::move(handler)(ep, std::move(result));
+        [work_executor](auto handler, auto f) mutable {
+            // Post work to the worker thread pool
+            boost::asio::post(
+                work_executor, [handler = std::move(handler), f = std::move(f)]() mutable {
+                    std::exception_ptr ep;
+                    ResultType result{};
+                    try {
+                        result = f();
+                    } catch (...) {
+                        ep = std::current_exception();
+                    }
+                    // Post completion back to the handler's associated executor
+                    auto completion_executor = boost::asio::get_associated_executor(handler);
+                    boost::asio::post(completion_executor, [handler = std::move(handler), ep,
+                                                            result = std::move(result)]() mutable {
+                        std::move(handler)(ep, std::move(result));
+                    });
                 });
-            });
         },
         boost::asio::use_awaitable, std::forward<Fn>(fn));
 }
 
-inline yams::Result<std::shared_ptr<IModelProvider>>
-check_provider_ready(const ServiceManager* sm) {
+inline yams::Result<std::shared_ptr<IModelProvider>> check_provider_ready(ServiceManager* sm) {
     try {
         if (!sm)
             return yams::Error{yams::ErrorCode::InvalidState, "ServiceManager unavailable"};
@@ -191,21 +164,6 @@ ensure_model_loaded(ServiceManager* sm, std::shared_ptr<IModelProvider> provider
         co_return yams::Error{yams::ErrorCode::InvalidData, "Model name required"};
     if (provider->isModelLoaded(model))
         co_return yams::Result<void>();
-
-    std::uint64_t estimatedModelBytes = 0;
-    try {
-        auto info = provider->getModelInfo(model);
-        if (info) {
-            estimatedModelBytes = static_cast<std::uint64_t>(info.value().memoryUsageBytes);
-        }
-    } catch (...) {
-    }
-
-    if (!ResourceGovernor::instance().canLoadModel(estimatedModelBytes)) {
-        co_return yams::Error{yams::ErrorCode::ResourceExhausted,
-                              "Model load denied by resource governor"};
-    }
-
     auto run_load = [provider, model, optionsJson]() -> yams::Result<void> {
         try {
             if (!optionsJson.empty())
@@ -245,39 +203,9 @@ generate_batch(IModelProvider* provider, const std::string& model,
     if (!provider)
         return yams::Error{yams::ErrorCode::InvalidState, "Provider null"};
     try {
-        if (texts.empty())
-            return std::vector<std::vector<float>>{};
-
-        std::size_t cap = TuneAdvisor::resolvedEmbedDocCap();
-        if (cap > texts.size())
-            cap = texts.size();
-
-        if (texts.size() <= cap) {
-            if (model.empty())
-                return provider->generateBatchEmbeddings(texts);
-            return provider->generateBatchEmbeddingsFor(model, texts);
-        }
-
-        std::vector<std::vector<float>> out;
-        out.reserve(texts.size());
-        for (std::size_t start = 0; start < texts.size(); start += cap) {
-            std::size_t end = std::min(start + cap, texts.size());
-            std::vector<std::string> sub(texts.begin() + start, texts.begin() + end);
-            yams::Result<std::vector<std::vector<float>>> r;
-            if (model.empty())
-                r = provider->generateBatchEmbeddings(sub);
-            else
-                r = provider->generateBatchEmbeddingsFor(model, sub);
-            if (!r)
-                return r.error();
-            auto& batch = r.value();
-            if (batch.size() != sub.size()) {
-                return yams::Error{yams::ErrorCode::InvalidData, "Batch embedding size mismatch"};
-            }
-            for (auto& v : batch)
-                out.push_back(std::move(v));
-        }
-        return out;
+        if (model.empty())
+            return provider->generateBatchEmbeddings(texts);
+        return provider->generateBatchEmbeddingsFor(model, texts);
     } catch (const std::exception& e) {
         return yams::Error{yams::ErrorCode::InternalError, e.what()};
     }
@@ -289,13 +217,13 @@ struct VectorDiag {
     std::string buildReason{"unknown"};
 };
 
-inline VectorDiag collect_vector_diag(const ServiceManager* sm) {
+inline VectorDiag collect_vector_diag(ServiceManager* sm) {
     VectorDiag d;
     if (!sm)
         return d;
     try {
         // Phase 2.2: Use non-blocking cached snapshot instead of getSearchEngineSnapshot()
-        const auto* cachedEngine = sm->getCachedSearchEngine();
+        auto cachedEngine = sm->getCachedSearchEngine();
         auto provider = sm->getModelProvider();
         if (provider) {
             try {
@@ -334,7 +262,7 @@ inline boost::asio::awaitable<yams::Result<T>> await_with_retry(Fn&& fn, int att
 }
 
 // Build plugins JSON snapshot and count
-inline std::pair<std::string, size_t> build_plugins_json(const ServiceManager* sm) {
+inline std::pair<std::string, size_t> build_plugins_json(ServiceManager* sm) {
     nlohmann::json arr = nlohmann::json::array();
     size_t count = 0;
     try {
@@ -378,13 +306,13 @@ inline std::pair<std::string, size_t> build_plugins_json(const ServiceManager* s
         };
 
         // ABI (native) plugins
-        const auto* abi = sm->getAbiPluginHost();
+        auto* abi = sm->getAbiPluginHost();
         if (abi) {
             addPlugins(abi->listLoaded(), "native");
         }
 
         // External (Python/JS) plugins
-        const auto* external = sm->getExternalPluginHost();
+        auto* external = sm->getExternalPluginHost();
         if (external) {
             addPlugins(external->listLoaded(), "external");
         }
@@ -395,7 +323,7 @@ inline std::pair<std::string, size_t> build_plugins_json(const ServiceManager* s
 
 // Build typed providers list for StatusResponse
 inline std::vector<yams::daemon::StatusResponse::ProviderInfo>
-build_typed_providers(const ServiceManager* sm, const yams::daemon::StateComponent* state) {
+build_typed_providers(ServiceManager* sm, const yams::daemon::StateComponent* state) {
     std::vector<yams::daemon::StatusResponse::ProviderInfo> providers;
     if (!sm) {
         spdlog::debug("[build_typed_providers] ServiceManager is null");
@@ -457,7 +385,7 @@ build_typed_providers(const ServiceManager* sm, const yams::daemon::StateCompone
     } catch (...) {
         spdlog::error("[build_typed_providers] Unknown exception");
     }
-    spdlog::debug("[build_typed_providers] Returning {} providers", providers.size());
+    spdlog::info("[build_typed_providers] Returning {} providers", providers.size());
     return providers;
 }
 

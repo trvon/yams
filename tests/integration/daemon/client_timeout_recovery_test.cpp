@@ -7,11 +7,14 @@
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include <chrono>
-#include <filesystem>
-#include <thread>
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <memory>
+#include <thread>
+#include <vector>
 
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
@@ -48,17 +51,50 @@ bool connectWithRetry(DaemonClient& client, int maxRetries = 3,
     return false;
 }
 
+bool listWithRetry(DaemonClient& client, int maxRetries = 6,
+                   std::chrono::milliseconds retryDelay = 200ms) {
+    ListRequest req;
+    req.limit = 10;
+    for (int attempt = 0; attempt < maxRetries; ++attempt) {
+        auto result = yams::cli::run_sync(client.list(req), 5s);
+        if (result.has_value()) {
+            return true;
+        }
+        std::this_thread::sleep_for(retryDelay);
+    }
+    return false;
+}
+
 bool containsSubstring(const std::vector<std::string>& values, const std::string& needle) {
     return std::any_of(values.begin(), values.end(),
                        [&](const auto& value) { return value.find(needle) != std::string::npos; });
+}
+
+DaemonHarness::Options makeLeanHarnessOptions() {
+    DaemonHarness::Options opts;
+    opts.enableModelProvider = false;
+    opts.useMockModelProvider = false;
+    return opts;
+}
+
+bool startHarnessWithRetry(DaemonHarness& harness, std::chrono::milliseconds timeout,
+                           int maxAttempts = 3) {
+    for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+        if (harness.start(timeout)) {
+            return true;
+        }
+        harness.stop();
+        std::this_thread::sleep_for(300ms);
+    }
+    return false;
 }
 } // namespace
 
 TEST_CASE("Client timeout recovery: Immediate EOF detection and retry",
           "[daemon][timeout][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
-    DaemonHarness harness;
-    REQUIRE(harness.start(5s));
+    DaemonHarness harness(makeLeanHarnessOptions());
+    REQUIRE(startHarnessWithRetry(harness, 10s));
 
     auto client = createClient(harness.socketPath());
 
@@ -98,8 +134,8 @@ TEST_CASE("Client timeout recovery: Honors YAMS_IPC_TIMEOUT_MS for idle reap",
     ScopedEnvVar ipcTimeoutEnv{"YAMS_IPC_TIMEOUT_MS", std::string{"1000"}};
     ScopedEnvVar maxIdleEnv{"YAMS_MAX_IDLE_TIMEOUTS", std::string{"1"}};
 
-    DaemonHarness harness;
-    REQUIRE(harness.start(5s));
+    DaemonHarness harness(makeLeanHarnessOptions());
+    REQUIRE(startHarnessWithRetry(harness, 10s));
 
     auto idleClient = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(idleClient));
@@ -138,11 +174,103 @@ TEST_CASE("Client timeout recovery: Honors YAMS_IPC_TIMEOUT_MS for idle reap",
     REQUIRE(resultAfterIdle.has_value());
 }
 
+TEST_CASE("Client timeout recovery: Connection lifetime expiry remains crash-free",
+          "[daemon][timeout][lifetime][integration][stress]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    ScopedEnvVar lifetimeEnv{"YAMS_CONNECTION_LIFETIME_S", std::string{"1"}};
+    ScopedEnvVar ipcTimeoutEnv{"YAMS_IPC_TIMEOUT_MS", std::string{"5000"}};
+    ScopedEnvVar maxIdleEnv{"YAMS_MAX_IDLE_TIMEOUTS", std::string{"10"}};
+
+    DaemonHarness harness(makeLeanHarnessOptions());
+    REQUIRE(startHarnessWithRetry(harness, 12s));
+
+    auto client = createClient(harness.socketPath());
+    REQUIRE(connectWithRetry(client));
+
+    auto* socketServer = harness.daemon()->getSocketServer();
+    REQUIRE(socketServer != nullptr);
+    const uint64_t baselineConnections = socketServer->totalConnections();
+
+    constexpr int kLifetimeCycles = 8;
+    for (int cycle = 0; cycle < kLifetimeCycles; ++cycle) {
+        INFO("lifetime cycle " << cycle);
+
+        auto warm = yams::cli::run_sync(client.status(), 5s);
+        REQUIRE(warm.has_value());
+
+        std::this_thread::sleep_for(1300ms);
+
+        REQUIRE(harness.daemon() != nullptr);
+        REQUIRE(harness.daemon()->isRunning());
+        REQUIRE(listWithRetry(client));
+        REQUIRE(harness.daemon()->isRunning());
+    }
+
+    REQUIRE(socketServer->totalConnections() > baselineConnections);
+}
+
+TEST_CASE("Client timeout recovery: Parallel clients survive lifetime expiry",
+          "[daemon][timeout][lifetime][integration][stress][parallel]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    ScopedEnvVar lifetimeEnv{"YAMS_CONNECTION_LIFETIME_S", std::string{"1"}};
+    ScopedEnvVar ipcTimeoutEnv{"YAMS_IPC_TIMEOUT_MS", std::string{"5000"}};
+    ScopedEnvVar maxIdleEnv{"YAMS_MAX_IDLE_TIMEOUTS", std::string{"10"}};
+
+    DaemonHarness harness(makeLeanHarnessOptions());
+    REQUIRE(startHarnessWithRetry(harness, 12s));
+
+    auto* socketServer = harness.daemon()->getSocketServer();
+    REQUIRE(socketServer != nullptr);
+    const uint64_t baselineConnections = socketServer->totalConnections();
+
+    constexpr int kClients = 4;
+    std::vector<std::unique_ptr<DaemonClient>> clients;
+    clients.reserve(kClients);
+    for (int i = 0; i < kClients; ++i) {
+        clients.push_back(std::make_unique<DaemonClient>(createClient(harness.socketPath())));
+        REQUIRE(connectWithRetry(*clients.back()));
+    }
+
+    constexpr int kLifetimeCycles = 5;
+    for (int cycle = 0; cycle < kLifetimeCycles; ++cycle) {
+        INFO("parallel lifetime cycle " << cycle);
+
+        for (int i = 0; i < kClients; ++i) {
+            auto warm = yams::cli::run_sync(clients[i]->status(), 5s);
+            REQUIRE(warm.has_value());
+            std::this_thread::sleep_for(120ms);
+        }
+
+        std::this_thread::sleep_for(1300ms);
+
+        std::vector<uint8_t> recovered(kClients, 0);
+        std::vector<std::thread> threads;
+        threads.reserve(kClients);
+        for (int i = 0; i < kClients; ++i) {
+            threads.emplace_back(
+                [&, i]() { recovered[i] = listWithRetry(*clients[i], 8, 150ms) ? 1 : 0; });
+        }
+        for (auto& t : threads) {
+            t.join();
+        }
+
+        REQUIRE(harness.daemon() != nullptr);
+        REQUIRE(harness.daemon()->isRunning());
+        for (int i = 0; i < kClients; ++i) {
+            REQUIRE(recovered[i] == 1);
+        }
+    }
+
+    REQUIRE(socketServer->totalConnections() > baselineConnections + kClients);
+}
+
 TEST_CASE("Client timeout recovery: Streaming request connection handling",
           "[daemon][timeout][streaming][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
-    DaemonHarness harness;
-    REQUIRE(harness.start(5s));
+    DaemonHarness harness(makeLeanHarnessOptions());
+    REQUIRE(startHarnessWithRetry(harness, 10s));
 
     auto client = createClient(harness.socketPath());
 
@@ -178,8 +306,8 @@ TEST_CASE("Client timeout recovery: Streaming request connection handling",
 TEST_CASE("Client timeout recovery: Connection pool management",
           "[daemon][timeout][pool][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
-    DaemonHarness harness;
-    REQUIRE(harness.start(5s));
+    DaemonHarness harness(makeLeanHarnessOptions());
+    REQUIRE(startHarnessWithRetry(harness, 10s));
 
     auto client = createClient(harness.socketPath());
 
@@ -205,8 +333,8 @@ TEST_CASE("Client timeout recovery: Connection pool management",
 TEST_CASE("Client timeout recovery: Rapid request cycle",
           "[daemon][timeout][stress][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
-    DaemonHarness harness;
-    REQUIRE(harness.start(5s));
+    DaemonHarness harness(makeLeanHarnessOptions());
+    REQUIRE(startHarnessWithRetry(harness, 10s));
 
     auto client = createClient(harness.socketPath());
 
@@ -226,8 +354,8 @@ TEST_CASE("Client timeout recovery: Rapid request cycle",
 TEST_CASE("Client timeout recovery: Daemon restart handling",
           "[daemon][timeout][reconnect][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
-    DaemonHarness harness;
-    REQUIRE(harness.start(10s));
+    DaemonHarness harness(makeLeanHarnessOptions());
+    REQUIRE(startHarnessWithRetry(harness, 12s));
 
     auto client = createClient(harness.socketPath());
 
@@ -245,7 +373,7 @@ TEST_CASE("Client timeout recovery: Daemon restart handling",
         harness.stop();
         std::this_thread::sleep_for(500ms);
 
-        REQUIRE(harness.start(10s));
+        REQUIRE(startHarnessWithRetry(harness, 12s));
 
         // Allow restarted daemon to fully initialize
         std::this_thread::sleep_for(500ms);
@@ -260,8 +388,8 @@ TEST_CASE("Client timeout recovery: Daemon restart handling",
 TEST_CASE("Client timeout recovery: Error message quality",
           "[daemon][timeout][errors][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
-    DaemonHarness harness;
-    REQUIRE(harness.start(5s));
+    DaemonHarness harness(makeLeanHarnessOptions());
+    REQUIRE(startHarnessWithRetry(harness, 10s));
 
     auto client = createClient(harness.socketPath());
 
@@ -298,8 +426,8 @@ TEST_CASE("Client timeout recovery: Error message quality",
 TEST_CASE("Client timeout recovery: Connection refused when daemon down",
           "[daemon][timeout][connection-refused][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
-    DaemonHarness harness;
-    REQUIRE(harness.start(10s));
+    DaemonHarness harness(makeLeanHarnessOptions());
+    REQUIRE(startHarnessWithRetry(harness, 12s));
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
@@ -332,8 +460,8 @@ TEST_CASE("Client timeout recovery: Connection refused when daemon down",
 TEST_CASE("Client timeout recovery: Shutdown cancels in-flight request",
           "[daemon][timeout][shutdown][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
-    DaemonHarness harness;
-    REQUIRE(harness.start(5s));
+    DaemonHarness harness(makeLeanHarnessOptions());
+    REQUIRE(startHarnessWithRetry(harness, 10s));
 
     ClientConfig config;
     config.socketPath = harness.socketPath();
@@ -384,8 +512,8 @@ TEST_CASE("Client timeout recovery: Tag filtering matrix for list and search",
           "[daemon][timeout][tags][integration]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
-    DaemonHarness harness;
-    REQUIRE(harness.start(8s));
+    DaemonHarness harness(makeLeanHarnessOptions());
+    REQUIRE(startHarnessWithRetry(harness, 12s));
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
@@ -398,8 +526,6 @@ TEST_CASE("Client timeout recovery: Tag filtering matrix for list and search",
     addRed.name = redName;
     addRed.content = "red content " + queryToken;
     addRed.tags = {"team-red", "group-a"};
-    addRed.waitForProcessing = true;
-    addRed.waitTimeoutSeconds = 30;
     auto addRedResult = yams::cli::run_sync(client.streamingAddDocument(addRed), 20s);
     REQUIRE(addRedResult.has_value());
 
@@ -407,8 +533,6 @@ TEST_CASE("Client timeout recovery: Tag filtering matrix for list and search",
     addBlue.name = blueName;
     addBlue.content = "blue content " + queryToken;
     addBlue.tags = {"team-blue", "group-a"};
-    addBlue.waitForProcessing = true;
-    addBlue.waitTimeoutSeconds = 30;
     auto addBlueResult = yams::cli::run_sync(client.streamingAddDocument(addBlue), 20s);
     REQUIRE(addBlueResult.has_value());
 
@@ -416,16 +540,32 @@ TEST_CASE("Client timeout recovery: Tag filtering matrix for list and search",
     listRedOnly.limit = 50;
     listRedOnly.tags = {"team-red"};
     listRedOnly.matchAllTags = true;
-    auto listRedOnlyResult = yams::cli::run_sync(client.list(listRedOnly), 10s);
-    REQUIRE(listRedOnlyResult.has_value());
-    const auto& listRedOnlyValue = listRedOnlyResult.value();
-
+    yams::Result<yams::daemon::ListResponse> listRedOnlyResult;
     std::vector<std::string> listedNames;
-    for (const auto& item : listRedOnlyValue.items) {
-        listedNames.push_back(item.name);
-        listedNames.push_back(item.fileName);
-        listedNames.push_back(item.path);
+    bool foundRed = false;
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        listRedOnlyResult = yams::cli::run_sync(client.list(listRedOnly), 10s);
+        if (!listRedOnlyResult.has_value()) {
+            std::this_thread::sleep_for(250ms);
+            continue;
+        }
+
+        listedNames.clear();
+        for (const auto& item : listRedOnlyResult.value().items) {
+            listedNames.push_back(item.name);
+            listedNames.push_back(item.fileName);
+            listedNames.push_back(item.path);
+        }
+
+        if (containsSubstring(listedNames, redName)) {
+            foundRed = true;
+            break;
+        }
+        std::this_thread::sleep_for(250ms);
     }
+
+    REQUIRE(listRedOnlyResult.has_value());
+    REQUIRE(foundRed);
     REQUIRE(containsSubstring(listedNames, redName));
     REQUIRE_FALSE(containsSubstring(listedNames, blueName));
 

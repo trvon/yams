@@ -1,6 +1,9 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <future>
+#include <memory>
 #include <unordered_map>
+#include <boost/asio/post.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -18,8 +21,75 @@ namespace yams::daemon {
 
 // Forward declare helper
 using PendingPostIngestByMime = std::unordered_map<std::string, std::vector<std::string>>;
-static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumentTask& task,
-                        PendingPostIngestByMime& pendingPostIngest);
+static PendingPostIngestByMime processTask(ServiceManager* sm,
+                                           const InternalEventBus::StoreDocumentTask& task);
+static std::future<PendingPostIngestByMime>
+dispatchTaskToCoordinator(ServiceManager* sm, WorkCoordinator* coordinator,
+                          InternalEventBus::StoreDocumentTask task) {
+    std::promise<PendingPostIngestByMime> promise;
+    auto future = promise.get_future();
+
+    if (!coordinator || !coordinator->isRunning()) {
+        try {
+            promise.set_value(processTask(sm, task));
+        } catch (...) {
+            promise.set_exception(std::current_exception());
+        }
+        return future;
+    }
+
+    auto sharedPromise =
+        std::make_shared<std::promise<PendingPostIngestByMime>>(std::move(promise));
+    auto executor = coordinator->getExecutor();
+    boost::asio::post(executor, [sm, task = std::move(task), sharedPromise]() mutable {
+        try {
+            sharedPromise->set_value(processTask(sm, task));
+        } catch (...) {
+            sharedPromise->set_exception(std::current_exception());
+        }
+    });
+
+    return future;
+}
+
+static void mergePendingPostIngest(PendingPostIngestByMime& target,
+                                   PendingPostIngestByMime&& source) {
+    for (auto& [mime, hashes] : source) {
+        if (hashes.empty()) {
+            continue;
+        }
+        auto& dst = target[mime];
+        dst.insert(dst.end(), std::make_move_iterator(hashes.begin()),
+                   std::make_move_iterator(hashes.end()));
+    }
+}
+
+static std::size_t resolveIngestParallelism(WorkCoordinator* coordinator, bool underPressure) {
+    std::size_t parallelism = 0;
+    if (const char* env = std::getenv("YAMS_INGEST_PARALLELISM"); env && *env) {
+        try {
+            parallelism = static_cast<std::size_t>(std::stoul(env));
+        } catch (...) {
+            parallelism = 0;
+        }
+    }
+
+    if (parallelism == 0) {
+        const std::size_t workers = coordinator ? coordinator->getWorkerCount() : 0;
+        if (workers > 1) {
+            parallelism = std::max<std::size_t>(2, workers / 2);
+        } else {
+            parallelism = 2;
+        }
+    }
+
+    parallelism = std::clamp<std::size_t>(parallelism, 1, 8);
+    if (underPressure) {
+        parallelism = std::max<std::size_t>(1, parallelism / 2);
+    }
+    return parallelism;
+}
+
 static void flushPendingPostIngestBatches(ServiceManager* sm, PendingPostIngestByMime& pending) {
     if (!sm || !sm->getPostIngestQueue() || pending.empty()) {
         pending.clear();
@@ -92,12 +162,44 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
 
         InternalEventBus::StoreDocumentTask task;
         int processed = 0;
-        PendingPostIngestByMime pendingPostIngest;
+        std::vector<InternalEventBus::StoreDocumentTask> batch;
+        batch.reserve(static_cast<std::size_t>(batchLimit));
         while (processed < batchLimit && channel->try_pop(task)) {
             idleDelay = std::chrono::milliseconds(5);
-            processTask(sm_, task, pendingPostIngest);
+            batch.push_back(std::move(task));
             ++processed;
         }
+
+        PendingPostIngestByMime pendingPostIngest;
+        if (!batch.empty()) {
+            const std::size_t parallelism = resolveIngestParallelism(coordinator_, underPressure);
+
+            for (std::size_t offset = 0; offset < batch.size();) {
+                const std::size_t waveSize =
+                    std::min<std::size_t>(parallelism, batch.size() - offset);
+                std::vector<std::future<PendingPostIngestByMime>> futures;
+                futures.reserve(waveSize);
+
+                for (std::size_t i = 0; i < waveSize; ++i) {
+                    auto taskCopy = std::move(batch[offset + i]);
+                    futures.push_back(
+                        dispatchTaskToCoordinator(sm_, coordinator_, std::move(taskCopy)));
+                }
+
+                for (auto& fut : futures) {
+                    try {
+                        mergePendingPostIngest(pendingPostIngest, fut.get());
+                    } catch (const std::exception& e) {
+                        spdlog::error("[IngestService] parallel task failed: {}", e.what());
+                    } catch (...) {
+                        spdlog::error("[IngestService] parallel task failed: unknown exception");
+                    }
+                }
+
+                offset += waveSize;
+            }
+        }
+
         if (!pendingPostIngest.empty()) {
             flushPendingPostIngestBatches(sm_, pendingPostIngest);
         }
@@ -120,8 +222,9 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
     spdlog::info("[IngestService] Channel poller exited");
 }
 
-static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumentTask& task,
-                        PendingPostIngestByMime& pendingPostIngest) {
+static PendingPostIngestByMime processTask(ServiceManager* sm,
+                                           const InternalEventBus::StoreDocumentTask& task) {
+    PendingPostIngestByMime pendingPostIngest;
     const auto& req = task.request;
 
     try {
@@ -139,7 +242,7 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
     if (!isDir && req.path.empty() && (req.content.empty() || req.name.empty())) {
         spdlog::warn("Failed to store document from ingest queue: {}",
                      "Provide either 'path' or 'content' + 'name'");
-        return;
+        return pendingPostIngest;
     }
 
     auto appContext = sm->getAppContext();
@@ -228,6 +331,8 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
             }
         }
     }
+
+    return pendingPostIngest;
 }
 
 } // namespace yams::daemon

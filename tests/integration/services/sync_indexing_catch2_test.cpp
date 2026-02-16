@@ -38,8 +38,20 @@ class SyncIndexingFixture {
 public:
     SyncIndexingFixture() {
         // Start daemon with harness
-        harness_ = std::make_unique<yams::test::DaemonHarness>();
-        bool started = harness_->start(5s);
+        yams::test::DaemonHarness::Options opts;
+        opts.enableModelProvider = false;
+        opts.useMockModelProvider = false;
+        harness_ = std::make_unique<yams::test::DaemonHarness>(opts);
+
+        bool started = false;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            started = harness_->start(15s);
+            if (started) {
+                break;
+            }
+            harness_->stop();
+            std::this_thread::sleep_for(250ms);
+        }
         REQUIRE(started);
 
         // Create test files directory

@@ -313,6 +313,14 @@ int main(int argc, char* argv[]) {
                 if (daemonSection.find("enable") != daemonSection.end()) {
                     config.enableModelProvider = (daemonSection.at("enable") == "true");
                 }
+                if (daemonSection.find("model_provider_required") != daemonSection.end()) {
+                    std::string v = daemonSection.at("model_provider_required");
+                    for (auto& c : v) {
+                        c = static_cast<char>(std::tolower(c));
+                    }
+                    config.modelProviderRequired =
+                        (v == "1" || v == "true" || v == "yes" || v == "on");
+                }
 
                 // Plugin configuration
                 if (config.pluginDir.empty() &&

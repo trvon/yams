@@ -82,9 +82,9 @@ constexpr int64_t kPathTreeNullParent = PathTreeNode::kNullParent;
 // Transaction begin helper with backend-appropriate semantics.
 // - libsql (MVCC): Uses regular BEGIN since concurrent writers are supported.
 // - SQLite: Uses BEGIN IMMEDIATE with retry/backoff for lock contention.
-Result<void> beginTransactionWithRetry(
-    Database& db, int maxRetries = 5,
-    std::chrono::milliseconds initialBackoff = std::chrono::milliseconds(10)) {
+Result<void>
+beginTransactionWithRetry(Database& db, int maxRetries = 5,
+                          std::chrono::milliseconds initialBackoff = std::chrono::milliseconds(5)) {
 #if YAMS_LIBSQL_BACKEND
     // libsql supports MVCC - concurrent writers don't block each other.
     // Use regular BEGIN (deferred) for better concurrency.
@@ -539,6 +539,183 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
             spdlog::debug("Document with hash {} already exists (id={}), using existing",
                           info.sha256Hash, docId);
         }
+
+        return docId;
+    });
+}
+
+Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
+    const DocumentInfo& info, const std::vector<std::pair<std::string, MetadataValue>>& tags,
+    TreeSnapshotRecord* snapshot) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::insertDocumentWithMetadata");
+    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+        // Wrap everything in a single BEGIN IMMEDIATE to reduce lock acquisitions
+        // from ~15-20 per document down to 1.
+        YAMS_TRY(beginTransactionWithRetry(db));
+        auto rollback = scope_exit([&] { db.execute("ROLLBACK"); });
+
+        // --- 1. INSERT document ---
+        std::string sql = "INSERT OR IGNORE INTO documents (file_path, file_name, file_extension, "
+                          "file_size, sha256_hash, mime_type, created_time, modified_time, "
+                          "indexed_time, content_extracted, extraction_status, extraction_error";
+
+        if (hasPathIndexing_) {
+            sql += ", path_prefix, reverse_path, path_hash, parent_hash, path_depth";
+        }
+
+        sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+        if (hasPathIndexing_) {
+            sql += ", ?, ?, ?, ?, ?";
+        }
+        sql += ")";
+
+        auto stmtResult = db.prepare(sql);
+        if (!stmtResult)
+            return stmtResult.error();
+
+        Statement stmt = std::move(stmtResult).value();
+
+        if (hasPathIndexing_) {
+            auto bindResult = stmt.bindAll(
+                info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
+                info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
+                info.contentExtracted ? 1 : 0,
+                ExtractionStatusUtils::toString(info.extractionStatus), info.extractionError,
+                info.pathPrefix, info.reversePath, info.pathHash, info.parentHash, info.pathDepth);
+            if (!bindResult)
+                return bindResult.error();
+        } else {
+            auto bindResult = stmt.bindAll(
+                info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
+                info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
+                info.contentExtracted ? 1 : 0,
+                ExtractionStatusUtils::toString(info.extractionStatus), info.extractionError);
+            if (!bindResult)
+                return bindResult.error();
+        }
+
+        auto execResult = stmt.execute();
+        if (!execResult)
+            return execResult.error();
+
+        int changes = db.changes();
+        int64_t docId;
+
+        if (changes > 0) {
+            docId = db.lastInsertRowId();
+            cachedDocumentCount_.fetch_add(1, std::memory_order_relaxed);
+            if (info.contentExtracted) {
+                cachedExtractedCount_.fetch_add(1, std::memory_order_relaxed);
+            }
+            spdlog::debug("insertDocumentWithMetadata: inserted hash={} id={}", info.sha256Hash,
+                          docId);
+        } else {
+            auto checkStmt = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
+            if (!checkStmt)
+                return checkStmt.error();
+            auto& stmt2 = checkStmt.value();
+            if (auto bindRes = stmt2.bind(1, info.sha256Hash); !bindRes)
+                return bindRes.error();
+            auto stepRes = stmt2.step();
+            if (!stepRes)
+                return stepRes.error();
+            if (!stepRes.value())
+                return Error{ErrorCode::DatabaseError,
+                             "Document insert ignored but existing record not found"};
+            docId = stmt2.getInt64(0);
+            spdlog::debug("insertDocumentWithMetadata: existing hash={} id={}", info.sha256Hash,
+                          docId);
+        }
+
+        // --- 2. Batch upsert metadata (if any) ---
+        if (!tags.empty()) {
+            // Use ON CONFLICT upsert to avoid DELETE+INSERT write amplification.
+            // Prepare once, bind+execute+reset per tag pair.
+            static const std::string metaUpsertSql =
+                "INSERT INTO metadata (document_id, key, value, value_type) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(document_id, key) DO UPDATE SET value = excluded.value, "
+                "value_type = excluded.value_type";
+
+            YAMS_TRY_UNWRAP(metaStmt, db.prepareCached(metaUpsertSql));
+            for (const auto& [key, value] : tags) {
+                YAMS_TRY(metaStmt->bind(1, docId));
+                YAMS_TRY(metaStmt->bind(2, key));
+                YAMS_TRY(metaStmt->bind(3, value.value));
+                YAMS_TRY(metaStmt->bind(4, MetadataValueTypeUtils::toStringView(value.type)));
+                YAMS_TRY(metaStmt->execute());
+                YAMS_TRY(metaStmt->reset()); // Reset for next iteration
+            }
+        }
+
+        // --- 3. Upsert tree snapshot (if provided) ---
+        if (snapshot) {
+            snapshot->ingestDocumentId = docId;
+
+            std::string directoryPath = snapshot->metadata.count("directory_path")
+                                            ? snapshot->metadata.at("directory_path")
+                                            : "";
+            std::string snapshotLabel = snapshot->metadata.count("snapshot_label")
+                                            ? snapshot->metadata.at("snapshot_label")
+                                            : "";
+            std::string gitCommit =
+                snapshot->metadata.count("git_commit") ? snapshot->metadata.at("git_commit") : "";
+            std::string gitBranch =
+                snapshot->metadata.count("git_branch") ? snapshot->metadata.at("git_branch") : "";
+            std::string gitRemote =
+                snapshot->metadata.count("git_remote") ? snapshot->metadata.at("git_remote") : "";
+
+            auto snapStmtResult = db.prepare(R"(
+                INSERT INTO tree_snapshots (
+                    snapshot_id, created_at, directory_path, tree_root_hash,
+                    snapshot_label, git_commit, git_branch, git_remote, files_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(snapshot_id) DO UPDATE SET
+                    created_at = excluded.created_at,
+                    directory_path = excluded.directory_path,
+                    tree_root_hash = excluded.tree_root_hash,
+                    snapshot_label = excluded.snapshot_label,
+                    git_commit = excluded.git_commit,
+                    git_branch = excluded.git_branch,
+                    git_remote = excluded.git_remote,
+                    files_count = excluded.files_count
+            )");
+            if (!snapStmtResult)
+                return snapStmtResult.error();
+
+            Statement snapStmt = std::move(snapStmtResult).value();
+            snapStmt.bind(1, snapshot->snapshotId);
+            snapStmt.bind(2, static_cast<int64_t>(snapshot->createdTime));
+            snapStmt.bind(3, directoryPath);
+            if (snapshot->rootTreeHash.empty())
+                snapStmt.bind(4, nullptr);
+            else
+                snapStmt.bind(4, snapshot->rootTreeHash);
+            if (snapshotLabel.empty())
+                snapStmt.bind(5, nullptr);
+            else
+                snapStmt.bind(5, snapshotLabel);
+            if (gitCommit.empty())
+                snapStmt.bind(6, nullptr);
+            else
+                snapStmt.bind(6, gitCommit);
+            if (gitBranch.empty())
+                snapStmt.bind(7, nullptr);
+            else
+                snapStmt.bind(7, gitBranch);
+            if (gitRemote.empty())
+                snapStmt.bind(8, nullptr);
+            else
+                snapStmt.bind(8, gitRemote);
+            snapStmt.bind(9, static_cast<int64_t>(snapshot->fileCount));
+
+            auto snapExecResult = snapStmt.execute();
+            if (!snapExecResult)
+                return snapExecResult.error();
+        }
+
+        // --- COMMIT ---
+        YAMS_TRY(db.execute("COMMIT"));
+        rollback.dismiss();
 
         return docId;
     });
@@ -2206,38 +2383,39 @@ MetadataRepository::removeFromIndexByHashBatch(const std::vector<std::string>& h
 }
 
 Result<std::vector<int64_t>> MetadataRepository::getAllFts5IndexedDocumentIds() {
-    return executeReadQuery<std::vector<int64_t>>([&](Database& db) -> Result<std::vector<int64_t>> {
-        // First check if FTS5 is available
-        auto fts5Result = db.hasFTS5();
-        if (!fts5Result)
-            return fts5Result.error();
+    return executeReadQuery<std::vector<int64_t>>(
+        [&](Database& db) -> Result<std::vector<int64_t>> {
+            // First check if FTS5 is available
+            auto fts5Result = db.hasFTS5();
+            if (!fts5Result)
+                return fts5Result.error();
 
-        if (!fts5Result.value()) {
-            return std::vector<int64_t>{}; // FTS5 not available, return empty
-        }
+            if (!fts5Result.value()) {
+                return std::vector<int64_t>{}; // FTS5 not available, return empty
+            }
 
-        // Query all rowids from FTS5 index (rowid corresponds to document.id)
-        auto stmtResult = db.prepare("SELECT DISTINCT rowid FROM documents_fts");
-        if (!stmtResult)
-            return stmtResult.error();
+            // Query all rowids from FTS5 index (rowid corresponds to document.id)
+            auto stmtResult = db.prepare("SELECT DISTINCT rowid FROM documents_fts");
+            if (!stmtResult)
+                return stmtResult.error();
 
-        Statement stmt = std::move(stmtResult).value();
-        std::vector<int64_t> docIds;
+            Statement stmt = std::move(stmtResult).value();
+            std::vector<int64_t> docIds;
 
-        for (;;) {
-            auto stepResult = stmt.step();
-            if (!stepResult)
-                return stepResult.error();
+            for (;;) {
+                auto stepResult = stmt.step();
+                if (!stepResult)
+                    return stepResult.error();
 
-            if (!stepResult.value())
-                break;
+                if (!stepResult.value())
+                    break;
 
-            int64_t docId = stmt.getInt64(0);
-            docIds.push_back(docId);
-        }
+                int64_t docId = stmt.getInt64(0);
+                docIds.push_back(docId);
+            }
 
-        return docIds;
-    });
+            return docIds;
+        });
 }
 
 // Helper: escape a single term for FTS5 by wrapping in quotes
@@ -3754,8 +3932,8 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
     }
 
     // Cache miss or stale - compute fresh stats
-    auto result = executeReadQuery<storage::CorpusStats>(
-        [&](Database& db) -> Result<storage::CorpusStats> {
+    auto result =
+        executeReadQuery<storage::CorpusStats>([&](Database& db) -> Result<storage::CorpusStats> {
             storage::CorpusStats stats;
 
             // 1. Basic document metrics: count, total size, avg size, path depth

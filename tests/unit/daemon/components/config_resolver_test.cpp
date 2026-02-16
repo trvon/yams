@@ -104,7 +104,7 @@ TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy defaults are embedding
     EnvGuard cfg("YAMS_CONFIG_PATH", "");
 
     auto policy = ConfigResolver::resolveEmbeddingChunkingPolicy();
-    CHECK(policy.strategy == yams::vector::ChunkingStrategy::SENTENCE_BASED);
+    CHECK(policy.strategy == yams::vector::ChunkingStrategy::PARAGRAPH_BASED);
     CHECK_FALSE(policy.config.preserve_sentences);
     CHECK_FALSE(policy.config.use_token_count);
 }

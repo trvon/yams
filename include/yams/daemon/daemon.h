@@ -44,6 +44,7 @@ struct DaemonConfig {
     size_t maxLogFiles = 5;
     size_t maxLogSizeMb = 10;
     bool enableModelProvider = false;
+    bool modelProviderRequired = false;
     ModelPoolConfig modelPoolConfig;
     std::filesystem::path pluginDir;
     std::string pluginNamePolicy{"relaxed"};

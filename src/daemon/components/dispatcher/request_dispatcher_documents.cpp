@@ -542,7 +542,53 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
                 }
             }
 
-            // For single files when daemon is ready, store synchronously for immediate availability
+            // For single files when daemon is ready, prefer async queueing by default
+            // to avoid blocking WorkCoordinator request threads under multi-client load.
+            // Set YAMS_SYNC_SINGLE_FILE_ADD=1/true to restore synchronous behavior.
+            bool syncSingleFileAdd = false;
+            if (const char* envSync = std::getenv("YAMS_SYNC_SINGLE_FILE_ADD");
+                envSync && *envSync) {
+                std::string value(envSync);
+                std::transform(value.begin(), value.end(), value.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                syncSingleFileAdd =
+                    (value == "1" || value == "true" || value == "yes" || value == "on");
+            }
+
+            if (!syncSingleFileAdd) {
+                auto channel =
+                    InternalEventBus::instance()
+                        .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+                            "store_document_tasks",
+                            static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity()));
+                InternalEventBus::StoreDocumentTask task{req};
+                if (channel->try_push(std::move(task))) {
+                    AddDocumentResponse response;
+                    response.path = req.path.empty() ? req.name : req.path;
+                    response.documentsAdded = 0;
+
+                    // Compute hash for immediate feedback for single-file/content adds.
+                    try {
+                        auto hasher = yams::crypto::createSHA256Hasher();
+                        if (!req.content.empty()) {
+                            response.hash = hasher->hash(req.content);
+                        } else if (!req.path.empty()) {
+                            response.hash = hasher->hashFile(req.path);
+                        }
+                    } catch (...) {
+                        response.hash = "";
+                    }
+
+                    response.extractionStatus = "pending";
+                    response.message = "Ingestion accepted for asynchronous processing.";
+                    co_return response;
+                }
+
+                co_return ErrorResponse{ErrorCode::ResourceExhausted,
+                                        "Ingestion queue is full. Please try again later."};
+            }
+
+            // Optional sync fallback path (diagnostics/compat only)
             auto appContext = serviceManager_->getAppContext();
             auto docService = app::services::makeDocumentService(appContext);
             app::services::StoreDocumentRequest serviceReq;
@@ -561,10 +607,7 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             serviceReq.sessionId = req.sessionId;
             serviceReq.noEmbeddings = req.noEmbeddings;
 
-            // Store document synchronously
-            // Note: This may block the async context briefly, but ensures reliable completion
             auto result = docService->store(serviceReq);
-
             if (!result) {
                 co_return ErrorResponse{result.error().code, result.error().message};
             }
@@ -575,108 +618,8 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             response.path = req.path.empty() ? req.name : req.path;
             response.documentsAdded = 1;
             response.size = serviceResp.bytesStored;
+            response.extractionStatus = "pending";
             response.message = "Document stored successfully.";
-
-            // Fast-track: small documents (<10KB) get extracted synchronously
-            constexpr size_t kFastTrackThreshold = 10 * 1024; // 10KB
-            bool fastTracked = false;
-            bool enqueued = false;
-
-            if (serviceResp.bytesStored > 0 && serviceResp.bytesStored < kFastTrackThreshold &&
-                serviceManager_ && !serviceResp.hash.empty()) {
-                // Try to extract synchronously for small documents
-                auto metaRepo = serviceManager_->getMetadataRepo();
-                auto contentStore = serviceManager_->getContentStore();
-                auto extractors = serviceManager_->getContentExtractors();
-
-                if (metaRepo && contentStore && !extractors.empty()) {
-                    auto docInfoRes = metaRepo->getDocumentByHash(serviceResp.hash);
-                    if (docInfoRes && docInfoRes.value().has_value()) {
-                        const auto& docInfo = docInfoRes.value().value();
-                        auto text = extraction::util::extractDocumentText(
-                            contentStore, serviceResp.hash,
-                            docInfo.mimeType.empty() ? req.mimeType : docInfo.mimeType,
-                            docInfo.fileExtension, extractors);
-
-                        if (text && !text->empty()) {
-                            // Persist extracted text synchronously
-                            auto persistRes = ingest::persist_content_and_index(
-                                *metaRepo, docInfo.id, docInfo.fileName, *text, docInfo.mimeType,
-                                "fast_track_sync");
-
-                            if (persistRes) {
-                                fastTracked = true;
-                                response.message = "Document stored and extracted (fast-track).";
-                                response.extractionStatus = "success";
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Enqueue for post-ingest processing if not fast-tracked
-            if (!fastTracked && serviceManager_ && serviceManager_->getPostIngestQueue() &&
-                !serviceResp.hash.empty()) {
-                serviceManager_->enqueuePostIngest(serviceResp.hash, req.mimeType);
-                enqueued = true;
-            }
-
-            // Sync mode: wait for extraction to complete (unless not enqueued)
-            if (req.waitForProcessing && enqueued && response.extractionStatus != "success") {
-                auto metaRepo = serviceManager_->getMetadataRepo();
-                if (metaRepo) {
-                    const int timeoutSeconds =
-                        req.waitTimeoutSeconds > 0 ? req.waitTimeoutSeconds : 30;
-                    const auto startTime = std::chrono::steady_clock::now();
-                    bool extractionComplete = false;
-                    // Adaptive backoff: start fast (5ms) for small docs that extract
-                    // instantly via fast-track, double up to 100ms ceiling.
-                    auto pollInterval = std::chrono::milliseconds(5);
-
-                    // Poll for extraction status
-                    while (!extractionComplete) {
-                        auto docInfoRes = metaRepo->getDocumentByHash(serviceResp.hash);
-                        if (docInfoRes && docInfoRes.value().has_value()) {
-                            const auto& docInfo = docInfoRes.value().value();
-
-                            if (docInfo.extractionStatus == metadata::ExtractionStatus::Success) {
-                                response.extractionStatus = "success";
-                                extractionComplete = true;
-                                response.message = "Document stored and extracted.";
-                            } else if (docInfo.extractionStatus ==
-                                       metadata::ExtractionStatus::Failed) {
-                                response.extractionStatus = "failed";
-                                extractionComplete = true;
-                                response.message = "Document stored but extraction failed.";
-                            } else if (docInfo.extractionStatus ==
-                                       metadata::ExtractionStatus::Skipped) {
-                                response.extractionStatus = "skipped";
-                                extractionComplete = true;
-                                response.message = "Document stored (extraction skipped).";
-                            }
-                        }
-
-                        if (!extractionComplete) {
-                            // Check timeout
-                            auto elapsed = std::chrono::steady_clock::now() - startTime;
-                            if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() >=
-                                timeoutSeconds) {
-                                response.extractionStatus = "pending";
-                                response.message = "Document stored (extraction in progress).";
-                                break;
-                            }
-
-                            // Adaptive backoff polling
-                            std::this_thread::sleep_for(pollInterval);
-                            pollInterval =
-                                std::min(pollInterval * 2, std::chrono::milliseconds(100));
-                        }
-                    }
-                }
-            } else if (!fastTracked) {
-                response.extractionStatus = enqueued ? "pending" : "skipped";
-            }
-
             co_return response;
         });
 }

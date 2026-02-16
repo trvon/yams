@@ -34,16 +34,21 @@ struct IndexingFixture {
     ~IndexingFixture() {
         indexingService_.reset();
         searchEngine_.reset();
+        appContext_.metadataRepo.reset();
+        appContext_.store.reset();
+        appContext_.searchEngine.reset();
+        contentStore_.reset();
+        metadataRepo_.reset();
+
+        if (pool_) {
+            pool_->shutdown();
+            pool_.reset();
+        }
 
         if (database_) {
             database_->close();
             database_.reset();
         }
-        if (pool_) {
-            pool_->shutdown();
-            pool_.reset();
-        }
-        metadataRepo_.reset();
 
         std::error_code ec;
         if (!testDir_.empty() && std::filesystem::exists(testDir_)) {

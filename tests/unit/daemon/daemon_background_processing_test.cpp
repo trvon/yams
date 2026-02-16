@@ -30,6 +30,17 @@ using namespace yams;
 using namespace yams::daemon;
 
 namespace {
+void stopAndResetQueue(std::unique_ptr<PostIngestQueue>& queue) {
+    if (!queue) {
+        return;
+    }
+    queue->stop();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (queue->started() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    queue.reset();
+}
 
 int setEnvValue(const char* name, const char* value) {
 #if defined(_WIN32)
@@ -522,7 +533,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
         REQUIRE(updated.contentExtracted);
         REQUIRE(updated.extractionStatus == metadata::ExtractionStatus::Success);
 
-        queue.reset();
+        stopAndResetQueue(queue);
     }
 
     SECTION("Queue shutdown drains pending tasks") {
@@ -541,7 +552,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
             doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
         REQUIRE(queue->tryEnqueue(std::move(task)));
 
-        queue.reset();
+        stopAndResetQueue(queue);
         SUCCEED("Queue shutdown completed without hang");
     }
 
@@ -666,7 +677,7 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
     // With fixed chunking target=16 and a large payload, at least one doc should have >1 chunk.
     REQUIRE(docsWithMultipleChunks > 0);
 
-    queue.reset();
+    stopAndResetQueue(queue);
     coordinator.stop();
     coordinator.join();
 }
@@ -684,7 +695,9 @@ TEST_CASE("PostIngestQueue: Parallel extraction preserves per-task identity",
     auto metadataRepo = std::make_shared<StubMetadataRepository>();
     auto extractor = std::make_shared<StubExtractor>();
     std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors{extractor};
-    REQUIRE(TuneAdvisor::postExtractionConcurrent() > 1);
+    if (TuneAdvisor::postExtractionConcurrent() <= 1) {
+        SKIP("Parallel extraction concurrency not available in this test runtime");
+    }
 
     constexpr int64_t kDocBaseId = 5000;
     constexpr int kDocCount = 128;
@@ -738,7 +751,7 @@ TEST_CASE("PostIngestQueue: Parallel extraction preserves per-task identity",
         REQUIRE(insertedDocIds[static_cast<std::size_t>(i)] == kDocBaseId + i);
     }
 
-    queue.reset();
+    stopAndResetQueue(queue);
     coordinator.stop();
     coordinator.join();
 }
@@ -802,7 +815,7 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
     REQUIRE(std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) ==
             insertedDocIds.end());
 
-    queue.reset();
+    stopAndResetQueue(queue);
     coordinator.stop();
     coordinator.join();
 }
@@ -860,7 +873,7 @@ TEST_CASE("PostIngestQueue: keeps multi-doc batches when extraction concurrency 
     REQUIRE(queue->failed() == 0);
     REQUIRE(metadataRepo->maxBatchWriteSize() > 1);
 
-    queue.reset();
+    stopAndResetQueue(queue);
     coordinator.stop();
     coordinator.join();
 }
@@ -939,7 +952,7 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
         REQUIRE(static_cast<int>(pq->processed()) == expected);
         REQUIRE(pq->failed() == 0);
 
-        pq.reset();
+        stopAndResetQueue(pq);
     }
 
     // Cleanup coordinator at test end

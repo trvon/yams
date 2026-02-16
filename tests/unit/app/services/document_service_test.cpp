@@ -33,15 +33,22 @@ struct DocumentFixture {
         searchEngine_.reset();
         contentStore_.reset();
 
-        if (database_) {
-            database_->close();
-            database_.reset();
-        }
+        // Clear all shared_ptr refs to metadataRepo BEFORE pool/database
+        // destruction.  appContext_ holds its own copy of the shared_ptr,
+        // and C++ destroys members in reverse declaration order — but
+        // appContext_ is declared AFTER pool_, so pool_ would be destroyed
+        // while appContext_ still owns a MetadataRepository that references it.
+        metadataRepo_.reset();
+        appContext_ = {}; // drops shared_ptr copies held by AppContext
+
         if (pool_) {
             pool_->shutdown();
             pool_.reset();
         }
-        metadataRepo_.reset();
+        if (database_) {
+            database_->close();
+            database_.reset();
+        }
 
         if (!testDir_.empty() && std::filesystem::exists(testDir_)) {
             std::error_code ec;

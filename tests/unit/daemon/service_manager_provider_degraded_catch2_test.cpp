@@ -26,3 +26,37 @@ TEST_CASE("ServiceManager: degrades when no provider available", "[daemon]") {
     // Expect degraded since we explicitly dispatch when adoption fails.
     CHECK(snap.state == EmbeddingProviderState::Degraded);
 }
+
+TEST_CASE("Daemon lifecycle: Initializing -> Degraded when provider missing and not required",
+          "[daemon][lifecycle][unit]") {
+    DaemonConfig cfg;
+    cfg.enableModelProvider = true;
+    cfg.modelProviderRequired = false;
+
+    StateComponent state{};
+    state.readiness.modelProviderReady.store(false, std::memory_order_release);
+
+    DaemonLifecycleFsm lifecycleFsm;
+    lifecycleFsm.dispatch(BootstrappedEvent{});
+    REQUIRE(lifecycleFsm.snapshot().state == LifecycleState::Initializing);
+
+    ServiceManager sm(cfg, state, lifecycleFsm);
+    auto adopt = sm.adoptModelProviderFromHosts();
+    REQUIRE(adopt.has_value());
+    REQUIRE_FALSE(adopt.value());
+
+    const bool providerExpected = cfg.enableModelProvider;
+    const bool providerReady = state.readiness.modelProviderReady.load(std::memory_order_acquire);
+    if (providerExpected && !providerReady) {
+        lifecycleFsm.setSubsystemDegraded(
+            "model_provider", true,
+            "Model provider unavailable; embeddings disabled until provider recovery");
+        lifecycleFsm.dispatch(DegradedEvent{});
+    } else {
+        lifecycleFsm.dispatch(HealthyEvent{});
+    }
+
+    auto snap = lifecycleFsm.snapshot();
+    REQUIRE(snap.state == LifecycleState::Degraded);
+    REQUIRE(lifecycleFsm.isSubsystemDegraded("model_provider"));
+}

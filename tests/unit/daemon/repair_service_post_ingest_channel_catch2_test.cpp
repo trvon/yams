@@ -91,6 +91,10 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE(sm->initialize());
     sm->startAsyncInit();
 
+    // Wait for async initialization to settle before reading optional subsystem pointers.
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
     // Async init can race this test; wait briefly for repo availability.
     auto meta = sm->getMetadataRepo();
     for (int i = 0; i < 100 && meta == nullptr; ++i) {

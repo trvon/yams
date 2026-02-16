@@ -408,6 +408,26 @@ public:
 
     // Document operations
     Result<int64_t> insertDocument(const DocumentInfo& info) override;
+
+    /**
+     * @brief Insert a document with metadata and snapshot in a single transaction.
+     *
+     * Combines insertDocument + setMetadataBatch + upsertTreeSnapshot into ONE
+     * BEGIN IMMEDIATE transaction, reducing SQLite lock acquisitions from ~15-20
+     * per document down to 1.  This is the primary optimization for multi-client
+     * ingestion throughput.
+     *
+     * @param info          Document info to insert.
+     * @param tags          Key-value metadata pairs (may be empty).
+     * @param snapshot      Optional snapshot record; its ingestDocumentId is set
+     *                      to the newly inserted docId internally.
+     * @return The document ID (either newly inserted or existing).
+     */
+    Result<int64_t>
+    insertDocumentWithMetadata(const DocumentInfo& info,
+                               const std::vector<std::pair<std::string, MetadataValue>>& tags,
+                               TreeSnapshotRecord* snapshot = nullptr);
+
     Result<std::optional<DocumentInfo>> getDocument(int64_t id) override;
     Result<std::optional<DocumentInfo>> getDocumentByHash(const std::string& hash) override;
     Result<void> updateDocument(const DocumentInfo& info) override;
@@ -830,9 +850,9 @@ private:
             if (result.has_value()) {
                 if (attempt > 0) {
                     // Log successful retry at debug level
-                    spdlog::debug(
-                        "MetadataRepository::executeQueryOnPool route='{}' succeeded after {} retries",
-                        route, attempt);
+                    spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' succeeded "
+                                  "after {} retries",
+                                  route, attempt);
                 }
                 if constexpr (std::is_void_v<T>) {
                     return Result<void>();
@@ -861,8 +881,8 @@ private:
                         route, op.empty() ? "(unknown)" : op, result.error().message);
                 }
                 spdlog::error(
-                    "MetadataRepository::executeQueryOnPool route='{}' connection error: {}",
-                    route, result.error().message);
+                    "MetadataRepository::executeQueryOnPool route='{}' connection error: {}", route,
+                    result.error().message);
                 return Error{result.error()};
             }
 
@@ -875,8 +895,7 @@ private:
         }
 
         // Should never reach here, but satisfy compiler
-        return Error{ErrorCode::DatabaseError,
-                     "executeQueryOnPool: unexpected retry loop exit"};
+        return Error{ErrorCode::DatabaseError, "executeQueryOnPool: unexpected retry loop exit"};
     }
 
     template <typename T> Result<T> executeReadQuery(std::function<Result<T>(Database&)> func) {

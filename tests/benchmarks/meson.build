@@ -307,6 +307,38 @@ if catch2_with_main_dep.found()
        })
 
   alias_target('bench_hnsw', hnsw_entity_search_bench)
+
+  # Multi-client ingestion & concurrent access benchmark (Catch2-based)
+  # Measures ingestion throughput, latency, and fairness under multi-client load.
+  # Tagged [!benchmark] so won't run by default - invoke manually or in nightly CI.
+  multi_client_ingestion_bench = executable('multi_client_ingestion_bench',
+    files('multi_client_ingestion_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_with_main_dep,
+      test_deps,
+      dependency('nlohmann_json'),
+      dependency('spdlog'),
+    ] + tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  test('multi_client_ingestion_bench', multi_client_ingestion_bench,
+       args: ['--allow-running-no-tests'],
+       suite: ['bench', 'multi-client'],
+       is_parallel: false,
+       timeout: 600,
+       env: {
+         'YAMS_TESTING': '1',
+         'YAMS_DISABLE_VECTORS': '1',
+         'YAMS_DISABLE_SESSION_WATCHER': '1',
+         'YAMS_SKIP_MODEL_LOADING': '1',
+         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+         'LD_LIBRARY_PATH': _test_env_ld_library_path,
+       })
+
+  alias_target('bench_multi_client', multi_client_ingestion_bench)
 else
-  message('Catch2 not found, skipping symbol_extraction_bench and hnsw_entity_search_bench')
+  message('Catch2 not found, skipping symbol_extraction_bench, hnsw_entity_search_bench, and multi_client_ingestion_bench')
 endif

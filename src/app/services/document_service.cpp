@@ -703,38 +703,37 @@ public:
 
             populatePathDerivedFields(info);
 
-            auto ins = ctx_.metadataRepo->insertDocument(info);
+            // Build metadata tags as key-value pairs for the combined insert
+            std::vector<std::pair<std::string, metadata::MetadataValue>> tagPairs;
+            tagPairs.reserve(md.tags.size());
+            for (const auto& [k, v] : md.tags) {
+                tagPairs.emplace_back(k, metadata::MetadataValue(v));
+            }
+
+            // Build snapshot record for the combined insert
+            metadata::TreeSnapshotRecord snapshotRecord;
+            snapshotRecord.snapshotId = snapshotId;
+            // ingestDocumentId is set by insertDocumentWithMetadata
+            snapshotRecord.createdTime =
+                std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+            snapshotRecord.fileCount = 1;
+            snapshotRecord.totalBytes = info.fileSize;
+            snapshotRecord.metadata["directory_path"] = info.filePath;
+            if (!req.snapshotLabel.empty()) {
+                snapshotRecord.metadata["snapshot_label"] = req.snapshotLabel;
+            }
+            if (!req.collection.empty()) {
+                snapshotRecord.metadata["collection"] = req.collection;
+            }
+
+            // Single-transaction insert: document + metadata + snapshot in one
+            // BEGIN IMMEDIATE, reducing 15-20 lock acquisitions to 1.
+            auto ins =
+                ctx_.metadataRepo->insertDocumentWithMetadata(info, tagPairs, &snapshotRecord);
             if (ins) {
                 int64_t docId = ins.value();
-                for (const auto& [k, v] : md.tags) {
-                    (void)ctx_.metadataRepo->setMetadata(docId, k, metadata::MetadataValue(v));
-                }
 
-                // Persist a first-class snapshot record for non-directory adds.
-                // This ensures snapshots created via file/stdin ingestion are visible
-                // in tree_snapshots-backed views and not only derivable from document tags.
-                metadata::TreeSnapshotRecord snapshotRecord;
-                snapshotRecord.snapshotId = snapshotId;
-                snapshotRecord.ingestDocumentId = docId;
-                snapshotRecord.createdTime =
-                    std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch())
-                        .count();
-                snapshotRecord.fileCount = 1;
-                snapshotRecord.totalBytes = info.fileSize;
-                snapshotRecord.metadata["directory_path"] = info.filePath;
-                if (!req.snapshotLabel.empty()) {
-                    snapshotRecord.metadata["snapshot_label"] = req.snapshotLabel;
-                }
-                if (!req.collection.empty()) {
-                    snapshotRecord.metadata["collection"] = req.collection;
-                }
-                auto snapshotUpsert = ctx_.metadataRepo->upsertTreeSnapshot(snapshotRecord);
-                if (!snapshotUpsert) {
-                    spdlog::warn("DocumentService: failed to upsert snapshot '{}' record: {}",
-                                 snapshotId, snapshotUpsert.error().message);
-                }
-
-                // Update path tree for this document (best-effort)
+                // Update path tree for this document (best-effort, separate txn)
                 try {
                     auto treeRes = ctx_.metadataRepo->upsertPathTreeForDocument(
                         info, docId, true /* isNewDocument */, std::span<const float>());

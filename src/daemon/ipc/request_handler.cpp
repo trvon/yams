@@ -312,8 +312,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 if (st == ConnectionFsm::State::Error || st == ConnectionFsm::State::Closed) {
                     spdlog::warn("Closing connection immediately due to FSM={} (context={}): {}",
                                  ConnectionFsm::to_string(st), "before_async_read", guard_err);
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
+                    if (sock->is_open()) {
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
+                    }
                     break;
                 }
 
@@ -345,8 +347,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     spdlog::warn("Closing connection after prolonged unreadable FSM state "
                                  "(count={}, state={})",
                                  fsm_guard_fail_count, ConnectionFsm::to_string(st));
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
+                    if (sock->is_open()) {
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
+                    }
                     break;
                 }
                 continue;
@@ -431,8 +435,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     spdlog::info(
                         "Closing idle connection after {} consecutive read timeouts (fd={})",
                         consecutive_idle_timeouts, sock_fd);
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
+                    if (sock->is_open()) {
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
+                    }
                     break;
                 }
                 continue;
@@ -442,8 +448,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 if (read_ec) {
                     spdlog::debug("Closing connection: read error {} ({})", read_ec.message(),
                                   read_ec.value());
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
+                    if (sock->is_open()) {
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
+                    }
                     break;
                 }
                 bytes_read = read_bytes;
@@ -468,8 +476,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 fsm.on_readable(static_cast<size_t>(bytes_read));
             } else {
                 spdlog::debug("Closing connection: FSM not alive during read");
-                boost::system::error_code ignore_ec;
-                sock->close(ignore_ec);
+                if (sock->is_open()) {
+                    boost::system::error_code ignore_ec;
+                    sock->close(ignore_ec);
+                }
                 break;
             }
 
@@ -493,8 +503,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     spdlog::error("Invalid frame received");
                     (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                               "Invalid frame format");
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
+                    if (sock->is_open()) {
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
+                    }
                     feed_error = true;
                     break;
                 }
@@ -503,8 +515,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     spdlog::error("Frame too large");
                     (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                               "Frame exceeds maximum size");
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
+                    if (sock->is_open()) {
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
+                    }
                     feed_error = true;
                     break;
                 }
@@ -522,8 +536,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                       frame_result.error().message);
                         (void)co_await send_error(*sock, ErrorCode::SerializationError,
                                                   "Failed to get frame");
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        if (sock->is_open()) {
+                            boost::system::error_code ignore_ec;
+                            sock->close(ignore_ec);
+                        }
                         should_exit = true;
                         break;
                     }
@@ -552,8 +568,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         }
                         (void)co_await send_error(*sock, message_result.error().code,
                                                   message_result.error().message, correlated_id);
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        if (sock->is_open()) {
+                            boost::system::error_code ignore_ec;
+                            sock->close(ignore_ec);
+                        }
                         should_exit = true;
                         break;
                     }
@@ -566,8 +584,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         // Correlate error with the observed message requestId and close
                         (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                                   "Expected request message", message.requestId);
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        if (sock->is_open()) {
+                            boost::system::error_code ignore_ec;
+                            sock->close(ignore_ec);
+                        }
                         should_exit = true;
                         break;
                     }

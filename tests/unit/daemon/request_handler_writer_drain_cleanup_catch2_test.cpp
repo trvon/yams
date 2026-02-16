@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 
 using namespace yams::daemon;
 
@@ -16,6 +17,8 @@ TEST_CASE("RequestHandler: writer_drain clears queued state on write error",
 #ifdef _WIN32
     SKIP("Unix domain socket tests skipped on Windows");
 #endif
+
+    const auto previousSigpipeHandler = std::signal(SIGPIPE, SIG_IGN);
 
     boost::asio::io_context io;
 
@@ -80,4 +83,6 @@ TEST_CASE("RequestHandler: writer_drain clears queued state on write error",
         REQUIRE(snap.active > 0);
         REQUIRE(snap.queues == 1);
     }
+
+    std::signal(SIGPIPE, previousSigpipeHandler);
 }
