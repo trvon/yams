@@ -4,6 +4,9 @@
 #include <future>
 #include <sstream>
 #include <thread>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/crypto/hasher.h>
@@ -23,6 +26,73 @@
 #include <yams/vector/embedding_service.h>
 
 namespace yams::daemon {
+
+namespace {
+
+int envIntOrDefault(const char* name, int fallback, int minValue, int maxValue) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) {
+        return fallback;
+    }
+    try {
+        int parsed = std::stoi(raw);
+        return std::clamp(parsed, minValue, maxValue);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+int computeEnqueueDelayMs(const AddDocumentRequest& req, int attempt, int baseDelayMs,
+                          int maxDelayMs) {
+    int expDelay = baseDelayMs;
+    if (attempt > 0) {
+        const int shift = std::min(attempt, 10);
+        expDelay = std::min(maxDelayMs, baseDelayMs << shift);
+    }
+
+    const std::string key = req.name.empty() ? req.path : req.name;
+    const std::size_t seed = std::hash<std::string>{}(key);
+    const int jitterCap = std::max(1, expDelay / 2);
+    const int jitter = static_cast<int>(seed % static_cast<std::size_t>(jitterCap));
+    return std::min(maxDelayMs, expDelay + jitter);
+}
+
+boost::asio::awaitable<bool> tryEnqueueStoreDocumentTaskWithBackoff(const AddDocumentRequest& req,
+                                                                    std::size_t channelCapacity) {
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+            "store_document_tasks", channelCapacity);
+
+    const int maxAttempts = envIntOrDefault("YAMS_INGEST_ENQUEUE_RETRIES", 6, 1, 50);
+    const int baseDelayMs = envIntOrDefault("YAMS_INGEST_ENQUEUE_BASE_DELAY_MS", 2, 1, 1000);
+    const int maxDelayMs = envIntOrDefault("YAMS_INGEST_ENQUEUE_MAX_DELAY_MS", 25, 1, 5000);
+
+    auto ex = co_await boost::asio::this_coro::executor;
+    boost::asio::steady_timer timer(ex);
+
+    for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+        InternalEventBus::StoreDocumentTask task{req};
+        if (channel->try_push(std::move(task))) {
+            if (attempt > 0) {
+                spdlog::debug("[RequestDispatcher] AddDocument enqueue succeeded after {} retries",
+                              attempt);
+            }
+            co_return true;
+        }
+
+        if (attempt + 1 >= maxAttempts) {
+            break;
+        }
+
+        const int delayMs = computeEnqueueDelayMs(req, attempt, baseDelayMs, maxDelayMs);
+        timer.expires_after(std::chrono::milliseconds(delayMs));
+        co_await timer.async_wait(boost::asio::use_awaitable);
+    }
+
+    co_return false;
+}
+
+} // namespace
 
 // PBI-008-11 scaffold: prepare session using app services (no IPC exposure yet)
 int RequestDispatcher::prepareSession(const PrepareSessionOptions& opts) {
@@ -443,13 +513,9 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             // Check admission control before accepting new work
             if (!ResourceGovernor::instance().canAdmitWork()) {
                 // Queue for deferred processing instead of rejecting outright
-                auto channel =
-                    InternalEventBus::instance()
-                        .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
-                            "store_document_tasks",
-                            static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity()));
-                InternalEventBus::StoreDocumentTask task{req};
-                if (channel->try_push(std::move(task))) {
+                const auto channelCapacity =
+                    static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());
+                if (co_await tryEnqueueStoreDocumentTaskWithBackoff(req, channelCapacity)) {
                     AddDocumentResponse response;
                     response.path = req.path.empty() ? req.name : req.path;
                     response.documentsAdded = 0;
@@ -500,13 +566,9 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
 
             // For directories or if daemon not ready, use async queue
             if (isDir || req.recursive || !daemonReady) {
-                auto channel =
-                    InternalEventBus::instance()
-                        .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
-                            "store_document_tasks",
-                            static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity()));
-                InternalEventBus::StoreDocumentTask task{req};
-                if (channel->try_push(std::move(task))) {
+                const auto channelCapacity =
+                    static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());
+                if (co_await tryEnqueueStoreDocumentTaskWithBackoff(req, channelCapacity)) {
                     AddDocumentResponse response;
                     response.path = req.path.empty() ? req.name : req.path;
                     response.documentsAdded = 0;
@@ -556,13 +618,9 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
             }
 
             if (!syncSingleFileAdd) {
-                auto channel =
-                    InternalEventBus::instance()
-                        .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
-                            "store_document_tasks",
-                            static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity()));
-                InternalEventBus::StoreDocumentTask task{req};
-                if (channel->try_push(std::move(task))) {
+                const auto channelCapacity =
+                    static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());
+                if (co_await tryEnqueueStoreDocumentTaskWithBackoff(req, channelCapacity)) {
                     AddDocumentResponse response;
                     response.path = req.path.empty() ? req.name : req.path;
                     response.documentsAdded = 0;

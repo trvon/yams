@@ -267,6 +267,53 @@ TEST_CASE("Model eviction threshold override precedence", "[daemon][tune][adviso
     }
 }
 
+TEST_CASE("Governor warning scale percent tuning", "[daemon][tune][advisor][catch2]") {
+    TuneAdvisor::resetGovernorWarningScalePercentOverride();
+
+    SECTION("Default value is 85 percent") {
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 85u);
+    }
+
+    SECTION("Valid env var overrides default") {
+        EnvGuard envGuard("YAMS_GOV_WARNING_SCALE_PCT", "92");
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 92u);
+    }
+
+    SECTION("Invalid env var falls back to default") {
+        EnvGuard envGuard("YAMS_GOV_WARNING_SCALE_PCT", "invalid");
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 85u);
+    }
+
+    SECTION("Out-of-range env var falls back to default") {
+        EnvGuard envGuard("YAMS_GOV_WARNING_SCALE_PCT", "9");
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 85u);
+    }
+
+    SECTION("Programmatic setter overrides env var") {
+        EnvGuard envGuard("YAMS_GOV_WARNING_SCALE_PCT", "90");
+        TuneAdvisor::setGovernorWarningScalePercent(77u);
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 77u);
+    }
+
+    SECTION("Setter clamps values into allowed range") {
+        TuneAdvisor::setGovernorWarningScalePercent(5u);
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 10u);
+
+        TuneAdvisor::setGovernorWarningScalePercent(150u);
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 100u);
+    }
+
+    SECTION("Setter zero resets override") {
+        TuneAdvisor::setGovernorWarningScalePercent(72u);
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 72u);
+
+        TuneAdvisor::setGovernorWarningScalePercent(0u);
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 85u);
+    }
+
+    TuneAdvisor::resetGovernorWarningScalePercentOverride();
+}
+
 TEST_CASE("Connection lifetime seconds env var", "[daemon][tune][advisor][catch2]") {
     TuneAdvisor::resetConnectionLifetimeSecondsOverride();
 

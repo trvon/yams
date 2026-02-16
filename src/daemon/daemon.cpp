@@ -810,6 +810,15 @@ Result<void> YamsDaemon::stop() {
         ioCoordinator_.reset();
     }
 
+    // Release metrics before ServiceManager teardown.
+    // DaemonMetrics owns asio strand/executor state bound to WorkCoordinator's io_context.
+    // If metrics is destroyed after ServiceManager::shutdown() tears down WorkCoordinator,
+    // strand service destruction can read freed io_context memory (ASAN UAF).
+    {
+        std::lock_guard<std::mutex> lk(metricsMutex_);
+        metrics_.reset();
+    }
+
     // Stop ServiceManager (this will stop WorkCoordinator's io_context in Phase 4)
     if (serviceManager_) {
         spdlog::debug("Shutting down service manager...");
@@ -841,12 +850,6 @@ Result<void> YamsDaemon::stop() {
 
     // Mark lifecycle stopped
     lifecycleFsm_.dispatch(StoppedEvent{});
-
-    // Now that the daemon is fully stopped (no more request handling), release metrics.
-    {
-        std::lock_guard<std::mutex> lk(metricsMutex_);
-        metrics_.reset();
-    }
 
     spdlog::info("YAMS daemon stopped.");
     return Result<void>();

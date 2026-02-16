@@ -920,6 +920,22 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 3.7: No embedding service to quiesce");
     }
 
+    // Phase 3.8: Stop ingest service before WorkCoordinator shutdown.
+    // Ingest processing dispatches work onto WorkCoordinator executors and waits on futures;
+    // stopping the coordinator first can destroy pending promises and leave workers wedged.
+    spdlog::info("[ServiceManager] Phase 3.8: Quiescing ingest service");
+    if (ingestService_) {
+        try {
+            ingestService_->stop();
+            ingestService_.reset();
+            spdlog::info("[ServiceManager] Phase 3.8: Ingest service quiesced");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.8: IngestService quiesce failed: {}", e.what());
+        }
+    } else {
+        spdlog::info("[ServiceManager] Phase 3.8: No ingest service to quiesce");
+    }
+
     // Phase 4: Cancel all asynchronous operations and stop WorkCoordinator io_context
     spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
     shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
@@ -963,18 +979,7 @@ void ServiceManager::shutdown() {
         }
     }
 
-    spdlog::info("[ServiceManager] Phase 6.1: Stopping ingest service");
-    if (ingestService_) {
-        try {
-            ingestService_->stop();
-            ingestService_.reset();
-            spdlog::info("[ServiceManager] Phase 6.1: Ingest service stopped");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 6.1: IngestService shutdown failed: {}", e.what());
-        }
-    } else {
-        spdlog::info("[ServiceManager] Phase 6.1: No ingest service to stop");
-    }
+    spdlog::info("[ServiceManager] Phase 6.1: Ingest service already quiesced");
 
     spdlog::info("[ServiceManager] Phase 6.2: Shutting down graph component");
     if (graphComponent_) {
@@ -1108,6 +1113,11 @@ void ServiceManager::shutdown() {
     spdlog::info("[ServiceManager] Phase 8.3: Vector search uses VectorDatabase directly");
     contentStore_.reset();
     spdlog::info("[ServiceManager] Phase 8.4: Content store reset");
+
+    spdlog::info("[ServiceManager] Phase 8.4.5: Releasing async strands");
+    initStrand_.reset();
+    pluginStrand_.reset();
+    modelStrand_.reset();
 
     spdlog::info("[ServiceManager] Phase 8.5: Releasing WorkCoordinator");
     workCoordinator_.reset(); // WorkCoordinator destructor will join threads

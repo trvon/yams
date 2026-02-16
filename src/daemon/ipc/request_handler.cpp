@@ -949,8 +949,16 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             }
         } job_guard{std::move(job_cleanup)};
 
-        // Use the configured processor (server may decorate with streaming support)
+        // Use a request-scoped processor instance for streaming paths.
+        // The shared handler-level StreamingRequestProcessor stores mutable per-request state
+        // (pending_request_, mode_, chunk cursors). Under multiplexed concurrent requests,
+        // sharing that instance can corrupt state across requests. Build a fresh wrapper
+        // per request when dispatcher_ is available so streaming state is isolated.
         std::shared_ptr<RequestProcessor> proc = processor_;
+        if (dispatcher_) {
+            auto adapter = std::make_shared<DispatcherAdapter>(dispatcher_);
+            proc = std::make_shared<StreamingRequestProcessor>(adapter, config_);
+        }
         spdlog::debug("handle_streaming_request: processor type={} for request_id={}",
                       proc ? typeid(RequestProcessor).name() : "null", request_id);
 

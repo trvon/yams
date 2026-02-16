@@ -314,6 +314,23 @@ void PostIngestQueue::stop() {
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, false);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, false);
     spdlog::info("[PostIngestQueue] Stop requested");
+
+    auto allPollersStopped = [this]() {
+        for (std::size_t s = 0; s < kStageCount; ++s) {
+            if (stageStarted_[s].load(std::memory_order_acquire)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (allPollersStopped() && totalInFlight() == 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
 }
 
 // ============================================================================

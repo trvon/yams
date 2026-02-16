@@ -25,6 +25,7 @@ private:
     WorkCoordinator* coordinator_;
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     std::atomic<bool> stop_{false};
+    std::atomic<bool> running_{false};
 };
 
 } // namespace yams::daemon

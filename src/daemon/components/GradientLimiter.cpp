@@ -182,10 +182,23 @@ GradientLimiter::Metrics GradientLimiter::metrics() const {
 }
 
 void GradientLimiter::applyPressure(uint8_t level) {
-    pressureLevel_.store(level, std::memory_order_relaxed);
+    const uint8_t prevLevel = pressureLevel_.exchange(level, std::memory_order_relaxed);
 
     switch (level) {
         case 0:
+            if (prevLevel > 0) {
+                // Pressure released: clear stale RTT history and restore a reasonable
+                // throughput floor so recovery does not require many samples.
+                minRtt_.store(0.0, std::memory_order_relaxed);
+                smoothedRtt_.store(0.0, std::memory_order_relaxed);
+                longRtt_.store(0.0, std::memory_order_relaxed);
+                gradient_.store(1.0, std::memory_order_relaxed);
+
+                double current = limit_.load(std::memory_order_relaxed);
+                double recovered = std::max(current, config_.initialLimit);
+                recovered = std::clamp(recovered, config_.minLimit, config_.maxLimit);
+                limit_.store(recovered, std::memory_order_relaxed);
+            }
             return;
         case 1: {
             double cap = config_.maxLimit * 0.75;

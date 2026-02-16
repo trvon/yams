@@ -234,6 +234,19 @@ public:
 #ifdef YAMS_TESTING
     /// Test hook: expose updateScalingCaps for deterministic unit testing
     void testing_updateScalingCaps(ResourcePressureLevel level) { updateScalingCaps(level); }
+
+    /// Test hook: set current/proposed pressure state for computeLevel tests
+    void testing_setPressureState(ResourcePressureLevel level,
+                                  std::chrono::steady_clock::time_point proposedSince) {
+        currentLevel_.store(level, std::memory_order_relaxed);
+        proposedLevel_ = level;
+        proposedLevelSince_ = proposedSince;
+    }
+
+    /// Test hook: expose computeLevel for deterministic unit testing
+    [[nodiscard]] ResourcePressureLevel testing_computeLevel(const ResourceSnapshot& snap) {
+        return computeLevel(snap);
+    }
 #endif
 
 private:

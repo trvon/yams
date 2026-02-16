@@ -2019,12 +2019,45 @@ public:
     // Ingest channel capacity (store_document_tasks). Clamp to post-ingest queue max to avoid
     // unbounded buffering of document payloads under governor backpressure.
     static uint32_t storeDocumentChannelCapacity() {
+        uint32_t ov = storeDocumentChannelCapacityOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+
         uint32_t base = 4096;
+        if (const char* s = std::getenv("YAMS_STORE_DOCUMENT_CHANNEL_CAPACITY")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 64 && v <= 1'000'000)
+                    base = v;
+            } catch (...) {
+            }
+        }
+
+        bool correctnessMode = true;
+        if (const char* s = std::getenv("YAMS_INGEST_CORRECTNESS_MODE")) {
+            std::string v(s);
+            std::transform(v.begin(), v.end(), v.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            correctnessMode = !(v == "0" || v == "false" || v == "no" || v == "off");
+        }
+
         uint32_t cap = postIngestQueueMax();
         if (cap == 0)
             cap = base;
+
+        if (correctnessMode) {
+            // Favor correctness under bursty producers by allowing a deeper ingest queue.
+            // Still bounded to avoid unbounded memory growth.
+            uint32_t target = std::max<uint32_t>(base, 4096u);
+            return std::clamp(target, 64u, 65536u);
+        }
+
         uint32_t bounded = std::min<uint32_t>(base, cap);
         return std::max<uint32_t>(64u, bounded);
+    }
+    static void setStoreDocumentChannelCapacity(uint32_t v) {
+        storeDocumentChannelCapacityOverride_.store(std::clamp(v, 64u, 1'000'000u),
+                                                    std::memory_order_relaxed);
     }
 
     // =========================================================================
@@ -2493,6 +2526,7 @@ private:
     static inline std::atomic<uint32_t> postIngestQueueMaxOverride_{0};
     static inline std::atomic<uint32_t> postIngestBatchSizeOverride_{0};
     static inline std::atomic<uint32_t> postIngestRpcQueueMaxOverride_{0};
+    static inline std::atomic<uint32_t> storeDocumentChannelCapacityOverride_{0};
     static inline std::atomic<uint32_t> postIngestRpcMaxPerBatchOverride_{0};
     static inline std::atomic<uint32_t> ioConnPerThreadOverride_{0};
     static inline std::atomic<uint32_t> connectionSlotsMinOverride_{0};
@@ -2625,6 +2659,35 @@ public:
     }
     static void setEnableAdmissionControl(bool en) {
         enableAdmissionControlOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
+    }
+
+    /// Percent of normal concurrency retained at Warning pressure (10-100).
+    /// Used by ResourceGovernor to apply a gradual slowdown instead of abrupt halving.
+    /// Environment: YAMS_GOV_WARNING_SCALE_PCT
+    static uint32_t governorWarningScalePercent() {
+        uint32_t ov = governorWarningScalePctOverride_.load(std::memory_order_relaxed);
+        if (ov >= 10 && ov <= 100)
+            return ov;
+        if (const char* s = std::getenv("YAMS_GOV_WARNING_SCALE_PCT")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 10 && v <= 100)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 85;
+    }
+    static void setGovernorWarningScalePercent(uint32_t pct) {
+        if (pct == 0) {
+            governorWarningScalePctOverride_.store(0, std::memory_order_relaxed);
+            return;
+        }
+        governorWarningScalePctOverride_.store(std::clamp<uint32_t>(pct, 10u, 100u),
+                                               std::memory_order_relaxed);
+    }
+    static void resetGovernorWarningScalePercentOverride() {
+        governorWarningScalePctOverride_.store(0, std::memory_order_relaxed);
     }
 
     /// Memory budget in bytes. 0 = auto-detect based on profile:
@@ -3287,6 +3350,7 @@ private:
     static inline std::atomic<uint32_t> memoryHysteresisMsOverride_{0};
     static inline std::atomic<uint32_t> cpuLevelHysteresisMsOverride_{0};
     static inline std::atomic<uint32_t> modelEvictionCooldownMsOverride_{0};
+    static inline std::atomic<uint32_t> governorWarningScalePctOverride_{0};
 
     // Gradient limiter overrides
     static inline std::atomic<int> enableGradientLimitersOverride_{-1};

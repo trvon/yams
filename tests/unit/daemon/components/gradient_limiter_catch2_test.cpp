@@ -270,7 +270,7 @@ TEST_CASE("Reset restores initial state", "[daemon][gradient][catch2]") {
 // applyPressure (Governor bridge)
 // ============================================================================
 
-TEST_CASE("applyPressure Normal is a no-op", "[daemon][gradient][catch2]") {
+TEST_CASE("applyPressure Normal from Normal is a no-op", "[daemon][gradient][catch2]") {
     GradientLimiter::Config cfg;
     cfg.initialLimit = 10.0;
     cfg.maxLimit = 20.0;
@@ -278,6 +278,21 @@ TEST_CASE("applyPressure Normal is a no-op", "[daemon][gradient][catch2]") {
 
     lim.applyPressure(0); // Normal
     REQUIRE(lim.effectiveLimit() == 10);
+}
+
+TEST_CASE("applyPressure Normal after pressure restores throughput floor",
+          "[daemon][gradient][catch2]") {
+    GradientLimiter::Config cfg;
+    cfg.initialLimit = 10.0;
+    cfg.minLimit = 2.0;
+    cfg.maxLimit = 20.0;
+    GradientLimiter lim("test", cfg);
+
+    lim.applyPressure(2); // Critical -> minLimit
+    REQUIRE(lim.effectiveLimit() == 2);
+
+    lim.applyPressure(0); // Normal -> restore to at least initialLimit
+    REQUIRE(lim.effectiveLimit() >= 10);
 }
 
 TEST_CASE("applyPressure Warning clamps to 75% of maxLimit", "[daemon][gradient][catch2]") {

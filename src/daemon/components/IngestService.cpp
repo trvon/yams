@@ -2,6 +2,10 @@
 #include <algorithm>
 #include <future>
 #include <memory>
+#include <chrono>
+#include <cctype>
+#include <string>
+#include <thread>
 #include <unordered_map>
 #include <boost/asio/post.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -83,9 +87,23 @@ static std::size_t resolveIngestParallelism(WorkCoordinator* coordinator, bool u
         }
     }
 
-    parallelism = std::clamp<std::size_t>(parallelism, 1, 8);
+    bool correctnessMode = true;
+    if (const char* s = std::getenv("YAMS_INGEST_CORRECTNESS_MODE")) {
+        std::string value(s);
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        correctnessMode = !(value == "0" || value == "false" || value == "no" || value == "off");
+    }
+
+    const std::size_t maxParallel = correctnessMode ? 16 : 8;
+    parallelism = std::clamp<std::size_t>(parallelism, 1, maxParallel);
     if (underPressure) {
-        parallelism = std::max<std::size_t>(1, parallelism / 2);
+        if (correctnessMode) {
+            parallelism =
+                std::min<std::size_t>(maxParallel, std::max<std::size_t>(2, parallelism * 2));
+        } else {
+            parallelism = std::max<std::size_t>(1, parallelism / 2);
+        }
     }
     return parallelism;
 }
@@ -120,9 +138,27 @@ void IngestService::start() {
 void IngestService::stop() {
     stop_.store(true);
     spdlog::info("[IngestService] Stop requested");
+
+    constexpr auto kWaitStep = std::chrono::milliseconds(1);
+    constexpr auto kWaitBudget = std::chrono::milliseconds(2000);
+    auto waited = std::chrono::milliseconds(0);
+    while (running_.load(std::memory_order_acquire) && waited < kWaitBudget) {
+        std::this_thread::sleep_for(kWaitStep);
+        waited += kWaitStep;
+    }
+
+    if (running_.load(std::memory_order_acquire)) {
+        spdlog::warn("[IngestService] Stop timed out waiting for channel poller to exit");
+    }
 }
 
 boost::asio::awaitable<void> IngestService::channelPoller() {
+    running_.store(true, std::memory_order_release);
+    struct RunningGuard {
+        std::atomic<bool>& running;
+        ~RunningGuard() { running.store(false, std::memory_order_release); }
+    } runningGuard{running_};
+
     const std::size_t channelCapacity =
         static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());
     auto channel =
@@ -132,6 +168,14 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
     auto idleDelay = std::chrono::milliseconds(5);
+    bool correctnessMode = true;
+    if (const char* s = std::getenv("YAMS_INGEST_CORRECTNESS_MODE")) {
+        std::string value(s);
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        correctnessMode = !(value == "0" || value == "false" || value == "no" || value == "off");
+    }
+
     auto maxIdleDelay = []() {
         auto snap = TuningSnapshotRegistry::instance().get();
         uint32_t pollMs = snap ? snap->workerPollMs : TuneAdvisor::workerPollMs();
@@ -157,7 +201,15 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
         if (!ResourceGovernor::instance().canAdmitWork()) {
             // Avoid full ingestion deadlock under pressure: keep draining slowly.
             underPressure = true;
-            batchLimit = std::max(4, tunedBatch / 4);
+            batchLimit =
+                correctnessMode ? std::max(32, tunedBatch * 2) : std::max(4, tunedBatch / 4);
+        }
+
+        const std::size_t queueDepth = channel->size_approx();
+        const std::size_t queueCap = std::max<std::size_t>(1, channel->capacity());
+        const bool backlogHigh = (queueDepth * 100u / queueCap) >= 70u;
+        if (correctnessMode && backlogHigh) {
+            batchLimit = std::min(512, std::max(batchLimit, tunedBatch * 4));
         }
 
         InternalEventBus::StoreDocumentTask task;
@@ -214,6 +266,9 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
                 }
             }
         } else if (underPressure) {
+            if (correctnessMode && backlogHigh) {
+                continue;
+            }
             timer.expires_after(std::chrono::milliseconds(25));
             co_await timer.async_wait(boost::asio::use_awaitable);
         }

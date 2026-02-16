@@ -325,6 +325,56 @@ std::string isoTimestamp() {
     return oss.str();
 }
 
+std::string toLowerCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return value;
+}
+
+bool containsInsensitive(const std::string& haystackLower, std::string_view needle) {
+    return haystackLower.find(std::string(needle)) != std::string::npos;
+}
+
+std::string classifyFailureMessage(const std::string& errorMsg) {
+    if (errorMsg.empty()) {
+        return "unknown";
+    }
+
+    const std::string lower = toLowerCopy(errorMsg);
+
+    if (containsInsensitive(lower, "timed out") || containsInsensitive(lower, "timeout")) {
+        return "timeout";
+    }
+    if (containsInsensitive(lower, "retry after") || containsInsensitive(lower, "backpressure")) {
+        return "backpressure";
+    }
+    if (containsInsensitive(lower, "connection refused") ||
+        containsInsensitive(lower, "no such file or directory")) {
+        return "connect_refused";
+    }
+    if (containsInsensitive(lower, "broken pipe") || containsInsensitive(lower, "eof") ||
+        containsInsensitive(lower, "connection reset")) {
+        return "connection_drop";
+    }
+    if (containsInsensitive(lower, "cancel")) {
+        return "cancelled";
+    }
+    if (containsInsensitive(lower, "database is locked") ||
+        containsInsensitive(lower, "sql_busy")) {
+        return "db_locked";
+    }
+    if (containsInsensitive(lower, "queue") &&
+        (containsInsensitive(lower, "full") || containsInsensitive(lower, "overflow"))) {
+        return "queue_full";
+    }
+    if (containsInsensitive(lower, "parse") || containsInsensitive(lower, "protocol") ||
+        containsInsensitive(lower, "invalid response")) {
+        return "protocol";
+    }
+
+    return "other";
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Wait for queue drain
 // ─────────────────────────────────────────────────────────────────────────────
@@ -586,6 +636,21 @@ TEST_CASE("Multi-client ingestion: concurrent pure ingest",
     }
     auto aggStats = PercentileStats::compute(allAddLatencies);
 
+    std::map<std::string, int> failureBreakdown;
+    std::map<std::string, std::string> failureSamples;
+    for (const auto& cr : clientResults) {
+        for (const auto& op : cr.latencies) {
+            if (op.opType != "add" || op.success) {
+                continue;
+            }
+            const auto bucket = classifyFailureMessage(op.errorMsg);
+            failureBreakdown[bucket] += 1;
+            if (!op.errorMsg.empty() && !failureSamples.contains(bucket)) {
+                failureSamples[bucket] = op.errorMsg;
+            }
+        }
+    }
+
     // Print summary
     std::cout << "\n=== Concurrent Pure Ingest (N=" << cfg.numClients << ") ===\n";
     std::cout << "  Total docs: " << totalDocsIngested.load() << "/"
@@ -594,6 +659,18 @@ TEST_CASE("Multi-client ingestion: concurrent pure ingest",
     std::cout << "  Wall time: " << std::fixed << std::setprecision(2) << globalElapsed << "s\n";
     std::cout << "  Aggregate throughput: " << aggregateThroughput << " docs/s\n";
     printPercentiles("Add latency (all)", aggStats);
+
+    if (!failureBreakdown.empty()) {
+        std::cout << "\n  Failure breakdown (add requests):\n";
+        for (const auto& [bucket, count] : failureBreakdown) {
+            std::cout << "    " << bucket << ": " << count;
+            auto sampleIt = failureSamples.find(bucket);
+            if (sampleIt != failureSamples.end()) {
+                std::cout << " (sample: " << sampleIt->second << ")";
+            }
+            std::cout << "\n";
+        }
+    }
 
     std::cout << "\n  Per-client breakdown:\n";
     for (auto& cr : clientResults) {
@@ -648,6 +725,16 @@ TEST_CASE("Multi-client ingestion: concurrent pure ingest",
         timeSeries.push_back(json{{"elapsed_ms", s.elapsedMs}, {"snapshot", s.snap.toJson()}});
     }
 
+    json failureBreakdownJson = json::object();
+    for (const auto& [bucket, count] : failureBreakdown) {
+        failureBreakdownJson[bucket] = count;
+    }
+
+    json failureSamplesJson = json::object();
+    for (const auto& [bucket, sample] : failureSamples) {
+        failureSamplesJson[bucket] = sample;
+    }
+
     json record{
         {"timestamp", isoTimestamp()},
         {"test", "concurrent_pure_ingest"},
@@ -659,6 +746,8 @@ TEST_CASE("Multi-client ingestion: concurrent pure ingest",
         {"elapsed_seconds", globalElapsed},
         {"aggregate_throughput_docs_per_sec", aggregateThroughput},
         {"add_latency", aggStats.toJson()},
+        {"failure_breakdown", failureBreakdownJson},
+        {"failure_samples", failureSamplesJson},
         {"per_client", perClient},
         {"daemon_snapshot_final", finalSnap.toJson()},
         {"time_series", timeSeries},

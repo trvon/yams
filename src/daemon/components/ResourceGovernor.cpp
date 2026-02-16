@@ -477,6 +477,7 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
     // Apply hysteresis: require time at a level before transitioning
     // (decoupled from tick interval for consistent behavior at any tick rate)
     const auto hysteresisMs = std::chrono::milliseconds(TuneAdvisor::memoryHysteresisMs());
+    const auto cpuHysteresisMs = std::chrono::milliseconds(TuneAdvisor::cpuLevelHysteresisMs());
     // Fix Issue 5 (timing audit): use snap.timestamp instead of calling now() again
     // to avoid drift between the snapshot time and the hysteresis comparison.
     auto now = snap.timestamp;
@@ -497,8 +498,13 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
         }
         return currentLvl; // Hold at current level
     } else if (rawLevel < currentLvl) {
-        // De-escalating - require 2× hysteresisMs for stability
-        if (elapsed >= hysteresisMs * 2) {
+        // De-escalating:
+        // - Memory-driven pressure keeps conservative 2x hysteresis for stability.
+        // - CPU-driven pressure uses a shorter CPU-specific hysteresis to avoid
+        //   excessive recovery lag and backlog oscillation.
+        const bool memoryPressurePresent = snap.memoryPressure >= warningThresh;
+        const auto deescalationHold = memoryPressurePresent ? (hysteresisMs * 2) : cpuHysteresisMs;
+        if (elapsed >= deescalationHold) {
             return rawLevel;
         }
         return currentLvl; // Hold at current level
@@ -513,6 +519,15 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
 
 void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
     std::unique_lock lock(mutex_);
+
+    auto slowDown = [](std::uint32_t current, std::uint32_t percent) -> std::uint32_t {
+        if (current == 0) {
+            return 0;
+        }
+        const std::uint32_t scaled = static_cast<std::uint32_t>(
+            (static_cast<std::uint64_t>(current) * percent + 99u) / 100u);
+        return std::min(current, std::max(1u, scaled));
+    };
 
     // Get TuneAdvisor defaults
     const auto defaultIngest = TuneAdvisor::maxIngestWorkers();
@@ -541,23 +556,25 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
             };
             break;
 
-        case ResourcePressureLevel::Warning:
-            // Cap at 50% of normal, block model loads.
-            // Use min(default, ...) to ensure Warning never exceeds Normal allocation.
-            // Without min(): max(2, 1/2) = 2 > 1 when defaults are small (2-core system).
+        case ResourcePressureLevel::Warning: {
+            // Gentle reduction under Warning to avoid abrupt throughput cliffs.
+            // Keep model-load blocking, but retain most pipeline concurrency so
+            // gradient limiters can adapt smoothly.
+            const std::uint32_t warningScale = TuneAdvisor::governorWarningScalePercent();
             scalingCaps_ = ScalingCaps{
-                .ingestWorkers = std::min(defaultIngest, std::max(1u, defaultIngest / 2)),
-                .searchConcurrency = std::min(defaultSearch, std::max(1u, defaultSearch / 2)),
-                .extractionConcurrency = std::min(defaultExtract, std::max(1u, defaultExtract / 2)),
-                .kgConcurrency = std::min(defaultKg, std::max(1u, defaultKg / 2)),
-                .symbolConcurrency = std::min(defaultSymbol, std::max(1u, defaultSymbol / 2)),
-                .entityConcurrency = std::min(defaultEntity, std::max(1u, defaultEntity / 2)),
-                .titleConcurrency = std::min(defaultTitle, std::max(1u, defaultTitle / 2)),
-                .embedConcurrency = std::min(defaultEmbed, std::max(1u, defaultEmbed / 2)),
+                .ingestWorkers = slowDown(defaultIngest, warningScale),
+                .searchConcurrency = slowDown(defaultSearch, warningScale),
+                .extractionConcurrency = slowDown(defaultExtract, warningScale),
+                .kgConcurrency = slowDown(defaultKg, warningScale),
+                .symbolConcurrency = slowDown(defaultSymbol, warningScale),
+                .entityConcurrency = slowDown(defaultEntity, warningScale),
+                .titleConcurrency = slowDown(defaultTitle, warningScale),
+                .embedConcurrency = slowDown(defaultEmbed, warningScale),
                 .allowModelLoads = false,
                 .allowNewIngest = true,
             };
             break;
+        }
 
         case ResourcePressureLevel::Critical:
             // Minimum concurrency, aggressive reduction.

@@ -225,12 +225,9 @@ uint32_t TuningManager::testing_computeEmbedScaleBias(std::size_t embedQueued,
     return computeEmbedScaleBias(embedQueued, embedDroppedDelta, postQueued, embedInFlight);
 }
 
-int32_t TuningManager::computeContentionBudgetAdjustment(std::size_t waitingRequests,
-                                                         std::uint64_t waitMicrosDelta,
-                                                         std::size_t timeoutDelta,
-                                                         std::size_t failedDelta,
-                                                         std::size_t processedDelta,
-                                                         std::uint32_t healthyTicks) {
+int32_t TuningManager::computeContentionBudgetAdjustment(
+    std::size_t waitingRequests, std::uint64_t waitMicrosDelta, std::size_t timeoutDelta,
+    std::size_t failedDelta, std::size_t processedDelta, std::uint32_t healthyTicks) {
     if (timeoutDelta > 0 || failedDelta > 0) {
         return -2;
     }
@@ -244,12 +241,9 @@ int32_t TuningManager::computeContentionBudgetAdjustment(std::size_t waitingRequ
     return 0;
 }
 
-int32_t TuningManager::testing_computeContentionBudgetAdjustment(std::size_t waitingRequests,
-                                                                 std::uint64_t waitMicrosDelta,
-                                                                 std::size_t timeoutDelta,
-                                                                 std::size_t failedDelta,
-                                                                 std::size_t processedDelta,
-                                                                 std::uint32_t healthyTicks) {
+int32_t TuningManager::testing_computeContentionBudgetAdjustment(
+    std::size_t waitingRequests, std::uint64_t waitMicrosDelta, std::size_t timeoutDelta,
+    std::size_t failedDelta, std::size_t processedDelta, std::uint32_t healthyTicks) {
     return computeContentionBudgetAdjustment(waitingRequests, waitMicrosDelta, timeoutDelta,
                                              failedDelta, processedDelta, healthyTicks);
 }
@@ -318,8 +312,8 @@ void TuningManager::tick_once() {
         // Only clamp ONNX slots under memory pressure.
         // OnnxConcurrencyRegistry is a global budget across multiple lanes; clamping it to
         // embedding concurrency during Normal pressure can underutilize other lanes.
-        const bool underPressure =
-            TuneAdvisor::enableResourceGovernor() && govSnap.level != ResourcePressureLevel::Normal;
+        const bool underPressure = TuneAdvisor::enableResourceGovernor() &&
+                                   govSnap.level >= ResourcePressureLevel::Critical;
         if (underPressure) {
             desiredMax = std::min<uint32_t>(desiredMax, governor.maxEmbedConcurrency());
         } else {
@@ -565,27 +559,26 @@ void TuningManager::tick_once() {
                 previousReadFailedAcquisitions_ = stats.failedAcquisitions;
             }
 
-            const bool healthyWindow = (waitingRequests == 0 && waitMicrosDelta <= 1000 &&
-                                        timeoutDelta == 0 && failedDelta == 0 &&
-                                        processedDelta >= 4);
+            const bool healthyWindow =
+                (waitingRequests == 0 && waitMicrosDelta <= 1000 && timeoutDelta == 0 &&
+                 failedDelta == 0 && processedDelta >= 4);
             if (healthyWindow) {
-                contentionHealthyTicks_ = std::min<std::uint32_t>(contentionHealthyTicks_ + 1,
-                                                                  1000u);
+                contentionHealthyTicks_ =
+                    std::min<std::uint32_t>(contentionHealthyTicks_ + 1, 1000u);
             } else {
                 contentionHealthyTicks_ = 0;
             }
 
-            const int32_t contentionAdjust =
-                computeContentionBudgetAdjustment(waitingRequests, waitMicrosDelta, timeoutDelta,
-                                                 failedDelta, processedDelta,
-                                                 contentionHealthyTicks_);
+            const int32_t contentionAdjust = computeContentionBudgetAdjustment(
+                waitingRequests, waitMicrosDelta, timeoutDelta, failedDelta, processedDelta,
+                contentionHealthyTicks_);
             if (contentionAdjust < 0) {
                 const uint32_t drop = static_cast<uint32_t>(-contentionAdjust);
                 totalBudget = (totalBudget > 2u) ? std::max<uint32_t>(2u, totalBudget - drop) : 2u;
                 contentionHealthyTicks_ = 0;
             } else if (contentionAdjust > 0) {
-                totalBudget =
-                    std::min<uint32_t>(hwCap, totalBudget + static_cast<uint32_t>(contentionAdjust));
+                totalBudget = std::min<uint32_t>(
+                    hwCap, totalBudget + static_cast<uint32_t>(contentionAdjust));
                 contentionHealthyTicks_ = 0;
             }
 
@@ -670,7 +663,7 @@ void TuningManager::tick_once() {
 
             const bool applyGovernorConcurrencyCaps =
                 TuneAdvisor::enableResourceGovernor() &&
-                govSnap.level != ResourcePressureLevel::Normal;
+                govSnap.level >= ResourcePressureLevel::Critical;
             if (applyGovernorConcurrencyCaps) {
                 extractionTarget = std::min(extractionTarget, governor.maxExtractionConcurrency());
                 kgTarget = std::min(kgTarget, governor.maxKgConcurrency());

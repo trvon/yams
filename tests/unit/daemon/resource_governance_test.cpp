@@ -238,6 +238,110 @@ TEST_CASE("ResourceGovernor scaling caps are queryable", "[daemon][governance][c
     (void)maxKg;
 }
 
+TEST_CASE("ResourceGovernor Warning caps honor configurable scale percent",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+    TuneAdvisor::resetGovernorWarningScalePercentOverride();
+
+    auto expectedScaled = [](uint32_t current, uint32_t percent) -> uint32_t {
+        if (current == 0) {
+            return 0;
+        }
+        uint32_t scaled =
+            static_cast<uint32_t>((static_cast<uint64_t>(current) * percent + 99u) / 100u);
+        return std::min(current, std::max(1u, scaled));
+    };
+
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    auto normal = governor.getScalingCaps();
+
+    TuneAdvisor::setGovernorWarningScalePercent(90u);
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Warning);
+    auto warning90 = governor.getScalingCaps();
+
+    CHECK(warning90.ingestWorkers == expectedScaled(normal.ingestWorkers, 90u));
+    CHECK(warning90.searchConcurrency == expectedScaled(normal.searchConcurrency, 90u));
+    CHECK(warning90.extractionConcurrency == expectedScaled(normal.extractionConcurrency, 90u));
+    CHECK(warning90.kgConcurrency == expectedScaled(normal.kgConcurrency, 90u));
+    CHECK(warning90.symbolConcurrency == expectedScaled(normal.symbolConcurrency, 90u));
+    CHECK(warning90.entityConcurrency == expectedScaled(normal.entityConcurrency, 90u));
+    CHECK(warning90.titleConcurrency == expectedScaled(normal.titleConcurrency, 90u));
+    CHECK(warning90.embedConcurrency == expectedScaled(normal.embedConcurrency, 90u));
+    CHECK_FALSE(warning90.allowModelLoads);
+    CHECK(warning90.allowNewIngest);
+
+    TuneAdvisor::setGovernorWarningScalePercent(70u);
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Warning);
+    auto warning70 = governor.getScalingCaps();
+    CHECK(warning70.ingestWorkers == expectedScaled(normal.ingestWorkers, 70u));
+    CHECK(warning70.searchConcurrency == expectedScaled(normal.searchConcurrency, 70u));
+
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    TuneAdvisor::resetGovernorWarningScalePercentOverride();
+}
+
+TEST_CASE("ResourceGovernor de-escalation hysteresis differentiates CPU and memory pressure",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    // Save and restore tunables touched by this test.
+    const double prevWarning = TuneAdvisor::memoryWarningThreshold();
+    const double prevCritical = TuneAdvisor::memoryCriticalThreshold();
+    const double prevEmergency = TuneAdvisor::memoryEmergencyThreshold();
+    const uint32_t prevMemHys = TuneAdvisor::memoryHysteresisMs();
+    const uint32_t prevCpuHys = TuneAdvisor::cpuLevelHysteresisMs();
+
+    TuneAdvisor::setMemoryWarningThreshold(0.70);
+    TuneAdvisor::setMemoryCriticalThreshold(0.90);
+    TuneAdvisor::setMemoryEmergencyThreshold(0.97);
+    TuneAdvisor::setMemoryHysteresisMs(500);
+    TuneAdvisor::setCpuLevelHysteresisMs(100);
+
+    const auto t0 = std::chrono::steady_clock::now();
+
+    SECTION("CPU-driven de-escalation uses cpu-level hysteresis") {
+        governor.testing_setPressureState(ResourcePressureLevel::Warning, t0);
+
+        ResourceSnapshot snap{};
+        snap.memoryPressure = 0.30; // no memory pressure
+        snap.cpuUsagePercent = 0.0;
+        snap.embedQueued = 0;
+
+        snap.timestamp = t0;
+        CHECK(governor.testing_computeLevel(snap) == ResourcePressureLevel::Warning);
+
+        snap.timestamp = t0 + std::chrono::milliseconds(150);
+        CHECK(governor.testing_computeLevel(snap) == ResourcePressureLevel::Normal);
+    }
+
+    SECTION("Memory-driven de-escalation keeps conservative 2x hysteresis") {
+        governor.testing_setPressureState(ResourcePressureLevel::Critical, t0);
+
+        ResourceSnapshot snap{};
+        snap.memoryPressure = 0.80; // warning-level memory pressure (below critical)
+        snap.cpuUsagePercent = 0.0;
+        snap.embedQueued = 0;
+
+        snap.timestamp = t0;
+        CHECK(governor.testing_computeLevel(snap) == ResourcePressureLevel::Critical);
+
+        snap.timestamp = t0 + std::chrono::milliseconds(600);
+        CHECK(governor.testing_computeLevel(snap) == ResourcePressureLevel::Critical);
+
+        snap.timestamp = t0 + std::chrono::milliseconds(1100);
+        CHECK(governor.testing_computeLevel(snap) == ResourcePressureLevel::Warning);
+    }
+
+    // Restore original values.
+    TuneAdvisor::setMemoryWarningThreshold(prevWarning);
+    TuneAdvisor::setMemoryCriticalThreshold(prevCritical);
+    TuneAdvisor::setMemoryEmergencyThreshold(prevEmergency);
+    TuneAdvisor::setMemoryHysteresisMs(prevMemHys);
+    TuneAdvisor::setCpuLevelHysteresisMs(prevCpuHys);
+    governor.testing_setPressureState(ResourcePressureLevel::Normal,
+                                      std::chrono::steady_clock::now());
+}
+
 TEST_CASE("ResourceGovernor snapshot contains valid metrics", "[daemon][governance][catch2]") {
     auto& governor = ResourceGovernor::instance();
 
