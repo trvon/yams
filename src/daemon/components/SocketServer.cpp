@@ -1140,8 +1140,11 @@ std::size_t SocketServer::close_sockets_on_executor(
         try {
             boost::asio::dispatch(exec, [sock, promise]() mutable {
                 boost::system::error_code ec;
-                sock->cancel(ec);
-                sock->close(ec);
+                if (sock->is_open()) {
+                    boost::system::error_code shutdown_ec;
+                    sock->shutdown(boost::asio::socket_base::shutdown_both, shutdown_ec);
+                    sock->cancel(ec);
+                }
                 promise->set_value();
             });
         } catch (const std::exception& e) {

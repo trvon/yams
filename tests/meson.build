@@ -1302,6 +1302,8 @@ if catch2_dep.found()
       'unit/search/query_parser_catch2_test.cpp',
       'unit/search/query_qualifiers_catch2_test.cpp',
       'unit/search/result_fusion_catch2_test.cpp',
+      'unit/search/result_ranker_catch2_test.cpp',
+      'unit/search/search_engine_config_catch2_test.cpp',
       'unit/search/search_smoke_catch2_test.cpp',
       'unit/search/query_literal_extractor_catch2_test.cpp',
       'unit/search/search_filters_catch2_test.cpp',
@@ -1340,9 +1342,8 @@ if catch2_dep.found()
   # Migrated from GTest as part of yams-3s4 / yams-pmf
   catch2_compression_submodule_exe = executable('catch2_compression_submodule',
     files(
-      'unit/compression/basic_error_handler_catch2_test.cpp',
-      # TODO(yams-3s4): Fix API mismatch - uses non-existent ValidationConfig fields
-      # 'unit/compression/basic_integrity_validator_catch2_test.cpp',
+      # basic_error_handler_catch2_test.cpp removed: fully covered by error_handler_catch2_test.cpp
+      # basic_integrity_validator_catch2_test.cpp removed: fully covered by integrity_validator_catch2_test.cpp
       'unit/compression/compression_comprehensive_catch2_test.cpp',
       'unit/compression/compression_monitor_catch2_test.cpp',
       'unit/compression/compression_policy_catch2_test.cpp',
@@ -1921,6 +1922,16 @@ if catch2_dep.found()
     install: false,
   )
 
+  # Archive content handler tests (formatToString, ProcessingStats, helper functions, canHandle)
+  archive_content_handler_exe = executable('archive_content_handler',
+    files('unit/content/archive_content_handler_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   html_extractor_robust_exe = executable('html_extractor_robust',
     files('unit/extraction/html_extractor_robust_test.cpp'),
     include_directories: incs,
@@ -2312,6 +2323,12 @@ if catch2_dep.found()
   # Content tests
   test('content_handlers', content_handlers_exe,
     suite: ['catch2', 'unit', 'content', 'handlers'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('archive_content_handler', archive_content_handler_exe,
+    suite: ['catch2', 'unit', 'content', 'archive'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
