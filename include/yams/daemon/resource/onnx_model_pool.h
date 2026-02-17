@@ -10,6 +10,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -68,6 +69,10 @@ public:
     size_t getEmbeddingDim() const { return info_.embeddingDim; }
     size_t getMaxSequenceLength() const { return info_.maxSequenceLength; }
     std::string getExecutionProvider() const;
+    size_t getLearnedBatchLimit() const;
+
+    Result<void> setThreading(int intraThreads, int interThreads);
+    std::pair<int, int> getThreading() const;
 
     // Statistics
     size_t getRequestCount() const { return info_.requestCount.load(); }
@@ -172,6 +177,9 @@ public:
     // This triggers lazy loading so subsequent real requests are faster
     Result<void> warmupModel(const std::string& modelName);
 
+    Result<void> setModelThreading(const std::string& modelName, int intraThreads, int interThreads,
+                                   bool applyNow = true);
+
     // Evict least recently used models
     void evictLRU(size_t numToEvict = 1);
 
@@ -245,6 +253,7 @@ private:
     std::unordered_set<std::string> loadingModels_; // Models currently being loaded
     std::unordered_map<std::string, ModelEntry> models_;
     std::unordered_map<std::string, ResolutionHints> modelHints_;
+    std::unordered_map<std::string, std::pair<int, int>> threadingOverrides_;
 
     // Statistics
     std::atomic<size_t> totalRequests_{0};

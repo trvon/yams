@@ -1348,11 +1348,30 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
         sqlite3_finalize(stmt);
     }
 
+    if (progress) {
+        RepairEvent ev;
+        ev.phase = "repairing";
+        ev.operation = "chunks";
+        ev.message = "Loaded " + std::to_string(referencedHashes.size()) +
+                     " referenced hashes, scanning filesystem...";
+        progress(ev);
+    }
+
     // Scan manifests for additional references
+    size_t manifestDirsScanned = 0;
     if (fs::exists(objectsPath)) {
         for (const auto& dirEntry : fs::directory_iterator(objectsPath)) {
             if (!fs::is_directory(dirEntry))
                 continue;
+            ++manifestDirsScanned;
+            if (progress && manifestDirsScanned % 64 == 0) {
+                RepairEvent ev;
+                ev.phase = "repairing";
+                ev.operation = "chunks";
+                ev.message =
+                    "Scanning manifests (" + std::to_string(manifestDirsScanned) + " dirs)...";
+                progress(ev);
+            }
             for (const auto& fileEntry : fs::directory_iterator(dirEntry.path())) {
                 if (!fs::is_regular_file(fileEntry))
                     continue;
@@ -1395,10 +1414,20 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
     // Find orphaned chunks
     std::vector<std::pair<std::string, fs::path>> orphanedChunks;
     uint64_t bytesToReclaim = 0;
+    size_t dirsScanned = 0;
     if (fs::exists(objectsPath)) {
         for (const auto& dirEntry : fs::directory_iterator(objectsPath)) {
             if (!fs::is_directory(dirEntry))
                 continue;
+            ++dirsScanned;
+            // Emit progress every 64 prefix dirs to keep the stream alive
+            if (progress && dirsScanned % 64 == 0) {
+                RepairEvent ev;
+                ev.phase = "repairing";
+                ev.operation = "chunks";
+                ev.message = "Scanning directory " + std::to_string(dirsScanned) + "...";
+                progress(ev);
+            }
             std::string dirName = dirEntry.path().filename().string();
             for (const auto& fileEntry : fs::directory_iterator(dirEntry.path())) {
                 if (!fs::is_regular_file(fileEntry))
@@ -1582,8 +1611,13 @@ RepairOperationResult RepairService::rebuildFts5Index(bool dryRun, bool verbose,
                 }
                 content.extractionMethod = "repair";
                 auto contentResult = meta->insertContent(content);
-                auto ir =
-                    meta->indexDocumentContent(d.id, d.fileName, *extractedOpt, effectiveMime);
+
+                // Cap text for FTS5 indexing too — SQLite cannot bind strings > ~2 GB
+                // and very large documents cause "string or blob too big" errors.
+                const auto& textForIndex = (extractedOpt->size() > kMaxTextToPersistInMetadataBytes)
+                                               ? content.contentText
+                                               : *extractedOpt;
+                auto ir = meta->indexDocumentContent(d.id, d.fileName, textForIndex, effectiveMime);
 
                 if (ir && contentResult) {
                     (void)meta->updateDocumentExtractionStatus(d.id, true,

@@ -297,6 +297,9 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
             coremlUnifiedCap, embedProfile.empty() ? "default" : embedProfile);
     }
 
+    std::size_t coremlDynamicCap = coremlUnifiedCap;
+    uint64_t lastWarnCountObserved = 0;
+
     std::size_t lastEffectiveConcurrent = 0;
     while (!stop_.load()) {
         bool didWork = false;
@@ -342,7 +345,31 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
         } catch (...) {
         }
         if (coremlUnified) {
-            effectiveMaxConcurrent = std::min(effectiveMaxConcurrent, coremlUnifiedCap);
+            const auto lastInferMs = inferSubBatchLastDurationMs_.load(std::memory_order_relaxed);
+            const auto oldestInferMs = inferOldestActiveMs();
+            const auto warnCount = inferSubBatchWarnCount_.load(std::memory_order_relaxed);
+
+            // Downshift aggressively on signs of pressure/stalls.
+            if (warnCount > lastWarnCountObserved || oldestInferMs > 20000 || lastInferMs > 12000) {
+                coremlDynamicCap = 1;
+            } else {
+                // Gradually recover toward configured cap when latency is healthy and backlog
+                // exists.
+                const std::size_t rampThreshold =
+                    std::max<std::size_t>(maxJobDocCap * coremlUnifiedCap, 64u);
+                if (bufferedBacklog > rampThreshold && lastInferMs > 0 && lastInferMs < 6000 &&
+                    oldestInferMs < 8000 && coremlDynamicCap < coremlUnifiedCap) {
+                    coremlDynamicCap++;
+                }
+
+                // Reduce cap when work is nearly drained to minimize unified-memory pressure.
+                if (bufferedBacklog < maxJobDocCap && coremlDynamicCap > 1) {
+                    coremlDynamicCap--;
+                }
+            }
+
+            lastWarnCountObserved = warnCount;
+            effectiveMaxConcurrent = std::min(effectiveMaxConcurrent, coremlDynamicCap);
         }
         const std::size_t maxPendingJobs =
             std::max<std::size_t>(maxJobDocCap, effectiveMaxConcurrent * 2);

@@ -1635,6 +1635,67 @@ private:
                 spinner->stop();
             }
             if (!sres) {
+                // IPC failed — the daemon is likely still initializing (VectorDB, model
+                // loading, etc.) and can't serve requests yet. Fall back to the bootstrap
+                // status file that the daemon writes throughout initialization so the
+                // user sees useful progress instead of an opaque error.
+                try {
+                    auto rt = daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
+                    std::ifstream bf(rt);
+                    if (bf) {
+                        json j;
+                        bf >> j;
+                        std::string overall = j.value("overall", std::string{"initializing"});
+                        // Capitalize first letter for display
+                        if (!overall.empty())
+                            overall[0] = static_cast<char>(
+                                std::toupper(static_cast<unsigned char>(overall[0])));
+
+                        std::cout << "YAMS daemon is " << overall << " (IPC not yet responsive)\n";
+
+                        if (j.contains("readiness")) {
+                            std::vector<std::string> waiting;
+                            for (auto it = j["readiness"].begin(); it != j["readiness"].end();
+                                 ++it) {
+                                if (!it.value().get<bool>()) {
+                                    std::ostringstream w;
+                                    w << it.key();
+                                    if (j.contains("progress") &&
+                                        j["progress"].contains(it.key())) {
+                                        try {
+                                            w << " (" << j["progress"][it.key()].get<int>() << "%)";
+                                        } catch (...) {
+                                        }
+                                    }
+                                    waiting.push_back(w.str());
+                                }
+                            }
+                            if (!waiting.empty()) {
+                                std::cout << "  Waiting on: ";
+                                for (size_t i = 0; i < waiting.size() && i < 4; ++i) {
+                                    if (i)
+                                        std::cout << ", ";
+                                    std::cout << waiting[i];
+                                }
+                                if (waiting.size() > 4)
+                                    std::cout << ", …";
+                                std::cout << "\n";
+                            }
+                        }
+                        if (j.contains("uptime_seconds")) {
+                            try {
+                                auto elapsed = j["uptime_seconds"].get<long>();
+                                std::cout << "  Uptime: ~" << elapsed << "s\n";
+                            } catch (...) {
+                            }
+                        }
+                        std::cout << "  Hint: Run 'yams daemon status -d' once ready, "
+                                     "or tail the daemon log.\n";
+                        return;
+                    }
+                } catch (...) {
+                }
+                // No bootstrap file available either — fall back to the original message
                 std::cout << "YAMS daemon status unavailable (IPC error)\n";
                 return;
             }
@@ -2511,6 +2572,43 @@ private:
         }
         if (spinner) {
             spinner->stop();
+        }
+        // All retries exhausted — fall back to bootstrap status file before giving up
+        try {
+            auto rt = daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
+            std::ifstream bf(rt);
+            if (bf) {
+                json j;
+                bf >> j;
+                std::string overall = j.value("overall", std::string{"initializing"});
+                if (!overall.empty())
+                    overall[0] =
+                        static_cast<char>(std::toupper(static_cast<unsigned char>(overall[0])));
+                std::cout << "YAMS daemon is " << overall << " (IPC not yet responsive after " << 5
+                          << " attempts)\n";
+                if (j.contains("readiness")) {
+                    for (auto it = j["readiness"].begin(); it != j["readiness"].end(); ++it) {
+                        std::string state = it.value().get<bool>() ? "ready" : "waiting";
+                        std::string pct;
+                        if (j.contains("progress") && j["progress"].contains(it.key())) {
+                            try {
+                                pct = " (" + std::to_string(j["progress"][it.key()].get<int>()) +
+                                      "%)";
+                            } catch (...) {
+                            }
+                        }
+                        std::cout << "  " << it.key() << ": " << state << pct << "\n";
+                    }
+                }
+                if (j.contains("uptime_seconds")) {
+                    try {
+                        std::cout << "  Uptime: ~" << j["uptime_seconds"].get<long>() << "s\n";
+                    } catch (...) {
+                    }
+                }
+                return;
+            }
+        } catch (...) {
         }
         spdlog::error("Failed to get daemon status: {}", lastErr.message);
         std::exit(1);

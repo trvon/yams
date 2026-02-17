@@ -157,6 +157,8 @@ std::vector<std::string> GrammarLoader::getLibraryCandidates(std::string_view la
     lib_names.push_back(underscore_name + ".so");
 #endif
 
+    candidates.reserve(search_paths.size() * lib_names.size());
+
     // For each search path, add all library name variants
     for (const auto& base_path : search_paths) {
         if (!std::filesystem::exists(base_path))
@@ -186,9 +188,12 @@ GrammarLoader::loadGrammar(std::string_view language) {
     }
 
     // Try each candidate
-    std::vector<std::string> tried_paths;
+    std::string tried_join;
     for (const auto& candidate : candidates) {
-        tried_paths.push_back(candidate);
+        if (!tried_join.empty()) {
+            tried_join += ", ";
+        }
+        tried_join += candidate;
 
         std::fprintf(stderr, "[yams] trying grammar candidate: %s\n", candidate.c_str());
         void* handle = dlopen(candidate.c_str(), RTLD_LAZY | RTLD_LOCAL);
@@ -212,12 +217,6 @@ GrammarLoader::loadGrammar(std::string_view language) {
     }
 
     // All candidates failed
-    std::string tried_join;
-    for (size_t i = 0; i < tried_paths.size(); ++i) {
-        tried_join += tried_paths[i];
-        if (i + 1 < tried_paths.size())
-            tried_join += ", ";
-    }
     return tl::unexpected(GrammarLoadError{
         GrammarLoadError::LOAD_FAILED,
         fmt::format("Failed to load grammar for '{}'. Tried: {}", language, tried_join)});

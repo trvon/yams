@@ -1882,6 +1882,9 @@ if catch2_dep.found()
     dependency('yams_integrity'),
     dependency('yams_storage_engine'),
     dependency('yams_reference_counter'),
+    dependency('yams_metadata'),
+    dependency('yams_search'),
+    dependency('yams_daemon'),
   ]
 
   integrity_catch2_exe = executable('integrity_catch2',

@@ -82,59 +82,48 @@ void assert_has_kind(yams_symbol_extraction_result_v1* out, const char* kind,
 
 // Helper to load the plugin (refactored from test code)
 std::optional<PluginAPI> loadPlugin() {
-#ifndef PLUGIN_PATH
+    std::vector<const char*> libnames;
 #ifdef _WIN32
-    const char* libname = "yams_symbol_extractor.dll";
+    libnames = {"yams_symbol_extractor.dll"};
 #elif defined(__APPLE__)
-    const char* libname = "yams_symbol_extractor.dylib";
+    libnames = {"yams_symbol_extractor.dylib", "yams_symbol_extractor.so"};
 #else
-    const char* libname = "yams_symbol_extractor.so";
+    libnames = {"yams_symbol_extractor.so"};
 #endif
-    const char* buildroot_env = std::getenv("MESON_BUILD_ROOT");
-    std::vector<std::string> paths;
-    if (buildroot_env && *buildroot_env) {
-        std::string br(buildroot_env);
-        paths.push_back(br + "/plugins/symbol_extractor_treesitter/" + libname);
-        paths.push_back(br + "/tools/yams.d/plugins/symbol_extractor_treesitter/" + libname);
-    }
-    paths.push_back(std::string("plugins/symbol_extractor_treesitter/") + libname);
-    paths.push_back(std::string("tools/yams.d/plugins/symbol_extractor_treesitter/") + libname);
-    paths.push_back(std::string("../plugins/symbol_extractor_treesitter/") + libname);
-    paths.push_back(std::string("../tools/yams.d/plugins/symbol_extractor_treesitter/") + libname);
-    std::optional<PluginAPI> plug;
-    for (const auto& cand : paths) {
-        plug = load_extractor(cand.c_str());
-        if (plug.has_value())
-            break;
-    }
-    return plug;
-#else
-    std::optional<PluginAPI> plug = load_extractor(PLUGIN_PATH);
-    if (!plug.has_value()) {
-#ifdef _WIN32
-        const char* libname = "yams_symbol_extractor.dll";
-#elif defined(__APPLE__)
-        const char* libname = "yams_symbol_extractor.dylib";
-#else
-        const char* libname = "yams_symbol_extractor.so";
-#endif
+
+    auto try_fallback_paths = [&](std::optional<PluginAPI>& plug) {
         const char* buildroot_env = std::getenv("MESON_BUILD_ROOT");
         std::vector<std::string> paths;
-        if (buildroot_env && *buildroot_env) {
-            std::string br(buildroot_env);
-            paths.push_back(br + "/plugins/symbol_extractor_treesitter/" + libname);
-            paths.push_back(br + "/tools/yams.d/plugins/symbol_extractor_treesitter/" + libname);
+        for (const char* libname : libnames) {
+            if (buildroot_env && *buildroot_env) {
+                std::string br(buildroot_env);
+                paths.push_back(br + "/plugins/symbol_extractor_treesitter/" + libname);
+                paths.push_back(br + "/tools/yams.d/plugins/symbol_extractor_treesitter/" +
+                                libname);
+            }
+            paths.push_back(std::string("plugins/symbol_extractor_treesitter/") + libname);
+            paths.push_back(std::string("tools/yams.d/plugins/symbol_extractor_treesitter/") +
+                            libname);
+            paths.push_back(std::string("../plugins/symbol_extractor_treesitter/") + libname);
+            paths.push_back(std::string("../tools/yams.d/plugins/symbol_extractor_treesitter/") +
+                            libname);
         }
-        paths.push_back(std::string("plugins/symbol_extractor_treesitter/") + libname);
-        paths.push_back(std::string("tools/yams.d/plugins/symbol_extractor_treesitter/") + libname);
-        paths.push_back(std::string("../plugins/symbol_extractor_treesitter/") + libname);
-        paths.push_back(std::string("../tools/yams.d/plugins/symbol_extractor_treesitter/") +
-                        libname);
+
         for (const auto& cand : paths) {
             plug = load_extractor(cand.c_str());
             if (plug.has_value())
                 break;
         }
+    };
+
+#ifndef PLUGIN_PATH
+    std::optional<PluginAPI> plug;
+    try_fallback_paths(plug);
+    return plug;
+#else
+    std::optional<PluginAPI> plug = load_extractor(PLUGIN_PATH);
+    if (!plug.has_value()) {
+        try_fallback_paths(plug);
     }
     return plug;
 #endif

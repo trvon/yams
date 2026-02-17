@@ -171,25 +171,40 @@ public:
             if (json.contains("model") && json["model"].contains("vocab")) {
                 const auto& vocab = json["model"]["vocab"];
 
+                size_t max_added_token_id = 0;
+                if (json.contains("added_tokens") && json["added_tokens"].is_array()) {
+                    for (const auto& token : json["added_tokens"]) {
+                        if (token.contains("id") && token["id"].is_number()) {
+                            int id = token["id"].get<int>();
+                            if (id >= 0) {
+                                max_added_token_id =
+                                    std::max(max_added_token_id, static_cast<size_t>(id));
+                            }
+                        }
+                    }
+                }
+
                 if (vocab.is_array()) {
                     // Unigram/SentencePiece format: vocab is array of [token, score] pairs
                     // Index in array is the token ID
                     is_unigram_ = true;
-                    id_to_token_.reserve(vocab.size());
+                    size_t initial_size = std::max(vocab.size(), max_added_token_id + 1);
+                    id_to_token_.assign(initial_size, "");
                     for (size_t id = 0; id < vocab.size(); ++id) {
                         const auto& entry = vocab[id];
                         if (entry.is_array() && !entry.empty() && entry[0].is_string()) {
                             std::string token = entry[0].get<std::string>();
                             vocab_[token] = static_cast<int>(id);
-                            id_to_token_.push_back(token);
-                        } else {
-                            id_to_token_.push_back("");
+                            id_to_token_[id] = std::move(token);
                         }
                     }
                     spdlog::info("[Glint] Loaded Unigram tokenizer with {} tokens", vocab_.size());
                 } else if (vocab.is_object()) {
                     // WordPiece format: {"token": id}
                     is_unigram_ = false;
+                    if (max_added_token_id > 0) {
+                        id_to_token_.resize(max_added_token_id + 1);
+                    }
                     for (auto& [token, id_val] : vocab.items()) {
                         if (id_val.is_number()) {
                             int id = id_val.get<int>();

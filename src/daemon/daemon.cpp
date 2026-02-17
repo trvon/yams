@@ -357,6 +357,17 @@ Result<void> YamsDaemon::start() {
             }
             ioCoordinator_.reset();
         }
+        if (tuningManager_) {
+            try {
+                tuningManager_->stop();
+            } catch (...) {
+            }
+            tuningManager_.reset();
+        }
+        {
+            std::lock_guard<std::mutex> lk(metricsMutex_);
+            metrics_.reset();
+        }
         serviceManager_->shutdown();
         lifecycleManager_->shutdown();
         return Error{ErrorCode::IOError,
@@ -386,6 +397,17 @@ Result<void> YamsDaemon::start() {
             }
             ioCoordinator_.reset();
         }
+        if (tuningManager_) {
+            try {
+                tuningManager_->stop();
+            } catch (...) {
+            }
+            tuningManager_.reset();
+        }
+        {
+            std::lock_guard<std::mutex> lk(metricsMutex_);
+            metrics_.reset();
+        }
         serviceManager_->shutdown();
         lifecycleManager_->shutdown();
         return Error{ErrorCode::InternalError,
@@ -394,6 +416,9 @@ Result<void> YamsDaemon::start() {
     spdlog::info("[Startup] Phase: IOCoordinator Start OK");
 
     // Provide SocketServer to DaemonMetrics after start() so proxy socket path is available.
+    // Also start polling immediately so status requests get real snapshots during initialization,
+    // rather than deferring polling until ServiceManager reaches Ready (which can take minutes
+    // for large VectorDB).
     {
         std::shared_ptr<DaemonMetrics> m;
         {
@@ -402,6 +427,8 @@ Result<void> YamsDaemon::start() {
         }
         if (m) {
             m->setSocketServer(socketServer_.get());
+            m->startPolling();
+            spdlog::info("[Startup] DaemonMetrics background polling started (early)");
         }
     }
 
@@ -533,8 +560,8 @@ void YamsDaemon::runLoop() {
                         m = metrics_;
                     }
                     if (m) {
-                        m->startPolling();
-                        spdlog::info("[InitWaiter] DaemonMetrics background polling started");
+                        m->startPolling(); // no-op if already started during early startup
+                        spdlog::info("[InitWaiter] DaemonMetrics polling confirmed active");
                     }
                 } catch (const std::exception& e) {
                     spdlog::warn("[InitWaiter] Failed to start metrics polling: {}", e.what());

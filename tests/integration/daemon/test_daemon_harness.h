@@ -149,8 +149,8 @@ public:
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         spdlog::info("[DaemonHarness] runLoop thread started, polling for daemon Ready state...");
 
-        // Poll for daemon to reach Ready state in lifecycle FSM
-        // This ensures ServiceManager has completed initialization, not just socket availability
+        // Poll for daemon to reach a usable lifecycle state in lifecycle FSM.
+        // Ready or Degraded both indicate initialization completed enough for IPC tests.
         auto deadline = std::chrono::steady_clock::now() + timeout;
         bool lifecycleReady = false;
 
@@ -159,9 +159,11 @@ public:
 
             // Check lifecycle state first
             auto lifecycle = daemon_->getLifecycle().snapshot();
-            if (lifecycle.state == yams::daemon::LifecycleState::Ready) {
+            if (lifecycle.state == yams::daemon::LifecycleState::Ready ||
+                lifecycle.state == yams::daemon::LifecycleState::Degraded) {
                 lifecycleReady = true;
-                spdlog::info("[DaemonHarness] Daemon lifecycle reached Ready state");
+                spdlog::info("[DaemonHarness] Daemon lifecycle reached usable state: {}",
+                             static_cast<int>(lifecycle.state));
                 break;
             } else if (lifecycle.state == yams::daemon::LifecycleState::Failed) {
                 spdlog::error("[DaemonHarness] Daemon lifecycle reached Failed state: {}",
@@ -239,12 +241,14 @@ public:
             // Reset GlobalIOContext to clean up threads and io_context state
             // This is critical for test isolation - without it, threads accumulate across test
             // cases Temporarily unset YAMS_TESTING to allow reset() to actually work
-            const char* yams_testing = std::getenv("YAMS_TESTING");
-            const char* yams_safe = std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
-            if (yams_testing) {
+            const char* yams_testing_env = std::getenv("YAMS_TESTING");
+            const char* yams_safe_env = std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
+            std::string yams_testing = yams_testing_env ? yams_testing_env : "";
+            std::string yams_safe = yams_safe_env ? yams_safe_env : "";
+            if (yams_testing_env) {
                 unsetenv("YAMS_TESTING");
             }
-            if (yams_safe) {
+            if (yams_safe_env) {
                 unsetenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
             }
 
@@ -271,11 +275,11 @@ public:
 #endif
 
             // Restore environment variables
-            if (yams_testing) {
-                setenv("YAMS_TESTING", yams_testing, 1);
+            if (yams_testing_env) {
+                setenv("YAMS_TESTING", yams_testing.c_str(), 1);
             }
-            if (yams_safe) {
-                setenv("YAMS_TEST_SAFE_SINGLE_INSTANCE", yams_safe, 1);
+            if (yams_safe_env) {
+                setenv("YAMS_TEST_SAFE_SINGLE_INSTANCE", yams_safe.c_str(), 1);
             }
 
             if (isolateStateActive_) {

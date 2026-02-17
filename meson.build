@@ -76,6 +76,12 @@ endif
 
 # --- ThreadSanitizer for race detection ---
 enable_tsan = get_option('enable-tsan')
+enable_asan = get_option('enable-asan')
+
+if enable_tsan and enable_asan
+  error('TSAN and ASAN cannot be enabled in the same build. Configure separate build directories.')
+endif
+
 if enable_tsan
   buildtype = get_option('buildtype')
   # TSan is most useful in debug builds; warn if enabled in release
@@ -93,6 +99,25 @@ if enable_tsan
     message('Note: TSan requires all code (including dependencies) to be compiled with -fsanitize=thread')
   else
     error('ThreadSanitizer requested but compiler does not support -fsanitize=thread')
+  endif
+endif
+
+if enable_asan
+  buildtype = get_option('buildtype')
+  # ASan is most useful in debug builds; warn if enabled in release
+  if buildtype == 'release' or buildtype == 'plain'
+    warning('AddressSanitizer enabled in non-debug build. This will significantly impact performance.')
+  endif
+
+  # Check if compiler supports ASan
+  if cpp.has_argument('-fsanitize=address')
+    # Use additional flags for better stack traces (sanitizer is set via b_sanitize option)
+    asan_extra_flags = ['-fno-omit-frame-pointer']
+    add_project_arguments(asan_extra_flags, language: 'cpp')
+    add_project_arguments(asan_extra_flags, language: 'c')
+    message('AddressSanitizer enabled - memory errors will fail fast')
+  else
+    error('AddressSanitizer requested but compiler does not support -fsanitize=address')
   endif
 endif
 

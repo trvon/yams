@@ -2,12 +2,14 @@
 
 # Unified build script for YAMS
 #
-# Usage: ./setup.sh [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan]
+# Usage: ./setup.sh [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan] [--asan] [--no-asan]
 #        ./setup.sh Release --with-tests
 #   build_type: Release (default), Debug, Profiling, or Fuzzing (TODO)
 #   --coverage: Enable code coverage instrumentation (Debug builds only)
 #   --tsan: Enable ThreadSanitizer for race detection (default for Debug builds)
 #   --no-tsan: Disable ThreadSanitizer (overrides default)
+#   --asan: Enable AddressSanitizer for memory error detection
+#   --no-asan: Disable AddressSanitizer (overrides default)
 #
 # Environment variables (for CI/advanced use):
 #   YAMS_CONAN_HOST_PROFILE  - Path to Conan host profile (bypasses auto-detection)
@@ -44,8 +46,11 @@ set -euo pipefail
 
 ENABLE_COVERAGE=false
 ENABLE_TSAN="${ENABLE_TSAN:-}"  # Preserve environment variable if set
+ENABLE_ASAN="${ENABLE_ASAN:-}"  # Preserve environment variable if set
 BUILD_TYPE_INPUT=""
 ENABLE_RELEASE_TESTS=false
+TSAN_EXPLICIT=false
+ASAN_EXPLICIT=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -55,10 +60,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     --tsan)
       ENABLE_TSAN=true
+      TSAN_EXPLICIT=true
       shift
       ;;
     --no-tsan)
       ENABLE_TSAN=false
+      TSAN_EXPLICIT=true
+      shift
+      ;;
+    --asan)
+      ENABLE_ASAN=true
+      ASAN_EXPLICIT=true
+      shift
+      ;;
+    --no-asan)
+      ENABLE_ASAN=false
+      ASAN_EXPLICIT=true
       shift
       ;;
     --with-tests)
@@ -75,7 +92,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      echo "Usage: $0 [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan] [--with-tests]" >&2
+      echo "Usage: $0 [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan] [--asan] [--no-asan] [--with-tests]" >&2
       exit 1
       ;;
   esac
@@ -679,6 +696,24 @@ if [[ -z "${ENABLE_TSAN}" ]]; then
   fi
 fi
 
+# AddressSanitizer: default disabled; enable with --asan or ENABLE_ASAN=true
+if [[ -z "${ENABLE_ASAN}" ]]; then
+  ENABLE_ASAN=false
+fi
+
+# If ASAN was explicitly requested and TSAN wasn't explicitly chosen, prefer ASAN for this build.
+if [[ "${ENABLE_ASAN}" == "true" ]] && [[ "${ASAN_EXPLICIT}" == "true" ]] && [[ "${TSAN_EXPLICIT}" == "false" ]]; then
+  ENABLE_TSAN=false
+fi
+
+if [[ "${ENABLE_TSAN}" == "true" ]] && [[ "${ENABLE_ASAN}" == "true" ]]; then
+  echo "Error: TSAN and ASAN cannot be enabled in the same build directory." >&2
+  echo "Use separate invocations, e.g.:" >&2
+  echo "  ./setup.sh Debug --tsan --no-asan" >&2
+  echo "  ./setup.sh Debug --asan --no-tsan" >&2
+  exit 1
+fi
+
 if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
   MESON_OPTIONS+=(
     "-Dbuild-tests=true"
@@ -697,9 +732,14 @@ if [[ "${BUILD_TYPE}" == "Release" ]] && [[ "${ENABLE_RELEASE_TESTS}" == "true" 
 fi
 
 MESON_OPTIONS+=("-Denable-tsan=${ENABLE_TSAN}")
+MESON_OPTIONS+=("-Denable-asan=${ENABLE_ASAN}")
+
 if [[ "${ENABLE_TSAN}" == "true" ]]; then
   MESON_OPTIONS+=("-Db_sanitize=thread")
   echo "ThreadSanitizer enabled (race detection)"
+elif [[ "${ENABLE_ASAN}" == "true" ]]; then
+  MESON_OPTIONS+=("-Db_sanitize=address,undefined")
+  echo "AddressSanitizer enabled (memory safety checks)"
 else
   # Ensure any previous sanitizer setting doesn't persist across reconfigure.
   # Users can override via YAMS_EXTRA_MESON_FLAGS.

@@ -115,9 +115,7 @@ static std::chrono::milliseconds modelAcquireTimeout(bool batchCall) {
 
 // Provide a C-callable function for threading control (not supported yet)
 static yams_status_t onnx_set_threading(void* /*self*/, const char* /*model_id*/, int /*intra*/,
-                                        int /*inter*/) {
-    return YAMS_ERR_UNSUPPORTED;
-}
+                                        int /*inter*/);
 
 struct ProviderCtx {
     enum class State : uint8_t { Unloaded, Loading, Ready, Failed };
@@ -628,6 +626,37 @@ struct ProviderCtx {
                      pool ? "valid" : "null");
     }
 };
+
+static yams_status_t onnx_set_threading(void* self, const char* model_id, int intra, int inter) {
+    if (!self || !model_id || !*model_id) {
+        return YAMS_ERR_INVALID_ARG;
+    }
+    if (intra == 0 || inter == 0) {
+        return YAMS_ERR_INVALID_ARG;
+    }
+    if ((intra < -1 || intra > 64) || (inter < -1 || inter > 64)) {
+        return YAMS_ERR_INVALID_ARG;
+    }
+
+    auto* c = static_cast<ProviderCtx*>(self);
+    if (c->disabled) {
+        return YAMS_ERR_UNSUPPORTED;
+    }
+    if (!c->pool) {
+        return YAMS_ERR_INTERNAL;
+    }
+
+    auto r = c->pool->setModelThreading(model_id, intra, inter, true);
+    if (!r) {
+        spdlog::warn("[ONNX Plugin] set_threading failed model='{}' intra={} inter={}: {}",
+                     model_id, intra, inter, r.error().message);
+        return YAMS_ERR_INTERNAL;
+    }
+
+    spdlog::info("[ONNX Plugin] set_threading applied model='{}' intra={} inter={}", model_id,
+                 intra, inter);
+    return YAMS_OK;
+}
 
 static bool shutdownInProgress(const ProviderCtx* c) {
     if (c && c->shutdownRequested.load(std::memory_order_acquire)) {
@@ -1429,6 +1458,10 @@ struct ProviderSingleton {
                     auto h = c->pool->acquireModel(model_id, std::chrono::milliseconds(500));
                     if (h) {
                         ep = h.value()->getExecutionProvider();
+                        auto [intraThreads, interThreads] = h.value()->getThreading();
+                        j["intra_threads"] = intraThreads;
+                        j["inter_threads"] = interThreads;
+                        j["learned_batch_cap"] = h.value()->getLearnedBatchLimit();
                         {
                             std::lock_guard<std::mutex> lk(c->mu);
                             c->actualExecutionProvider = ep;
@@ -1457,9 +1490,13 @@ struct ProviderSingleton {
                 }
             }
             j["dim"] = dim;
-            j["intra_threads"] =
-                static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
-            j["inter_threads"] = 1;
+            if (!j.contains("intra_threads")) {
+                j["intra_threads"] =
+                    static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+            }
+            if (!j.contains("inter_threads")) {
+                j["inter_threads"] = 1;
+            }
             // Source hint from path when present
             try {
                 if (j.contains("path") && j["path"].is_string()) {

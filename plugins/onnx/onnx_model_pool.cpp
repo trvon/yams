@@ -94,6 +94,7 @@ static Ort::Env& get_global_ort_env() {
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <thread>
 #include <unordered_map>
 
@@ -366,7 +367,10 @@ public:
         int intra = config.num_threads > 0 ? config.num_threads : intra_default;
         intra = detect_threads("YAMS_ONNX_INTRA_OP_THREADS", intra);
 #endif
-        int inter = detect_threads("YAMS_ONNX_INTER_OP_THREADS", inter_default);
+        int inter = config.inter_op_threads > 0 ? config.inter_op_threads : inter_default;
+        inter = detect_threads("YAMS_ONNX_INTER_OP_THREADS", inter);
+        configuredIntraThreads_ = intra;
+        configuredInterThreads_ = inter;
         sessionOptions_->SetIntraOpNumThreads(intra);
         sessionOptions_->SetInterOpNumThreads(inter);
 
@@ -809,6 +813,44 @@ public:
 
     bool isValid() const { return test_mode_ ? isLoaded_ : (isLoaded_ && session_ != nullptr); }
 
+    std::pair<int, int> getThreading() const {
+        return {configuredIntraThreads_, configuredInterThreads_};
+    }
+
+    size_t getLearnedBatchLimit() const {
+        return providerBatchLimit_.load(std::memory_order_relaxed);
+    }
+
+    Result<void> setThreading(int intraThreads, int interThreads) {
+        auto valid = [](int value) { return value == -1 || (value >= 1 && value <= 64); };
+        if (!valid(intraThreads) || !valid(interThreads)) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Threading values must be -1 or in range [1, 64]"};
+        }
+
+        if (intraThreads > 0) {
+            config_.num_threads = intraThreads;
+        }
+        if (interThreads > 0) {
+            config_.inter_op_threads = interThreads;
+        }
+
+        configuredIntraThreads_ =
+            (config_.num_threads > 0) ? config_.num_threads : configuredIntraThreads_;
+        configuredInterThreads_ =
+            (config_.inter_op_threads > 0) ? config_.inter_op_threads : configuredInterThreads_;
+        if (sessionOptions_) {
+            sessionOptions_->SetIntraOpNumThreads(configuredIntraThreads_);
+            sessionOptions_->SetInterOpNumThreads(configuredInterThreads_);
+        }
+
+        // Force lazy reload on next inference with updated threading.
+        session_.reset();
+        isLoaded_ = false;
+
+        return Result<void>();
+    }
+
     size_t getEmbeddingDim() const { return embeddingDim_; }
     size_t getMaxSequenceLength() const { return maxSequenceLength_; }
     const std::string& getExecutionProvider() const { return actualExecutionProvider_; }
@@ -1051,6 +1093,10 @@ private:
             const size_t sharedCap = loadSharedBatchLimit(modelName_, actualExecutionProvider_);
             if (sharedCap > 0) {
                 providerBatchLimit_.store(sharedCap, std::memory_order_relaxed);
+                const auto currentCap = TuneAdvisor::getEmbedDocCap();
+                if (currentCap == 0 || currentCap > sharedCap) {
+                    TuneAdvisor::setEmbedDocCap(sharedCap);
+                }
             }
         }
 
@@ -1228,12 +1274,81 @@ private:
                     mergeSharedBatchLimit(modelName_, actualExecutionProvider_, observedCap);
                 if (mergedCap > 0) {
                     providerBatchLimit_.store(mergedCap, std::memory_order_relaxed);
+                    const auto currentCap = TuneAdvisor::getEmbedDocCap();
+                    if (currentCap == 0 || currentCap > mergedCap) {
+                        TuneAdvisor::setEmbedDocCap(mergedCap);
+                    }
                 }
                 spdlog::warn(
                     "[ONNX] Provider returned smaller batch than requested: requested_B={} "
-                    "output_B={} (learned_cap={}), retrying via chunking",
+                    "output_B={} (learned_cap={}), processing partial result + chunking remainder",
                     B, observedCap, mergedCap);
-                return runOnnxBatch(texts);
+
+                std::vector<std::vector<float>> partial(observedCap,
+                                                        std::vector<float>(hidden_dim, 0.0f));
+                const float* data = out.GetTensorData<float>();
+                for (size_t b = 0; b < observedCap; ++b) {
+                    auto& emb = partial[b];
+                    if (pooling_mode_ == Pooling::CLS) {
+                        const size_t off = b * SS * DD;
+                        for (size_t d = 0; d < DD; ++d)
+                            emb[d] = data[off + d];
+                    } else if (pooling_mode_ == Pooling::MAX) {
+                        for (size_t i = 0; i < std::min(SS, masks[b].size()); ++i) {
+                            if (masks[b][i] <= 0)
+                                continue;
+                            const size_t off = b * SS * DD + i * DD;
+                            for (size_t d = 0; d < DD; ++d)
+                                emb[d] = std::max(emb[d], data[off + d]);
+                        }
+                    } else {
+                        float total = 0.0f;
+                        for (size_t i = 0; i < std::min(SS, masks[b].size()); ++i) {
+                            float w = static_cast<float>(masks[b][i]);
+                            if (w <= 0.0f) {
+                                continue;
+                            }
+                            total += w;
+                            const size_t off = b * SS * DD + i * DD;
+                            for (size_t d = 0; d < DD; ++d)
+                                emb[d] += data[off + d] * w;
+                        }
+                        if (total > 0.0f) {
+                            for (auto& v : emb)
+                                v = static_cast<float>(v / total);
+                        }
+                    }
+                    if (normalize_) {
+                        double norm = 0.0;
+                        for (auto v : emb) {
+                            const double dv = static_cast<double>(v);
+                            norm += dv * dv;
+                        }
+                        norm = std::sqrt(norm);
+                        if (norm > 1e-8) {
+                            for (auto& v : emb)
+                                v = static_cast<float>(v / norm);
+                        } else {
+                            std::fill(emb.begin(), emb.end(), 0.0f);
+                        }
+                    }
+                }
+
+                std::vector<std::string> remainder;
+                remainder.reserve(B - observedCap);
+                for (size_t idx = observedCap; idx < B; ++idx) {
+                    remainder.push_back(texts[idx]);
+                }
+                if (!remainder.empty()) {
+                    auto rem = runOnnxBatch(remainder);
+                    if (!rem) {
+                        return rem.error();
+                    }
+                    auto& remVals = rem.value();
+                    partial.insert(partial.end(), std::make_move_iterator(remVals.begin()),
+                                   std::make_move_iterator(remVals.end()));
+                }
+                return partial;
             }
 
             if (hidden_dim > 0 && d2 > 0 && DD != hidden_dim) {
@@ -1316,12 +1431,52 @@ private:
                     mergeSharedBatchLimit(modelName_, actualExecutionProvider_, observedCap);
                 if (mergedCap > 0) {
                     providerBatchLimit_.store(mergedCap, std::memory_order_relaxed);
+                    const auto currentCap = TuneAdvisor::getEmbedDocCap();
+                    if (currentCap == 0 || currentCap > mergedCap) {
+                        TuneAdvisor::setEmbedDocCap(mergedCap);
+                    }
                 }
                 spdlog::warn(
                     "[ONNX] Provider returned smaller batch than requested: requested_B={} "
-                    "output_B={} (learned_cap={}), retrying via chunking",
+                    "output_B={} (learned_cap={}), processing partial result + chunking remainder",
                     B, observedCap, mergedCap);
-                return runOnnxBatch(texts);
+
+                std::vector<std::vector<float>> partial;
+                partial.reserve(B);
+                const float* data = out.GetTensorData<float>();
+                for (size_t b = 0; b < observedCap; ++b) {
+                    partial.emplace_back(data + b * DD, data + (b + 1) * DD);
+                    if (normalize_) {
+                        double norm = 0.0;
+                        for (auto v : partial.back()) {
+                            const double dv = static_cast<double>(v);
+                            norm += dv * dv;
+                        }
+                        norm = std::sqrt(norm);
+                        if (norm > 1e-8) {
+                            for (auto& v : partial.back())
+                                v = static_cast<float>(v / norm);
+                        } else {
+                            std::fill(partial.back().begin(), partial.back().end(), 0.0f);
+                        }
+                    }
+                }
+
+                std::vector<std::string> remainder;
+                remainder.reserve(B - observedCap);
+                for (size_t idx = observedCap; idx < B; ++idx) {
+                    remainder.push_back(texts[idx]);
+                }
+                if (!remainder.empty()) {
+                    auto rem = runOnnxBatch(remainder);
+                    if (!rem) {
+                        return rem.error();
+                    }
+                    auto& remVals = rem.value();
+                    partial.insert(partial.end(), std::make_move_iterator(remVals.begin()),
+                                   std::make_move_iterator(remVals.end()));
+                }
+                return partial;
             }
 
             if (hidden_dim > 0 && d1 > 0 && DD != hidden_dim) {
@@ -1383,6 +1538,8 @@ private:
     bool test_mode_ = false;
     bool dynamicPaddingEnabled_ = true; // controlled by YAMS_ONNX_DYNAMIC_PADDING
     std::atomic<size_t> providerBatchLimit_{0};
+    int configuredIntraThreads_{1};
+    int configuredInterThreads_{1};
 
     enum class Pooling { MEAN, CLS, MAX };
     Pooling pooling_mode_ = Pooling::MEAN;
@@ -1558,6 +1715,18 @@ bool OnnxModelSession::isValid() const {
 
 std::string OnnxModelSession::getExecutionProvider() const {
     return pImpl->getExecutionProvider();
+}
+
+size_t OnnxModelSession::getLearnedBatchLimit() const {
+    return pImpl->getLearnedBatchLimit();
+}
+
+Result<void> OnnxModelSession::setThreading(int intraThreads, int interThreads) {
+    return pImpl->setThreading(intraThreads, interThreads);
+}
+
+std::pair<int, int> OnnxModelSession::getThreading() const {
+    return pImpl->getThreading();
 }
 
 // ============================================================================
@@ -2307,6 +2476,42 @@ Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
     return Result<void>();
 }
 
+Result<void> OnnxModelPool::setModelThreading(const std::string& modelName, int intraThreads,
+                                              int interThreads, bool applyNow) {
+    auto valid = [](int value) { return value == -1 || (value >= 1 && value <= 64); };
+    if (modelName.empty() || !valid(intraThreads) || !valid(interThreads)) {
+        return Error{ErrorCode::InvalidArgument,
+                     "setModelThreading requires model name and valid thread values"};
+    }
+
+    std::shared_ptr<ResourcePool<OnnxModelSession>> pool;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        threadingOverrides_[modelName] = {intraThreads, interThreads};
+        auto it = models_.find(modelName);
+        if (it != models_.end()) {
+            pool = it->second.pool;
+        }
+    }
+
+    if (!applyNow || !pool) {
+        return Result<void>();
+    }
+
+    if (pool->getStats().inUseResources > 0) {
+        return Error{ErrorCode::ResourceBusy,
+                     "Model is currently in use; threading override will apply on next reload"};
+    }
+
+    auto handle = pool->acquire(std::chrono::milliseconds(500));
+    if (!handle) {
+        return Error{ErrorCode::Timeout,
+                     "Timed out acquiring model session to apply threading override"};
+    }
+
+    return handle.value()->setThreading(intraThreads, interThreads);
+}
+
 void OnnxModelPool::evictLRU(size_t numToEvict) {
     if (runtimeGpuEnabled_ && !allowGpuAutoUnload()) {
         spdlog::debug(
@@ -2681,6 +2886,15 @@ OnnxModelPool::createModelSession(const std::string& modelName) {
     config.model_name = modelName;
     config.enable_gpu = config_.enableGPU;
     config.num_threads = config_.numThreads;
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = threadingOverrides_.find(modelName);
+        if (it != threadingOverrides_.end()) {
+            config.num_threads = it->second.first;
+            config.inter_op_threads = it->second.second;
+        }
+    }
 
     try {
         auto session = std::make_shared<OnnxModelSession>(modelPath, modelName, config);
