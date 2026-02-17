@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <future>
 #include <random>
 #include <set>
@@ -278,6 +279,26 @@ TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction auto rol
     CHECK(count.value() == 0u);
 }
 
+TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter transaction closed-state behavior",
+                 "[storage][refcount][transaction][edge][catch2]") {
+    const std::string hash = generateHash(450);
+
+    auto txn = refCounter->beginTransaction();
+    REQUIRE(txn != nullptr);
+    txn->increment(hash, 1024);
+
+    auto firstCommit = txn->commit();
+    REQUIRE(firstCommit.has_value());
+    CHECK_FALSE(txn->isActive());
+
+    auto secondCommit = txn->commit();
+    CHECK_FALSE(secondCommit.has_value());
+    CHECK(secondCommit.error().code == yams::ErrorCode::TransactionFailed);
+
+    REQUIRE_THROWS_AS(txn->increment(hash, 1024), std::runtime_error);
+    REQUIRE_THROWS_AS(txn->decrement(hash), std::runtime_error);
+}
+
 TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter get unreferenced blocks",
                  "[storage][refcount][catch2]") {
     std::vector<std::string> allHashes;
@@ -491,6 +512,51 @@ TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter backup restore",
 
     // Cleanup
     std::filesystem::remove(backupPath);
+}
+
+TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter backup restore error paths",
+                 "[storage][refcount][backup][edge][catch2]") {
+    auto missingParent = std::filesystem::temp_directory_path() /
+                         std::format("yams_refcount_missing_parent_{}",
+                                     std::chrono::system_clock::now().time_since_epoch().count()) /
+                         "backup.db";
+
+    auto backupResult = refCounter->backup(missingParent);
+    CHECK_FALSE(backupResult.has_value());
+    CHECK(backupResult.error().code == yams::ErrorCode::DatabaseError);
+
+    auto missingBackup = std::filesystem::temp_directory_path() /
+                         std::format("yams_refcount_missing_backup_{}.db",
+                                     std::chrono::system_clock::now().time_since_epoch().count());
+    auto restoreResult = refCounter->restore(missingBackup);
+    CHECK_FALSE(restoreResult.has_value());
+    CHECK(restoreResult.error().code == yams::ErrorCode::DatabaseError);
+}
+
+TEST_CASE("ReferenceCounter factory returns null for invalid database path",
+          "[storage][refcount][factory][edge][catch2]") {
+    auto tempRoot = std::filesystem::temp_directory_path();
+    auto blockerPath =
+        tempRoot / std::format("yams_refcount_blocker_{}",
+                               std::chrono::system_clock::now().time_since_epoch().count());
+    {
+        std::ofstream blocker(blockerPath.string(), std::ios::binary);
+        REQUIRE(blocker.good());
+        blocker << "x";
+    }
+
+    ReferenceCounter::Config config{.databasePath = blockerPath / "nested" / "refcount.db",
+                                    .enableWAL = true,
+                                    .enableStatistics = true,
+                                    .cacheSize = 1000,
+                                    .busyTimeout = 1000,
+                                    .enableAuditLog = false};
+
+    auto counter = createReferenceCounter(std::move(config));
+    CHECK(counter == nullptr);
+
+    std::error_code ec;
+    std::filesystem::remove(blockerPath, ec);
 }
 
 TEST_CASE_METHOD(ReferenceCounterFixture, "ReferenceCounter async batch operations",

@@ -626,9 +626,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install conan "meson==1.9.1" ninja
 
-          # Install WiX for MSI packaging
-          dotnet tool install --global wix
-          wix extension add -g WixToolset.UI.wixext
+          # Install WiX for MSI packaging (pin versions to avoid prerelease incompatibility)
+          dotnet tool install --global wix --version 6.0.2
+          wix extension add -g WixToolset.UI.wixext/6.0.2
 
           # Install Zig for zyp PDF plugin
           $zigVersion = "0.15.2"

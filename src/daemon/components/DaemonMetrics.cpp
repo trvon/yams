@@ -652,6 +652,21 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         }
         out.ipcTasksPending = state_->stats.ipcTasksPending.load();
         out.ipcTasksActive = state_->stats.ipcTasksActive.load();
+        out.repairRunning = state_->stats.repairRunning.load(std::memory_order_relaxed);
+        out.repairInProgress = state_->stats.repairInProgress.load(std::memory_order_relaxed);
+        out.repairQueueDepth = state_->stats.repairQueueDepth.load(std::memory_order_relaxed);
+        out.repairBatchesAttempted =
+            state_->stats.repairBatchesAttempted.load(std::memory_order_relaxed);
+        out.repairEmbeddingsGenerated =
+            state_->stats.repairEmbeddingsGenerated.load(std::memory_order_relaxed);
+        out.repairEmbeddingsSkipped =
+            state_->stats.repairEmbeddingsSkipped.load(std::memory_order_relaxed);
+        out.repairFailedOperations =
+            state_->stats.repairFailedOperations.load(std::memory_order_relaxed);
+        out.repairIdleTicks = state_->stats.repairIdleTicks.load(std::memory_order_relaxed);
+        out.repairBusyTicks = state_->stats.repairBusyTicks.load(std::memory_order_relaxed);
+        out.repairTotalBacklog = state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
+        out.repairProcessed = state_->stats.repairProcessed.load(std::memory_order_relaxed);
     } catch (...) {
     }
 
@@ -693,6 +708,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             state_->readiness.vectorDbDim.load() > 0;
         out.readinessStates[std::string(readiness::kPlugins)] =
             state_->readiness.pluginsReady.load();
+        out.readinessStates[std::string(readiness::kRepairService)] = out.repairRunning;
         // Only include search init progress while not fully ready or when progress < 100%
         const bool searchReady = state_->readiness.searchEngineReady.load();
         const int searchPct = std::clamp<int>(state_->readiness.searchProgress.load(), 0, 100);

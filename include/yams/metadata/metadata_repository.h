@@ -174,6 +174,21 @@ struct DocumentQueryOptions {
     std::optional<std::string> likePattern;
     // Generic metadata filtering (replaces findDocumentsByCollection)
     std::vector<std::pair<std::string, std::string>> metadataFilters;
+
+    // --- Repair / health-check filters (added for targeted stuck-doc detection) ---
+    /// Filter by extraction status (e.g., Failed, Pending). Multiple values → OR.
+    std::vector<ExtractionStatus> extractionStatuses;
+    /// Filter by repair status (e.g., Processing). Multiple values → OR.
+    std::vector<RepairStatus> repairStatuses;
+    /// Only return docs whose repair_attempts < this value (0 = no filter).
+    int32_t maxRepairAttempts{0};
+    /// Only return docs that have NO matching row in document_content.
+    bool onlyMissingContent{false};
+    /// Only return docs indexed/modified before this epoch-seconds value (for stalled detection).
+    /// Uses COALESCE(NULLIF(indexed_time,0), modified_time) < stalledBefore.
+    std::optional<int64_t> stalledBefore;
+    /// Only return docs whose repair_attempted_at < this epoch-seconds value.
+    std::optional<int64_t> repairAttemptedBefore;
 };
 
 struct MetadataValueCount {
@@ -687,6 +702,16 @@ public:
     Result<std::vector<TreeChangeRecord>> listTreeChanges(const TreeDiffQuery& query) override;
     Result<void> finalizeTreeDiff(int64_t diffId, std::size_t changeCount,
                                   std::string_view status) override;
+
+    // --- Repair helpers (non-virtual, concrete-class only) ---
+
+    /// Count documents that have a non-empty file_path but no matching path_tree_nodes entry.
+    /// Uses a single efficient LEFT JOIN anti-join query.
+    Result<uint64_t> countDocsMissingPathTree();
+
+    /// Return documents that have a non-empty file_path but no matching path_tree_nodes entry.
+    /// Uses a single efficient LEFT JOIN anti-join query. Limited to `limit` rows (0 = no limit).
+    Result<std::vector<DocumentInfo>> findDocsMissingPathTree(int limit = 0);
 
 public:
     void setKnowledgeGraphStore(std::shared_ptr<KnowledgeGraphStore> kgStore) {

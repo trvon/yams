@@ -197,7 +197,7 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
     REQUIRE(std::holds_alternative<StatusResponse>(resp));
     const auto& status = std::get<StatusResponse>(resp);
 
-    const std::array<std::string_view, 19> requiredCoreReadinessKeys = {
+    const std::array<std::string_view, 20> requiredCoreReadinessKeys = {
         readiness::kIpcServer,
         readiness::kContentStore,
         readiness::kDatabase,
@@ -214,6 +214,7 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
         readiness::kEmbeddingDegraded,
         readiness::kPluginsReady,
         readiness::kPluginsDegraded,
+        readiness::kRepairService,
         readiness::kSearchEngineBuildReasonInitial,
         readiness::kSearchEngineBuildReasonRebuild,
         readiness::kSearchEngineBuildReasonDegraded};
@@ -222,6 +223,47 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
         INFO("missing readiness key: " << key);
         REQUIRE(status.readinessStates.count(std::string(key)) > 0);
     }
+}
+
+TEST_CASE("RequestDispatcher: status includes repair metrics and flags",
+          "[daemon][status][repair]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_repair_metrics_");
+
+    YamsDaemon daemon(cfg);
+    StateComponent state;
+    state.stats.repairQueueDepth.store(7);
+    state.stats.repairBatchesAttempted.store(11);
+    state.stats.repairEmbeddingsGenerated.store(5);
+    state.stats.repairEmbeddingsSkipped.store(2);
+    state.stats.repairFailedOperations.store(1);
+    state.stats.repairIdleTicks.store(99);
+    state.stats.repairBusyTicks.store(33);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&daemon, &svc, &state);
+
+    StatusRequest req;
+    req.detailed = true;
+    Request r = req;
+
+    boost::asio::io_context ioc;
+    auto fut = boost::asio::co_spawn(ioc, dispatcher.dispatch(r), boost::asio::use_future);
+    ioc.run();
+    auto resp = fut.get();
+
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+    const auto& status = std::get<StatusResponse>(resp);
+
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairQueueDepth)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairBatchesAttempted)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairEmbeddingsGenerated)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairEmbeddingsSkipped)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairFailedOperations)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairIdleTicks)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairBusyTicks)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairRunning)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairInProgress)) > 0);
 }
 
 TEST_CASE("RequestDispatcher: status responds even when lifecycle not ready",

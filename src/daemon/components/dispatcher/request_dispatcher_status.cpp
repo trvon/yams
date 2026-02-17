@@ -259,6 +259,23 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.requestCounts[std::string(metrics::kStreamBatches)] = snap->streamBatches;
             res.requestCounts[std::string(metrics::kStreamKeepalives)] = snap->streamKeepalives;
             res.requestCounts[std::string(metrics::kStreamTtfbAvgMs)] = snap->streamTtfbAvgMs;
+            // Repair service metrics
+            res.requestCounts[std::string(metrics::kRepairQueueDepth)] = snap->repairQueueDepth;
+            res.requestCounts[std::string(metrics::kRepairBatchesAttempted)] =
+                snap->repairBatchesAttempted;
+            res.requestCounts[std::string(metrics::kRepairEmbeddingsGenerated)] =
+                snap->repairEmbeddingsGenerated;
+            res.requestCounts[std::string(metrics::kRepairEmbeddingsSkipped)] =
+                snap->repairEmbeddingsSkipped;
+            res.requestCounts[std::string(metrics::kRepairFailedOperations)] =
+                snap->repairFailedOperations;
+            res.requestCounts[std::string(metrics::kRepairIdleTicks)] = snap->repairIdleTicks;
+            res.requestCounts[std::string(metrics::kRepairBusyTicks)] = snap->repairBusyTicks;
+            res.requestCounts[std::string(metrics::kRepairTotalBacklog)] = snap->repairTotalBacklog;
+            res.requestCounts[std::string(metrics::kRepairProcessed)] = snap->repairProcessed;
+            res.requestCounts[std::string(metrics::kRepairRunning)] = snap->repairRunning ? 1 : 0;
+            res.requestCounts[std::string(metrics::kRepairInProgress)] =
+                snap->repairInProgress ? 1 : 0;
             // File/directory add tracking
             res.requestCounts[std::string(metrics::kFilesAdded)] =
                 static_cast<size_t>(snap->filesAdded);
@@ -671,6 +688,37 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             }
         }
 
+        // Repair metrics should be visible even in fallback/non-metrics status path.
+        try {
+            if (state_) {
+                const auto repairRunning =
+                    state_->stats.repairRunning.load(std::memory_order_relaxed);
+                res.requestCounts[std::string(metrics::kRepairQueueDepth)] =
+                    state_->stats.repairQueueDepth.load(std::memory_order_relaxed);
+                res.requestCounts[std::string(metrics::kRepairBatchesAttempted)] =
+                    state_->stats.repairBatchesAttempted.load(std::memory_order_relaxed);
+                res.requestCounts[std::string(metrics::kRepairEmbeddingsGenerated)] =
+                    state_->stats.repairEmbeddingsGenerated.load(std::memory_order_relaxed);
+                res.requestCounts[std::string(metrics::kRepairEmbeddingsSkipped)] =
+                    state_->stats.repairEmbeddingsSkipped.load(std::memory_order_relaxed);
+                res.requestCounts[std::string(metrics::kRepairFailedOperations)] =
+                    state_->stats.repairFailedOperations.load(std::memory_order_relaxed);
+                res.requestCounts[std::string(metrics::kRepairIdleTicks)] =
+                    state_->stats.repairIdleTicks.load(std::memory_order_relaxed);
+                res.requestCounts[std::string(metrics::kRepairBusyTicks)] =
+                    state_->stats.repairBusyTicks.load(std::memory_order_relaxed);
+                res.requestCounts[std::string(metrics::kRepairTotalBacklog)] =
+                    state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
+                res.requestCounts[std::string(metrics::kRepairProcessed)] =
+                    state_->stats.repairProcessed.load(std::memory_order_relaxed);
+                res.requestCounts[std::string(metrics::kRepairRunning)] = repairRunning ? 1 : 0;
+                res.requestCounts[std::string(metrics::kRepairInProgress)] =
+                    state_->stats.repairInProgress.load(std::memory_order_relaxed) ? 1 : 0;
+                res.readinessStates[std::string(readiness::kRepairService)] = repairRunning;
+            }
+        } catch (...) {
+        }
+
         // Keep canonical readiness keys stable for clients/tests even when
         // specific FSM snapshots are unavailable in a given code path.
         const std::pair<std::string_view, bool> defaultReadiness[] = {
@@ -678,6 +726,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             {readiness::kEmbeddingDegraded, false},
             {readiness::kPluginsReady, false},
             {readiness::kPluginsDegraded, false},
+            {readiness::kRepairService, false},
             {readiness::kSearchEngineBuildReasonInitial, false},
             {readiness::kSearchEngineBuildReasonRebuild, false},
             {readiness::kSearchEngineBuildReasonDegraded, false},

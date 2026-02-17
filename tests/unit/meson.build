@@ -27,10 +27,12 @@ unit_app_services = files(
   # Migrated to Catch2 - see tests/meson.build
   # 'app/services/document_service_test.cpp',
   # 'app/services/document_service_errors_test.cpp',
-  'app/services/search_service_test.cpp',
+  # Migrated to Catch2 - see tests/meson.build (search_service_catch2_test.cpp)
+  # 'app/services/search_service_test.cpp',
   # Migrated to Catch2 - see tests/meson.build (hybrid_search_comprehensive_test.cpp)
   # 'app/services/search_service_comprehensive_test.cpp',
-  'app/services/search_hash_edge_cases_test.cpp',
+  # Migrated to Catch2 - see tests/meson.build (search_hash_edge_cases_catch2_test.cpp)
+  # 'app/services/search_hash_edge_cases_test.cpp',
   # Migrated to Catch2 - see tests/meson.build (service_utilities_test.cpp)
   # 'app/services/session_service_test.cpp',
   # 'app/services/utils_test.cpp',
@@ -98,7 +100,8 @@ if lzma_dep.found() and lzma_opt.allowed()
 endif
 
 unit_daemon_base = files(
-  'daemon/metrics_consistency_test.cpp',
+  # Migrated to Catch2 - see tests/meson.build (metrics_consistency_catch2_test.cpp)
+  # 'daemon/metrics_consistency_test.cpp',
   # Daemon FSM tests migrated to Catch2 (see tests/meson.build catch2_test_sources)
   # Previously: 14 FSM test files now consolidated in daemon_fsm_suite_test.cpp
 
@@ -207,8 +210,8 @@ unit_mcp = files(
 
 unit_metadata = files(
   # All metadata tests migrated to Catch2 - see tests/meson.build
-  # Remaining GTest files:
-  'metadata/fts5_performance_stress_test.cpp',  # Stress test (opt-in via YAMS_RUN_STRESS_TESTS=1)
+  # Migrated to Catch2 - see tests/meson.build (fts5_performance_stress_catch2_test.cpp)
+  # 'metadata/fts5_performance_stress_test.cpp',  # Stress test (opt-in via YAMS_RUN_STRESS_TESTS=1)
 )
 
 unit_resolve = files(
@@ -295,7 +298,7 @@ unit_srcs += unit_ingest
 unit_srcs += unit_wal
 unit_srcs += unit_plugins
 
-if gtest_dep.found()
+if gtest_dep.found() and unit_srcs.length() > 0
   yams_unit_objs = static_library('yams_unit_objs', unit_srcs,
     include_directories: incs,
     dependencies: [gtest_compile_dep] + gmock_compile_deps + test_deps,
@@ -303,6 +306,8 @@ if gtest_dep.found()
     install: false,
     pic: true,
   )
+elif unit_srcs.length() == 0
+  message('All GTest sources migrated to Catch2; skipping yams_unit_objs.')
 else
   message('GTest not found; skipping compilation of yams_unit_objs.')
 endif

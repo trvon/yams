@@ -1,24 +1,28 @@
+// Copyright (c) 2025 YAMS Contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Migrated from GTest: metrics_consistency_test.cpp
+
+#include <catch2/catch_test_macros.hpp>
+
 #include <string_view>
 #include <unordered_set>
-#include <iostream>
-#include <gtest/gtest.h>
+
 #include <yams/daemon/metric_keys.h>
 
 using namespace yams::daemon::metrics;
 
-TEST(MetricsConsistencyTest, ValidateKeysNotEmpty) {
-    // Basic sanity checks
+TEST_CASE("Metrics consistency: keys not empty", "[unit][daemon][metrics]") {
     static_assert(!kWorkerThreads.empty());
     static_assert(!kPostIngestQueued.empty());
     static_assert(!kKgQueueDepth.empty());
 
-    EXPECT_FALSE(kWorkerThreads.empty());
-    EXPECT_FALSE(kPostIngestQueued.empty());
-    EXPECT_FALSE(kKgQueueDepth.empty());
+    CHECK_FALSE(kWorkerThreads.empty());
+    CHECK_FALSE(kPostIngestQueued.empty());
+    CHECK_FALSE(kKgQueueDepth.empty());
 }
 
-TEST(MetricsConsistencyTest, ValidateUniqueKeys) {
-    // Ensure no two constants accidentally point to the same string literal
+TEST_CASE("Metrics consistency: unique keys", "[unit][daemon][metrics]") {
     std::unordered_set<std::string_view> keys = {
         // Vector
         kVectorEmbeddingsAvailable, kVectorScoringEnabled,
@@ -89,37 +93,31 @@ TEST(MetricsConsistencyTest, ValidateUniqueKeys) {
         kRepairEmbeddingsGenerated, kRepairEmbeddingsSkipped, kRepairFailedOperations,
         kRepairIdleTicks, kRepairBusyTicks, kRepairTotalBacklog, kRepairProcessed};
 
-    for (const auto& key : keys) {
-        std::cout << "DEBUG KEY: " << key << std::endl;
-    }
-    std::cout << "TOTAL KEYS: " << keys.size() << std::endl;
-
-    EXPECT_GE(keys.size(), 81);
+    CHECK(keys.size() >= 81);
 }
 
-TEST(MetricsConsistencyTest, ValidateSpecificValues) {
-    // Ensure we didn't change the underlying string values accidentally
-    EXPECT_EQ(kKgQueueDepth, "kg_queue_depth");
-    EXPECT_EQ(kPostIngestQueued, "post_ingest_queued");
-    EXPECT_EQ(kEmbedQueued, "embed_svc_queued");
-    EXPECT_EQ(kSearchActive, "search_active");
-    EXPECT_EQ(kStorageLogicalBytes, "storage_logical_bytes");
-    EXPECT_EQ(kRepairQueueDepth, "repair_queue_depth");
-    EXPECT_EQ(kRepairBatchesAttempted, "repair_batches_attempted");
-    EXPECT_EQ(kRepairInProgress, "repair_in_progress");
+TEST_CASE("Metrics consistency: specific values", "[unit][daemon][metrics]") {
+    CHECK(kKgQueueDepth == "kg_queue_depth");
+    CHECK(kPostIngestQueued == "post_ingest_queued");
+    CHECK(kEmbedQueued == "embed_svc_queued");
+    CHECK(kSearchActive == "search_active");
+    CHECK(kStorageLogicalBytes == "storage_logical_bytes");
+    CHECK(kRepairQueueDepth == "repair_queue_depth");
+    CHECK(kRepairBatchesAttempted == "repair_batches_attempted");
+    CHECK(kRepairInProgress == "repair_in_progress");
 }
 
-TEST(MetricsConsistencyTest, ValidateReadinessKeysNotEmpty) {
+TEST_CASE("Metrics consistency: readiness keys not empty", "[unit][daemon][metrics]") {
     static_assert(!yams::daemon::readiness::kIpcServer.empty());
     static_assert(!yams::daemon::readiness::kVectorDb.empty());
     static_assert(!yams::daemon::readiness::kSearchEngineDegraded.empty());
 
-    EXPECT_FALSE(yams::daemon::readiness::kIpcServer.empty());
-    EXPECT_FALSE(yams::daemon::readiness::kVectorDb.empty());
-    EXPECT_FALSE(yams::daemon::readiness::kSearchEngineDegraded.empty());
+    CHECK_FALSE(yams::daemon::readiness::kIpcServer.empty());
+    CHECK_FALSE(yams::daemon::readiness::kVectorDb.empty());
+    CHECK_FALSE(yams::daemon::readiness::kSearchEngineDegraded.empty());
 }
 
-TEST(MetricsConsistencyTest, ValidateReadinessUniqueKeys) {
+TEST_CASE("Metrics consistency: readiness unique keys", "[unit][daemon][metrics]") {
     std::unordered_set<std::string_view> keys = {
         yams::daemon::readiness::kIpcServer,
         yams::daemon::readiness::kContentStore,
@@ -146,20 +144,20 @@ TEST(MetricsConsistencyTest, ValidateReadinessUniqueKeys) {
         yams::daemon::readiness::kSearchEngineBuildReasonDegraded,
     };
 
-    EXPECT_EQ(keys.size(), 23);
+    CHECK(keys.size() == 23);
 }
 
-TEST(MetricsConsistencyTest, ValidateReadinessSpecificValues) {
-    EXPECT_EQ(yams::daemon::readiness::kIpcServer, "ipc_server");
-    EXPECT_EQ(yams::daemon::readiness::kContentStore, "content_store");
-    EXPECT_EQ(yams::daemon::readiness::kMetadataRepo, "metadata_repo");
-    EXPECT_EQ(yams::daemon::readiness::kSearchEngine, "search_engine");
-    EXPECT_EQ(yams::daemon::readiness::kModelProvider, "model_provider");
-    EXPECT_EQ(yams::daemon::readiness::kVectorIndex, "vector_index");
-    EXPECT_EQ(yams::daemon::readiness::kVectorDb, "vector_db");
-    EXPECT_EQ(yams::daemon::readiness::kPlugins, "plugins");
-    EXPECT_EQ(yams::daemon::readiness::kRepairService, "repair_service");
-    EXPECT_EQ(yams::daemon::readiness::kVectorDbInitAttempted, "vector_db_init_attempted");
-    EXPECT_EQ(yams::daemon::readiness::kVectorDbReady, "vector_db_ready");
-    EXPECT_EQ(yams::daemon::readiness::kVectorDbDim, "vector_db_dim");
+TEST_CASE("Metrics consistency: readiness specific values", "[unit][daemon][metrics]") {
+    CHECK(yams::daemon::readiness::kIpcServer == "ipc_server");
+    CHECK(yams::daemon::readiness::kContentStore == "content_store");
+    CHECK(yams::daemon::readiness::kMetadataRepo == "metadata_repo");
+    CHECK(yams::daemon::readiness::kSearchEngine == "search_engine");
+    CHECK(yams::daemon::readiness::kModelProvider == "model_provider");
+    CHECK(yams::daemon::readiness::kVectorIndex == "vector_index");
+    CHECK(yams::daemon::readiness::kVectorDb == "vector_db");
+    CHECK(yams::daemon::readiness::kPlugins == "plugins");
+    CHECK(yams::daemon::readiness::kRepairService == "repair_service");
+    CHECK(yams::daemon::readiness::kVectorDbInitAttempted == "vector_db_init_attempted");
+    CHECK(yams::daemon::readiness::kVectorDbReady == "vector_db_ready");
+    CHECK(yams::daemon::readiness::kVectorDbDim == "vector_db_dim");
 }

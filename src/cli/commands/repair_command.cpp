@@ -2,6 +2,7 @@
 /// @brief Thin RPC client for `yams repair` — delegates all work to the daemon's RepairService.
 
 #include <spdlog/spdlog.h>
+#include <cstdlib>
 #include <iostream>
 
 #include <boost/asio/awaitable.hpp>
@@ -89,18 +90,21 @@ public:
         }
 
         // Build the RPC request
+        // NOTE: --all intentionally excludes block_refs for now because it can be very slow
+        // on large stores. Use --refs (or --all --refs) to include it explicitly.
+        const bool effectiveAll = repairAll_;
         RepairRequest req;
-        req.repairOrphans = repairOrphans_;
-        req.repairMime = repairMime_;
-        req.repairDownloads = repairDownloads_;
-        req.repairPathTree = repairPathTree_;
-        req.repairChunks = repairChunks_;
+        req.repairOrphans = repairOrphans_ || effectiveAll;
+        req.repairMime = repairMime_ || effectiveAll;
+        req.repairDownloads = repairDownloads_ || effectiveAll;
+        req.repairPathTree = repairPathTree_ || effectiveAll;
+        req.repairChunks = repairChunks_ || effectiveAll;
         req.repairBlockRefs = repairBlockRefs_;
-        req.repairFts5 = repairFts5_;
-        req.repairEmbeddings = repairEmbeddings_;
-        req.repairStuckDocs = repairStuckDocs_;
-        req.optimizeDb = optimizeDb_;
-        req.repairAll = repairAll_;
+        req.repairFts5 = repairFts5_ || effectiveAll;
+        req.repairEmbeddings = repairEmbeddings_ || effectiveAll;
+        req.repairStuckDocs = repairStuckDocs_ || effectiveAll;
+        req.optimizeDb = optimizeDb_ || effectiveAll;
+        req.repairAll = false;
         req.dryRun = dryRun_;
         req.verbose = verbose_;
         req.force = force_;
@@ -192,7 +196,18 @@ public:
             },
             boost::asio::detached);
 
-        auto res = (fut.wait_for(std::chrono::minutes(10)) == std::future_status::ready)
+        std::chrono::milliseconds localWaitTimeout = cfg.requestTimeout;
+        if (const char* envMs = std::getenv("YAMS_REPAIR_RPC_TIMEOUT_MS")) {
+            try {
+                auto parsed = std::stoll(std::string(envMs));
+                if (parsed > 0) {
+                    localWaitTimeout = std::chrono::milliseconds(parsed);
+                }
+            } catch (...) {
+            }
+        }
+
+        auto res = (fut.wait_for(localWaitTimeout) == std::future_status::ready)
                        ? fut.get()
                        : Result<RepairResponse>(Error{ErrorCode::Timeout, "Repair RPC timed out"});
 

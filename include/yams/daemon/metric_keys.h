@@ -102,21 +102,17 @@ constexpr std::string_view kSearchConcurrencyLimit = "search_concurrency_limit";
 // Route-separated DB pool metrics (write/work vs read)
 constexpr std::string_view kDbWritePoolAvailable = "db_write_pool_available";
 constexpr std::string_view kDbWritePoolTotalConnections = "db_write_pool_total_connections";
-constexpr std::string_view kDbWritePoolAvailableConnections =
-	"db_write_pool_available_connections";
+constexpr std::string_view kDbWritePoolAvailableConnections = "db_write_pool_available_connections";
 constexpr std::string_view kDbWritePoolActiveConnections = "db_write_pool_active_connections";
 constexpr std::string_view kDbWritePoolWaitingRequests = "db_write_pool_waiting_requests";
-constexpr std::string_view kDbWritePoolMaxObservedWaiting =
-	"db_write_pool_max_observed_waiting";
+constexpr std::string_view kDbWritePoolMaxObservedWaiting = "db_write_pool_max_observed_waiting";
 constexpr std::string_view kDbWritePoolTotalWaitMicros = "db_write_pool_total_wait_micros";
 constexpr std::string_view kDbWritePoolTimeoutCount = "db_write_pool_timeout_count";
-constexpr std::string_view kDbWritePoolFailedAcquisitions =
-	"db_write_pool_failed_acquisitions";
+constexpr std::string_view kDbWritePoolFailedAcquisitions = "db_write_pool_failed_acquisitions";
 
 constexpr std::string_view kDbReadPoolAvailable = "db_read_pool_available";
 constexpr std::string_view kDbReadPoolTotalConnections = "db_read_pool_total_connections";
-constexpr std::string_view kDbReadPoolAvailableConnections =
-	"db_read_pool_available_connections";
+constexpr std::string_view kDbReadPoolAvailableConnections = "db_read_pool_available_connections";
 constexpr std::string_view kDbReadPoolActiveConnections = "db_read_pool_active_connections";
 constexpr std::string_view kDbReadPoolWaitingRequests = "db_read_pool_waiting_requests";
 constexpr std::string_view kDbReadPoolMaxObservedWaiting = "db_read_pool_max_observed_waiting";
@@ -195,6 +191,19 @@ constexpr std::string_view kBusPostDropped = "bus_post_dropped";
 // Resource Governor metrics
 constexpr std::string_view kPressureLevel = "pressure_level";
 
+// Repair Service metrics
+constexpr std::string_view kRepairRunning = "repair_running";
+constexpr std::string_view kRepairInProgress = "repair_in_progress";
+constexpr std::string_view kRepairQueueDepth = "repair_queue_depth";
+constexpr std::string_view kRepairBatchesAttempted = "repair_batches_attempted";
+constexpr std::string_view kRepairEmbeddingsGenerated = "repair_embeddings_generated";
+constexpr std::string_view kRepairEmbeddingsSkipped = "repair_embeddings_skipped";
+constexpr std::string_view kRepairFailedOperations = "repair_failed_operations";
+constexpr std::string_view kRepairIdleTicks = "repair_idle_ticks";
+constexpr std::string_view kRepairBusyTicks = "repair_busy_ticks";
+constexpr std::string_view kRepairTotalBacklog = "repair_total_backlog";
+constexpr std::string_view kRepairProcessed = "repair_processed";
+
 } // namespace yams::daemon::metrics
 
 namespace yams::daemon::readiness {
@@ -209,6 +218,7 @@ constexpr std::string_view kModelProvider = "model_provider";
 constexpr std::string_view kVectorIndex = "vector_index";
 constexpr std::string_view kVectorDb = "vector_db";
 constexpr std::string_view kPlugins = "plugins";
+constexpr std::string_view kRepairService = "repair_service";
 
 // Extended readiness details
 constexpr std::string_view kVectorDbInitAttempted = "vector_db_init_attempted";

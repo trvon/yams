@@ -3522,6 +3522,62 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
                 addText(value);
             }
 
+            // --- Repair / health-check filters ---
+
+            if (!options.extractionStatuses.empty()) {
+                if (options.extractionStatuses.size() == 1) {
+                    conditions.emplace_back("extraction_status = ?");
+                    addText(ExtractionStatusUtils::toString(options.extractionStatuses[0]));
+                } else {
+                    std::string clause = "(";
+                    for (size_t i = 0; i < options.extractionStatuses.size(); ++i) {
+                        if (i > 0)
+                            clause += " OR ";
+                        clause += "extraction_status = ?";
+                        addText(ExtractionStatusUtils::toString(options.extractionStatuses[i]));
+                    }
+                    clause += ')';
+                    conditions.emplace_back(std::move(clause));
+                }
+            }
+
+            if (!options.repairStatuses.empty()) {
+                if (options.repairStatuses.size() == 1) {
+                    conditions.emplace_back("repair_status = ?");
+                    addText(RepairStatusUtils::toString(options.repairStatuses[0]));
+                } else {
+                    std::string clause = "(";
+                    for (size_t i = 0; i < options.repairStatuses.size(); ++i) {
+                        if (i > 0)
+                            clause += " OR ";
+                        clause += "repair_status = ?";
+                        addText(RepairStatusUtils::toString(options.repairStatuses[i]));
+                    }
+                    clause += ')';
+                    conditions.emplace_back(std::move(clause));
+                }
+            }
+
+            if (options.maxRepairAttempts > 0) {
+                conditions.emplace_back("repair_attempts < ?");
+                addInt(options.maxRepairAttempts);
+            }
+
+            if (options.onlyMissingContent) {
+                conditions.emplace_back("NOT EXISTS (SELECT 1 FROM document_content c "
+                                        "WHERE c.document_id = documents.id)");
+            }
+
+            if (options.stalledBefore) {
+                conditions.emplace_back("COALESCE(NULLIF(indexed_time, 0), modified_time) < ?");
+                addInt(*options.stalledBefore);
+            }
+
+            if (options.repairAttemptedBefore) {
+                conditions.emplace_back("repair_attempted_at < ?");
+                addInt(*options.repairAttemptedBefore);
+            }
+
             if (!conditions.empty()) {
                 sql += " WHERE ";
                 for (size_t i = 0; i < conditions.size(); ++i) {
@@ -5086,6 +5142,64 @@ MetadataRepository::findPathTreeNodeByFullPath(std::string_view fullPath) {
                 node.centroid = blobToFloatVector(stmt.getBlob(6));
             }
             return std::optional<PathTreeNode>{std::move(node)};
+        });
+}
+
+// ---------------------------------------------------------------------------
+// Repair helpers (concrete-class only)
+// ---------------------------------------------------------------------------
+
+Result<uint64_t> MetadataRepository::countDocsMissingPathTree() {
+    return executeReadQuery<uint64_t>([&](Database& db) -> Result<uint64_t> {
+        auto stmtResult = db.prepare("SELECT COUNT(*) FROM documents d "
+                                     "LEFT JOIN path_tree_nodes p ON p.full_path = d.file_path "
+                                     "WHERE d.file_path != '' AND p.node_id IS NULL");
+        if (!stmtResult)
+            return stmtResult.error();
+
+        auto stmt = std::move(stmtResult).value();
+        auto stepRes = stmt.step();
+        if (!stepRes)
+            return stepRes.error();
+        if (!stepRes.value())
+            return uint64_t(0);
+
+        return static_cast<uint64_t>(stmt.getInt64(0));
+    });
+}
+
+Result<std::vector<DocumentInfo>> MetadataRepository::findDocsMissingPathTree(int limit) {
+    return executeReadQuery<std::vector<DocumentInfo>>(
+        [&](Database& db) -> Result<std::vector<DocumentInfo>> {
+            std::string sql = "SELECT ";
+            sql += documentColumnList(false);
+            sql += " FROM documents d "
+                   "LEFT JOIN path_tree_nodes p ON p.full_path = d.file_path "
+                   "WHERE d.file_path != '' AND p.node_id IS NULL";
+            if (limit > 0) {
+                sql += " LIMIT ?";
+            }
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult)
+                return stmtResult.error();
+
+            auto stmt = std::move(stmtResult).value();
+            if (limit > 0) {
+                if (auto r = stmt.bind(1, static_cast<int64_t>(limit)); !r)
+                    return r.error();
+            }
+
+            std::vector<DocumentInfo> docs;
+            while (true) {
+                auto stepRes = stmt.step();
+                if (!stepRes)
+                    return stepRes.error();
+                if (!stepRes.value())
+                    break;
+                docs.push_back(mapDocumentRow(stmt));
+            }
+            return docs;
         });
 }
 

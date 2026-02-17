@@ -322,6 +322,19 @@ struct MetricsSnapshot {
 
     // Deferred ingestion queue depth (store_document_tasks channel)
     std::size_t deferredQueueDepth{0};
+
+    // Repair service metrics
+    bool repairRunning{false};
+    bool repairInProgress{false};
+    std::uint64_t repairQueueDepth{0};
+    std::uint64_t repairBatchesAttempted{0};
+    std::uint64_t repairEmbeddingsGenerated{0};
+    std::uint64_t repairEmbeddingsSkipped{0};
+    std::uint64_t repairFailedOperations{0};
+    std::uint64_t repairIdleTicks{0};
+    std::uint64_t repairBusyTicks{0};
+    std::uint64_t repairTotalBacklog{0};
+    std::uint64_t repairProcessed{0};
 };
 
 class SocketServer; // Forward declaration

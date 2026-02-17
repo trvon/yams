@@ -247,6 +247,27 @@ Result<void> LifecycleComponent::initialize() {
                 spdlog::debug("Removed stale socket file: {}", sock.string());
             }
         }
+
+        if (!sock.empty()) {
+            auto base = sock.stem().string();
+            if (base.empty()) {
+                base = sock.filename().string();
+            }
+            if (base.empty()) {
+                base = "yams-daemon";
+            }
+            auto proxySock = sock.parent_path() / (base + ".proxy.sock");
+            if (std::filesystem::exists(proxySock)) {
+                std::error_code proxyEc;
+                std::filesystem::remove(proxySock, proxyEc);
+                if (proxyEc) {
+                    spdlog::warn("Failed to remove stale proxy socket '{}': {}", proxySock.string(),
+                                 proxyEc.message());
+                } else {
+                    spdlog::debug("Removed stale proxy socket file: {}", proxySock.string());
+                }
+            }
+        }
     } catch (...) {
         // best effort
     }

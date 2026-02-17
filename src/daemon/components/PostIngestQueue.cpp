@@ -927,6 +927,8 @@ void PostIngestQueue::processMetadataStage(
                     spdlog::warn("[PostIngestQueue] Failed to mark extraction failed for {}: {}",
                                  hash, updateRes.error().message);
                 }
+                (void)meta_->batchUpdateDocumentRepairStatuses({hash},
+                                                               metadata::RepairStatus::Failed);
             }
         } else if (docId >= 0) {
             spdlog::info("[PostIngestQueue] Extracted {} bytes for {} (docId={})", txt->size(),
@@ -947,7 +949,11 @@ void PostIngestQueue::processMetadataStage(
                     spdlog::error("[PostIngestQueue] Failed to update extraction status for {}: {}",
                                   hash, updateRes.error().message);
                 }
+                (void)meta_->batchUpdateDocumentRepairStatuses({hash},
+                                                               metadata::RepairStatus::Failed);
             } else {
+                (void)meta_->batchUpdateDocumentRepairStatuses({hash},
+                                                               metadata::RepairStatus::Completed);
                 auto duration = std::chrono::steady_clock::now() - startTime;
                 double ms = std::chrono::duration<double, std::milli>(duration).count();
                 spdlog::info("[PostIngestQueue] Metadata stage completed for {} in {:.2f}ms", hash,
@@ -2338,7 +2344,19 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
                 spdlog::warn("[PostIngestQueue] Failed to mark extraction failed for {}: {}",
                              failure.hash, updateRes.error().message);
             }
+            (void)meta_->batchUpdateDocumentRepairStatuses({failure.hash},
+                                                           metadata::RepairStatus::Failed);
         }
+    }
+
+    if (!successes.empty() && meta_) {
+        std::vector<std::string> successHashes;
+        successHashes.reserve(successes.size());
+        for (const auto& prepared : successes) {
+            successHashes.push_back(prepared.hash);
+        }
+        (void)meta_->batchUpdateDocumentRepairStatuses(successHashes,
+                                                       metadata::RepairStatus::Completed);
     }
 }
 

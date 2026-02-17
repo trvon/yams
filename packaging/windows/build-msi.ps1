@@ -86,9 +86,9 @@ Write-Host "Checking for WiX Toolset..." -ForegroundColor Cyan
 $wixPath = Get-Command wix -ErrorAction SilentlyContinue
 if (-not $wixPath) {
     Write-Host "WiX Toolset not found. Installing via dotnet tool..." -ForegroundColor Yellow
-    & dotnet tool install --global wix
+    & dotnet tool install --global wix --version 6.0.2
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to install WiX Toolset. Please install manually: dotnet tool install --global wix"
+        Write-Error "Failed to install WiX Toolset. Please install manually: dotnet tool install --global wix --version 6.0.2"
         exit 1
     }
     # Refresh PATH
@@ -99,9 +99,9 @@ if (-not $wixPath) {
 Write-Host "WiX version:" -ForegroundColor Cyan
 & wix --version
 
-# Add WiX UI extension
+# Add WiX UI extension (pin to 6.0.2 to match WiX toolset version)
 Write-Host "Adding WiX UI extension..." -ForegroundColor Cyan
-& wix extension add -g WixToolset.UI.wixext
+& wix extension add -g WixToolset.UI.wixext/6.0.2
 if ($LASTEXITCODE -ne 0) {
     Write-Warning "WiX UI extension may already be installed, continuing..."
 }

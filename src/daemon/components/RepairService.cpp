@@ -194,6 +194,9 @@ RepairService::getSymbolExtractorsForScheduling() const {
 void RepairService::start() {
     if (!cfg_.enable || running_.exchange(true))
         return;
+    if (state_) {
+        state_->stats.repairRunning.store(true, std::memory_order_relaxed);
+    }
     tokens_.store(cfg_.maintenanceTokens);
     shutdownState_->finished.store(false, std::memory_order_relaxed);
     shutdownState_->running.store(true, std::memory_order_relaxed);
@@ -240,6 +243,10 @@ void RepairService::start() {
 void RepairService::stop() {
     if (!running_.exchange(false))
         return;
+    if (state_) {
+        state_->stats.repairRunning.store(false, std::memory_order_relaxed);
+        state_->stats.repairInProgress.store(false, std::memory_order_relaxed);
+    }
     shutdownState_->running.store(false, std::memory_order_release);
     queueCv_.notify_all();
     {
@@ -512,10 +519,17 @@ RepairService::backgroundLoop(std::shared_ptr<ShutdownState> shutdownState) {
                     "embed_jobs", embedCap);
             bool queued = co_await queueWithBackoff(embedQ, std::move(job), timer, running_,
                                                     "embed", missingEmbeddings.size(), 50, 1000);
-            if (queued)
+            if (queued) {
                 InternalEventBus::instance().incEmbedQueued();
-            else
+            } else {
+                if (meta_repo) {
+                    // Avoid leaving documents stuck in Processing when enqueue fails (shutdown,
+                    // channel pressure). They can be retried by subsequent repair passes.
+                    (void)meta_repo->batchUpdateDocumentRepairStatuses(
+                        missingEmbeddings, yams::metadata::RepairStatus::Pending);
+                }
                 InternalEventBus::instance().incEmbedDropped();
+            }
         }
 
         // Queue FTS5 jobs
@@ -585,7 +599,8 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
                         missingEmb = !hasEmbedRes || !hasEmbedRes.value();
                     }
                     const bool missingFts =
-                        (!d.contentExtracted) ||
+                        (!d.contentExtracted) &&
+                        (d.extractionStatus != yams::metadata::ExtractionStatus::Skipped) &&
                         (d.extractionStatus != yams::metadata::ExtractionStatus::Success);
 
                     if (missingEmb || missingFts) {
@@ -609,6 +624,10 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
         if (totalEnqueued > 0) {
             totalBacklog_.store(totalEnqueued, std::memory_order_relaxed);
             processed_.store(0, std::memory_order_relaxed);
+            if (state_) {
+                state_->stats.repairTotalBacklog.store(totalEnqueued, std::memory_order_relaxed);
+                state_->stats.repairProcessed.store(0, std::memory_order_relaxed);
+            }
             spdlog::debug("RepairService: initial scan queued {} documents", totalEnqueued);
         }
     } catch (const std::exception& e) {
@@ -779,9 +798,11 @@ void RepairService::updateProgressPct() {
     if (!state_)
         return;
     auto tot = totalBacklog_.load(std::memory_order_relaxed);
+    state_->stats.repairTotalBacklog.store(tot, std::memory_order_relaxed);
     if (tot == 0)
         return;
     auto done = processed_.load(std::memory_order_relaxed);
+    state_->stats.repairProcessed.store(done, std::memory_order_relaxed);
     int pct = static_cast<int>(std::min<std::uint64_t>(100, (done * 100) / tot));
     state_->readiness.vectorIndexProgress.store(pct, std::memory_order_relaxed);
 }
@@ -803,11 +824,20 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
     }
 
     repairInProgress_.store(true, std::memory_order_release);
+    if (state_) {
+        state_->stats.repairInProgress.store(true, std::memory_order_relaxed);
+    }
     // RAII guard to clear the flag when we leave this scope.
     struct InProgressGuard {
         std::atomic<bool>& flag;
-        ~InProgressGuard() { flag.store(false, std::memory_order_release); }
-    } inProgressGuard{repairInProgress_};
+        std::atomic<bool>* statsFlag;
+        ~InProgressGuard() {
+            flag.store(false, std::memory_order_release);
+            if (statsFlag) {
+                statsFlag->store(false, std::memory_order_relaxed);
+            }
+        }
+    } inProgressGuard{repairInProgress_, state_ ? &state_->stats.repairInProgress : nullptr};
 
     RepairResponse response;
     std::vector<RepairOperationResult> results;
@@ -906,48 +936,71 @@ RepairService::detectStuckDocuments(int32_t maxRetries) {
     if (!meta)
         return stuck;
 
-    auto docsResult = meta->queryDocuments(metadata::DocumentQueryOptions{});
-    if (!docsResult)
-        return stuck;
-
     auto now = std::chrono::system_clock::now();
     auto threshold = std::chrono::duration_cast<std::chrono::seconds>(cfg_.stalledThreshold);
+    auto cutoffEpoch =
+        std::chrono::duration_cast<std::chrono::seconds>((now - threshold).time_since_epoch())
+            .count();
 
-    for (const auto& d : docsResult.value()) {
-        if (d.repairAttempts >= maxRetries)
-            continue; // exhausted retries
+    // Use targeted SQL queries for each stuck category instead of loading all docs.
 
-        // Category 1: Failed extraction
-        if (d.extractionStatus == metadata::ExtractionStatus::Failed) {
-            stuck.push_back({StuckDocumentInfo::FailedExtraction, d.id, d.sha256Hash, d.filePath,
-                             d.repairAttempts});
-            continue;
+    // Category 1: Failed extraction
+    {
+        metadata::DocumentQueryOptions opts;
+        opts.extractionStatuses = {metadata::ExtractionStatus::Failed};
+        opts.maxRepairAttempts = maxRetries;
+
+        auto docsResult = meta->queryDocuments(opts);
+        if (docsResult) {
+            for (const auto& d : docsResult.value()) {
+                stuck.push_back({StuckDocumentInfo::FailedExtraction, d.id, d.sha256Hash,
+                                 d.filePath, d.repairAttempts});
+            }
         }
+    }
 
-        // Category 2: Ghost success (Success but no content row)
-        if (d.extractionStatus == metadata::ExtractionStatus::Success) {
-            auto contentRes = meta->getContent(d.id);
-            if (contentRes && !contentRes.value().has_value()) {
+    // Category 2: Ghost success (Success but no content row)
+    {
+        metadata::DocumentQueryOptions opts;
+        opts.extractionStatuses = {metadata::ExtractionStatus::Success};
+        opts.maxRepairAttempts = maxRetries;
+        opts.onlyMissingContent = true;
+
+        auto docsResult = meta->queryDocuments(opts);
+        if (docsResult) {
+            for (const auto& d : docsResult.value()) {
                 stuck.push_back({StuckDocumentInfo::GhostSuccess, d.id, d.sha256Hash, d.filePath,
                                  d.repairAttempts});
-                continue;
             }
         }
+    }
 
-        // Category 3: Stalled Pending
-        if (d.extractionStatus == metadata::ExtractionStatus::Pending) {
-            auto age = std::chrono::duration_cast<std::chrono::seconds>(now - d.modifiedTime);
-            if (age >= threshold) {
+    // Category 3: Stalled Pending (indexed/modified before cutoff)
+    {
+        metadata::DocumentQueryOptions opts;
+        opts.extractionStatuses = {metadata::ExtractionStatus::Pending};
+        opts.maxRepairAttempts = maxRetries;
+        opts.stalledBefore = cutoffEpoch;
+
+        auto docsResult = meta->queryDocuments(opts);
+        if (docsResult) {
+            for (const auto& d : docsResult.value()) {
                 stuck.push_back({StuckDocumentInfo::StalledPending, d.id, d.sha256Hash, d.filePath,
                                  d.repairAttempts});
-                continue;
             }
         }
+    }
 
-        // Category 4: Stalled Processing (repairStatus)
-        if (d.repairStatus == metadata::RepairStatus::Processing) {
-            auto age = std::chrono::duration_cast<std::chrono::seconds>(now - d.repairAttemptedAt);
-            if (age >= threshold) {
+    // Category 4: Stalled Processing (repairStatus stuck in Processing)
+    {
+        metadata::DocumentQueryOptions opts;
+        opts.repairStatuses = {metadata::RepairStatus::Processing};
+        opts.maxRepairAttempts = maxRetries;
+        opts.repairAttemptedBefore = cutoffEpoch;
+
+        auto docsResult = meta->queryDocuments(opts);
+        if (docsResult) {
+            for (const auto& d : docsResult.value()) {
                 stuck.push_back({StuckDocumentInfo::StalledProcessing, d.id, d.sha256Hash,
                                  d.filePath, d.repairAttempts});
             }
@@ -985,13 +1038,16 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
     }
 
     // Re-enqueue stuck documents for re-extraction via a high-priority PostIngestQueue channel.
-    // This keeps RPC repair responsive even when the normal channel is saturated.
+    // Use back-pressure retries with drain polling to avoid channel overflow and silent doc loss.
     const std::size_t rpcCapacity = static_cast<std::size_t>(TuneAdvisor::postIngestRpcQueueMax());
     const bool useRpcChannel = (rpcCapacity > 0);
     auto postIngestChannel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
             useRpcChannel ? "post_ingest_rpc" : "post_ingest",
             useRpcChannel ? rpcCapacity : std::size_t(4096));
+
+    constexpr int kMaxRetryRounds = 20; // 20 rounds × 500ms = 10s max wait per document
+    constexpr auto kDrainPollInterval = std::chrono::milliseconds(500);
 
     for (size_t i = 0; i < stuckDocs.size(); ++i) {
         const auto& s = stuckDocs[i];
@@ -1000,7 +1056,18 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
         InternalEventBus::PostIngestTask task;
         task.hash = s.hash;
         task.mime = ""; // will be re-detected
-        if (postIngestChannel->try_push(task)) {
+
+        // Attempt the push with back-pressure retries
+        bool pushed = postIngestChannel->try_push(task);
+        if (!pushed) {
+            // Channel full — wait for consumer to drain, then retry
+            for (int retry = 0; retry < kMaxRetryRounds && !pushed; ++retry) {
+                std::this_thread::sleep_for(kDrainPollInterval);
+                pushed = postIngestChannel->try_push(task);
+            }
+        }
+
+        if (pushed) {
             // Increment repair attempts
             auto docRes = meta->getDocument(s.docId);
             if (docRes && docRes.value().has_value()) {
@@ -1023,7 +1090,8 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
             ++result.succeeded;
         } else {
             ++result.failed;
-            spdlog::warn("RepairService: PostIngest channel full, could not re-enqueue {}",
+            spdlog::warn("RepairService: PostIngest channel full after retries, could not "
+                         "re-enqueue {} (consider increasing YAMS_POST_INGEST_RPC_QUEUE_MAX)",
                          s.hash.substr(0, 12));
         }
 
@@ -1040,6 +1108,10 @@ RepairOperationResult RepairService::recoverStuckDocuments(const RepairRequest& 
     }
 
     result.message = "Recovered " + std::to_string(result.succeeded) + " stuck documents";
+    if (result.failed > 0) {
+        result.message += " (" + std::to_string(result.failed) +
+                          " could not be enqueued — re-run repair to retry)";
+    }
     return result;
 }
 
@@ -1280,20 +1352,13 @@ RepairOperationResult RepairService::rebuildPathTree(bool dryRun, bool verbose,
     }
 
     if (dryRun) {
-        auto docsResult = concreteRepo->queryDocuments(metadata::DocumentQueryOptions{});
-        if (!docsResult) {
-            result.message = "Failed to query";
+        auto countResult = concreteRepo->countDocsMissingPathTree();
+        if (!countResult) {
+            result.message = "Failed to count missing path tree entries";
             return result;
         }
-        uint64_t missing = 0;
-        for (const auto& doc : docsResult.value()) {
-            if (doc.filePath.empty())
-                continue;
-            auto existingNode = concreteRepo->findPathTreeNodeByFullPath(doc.filePath);
-            if (!existingNode || !existingNode.value().has_value())
-                missing++;
-        }
-        result.processed = docsResult.value().size();
+        uint64_t missing = countResult.value();
+        result.processed = missing;
         result.skipped = missing;
         result.message = "Would rebuild " + std::to_string(missing) + " path tree entries";
         return result;
@@ -1333,6 +1398,39 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
     if (sqlite3_open(refsDbPath.string().c_str(), &db) != SQLITE_OK) {
         result.message = "Failed to open refs.db";
         return result;
+    }
+
+    // Quick-check: count unreferenced block_references entries.
+    // If zero, the common case (no orphans expected) can skip the expensive FS walk.
+    {
+        sqlite3_stmt* countStmt = nullptr;
+        const char* countSql = "SELECT COUNT(*) FROM block_references WHERE ref_count = 0";
+        int zeroRefCount = 0;
+        if (sqlite3_prepare_v2(db, countSql, -1, &countStmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(countStmt) == SQLITE_ROW)
+                zeroRefCount = sqlite3_column_int(countStmt, 0);
+            sqlite3_finalize(countStmt);
+        }
+
+        if (zeroRefCount == 0) {
+            // Also do a quick FS sanity check: count prefix dirs. If the count matches
+            // the number of referenced hashes' unique prefixes, no orphans are possible.
+            // For now, if refs.db tracks no zero-ref entries, trust it and skip the walk.
+            sqlite3_close(db);
+            result.message = "No orphaned chunks (quick-check: 0 unreferenced blocks)";
+            if (progress) {
+                RepairEvent ev;
+                ev.phase = "completed";
+                ev.operation = "chunks";
+                ev.message = result.message;
+                progress(ev);
+            }
+            return result;
+        }
+
+        spdlog::info("[RepairService] chunks: {} unreferenced block_references, proceeding "
+                     "with filesystem scan",
+                     zeroRefCount);
     }
 
     // Get referenced hashes
@@ -1497,7 +1595,17 @@ RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool ver
     }
 
     auto repairResult = integrity::RepairManager::repairBlockReferences(
-        objectsPath, refsDbPath, dryRun, [](uint64_t, uint64_t) {});
+        objectsPath, refsDbPath, dryRun, [progress](uint64_t processed, uint64_t total) {
+            if (!progress)
+                return;
+            RepairEvent ev;
+            ev.phase = "repairing";
+            ev.operation = "block_refs";
+            ev.processed = processed;
+            ev.total = total;
+            ev.message = "Scanning block references";
+            progress(ev);
+        });
     if (!repairResult) {
         result.message = "Block refs repair failed: " + repairResult.error().message;
         result.failed = 1;

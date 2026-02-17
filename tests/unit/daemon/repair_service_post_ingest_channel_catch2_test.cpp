@@ -2,6 +2,9 @@
 
 #include <chrono>
 #include <filesystem>
+#include <functional>
+#include <optional>
+#include <span>
 #include <string>
 #include <thread>
 
@@ -57,6 +60,27 @@ struct ServiceManagerFixture {
         }
     }
 };
+
+std::optional<RepairOperationResult> findOperationResult(const RepairResponse& response,
+                                                         std::string_view operation) {
+    for (const auto& result : response.operationResults) {
+        if (result.operation == operation) {
+            return result;
+        }
+    }
+    return std::nullopt;
+}
+
+bool waitForCondition(std::chrono::milliseconds timeout, const std::function<bool()>& predicate) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return predicate();
+}
 
 } // namespace
 
@@ -167,6 +191,223 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     drainQueue(postIngest);
     drainQueue(postIngestRpc);
     drainQueue(postIngestTasks);
+
+    piq->resumeAll();
+
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "RepairService: post-ingest success should mark repair status completed",
+                 "[daemon][repair][regression][post-ingest]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    auto meta = sm->getMetadataRepo();
+    auto store = sm->getContentStore();
+    REQUIRE(meta != nullptr);
+    REQUIRE(store != nullptr);
+
+    PostIngestQueue* piq = sm->getPostIngestQueue();
+    for (int i = 0; i < 200 && piq == nullptr; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        piq = sm->getPostIngestQueue();
+    }
+    REQUIRE(piq != nullptr);
+    for (int i = 0; i < 200 && !piq->started(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(piq->started());
+    piq->resumeAll();
+
+    auto postIngestRpc =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
+            "post_ingest_rpc", 64);
+    REQUIRE(postIngestRpc != nullptr);
+    drainQueue(postIngestRpc);
+
+    const std::string text = "repair service regression test content";
+    const auto textBytes = std::as_bytes(std::span<const char>(text.data(), text.size()));
+    auto storeRes = store->storeBytes(textBytes);
+    REQUIRE(storeRes.has_value());
+    const auto hash = storeRes.value().contentHash;
+
+    metadata::DocumentInfo doc{};
+    doc.fileName = "regression.txt";
+    doc.filePath = (config_.dataDir / "regression.txt").string();
+    doc.fileExtension = "txt";
+    doc.fileSize = text.size();
+    doc.sha256Hash = hash;
+    doc.mimeType = "text/plain";
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+
+    auto idRes = meta->insertDocument(doc);
+    REQUIRE(idRes.has_value());
+    const int64_t docId = idRes.value();
+
+    auto statusRes =
+        meta->batchUpdateDocumentRepairStatuses({hash}, metadata::RepairStatus::Processing);
+    REQUIRE(statusRes.has_value());
+
+    InternalEventBus::PostIngestTask task;
+    task.hash = hash;
+    task.mime = "text/plain";
+    REQUIRE(postIngestRpc->try_push(task));
+
+    const bool completed = waitForCondition(std::chrono::seconds(5), [&]() {
+        auto docRes = meta->getDocument(docId);
+        if (!docRes || !docRes.value().has_value()) {
+            return false;
+        }
+        const auto& current = docRes.value().value();
+        return current.repairStatus == metadata::RepairStatus::Completed;
+    });
+    REQUIRE(completed);
+
+    auto finalDocRes = meta->getDocument(docId);
+    REQUIRE(finalDocRes.has_value());
+    REQUIRE(finalDocRes.value().has_value());
+    CHECK(finalDocRes.value()->repairStatus == metadata::RepairStatus::Completed);
+
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "RepairService: startup scan should ignore extraction skipped docs",
+                 "[daemon][repair][regression][startup-scan]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    auto meta = sm->getMetadataRepo();
+    REQUIRE(meta != nullptr);
+
+    metadata::DocumentInfo doc{};
+    doc.fileName = "binary.jpg";
+    doc.filePath = (config_.dataDir / "binary.jpg").string();
+    doc.fileExtension = "jpg";
+    doc.fileSize = 123;
+    doc.sha256Hash = std::string(64, 'b');
+    doc.mimeType = "image/jpeg";
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+
+    auto idRes = meta->insertDocument(doc);
+    REQUIRE(idRes.has_value());
+    const int64_t docId = idRes.value();
+
+    auto extractionRes = meta->updateDocumentExtractionStatus(
+        docId, false, metadata::ExtractionStatus::Skipped, "test skipped");
+    REQUIRE(extractionRes.has_value());
+    auto repairRes =
+        meta->batchUpdateDocumentRepairStatuses({doc.sha256Hash}, metadata::RepairStatus::Pending);
+    REQUIRE(repairRes.has_value());
+
+    state_.stats.repairTotalBacklog.store(0, std::memory_order_relaxed);
+
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.maxBatch = 16;
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 0; }, cfg);
+    repair.start();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    repair.stop();
+
+    CHECK(state_.stats.repairTotalBacklog.load(std::memory_order_relaxed) == 0u);
+
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "RepairService: stalled pending detection should use indexed age",
+                 "[daemon][repair][regression][stuck-docs]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    auto meta = sm->getMetadataRepo();
+    REQUIRE(meta != nullptr);
+
+    metadata::DocumentInfo doc{};
+    doc.fileName = "pending.txt";
+    doc.filePath = (config_.dataDir / "pending.txt").string();
+    doc.fileExtension = "txt";
+    doc.fileSize = 17;
+    doc.sha256Hash = std::string(64, 'c');
+    doc.mimeType = "text/plain";
+    doc.setModifiedTime(1); // very old file mtime
+    const auto recent =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.indexedTime = recent; // recently indexed, should not be stalled
+
+    auto idRes = meta->insertDocument(doc);
+    REQUIRE(idRes.has_value());
+    const int64_t docId = idRes.value();
+
+    auto extractionRes = meta->updateDocumentExtractionStatus(
+        docId, false, metadata::ExtractionStatus::Pending, "pending test");
+    REQUIRE(extractionRes.has_value());
+    auto repairRes =
+        meta->batchUpdateDocumentRepairStatuses({doc.sha256Hash}, metadata::RepairStatus::Pending);
+    REQUIRE(repairRes.has_value());
+
+    RepairService::Config cfg;
+    cfg.enable = false;
+    cfg.stalledThreshold = std::chrono::seconds(60);
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 0; }, cfg);
+
+    RepairRequest req;
+    req.repairStuckDocs = true;
+    req.dryRun = true;
+    req.maxRetries = 3;
+
+    auto resp = repair.executeRepair(req, nullptr);
+    auto stuckDocsResult = findOperationResult(resp, "stuck_docs");
+    REQUIRE(stuckDocsResult.has_value());
+    CHECK(stuckDocsResult->processed == 0u);
 
     sm->shutdown();
 }

@@ -439,6 +439,20 @@ private:
         return false;
     }
 
+    std::filesystem::path deriveProxySocketPath(const std::filesystem::path& daemonSocket) {
+        if (daemonSocket.empty()) {
+            return {};
+        }
+        auto base = daemonSocket.stem().string();
+        if (base.empty()) {
+            base = daemonSocket.filename().string();
+        }
+        if (base.empty()) {
+            base = "yams-daemon";
+        }
+        return daemonSocket.parent_path() / (base + ".proxy.sock");
+    }
+
     void cleanupDaemonFiles(const std::string& socketPath, const std::string& pidFilePath) {
         auto removeWithRetry = [](const std::filesystem::path& path, const std::string& label) {
             if (path.empty()) {
@@ -471,6 +485,8 @@ private:
         // Remove socket file if it exists
         if (!socketPath.empty()) {
             removeWithRetry(std::filesystem::path{socketPath}, "socket");
+            removeWithRetry(deriveProxySocketPath(std::filesystem::path{socketPath}),
+                            "proxy socket");
         }
 
         // Remove PID file if it exists
@@ -1785,6 +1801,33 @@ private:
             std::string embExtra = s.embeddingModel.empty() ? "" : s.embeddingModel;
             overview.push_back({"Embeddings", paintStatus(embSev, embText), embExtra});
 
+            // Repair summary
+            auto findCompactCount = [&](const char* key) -> uint64_t {
+                auto it = s.requestCounts.find(key);
+                return it != s.requestCounts.end() ? it->second : 0ULL;
+            };
+            const bool repairRunning = findCompactCount("repair_running") > 0;
+            const bool repairInProgress = findCompactCount("repair_in_progress") > 0;
+            const uint64_t repairQueue = findCompactCount("repair_queue_depth");
+            const uint64_t repairFailed = findCompactCount("repair_failed_operations");
+            Severity repairSev = !repairRunning       ? Severity::Warn
+                                 : (repairFailed > 0) ? Severity::Warn
+                                 : (repairInProgress) ? Severity::Warn
+                                 : (repairQueue > 0)  ? Severity::Warn
+                                                      : Severity::Good;
+            std::ostringstream repairText;
+            repairText << (repairRunning ? "Running" : "Stopped");
+            if (repairInProgress) {
+                repairText << " · RPC active";
+            }
+            std::ostringstream repairExtra;
+            repairExtra << repairQueue << " pending";
+            if (repairFailed > 0) {
+                repairExtra << " · " << repairFailed << " failed";
+            }
+            overview.push_back(
+                {"Repair", paintStatus(repairSev, repairText.str()), repairExtra.str()});
+
             render_rows(std::cout, overview);
 
             // Show issues if any
@@ -2240,6 +2283,50 @@ private:
                 if (!internalRows.empty()) {
                     render_rows(std::cout, internalRows);
                 }
+
+                std::cout << "\n" << section_header("Repair Service") << "\n\n";
+                std::vector<Row> repairRows;
+                const bool repairRunning = findPostIngestCount("repair_running") > 0;
+                const bool repairInProgress = findPostIngestCount("repair_in_progress") > 0;
+                const uint64_t repairQueue = findPostIngestCount("repair_queue_depth");
+                const uint64_t repairBatches = findPostIngestCount("repair_batches_attempted");
+                const uint64_t repairEmbeddings =
+                    findPostIngestCount("repair_embeddings_generated");
+                const uint64_t repairFailed = findPostIngestCount("repair_failed_operations");
+                const uint64_t repairBacklog = findPostIngestCount("repair_total_backlog");
+                const uint64_t repairProcessed = findPostIngestCount("repair_processed");
+
+                std::string repairStatus = repairRunning ? "running" : "stopped";
+                Severity repairStatusSev = repairRunning ? Severity::Good : Severity::Warn;
+                if (repairInProgress) {
+                    repairStatus += " · RPC active";
+                    repairStatusSev = Severity::Warn;
+                }
+                repairRows.push_back({"Status", paintStatus(repairStatusSev, repairStatus), ""});
+
+                if (repairBacklog > 0) {
+                    const double fraction =
+                        std::min(1.0, static_cast<double>(repairProcessed) / repairBacklog);
+                    std::ostringstream progress;
+                    progress << progress_bar(fraction, 12, "#", "░", Ansi::GREEN, Ansi::YELLOW,
+                                             Ansi::RED, true)
+                             << " " << repairProcessed << "/" << repairBacklog;
+                    repairRows.push_back({"Progress", progress.str(), ""});
+                }
+
+                std::ostringstream queue;
+                queue << repairQueue << " pending";
+                repairRows.push_back({"Queue", queue.str(), ""});
+
+                std::ostringstream repairStats;
+                repairStats << repairBatches << " batches · " << repairEmbeddings << " embeddings";
+                Severity repairStatsSev = repairFailed > 0 ? Severity::Warn : Severity::Good;
+                if (repairFailed > 0) {
+                    repairStats << " · " << repairFailed << " failed";
+                }
+                repairRows.push_back({"Stats", paintStatus(repairStatsSev, repairStats.str()), ""});
+
+                render_rows(std::cout, repairRows);
 
                 std::cout << "\n" << section_header("Storage & Embeddings") << "\n\n";
                 std::vector<Row> storageRows;
