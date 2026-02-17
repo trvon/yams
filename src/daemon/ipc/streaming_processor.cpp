@@ -172,6 +172,16 @@ StreamingRequestProcessor::process_streaming_impl(Request request) {
             co_return std::nullopt;
         }
 
+        // RepairRequest: defer to stream_chunks() in request_handler for
+        // producer-thread streaming with keepalives.  Do NOT eagerly compute
+        // here — repair can take tens of minutes.
+        if (std::holds_alternative<RepairRequest>(req_copy)) {
+            spdlog::debug("[SRP] deferring RepairRequest to stream_chunks");
+            mode_ = Mode::Repair;
+            pending_request_.emplace(std::make_unique<Request>(std::move(request)));
+            co_return std::nullopt;
+        }
+
         // Not a streaming-recognized request: delegate immediately.
         // Note: request is still valid here because all branches that move it
         // also co_return immediately, so we only reach here if it wasn't moved.
@@ -206,7 +216,8 @@ bool StreamingRequestProcessor::supports_streaming(const Request& request) const
         std::holds_alternative<BatchEmbeddingRequest>(request) ||
         std::holds_alternative<EmbedDocumentsRequest>(request) ||
         std::holds_alternative<GenerateEmbeddingRequest>(request) ||
-        std::holds_alternative<LoadModelRequest>(request)) {
+        std::holds_alternative<LoadModelRequest>(request) ||
+        std::holds_alternative<RepairRequest>(request)) {
         return true;
     }
     return delegate_->supports_streaming(request);

@@ -202,6 +202,25 @@ public:
 
         const auto& resp = res.value();
 
+        // Check if repair was rejected because another is already in progress
+        if (!resp.success && resp.operationResults.empty() && !resp.errors.empty()) {
+            bool alreadyRunning = false;
+            for (const auto& e : resp.errors) {
+                if (e.find("already in progress") != std::string::npos) {
+                    alreadyRunning = true;
+                    break;
+                }
+            }
+            if (alreadyRunning) {
+                std::cout << "\n"
+                          << ui::status_info(
+                                 "A repair operation is already running. "
+                                 "Please wait for it to finish before starting another.")
+                          << "\n";
+                return Result<void>();
+            }
+        }
+
         // Final summary
         std::cout << "\n" << ui::horizontal_rule(60, '=') << "\n";
 

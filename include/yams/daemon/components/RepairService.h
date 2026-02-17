@@ -92,6 +92,11 @@ public:
     // ── On-demand repair (from RPC) ──
     RepairResponse executeRepair(const RepairRequest& request, ProgressFn progress);
 
+    /// Returns true if an on-demand repair RPC is currently executing.
+    bool isRepairInProgress() const noexcept {
+        return repairInProgress_.load(std::memory_order_acquire);
+    }
+
     // ── Live tuning hooks ──
     void setMaintenanceTokens(std::uint32_t tokens) {
         tokens_.store(tokens, std::memory_order_relaxed);
@@ -203,6 +208,7 @@ private:
 
     // On-demand repair serialization (only one RPC repair at a time)
     std::mutex repairMutex_;
+    std::atomic<bool> repairInProgress_{false};
 };
 
 } // namespace yams::daemon

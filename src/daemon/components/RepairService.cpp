@@ -791,7 +791,23 @@ void RepairService::updateProgressPct() {
 // ============================================================================
 
 RepairResponse RepairService::executeRepair(const RepairRequest& request, ProgressFn progress) {
-    std::lock_guard<std::mutex> lock(repairMutex_); // serialize concurrent RPCs
+    std::unique_lock<std::mutex> lock(repairMutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        // Another repair RPC is already running — return immediately.
+        RepairResponse busy;
+        busy.success = false;
+        busy.errors.push_back(
+            "Repair is already in progress. Please wait for the current run to finish.");
+        spdlog::info("[RepairService] executeRepair rejected: repair already in progress");
+        return busy;
+    }
+
+    repairInProgress_.store(true, std::memory_order_release);
+    // RAII guard to clear the flag when we leave this scope.
+    struct InProgressGuard {
+        std::atomic<bool>& flag;
+        ~InProgressGuard() { flag.store(false, std::memory_order_release); }
+    } inProgressGuard{repairInProgress_};
 
     RepairResponse response;
     std::vector<RepairOperationResult> results;
@@ -1504,8 +1520,28 @@ RepairOperationResult RepairService::rebuildFts5Index(bool dryRun, bool verbose,
                                 : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
 
     result.processed = docs.value().size();
+    const size_t totalDocs = docs.value().size();
+    size_t docIdx = 0;
 
     for (const auto& d : docs.value()) {
+        ++docIdx;
+
+        // Emit progress every 500 docs so the streaming layer has events to
+        // send (prevents client read timeouts during large rebuilds).
+        if (progress && docIdx % 500 == 0) {
+            RepairEvent ev;
+            ev.phase = "repairing";
+            ev.operation = "fts5";
+            ev.processed = docIdx;
+            ev.total = totalDocs;
+            ev.succeeded = result.succeeded;
+            ev.failed = result.failed;
+            ev.skipped = result.skipped;
+            ev.message = "Rebuilding FTS5 index (" + std::to_string(docIdx) + "/" +
+                         std::to_string(totalDocs) + ")";
+            progress(ev);
+        }
+
         std::string ext = d.fileExtension;
         if (!ext.empty() && ext[0] == '.')
             ext.erase(0, 1);

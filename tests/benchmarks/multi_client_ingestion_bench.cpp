@@ -1400,3 +1400,214 @@ TEST_CASE("Multi-client ingestion: reader starvation under ingest load",
     };
     emitJsonl(cfg.outputPath, record);
 }
+
+TEST_CASE("Multi-client ingestion: file access under ingest load",
+          "[!benchmark][multi-client][access]") {
+    // Validate get/cat responsiveness while concurrent ingestion is running.
+    auto cfg = BenchConfig::fromEnv();
+
+    DaemonHarness harness(benchHarnessOptions());
+    REQUIRE(harness.start(kStartTimeout));
+
+    // Seed a baseline corpus so readers always have accessible hashes.
+    std::vector<std::string> knownHashes;
+    std::mutex knownHashesMutex;
+    {
+        ClientConfig warmCfg;
+        warmCfg.socketPath = harness.socketPath();
+        warmCfg.autoStart = false;
+        warmCfg.requestTimeout = 30s;
+        DaemonClient warmClient(warmCfg);
+
+        for (int i = 0; i < 64; ++i) {
+            AddDocumentRequest req;
+            req.name = "access_preseed_" + std::to_string(i) + ".md";
+            req.content = generateDocument(700, i, cfg.docSizeBytes);
+            req.tags = {"bench", "access-preseed"};
+            auto res = yams::cli::run_sync(warmClient.streamingAddDocument(req), 30s);
+            if (res && !res.value().hash.empty()) {
+                std::lock_guard<std::mutex> lk(knownHashesMutex);
+                knownHashes.push_back(res.value().hash);
+            }
+        }
+        waitForDrain(warmClient, 30s);
+    }
+
+    const int numWriters = std::max(1, cfg.numClients - std::max(1, cfg.numClients / 3));
+    const int numReaders = std::max(1, cfg.numClients / 3);
+
+    std::atomic<bool> done{false};
+    std::atomic<int> writerDocs{0};
+    std::atomic<int> readerOps{0};
+    std::atomic<int> readerFails{0};
+    std::atomic<int> readerAttempts{0};
+    std::atomic<int> getOps{0};
+    std::atomic<int> catOps{0};
+    std::mutex getLatMutex;
+    std::mutex catLatMutex;
+    std::vector<int64_t> getLatencies;
+    std::vector<int64_t> catLatencies;
+
+    auto pickHash = [&](std::mt19937& rng) -> std::string {
+        std::lock_guard<std::mutex> lk(knownHashesMutex);
+        if (knownHashes.empty()) {
+            return std::string{};
+        }
+        std::uniform_int_distribution<std::size_t> dist(0, knownHashes.size() - 1);
+        return knownHashes[dist(rng)];
+    };
+
+    auto globalStart = std::chrono::steady_clock::now();
+
+    std::vector<std::thread> writerThreads;
+    writerThreads.reserve(numWriters);
+    for (int w = 0; w < numWriters; ++w) {
+        writerThreads.emplace_back([&, w]() {
+            ClientConfig ccfg;
+            ccfg.socketPath = harness.socketPath();
+            ccfg.autoStart = false;
+            ccfg.requestTimeout = 30s;
+            DaemonClient client(ccfg);
+
+            for (int i = 0; i < cfg.docsPerClient; ++i) {
+                AddDocumentRequest req;
+                req.name = "access_writer" + std::to_string(w) + "_" + std::to_string(i) + ".md";
+                req.content = generateDocument(w, i, cfg.docSizeBytes);
+                req.tags = {"bench", "access", "writer-" + std::to_string(w)};
+
+                auto res = yams::cli::run_sync(client.streamingAddDocument(req), 30s);
+                if (res) {
+                    writerDocs.fetch_add(1);
+                    if (!res.value().hash.empty()) {
+                        std::lock_guard<std::mutex> lk(knownHashesMutex);
+                        knownHashes.push_back(res.value().hash);
+                    }
+                }
+            }
+        });
+    }
+
+    std::vector<std::thread> readerThreads;
+    readerThreads.reserve(numReaders);
+    for (int r = 0; r < numReaders; ++r) {
+        readerThreads.emplace_back([&, r]() {
+            ClientConfig ccfg;
+            ccfg.socketPath = harness.socketPath();
+            ccfg.autoStart = false;
+            ccfg.requestTimeout = 10s;
+            DaemonClient client(ccfg);
+
+            std::mt19937 rng(static_cast<unsigned>(r * 1009 + 17));
+            bool doGet = true;
+
+            while (!done.load()) {
+                std::string hash = pickHash(rng);
+                if (hash.empty()) {
+                    std::this_thread::sleep_for(5ms);
+                    continue;
+                }
+                readerAttempts.fetch_add(1);
+
+                // Alternate get (metadata-focused) and cat (content-focused)
+                if (doGet) {
+                    GetRequest req;
+                    req.hash = hash;
+                    req.metadataOnly = true;
+
+                    auto t0 = std::chrono::steady_clock::now();
+                    auto res = yams::cli::run_sync(client.get(req), 10s);
+                    auto t1 = std::chrono::steady_clock::now();
+                    auto latUs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+                    if (res) {
+                        getOps.fetch_add(1);
+                        readerOps.fetch_add(1);
+                        std::lock_guard<std::mutex> lk(getLatMutex);
+                        getLatencies.push_back(latUs);
+                    } else {
+                        readerFails.fetch_add(1);
+                    }
+                } else {
+                    CatRequest req;
+                    req.hash = hash;
+
+                    auto t0 = std::chrono::steady_clock::now();
+                    auto res = yams::cli::run_sync(client.cat(req), 10s);
+                    auto t1 = std::chrono::steady_clock::now();
+                    auto latUs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+                    if (res) {
+                        catOps.fetch_add(1);
+                        readerOps.fetch_add(1);
+                        std::lock_guard<std::mutex> lk(catLatMutex);
+                        catLatencies.push_back(latUs);
+                    } else {
+                        readerFails.fetch_add(1);
+                    }
+                }
+                doGet = !doGet;
+
+                std::this_thread::sleep_for(2ms);
+            }
+        });
+    }
+
+    for (auto& t : writerThreads)
+        t.join();
+    done.store(true);
+
+    for (auto& t : readerThreads)
+        t.join();
+
+    ClientConfig monCfg;
+    monCfg.socketPath = harness.socketPath();
+    monCfg.autoStart = false;
+    monCfg.requestTimeout = 10s;
+    DaemonClient monitorClient(monCfg);
+    bool drained = waitForDrain(monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs));
+
+    auto globalEnd = std::chrono::steady_clock::now();
+    double globalElapsed = std::chrono::duration<double>(globalEnd - globalStart).count();
+
+    auto getStats = PercentileStats::compute(getLatencies);
+    auto catStats = PercentileStats::compute(catLatencies);
+
+    std::cout << "\n=== File Access Under Ingest Load ===\n";
+    std::cout << "  Writers: " << numWriters << " (ingested " << writerDocs.load() << " docs)\n";
+    std::cout << "  Readers: " << numReaders << " (ops=" << readerOps.load()
+              << ", attempts=" << readerAttempts.load() << ", get=" << getOps.load()
+              << ", cat=" << catOps.load() << ", fails=" << readerFails.load() << ")\n";
+    std::cout << "  Wall time: " << std::fixed << std::setprecision(2) << globalElapsed << "s\n";
+    printPercentiles("Get latency", getStats);
+    printPercentiles("Cat latency", catStats);
+    std::cout << "  Queue drained: " << (drained ? "yes" : "NO") << "\n\n";
+
+    CHECK(writerDocs.load() > 0);
+    CHECK(readerOps.load() > 0);
+    CHECK(readerFails.load() < readerAttempts.load());
+    CHECK(drained);
+
+    json record{
+        {"timestamp", isoTimestamp()},
+        {"test", "access_under_ingest_load"},
+        {"num_clients", cfg.numClients},
+        {"num_writers", numWriters},
+        {"num_readers", numReaders},
+        {"docs_per_writer", cfg.docsPerClient},
+        {"doc_size_bytes", cfg.docSizeBytes},
+        {"total_writer_docs", writerDocs.load()},
+        {"reader_attempts", readerAttempts.load()},
+        {"reader_ops", readerOps.load()},
+        {"get_ops", getOps.load()},
+        {"cat_ops", catOps.load()},
+        {"reader_fails", readerFails.load()},
+        {"elapsed_seconds", globalElapsed},
+        {"get_latency", getStats.toJson()},
+        {"cat_latency", catStats.toJson()},
+        {"drained", drained},
+        {"tuning_profile", cfg.tuningProfile},
+    };
+    emitJsonl(cfg.outputPath, record);
+}

@@ -73,7 +73,7 @@ private:
         std::size_t pos{0};
     };
 
-    enum class Mode { None, Search, List, Grep, BatchEmbed, EmbedDocs };
+    enum class Mode { None, Search, List, Grep, BatchEmbed, EmbedDocs, Repair };
 
     std::size_t compute_item_chunk_count(std::size_t approx_bytes_per_item) const;
 
