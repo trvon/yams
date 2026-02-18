@@ -1,6 +1,10 @@
 {
     "C_Cpp.default.configurationProvider": "mesonbuild.mesonbuild",
+<<<<<<< Updated upstream
     "C_Cpp.default.compileCommands": "${workspaceFolder}/builddir/compile_commands.json",
+=======
+    "C_Cpp.default.compileCommands": "/Volumes/picaso/work/tools/yams/builddir/compile_commands.json",
+>>>>>>> Stashed changes
     "mesonbuild.configureOnOpen": false,
     "mesonbuild.buildFolder": "builddir",
     "files.associations": {

@@ -81,6 +81,9 @@ Discover options: `yams --help`
 - `YAMS_CONFIG`: config file override
 - `YAMS_TUNING_PROFILE`: efficient|balanced|aggressive
 - `YAMS_MAX_ACTIVE_CONN`: connection limit
+- `YAMS_IO_THREADS`: dedicated IPC I/O thread count
+- `YAMS_SERVER_MAX_INFLIGHT`: max in-flight requests per connection
+- `YAMS_CONNECTION_LIFETIME_S`: absolute lifetime for main IPC connections (`0` disables)
 - `YAMS_KEEPALIVE_MS`: daemon keepalive interval
 
 ## Performance Tuning
@@ -133,6 +136,29 @@ export YAMS_TUNING_PROFILE=aggressive
 - **SQLite:** WAL enabled, `synchronous=NORMAL` (bulk ingest), `FULL` (steady-state)
 - **FTS5:** Index only queried fields, run `optimize` after bulk ingest
 - **OS limits:** `nofile >= 16384`
+
+### Multi-Client Responsiveness
+
+When daemon responsiveness degrades under many concurrent clients, prefer these overrides first:
+
+```bash
+export YAMS_IO_THREADS=10
+export YAMS_MAX_ACTIVE_CONN=2048
+export YAMS_SERVER_MAX_INFLIGHT=64
+export YAMS_IPC_TIMEOUT_MS=15000
+export YAMS_MAX_IDLE_TIMEOUTS=12
+```
+
+If long-lived main-socket clients are being reaped by lifetime limits, increase or disable lifetime
+enforcement:
+
+```bash
+# 30 minutes
+export YAMS_CONNECTION_LIFETIME_S=1800
+
+# disable absolute lifetime close for main socket connections
+export YAMS_CONNECTION_LIFETIME_S=0
+```
 
 ### Workload-Specific
 

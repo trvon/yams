@@ -202,6 +202,46 @@
 			"command": "docker run --rm -v ${workspaceFolder}:/work -w /work yams/local-ci:ubuntu-24.04 bash -lc 'rm -rf build || true'",
 			"problemMatcher": [],
 			"group": "none"
+		},
+		{
+			"label": "triage: client timeout cases",
+			"type": "shell",
+			"command": "for c in \"Client timeout recovery: Immediate EOF detection and retry\" \"Client timeout recovery: Honors YAMS_IPC_TIMEOUT_MS for idle reap\" \"Client timeout recovery: Streaming request connection handling\" \"Client timeout recovery: Connection pool management\" \"Client timeout recovery: Rapid request cycle\" \"Client timeout recovery: Daemon restart handling\" \"Client timeout recovery: Error message quality\" \"Client timeout recovery: Connection refused when daemon down\" \"Client timeout recovery: Shutdown cancels in-flight request\" \"Client timeout recovery: Tag filtering matrix for list and search\"; do echo \"=== $c\"; ./builddir/tests/integration/daemon/yams_client_timeout_recovery_tests_catch2 \"$c\" >/tmp/ctr_case.log 2>&1; code=$?; echo \"exit=$code\"; if [ $code -ne 0 ]; then tail -n 120 /tmp/ctr_case.log; break; fi; done"
+		},
+		{
+			"label": "triage: tsan signatures",
+			"type": "shell",
+			"command": "rg -n \"SUMMARY: ThreadSanitizer|WARNING: ThreadSanitizer|data race|mutex|signal\" /tmp/ctr_case.log | head -n 120"
+		},
+		{
+			"label": "triage: client-timeout verbose",
+			"type": "shell",
+			"command": "meson test -C builddir \"yams:client_timeout_recovery\" --print-errorlogs --test-args=\"-s\""
+		},
+		{
+			"label": "triage: find failed assertion",
+			"type": "shell",
+			"command": "python3 - <<'PY'\nfrom pathlib import Path\ntext=Path('builddir/meson-logs/testlog.txt').read_text(errors='replace')\nfor pat in ['FAILED:', 'failed:', 'REQUIRE(', 'CHECK(', 'Assertion', 'test cases:']:\n    print('\\n--',pat)\n    for i,line in enumerate(text.splitlines(),1):\n        if pat in line:\n            print(i,line)\n            if pat!='test cases:':\n                pass\n            \nPY"
+		},
+		{
+			"label": "triage: failed-line-context",
+			"type": "shell",
+			"command": "python3 - <<'PY'\nfrom pathlib import Path\nlines=Path('builddir/meson-logs/testlog.txt').read_text(errors='replace').splitlines()\nfor i,l in enumerate(lines):\n    if 'FAILED:' in l:\n        s=max(0,i-6); e=min(len(lines),i+12)\n        print('\\n'.join(f'{j+1}: {lines[j]}' for j in range(s,e)))\n        print('---')\nPY"
+		},
+		{
+			"label": "triage: daemon-shutdown failed line",
+			"type": "shell",
+			"command": "python3 - <<'PY'\nfrom pathlib import Path\nlines=Path('builddir/meson-logs/testlog.txt').read_text(errors='replace').splitlines()\nfor i,l in enumerate(lines):\n    if 'FAILED:' in l:\n        s=max(0,i-8); e=min(len(lines),i+12)\n        print('\\n'.join(f'{j+1}: {lines[j]}' for j in range(s,e)))\n        print('---')\nPY"
+		},
+		{
+			"label": "triage: daemon-shutdown verbose",
+			"type": "shell",
+			"command": "meson test -C builddir \"yams:daemon_shutdown_inflight_ops\" --print-errorlogs --test-args=\"-s\" && python3 - <<'PY'\nfrom pathlib import Path\nlines=Path('builddir/meson-logs/testlog.txt').read_text(errors='replace').splitlines()\nfor i,l in enumerate(lines):\n    if 'FAILED:' in l:\n        s=max(0,i-6); e=min(len(lines),i+12)\n        print('\\n'.join(f'{j+1}: {lines[j]}' for j in range(s,e)))\n        print('---')\nPY"
+		},
+		{
+			"label": "stability: daemon-shutdown repeats",
+			"type": "shell",
+			"command": "for i in 1 2 3; do echo \"RUN $i\"; meson test -C builddir \"yams:daemon_shutdown_inflight_ops\" --print-errorlogs || exit 1; done"
 		}
 	]
 }
