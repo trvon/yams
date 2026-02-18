@@ -7,6 +7,7 @@ yams_extraction = static_library('yams_extraction',
   [
     'text_extractor_factory.cpp',
     'text_extractor_utils.cpp',
+    'title_util.cpp',
     'plain_text_extractor.cpp',
     'html_text_extractor.cpp',
     'format_handlers/format_handler.cpp',

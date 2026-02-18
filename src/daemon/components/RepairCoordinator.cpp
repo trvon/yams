@@ -307,7 +307,13 @@ void RepairCoordinator::stop() {
 bool RepairCoordinator::maintenance_allowed() const {
     if (!activeConnFn_)
         return false;
-    return activeConnFn_() == 0;
+
+    size_t active = activeConnFn_();
+    if (active == 0)
+        return true;
+
+    // If busy, check if we have tokens for cooperative repair
+    return TuneAdvisor::repairTokensBusy() > 0;
 }
 
 void RepairCoordinator::onDocumentAdded(const DocumentAddedEvent& event) {
@@ -456,6 +462,28 @@ void RepairCoordinator::onDocumentRemoved(const DocumentRemovedEvent& event) {
 
     // For now, just log - in future could clean up orphaned embeddings
     spdlog::debug("RepairCoordinator: document {} removed", event.hash);
+
+    if (services_) {
+        auto vectorDb = services_->getVectorDatabase();
+        if (vectorDb) {
+            // Spawn a detached task to cleanup vectors without blocking the event bus
+            boost::asio::co_spawn(
+                RepairThreadPool::instance().get_executor(),
+                [vectorDb, hash = event.hash]() -> boost::asio::awaitable<void> {
+                    try {
+                        // vectorDb is captured by value (shared_ptr), ensuring it stays alive
+                        if (vectorDb->deleteVectorsByDocument(hash)) {
+                            spdlog::debug("RepairCoordinator: removed vectors for {}", hash);
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::warn("RepairCoordinator: failed to remove vectors for {}: {}", hash,
+                                     e.what());
+                    }
+                    co_return;
+                },
+                boost::asio::detached);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

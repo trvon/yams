@@ -309,6 +309,7 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
         cfg.startedFlag->store(false, std::memory_order_release);
     }
     spdlog::info("[PostIngestQueue] {} poller exited", cfg.stageName);
+    co_return;
 }
 
 } // namespace yams::daemon

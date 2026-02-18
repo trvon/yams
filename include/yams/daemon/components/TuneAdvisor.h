@@ -479,8 +479,17 @@ public:
     }
 
     // Maintenance tokens (concurrency) when daemon is idle. Default 1.
+    // Maintenance tokens (concurrency) when daemon is idle. Default scales with profile.
+    // Efficient: 1, Balanced: 2, Aggressive: 4
     static uint32_t repairTokensIdle() {
         uint32_t def = 1;
+        double scale = profileScale();
+        if (scale >= 1.0) {
+            def = 4;
+        } else if (scale >= 0.5) {
+            def = 2;
+        }
+
         if (const char* s = std::getenv("YAMS_REPAIR_TOKENS_IDLE")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
@@ -490,9 +499,14 @@ public:
         }
         return def;
     }
-    // Maintenance tokens (concurrency) when daemon is busy (has active connections). Default 0.
+    // Maintenance tokens (concurrency) when daemon is busy (has active connections).
+    // Default 0, except Aggressive mode which keeps 1 worker to ensure catch-up.
     static uint32_t repairTokensBusy() {
         uint32_t def = 0;
+        if (profileScale() >= 1.0) {
+            def = 1;
+        }
+
         if (const char* s = std::getenv("YAMS_REPAIR_TOKENS_BUSY")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));

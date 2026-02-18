@@ -68,15 +68,34 @@ static void mergePendingPostIngest(PendingPostIngestByMime& target,
     }
 }
 
-static std::size_t resolveIngestParallelism(WorkCoordinator* coordinator, bool underPressure) {
-    std::size_t parallelism = 0;
-    if (const char* env = std::getenv("YAMS_INGEST_PARALLELISM"); env && *env) {
-        try {
-            parallelism = static_cast<std::size_t>(std::stoul(env));
-        } catch (...) {
-            parallelism = 0;
+static std::size_t getEnvIngestParallelism() {
+    static const std::size_t val = []() {
+        if (const char* env = std::getenv("YAMS_INGEST_PARALLELISM"); env && *env) {
+            try {
+                return static_cast<std::size_t>(std::stoul(env));
+            } catch (...) {
+            }
         }
-    }
+        return std::size_t{0};
+    }();
+    return val;
+}
+
+static bool getEnvIngestCorrectnessMode() {
+    static const bool val = []() {
+        if (const char* s = std::getenv("YAMS_INGEST_CORRECTNESS_MODE")) {
+            std::string value(s);
+            std::transform(value.begin(), value.end(), value.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return !(value == "0" || value == "false" || value == "no" || value == "off");
+        }
+        return true;
+    }();
+    return val;
+}
+
+static std::size_t resolveIngestParallelism(WorkCoordinator* coordinator, bool underPressure) {
+    std::size_t parallelism = getEnvIngestParallelism();
 
     if (parallelism == 0) {
         const std::size_t workers = coordinator ? coordinator->getWorkerCount() : 0;
@@ -87,13 +106,7 @@ static std::size_t resolveIngestParallelism(WorkCoordinator* coordinator, bool u
         }
     }
 
-    bool correctnessMode = true;
-    if (const char* s = std::getenv("YAMS_INGEST_CORRECTNESS_MODE")) {
-        std::string value(s);
-        std::transform(value.begin(), value.end(), value.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        correctnessMode = !(value == "0" || value == "false" || value == "no" || value == "off");
-    }
+    const bool correctnessMode = getEnvIngestCorrectnessMode();
 
     const std::size_t maxParallel = correctnessMode ? 16 : 8;
     parallelism = std::clamp<std::size_t>(parallelism, 1, maxParallel);
@@ -168,13 +181,7 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
     auto idleDelay = std::chrono::milliseconds(5);
-    bool correctnessMode = true;
-    if (const char* s = std::getenv("YAMS_INGEST_CORRECTNESS_MODE")) {
-        std::string value(s);
-        std::transform(value.begin(), value.end(), value.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        correctnessMode = !(value == "0" || value == "false" || value == "no" || value == "off");
-    }
+    const bool correctnessMode = getEnvIngestCorrectnessMode();
 
     auto maxIdleDelay = []() {
         auto snap = TuningSnapshotRegistry::instance().get();

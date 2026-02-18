@@ -13,6 +13,7 @@ struct GradientLimiterConfig {
     double initialLimit = 4.0;     ///< Starting concurrency
     double minLimit = 1.0;         ///< Floor - never below this
     double maxLimit = 32.0;        ///< Ceiling - never above this
+    double minGradient = 0.5;      ///< Minimum gradient multiplier (floor for congestion reduction)
     double smoothingAlpha = 0.2;   ///< Short-window EMA alpha
     double longWindowAlpha = 0.05; ///< Long-window EMA alpha (drift correction)
     double tolerance = 1.5;        ///< Queue tolerance multiplier

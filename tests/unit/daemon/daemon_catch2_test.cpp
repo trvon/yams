@@ -20,6 +20,7 @@ using nlohmann::json;
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/proto_serializer.h>
+#include <yams/compat/unistd.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_index_manager.h>
@@ -27,16 +28,10 @@ using nlohmann::json;
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
-#include <process.h>
 #include <share.h>
 using pid_t = int;
-#define getpid _getpid
-static int setenv(const char* name, const char* value, int overwrite) {
-    return _putenv_s(name, value);
-}
 #else
 #include <signal.h>
-#include <unistd.h>
 #include <sys/wait.h>
 #endif
 

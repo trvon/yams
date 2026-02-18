@@ -346,10 +346,30 @@ inline std::string appendGpuProvider(Ort::SessionOptions& opts,
             cuda_opts["enable_cuda_graph"] = detail::envOr("YAMS_CUDA_GRAPH", "0");
             cuda_opts["use_tf32"] = "1";
 
-            // Optional memory limit override
-            std::string memLimit = detail::envOr("YAMS_CUDA_MEM_LIMIT", "");
-            if (!memLimit.empty()) {
-                cuda_opts["gpu_mem_limit"] = memLimit;
+            // Profile-aware VRAM budgeting. If YAMS_CUDA_MEM_LIMIT is set, it always wins.
+            // Otherwise, set a conservative fraction of total VRAM so we don't default to "use 100%
+            // GPU".
+            {
+                if (auto overrideLimit = detail::envSizeTOpt("YAMS_CUDA_MEM_LIMIT")) {
+                    cuda_opts["gpu_mem_limit"] = std::to_string(*overrideLimit);
+                } else {
+                    const auto& gpu = yams::daemon::resource::detectGpu();
+                    if (gpu.detected && gpu.vramBytes > 0 &&
+                        gpu.vramBytes <=
+                            static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+                        const double frac = detail::profileGpuMemFraction();
+                        uint64_t budget = static_cast<uint64_t>(static_cast<double>(gpu.vramBytes) *
+                                                                std::clamp(frac, 0.0, 1.0));
+                        constexpr uint64_t kMinBudgetBytes = 256ull * 1024ull * 1024ull;
+                        budget = std::clamp(budget, kMinBudgetBytes, gpu.vramBytes);
+                        cuda_opts["gpu_mem_limit"] = std::to_string(static_cast<size_t>(budget));
+                        spdlog::debug(
+                            "[ONNX] CUDA mem budget: {:.0f}% of VRAM ({} bytes / {} bytes) "
+                            "[profile_scale={:.2f}]",
+                            frac * 100.0, budget, gpu.vramBytes,
+                            yams::daemon::TuneAdvisor::profileScale());
+                    }
+                }
             }
 
             opts.AppendExecutionProvider("CUDA", cuda_opts);

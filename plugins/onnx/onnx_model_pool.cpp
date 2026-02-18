@@ -128,27 +128,42 @@ int envIntOr(const char* name, int fallback) {
     return fallback;
 }
 
-bool migraphxProcessLockEnabled() {
+bool gpuProcessLockEnabled() {
+    if (const char* v = std::getenv("YAMS_GPU_PROCESS_LOCK")) {
+        return envTruthy(v);
+    }
     if (const char* v = std::getenv("YAMS_MIGRAPHX_PROCESS_LOCK")) {
         return envTruthy(v);
     }
     return true;
 }
 
-std::filesystem::path resolveMigraphxProcessLockPath() {
+std::filesystem::path resolveGpuProcessLockPath() {
+    if (const char* configured = std::getenv("YAMS_GPU_LOCK_PATH"); configured && *configured) {
+        std::filesystem::path path(configured);
+        if (path.extension() == ".lock") {
+            return path;
+        }
+        auto devEnv = std::getenv("YAMS_GPU_DEVICE_ID");
+        int deviceId = devEnv ? std::stoi(devEnv) : 0;
+        return path / ("yams-gpu-device-" + std::to_string(deviceId) + ".lock");
+    }
+
     if (const char* configured = std::getenv("YAMS_MIGRAPHX_LOCK_PATH");
         configured && *configured) {
         std::filesystem::path path(configured);
         if (path.extension() == ".lock") {
             return path;
         }
-        const int deviceId = envIntOr("YAMS_MIGRAPHX_DEVICE_ID", 0);
-        return path / ("migraphx-device-" + std::to_string(deviceId) + ".lock");
+        return path / "migraphx.lock"; // Fallback legacy behavior if needed, or just standard
     }
 
-    const int deviceId = envIntOr("YAMS_MIGRAPHX_DEVICE_ID", 0);
+    int deviceId = envIntOr("YAMS_GPU_DEVICE_ID", -1);
+    if (deviceId < 0) {
+        deviceId = envIntOr("YAMS_MIGRAPHX_DEVICE_ID", 0);
+    }
     return std::filesystem::temp_directory_path() /
-           ("yams-migraphx-device-" + std::to_string(deviceId) + ".lock");
+           ("yams-gpu-device-" + std::to_string(deviceId) + ".lock");
 }
 
 class ScopedProcessFileLock {
@@ -220,7 +235,7 @@ private:
 #endif
 };
 
-size_t& migraphxProcessLockDepth() {
+size_t& gpuProcessLockDepth() {
     static thread_local size_t depth = 0;
     return depth;
 }
@@ -494,24 +509,31 @@ public:
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         const bool usesMigraphxProvider = providerLower.find("migraphx") != std::string::npos;
 
-        std::unique_lock<std::recursive_mutex> migraphxLoadLock;
-        std::unique_ptr<ScopedProcessFileLock> migraphxProcessLoadLock;
-        if (usesMigraphxProvider) {
-            // ROCm/HSA provider initialization and first session materialization can race when
-            // multiple sessions for the same model are created concurrently. Serialize MIGraphX
-            // load paths to avoid non-deterministic GPU faults during startup.
-            static std::recursive_mutex* g_migraphx_load_mutex = new std::recursive_mutex();
-            migraphxLoadLock = std::unique_lock<std::recursive_mutex>(*g_migraphx_load_mutex);
-            spdlog::debug("[ONNX] MIGraphX load gate acquired for '{}'", modelName_);
+        std::unique_lock<std::recursive_mutex> gpuLoadLock;
+        std::unique_ptr<ScopedProcessFileLock> gpuProcessLoadLock;
 
-            if (migraphxProcessLockEnabled()) {
-                const auto processLockPath = resolveMigraphxProcessLockPath();
-                migraphxProcessLoadLock = std::make_unique<ScopedProcessFileLock>(processLockPath);
-                if (migraphxProcessLoadLock->locked()) {
-                    spdlog::debug("[ONNX] MIGraphX process load lock acquired: {}",
+        bool usesGpuProvider = false;
+        if (providerLower.find("migraphx") != std::string::npos ||
+            providerLower.find("cuda") != std::string::npos ||
+            providerLower.find("dml") != std::string::npos ||
+            providerLower.find("directml") != std::string::npos) {
+            usesGpuProvider = true;
+        }
+
+        if (usesGpuProvider) {
+            // Serialize GPU load paths to avoid non-deterministic GPU faults during startup.
+            static std::recursive_mutex* g_gpu_load_mutex = new std::recursive_mutex();
+            gpuLoadLock = std::unique_lock<std::recursive_mutex>(*g_gpu_load_mutex);
+            spdlog::debug("[ONNX] GPU load gate acquired for '{}'", modelName_);
+
+            if (gpuProcessLockEnabled()) {
+                const auto processLockPath = resolveGpuProcessLockPath();
+                gpuProcessLoadLock = std::make_unique<ScopedProcessFileLock>(processLockPath);
+                if (gpuProcessLoadLock->locked()) {
+                    spdlog::debug("[ONNX] GPU process load lock acquired: {}",
                                   processLockPath.string());
                 } else {
-                    spdlog::warn("[ONNX] Failed to acquire MIGraphX process load lock: {}",
+                    spdlog::warn("[ONNX] Failed to acquire GPU process load lock: {}",
                                  processLockPath.string());
                 }
             }
@@ -867,20 +889,20 @@ private:
         actualExecutionProvider_ = onnx_util::appendGpuProvider(*sessionOptions_, cacheDir);
     }
 
-    struct MigraphxInferenceGuard {
+    struct GpuInferenceGuard {
         std::unique_lock<std::recursive_mutex> threadLock;
         std::unique_ptr<ScopedProcessFileLock> processLock;
         bool depthIncremented{false};
 
-        MigraphxInferenceGuard() = default;
-        MigraphxInferenceGuard(const MigraphxInferenceGuard&) = delete;
-        MigraphxInferenceGuard& operator=(const MigraphxInferenceGuard&) = delete;
-        MigraphxInferenceGuard(MigraphxInferenceGuard&&) noexcept = default;
-        MigraphxInferenceGuard& operator=(MigraphxInferenceGuard&&) noexcept = default;
+        GpuInferenceGuard() = default;
+        GpuInferenceGuard(const GpuInferenceGuard&) = delete;
+        GpuInferenceGuard& operator=(const GpuInferenceGuard&) = delete;
+        GpuInferenceGuard(GpuInferenceGuard&&) noexcept = default;
+        GpuInferenceGuard& operator=(GpuInferenceGuard&&) noexcept = default;
 
-        ~MigraphxInferenceGuard() {
+        ~GpuInferenceGuard() {
             if (depthIncremented) {
-                auto& depth = migraphxProcessLockDepth();
+                auto& depth = gpuProcessLockDepth();
                 if (depth > 0) {
                     --depth;
                 }
@@ -888,34 +910,41 @@ private:
         }
     };
 
-    MigraphxInferenceGuard acquireMigraphxInferenceLock() const {
-        MigraphxInferenceGuard guard;
+    GpuInferenceGuard acquireGpuInferenceLock() const {
+        GpuInferenceGuard guard;
         std::string providerLower = actualExecutionProvider_;
         std::transform(providerLower.begin(), providerLower.end(), providerLower.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        const bool usesMigraphxProvider = providerLower.find("migraphx") != std::string::npos;
-        if (!usesMigraphxProvider) {
+
+        bool usesGpuProvider = false;
+        if (providerLower.find("migraphx") != std::string::npos ||
+            providerLower.find("cuda") != std::string::npos ||
+            providerLower.find("dml") != std::string::npos ||
+            providerLower.find("directml") != std::string::npos) {
+            usesGpuProvider = true;
+        }
+        if (!usesGpuProvider) {
             return guard;
         }
 
-        static std::recursive_mutex* g_migraphx_infer_mutex = new std::recursive_mutex();
-        guard.threadLock = std::unique_lock<std::recursive_mutex>(*g_migraphx_infer_mutex);
+        static std::recursive_mutex* g_gpu_infer_mutex = new std::recursive_mutex();
+        guard.threadLock = std::unique_lock<std::recursive_mutex>(*g_gpu_infer_mutex);
 
-        if (!migraphxProcessLockEnabled()) {
+        if (!gpuProcessLockEnabled()) {
             return guard;
         }
 
-        auto& depth = migraphxProcessLockDepth();
+        auto& depth = gpuProcessLockDepth();
         ++depth;
         guard.depthIncremented = true;
         if (depth > 1) {
             return guard;
         }
 
-        const auto processLockPath = resolveMigraphxProcessLockPath();
+        const auto processLockPath = resolveGpuProcessLockPath();
         guard.processLock = std::make_unique<ScopedProcessFileLock>(processLockPath);
         if (!guard.processLock->locked()) {
-            spdlog::warn("[ONNX] Failed to acquire MIGraphX process inference lock: {}",
+            spdlog::warn("[ONNX] Failed to acquire GPU process inference lock: {}",
                          processLockPath.string());
             guard.processLock.reset();
         }
@@ -931,9 +960,8 @@ private:
         return ((len + alignment - 1) / alignment) * alignment;
     }
 
-    // Helper that performs tokenization + ONNX run + pooling for single input
     Result<std::vector<float>> runOnnx(const std::string& t) {
-        auto migraphxInferenceLock = acquireMigraphxInferenceLock();
+        auto gpuInferenceLock = acquireGpuInferenceLock();
 
         const size_t seq_len = maxSequenceLength_ > 0 ? maxSequenceLength_ : 512;
         auto tokens = preprocessor_.tokenize(t);
@@ -1082,9 +1110,8 @@ private:
         return Error{ErrorCode::InvalidData, "Unexpected output tensor rank"};
     }
 
-    // Helper that performs batched tokenization + single ONNX run + pooling
     Result<std::vector<std::vector<float>>> runOnnxBatch(const std::vector<std::string>& texts) {
-        auto migraphxInferenceLock = acquireMigraphxInferenceLock();
+        auto gpuInferenceLock = acquireGpuInferenceLock();
 
         if (texts.empty())
             return std::vector<std::vector<float>>{};

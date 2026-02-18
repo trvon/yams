@@ -14,9 +14,7 @@
 #include <thread>
 #include <vector>
 
-#ifndef _WIN32
-#include <unistd.h>
-#endif
+#include <yams/compat/unistd.h>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -38,14 +36,7 @@ namespace fs = std::filesystem;
 inline std::string uniqueSuffix() {
     static std::atomic<int> counter{0};
     auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-    return std::to_string(
-#ifdef _WIN32
-               _getpid()
-#else
-               getpid()
-#endif
-                   ) +
-           "_" + std::to_string(now) + "_" + std::to_string(counter++);
+    return std::to_string(getpid()) + "_" + std::to_string(now) + "_" + std::to_string(counter++);
 }
 
 /**

@@ -10,16 +10,7 @@
 #include <string>
 #include <thread>
 
-#ifdef _WIN32
-#include <process.h>
-using pid_t = int;
-#define getpid _getpid
-static int setenv(const char* name, const char* value, int overwrite) {
-    return _putenv_s(name, value);
-}
-#else
-#include <unistd.h>
-#endif
+#include <yams/compat/unistd.h>
 
 namespace yams::daemon::bench {
 

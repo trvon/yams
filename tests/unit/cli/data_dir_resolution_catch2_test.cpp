@@ -12,11 +12,7 @@
 #include <fstream>
 #include <string>
 
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
+#include <yams/compat/unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -47,21 +43,9 @@ public:
     ScopedEnv& operator=(const ScopedEnv&) = delete;
 
 private:
-    void set(const char* value) {
-#ifdef _WIN32
-        _putenv_s(name_.c_str(), value);
-#else
-        setenv(name_.c_str(), value, 1);
-#endif
-    }
+    void set(const char* value) { setenv(name_.c_str(), value, 1); }
 
-    void unset() {
-#ifdef _WIN32
-        _putenv_s(name_.c_str(), "");
-#else
-        unsetenv(name_.c_str());
-#endif
-    }
+    void unset() { unsetenv(name_.c_str()); }
 
     std::string name_;
     std::string oldValue_;
@@ -80,11 +64,7 @@ public:
 
     ~ScopedEnvUnset() {
         if (hadValue_) {
-#ifdef _WIN32
-            _putenv_s(name_.c_str(), oldValue_.c_str());
-#else
             setenv(name_.c_str(), oldValue_.c_str(), 1);
-#endif
         }
     }
 
@@ -92,13 +72,7 @@ public:
     ScopedEnvUnset& operator=(const ScopedEnvUnset&) = delete;
 
 private:
-    void unset() {
-#ifdef _WIN32
-        _putenv_s(name_.c_str(), "");
-#else
-        unsetenv(name_.c_str());
-#endif
-    }
+    void unset() { unsetenv(name_.c_str()); }
 
     std::string name_;
     std::string oldValue_;
@@ -111,12 +85,7 @@ private:
 class TempConfig {
 public:
     explicit TempConfig(const std::string& content) {
-        auto pid =
-#ifdef _WIN32
-            _getpid();
-#else
-            getpid();
-#endif
+        auto pid = getpid();
         tempDir_ = fs::temp_directory_path() / ("yams_test_" + std::to_string(pid));
         fs::create_directories(tempDir_);
         configPath_ = tempDir_ / "config.toml";

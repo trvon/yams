@@ -10,12 +10,21 @@
 #include <sstream>
 #include <string>
 #include <thread>
-#include <sys/wait.h>
+
+#include <yams/compat/unistd.h>
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
 namespace {
+
+bool setEnvValue(const std::string& key, const std::string& value) {
+    return setenv(key.c_str(), value.c_str(), 1) == 0;
+}
+
+bool unsetEnvValue(const std::string& key) {
+    return unsetenv(key.c_str()) == 0;
+}
 
 struct CommandResult {
     int exitCode = -1;
@@ -29,14 +38,14 @@ public:
             hadOld_ = true;
             oldValue_ = cur;
         }
-        setenv(key.c_str(), value.c_str(), 1);
+        setEnvValue(key, value);
     }
 
     ~ScopedEnvVar() {
         if (hadOld_) {
-            setenv(key_.c_str(), oldValue_.c_str(), 1);
+            setEnvValue(key_, oldValue_);
         } else {
-            unsetenv(key_.c_str());
+            unsetEnvValue(key_);
         }
     }
 
@@ -52,7 +61,11 @@ private:
 CommandResult runCommandCapture(const std::string& cmd) {
     CommandResult result;
     std::array<char, 4096> buffer{};
+#ifdef _WIN32
+    FILE* pipe = _popen((cmd + " 2>&1").c_str(), "r");
+#else
     FILE* pipe = popen((cmd + " 2>&1").c_str(), "r");
+#endif
     if (!pipe) {
         result.exitCode = -1;
         result.output = "popen failed";
@@ -63,17 +76,34 @@ CommandResult runCommandCapture(const std::string& cmd) {
         result.output.append(buffer.data());
     }
 
-    int status = pclose(pipe);
+    int status = 0;
+#ifdef _WIN32
+    status = _pclose(pipe);
+#else
+    status = pclose(pipe);
+#endif
     if (status == -1) {
         result.exitCode = -1;
     } else {
-        result.exitCode = WEXITSTATUS(status);
+        result.exitCode = status;
     }
 
     return result;
 }
 
 std::string shellQuote(const std::string& value) {
+#ifdef _WIN32
+    std::string quoted = "\"";
+    for (char c : value) {
+        if (c == '"') {
+            quoted += "\\\"";
+        } else {
+            quoted.push_back(c);
+        }
+    }
+    quoted += '"';
+    return quoted;
+#else
     std::string quoted = "'";
     for (char c : value) {
         if (c == '\'') {
@@ -84,11 +114,16 @@ std::string shellQuote(const std::string& value) {
     }
     quoted += "'";
     return quoted;
+#endif
 }
 
 std::optional<fs::path> findYamsBinary() {
     if (const char* buildRoot = std::getenv("MESON_BUILD_ROOT")) {
+#ifdef _WIN32
+        fs::path candidate = fs::path(buildRoot) / "src/cli/yams.exe";
+#else
         fs::path candidate = fs::path(buildRoot) / "src/cli/yams";
+#endif
         if (fs::exists(candidate)) {
             return candidate;
         }

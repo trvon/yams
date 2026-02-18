@@ -15,9 +15,9 @@
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/client/ipc_failure.h>
+#include <yams/compat/unistd.h>
 
 #ifndef _WIN32
-#include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #endif

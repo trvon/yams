@@ -124,7 +124,7 @@ void GradientLimiter::updateLimit(double rttNanos, uint32_t inFlightSnapshot) {
     if (newSmoothed > 0.0) {
         double gradientLong = config_.tolerance * newLong / newSmoothed;
         double gradientMin = config_.tolerance * currentMin / newSmoothed;
-        gradient = std::clamp(std::min(gradientLong, gradientMin), 0.5, 1.0);
+        gradient = std::clamp(std::min(gradientLong, gradientMin), config_.minGradient, 1.0);
     } else {
         gradient = 1.0;
     }

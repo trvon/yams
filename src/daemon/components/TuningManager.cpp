@@ -1088,7 +1088,18 @@ void TuningManager::tick_once() {
     } catch (...) {
     }
 
-    // RepairCoordinator tuning (tokens/batch) centralized here
+    // RepairCoordinator tuning (tokens/batch) centralized here.
+    //
+    // Cooperative repair: instead of a binary idle=1/busy=0 token scheme,
+    // allow repair to continue at reduced concurrency while the
+    // PostIngestQueue is actively processing.  This prevents the
+    // repair-then-flood pattern that causes governor oscillation.
+    //
+    // Token selection priority:
+    //   Emergency/Critical pressure → 0 (governor already blocked work)
+    //   busyHeld + PostIngestQueue active → repairTokensDuringIngest() (cooperative)
+    //   busyHeld (no PIQ) → repairTokensBusy() (legacy: 0)
+    //   idle → repairTokensIdle() (full repair throughput)
     try {
         if (setRepair_) {
             using clock = std::chrono::steady_clock;
@@ -1115,9 +1126,33 @@ void TuningManager::tick_once() {
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - repairReadySince_)
                         .count() >= readyHold;
 
-            uint32_t tokens =
-                busyHeld ? TuneAdvisor::repairTokensBusy() : TuneAdvisor::repairTokensIdle();
+            uint32_t tokens = TuneAdvisor::repairTokensIdle();
+            if (busyHeld) {
+                // Check if PostIngestQueue is actively processing — if so, allow
+                // cooperative repair tokens instead of fully halting.
+                bool piqActive = false;
+                if (sm_) {
+                    if (auto* pq = sm_->getPostIngestQueue()) {
+                        piqActive = pq->started() && (pq->size() > 0 || pq->totalInFlight() > 0);
+                    }
+                }
+                // Under Critical/Emergency pressure the governor has already
+                // paused stages and blocked admission; halt repair entirely.
+                if (govSnap.level >= ResourcePressureLevel::Critical) {
+                    tokens = 0;
+                } else if (piqActive) {
+                    tokens = TuneAdvisor::repairTokensBusy();
+                } else {
+                    tokens = TuneAdvisor::repairTokensBusy();
+                }
+            }
             uint32_t batch = TuneAdvisor::repairMaxBatch();
+
+            // Under Warning pressure, reduce batch size to slow repair throughput
+            // proportionally, giving more bus capacity to the ingestion pipeline.
+            if (govSnap.level >= ResourcePressureLevel::Warning && batch > 1) {
+                batch = std::max<uint32_t>(1, batch / 2);
+            }
 
             // Rate limiting: cap batches per second; if exceeded, force tokens=0 this window
             uint32_t maxPerSec = TuneAdvisor::repairMaxBatchesPerSec();

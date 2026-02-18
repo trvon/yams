@@ -3,6 +3,7 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -499,6 +500,53 @@ RepairService::backgroundLoop(std::shared_ptr<ShutdownState> shutdownState) {
         auto [missingEmbeddings, missingFts5] = detectMissingWork(batch);
         auto meta_repo = services_ ? services_->getMetadataRepo() : nullptr;
 
+        // Check ResourceGovernor before queuing repair work.
+        // Under elevated pressure the ingestion pipeline is already competing for
+        // embed/FTS5 channel capacity; repair should yield to avoid amplifying
+        // the pressure that caused the governor to throttle in the first place.
+        auto& governor = ResourceGovernor::instance();
+        const auto pressureLevel = governor.getPressureLevel();
+        if (pressureLevel >= ResourcePressureLevel::Critical) {
+            // Re-enqueue the batch so it is not lost; back off and retry later.
+            {
+                std::lock_guard<std::mutex> lk(queueMutex_);
+                for (auto& h : batch) {
+                    if (pendingSet_.find(h) == pendingSet_.end()) {
+                        pendingSet_.insert(h);
+                        pendingDocuments_.push(std::move(h));
+                    }
+                }
+                if (state_)
+                    state_->stats.repairQueueDepth.store(
+                        static_cast<uint64_t>(pendingDocuments_.size()));
+            }
+            spdlog::debug("RepairService: deferring batch ({} docs) under {} pressure",
+                          batch.size(), pressureLevelName(pressureLevel));
+            timer.expires_after(std::chrono::milliseconds(500));
+            co_await timer.async_wait(boost::asio::use_awaitable);
+            continue;
+        }
+
+        // Under Warning pressure, reduce batch sizes so repair cooperates with
+        // the ingestion pipeline instead of competing for channel capacity.
+        if (pressureLevel >= ResourcePressureLevel::Warning) {
+            const size_t reducedCap = std::max<size_t>(1, missingEmbeddings.size() / 2);
+            if (missingEmbeddings.size() > reducedCap) {
+                // Put excess back into the pending queue for the next iteration.
+                std::lock_guard<std::mutex> lk(queueMutex_);
+                for (size_t i = reducedCap; i < missingEmbeddings.size(); ++i) {
+                    if (pendingSet_.find(missingEmbeddings[i]) == pendingSet_.end()) {
+                        pendingSet_.insert(missingEmbeddings[i]);
+                        pendingDocuments_.push(missingEmbeddings[i]);
+                    }
+                }
+                missingEmbeddings.resize(reducedCap);
+                if (state_)
+                    state_->stats.repairQueueDepth.store(
+                        static_cast<uint64_t>(pendingDocuments_.size()));
+            }
+        }
+
         // Queue embedding repair jobs
         if (!missingEmbeddings.empty()) {
             if (state_)
@@ -532,10 +580,13 @@ RepairService::backgroundLoop(std::shared_ptr<ShutdownState> shutdownState) {
             }
         }
 
-        // Queue FTS5 jobs
-        bool allowFts5 = maintenanceAllowed() ||
-                         (shutdownState->config.allowDegraded && activeConnFn_ &&
-                          activeConnFn_() <= shutdownState->config.maxActiveDuringDegraded);
+        // Queue FTS5 jobs — also gated by governor admission control.
+        // FTS5 indexing is less resource-intensive than embedding but still adds
+        // I/O pressure; skip under Critical/Emergency to let ingestion proceed.
+        bool allowFts5 = (pressureLevel < ResourcePressureLevel::Critical) &&
+                         (maintenanceAllowed() ||
+                          (shutdownState->config.allowDegraded && activeConnFn_ &&
+                           activeConnFn_() <= shutdownState->config.maxActiveDuringDegraded));
         if (!missingFts5.empty() && allowFts5) {
             InternalEventBus::Fts5Job ftsJob{
                 .hashes = missingFts5,
