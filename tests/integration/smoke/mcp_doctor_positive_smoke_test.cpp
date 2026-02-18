@@ -64,6 +64,24 @@ Result<void> wait_for_daemon_ready(const std::filesystem::path& socketPath) {
     return Error{yams::ErrorCode::Timeout,
                  std::string("daemon never reached ready state: ") + statusErr};
 }
+
+std::filesystem::path resolve_test_prompts_dir() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+
+    const fs::path cwd = fs::current_path(ec);
+    const fs::path repoPromptsFromBuild = cwd / ".." / "docs" / "prompts";
+    if (fs::exists(repoPromptsFromBuild, ec)) {
+        return fs::weakly_canonical(repoPromptsFromBuild, ec);
+    }
+
+    const fs::path repoPromptsFromSource = cwd / "docs" / "prompts";
+    if (fs::exists(repoPromptsFromSource, ec)) {
+        return fs::weakly_canonical(repoPromptsFromSource, ec);
+    }
+
+    return cwd;
+}
 } // namespace
 
 // Linux-only: relies on AF_UNIX socket semantics and short XDG_RUNTIME_DIR
@@ -153,12 +171,15 @@ protected:
         // Ensure clean environment for each test
         ::unsetenv("YAMS_SOCKET_PATH");
         ::unsetenv("YAMS_DAEMON_SOCKET");
+        const auto promptsDir = resolve_test_prompts_dir();
+        ::setenv("YAMS_MCP_PROMPTS_DIR", promptsDir.string().c_str(), 1);
     }
 
     void TearDown() override {
         // Cleanup environment
         ::unsetenv("YAMS_SOCKET_PATH");
         ::unsetenv("YAMS_DAEMON_SOCKET");
+        ::unsetenv("YAMS_MCP_PROMPTS_DIR");
     }
 };
 
@@ -203,9 +224,12 @@ protected:
         // Set daemon socket environment variables
         ::setenv("YAMS_SOCKET_PATH", socketPath().string().c_str(), 1);
         ::setenv("YAMS_DAEMON_SOCKET", socketPath().string().c_str(), 1);
+        const auto promptsDir = resolve_test_prompts_dir();
+        ::setenv("YAMS_MCP_PROMPTS_DIR", promptsDir.string().c_str(), 1);
     }
 
     void TearDown() override {
+        ::unsetenv("YAMS_MCP_PROMPTS_DIR");
         // Ensure daemon is stopped before base cleanup
         stopDaemon();
 

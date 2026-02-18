@@ -393,6 +393,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
 
         REQUIRE(queue->processed() == 1);
         REQUIRE(queue->failed() == 0);
+        REQUIRE(queue->enrichInFlight() == 0);
         REQUIRE(metadataRepo->contentInserted());
 
         auto content = metadataRepo->lastContent();
@@ -596,6 +597,7 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
 
         REQUIRE(static_cast<int>(pq->processed()) == expected);
         REQUIRE(pq->failed() == 0);
+        REQUIRE(pq->enrichInFlight() == 0);
 
         pq.reset();
     }

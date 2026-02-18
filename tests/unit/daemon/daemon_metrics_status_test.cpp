@@ -191,6 +191,9 @@ TEST_CASE("StatusResponse: Protocol serialization", "[daemon][status][protocol]"
         s.lifecycleState = "starting";
         s.lastError = "boom";
         s.requestCounts["worker_threads"] = 4;
+        s.requestCounts["enrich_inflight"] = 3;
+        s.requestCounts["enrich_queue_depth"] = 11;
+        s.requestCounts["post_enrich_limit"] = 5;
 
         // FSM-exported fields
         s.requestCounts["service_fsm_state"] = 3;
@@ -232,6 +235,9 @@ TEST_CASE("StatusResponse: Protocol serialization", "[daemon][status][protocol]"
         // Verify FSM state counts
         REQUIRE(decoded.requestCounts.at("worker_threads") == 4);
         REQUIRE(decoded.requestCounts.at("service_fsm_state") == 3);
+        REQUIRE(decoded.requestCounts.at("enrich_inflight") == 3);
+        REQUIRE(decoded.requestCounts.at("enrich_queue_depth") == 11);
+        REQUIRE(decoded.requestCounts.at("post_enrich_limit") == 5);
 
         // Verify readiness flags
         REQUIRE(decoded.readinessStates.at("embedding_ready") == false);
@@ -316,9 +322,8 @@ TEST_CASE("DaemonMetrics: FSM state export", "[daemon][metrics][fsm]") {
 
     SECTION("Plugin host FSM state is accessible") {
         auto snapshot = svc.getPluginHostFsmSnapshot();
-        // Plugin host starts in NotInitialized state until PluginManager is created
-        // ServiceManager returns fallback PluginHostSnapshot{} when pluginManager_ is null
-        REQUIRE(snapshot.state == PluginHostState::NotInitialized);
+        // PluginManager initializes host FSM to Ready (with zero plugins loaded)
+        REQUIRE(snapshot.state == PluginHostState::Ready);
     }
 }
 

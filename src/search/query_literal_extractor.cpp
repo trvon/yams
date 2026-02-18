@@ -63,7 +63,6 @@ void QueryLiteralExtractor::collectTerms(const QueryNode* node, std::vector<std:
         }
 
         case QueryNodeType::Not: {
-            auto* notNode = static_cast<const NotNode*>(node);
             // Skip NOT terms - they're exclusions, not useful for pre-filtering
             break;
         }

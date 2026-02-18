@@ -23,6 +23,8 @@
 #include <shared_mutex>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace yams::daemon {
 
@@ -167,6 +169,38 @@ public:
     /// @return true if new work is allowed
     [[nodiscard]] bool canAdmitWork() const;
 
+    /// Record DB lock contention signal from the latest tuning window.
+    /// @param dbLockErrors Number of DB lock errors observed
+    /// @param lockThreshold Threshold above which contention is considered active
+    void reportDbLockContention(std::uint64_t dbLockErrors, std::uint32_t lockThreshold) noexcept;
+
+    /// Apply DB contention-aware cap to KG concurrency target.
+    [[nodiscard]] std::uint32_t
+    capKgConcurrencyForDbContention(std::uint32_t requested) const noexcept;
+
+    /// Apply DB contention-aware cap to embedding concurrency target.
+    [[nodiscard]] std::uint32_t
+    capEmbedConcurrencyForDbContention(std::uint32_t requested) const noexcept;
+
+    /// Recommend next connection slot target with hysteresis and governor gating.
+    [[nodiscard]] std::uint32_t
+    recommendConnectionSlotTarget(std::uint32_t currentSlots, std::uint32_t activeConnections,
+                                  std::uint32_t minSlots, std::uint32_t maxSlots,
+                                  std::uint32_t scaleStep,
+                                  std::uint32_t hysteresisTicks = 3) noexcept;
+
+    /// Compute a unified retry-after hint from queue/backpressure signals.
+    [[nodiscard]] std::uint32_t
+    recommendRetryAfterMs(std::uint64_t workerQueued, std::uint64_t maxWorkerQueue,
+                          std::int64_t muxQueuedBytes, std::uint64_t maxMuxBytes,
+                          std::uint64_t activeConnections, std::uint64_t maxActiveConn,
+                          std::uint64_t postIngestQueued, std::uint64_t postIngestCapacity,
+                          std::uint32_t controlIntervalMs) const noexcept;
+
+    /// Compute backpressure read-pause delay under current governor pressure state.
+    [[nodiscard]] std::uint32_t
+    recommendBackpressureReadPauseMs(std::uint32_t baseMs, bool queueBackpressured) const noexcept;
+
     // ========================================================================
     // Pressure Response Actions (called based on level transitions)
     // ========================================================================
@@ -215,6 +249,37 @@ public:
     /// Get current scaling caps (thread-safe copy)
     [[nodiscard]] ScalingCaps getScalingCaps() const;
 
+    // ========================================================================
+    // Dynamic Pool Registry (formerly PoolManager)
+    // ========================================================================
+
+    struct PoolConfig {
+        std::uint32_t min_size{1};
+        std::uint32_t max_size{32};
+        std::uint32_t cooldown_ms{500};
+        std::uint32_t low_watermark{25};
+        std::uint32_t high_watermark{85};
+    };
+
+    struct PoolDelta {
+        std::string component;
+        int change{0};
+        std::string reason;
+        std::uint32_t cooldown_ms{0};
+    };
+
+    struct PoolStats {
+        std::uint32_t current_size{0};
+        std::uint64_t resize_events{0};
+        std::uint64_t rejected_on_cap{0};
+        std::uint64_t throttled_on_cooldown{0};
+    };
+
+    void configurePool(const std::string& component, const PoolConfig& cfg);
+    [[nodiscard]] std::uint32_t applyPoolDelta(const PoolDelta& delta);
+    [[nodiscard]] PoolStats poolStats(const std::string& component) const;
+    [[nodiscard]] std::size_t shrinkAllPools();
+
 private:
     ResourceGovernor();
     ~ResourceGovernor() = default;
@@ -236,6 +301,16 @@ private:
 
     /// Record eviction timestamp for cooldown
     void recordEviction();
+
+    struct PoolEntry {
+        PoolConfig cfg{};
+        std::uint32_t size{0};
+        std::uint64_t last_resize_ns{0};
+        PoolStats stats{};
+    };
+
+    PoolEntry& poolEntryFor(const std::string& component);
+    const PoolEntry* poolEntryForConst(const std::string& component) const;
 
     // Thread safety
     mutable std::shared_mutex mutex_;
@@ -260,6 +335,14 @@ private:
     std::atomic<bool> cpuAdmissionBlocked_{false};
     std::chrono::steady_clock::time_point cpuHighSince_{};
     std::chrono::steady_clock::time_point cpuLowSince_{};
+
+    // DB lock contention and connection slot tuning state
+    std::atomic<std::uint8_t> dbLockContentionLevel_{0}; // 0=none, 1=moderate, 2=severe
+    std::atomic<std::uint32_t> connSlotHighTicks_{0};
+    std::atomic<std::uint32_t> connSlotLowTicks_{0};
+
+    // Dynamic pool registry
+    std::vector<std::pair<std::string, PoolEntry>> pools_;
 
     // Startup grace period: prevent false Emergency during early init
     std::chrono::steady_clock::time_point startupTime_{std::chrono::steady_clock::now()};

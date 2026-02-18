@@ -284,27 +284,18 @@ void PostIngestQueue::start() {
         boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
         spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
         boost::asio::co_spawn(coordinator_->getExecutor(), kgPoller(), boost::asio::detached);
-        spdlog::info("[PostIngestQueue] Spawning symbolPoller coroutine...");
-        boost::asio::co_spawn(coordinator_->getExecutor(), symbolPoller(), boost::asio::detached);
-        spdlog::info("[PostIngestQueue] Spawning entityPoller coroutine...");
-        auto entityExec =
-            entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor();
-        boost::asio::co_spawn(entityExec, entityPoller(), boost::asio::detached);
-        spdlog::info("[PostIngestQueue] Spawning titlePoller coroutine...");
-        boost::asio::co_spawn(coordinator_->getExecutor(), titlePoller(), boost::asio::detached);
+        spdlog::info("[PostIngestQueue] Spawning enrichPoller coroutine...");
+        boost::asio::co_spawn(coordinator_->getExecutor(), enrichPoller(), boost::asio::detached);
 
         constexpr int maxWaitMs = 100;
         for (int i = 0;
-             i < maxWaitMs && (!started_.load() || !kgStarted_.load() || !symbolStarted_.load() ||
-                               !entityStarted_.load() || !titleStarted_.load());
+             i < maxWaitMs && (!started_.load() || !kgStarted_.load() || !symbolStarted_.load());
              ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={}, "
-                     "entity={}, title={})",
-                     started_.load(), kgStarted_.load(), symbolStarted_.load(),
-                     entityStarted_.load(), titleStarted_.load());
+        spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={}, enrich={})",
+                     started_.load(), kgStarted_.load(), symbolStarted_.load());
     } else {
         spdlog::warn("[PostIngestQueue] start() skipped because stop_=true");
     }
@@ -695,6 +686,11 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     auto idleDelay = kMinIdleDelay;
 
     while (!stop_.load()) {
+        // Report queue depths to TuneAdvisor
+        TuneAdvisor::setPostExtractionQueueDepth(channel->size_approx());
+        // Embeddings share the same queue/dispatch path
+        TuneAdvisor::setPostEmbedQueueDepth(channel->size_approx());
+
         bool didWork = false;
         InternalEventBus::PostIngestTask task;
         const std::size_t batchSize = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
@@ -1471,6 +1467,7 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     auto idleDelay = kMinIdleDelay;
 
     while (!stop_.load()) {
+        TuneAdvisor::setPostKgQueueDepth(channel->size_approx());
         bool didWork = false;
         InternalEventBus::KgJob job;
         // Dynamic concurrency limit from TuneAdvisor
@@ -1532,35 +1529,48 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     spdlog::info("[PostIngestQueue] KG poller exited");
 }
 
-boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
+boost::asio::awaitable<void> PostIngestQueue::enrichPoller() {
     constexpr std::size_t symbolChannelCapacity = 16384;
-    auto channel =
+    constexpr std::size_t entityChannelCapacity = 4096;
+    constexpr std::size_t titleChannelCapacity = 4096;
+
+    auto symbolChannel =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
             "symbol_extraction", symbolChannelCapacity);
+    auto entityChannel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityExtractionJob>(
+            "entity_extraction", entityChannelCapacity);
+    auto titleChannel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::TitleExtractionJob>(
+            "title_extraction", titleChannelCapacity);
 
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
     symbolStarted_.store(true);
-    spdlog::info("[PostIngestQueue] Symbol extraction poller started");
+    spdlog::info("[PostIngestQueue] Enrich poller started (symbol+entity+title)");
 
-    // Adaptive backoff for CPU efficiency with responsiveness floor
-    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);  // Responsiveness floor
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10); // Idle ceiling
+    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10);
     auto idleDelay = kMinIdleDelay;
 
     while (!stop_.load()) {
+        TuneAdvisor::setPostSymbolQueueDepth(symbolChannel->size_approx());
+        TuneAdvisor::setPostEntityQueueDepth(entityChannel->size_approx());
+
         bool didWork = false;
-        InternalEventBus::SymbolExtractionJob job;
-        // Dynamic concurrency limit from TuneAdvisor
-        std::size_t maxConcurrent = maxSymbolConcurrent();
-        // Graduated pressure response for CPU-aware throttling
+        const bool symbolPaused = symbolPaused_.load(std::memory_order_acquire);
+        const bool entityPaused = entityPaused_.load(std::memory_order_acquire);
+        const bool titlePaused = titlePaused_.load(std::memory_order_acquire);
+
+        std::size_t maxConcurrent =
+            maxSymbolConcurrent() + maxEntityConcurrent() + maxTitleConcurrent();
         auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
         switch (pressureLevel) {
             case ResourcePressureLevel::Emergency:
-                maxConcurrent = 0; // Halt (backstop for pauseAll)
+                maxConcurrent = 0;
                 break;
             case ResourcePressureLevel::Critical:
-                maxConcurrent = 1; // Minimal concurrency
+                maxConcurrent = 1;
                 break;
             case ResourcePressureLevel::Warning:
                 maxConcurrent = std::max<std::size_t>(1, (maxConcurrent * 3) / 4);
@@ -1568,25 +1578,87 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
             default:
                 break;
         }
-        if (symbolPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
-            timer.expires_after(kMinIdleDelay); // Always fast when paused
+
+        const bool allPaused = symbolPaused && entityPaused && titlePaused;
+        if (allPaused || maxConcurrent == 0) {
+            timer.expires_after(kMinIdleDelay);
             co_await timer.async_wait(boost::asio::use_awaitable);
             continue;
         }
-        while (symbolInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
-            didWork = true;
-            wasActive_.store(true, std::memory_order_release);
-            symbolInFlight_.fetch_add(1);
-            boost::asio::post(coordinator_->getExecutor(),
-                              [this, hash = std::move(job.hash), docId = job.documentId,
-                               filePath = std::move(job.filePath),
-                               language = std::move(job.language),
-                               contentBytes = std::move(job.contentBytes)]() mutable {
-                                  processSymbolExtractionStage(hash, docId, filePath, language,
-                                                               std::move(contentBytes));
-                                  symbolInFlight_.fetch_sub(1);
-                                  checkDrainAndSignal();
-                              });
+
+        while (enrichInFlight_.load() < maxConcurrent) {
+            bool poppedAny = false;
+
+            InternalEventBus::SymbolExtractionJob symbolJob;
+            if (!symbolPaused && symbolChannel->try_pop(symbolJob)) {
+                poppedAny = true;
+                didWork = true;
+                wasActive_.store(true, std::memory_order_release);
+                enrichInFlight_.fetch_add(1);
+                boost::asio::post(coordinator_->getExecutor(),
+                                  [this, hash = std::move(symbolJob.hash),
+                                   docId = symbolJob.documentId,
+                                   filePath = std::move(symbolJob.filePath),
+                                   language = std::move(symbolJob.language),
+                                   contentBytes = std::move(symbolJob.contentBytes)]() mutable {
+                                      processSymbolExtractionStage(hash, docId, filePath, language,
+                                                                   std::move(contentBytes));
+                                      enrichInFlight_.fetch_sub(1);
+                                      checkDrainAndSignal();
+                                  });
+                if (enrichInFlight_.load() >= maxConcurrent) {
+                    break;
+                }
+            }
+
+            InternalEventBus::EntityExtractionJob entityJob;
+            if (!entityPaused && entityChannel->try_pop(entityJob)) {
+                poppedAny = true;
+                didWork = true;
+                wasActive_.store(true, std::memory_order_release);
+                enrichInFlight_.fetch_add(1);
+                auto entityExec = entityCoordinator_ ? entityCoordinator_->getExecutor()
+                                                     : coordinator_->getExecutor();
+                boost::asio::post(entityExec,
+                                  [this, hash = std::move(entityJob.hash),
+                                   docId = entityJob.documentId,
+                                   filePath = std::move(entityJob.filePath),
+                                   extension = std::move(entityJob.extension),
+                                   contentBytes = std::move(entityJob.contentBytes)]() mutable {
+                                      processEntityExtractionStage(hash, docId, filePath, extension,
+                                                                   std::move(contentBytes));
+                                      enrichInFlight_.fetch_sub(1);
+                                      checkDrainAndSignal();
+                                  });
+                if (enrichInFlight_.load() >= maxConcurrent) {
+                    break;
+                }
+            }
+
+            InternalEventBus::TitleExtractionJob titleJob;
+            if (!titlePaused && titleExtractor_ && titleChannel->try_pop(titleJob)) {
+                poppedAny = true;
+                didWork = true;
+                wasActive_.store(true, std::memory_order_release);
+                enrichInFlight_.fetch_add(1);
+                boost::asio::post(
+                    coordinator_->getExecutor(),
+                    [this, hash = std::move(titleJob.hash), docId = titleJob.documentId,
+                     textSnippet = std::move(titleJob.textSnippet),
+                     fallbackTitle = std::move(titleJob.fallbackTitle),
+                     filePath = std::move(titleJob.filePath),
+                     language = std::move(titleJob.language),
+                     mimeType = std::move(titleJob.mimeType)]() {
+                        processTitleExtractionStage(hash, docId, textSnippet, fallbackTitle,
+                                                    filePath, language, mimeType);
+                        enrichInFlight_.fetch_sub(1);
+                        checkDrainAndSignal();
+                    });
+            }
+
+            if (!poppedAny) {
+                break;
+            }
         }
 
         if (didWork) {
@@ -1595,12 +1667,10 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
                     co_await timer.async_wait(boost::asio::use_awaitable);
                 }
             }
-
-            idleDelay = kMinIdleDelay; // Reset on work
+            idleDelay = kMinIdleDelay;
             continue;
         }
 
-        // Adaptive backoff when idle
         timer.expires_after(idleDelay);
         co_await timer.async_wait(boost::asio::use_awaitable);
         if (idleDelay < kMaxIdleDelay) {
@@ -1608,7 +1678,7 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         }
     }
 
-    spdlog::info("[PostIngestQueue] Symbol extraction poller exited");
+    spdlog::info("[PostIngestQueue] Enrich poller exited");
 }
 
 void PostIngestQueue::dispatchToSymbolChannel(
@@ -1715,86 +1785,6 @@ void PostIngestQueue::dispatchToEntityChannel(
                      filePath, hash.substr(0, 12), extension);
         InternalEventBus::instance().incEntityQueued();
     }
-}
-
-boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
-    constexpr std::size_t entityChannelCapacity = 4096;
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityExtractionJob>(
-            "entity_extraction", entityChannelCapacity);
-
-    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-
-    entityStarted_.store(true);
-    spdlog::info("[PostIngestQueue] Entity extraction poller started");
-
-    // Adaptive backoff for CPU efficiency with responsiveness floor
-    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);  // Responsiveness floor
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10); // Idle ceiling
-    auto idleDelay = kMinIdleDelay;
-
-    while (!stop_.load()) {
-        bool didWork = false;
-        InternalEventBus::EntityExtractionJob job;
-        // Dynamic concurrency limit from TuneAdvisor
-        std::size_t maxConcurrent = maxEntityConcurrent();
-        // Graduated pressure response for CPU-aware throttling
-        auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
-        switch (pressureLevel) {
-            case ResourcePressureLevel::Emergency:
-                maxConcurrent = 0; // Halt (backstop for pauseAll)
-                break;
-            case ResourcePressureLevel::Critical:
-                maxConcurrent = 1; // Minimal concurrency
-                break;
-            case ResourcePressureLevel::Warning:
-                maxConcurrent = std::max<std::size_t>(1, (maxConcurrent * 3) / 4);
-                break;
-            default:
-                break;
-        }
-        if (entityPaused_.load(std::memory_order_acquire) || maxConcurrent == 0) {
-            timer.expires_after(kMinIdleDelay); // Always fast when paused
-            co_await timer.async_wait(boost::asio::use_awaitable);
-            continue;
-        }
-        while (entityInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
-            didWork = true;
-            wasActive_.store(true, std::memory_order_release);
-            entityInFlight_.fetch_add(1);
-            auto entityExec = entityCoordinator_ ? entityCoordinator_->getExecutor()
-                                                 : coordinator_->getExecutor();
-            boost::asio::post(entityExec, [this, hash = std::move(job.hash), docId = job.documentId,
-                                           filePath = std::move(job.filePath),
-                                           extension = std::move(job.extension),
-                                           contentBytes = std::move(job.contentBytes)]() mutable {
-                processEntityExtractionStage(hash, docId, filePath, extension,
-                                             std::move(contentBytes));
-                entityInFlight_.fetch_sub(1);
-                checkDrainAndSignal();
-            });
-        }
-
-        if (didWork) {
-            if (TuneAdvisor::enableResourceGovernor()) {
-                if (applyCpuThrottling(timer)) {
-                    co_await timer.async_wait(boost::asio::use_awaitable);
-                }
-            }
-
-            idleDelay = kMinIdleDelay; // Reset on work
-            continue;
-        }
-
-        // Adaptive backoff when idle
-        timer.expires_after(idleDelay);
-        co_await timer.async_wait(boost::asio::use_awaitable);
-        if (idleDelay < kMaxIdleDelay) {
-            idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
-        }
-    }
-
-    spdlog::info("[PostIngestQueue] Entity extraction poller exited");
 }
 
 void PostIngestQueue::processEntityExtractionStage(
@@ -2097,166 +2087,12 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
     }
 }
 
-boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
-    constexpr std::size_t titleChannelCapacity = 4096;
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::TitleExtractionJob>(
-            "title_extraction", titleChannelCapacity);
-
-    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
-
-    titleStarted_.store(true);
-    spdlog::info("[PostIngestQueue] Title extraction poller started");
-
-    // Adaptive backoff for CPU efficiency with responsiveness floor
-    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);  // Responsiveness floor
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10); // Idle ceiling
-    auto idleDelay = kMinIdleDelay;
-
-    enum class IdleReason : uint8_t {
-        None = 0,
-        Paused,
-        StageDisabled,
-        NoBudget,
-    };
-
-    IdleReason lastIdleReason = IdleReason::None;
-    auto lastIdleLog = std::chrono::steady_clock::time_point{};
-
-    while (!stop_.load()) {
-        try {
-            bool didWork = false;
-            InternalEventBus::TitleExtractionJob job;
-
-            // If the stage is not capable (no extractor), avoid a tight poll loop.
-            // refreshStageAvailability() should also mark the stage inactive, but we guard here
-            // since the poller is spawned unconditionally in start().
-            if (!titleExtractor_) {
-                if (lastIdleReason != IdleReason::StageDisabled) {
-                    spdlog::debug(
-                        "[PostIngestQueue] titlePoller idle (disabled: no titleExtractor)");
-                    lastIdleReason = IdleReason::StageDisabled;
-                }
-                timer.expires_after(std::chrono::milliseconds(250));
-                co_await timer.async_wait(boost::asio::use_awaitable);
-                continue;
-            }
-
-            // Dynamic concurrency limit
-            const std::size_t baseMaxConcurrent = maxTitleConcurrent();
-            std::size_t maxConcurrent = baseMaxConcurrent;
-
-            // Graduated pressure response for CPU-aware throttling
-            auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
-            bool pressureHalted = false;
-            switch (pressureLevel) {
-                case ResourcePressureLevel::Emergency:
-                    maxConcurrent = 0; // Halt (backstop for pauseAll)
-                    pressureHalted = true;
-                    break;
-                case ResourcePressureLevel::Critical:
-                    maxConcurrent = 1; // Minimal concurrency
-                    break;
-                case ResourcePressureLevel::Warning:
-                    maxConcurrent = std::max<std::size_t>(1, (maxConcurrent * 3) / 4);
-                    break;
-                default:
-                    break;
-            }
-
-            const bool paused = titlePaused_.load(std::memory_order_acquire);
-            if (paused || maxConcurrent == 0) {
-                IdleReason reason = paused ? IdleReason::Paused : IdleReason::NoBudget;
-                auto now = std::chrono::steady_clock::now();
-                const bool shouldLog = (reason != lastIdleReason) ||
-                                       (lastIdleLog.time_since_epoch().count() == 0) ||
-                                       ((now - lastIdleLog) >= std::chrono::seconds(5));
-                if (shouldLog) {
-                    if (paused) {
-                        spdlog::debug("[PostIngestQueue] titlePoller paused");
-                    } else if (pressureHalted) {
-                        spdlog::warn(
-                            "[PostIngestQueue] titlePoller idle (maxConcurrent=0, paused={}, "
-                            "pressure={})",
-                            paused, pressureLevelName(pressureLevel));
-                    } else {
-                        // Not an emergency: this is typically because TuneAdvisor allocated a 0
-                        // budget to Title under a small total post-ingest concurrency budget.
-                        // Keep it at debug to avoid noisy warnings.
-                        spdlog::debug(
-                            "[PostIngestQueue] titlePoller idle (maxConcurrent=0, baseMax={}, "
-                            "paused={}, pressure={})",
-                            baseMaxConcurrent, paused, pressureLevelName(pressureLevel));
-                    }
-                    lastIdleLog = now;
-                    lastIdleReason = reason;
-                }
-
-                // Avoid a tight loop when paused/no budget; still react quickly to resume.
-                if (paused) {
-                    timer.expires_after(std::chrono::milliseconds(10));
-                } else if (pressureHalted) {
-                    timer.expires_after(std::chrono::milliseconds(100));
-                } else {
-                    // Budget=0 in normal conditions: no need to poll aggressively.
-                    timer.expires_after(std::chrono::milliseconds(250));
-                }
-                co_await timer.async_wait(boost::asio::use_awaitable);
-                continue;
-            }
-
-            lastIdleReason = IdleReason::None;
-            while (titleInFlight_.load() < maxConcurrent && channel->try_pop(job)) {
-                didWork = true;
-                wasActive_.store(true, std::memory_order_release);
-                titleInFlight_.fetch_add(1);
-                boost::asio::post(
-                    coordinator_->getExecutor(),
-                    [this, hash = std::move(job.hash), docId = job.documentId,
-                     textSnippet = std::move(job.textSnippet),
-                     fallbackTitle = std::move(job.fallbackTitle),
-                     filePath = std::move(job.filePath), language = std::move(job.language),
-                     mimeType = std::move(job.mimeType)]() {
-                        processTitleExtractionStage(hash, docId, textSnippet, fallbackTitle,
-                                                    filePath, language, mimeType);
-                        titleInFlight_.fetch_sub(1);
-                        checkDrainAndSignal();
-                    });
-            }
-
-            if (didWork) {
-                if (TuneAdvisor::enableResourceGovernor()) {
-                    if (applyCpuThrottling(timer)) {
-                        co_await timer.async_wait(boost::asio::use_awaitable);
-                    }
-                }
-
-                idleDelay = kMinIdleDelay; // Reset on work
-                continue;
-            }
-
-            // Adaptive backoff when idle
-            timer.expires_after(idleDelay);
-            co_await timer.async_wait(boost::asio::use_awaitable);
-            if (idleDelay < kMaxIdleDelay) {
-                idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
-            }
-        } catch (const std::exception& e) {
-            spdlog::error("[PostIngestQueue] titlePoller exception: {}", e.what());
-            // Set recovery delay (co_await not allowed in catch handler)
-            idleDelay = std::chrono::milliseconds(100);
-        }
-    }
-
-    spdlog::info("[PostIngestQueue] Title extraction poller exited");
-}
-
 void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64_t docId,
                                                   const std::string& textSnippet,
                                                   const std::string& fallbackTitle,
                                                   const std::string& filePath,
                                                   const std::string& language,
-                                                  const std::string& mimeType) {
+                                                  [[maybe_unused]] const std::string& mimeType) {
     if (!titleExtractor_) {
         spdlog::debug("[PostIngestQueue] Title+NL extraction skipped for {} - no titleExtractor",
                       hash);

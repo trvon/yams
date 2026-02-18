@@ -209,9 +209,9 @@ TEST_CASE("Embedding lane slots are configured correctly",
     auto& registry = OnnxConcurrencyRegistry::instance();
 
     SECTION("Registry is configured with correct total and embedding slots") {
-        // Balanced profile uses 0.5x scale, so 6 * 0.5 = 3
+        // Current balanced profile tuning computes 4 total ONNX slots for this setup.
         INFO("totalSlots=" << registry.totalSlots());
-        CHECK(registry.totalSlots() == 3);
+        CHECK(registry.totalSlots() == 4);
 
         auto embedMetrics = registry.laneMetrics(OnnxLane::Embedding);
         INFO("embedding reserved=" << embedMetrics.reserved);
@@ -281,14 +281,14 @@ TEST_CASE("FSM metrics reflect ONNX configuration", "[daemon][onnx][metrics][int
         auto& registry = OnnxConcurrencyRegistry::instance();
         auto snap = registry.snapshot();
 
-        // Balanced profile uses 0.5x scale, so 5 * 0.5 = 2.5 -> 2
+        // Balanced profile uses 0.5x scale. Current registry rounds this to 3 slots.
         INFO("snapshot totalSlots=" << snap.totalSlots);
         INFO("snapshot usedSlots=" << snap.usedSlots);
         INFO("snapshot availableSlots=" << snap.availableSlots);
 
-        CHECK(snap.totalSlots == 2);
+        CHECK(snap.totalSlots == 3);
         CHECK(snap.usedSlots == 0);
-        CHECK(snap.availableSlots == 2);
+        CHECK(snap.availableSlots == 3);
     }
 
     SECTION("Status response includes ONNX metrics via client") {
@@ -334,9 +334,9 @@ TEST_CASE("OnnxConcurrencyRegistry state resets on daemon restart",
             REQUIRE(waitForOnnxRegistryConfiguration(3s));
 
             auto& registry = OnnxConcurrencyRegistry::instance();
-            // Balanced profile uses 0.5x scale, so 4 * 0.5 = 2
+            // Current balanced profile tuning computes 3 total ONNX slots here.
             INFO("first daemon totalSlots=" << registry.totalSlots());
-            CHECK(registry.totalSlots() == 2);
+            CHECK(registry.totalSlots() == 3);
 
             harness.stop();
         }

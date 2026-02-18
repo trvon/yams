@@ -129,12 +129,12 @@ public:
     // Per-stage inflight counts
     std::size_t extractionInFlight() const { return inFlight_.load(); }
     std::size_t kgInFlight() const { return kgInFlight_.load(); }
-    std::size_t symbolInFlight() const { return symbolInFlight_.load(); }
-    std::size_t entityInFlight() const { return entityInFlight_.load(); }
-    std::size_t titleInFlight() const { return titleInFlight_.load(); }
+    std::size_t enrichInFlight() const { return enrichInFlight_.load(); }
+    std::size_t symbolInFlight() const { return enrichInFlight_.load(); }
+    std::size_t entityInFlight() const { return enrichInFlight_.load(); }
+    std::size_t titleInFlight() const { return enrichInFlight_.load(); }
     std::size_t totalInFlight() const {
-        return inFlight_.load() + kgInFlight_.load() + symbolInFlight_.load() +
-               entityInFlight_.load() + titleInFlight_.load();
+        return inFlight_.load() + kgInFlight_.load() + enrichInFlight();
     }
 
     // Per-stage queue depths (approximate, from channel sizes)
@@ -219,9 +219,7 @@ public:
 private:
     boost::asio::awaitable<void> channelPoller();
     boost::asio::awaitable<void> kgPoller();
-    boost::asio::awaitable<void> symbolPoller();
-    boost::asio::awaitable<void> entityPoller();
-    boost::asio::awaitable<void> titlePoller();
+    boost::asio::awaitable<void> enrichPoller();
     void processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks);
     void processTask(const std::string& hash, const std::string& mime);
     void processMetadataStage(
@@ -289,8 +287,6 @@ private:
     std::atomic<bool> started_{false};
     std::atomic<bool> kgStarted_{false};
     std::atomic<bool> symbolStarted_{false};
-    std::atomic<bool> entityStarted_{false};
-    std::atomic<bool> titleStarted_{false};
 
     // Pause flags for ResourceGovernor pressure response
     std::atomic<bool> extractionPaused_{false};
@@ -307,9 +303,7 @@ private:
     std::atomic<std::uint64_t> directoriesProcessed_{0};
     std::atomic<std::size_t> inFlight_{0};
     std::atomic<std::size_t> kgInFlight_{0};
-    std::atomic<std::size_t> symbolInFlight_{0};
-    std::atomic<std::size_t> entityInFlight_{0};
-    std::atomic<std::size_t> titleInFlight_{0};
+    std::atomic<std::size_t> enrichInFlight_{0};
     std::atomic<double> latencyMsEma_{0.0};
     std::atomic<double> ratePerSecEma_{0.0};
     std::size_t capacity_{1000};

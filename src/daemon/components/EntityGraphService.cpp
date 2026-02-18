@@ -752,8 +752,9 @@ yams::Result<EntityGraphService::ContextNodes> EntityGraphService::resolveContex
 }
 
 yams::Result<EntityGraphService::SymbolNodeBatch> EntityGraphService::createSymbolNodes(
-    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, WriteBatch* batch,
-    ExtractionCache& cache, const Job& job, const yams_symbol_extraction_result_v1* result) {
+    [[maybe_unused]] const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
+    WriteBatch* batch, ExtractionCache& cache, const Job& job,
+    const yams_symbol_extraction_result_v1* result) {
     std::vector<yams::metadata::KGNode> symbolNodes;
     std::vector<yams::metadata::KGNode> versionNodes;
     symbolNodes.reserve(result->symbol_count);

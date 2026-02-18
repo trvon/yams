@@ -5,9 +5,9 @@
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <limits>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/InternalEventBus.h>
-#include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -41,6 +41,11 @@
 namespace yams::daemon {
 
 namespace {
+
+static inline std::uint64_t now_ns() {
+    using namespace std::chrono;
+    return duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+}
 
 /// Read current process RSS in bytes (cross-platform)
 std::uint64_t readRssBytes() {
@@ -413,8 +418,7 @@ void ResourceGovernor::collectMetrics(ServiceManager* sm, ResourceSnapshot& snap
     snap.activeIpcHandlers = static_cast<std::uint32_t>(muxSnap.activeHandlers);
 
     // Connection pool stats
-    auto& pm = PoolManager::instance();
-    auto ipcStats = pm.stats("ipc");
+    auto ipcStats = poolStats("ipc");
     snap.dbConnections = ipcStats.current_size;
 }
 
@@ -640,6 +644,191 @@ bool ResourceGovernor::canAdmitWork() const {
     return true;
 }
 
+void ResourceGovernor::reportDbLockContention(std::uint64_t dbLockErrors,
+                                              std::uint32_t lockThreshold) noexcept {
+    std::uint8_t nextLevel = 0;
+    if (lockThreshold > 0) {
+        if (dbLockErrors > static_cast<std::uint64_t>(lockThreshold) * 2ull) {
+            nextLevel = 2;
+        } else if (dbLockErrors > lockThreshold) {
+            nextLevel = 1;
+        }
+    }
+
+    const std::uint8_t previous =
+        dbLockContentionLevel_.exchange(nextLevel, std::memory_order_relaxed);
+    if (previous != nextLevel) {
+        if (nextLevel == 2) {
+            spdlog::debug("[ResourceGovernor] DB lock contention severe (errors={}, threshold={})",
+                          dbLockErrors, lockThreshold);
+        } else if (nextLevel == 1) {
+            spdlog::debug(
+                "[ResourceGovernor] DB lock contention moderate (errors={}, threshold={})",
+                dbLockErrors, lockThreshold);
+        } else if (previous > 0) {
+            spdlog::debug("[ResourceGovernor] DB lock contention cleared (errors={}, threshold={})",
+                          dbLockErrors, lockThreshold);
+        }
+    }
+}
+
+std::uint32_t
+ResourceGovernor::capKgConcurrencyForDbContention(std::uint32_t requested) const noexcept {
+    const auto level = dbLockContentionLevel_.load(std::memory_order_relaxed);
+    if (level >= 2) {
+        return std::min<std::uint32_t>(requested, 2);
+    }
+    if (level == 1) {
+        return std::min<std::uint32_t>(requested, 4);
+    }
+    return requested;
+}
+
+std::uint32_t
+ResourceGovernor::capEmbedConcurrencyForDbContention(std::uint32_t requested) const noexcept {
+    const auto level = dbLockContentionLevel_.load(std::memory_order_relaxed);
+    if (level >= 2) {
+        return std::min<std::uint32_t>(requested, 1);
+    }
+    if (level == 1) {
+        return std::min<std::uint32_t>(requested, 2);
+    }
+    return requested;
+}
+
+std::uint32_t ResourceGovernor::recommendConnectionSlotTarget(
+    std::uint32_t currentSlots, std::uint32_t activeConnections, std::uint32_t minSlots,
+    std::uint32_t maxSlots, std::uint32_t scaleStep, std::uint32_t hysteresisTicks) noexcept {
+    if (currentSlots == 0) {
+        connSlotHighTicks_.store(0, std::memory_order_relaxed);
+        connSlotLowTicks_.store(0, std::memory_order_relaxed);
+        return std::clamp<std::uint32_t>(minSlots, minSlots, maxSlots);
+    }
+
+    const double util = static_cast<double>(activeConnections) / static_cast<double>(currentSlots);
+    constexpr double highThreshold = 0.80;
+    constexpr double lowThreshold = 0.20;
+
+    if (util > highThreshold) {
+        const auto highTicks = connSlotHighTicks_.fetch_add(1, std::memory_order_relaxed) + 1;
+        connSlotLowTicks_.store(0, std::memory_order_relaxed);
+        if (highTicks >= hysteresisTicks) {
+            connSlotHighTicks_.store(0, std::memory_order_relaxed);
+            std::uint32_t target =
+                (currentSlots > (std::numeric_limits<std::uint32_t>::max() - scaleStep))
+                    ? currentSlots
+                    : static_cast<std::uint32_t>(currentSlots + scaleStep);
+
+            if (TuneAdvisor::enableResourceGovernor() &&
+                !canScaleUp("conn_slots", std::max<std::uint32_t>(1u, scaleStep))) {
+                target = currentSlots;
+            }
+
+            return std::clamp(target, minSlots, maxSlots);
+        }
+        return currentSlots;
+    }
+
+    if (util < lowThreshold && activeConnections > 0) {
+        const auto lowTicks = connSlotLowTicks_.fetch_add(1, std::memory_order_relaxed) + 1;
+        connSlotHighTicks_.store(0, std::memory_order_relaxed);
+        if (lowTicks >= hysteresisTicks) {
+            connSlotLowTicks_.store(0, std::memory_order_relaxed);
+            std::uint32_t target = (currentSlots > scaleStep)
+                                       ? static_cast<std::uint32_t>(currentSlots - scaleStep)
+                                       : currentSlots;
+            return std::clamp(target, minSlots, maxSlots);
+        }
+        return currentSlots;
+    }
+
+    connSlotHighTicks_.store(0, std::memory_order_relaxed);
+    connSlotLowTicks_.store(0, std::memory_order_relaxed);
+    return currentSlots;
+}
+
+std::uint32_t ResourceGovernor::recommendRetryAfterMs(
+    std::uint64_t workerQueued, std::uint64_t maxWorkerQueue, std::int64_t muxQueuedBytes,
+    std::uint64_t maxMuxBytes, std::uint64_t activeConnections, std::uint64_t maxActiveConn,
+    std::uint64_t postIngestQueued, std::uint64_t postIngestCapacity,
+    std::uint32_t controlIntervalMs) const noexcept {
+    std::uint32_t base = 0;
+
+    switch (getPressureLevel()) {
+        case ResourcePressureLevel::Emergency:
+            base = 1200;
+            break;
+        case ResourcePressureLevel::Critical:
+            base = 600;
+            break;
+        case ResourcePressureLevel::Warning:
+            base = 200;
+            break;
+        case ResourcePressureLevel::Normal:
+            base = 0;
+            break;
+    }
+
+    std::uint32_t extra = 0;
+
+    if (postIngestCapacity > 0 && postIngestQueued >= postIngestCapacity) {
+        extra =
+            std::max<std::uint32_t>(extra, std::max<std::uint32_t>(50u, controlIntervalMs / 4u));
+    }
+
+    if (maxWorkerQueue > 0 && workerQueued > maxWorkerQueue) {
+        extra += static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(workerQueued - maxWorkerQueue, 1000));
+    }
+
+    if (maxMuxBytes > 0 && muxQueuedBytes > 0 &&
+        static_cast<std::uint64_t>(muxQueuedBytes) > maxMuxBytes) {
+        const auto over = static_cast<std::uint64_t>(muxQueuedBytes) - maxMuxBytes;
+        extra +=
+            static_cast<std::uint32_t>(std::min<std::uint64_t>(over / (256ULL * 1024ULL), 4000));
+    }
+
+    if (maxActiveConn > 0 && activeConnections > maxActiveConn) {
+        extra += 200;
+    }
+
+    const std::uint32_t retry = base + extra;
+    return std::min<std::uint32_t>(retry, 5000u);
+}
+
+std::uint32_t
+ResourceGovernor::recommendBackpressureReadPauseMs(std::uint32_t baseMs,
+                                                   bool queueBackpressured) const noexcept {
+    std::uint32_t delay = std::max<std::uint32_t>(1u, baseMs);
+    std::uint32_t multiplier = 1;
+
+    if (queueBackpressured) {
+        multiplier = std::max<std::uint32_t>(multiplier, 2u);
+    }
+    if (!canAdmitWork()) {
+        multiplier = std::max<std::uint32_t>(multiplier, 3u);
+    }
+
+    switch (getPressureLevel()) {
+        case ResourcePressureLevel::Warning:
+            multiplier = std::max<std::uint32_t>(multiplier, 2u);
+            break;
+        case ResourcePressureLevel::Critical:
+            multiplier = std::max<std::uint32_t>(multiplier, 4u);
+            break;
+        case ResourcePressureLevel::Emergency:
+            multiplier = std::max<std::uint32_t>(multiplier, 8u);
+            break;
+        case ResourcePressureLevel::Normal:
+            break;
+    }
+
+    if (delay > (5000u / multiplier)) {
+        return 5000u;
+    }
+    return delay * multiplier;
+}
+
 // ============================================================================
 // Pressure Response Actions
 // ============================================================================
@@ -708,7 +897,10 @@ void ResourceGovernor::onCriticalLevel(ServiceManager* sm) {
     }
 
     // Shrink connection pools
-    // Note: PoolManager::shrinkAll() to be added in Phase 7
+    const auto shrunk = shrinkAllPools();
+    if (shrunk > 0) {
+        spdlog::info("[ResourceGovernor] Shrunk {} dynamic pools under critical pressure", shrunk);
+    }
 }
 
 void ResourceGovernor::onEmergencyLevel(ServiceManager* sm) {
@@ -819,6 +1011,98 @@ bool ResourceGovernor::canEvict() const {
 
 void ResourceGovernor::recordEviction() {
     lastEvictionTime_ = std::chrono::steady_clock::now();
+}
+
+void ResourceGovernor::configurePool(const std::string& component, const PoolConfig& cfg) {
+    auto& entry = poolEntryFor(component);
+    entry.cfg = cfg;
+    entry.size = std::clamp(entry.size, cfg.min_size, cfg.max_size);
+}
+
+std::uint32_t ResourceGovernor::applyPoolDelta(const PoolDelta& delta) {
+    auto& entry = poolEntryFor(delta.component);
+    const auto now = now_ns();
+    const auto cooldown =
+        (delta.cooldown_ms ? delta.cooldown_ms : entry.cfg.cooldown_ms) * 1'000'000ull;
+
+    if (cooldown && (now - entry.last_resize_ns) < cooldown) {
+        entry.stats.throttled_on_cooldown++;
+        YAMS_PLOT(("pool_" + delta.component + "_throttled").c_str(),
+                  static_cast<int64_t>(entry.stats.throttled_on_cooldown));
+        return entry.size;
+    }
+
+    int target = static_cast<int>(entry.size) + delta.change;
+    target = std::max<int>(target, static_cast<int>(entry.cfg.min_size));
+    target = std::min<int>(target, static_cast<int>(entry.cfg.max_size));
+
+    if (target == static_cast<int>(entry.size)) {
+        entry.stats.rejected_on_cap++;
+        YAMS_PLOT(("pool_" + delta.component + "_rejected").c_str(),
+                  static_cast<int64_t>(entry.stats.rejected_on_cap));
+        return entry.size;
+    }
+
+    entry.size = static_cast<std::uint32_t>(target);
+    entry.last_resize_ns = now;
+    entry.stats.resize_events++;
+    YAMS_PLOT(("pool_" + delta.component + "_size").c_str(), static_cast<int64_t>(entry.size));
+    YAMS_PLOT(("pool_" + delta.component + "_resizes").c_str(),
+              static_cast<int64_t>(entry.stats.resize_events));
+    return entry.size;
+}
+
+ResourceGovernor::PoolStats ResourceGovernor::poolStats(const std::string& component) const {
+    if (auto* entry = poolEntryForConst(component)) {
+        auto stats = entry->stats;
+        stats.current_size = entry->size;
+        return stats;
+    }
+    return {};
+}
+
+std::size_t ResourceGovernor::shrinkAllPools() {
+    std::unique_lock lock(mutex_);
+    std::size_t shrunkCount = 0;
+    const auto now = now_ns();
+
+    for (auto& [name, entry] : pools_) {
+        if (entry.size > entry.cfg.min_size) {
+            entry.size = entry.cfg.min_size;
+            entry.last_resize_ns = now;
+            entry.stats.resize_events++;
+            shrunkCount++;
+            YAMS_PLOT(("pool_" + name + "_size").c_str(), static_cast<int64_t>(entry.size));
+        }
+    }
+
+    return shrunkCount;
+}
+
+ResourceGovernor::PoolEntry& ResourceGovernor::poolEntryFor(const std::string& component) {
+    std::unique_lock lock(mutex_);
+    for (auto& [name, entry] : pools_) {
+        if (name == component) {
+            return entry;
+        }
+    }
+
+    pools_.push_back({component, PoolEntry{}});
+    auto& entry = pools_.back().second;
+    entry.size = entry.cfg.min_size;
+    entry.last_resize_ns = 0;
+    return entry;
+}
+
+const ResourceGovernor::PoolEntry*
+ResourceGovernor::poolEntryForConst(const std::string& component) const {
+    std::shared_lock lock(mutex_);
+    for (const auto& [name, entry] : pools_) {
+        if (name == component) {
+            return &entry;
+        }
+    }
+    return nullptr;
 }
 
 } // namespace yams::daemon

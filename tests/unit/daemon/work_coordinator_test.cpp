@@ -320,6 +320,44 @@ TEST_CASE("WorkCoordinator strand isolation", "[daemon][work_coordinator][strand
     }
 }
 
+TEST_CASE("WorkCoordinator priority executors", "[daemon][work_coordinator][priority]") {
+    SECTION("High priority executor runs posted work") {
+        WorkCoordinator coordinator;
+        coordinator.start(2);
+
+        std::atomic<bool> ran{false};
+        boost::asio::post(coordinator.getPriorityExecutor(WorkCoordinator::Priority::High),
+                          [&]() { ran.store(true, std::memory_order_release); });
+
+        bool completed = yams::test::wait_for_condition(
+            1000ms, 10ms, [&]() { return ran.load(std::memory_order_acquire); });
+
+        REQUIRE(completed);
+        coordinator.stop();
+        coordinator.join();
+    }
+
+    SECTION("post helper routes work through priority executor") {
+        WorkCoordinator coordinator;
+        coordinator.start(2);
+
+        std::atomic<int> ran{0};
+        coordinator.post(WorkCoordinator::Priority::High,
+                         [&]() { ran.fetch_add(1, std::memory_order_relaxed); });
+        coordinator.post(WorkCoordinator::Priority::Normal,
+                         [&]() { ran.fetch_add(1, std::memory_order_relaxed); });
+        coordinator.post(WorkCoordinator::Priority::Background,
+                         [&]() { ran.fetch_add(1, std::memory_order_relaxed); });
+
+        bool completed = yams::test::wait_for_condition(
+            1000ms, 10ms, [&]() { return ran.load(std::memory_order_relaxed) == 3; });
+
+        REQUIRE(completed);
+        coordinator.stop();
+        coordinator.join();
+    }
+}
+
 TEST_CASE("WorkCoordinator load handling", "[daemon][work_coordinator][load]") {
     SECTION("Handle high concurrent load") {
         WorkCoordinator coordinator;

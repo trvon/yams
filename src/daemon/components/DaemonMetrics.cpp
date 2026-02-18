@@ -15,6 +15,7 @@
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/MetricsSnapshotRegistry.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -726,8 +727,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 // Per-stage inflight counts
                 out.extractionInFlight = pq->extractionInFlight();
                 out.kgInFlight = pq->kgInFlight();
-                out.symbolInFlight = pq->symbolInFlight();
-                out.entityInFlight = pq->entityInFlight();
+                out.enrichInFlight = pq->enrichInFlight();
                 // File/directory add tracking
                 out.filesAdded = pq->filesAdded();
                 out.directoriesAdded = pq->directoriesAdded();
@@ -735,16 +735,12 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.directoriesProcessed = pq->directoriesProcessed();
                 // Per-stage queue depths (approximate, from channel sizes)
                 out.kgQueueDepth = pq->kgQueueDepth();
-                out.symbolQueueDepth = pq->symbolQueueDepth();
-                out.entityQueueDepth = pq->entityQueueDepth();
-                out.titleQueueDepth = pq->titleQueueDepth();
-                out.titleInFlight = pq->titleInFlight();
-                out.titleConcurrencyLimit = PostIngestQueue::maxTitleConcurrent();
+                out.enrichQueueDepth =
+                    pq->symbolQueueDepth() + pq->entityQueueDepth() + pq->titleQueueDepth();
                 // Dynamic concurrency limits (PBI-05a)
                 out.postExtractionLimit = TuneAdvisor::postExtractionConcurrent();
                 out.postKgLimit = TuneAdvisor::postKgConcurrent();
-                out.postSymbolLimit = TuneAdvisor::postSymbolConcurrent();
-                out.postEntityLimit = TuneAdvisor::postEntityConcurrent();
+                out.postEnrichLimit = TuneAdvisor::postEnrichConcurrent();
             }
             auto& bus = InternalEventBus::instance();
             out.kgQueued = bus.kgQueued();
@@ -877,6 +873,9 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     }
 
     int64_t muxQueuedBytesLocal = 0;
+    uint64_t postIngestQueued = 0;
+    uint64_t postIngestCapacity = 0;
+    uint32_t controlIntervalMs = 0;
     try {
         auto msnap = MuxMetricsRegistry::instance().snapshot();
         out.muxActiveHandlers = msnap.activeHandlers;
@@ -897,20 +896,15 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         muxQueuedBytesLocal = msnap.queuedBytes;
     } catch (...) {
     }
-    // Provide a best-effort retryAfter hint for clients when post-ingest queue is saturated.
+    // Collect load metrics used by unified retry-after policy in ResourceGovernor.
     try {
         if (services_) {
             if (auto* pq = services_->getPostIngestQueue()) {
-                auto queued = pq->size();
-                auto cap = pq->capacity();
-                if (cap > 0 && queued >= cap) {
-                    // Suggest a small backoff based on tuning control interval
-                    auto cfg = services_->getTuningConfig();
-                    out.retryAfterMs = std::max<uint32_t>(50, cfg.controlIntervalMs / 4);
-                } else {
-                    out.retryAfterMs = 0;
-                }
+                postIngestQueued = pq->size();
+                postIngestCapacity = pq->capacity();
             }
+            auto cfg = services_->getTuningConfig();
+            controlIntervalMs = cfg.controlIntervalMs;
             auto searchLoad = services_->getSearchLoadMetrics();
             out.searchActive = searchLoad.active;
             out.searchQueued = searchLoad.queued;
@@ -1328,41 +1322,18 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     } catch (...) {
     }
 
-    // Backpressure threshold parsing and retry hint
+    // Unified backpressure threshold parsing and retry hint via ResourceGovernor policy
     try {
         uint64_t maxWorkerQueue =
             services_ ? TuneAdvisor::maxWorkerQueue(services_->getWorkerThreads()) : 0;
         uint64_t maxMuxBytes = TuneAdvisor::maxMuxBytes();
         uint64_t maxActiveConn = TuneAdvisor::maxActiveConn();
-        // Active conn default 0 = unlimited; we only compute hint, not gating here
-
-        // Current load
         uint64_t queued = services_ ? services_->getWorkerQueueDepth() : 0;
         uint64_t activeConn = state_ ? state_->stats.activeConnections.load() : 0;
 
-        bool bp_worker = (maxWorkerQueue > 0 && queued > maxWorkerQueue);
-        bool bp_mux = (maxMuxBytes > 0 && muxQueuedBytesLocal > static_cast<int64_t>(maxMuxBytes));
-        bool bp_conn = (maxActiveConn > 0 && activeConn > maxActiveConn);
-
-        if (bp_worker || bp_mux || bp_conn) {
-            // Simple retry suggestion: proportional to overload
-            uint32_t base = 100; // 100ms base
-            uint32_t extra = 0;
-            if (bp_worker) {
-                extra += static_cast<uint32_t>(std::min<uint64_t>(queued - maxWorkerQueue, 1000));
-            }
-            if (bp_mux) {
-                // scale by MiB over budget
-                uint64_t over = static_cast<uint64_t>(muxQueuedBytesLocal) - maxMuxBytes;
-                extra += static_cast<uint32_t>(std::min<uint64_t>(over / (256ULL * 1024), 4000));
-            }
-            if (bp_conn) {
-                extra += 200; // flat 200ms if over conn cap
-            }
-            out.retryAfterMs = base + extra;
-        } else {
-            out.retryAfterMs = 0;
-        }
+        out.retryAfterMs = ResourceGovernor::instance().recommendRetryAfterMs(
+            queued, maxWorkerQueue, muxQueuedBytesLocal, maxMuxBytes, activeConn, maxActiveConn,
+            postIngestQueued, postIngestCapacity, controlIntervalMs);
     } catch (...) {
         out.retryAfterMs = 0;
     }

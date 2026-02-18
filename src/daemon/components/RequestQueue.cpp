@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <yams/daemon/components/RequestQueue.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
 #include <boost/asio/as_tuple.hpp>
@@ -247,33 +248,16 @@ float RequestQueue::utilization_percent() const noexcept {
 }
 
 uint32_t RequestQueue::calculate_retry_after_ms() const noexcept {
-    float util = utilization_percent();
-    if (util < 50.0f) {
-        return 0; // No backpressure needed
-    }
+    const auto currentDepth = static_cast<std::uint64_t>(depth());
+    const auto queueCapacity = static_cast<std::uint64_t>(config_.max_queue_size);
 
-    // Base delay scales with utilization
-    // 50% -> 50ms, 75% -> 150ms, 90% -> 400ms, 100% -> 1000ms
-    uint32_t base_ms = 0;
-    if (util >= 100.0f) {
-        base_ms = 1000;
-    } else if (util >= 90.0f) {
-        base_ms = 400;
-    } else if (util >= 75.0f) {
-        base_ms = 150;
-    } else {
-        base_ms = 50;
-    }
+    const auto highWatermarkDepth =
+        (queueCapacity * static_cast<std::uint64_t>(config_.high_watermark_percent)) / 100ull;
+    const auto workerQueueThreshold = (highWatermarkDepth > 0) ? (highWatermarkDepth - 1ull) : 0ull;
 
-    // Add component based on average wait time
-    uint64_t dequeued = metrics_.dequeued.load(std::memory_order_relaxed);
-    if (dequeued > 0) {
-        uint64_t avg_wait = metrics_.total_wait_time_ms.load(std::memory_order_relaxed) / dequeued;
-        // Add 10% of average wait time, capped at 500ms
-        base_ms += std::min<uint32_t>(static_cast<uint32_t>(avg_wait / 10), 500);
-    }
-
-    return std::min(base_ms, uint32_t{2000}); // Cap at 2 seconds
+    return ResourceGovernor::instance().recommendRetryAfterMs(
+        currentDepth, workerQueueThreshold, 0, 0, 0, 0, 0, 0,
+        std::max<std::uint32_t>(100u, config_.eviction_interval.count()));
 }
 
 const RequestQueue::Metrics& RequestQueue::metrics() const noexcept {
@@ -287,16 +271,30 @@ const RequestQueue::Config& RequestQueue::config() const noexcept {
 void RequestQueue::check_watermarks() {
     // Called with mutex held
     float util = utilization_percent();
+    const bool governor_backpressured = !ResourceGovernor::instance().canAdmitWork();
     bool was_backpressured = backpressured_.load(std::memory_order_relaxed);
     bool now_backpressured = was_backpressured;
 
-    // Hysteresis: only change state at watermarks
-    if (!was_backpressured && util >= static_cast<float>(config_.high_watermark_percent)) {
+    const bool at_or_above_high = util >= static_cast<float>(config_.high_watermark_percent);
+    const bool above_low = util > static_cast<float>(config_.low_watermark_percent);
+
+    // Unified backpressure with queue hysteresis + governor admission control.
+    if (governor_backpressured || at_or_above_high || (was_backpressured && above_low)) {
         now_backpressured = true;
-        metrics_.backpressure_activations.fetch_add(1, std::memory_order_relaxed);
-        spdlog::warn("[RequestQueue] Backpressure activated at {:.1f}% utilization", util);
-    } else if (was_backpressured && util <= static_cast<float>(config_.low_watermark_percent)) {
+    } else {
         now_backpressured = false;
+    }
+
+    if (!was_backpressured && now_backpressured) {
+        metrics_.backpressure_activations.fetch_add(1, std::memory_order_relaxed);
+        if (governor_backpressured) {
+            spdlog::warn(
+                "[RequestQueue] Backpressure activated by governor at {:.1f}% queue utilization",
+                util);
+        } else {
+            spdlog::warn("[RequestQueue] Backpressure activated at {:.1f}% utilization", util);
+        }
+    } else if (was_backpressured && !now_backpressured) {
         spdlog::info("[RequestQueue] Backpressure cleared at {:.1f}% utilization", util);
     }
 

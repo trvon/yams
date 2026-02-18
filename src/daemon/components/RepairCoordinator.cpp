@@ -16,8 +16,8 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/system_executor.hpp>
 #include <boost/asio/this_coro.hpp>
-#include <boost/asio/thread_pool.hpp>
 #include <yams/core/repair_fsm.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/ConfigResolver.h>
@@ -49,39 +49,6 @@ bool vectorsDisabledByEnv() {
     }
     return false;
 }
-
-// Shared thread pool for all RepairCoordinator instances
-// Profile-aware thread count: uses repairTokensIdle + 1 for DB queries
-// Static singleton - threads are lazily initialized
-struct RepairThreadPool {
-    std::unique_ptr<boost::asio::thread_pool> pool_;
-    std::once_flag init_flag_;
-
-    static RepairThreadPool& instance() {
-        static RepairThreadPool instance;
-        return instance;
-    }
-
-    boost::asio::any_io_executor get_executor() {
-        std::call_once(init_flag_, [this]() {
-            uint32_t threads = TuneAdvisor::repairTokensIdle();
-            if (threads < 1)
-                threads = 1;
-            // Add 1 extra thread for DB query coordination
-            threads = std::max(threads + 1, 2u);
-            pool_ = std::make_unique<boost::asio::thread_pool>(threads);
-            spdlog::debug("[RepairThreadPool] Initialized with {} threads", threads);
-        });
-        return pool_->get_executor();
-    }
-
-    // No explicit join in destructor to avoid double-free during static destruction
-    // The OS will clean up threads when the process exits
-    ~RepairThreadPool() = default;
-
-private:
-    RepairThreadPool() = default;
-};
 
 /**
  * @brief Build extension-to-language map from loaded symbol extractor plugins
@@ -230,7 +197,7 @@ void RepairCoordinator::start() {
     shutdownState_->running.store(true, std::memory_order_relaxed);
     shutdownState_->config = cfg_;
 
-    auto exec = RepairThreadPool::instance().get_executor();
+    auto exec = services_ ? services_->getBackgroundExecutor() : boost::asio::system_executor();
     auto shutdownState = shutdownState_;
     auto* self = this;
 
@@ -496,6 +463,22 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
 
     while (running_.load(std::memory_order_relaxed) &&
            shutdownState_->running.load(std::memory_order_acquire)) {
+        // Dynamic throttling: Check if daemon is busy
+        if (activeConnFn_ && TuneAdvisor::repairTokensBusy() == 0) {
+            size_t active = activeConnFn_();
+            if (active >= TuneAdvisor::repairBusyConnThreshold()) {
+                spdlog::debug("RepairCoordinator: pausing (busy with {} connections)", active);
+                try {
+                    timer.expires_after(
+                        std::chrono::milliseconds(TuneAdvisor::repairDegradeHoldMs()));
+                    co_await timer.async_wait(boost::asio::use_awaitable);
+                } catch (...) {
+                    // Ignore cancellation/errors
+                }
+                continue;
+            }
+        }
+
         // Update FSM hints with current running state
         core::RepairFsm::SchedulingHints hints;
         hints.closing = !running_.load(std::memory_order_relaxed) ||
@@ -686,8 +669,10 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
             } else if (maintenance_allowed()) {
                 spdlog::debug(
                     "RepairCoordinator: starting async initial scan (batched, non-blocking)");
-                // Spawn async scan on dedicated executor to avoid blocking this coroutine
-                auto scanExec = RepairThreadPool::instance().get_executor();
+                // Spawn async scan on background-priority executor to avoid blocking this
+                // coroutine
+                auto scanExec =
+                    services_ ? services_->getBackgroundExecutor() : boost::asio::system_executor();
                 boost::asio::co_spawn(
                     scanExec,
                     [this]() -> boost::asio::awaitable<void> {

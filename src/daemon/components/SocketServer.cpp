@@ -1,4 +1,3 @@
-#include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>

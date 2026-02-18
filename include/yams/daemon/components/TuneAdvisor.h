@@ -25,6 +25,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <yams/daemon/components/ResourceGovernor.h>
 
 // Platform-specific includes for memory detection (used by detectSystemMemory)
 // Note: These are only used in the implementation of detectSystemMemory()
@@ -1650,24 +1651,37 @@ public:
     /// Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
     /// Environment: YAMS_POST_SYMBOL_CONCURRENT
     static uint32_t postSymbolConcurrent() { return postIngestBudgetedConcurrency().symbol; }
-    static void setPostSymbolConcurrent(uint32_t v) {
-        postSymbolConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
-    }
 
     /// Maximum concurrent entity extraction tasks (profile-scaled, max 16)
     /// Entity extraction is CPU-heavy, so lower defaults
     /// Profile-scaled: Efficient=1, Balanced=2, Aggressive=2
     /// Environment: YAMS_POST_ENTITY_CONCURRENT
     static uint32_t postEntityConcurrent() { return postIngestBudgetedConcurrency().entity; }
-    static void setPostEntityConcurrent(uint32_t v) {
-        postEntityConcurrentOverride_.store(std::min(v, 16u), std::memory_order_relaxed);
-    }
 
     /// Maximum concurrent title extraction tasks (profile-scaled, max 16)
     /// Environment: YAMS_POST_TITLE_CONCURRENT
     static uint32_t postTitleConcurrent() { return postIngestBudgetedConcurrency().title; }
-    static void setPostTitleConcurrent(uint32_t v) {
-        postTitleConcurrentOverride_.store(std::min(v, 16u), std::memory_order_relaxed);
+
+    /// Maximum concurrent enrich tasks (Symbol + Entity + Title aggregate).
+    /// Environment: YAMS_POST_ENRICH_CONCURRENT
+    static uint32_t postEnrichConcurrent() {
+        auto budget = postIngestBudgetedConcurrency();
+        return budget.symbol + budget.entity + budget.title;
+    }
+    static void setPostEnrichConcurrent(uint32_t v) {
+        if (v == 0) {
+            postEnrichConcurrentOverride_.store(0u, std::memory_order_relaxed);
+            postSymbolConcurrentOverride_.store(0u, std::memory_order_relaxed);
+            postEntityConcurrentOverride_.store(0u, std::memory_order_relaxed);
+            postTitleConcurrentOverride_.store(0u, std::memory_order_relaxed);
+            return;
+        }
+
+        postEnrichConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
+        // Clear per-stage overrides so enrich override is authoritative.
+        postSymbolConcurrentOverride_.store(0u, std::memory_order_relaxed);
+        postEntityConcurrentOverride_.store(0u, std::memory_order_relaxed);
+        postTitleConcurrentOverride_.store(0u, std::memory_order_relaxed);
     }
 
     // PBI-05b: EmbeddingService concurrency (parallel embedding workers)
@@ -1834,6 +1848,26 @@ public:
     /// Get current DB lock error count (for monitoring)
     static uint64_t dbLockErrorCount() { return dbLockErrorCount_.load(std::memory_order_relaxed); }
 
+    // Dynamic queue depth reporting
+    static void setPostExtractionQueueDepth(size_t depth) {
+        postExtractionQueueDepth_.store(depth, std::memory_order_relaxed);
+    }
+    static void setPostKgQueueDepth(size_t depth) {
+        postKgQueueDepth_.store(depth, std::memory_order_relaxed);
+    }
+    static void setPostSymbolQueueDepth(size_t depth) {
+        postSymbolQueueDepth_.store(depth, std::memory_order_relaxed);
+    }
+    static void setPostEntityQueueDepth(size_t depth) {
+        postEntityQueueDepth_.store(depth, std::memory_order_relaxed);
+    }
+    static void setPostTitleQueueDepth(size_t depth) {
+        postTitleQueueDepth_.store(depth, std::memory_order_relaxed);
+    }
+    static void setPostEmbedQueueDepth(size_t depth) {
+        postEmbedQueueDepth_.store(depth, std::memory_order_relaxed);
+    }
+
 private:
     struct PostIngestConcurrencyBudget {
         uint32_t extraction;
@@ -1848,7 +1882,25 @@ private:
         constexpr std::size_t kStageCount = 6;
         constexpr std::size_t kExtractionIdx = 0;
         constexpr std::size_t kEmbedIdx = 5;
-        constexpr std::array<uint32_t, kStageCount> kWeights{1u, 1u, 1u, 1u, 1u, 2u};
+        // Base weights (mutable for dynamic adjustment)
+        std::array<uint32_t, kStageCount> kWeights{1u, 1u, 1u, 1u, 1u, 2u};
+
+        // Boost weights based on queue depth
+        auto boost = [&](size_t idx, const std::atomic<size_t>& depthVar) {
+            size_t d = depthVar.load(std::memory_order_relaxed);
+            if (d > 0)
+                kWeights[idx] += 2;
+            if (d > 100)
+                kWeights[idx] += 2;
+            if (d > 1000)
+                kWeights[idx] += 2;
+        };
+        boost(0, postExtractionQueueDepth_);
+        boost(1, postKgQueueDepth_);
+        boost(2, postSymbolQueueDepth_);
+        boost(3, postEntityQueueDepth_);
+        boost(4, postTitleQueueDepth_);
+        boost(5, postEmbedQueueDepth_);
         constexpr std::array<uint32_t, kStageCount> kMaxCaps{64u, 64u, 32u, 16u, 16u, 32u};
         const uint32_t totalBudget = std::max<uint32_t>(1, postIngestTotalConcurrent());
         const uint32_t activeMask = postIngestStageActiveMask();
@@ -2075,6 +2127,62 @@ private:
             hasOverride = true;
         };
 
+        auto applyEnrichOverride = [&](uint32_t value) {
+            constexpr std::array<std::size_t, 3> kEnrichIdx{2, 3, 4};
+            constexpr std::array<uint32_t, 3> kEnrichWeights{2u, 1u, 1u};
+
+            std::array<uint32_t, 3> stageValues{0u, 0u, 0u};
+            uint32_t activeWeight = 0;
+            for (std::size_t i = 0; i < kEnrichIdx.size(); ++i) {
+                if (caps[kEnrichIdx[i]] > 0) {
+                    activeWeight += kEnrichWeights[i];
+                }
+            }
+            if (activeWeight == 0 || value == 0) {
+                for (auto idx : kEnrichIdx) {
+                    clampLocked(idx, 0u);
+                }
+                return;
+            }
+
+            uint32_t remaining = value;
+            for (std::size_t i = 0; i < kEnrichIdx.size(); ++i) {
+                const std::size_t idx = kEnrichIdx[i];
+                if (caps[idx] == 0) {
+                    stageValues[i] = 0;
+                    continue;
+                }
+                uint32_t share = (value * kEnrichWeights[i]) / activeWeight;
+                stageValues[i] = std::min(caps[idx], share);
+                remaining -= std::min(remaining, stageValues[i]);
+            }
+
+            for (std::size_t pass = 0; remaining > 0 && pass < value + 8; ++pass) {
+                bool progressed = false;
+                for (std::size_t i = 0; i < kEnrichIdx.size() && remaining > 0; ++i) {
+                    const std::size_t idx = kEnrichIdx[i];
+                    if (caps[idx] == 0 || stageValues[i] >= caps[idx]) {
+                        continue;
+                    }
+                    stageValues[i] += 1;
+                    remaining -= 1;
+                    progressed = true;
+                }
+                if (!progressed) {
+                    break;
+                }
+            }
+
+            for (std::size_t i = 0; i < kEnrichIdx.size(); ++i) {
+                clampLocked(kEnrichIdx[i], stageValues[i]);
+            }
+        };
+
+        if (auto v = resolveOverride(postEnrichConcurrentOverride_, "YAMS_POST_ENRICH_CONCURRENT",
+                                     64u)) {
+            applyEnrichOverride(*v);
+        }
+
         if (auto v = resolveOverride(postExtractionConcurrentOverride_,
                                      "YAMS_POST_EXTRACTION_CONCURRENT", kMaxCaps[0])) {
             clampLocked(0, *v);
@@ -2177,6 +2285,7 @@ private:
     // PBI-05a: PostIngestQueue concurrency overrides
     static inline std::atomic<uint32_t> postExtractionConcurrentOverride_{0};
     static inline std::atomic<uint32_t> postKgConcurrentOverride_{0};
+    static inline std::atomic<uint32_t> postEnrichConcurrentOverride_{0};
     static inline std::atomic<uint32_t> postSymbolConcurrentOverride_{0};
     static inline std::atomic<uint32_t> postEntityConcurrentOverride_{0};
     static inline std::atomic<uint32_t> postTitleConcurrentOverride_{0};
@@ -2197,6 +2306,14 @@ private:
 
     // DB lock error tracking (rolling window counter)
     static inline std::atomic<uint64_t> dbLockErrorCount_{0};
+
+    // Dynamic queue depth counters
+    static inline std::atomic<size_t> postExtractionQueueDepth_{0};
+    static inline std::atomic<size_t> postKgQueueDepth_{0};
+    static inline std::atomic<size_t> postSymbolQueueDepth_{0};
+    static inline std::atomic<size_t> postEntityQueueDepth_{0};
+    static inline std::atomic<size_t> postTitleQueueDepth_{0};
+    static inline std::atomic<size_t> postEmbedQueueDepth_{0};
 
     // =========================================================================
     // Resource Governor Configuration (Memory Pressure Management)

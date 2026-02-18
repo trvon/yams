@@ -237,6 +237,63 @@ TEST_CASE("ResourceGovernor scaling caps are queryable", "[daemon][governance][c
     (void)maxKg;
 }
 
+TEST_CASE("ResourceGovernor applies DB contention caps", "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    governor.reportDbLockContention(0, 10);
+    CHECK(governor.capKgConcurrencyForDbContention(8) == 8);
+    CHECK(governor.capEmbedConcurrencyForDbContention(8) == 8);
+
+    governor.reportDbLockContention(11, 10);
+    CHECK(governor.capKgConcurrencyForDbContention(8) == 4);
+    CHECK(governor.capEmbedConcurrencyForDbContention(8) == 2);
+
+    governor.reportDbLockContention(25, 10);
+    CHECK(governor.capKgConcurrencyForDbContention(8) == 2);
+    CHECK(governor.capEmbedConcurrencyForDbContention(8) == 1);
+
+    governor.reportDbLockContention(0, 10);
+}
+
+TEST_CASE("ResourceGovernor recommends connection slot targets with hysteresis",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    const uint32_t current = 20;
+    const uint32_t minSlots = 8;
+    const uint32_t maxSlots = 64;
+    const uint32_t step = 4;
+
+    // Need sustained high utilization before growth.
+    CHECK(governor.recommendConnectionSlotTarget(current, 19, minSlots, maxSlots, step, 3) ==
+          current);
+    CHECK(governor.recommendConnectionSlotTarget(current, 19, minSlots, maxSlots, step, 3) ==
+          current);
+    CHECK(governor.recommendConnectionSlotTarget(current, 19, minSlots, maxSlots, step, 3) >=
+          current);
+
+    // Need sustained low utilization before shrink (and only when active > 0).
+    CHECK(governor.recommendConnectionSlotTarget(current, 1, minSlots, maxSlots, step, 3) ==
+          current);
+    CHECK(governor.recommendConnectionSlotTarget(current, 1, minSlots, maxSlots, step, 3) ==
+          current);
+    CHECK(governor.recommendConnectionSlotTarget(current, 1, minSlots, maxSlots, step, 3) <=
+          current);
+}
+
+TEST_CASE("ResourceGovernor recommends retry-after from overload signals",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    const auto none =
+        governor.recommendRetryAfterMs(0, 100, 0, 1024ULL * 1024ULL, 0, 1000, 0, 1000, 250);
+    CHECK(none == 0);
+
+    const auto overloaded = governor.recommendRetryAfterMs(
+        250, 100, 3LL * 1024LL * 1024LL, 1024ULL * 1024ULL, 1500, 1000, 1000, 1000, 400);
+    CHECK(overloaded > 0);
+}
+
 TEST_CASE("ResourceGovernor snapshot contains valid metrics", "[daemon][governance][catch2]") {
     auto& governor = ResourceGovernor::instance();
 

@@ -27,7 +27,9 @@ namespace yams::daemon {
 
 WorkCoordinator::WorkCoordinator()
     : ioContext_(std::make_shared<boost::asio::io_context>(BOOST_ASIO_CONCURRENCY_HINT_SAFE)),
-      started_(false) {
+      started_(false), highPriorityStrand_(ioContext_->get_executor()),
+      normalPriorityStrand_(ioContext_->get_executor()),
+      backgroundPriorityStrand_(ioContext_->get_executor()) {
     spdlog::debug("[WorkCoordinator] Constructed (io_context created, not started)");
 }
 
@@ -282,6 +284,18 @@ std::shared_ptr<boost::asio::io_context> WorkCoordinator::getIOContext() const n
 
 boost::asio::io_context::executor_type WorkCoordinator::getExecutor() const noexcept {
     return ioContext_->get_executor();
+}
+
+boost::asio::any_io_executor WorkCoordinator::getPriorityExecutor(Priority priority) const {
+    switch (priority) {
+        case Priority::High:
+            return highPriorityStrand_;
+        case Priority::Background:
+            return backgroundPriorityStrand_;
+        case Priority::Normal:
+        default:
+            return normalPriorityStrand_;
+    }
 }
 
 boost::asio::strand<boost::asio::io_context::executor_type> WorkCoordinator::makeStrand() const {

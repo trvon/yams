@@ -218,6 +218,17 @@ Result<void> LifecycleComponent::initialize() {
     // This check is independent of the PID file check (which is socket-based).
     dataDirLockFile_ = daemon_->config_.dataDir / ".yams-lock";
     if (auto result = acquireDataDirLock(); !result) {
+        // createPidFile() already succeeded above. Ensure we don't leak a PID file
+        // (or open fd) on early initialization failure.
+        if (pidFileFd_ != -1) {
+#ifdef _WIN32
+            _close(pidFileFd_);
+#else
+            close(pidFileFd_);
+#endif
+            pidFileFd_ = -1;
+        }
+        (void)removePidFile();
         return result;
     }
 

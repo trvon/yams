@@ -29,7 +29,6 @@
 #include <mach/task.h>
 #include <mach/task_info.h>
 #endif
-#include <boost/asio/thread_pool.hpp>
 #include <yams/api/content_store.h>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>

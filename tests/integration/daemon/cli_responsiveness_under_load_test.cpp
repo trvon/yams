@@ -1,6 +1,6 @@
 // Integration test verifying CLI commands (status, ping) remain responsive
 // even when the daemon is under heavy ingestion load.
-// This tests the fix that routes these requests to a dedicated CLI executor pool.
+// This tests the fix that routes these requests to a high-priority CLI executor path.
 
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch_session.hpp>

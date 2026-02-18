@@ -9,7 +9,6 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
-#include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -168,7 +167,6 @@ void TuningManager::tick_once() {
         (msnap.queuedBytes > 0) ? static_cast<std::uint64_t>(msnap.queuedBytes) : 0ull;
 
     // Idle shrink and pressure grow (centralized mirror of ResourceTuner, using TuneAdvisor)
-    auto& pm = PoolManager::instance();
 
     if (sm_) {
         auto ingestMetrics = sm_->getIngestMetricsSnapshot();
@@ -259,7 +257,6 @@ void TuningManager::tick_once() {
         auto* pq = sm_->getPostIngestQueue();
         if (pq) {
             const std::size_t queuedItems = pq->size();
-            (void)pq->totalInFlight();
 
             auto& bus = InternalEventBus::instance();
             const std::size_t embedQueued = bus.embedQueued();
@@ -284,25 +281,15 @@ void TuningManager::tick_once() {
 
             const uint64_t dbLockErrors = TuneAdvisor::getAndResetDbLockErrors();
             const uint32_t lockThreshold = TuneAdvisor::dbLockErrorThreshold();
+            governor.reportDbLockContention(dbLockErrors, lockThreshold);
 
             uint32_t extractionTarget = TuneAdvisor::postExtractionConcurrent();
             uint32_t kgTarget = TuneAdvisor::postKgConcurrent();
-            uint32_t symbolTarget = TuneAdvisor::postSymbolConcurrent();
-            uint32_t entityTarget = TuneAdvisor::postEntityConcurrent();
-            uint32_t titleTarget = TuneAdvisor::postTitleConcurrent();
+            uint32_t enrichTarget = TuneAdvisor::postEnrichConcurrent();
             uint32_t embedTarget = TuneAdvisor::postEmbedConcurrent();
 
-            if (dbLockErrors > lockThreshold * 2) {
-                kgTarget = std::min<uint32_t>(kgTarget, 2);
-                embedTarget = std::min<uint32_t>(embedTarget, 1);
-                spdlog::debug("TuningManager: DB lock errors ({}) severe; KG/embed reduced",
-                              dbLockErrors);
-            } else if (dbLockErrors > lockThreshold) {
-                kgTarget = std::min<uint32_t>(kgTarget, 4);
-                embedTarget = std::min<uint32_t>(embedTarget, 2);
-                spdlog::debug("TuningManager: DB lock errors ({}) > threshold; KG/embed reduced",
-                              dbLockErrors);
-            }
+            kgTarget = governor.capKgConcurrencyForDbContention(kgTarget);
+            embedTarget = governor.capEmbedConcurrencyForDbContention(embedTarget);
 
             if (TuneAdvisor::enableResourceGovernor()) {
                 extractionTarget = std::min(extractionTarget, governor.maxExtractionConcurrency());
@@ -320,9 +307,9 @@ void TuningManager::tick_once() {
                 };
                 applyActiveMask(1u << 0u, extractionTarget);
                 applyActiveMask(1u << 1u, kgTarget);
-                applyActiveMask(1u << 2u, symbolTarget);
-                applyActiveMask(1u << 3u, entityTarget);
-                applyActiveMask(1u << 4u, titleTarget);
+                if ((activeMask & ((1u << 2u) | (1u << 3u) | (1u << 4u))) == 0u) {
+                    enrichTarget = 0;
+                }
                 applyActiveMask(1u << 5u, embedTarget);
 
                 const bool extractionActive = extractionTarget > 0;
@@ -334,8 +321,7 @@ void TuningManager::tick_once() {
                 }
 
                 auto sumTargets = [&]() {
-                    return extractionTarget + kgTarget + symbolTarget + entityTarget + titleTarget +
-                           embedTarget;
+                    return extractionTarget + kgTarget + enrichTarget + embedTarget;
                 };
 
                 uint32_t totalTarget = sumTargets();
@@ -344,11 +330,8 @@ void TuningManager::tick_once() {
                         uint32_t* value;
                         uint32_t minValue;
                     };
-                    std::array<StageRef, 6> reduceOrder = {
-                        StageRef{&entityTarget, 0u},
-                        StageRef{&titleTarget, 0u},
-                        StageRef{&symbolTarget, 0u},
-                        StageRef{&kgTarget, 0u},
+                    std::array<StageRef, 4> reduceOrder = {
+                        StageRef{&enrichTarget, 0u}, StageRef{&kgTarget, 0u},
                         StageRef{&extractionTarget, minExtraction},
                         StageRef{&embedTarget, minEmbed}};
 
@@ -374,9 +357,7 @@ void TuningManager::tick_once() {
 
             TuneAdvisor::setPostExtractionConcurrent(extractionTarget);
             TuneAdvisor::setPostKgConcurrent(kgTarget);
-            TuneAdvisor::setPostSymbolConcurrent(symbolTarget);
-            TuneAdvisor::setPostEntityConcurrent(entityTarget);
-            TuneAdvisor::setPostTitleConcurrent(titleTarget);
+            TuneAdvisor::setPostEnrichConcurrent(enrichTarget);
             TuneAdvisor::setPostEmbedConcurrent(embedTarget);
 
 #if defined(TRACY_ENABLE)
@@ -384,6 +365,7 @@ void TuningManager::tick_once() {
             TracyPlot("post.inflight", static_cast<double>(currentInFlight));
             TracyPlot("post.extraction.limit", static_cast<double>(extractionTarget));
             TracyPlot("post.kg.limit", static_cast<double>(kgTarget));
+            TracyPlot("post.enrich.limit", static_cast<double>(enrichTarget));
             TracyPlot("post.embed.limit", static_cast<double>(embedTarget));
             TracyPlot("post.embed.queued", static_cast<double>(embedQueued));
             TracyPlot("post.embed.dropped", static_cast<double>(embedDropped));
@@ -411,8 +393,8 @@ void TuningManager::tick_once() {
     // Dynamic pool resizing based on load and pressure
     // Adjust pool sizes to match demand while respecting ResourceGovernor limits
     try {
-        auto ipcStats = pm.stats("ipc");
-        auto ioStats = pm.stats("ipc_io");
+        auto ipcStats = governor.poolStats("ipc");
+        auto ioStats = governor.poolStats("ipc_io");
 
         // Calculate pool utilization (active / current size)
         double ipcUtil = (ipcStats.current_size > 0)
@@ -444,12 +426,12 @@ void TuningManager::tick_once() {
                 // Check with ResourceGovernor if scaling is allowed
                 if (TuneAdvisor::enableResourceGovernor() &&
                     !governor.canScaleUp("ipc", scaleStep)) {
-                    maxSize = ipcStats.current_size; // Don't grow
+                    maxSize = static_cast<int32_t>(ipcStats.current_size); // Don't grow
                 }
                 target = std::min(target, maxSize);
                 int32_t delta = target - static_cast<int32_t>(ipcStats.current_size);
                 if (delta > 0) {
-                    pm.apply_delta(
+                    [[maybe_unused]] const auto updatedSize = governor.applyPoolDelta(
                         {"ipc", delta, "tuning_load_grow", TuneAdvisor::poolCooldownMs()});
                     spdlog::debug("TuningManager: IPC pool grown by {} (util={:.1f}%)", delta,
                                   ipcUtil * 100.0);
@@ -466,7 +448,7 @@ void TuningManager::tick_once() {
                 target = std::max(target, minSize);
                 int32_t delta = target - static_cast<int32_t>(ipcStats.current_size);
                 if (delta < 0) {
-                    pm.apply_delta(
+                    [[maybe_unused]] const auto updatedSize = governor.applyPoolDelta(
                         {"ipc", delta, "tuning_load_shrink", TuneAdvisor::poolCooldownMs()});
                     spdlog::debug("TuningManager: IPC pool shrunk by {} (util={:.1f}%)", -delta,
                                   ipcUtil * 100.0);
@@ -489,12 +471,12 @@ void TuningManager::tick_once() {
                 // Check with ResourceGovernor if scaling is allowed
                 if (TuneAdvisor::enableResourceGovernor() &&
                     !governor.canScaleUp("ipc_io", scaleStep)) {
-                    maxSize = ioStats.current_size; // Don't grow
+                    maxSize = static_cast<int32_t>(ioStats.current_size); // Don't grow
                 }
                 target = std::min(target, maxSize);
                 int32_t delta = target - static_cast<int32_t>(ioStats.current_size);
                 if (delta > 0) {
-                    pm.apply_delta(
+                    [[maybe_unused]] const auto updatedSize = governor.applyPoolDelta(
                         {"ipc_io", delta, "tuning_load_grow", TuneAdvisor::poolCooldownMs()});
                     spdlog::debug("TuningManager: IO pool grown by {} (util={:.1f}%)", delta,
                                   ioUtil * 100.0);
@@ -510,7 +492,7 @@ void TuningManager::tick_once() {
                 target = std::max(target, minSize);
                 int32_t delta = target - static_cast<int32_t>(ioStats.current_size);
                 if (delta < 0) {
-                    pm.apply_delta(
+                    [[maybe_unused]] const auto updatedSize = governor.applyPoolDelta(
                         {"ipc_io", delta, "tuning_load_shrink", TuneAdvisor::poolCooldownMs()});
                     spdlog::debug("TuningManager: IO pool shrunk by {} (util={:.1f}%)", -delta,
                                   ioUtil * 100.0);
@@ -528,64 +510,29 @@ void TuningManager::tick_once() {
     // Uses same hysteresis pattern as IPC/IO pools for consistency
     try {
         if (setConnectionSlots_ && state_) {
-            static uint32_t slotHighTicks = 0;
-            static uint32_t slotLowTicks = 0;
-
             const size_t activeConns = state_->stats.activeConnections.load();
             const size_t maxConns = state_->stats.maxConnections.load(std::memory_order_relaxed);
-            const size_t slotsFree =
-                state_->stats.connectionSlotsFree.load(std::memory_order_relaxed);
 
             if (maxConns > 0) {
                 double util = static_cast<double>(activeConns) / static_cast<double>(maxConns);
-
-                const double highThreshold = 0.80;  // Grow when >80% utilized
-                const double lowThreshold = 0.20;   // Shrink when <20% utilized
-                const uint32_t hysteresisTicks = 3; // Require 3 consecutive ticks
                 const uint32_t scaleStep = TuneAdvisor::connectionSlotsScaleStep();
                 const uint32_t minSlots = TuneAdvisor::connectionSlotsMin();
                 const uint32_t maxSlots = TuneAdvisor::connectionSlotsMax();
 
-                if (util > highThreshold) {
-                    slotHighTicks++;
-                    slotLowTicks = 0;
-                    if (slotHighTicks >= hysteresisTicks) {
-                        uint32_t target = static_cast<uint32_t>(maxConns) + scaleStep;
-                        // Gate through ResourceGovernor
-                        if (TuneAdvisor::enableResourceGovernor() &&
-                            !governor.canScaleUp("conn_slots", scaleStep)) {
-                            target = static_cast<uint32_t>(maxConns); // Don't grow
-                        }
-                        target = std::min(target, maxSlots);
-                        if (target > maxConns) {
-                            setConnectionSlots_(target);
-                            spdlog::debug("TuningManager: connection slots grown from {} to {} "
-                                          "(util={:.1f}%, active={})",
-                                          maxConns, target, util * 100.0, activeConns);
-                        }
-                        slotHighTicks = 0;
-                    }
-                } else if (util < lowThreshold && activeConns > 0) {
-                    // Only shrink if we have some connections (avoid shrinking at idle)
-                    slotLowTicks++;
-                    slotHighTicks = 0;
-                    if (slotLowTicks >= hysteresisTicks) {
-                        uint32_t target = (maxConns > scaleStep)
-                                              ? static_cast<uint32_t>(maxConns - scaleStep)
-                                              : static_cast<uint32_t>(maxConns);
-                        target = std::max(target, minSlots);
-                        if (target < maxConns) {
-                            setConnectionSlots_(target);
-                            spdlog::debug("TuningManager: connection slots shrunk from {} to {} "
-                                          "(util={:.1f}%, active={})",
-                                          maxConns, target, util * 100.0, activeConns);
-                        }
-                        slotLowTicks = 0;
-                    }
-                } else {
-                    // Reset hysteresis when in middle range
-                    slotHighTicks = 0;
-                    slotLowTicks = 0;
+                const uint32_t target = governor.recommendConnectionSlotTarget(
+                    static_cast<uint32_t>(maxConns), static_cast<uint32_t>(activeConns), minSlots,
+                    maxSlots, std::max<uint32_t>(1u, scaleStep));
+
+                if (target > maxConns) {
+                    setConnectionSlots_(target);
+                    spdlog::debug("TuningManager: connection slots grown from {} to {} "
+                                  "(util={:.1f}%, active={})",
+                                  maxConns, target, util * 100.0, activeConns);
+                } else if (target < maxConns) {
+                    setConnectionSlots_(target);
+                    spdlog::debug("TuningManager: connection slots shrunk from {} to {} "
+                                  "(util={:.1f}%, active={})",
+                                  maxConns, target, util * 100.0, activeConns);
                 }
             }
         }
@@ -596,8 +543,8 @@ void TuningManager::tick_once() {
 
     // Expose pool sizes and writer budget to FSM metrics for downstream visibility
     try {
-        auto ipcStats = pm.stats("ipc");
-        auto ioStats = pm.stats("ipc_io");
+        auto ipcStats = governor.poolStats("ipc");
+        auto ioStats = governor.poolStats("ipc_io");
         FsmMetricsRegistry::instance().setIpcPoolSize(ipcStats.current_size);
         FsmMetricsRegistry::instance().setIoPoolSize(ioStats.current_size);
         FsmMetricsRegistry::instance().setWriterBudgetBytes(writerBudget);
@@ -632,7 +579,8 @@ void TuningManager::tick_once() {
     try {
         auto s = std::make_shared<TuningSnapshot>();
         s->workerPollMs = TuneAdvisor::workerPollMs();
-        s->backpressureReadPauseMs = TuneAdvisor::backpressureReadPauseMs();
+        s->backpressureReadPauseMs = governor.recommendBackpressureReadPauseMs(
+            TuneAdvisor::backpressureReadPauseMs(), TuneAdvisor::requestQueueBackpressure());
         s->idleCpuPct = TuneAdvisor::idleCpuThresholdPercent();
         s->idleMuxLowBytes = TuneAdvisor::idleMuxLowBytes();
         s->idleShrinkHoldMs = TuneAdvisor::idleShrinkHoldMs();

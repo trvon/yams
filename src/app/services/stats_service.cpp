@@ -3,7 +3,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/metadata/query_helpers.h>
 #ifdef YAMS_ENABLE_DAEMON_FEATURES
-#include <yams/daemon/components/PoolManager.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #endif
 
 namespace yams::app::services {
@@ -75,9 +75,9 @@ public:
                     response.additionalStats["vector_embeddings"] = 0; // placeholder
                 }
 #ifdef YAMS_ENABLE_DAEMON_FEATURES
-                // PoolManager stats (IPC component)
+                // ResourceGovernor dynamic pool stats (IPC component)
                 try {
-                    auto stats = yams::daemon::PoolManager::instance().stats("ipc");
+                    auto stats = yams::daemon::ResourceGovernor::instance().poolStats("ipc");
                     response.additionalStats["pool_ipc_size"] =
                         static_cast<std::uint64_t>(stats.current_size);
                     response.additionalStats["pool_ipc_resizes"] =
@@ -87,7 +87,7 @@ public:
                     response.additionalStats["pool_ipc_throttled_on_cooldown"] =
                         static_cast<std::uint64_t>(stats.throttled_on_cooldown);
                 } catch (...) {
-                    // ignore if PoolManager not available
+                    // ignore if governor stats are unavailable
                 }
 #endif
             }

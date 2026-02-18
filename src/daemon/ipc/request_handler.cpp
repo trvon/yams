@@ -10,6 +10,7 @@
 #include <yams/daemon/ipc/stream_metrics_registry.h>
 #include <yams/daemon/ipc/streaming_processor.h>
 // Server tuning knobs
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
 #include <spdlog/spdlog.h>
@@ -324,8 +325,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
             if (fsm.backpressured()) {
                 using namespace boost::asio;
                 steady_timer bp_timer(co_await this_coro::executor);
-                bp_timer.expires_after(
-                    std::chrono::milliseconds(TuneAdvisor::backpressureReadPauseMs()));
+                auto pauseMs = ResourceGovernor::instance().recommendBackpressureReadPauseMs(
+                    TuneAdvisor::backpressureReadPauseMs(),
+                    TuneAdvisor::requestQueueBackpressure());
+                bp_timer.expires_after(std::chrono::milliseconds(pauseMs));
                 co_await bp_timer.async_wait(use_awaitable);
                 continue;
             }
@@ -373,7 +376,9 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                 : (fsm_guard_fail_count > 2000) ? 4
                                 : (fsm_guard_fail_count > 500)  ? 2
                                                                 : 1;
-                uint32_t delay_ms = std::min<uint32_t>(base * mult, 1500);
+                uint32_t delay_ms = ResourceGovernor::instance().recommendBackpressureReadPauseMs(
+                    base * mult, TuneAdvisor::requestQueueBackpressure());
+                delay_ms = std::min<uint32_t>(delay_ms, 1500);
                 wait.expires_after(std::chrono::milliseconds(delay_ms));
                 co_await wait.async_wait(use_awaitable);
 

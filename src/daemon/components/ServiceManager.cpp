@@ -42,7 +42,6 @@
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
-#include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_future.hpp>
 #include <tl/expected.hpp>
 #include <yams/api/content_store_builder.h>
@@ -65,7 +64,6 @@
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PluginManager.h>
-#include <yams/daemon/components/PoolManager.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -287,10 +285,6 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
     try {
         spdlog::debug("ServiceManager constructor start");
-        if (!cliRequestPool_) {
-            cliRequestPool_ = std::make_unique<boost::asio::thread_pool>(2);
-            spdlog::info("[ServiceManager] CLI request pool created with 2 threads");
-        }
         refreshPluginStatusSnapshot();
         // In test builds, prefer mock embedding provider unless explicitly disabled.
         // This avoids heavy ONNX runtime usage and platform-specific crashes on CI/macOS.
@@ -579,9 +573,9 @@ yams::Result<void> ServiceManager::initialize() {
     // Async initialization is now triggered explicitly via startAsyncInit()
     // to allow the daemon main loop to start first.
 
-    // Configure PoolManager defaults from TuneAdvisor for known components
+    // Configure ResourceGovernor pool defaults from TuneAdvisor for known components
     try {
-        PoolManager::Config ipcCfg{};
+        ResourceGovernor::PoolConfig ipcCfg{};
         ipcCfg.min_size = TuneAdvisor::poolMinSizeIpc();
         if (ipcCfg.min_size < 4) {
             ipcCfg.min_size = 4;
@@ -590,9 +584,10 @@ yams::Result<void> ServiceManager::initialize() {
         ipcCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
         ipcCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
         ipcCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
-        PoolManager::instance().configure("ipc", ipcCfg);
+        auto& governor = ResourceGovernor::instance();
+        governor.configurePool("ipc", ipcCfg);
 
-        PoolManager::Config ioCfg{};
+        ResourceGovernor::PoolConfig ioCfg{};
         ioCfg.min_size = TuneAdvisor::poolMinSizeIpcIo();
         // Bound IO max by both configured max and a dynamic cap from CPU budget
         try {
@@ -604,15 +599,16 @@ yams::Result<void> ServiceManager::initialize() {
         ioCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
         ioCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
         ioCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
-        PoolManager::instance().configure("ipc_io", ioCfg);
-        spdlog::info("PoolManager defaults configured: ipc[min={},max={}] io[min={},max={}]",
-                     ipcCfg.min_size, ipcCfg.max_size, ioCfg.min_size, ioCfg.max_size);
+        governor.configurePool("ipc_io", ioCfg);
+        spdlog::info(
+            "ResourceGovernor pool defaults configured: ipc[min={},max={}] io[min={},max={}]",
+            ipcCfg.min_size, ipcCfg.max_size, ioCfg.min_size, ioCfg.max_size);
 
         // Seed FsmMetricsRegistry with initial pool sizes for immediate visibility in status
         FsmMetricsRegistry::instance().setIpcPoolSize(static_cast<uint32_t>(ipcCfg.min_size));
         FsmMetricsRegistry::instance().setIoPoolSize(static_cast<uint32_t>(ioCfg.min_size));
     } catch (const std::exception& e) {
-        spdlog::debug("PoolManager configure error: {}", e.what());
+        spdlog::debug("ResourceGovernor pool configure error: {}", e.what());
     }
 
     // SearchEngine initialization is handled separately via searchEngineManager_
@@ -789,20 +785,6 @@ void ServiceManager::shutdown() {
 
     // Phase 3: (Removed - work guard now managed by WorkCoordinator)
     spdlog::info("[ServiceManager] Phase 3: Skipped (work guard managed by WorkCoordinator)");
-
-    // Phase 3.5: Stop CLI request pool to avoid starving shutdown
-    if (cliRequestPool_) {
-        try {
-            cliRequestPool_->stop();
-            cliRequestPool_->join();
-            cliRequestPool_.reset();
-            spdlog::info("[ServiceManager] Phase 3.5: CLI request pool stopped");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 3.5: CLI request pool stop failed: {}", e.what());
-        } catch (...) {
-            spdlog::warn("[ServiceManager] Phase 3.5: CLI request pool stop failed");
-        }
-    }
 
     // Phase 4: Cancel all asynchronous operations and stop WorkCoordinator io_context
     spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
@@ -2267,8 +2249,15 @@ boost::asio::any_io_executor ServiceManager::getWorkerExecutor() const {
 }
 
 boost::asio::any_io_executor ServiceManager::getCliExecutor() const {
-    if (cliRequestPool_) {
-        return cliRequestPool_->get_executor();
+    if (workCoordinator_) {
+        return workCoordinator_->getPriorityExecutor(WorkCoordinator::Priority::High);
+    }
+    return getWorkerExecutor();
+}
+
+boost::asio::any_io_executor ServiceManager::getBackgroundExecutor() const {
+    if (workCoordinator_) {
+        return workCoordinator_->getPriorityExecutor(WorkCoordinator::Priority::Background);
     }
     return getWorkerExecutor();
 }

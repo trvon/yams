@@ -7,6 +7,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/RequestQueue.h>
 
 #include <boost/asio/io_context.hpp>
@@ -253,13 +254,28 @@ TEST_CASE_METHOD(RequestQueueFixture, "RequestQueue retry after calculation",
     queue.start();
 
     SECTION("retry after increases with queue depth") {
+        const auto queueCapacity = static_cast<std::uint64_t>(cfg.max_queue_size);
+        const auto highWatermarkDepth =
+            (queueCapacity * static_cast<std::uint64_t>(cfg.high_watermark_percent)) / 100ull;
+        const auto workerQueueThreshold =
+            (highWatermarkDepth > 0) ? (highWatermarkDepth - 1ull) : 0ull;
+        const auto controlIntervalMs = std::max<std::uint32_t>(
+            100u, static_cast<std::uint32_t>(cfg.eviction_interval.count()));
+
         auto emptyRetry = queue.calculate_retry_after_ms();
+        auto expectedEmptyRetry = ResourceGovernor::instance().recommendRetryAfterMs(
+            0, workerQueueThreshold, 0, 0, 0, 0, 0, 0, controlIntervalMs);
+        CHECK(emptyRetry == expectedEmptyRetry);
 
         for (int i = 0; i < 8; ++i) {
             queue.try_enqueue(makeRequest());
         }
 
         auto fullRetry = queue.calculate_retry_after_ms();
+        auto expectedFullRetry = ResourceGovernor::instance().recommendRetryAfterMs(
+            static_cast<std::uint64_t>(queue.depth()), workerQueueThreshold, 0, 0, 0, 0, 0, 0,
+            controlIntervalMs);
+        CHECK(fullRetry == expectedFullRetry);
         CHECK(fullRetry >= emptyRetry);
     }
 

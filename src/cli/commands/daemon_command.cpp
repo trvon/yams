@@ -2076,36 +2076,28 @@ private:
                     uint64_t extractInFlight = findPostIngestCount("extraction_inflight");
                     uint64_t kgInFlight = findPostIngestCount("kg_inflight");
                     uint64_t kgQueueDepth = findPostIngestCount("kg_queue_depth");
-                    uint64_t symbolInFlight = findPostIngestCount("symbol_inflight");
-                    uint64_t symbolQueueDepth = findPostIngestCount("symbol_queue_depth");
-                    uint64_t entityInFlight = findPostIngestCount("entity_inflight");
-                    uint64_t entityQueueDepth = findPostIngestCount("entity_queue_depth");
-                    uint64_t titleQueueDepth = findPostIngestCount("title_queue_depth");
-                    uint64_t titleInFlight = findPostIngestCount("title_inflight");
-                    uint64_t titleLimit =
-                        std::max<uint64_t>(1, findPostIngestCount("post_title_limit"));
+                    uint64_t enrichInFlight = findPostIngestCount("enrich_inflight");
+                    uint64_t enrichQueueDepth = findPostIngestCount("enrich_queue_depth");
+                    uint64_t enrichLimit =
+                        std::max<uint64_t>(1, findPostIngestCount("post_enrich_limit"));
                     // Get dynamic concurrency limits (floor of 1 to prevent div-by-zero)
                     uint64_t extractLimit =
                         std::max<uint64_t>(1, findPostIngestCount("post_extraction_limit"));
                     uint64_t kgLimit = std::max<uint64_t>(1, findPostIngestCount("post_kg_limit"));
-                    uint64_t symbolLimit =
-                        std::max<uint64_t>(1, findPostIngestCount("post_symbol_limit"));
-                    uint64_t entityLimit =
-                        std::max<uint64_t>(1, findPostIngestCount("post_entity_limit"));
 
                     // Fetch audit metrics for all stages
                     uint64_t kgAuditQueued = findPostIngestCount("kg_queued");
                     uint64_t kgAuditConsumed = findPostIngestCount("kg_consumed");
                     uint64_t kgAuditDropped = findPostIngestCount("kg_dropped");
-                    uint64_t symbolAuditQueued = findPostIngestCount("symbol_queued");
-                    uint64_t symbolAuditConsumed = findPostIngestCount("symbol_consumed");
-                    uint64_t symbolAuditDropped = findPostIngestCount("symbol_dropped");
-                    uint64_t titleAuditQueued = findPostIngestCount("title_queued");
-                    uint64_t titleAuditConsumed = findPostIngestCount("title_consumed");
-                    uint64_t titleAuditDropped = findPostIngestCount("title_dropped");
-                    uint64_t entityAuditQueued = findPostIngestCount("entity_queued");
-                    uint64_t entityAuditConsumed = findPostIngestCount("entity_consumed");
-                    uint64_t entityAuditDropped = findPostIngestCount("entity_dropped");
+                    uint64_t enrichAuditQueued = findPostIngestCount("symbol_queued") +
+                                                 findPostIngestCount("entity_queued") +
+                                                 findPostIngestCount("title_queued");
+                    uint64_t enrichAuditConsumed = findPostIngestCount("symbol_consumed") +
+                                                   findPostIngestCount("entity_consumed") +
+                                                   findPostIngestCount("title_consumed");
+                    uint64_t enrichAuditDropped = findPostIngestCount("symbol_dropped") +
+                                                  findPostIngestCount("entity_dropped") +
+                                                  findPostIngestCount("title_dropped");
 
                     // Unified Pipeline Stages block
                     using yams::cli::detail::StageInfo;
@@ -2113,15 +2105,11 @@ private:
                         {"Extraction", extractInFlight, 0, extractLimit, 0, 0, 0},
                         {"Knowledge Graph", kgInFlight, kgQueueDepth, kgLimit, kgAuditQueued,
                          kgAuditConsumed, kgAuditDropped},
-                        {"Symbols", symbolInFlight, symbolQueueDepth, symbolLimit,
-                         symbolAuditQueued, symbolAuditConsumed, symbolAuditDropped},
-                        {"Entities", entityInFlight, entityQueueDepth, entityLimit,
-                         entityAuditQueued, entityAuditConsumed, entityAuditDropped},
-                        {"Title Extraction", titleInFlight, titleQueueDepth, titleLimit,
-                         titleAuditQueued, titleAuditConsumed, titleAuditDropped},
+                        {"Enrich", enrichInFlight, enrichQueueDepth, enrichLimit, enrichAuditQueued,
+                         enrichAuditConsumed, enrichAuditDropped},
                     };
 
-                    auto stageRows = yams::cli::detail::renderPipelineStages(stages, 5);
+                    auto stageRows = yams::cli::detail::renderPipelineStages(stages, 3);
                     if (!stageRows.empty()) {
                         postIngestRows.push_back({"", "", ""}); // Separator
                         postIngestRows.push_back({subsection_header("Pipeline Stages"), "", ""});

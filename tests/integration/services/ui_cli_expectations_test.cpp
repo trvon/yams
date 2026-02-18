@@ -1132,7 +1132,6 @@ TEST_F(UiCliExpectationsIT, FuzzyBoundsSimilarityZeroAndOne) {
     low.similarity = 0.0f;
     low.pathsOnly = true;
     low.limit = 50;
-    low.pathPattern = (root_ / "ingest" / "**").string();
 
     yams::app::services::SearchRequest high = low;
     high.similarity = 1.0f;
@@ -1144,14 +1143,29 @@ TEST_F(UiCliExpectationsIT, FuzzyBoundsSimilarityZeroAndOne) {
 
     // With a very permissive similarity, expect a superset or equal number of paths
     EXPECT_GE(rLow.value().paths.size(), rHigh.value().paths.size());
-    // High similarity should still return exact match when present
+    // High similarity should still return exact match when present. Post-ingest
+    // visibility can lag briefly, so poll for a short bounded window.
     bool highHasExact = false;
-    for (const auto& p : rHigh.value().paths) {
-        if (p.find("exact.txt") != std::string::npos) {
+    auto hasExactPath = [](const std::vector<std::string>& paths) {
+        for (const auto& p : paths) {
+            if (p.find("exact.txt") != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (hasExactPath(rHigh.value().paths)) {
             highHasExact = true;
             break;
         }
+        std::this_thread::sleep_for(100ms);
+        rHigh = yams::test_async::res(searchSvc->search(high), 2s);
+        ASSERT_TRUE(rHigh) << rHigh.error().message;
     }
+
     EXPECT_TRUE(highHasExact);
 }
 

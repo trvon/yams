@@ -98,30 +98,23 @@ struct MetricsSnapshot {
     std::uint64_t directoriesProcessed{0};
     double postIngestLatencyMsEma{0.0};
     double postIngestRateSecEma{0.0};
-    // Pipeline stage metrics (extraction → KG → symbol → entity → embedding)
+    // Pipeline stage metrics (extraction → KG → enrich → embedding)
     std::size_t extractionInFlight{0};
     std::size_t kgQueued{0};
     std::size_t kgDropped{0};
     std::size_t kgConsumed{0};
     std::size_t kgInFlight{0};
     std::size_t kgQueueDepth{0}; // Current channel queue depth
-    std::size_t symbolInFlight{0};
-    std::size_t symbolQueueDepth{0}; // Current channel queue depth
+    std::size_t enrichInFlight{0};
+    std::size_t enrichQueueDepth{0}; // Aggregated symbol+entity+title queue depth
     // Entity extraction metrics (external plugins like Ghidra)
     std::size_t entityQueued{0};
     std::size_t entityDropped{0};
     std::size_t entityConsumed{0};
-    std::size_t entityInFlight{0};
-    std::size_t entityQueueDepth{0}; // Current channel queue depth
-    // Title extraction metrics
-    std::size_t titleQueueDepth{0}; // Current channel queue depth
-    std::size_t titleInFlight{0};
-    std::size_t titleConcurrencyLimit{0};
+    std::size_t postEnrichLimit{0};
     // Dynamic concurrency limits (PBI-05a)
     std::size_t postExtractionLimit{4};
     std::size_t postKgLimit{8};
-    std::size_t postSymbolLimit{4};
-    std::size_t postEntityLimit{2};
 
     // Session watch status
     bool watchEnabled{false};

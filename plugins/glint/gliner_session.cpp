@@ -603,7 +603,8 @@ private:
     }
 
 #ifdef YAMS_USE_ONNX_RUNTIME
-    std::vector<EntitySpan> extract_onnx(std::string_view text, const std::vector<WordInfo>& words,
+    std::vector<EntitySpan> extract_onnx([[maybe_unused]] std::string_view text,
+                                         const std::vector<WordInfo>& words,
                                          std::span<const std::string> labels) {
         if (!session_) {
             return {};

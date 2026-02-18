@@ -601,7 +601,7 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
         auto tryAdopt = [&](const std::string& pluginName) -> bool {
             auto ifaceRes = getActivePluginHost()->getInterface(pluginName, "model_provider_v1", 2);
             if (!ifaceRes) {
-                spdlog::info("[PluginManager] No model_provider_v1 interface for '{}': {}",
+                spdlog::warn("[PluginManager] No model_provider_v1 interface for '{}': {}",
                              pluginName, ifaceRes.error().message);
                 return false;
             }

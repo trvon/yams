@@ -269,6 +269,55 @@ TEST_CASE("ResourceGovernor singleton is accessible during daemon operation",
     harness.stop();
 }
 
+TEST_CASE("ResourceGovernor phase-4 policy surfaces respond during daemon operation",
+          "[integration][governor][policy]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    DaemonHarness::Options opts;
+    opts.useMockModelProvider = true;
+    DaemonHarness harness(opts);
+    REQUIRE(harness.start(10s));
+    REQUIRE(waitForGovernorActive(30s));
+
+    auto& governor = ResourceGovernor::instance();
+
+    // Normalize singleton policy state before making policy assertions.
+    governor.reportDbLockContention(0, 1);
+    (void)governor.recommendConnectionSlotTarget(16u, 8u, 4u, 64u, 8u, 1);
+
+    const auto retryBaseline =
+        governor.recommendRetryAfterMs(0, 200, 0, 1024 * 1024, 1, 128, 0, 128, 500);
+    const auto retryOverloaded = governor.recommendRetryAfterMs(
+        300, 200, 4 * 1024 * 1024, 1024 * 1024, 200, 128, 128, 128, 500);
+    CHECK(retryOverloaded >= retryBaseline);
+    CHECK(retryOverloaded <= 5000);
+
+    const auto pauseIdle = governor.recommendBackpressureReadPauseMs(100, false);
+    const auto pauseBackpressured = governor.recommendBackpressureReadPauseMs(100, true);
+    CHECK(pauseIdle >= 1);
+    CHECK(pauseIdle <= 5000);
+    CHECK(pauseBackpressured >= pauseIdle);
+    CHECK(pauseBackpressured <= 5000);
+
+    const auto currentSlots = 16u;
+    const auto shrunk = governor.recommendConnectionSlotTarget(currentSlots, 1, 4, 64, 8, 1);
+    CHECK(shrunk <= currentSlots);
+    CHECK(shrunk >= 4u);
+
+    governor.reportDbLockContention(100, 10);
+    CHECK(governor.capKgConcurrencyForDbContention(8) <= 2);
+    CHECK(governor.capEmbedConcurrencyForDbContention(8) <= 1);
+
+    governor.reportDbLockContention(0, 10);
+    CHECK(governor.capKgConcurrencyForDbContention(8) == 8);
+    CHECK(governor.capEmbedConcurrencyForDbContention(4) == 4);
+
+    // Leave singleton state neutral to reduce inter-test coupling.
+    governor.reportDbLockContention(0, 1);
+
+    harness.stop();
+}
+
 // =============================================================================
 // Test 3: Verify Pressure Level Detection with Low Threshold
 // =============================================================================

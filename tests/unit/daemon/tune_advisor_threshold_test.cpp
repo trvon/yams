@@ -433,6 +433,9 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
         CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
+        CHECK(TuneAdvisor::postEnrichConcurrent() == TuneAdvisor::postSymbolConcurrent() +
+                                                         TuneAdvisor::postEntityConcurrent() +
+                                                         TuneAdvisor::postTitleConcurrent());
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
     }
 
@@ -447,6 +450,9 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
         CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
+        CHECK(TuneAdvisor::postEnrichConcurrent() == TuneAdvisor::postSymbolConcurrent() +
+                                                         TuneAdvisor::postEntityConcurrent() +
+                                                         TuneAdvisor::postTitleConcurrent());
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
     }
 
@@ -457,12 +463,28 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         setHardwareConcurrency(8);
 
         // With hw=8: base=max(2,(8*20)/100)=2, scaleRange=max(1,(8*15)/100)=1
-        // total=2+1=3, extraction=1, embed=2, others=0
+        // total=2+1=3. Fairness pass grants Title before extra Embed.
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
         CHECK(TuneAdvisor::postKgConcurrent() == 0u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 2u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEnrichConcurrent() == TuneAdvisor::postSymbolConcurrent() +
+                                                         TuneAdvisor::postEntityConcurrent() +
+                                                         TuneAdvisor::postTitleConcurrent());
+        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
+    }
+
+    SECTION("Unified enrich override controls aggregate enrich budget") {
+        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+        EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
+        EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
+        EnvGuard enrichOverrideGuard("YAMS_POST_ENRICH_CONCURRENT", "2");
+        setHardwareConcurrency(8);
+
+        CHECK(TuneAdvisor::postEnrichConcurrent() == 2u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() + TuneAdvisor::postEntityConcurrent() +
+                  TuneAdvisor::postTitleConcurrent() ==
+              2u);
     }
 }

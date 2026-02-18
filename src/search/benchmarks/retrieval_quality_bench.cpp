@@ -1111,7 +1111,7 @@ struct BenchFixture {
             return {it->second, true};
         };
 
-        uint64_t lastKgInFlight = 0, lastSymbolInFlight = 0, lastEntityInFlight = 0;
+        uint64_t lastKgInFlight = 0, lastEnrichInFlight = 0;
         uint64_t lastExtractionInFlight = 0;
 
         while (true) {
@@ -1153,36 +1153,34 @@ struct BenchFixture {
                 auto [extractionInFlight, extractionPresent] =
                     getMetric(counts, "extraction_inflight");
                 auto [kgInFlight, kgPresent] = getMetric(counts, "kg_inflight");
-                auto [symbolInFlight, symbolPresent] = getMetric(counts, "symbol_inflight");
-                auto [entityInFlight, entityPresent] = getMetric(counts, "entity_inflight");
+                auto [enrichInFlight, enrichPresent] = getMetric(counts, "enrich_inflight");
+                (void)enrichPresent;
 
                 // Total in-flight across all stages (matches PostIngestQueue::totalInFlight())
-                uint64_t totalInFlight =
-                    extractionInFlight + kgInFlight + symbolInFlight + entityInFlight;
+                uint64_t totalInFlight = extractionInFlight + kgInFlight + enrichInFlight;
 
                 bool statusChanged =
                     (queuedTotal != lastDepth || docCount != lastDocCount ||
                      indexedCount != lastIndexedDocCount ||
                      contentExtracted != lastContentExtracted ||
                      postProcessed != lastPostProcessed || kgInFlight != lastKgInFlight ||
-                     symbolInFlight != lastSymbolInFlight || entityInFlight != lastEntityInFlight ||
+                     enrichInFlight != lastEnrichInFlight ||
                      extractionInFlight != lastExtractionInFlight);
 
                 if (statusChanged) {
                     spdlog::info(
                         "Documents: total={} indexed={} / {} | queue={} inflight={} | extracted={} "
-                        "processed={} | extract={} kg={} symbol={} entity={} (total={})",
+                        "processed={} | extract={} kg={} enrich={} (total={})",
                         docCount, indexedCount, corpusSize, queuedTotal, postInflight,
                         contentExtracted, postProcessed, extractionInFlight, kgInFlight,
-                        symbolInFlight, entityInFlight, totalInFlight);
+                        enrichInFlight, totalInFlight);
                     lastDepth = queuedTotal;
                     lastDocCount = docCount;
                     lastIndexedDocCount = indexedCount;
                     lastContentExtracted = contentExtracted;
                     lastPostProcessed = postProcessed;
                     lastKgInFlight = kgInFlight;
-                    lastSymbolInFlight = symbolInFlight;
-                    lastEntityInFlight = entityInFlight;
+                    lastEnrichInFlight = enrichInFlight;
                     lastExtractionInFlight = extractionInFlight;
                     stableChecks = 0;
                     lastProgressTime = now; // Reset progress timer on any change

@@ -25,8 +25,10 @@
 #include <optional>
 #include <thread>
 #include <vector>
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/strand.hpp>
 
 namespace yams::daemon {
@@ -76,6 +78,12 @@ namespace yams::daemon {
  */
 class WorkCoordinator {
 public:
+    enum class Priority {
+        High,
+        Normal,
+        Background,
+    };
+
     /**
      * @brief Construct WorkCoordinator (does not start threads).
      *
@@ -157,6 +165,17 @@ public:
     [[nodiscard]] boost::asio::io_context::executor_type getExecutor() const noexcept;
 
     /**
+     * @brief Get an executor for a specific priority class.
+     *
+     * High-priority work is isolated from background work through dedicated strands.
+     */
+    [[nodiscard]] boost::asio::any_io_executor getPriorityExecutor(Priority priority) const;
+
+    template <typename Fn> void post(Priority priority, Fn&& fn) const {
+        boost::asio::post(getPriorityExecutor(priority), std::forward<Fn>(fn));
+    }
+
+    /**
      * @brief Create a new strand for logical work isolation.
      *
      * Strands guarantee that posted work executes serially (FIFO order),
@@ -226,6 +245,11 @@ private:
 
     /// Condition variable for joinWithTimeout() to wait on worker exit
     std::condition_variable joinCV_;
+
+    /// Priority-isolated executors bound to the shared io_context
+    boost::asio::strand<boost::asio::io_context::executor_type> highPriorityStrand_;
+    boost::asio::strand<boost::asio::io_context::executor_type> normalPriorityStrand_;
+    boost::asio::strand<boost::asio::io_context::executor_type> backgroundPriorityStrand_;
 };
 
 } // namespace yams::daemon

@@ -19,6 +19,7 @@
 
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/socket_utils.h>
 #include <yams/daemon/resource/resource_pool.h>
@@ -458,3 +459,51 @@ TEST_CASE("ResourcePool: Concurrency", "[daemon][components][pool][concurrent]")
 
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/global_io_context.h>
+
+TEST_CASE("Daemon components: ResourceGovernor backpressure policy helpers",
+          "[daemon][components][governor]") {
+    auto& governor = ResourceGovernor::instance();
+
+    constexpr std::uint32_t currentSlots = 16;
+    constexpr std::uint32_t minSlots = 4;
+    constexpr std::uint32_t maxSlots = 64;
+    constexpr std::uint32_t scaleStep = 8;
+
+    // Normalize singleton policy state to avoid cross-test carryover.
+    governor.reportDbLockContention(0, 1);
+    (void)governor.recommendConnectionSlotTarget(currentSlots, currentSlots / 2, minSlots, maxSlots,
+                                                 scaleStep, 1);
+
+    auto unchanged = governor.recommendConnectionSlotTarget(currentSlots, currentSlots, minSlots,
+                                                            maxSlots, scaleStep, 3);
+    CHECK(unchanged == currentSlots);
+
+    auto shrunk =
+        governor.recommendConnectionSlotTarget(currentSlots, 1, minSlots, maxSlots, scaleStep, 1);
+    CHECK(shrunk <= currentSlots);
+    CHECK(shrunk >= minSlots);
+
+    governor.reportDbLockContention(100, 10);
+    CHECK(governor.capKgConcurrencyForDbContention(8) <= 2);
+    CHECK(governor.capEmbedConcurrencyForDbContention(8) <= 1);
+
+    governor.reportDbLockContention(0, 10);
+    CHECK(governor.capKgConcurrencyForDbContention(8) == 8);
+    CHECK(governor.capEmbedConcurrencyForDbContention(4) == 4);
+
+    const auto retryBaseline = governor.recommendRetryAfterMs(0, 100, 0, 1024, 1, 100, 0, 100, 500);
+    const auto retryOverloaded = governor.recommendRetryAfterMs(
+        200, 100, 4 * 1024 * 1024, 1024 * 1024, 200, 50, 100, 100, 500);
+    CHECK(retryOverloaded >= retryBaseline);
+    CHECK(retryOverloaded <= 5000);
+
+    const auto pauseIdle = governor.recommendBackpressureReadPauseMs(100, false);
+    const auto pauseBackpressured = governor.recommendBackpressureReadPauseMs(100, true);
+    CHECK(pauseIdle >= 1);
+    CHECK(pauseIdle <= 5000);
+    CHECK(pauseBackpressured >= pauseIdle);
+    CHECK(pauseBackpressured <= 5000);
+
+    // Leave singleton policy state neutral for subsequent tests.
+    governor.reportDbLockContention(0, 1);
+}
