@@ -2,7 +2,7 @@
 
 # Explicit file list keeps configuration deterministic and fast
 dbg = (get_option('buildtype') == 'debug')
-if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli
+if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and gtest_dep.found()
   # GTest-based services tests (excluding retrieval_and_ingestion which moved to Catch2)
   services_integration_srcs = files(
     'ipc_conformance_test.cpp',
@@ -68,11 +68,15 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     args: ['--allow-running-no-tests'],
   )
 elif get_option('enable-integration-tests')
-  message('integration_services suite disabled (enable with -Denable-integration-services=true).')
+  if not gtest_dep.found()
+    message('integration_services suite disabled (GTest not found).')
+  else
+    message('integration_services suite disabled (enable with -Denable-integration-services=true).')
+  endif
 endif
 
 # Catch2 migration: Sync Indexing tests
-if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli
+if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and catch2_dep.found()
   catch2_sync_indexing_exe = executable('catch2_sync_indexing',
     files('sync_indexing_catch2_test.cpp'),
     include_directories: incs,

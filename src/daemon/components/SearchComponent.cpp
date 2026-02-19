@@ -1,13 +1,15 @@
 // Copyright (c) 2025 YAMS Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <spdlog/spdlog.h>
+#include <algorithm>
+#include <cstdlib>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 #include <yams/daemon/components/SearchComponent.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/metadata/metadata_repository.h>
-#include <spdlog/spdlog.h>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
 
 namespace yams::daemon {
 
@@ -86,6 +88,40 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
 
     // Check if search engine is ready (don't trigger if still initializing)
     if (!state_.readiness.searchEngineReady.load()) {
+        return false;
+    }
+
+    // Allow disabling rebuilds (bench + ops control).
+    if (const char* env = std::getenv("YAMS_DISABLE_SEARCH_REBUILDS")) {
+        try {
+            std::string v(env);
+            std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+            if (v == "1" || v == "true" || v == "yes" || v == "on") {
+                return false;
+            }
+        } catch (...) {
+        }
+    }
+
+    // Avoid rebuilds while ingestion is active (even if post-ingest is briefly drained).
+    // Ingest can run ahead of post-ingest; rebuilds here create oscillations and noise.
+    try {
+        auto ingest = serviceManager_.getIngestMetricsSnapshot();
+        if (ingest.queued > 0 || ingest.active > 0) {
+            return false;
+        }
+    } catch (...) {
+    }
+
+    // Rebuild only when ingest/post-ingest/embedding pipelines are drained.
+    // Rebuilding during heavy ingest competes with extraction+embedding and reduces throughput.
+    if (const auto* postIngest = serviceManager_.getPostIngestQueue()) {
+        if (postIngest->size() > 0 || postIngest->totalInFlight() > 0) {
+            return false;
+        }
+    }
+    if (serviceManager_.getEmbeddingQueuedJobs() > 0 ||
+        serviceManager_.getEmbeddingInFlightJobs() > 0) {
         return false;
     }
 

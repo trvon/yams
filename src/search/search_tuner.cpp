@@ -95,8 +95,9 @@ TuningState SearchTuner::computeState(const storage::CorpusStats& stats, std::st
         // Scientific/benchmark corpus: text+vector focus, no structure
         state = TuningState::SCIENTIFIC;
         reason << "prose_dominant (" << static_cast<int>(stats.proseRatio * 100)
-               << "%), flat_paths (depth=" << stats.pathDepthAvg
-               << "), no_tags (coverage=" << static_cast<int>(stats.tagCoverage * 100) << "%)";
+               << "%), benchmark_like (path_depth=" << stats.pathDepthAvg
+               << ", tag_coverage=" << static_cast<int>(stats.tagCoverage * 100)
+               << "%, symbol_density=" << stats.symbolDensity << ")";
     } else if (isCode && isSmall) {
         // Small code corpus: emphasize text + path hierarchy
         state = TuningState::SMALL_CODE;

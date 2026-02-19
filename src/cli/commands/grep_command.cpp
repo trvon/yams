@@ -42,6 +42,7 @@
 #include <yams/daemon/ipc/response_of.hpp>
 // Retrieval facade for daemon-first grep
 #include <yams/app/services/retrieval_service.h>
+#include <yams/app/services/services.hpp>
 
 namespace yams::cli {
 
@@ -350,37 +351,14 @@ public:
             {
                 std::vector<std::string> cwdPatterns;
                 if (scopeToCwd_ || !cwdOverride_.empty()) {
-                    std::error_code ec;
-                    auto cwd = std::filesystem::current_path(ec);
-                    if (!cwdOverride_.empty()) {
-                        std::filesystem::path base{cwdOverride_};
-                        if (!base.is_absolute()) {
-                            base = cwd / base;
-                        }
-                        cwd = std::filesystem::weakly_canonical(base, ec);
-                        if (ec)
-                            cwd = base;
+                    std::string cwdDir = cwdOverride_;
+                    if (cwdDir.empty()) {
+                        std::error_code ec;
+                        cwdDir = std::filesystem::current_path(ec).string();
                     }
-                    if (!ec) {
-                        std::string cwdPrefix = cwd.string();
-                        std::replace(cwdPrefix.begin(), cwdPrefix.end(), '\\', '/');
-                        if (!cwdPrefix.empty() && cwdPrefix.back() != '/') {
-                            cwdPrefix += '/';
-                        }
-                        cwdPatterns.push_back(cwdPrefix + "**/*");
-                        std::string noLeadingSlash = cwdPrefix;
-                        if (!noLeadingSlash.empty() && noLeadingSlash.front() == '/') {
-                            noLeadingSlash.erase(noLeadingSlash.begin());
-                        }
-                        if (!noLeadingSlash.empty()) {
-                            cwdPatterns.push_back(noLeadingSlash + "**/*");
-                        }
-                        auto baseName = std::filesystem::path(cwdPrefix).filename().string();
-                        if (!baseName.empty()) {
-                            cwdPatterns.push_back(baseName + "/**/*");
-                        }
-                        spdlog::debug("[CLI] Scoping grep to CWD: {}", cwdPrefix);
-                    }
+                    cwdPatterns = yams::app::services::utils::buildCwdScopePatterns(cwdDir);
+                    spdlog::debug("[CLI] Scoping grep to CWD: {} ({} patterns)", cwdDir,
+                                  cwdPatterns.size());
                 }
 
                 yams::app::services::GrepOptions dreq;
@@ -981,36 +959,13 @@ private:
             queryPatterns.push_back(std::string("**/*") + ext);
         }
         if (scopeToCwd_ || !cwdOverride_.empty()) {
-            std::error_code ec;
-            auto cwd = std::filesystem::current_path(ec);
-            if (!cwdOverride_.empty()) {
-                std::filesystem::path base{cwdOverride_};
-                if (!base.is_absolute()) {
-                    base = cwd / base;
-                }
-                cwd = std::filesystem::weakly_canonical(base, ec);
-                if (ec)
-                    cwd = base;
+            std::string cwdDir = cwdOverride_;
+            if (cwdDir.empty()) {
+                std::error_code ec;
+                cwdDir = std::filesystem::current_path(ec).string();
             }
-            if (!ec) {
-                std::string cwdPrefix = cwd.string();
-                std::replace(cwdPrefix.begin(), cwdPrefix.end(), '\\', '/');
-                if (!cwdPrefix.empty() && cwdPrefix.back() != '/') {
-                    cwdPrefix += '/';
-                }
-                queryPatterns.push_back(cwdPrefix + "**/*");
-                std::string noLeadingSlash = cwdPrefix;
-                if (!noLeadingSlash.empty() && noLeadingSlash.front() == '/') {
-                    noLeadingSlash.erase(noLeadingSlash.begin());
-                }
-                if (!noLeadingSlash.empty()) {
-                    queryPatterns.push_back(noLeadingSlash + "**/*");
-                }
-                auto baseName = std::filesystem::path(cwdPrefix).filename().string();
-                if (!baseName.empty()) {
-                    queryPatterns.push_back(baseName + "/**/*");
-                }
-            }
+            auto cwdPats = yams::app::services::utils::buildCwdScopePatterns(cwdDir);
+            queryPatterns.insert(queryPatterns.end(), cwdPats.begin(), cwdPats.end());
         }
 
         if (queryPatterns.empty()) {

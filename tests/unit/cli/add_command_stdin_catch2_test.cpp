@@ -10,14 +10,12 @@
 #include <string>
 
 #include "../../common/test_helpers_catch2.h"
+#include <yams/compat/unistd.h>
 
 #ifdef _WIN32
-#include <process.h>
 #define WIFEXITED(x) ((x) != -1)
 #define WEXITSTATUS(x) (x)
-#define getpid _getpid
 #else
-#include <unistd.h>
 #include <sys/wait.h>
 #endif
 

@@ -42,6 +42,7 @@
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_future.hpp>
 #include <tl/expected.hpp>
 #include <yams/api/content_store_builder.h>
@@ -71,7 +72,9 @@
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/retrieval_session.h>
+#include <yams/daemon/metric_keys.h>
 
+#include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
@@ -93,6 +96,18 @@ namespace {
 // Convenience alias for ConfigResolver timeouts
 inline int read_timeout_ms(const char* envName, int defaultMs, int minMs) {
     return yams::daemon::ConfigResolver::readTimeoutMs(envName, defaultMs, minMs);
+}
+
+inline void setOnnxShutdownMarker(bool enabled) {
+#ifdef _WIN32
+    _putenv_s("YAMS_ONNX_SHUTDOWN_IN_PROGRESS", enabled ? "1" : "");
+#else
+    if (enabled) {
+        ::setenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS", "1", 1);
+    } else {
+        ::unsetenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS");
+    }
+#endif
 }
 
 // Template-based plugin adoption helper to reduce code duplication
@@ -265,11 +280,12 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
     spdlog::debug("[ServiceManager] Creating WorkCoordinator...");
     try {
         workCoordinator_ = std::make_unique<WorkCoordinator>();
-        auto threadCount = yams::daemon::TuneAdvisor::recommendedThreads();
+        auto threadCount = yams::daemon::TuneAdvisor::workCoordinatorThreads();
         workCoordinator_->start(threadCount);
-        spdlog::info("[ServiceManager] WorkCoordinator created with {} worker threads (budget {}%)",
+        spdlog::info("[ServiceManager] WorkCoordinator created with {} worker threads (budget {}%, "
+                     "override={})",
                      workCoordinator_->getWorkerCount(),
-                     yams::daemon::TuneAdvisor::cpuBudgetPercent());
+                     yams::daemon::TuneAdvisor::cpuBudgetPercent(), threadCount);
 
         // Initialize strands for logical separation
         spdlog::debug("[ServiceManager] Creating strands...");
@@ -285,6 +301,10 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
     try {
         spdlog::debug("ServiceManager constructor start");
+        if (!cliRequestPool_) {
+            cliRequestPool_ = std::make_unique<boost::asio::thread_pool>(2);
+            spdlog::info("[ServiceManager] CLI request pool created with 2 threads");
+        }
         refreshPluginStatusSnapshot();
         // In test builds, prefer mock embedding provider unless explicitly disabled.
         // This avoids heavy ONNX runtime usage and platform-specific crashes on CI/macOS.
@@ -336,11 +356,48 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         if (abiHost_) {
             // Trust from env
             if (const char* env = std::getenv("YAMS_PLUGIN_DIR")) {
-                std::filesystem::path penv(env);
-                if (!penv.empty()) {
-                    if (auto tr = abiHost_->trustAdd(penv); !tr) {
-                        spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR {}: {}", penv.string(),
-                                     tr.error().message);
+                try {
+                    std::string raw(env);
+                    // Support multiple roots separated by ':' (POSIX) or ';' (Windows/INI style).
+                    // This is useful for benchmarks that want to pin to builddir plugins.
+                    std::vector<std::string> parts;
+                    parts.reserve(4);
+                    std::string cur;
+                    for (char ch : raw) {
+                        if (ch == ':' || ch == ';') {
+                            if (!cur.empty()) {
+                                parts.push_back(cur);
+                                cur.clear();
+                            }
+                            continue;
+                        }
+                        cur.push_back(ch);
+                    }
+                    if (!cur.empty()) {
+                        parts.push_back(cur);
+                    }
+
+                    if (parts.empty()) {
+                        parts.push_back(raw);
+                    }
+
+                    for (const auto& p : parts) {
+                        std::filesystem::path penv(p);
+                        if (penv.empty()) {
+                            continue;
+                        }
+                        if (auto tr = abiHost_->trustAdd(penv); !tr) {
+                            spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR {}: {}",
+                                         penv.string(), tr.error().message);
+                        }
+                    }
+                } catch (...) {
+                    std::filesystem::path penv(env);
+                    if (!penv.empty()) {
+                        if (auto tr = abiHost_->trustAdd(penv); !tr) {
+                            spdlog::warn("Failed to auto-trust YAMS_PLUGIN_DIR {}: {}",
+                                         penv.string(), tr.error().message);
+                        }
                     }
                 }
             }
@@ -366,17 +423,24 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 }
             }
 
-            // Trust system install location
+            // Trust system install location unless strict plugin-dir mode is enabled.
 #ifdef YAMS_INSTALL_PREFIX
             namespace fs = std::filesystem;
-            fs::path system_plugins = fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins";
-            if (fs::exists(system_plugins) && fs::is_directory(system_plugins)) {
-                if (auto tr = abiHost_->trustAdd(system_plugins)) {
-                    spdlog::info("Auto-trusted system plugin directory: {}",
-                                 system_plugins.string());
-                } else {
-                    spdlog::warn("Failed to auto-trust system plugins: {}", tr.error().message);
+            const bool strictPluginDirMode =
+                ConfigResolver::envTruthy(std::getenv("YAMS_PLUGIN_DIR_STRICT"));
+            if (!strictPluginDirMode) {
+                fs::path system_plugins =
+                    fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins";
+                if (fs::exists(system_plugins) && fs::is_directory(system_plugins)) {
+                    if (auto tr = abiHost_->trustAdd(system_plugins)) {
+                        spdlog::info("Auto-trusted system plugin directory: {}",
+                                     system_plugins.string());
+                    } else {
+                        spdlog::warn("Failed to auto-trust system plugins: {}", tr.error().message);
+                    }
                 }
+            } else {
+                spdlog::info("Strict plugin-dir mode enabled; skipping system plugin trust");
             }
 #endif
         } else {
@@ -470,6 +534,9 @@ ServiceManager::~ServiceManager() {
 }
 
 yams::Result<void> ServiceManager::initialize() {
+    // Clear any stale shutdown marker from prior daemon lifecycles in this process.
+    setOnnxShutdownMarker(false);
+
     // Validate data directory synchronously to fail fast if unwritable
     namespace fs = std::filesystem;
     fs::path dataDir = config_.dataDir;
@@ -573,7 +640,7 @@ yams::Result<void> ServiceManager::initialize() {
     // Async initialization is now triggered explicitly via startAsyncInit()
     // to allow the daemon main loop to start first.
 
-    // Configure ResourceGovernor pool defaults from TuneAdvisor for known components
+    // Configure pool defaults via ResourceGovernor from TuneAdvisor for known components
     try {
         ResourceGovernor::PoolConfig ipcCfg{};
         ipcCfg.min_size = TuneAdvisor::poolMinSizeIpc();
@@ -584,11 +651,13 @@ yams::Result<void> ServiceManager::initialize() {
         ipcCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
         ipcCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
         ipcCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
-        auto& governor = ResourceGovernor::instance();
-        governor.configurePool("ipc", ipcCfg);
+        ResourceGovernor::instance().configurePool("ipc", ipcCfg);
 
         ResourceGovernor::PoolConfig ioCfg{};
         ioCfg.min_size = TuneAdvisor::poolMinSizeIpcIo();
+        if (ioCfg.min_size < 2) {
+            ioCfg.min_size = 2;
+        }
         // Bound IO max by both configured max and a dynamic cap from CPU budget
         try {
             auto dynCap = TuneAdvisor::recommendedThreads(0.5 /*backgroundFactor*/);
@@ -599,16 +668,15 @@ yams::Result<void> ServiceManager::initialize() {
         ioCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
         ioCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
         ioCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
-        governor.configurePool("ipc_io", ioCfg);
-        spdlog::info(
-            "ResourceGovernor pool defaults configured: ipc[min={},max={}] io[min={},max={}]",
-            ipcCfg.min_size, ipcCfg.max_size, ioCfg.min_size, ioCfg.max_size);
+        ResourceGovernor::instance().configurePool("ipc_io", ioCfg);
+        spdlog::info("Pool defaults configured: ipc[min={},max={}] io[min={},max={}]",
+                     ipcCfg.min_size, ipcCfg.max_size, ioCfg.min_size, ioCfg.max_size);
 
         // Seed FsmMetricsRegistry with initial pool sizes for immediate visibility in status
         FsmMetricsRegistry::instance().setIpcPoolSize(static_cast<uint32_t>(ipcCfg.min_size));
         FsmMetricsRegistry::instance().setIoPoolSize(static_cast<uint32_t>(ioCfg.min_size));
     } catch (const std::exception& e) {
-        spdlog::debug("ResourceGovernor pool configure error: {}", e.what());
+        spdlog::debug("Pool configure error: {}", e.what());
     }
 
     // SearchEngine initialization is handled separately via searchEngineManager_
@@ -721,6 +789,14 @@ void ServiceManager::shutdown() {
     spdlog::info("[ServiceManager] Shutdown initiated");
     auto shutdownStart = std::chrono::steady_clock::now();
 
+    // Signal plugin providers to fast-fail long acquire paths while shutdown drains work.
+    setOnnxShutdownMarker(true);
+
+    // Hold components that must outlive WorkCoordinator shutdown.
+    // We move these out of member storage during early shutdown phases to prevent
+    // accidental reuse, while keeping the objects alive until we finish draining threads.
+    std::unique_ptr<CheckpointManager> checkpointManagerHold;
+
     // Phase 0: Signal async init coroutine to stop and wait for it to complete
     // This prevents the coroutine from accessing resources we're about to tear down
     spdlog::info("[ServiceManager] Phase 0: Requesting async init stop");
@@ -786,6 +862,79 @@ void ServiceManager::shutdown() {
     // Phase 3: (Removed - work guard now managed by WorkCoordinator)
     spdlog::info("[ServiceManager] Phase 3: Skipped (work guard managed by WorkCoordinator)");
 
+    // Phase 3.5: Stop CLI request pool to avoid starving shutdown
+    if (cliRequestPool_) {
+        try {
+            cliRequestPool_->stop();
+            cliRequestPool_->join();
+            cliRequestPool_.reset();
+            spdlog::info("[ServiceManager] Phase 3.5: CLI request pool stopped");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.5: CLI request pool stop failed: {}", e.what());
+        } catch (...) {
+            spdlog::warn("[ServiceManager] Phase 3.5: CLI request pool stop failed");
+        }
+    }
+
+    // Phase 3.6: Stop CheckpointManager before WorkCoordinator
+    spdlog::info("[ServiceManager] Phase 3.6: Stopping CheckpointManager");
+    if (checkpointManager_) {
+        checkpointManager_->stop();
+        checkpointManagerHold = std::move(checkpointManager_);
+        spdlog::info("[ServiceManager] Phase 3.6: CheckpointManager stopped");
+    }
+
+    // Phase 3.6.5: Stop post-ingest queue before quiescing embedding workers.
+    // This prevents new extraction/embedding dispatch during shutdown and reduces metadata lock
+    // contention while in-flight embed jobs finish.
+    spdlog::info("[ServiceManager] Phase 3.6.5: Quiescing post-ingest queue");
+    if (postIngest_) {
+        try {
+            postIngest_.reset();
+            spdlog::info("[ServiceManager] Phase 3.6.5: Post-ingest queue quiesced");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.6.5: Post-ingest quiesce failed: {}", e.what());
+        } catch (...) {
+            spdlog::warn("[ServiceManager] Phase 3.6.5: Post-ingest quiesce failed");
+        }
+    } else {
+        spdlog::info("[ServiceManager] Phase 3.6.5: No post-ingest queue to quiesce");
+    }
+
+    // Phase 3.7: Quiesce embedding service before stopping WorkCoordinator threads.
+    // Embedding jobs run on WorkCoordinator executors; stopping/joining workers first can leave
+    // in-flight embed tasks stranded and trigger shutdown detaches/timeouts.
+    spdlog::info("[ServiceManager] Phase 3.7: Quiescing embedding service");
+    if (embeddingService_) {
+        try {
+            embeddingService_->shutdown();
+            spdlog::info("[ServiceManager] Phase 3.7: Embedding service quiesced");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.7: Embedding service quiesce failed: {}",
+                         e.what());
+        } catch (...) {
+            spdlog::warn("[ServiceManager] Phase 3.7: Embedding service quiesce failed");
+        }
+    } else {
+        spdlog::info("[ServiceManager] Phase 3.7: No embedding service to quiesce");
+    }
+
+    // Phase 3.8: Stop ingest service before WorkCoordinator shutdown.
+    // Ingest processing dispatches work onto WorkCoordinator executors and waits on futures;
+    // stopping the coordinator first can destroy pending promises and leave workers wedged.
+    spdlog::info("[ServiceManager] Phase 3.8: Quiescing ingest service");
+    if (ingestService_) {
+        try {
+            ingestService_->stop();
+            ingestService_.reset();
+            spdlog::info("[ServiceManager] Phase 3.8: Ingest service quiesced");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.8: IngestService quiesce failed: {}", e.what());
+        }
+    } else {
+        spdlog::info("[ServiceManager] Phase 3.8: No ingest service to quiesce");
+    }
+
     // Phase 4: Cancel all asynchronous operations and stop WorkCoordinator io_context
     spdlog::info("[ServiceManager] Phase 4: Cancelling async operations");
     shutdownSignal_.emit(boost::asio::cancellation_type::terminal);
@@ -815,18 +964,21 @@ void ServiceManager::shutdown() {
     // Phase 6: Stop services in reverse dependency order
     spdlog::info("[ServiceManager] Phase 6: Shutting down daemon services");
 
-    spdlog::info("[ServiceManager] Phase 6.1: Stopping ingest service");
-    if (ingestService_) {
-        try {
-            ingestService_->stop();
-            ingestService_.reset();
-            spdlog::info("[ServiceManager] Phase 6.1: Ingest service stopped");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 6.1: IngestService shutdown failed: {}", e.what());
+    spdlog::info("[ServiceManager] Phase 6.0.5: Stopping repair service");
+    {
+        auto rs = getRepairServiceShared();
+        if (rs) {
+            try {
+                stopRepairService();
+                spdlog::info("[ServiceManager] Phase 6.0.5: Repair service stopped");
+            } catch (const std::exception& e) {
+                spdlog::warn("[ServiceManager] Phase 6.0.5: RepairService shutdown failed: {}",
+                             e.what());
+            }
         }
-    } else {
-        spdlog::info("[ServiceManager] Phase 6.1: No ingest service to stop");
     }
+
+    spdlog::info("[ServiceManager] Phase 6.1: Ingest service already quiesced");
 
     spdlog::info("[ServiceManager] Phase 6.2: Shutting down graph component");
     if (graphComponent_) {
@@ -848,13 +1000,12 @@ void ServiceManager::shutdown() {
         spdlog::info("[ServiceManager] Phase 6.3: No post-ingest queue to reset");
     }
 
-    spdlog::info("[ServiceManager] Phase 6.3.5: Shutting down embedding service");
+    spdlog::info("[ServiceManager] Phase 6.3.5: Resetting embedding service");
     if (embeddingService_) {
-        embeddingService_->shutdown();
         embeddingService_.reset();
-        spdlog::info("[ServiceManager] Phase 6.3.5: Embedding service shutdown complete");
+        spdlog::info("[ServiceManager] Phase 6.3.5: Embedding service reset complete");
     } else {
-        spdlog::info("[ServiceManager] Phase 6.3.5: No embedding service to shutdown");
+        spdlog::info("[ServiceManager] Phase 6.3.5: No embedding service to reset");
     }
 
     spdlog::info("[ServiceManager] Phase 6.3.6: Shutting down KG write queue");
@@ -875,9 +1026,17 @@ void ServiceManager::shutdown() {
     spdlog::info("[ServiceManager] Phase 6.6: Shutting down model provider");
     if (modelProvider_) {
         try {
-            auto loaded = modelProvider_->getLoadedModels();
-            for (const auto& name : loaded) {
-                (void)modelProvider_->unloadModel(name);
+            // Avoid unloading individual models during shutdown for ABI-backed providers.
+            // The ONNX plugin can have a background preload/warmup thread; unloading models here
+            // can race with that thread and lead to use-after-free (observed as
+            // std::system_error("mutex lock failed: Invalid argument") during teardown).
+            // For ABI providers, rely on plugin shutdown (Phase 6.9) to join background threads
+            // and release resources safely.
+            if (dynamic_cast<AbiModelProviderAdapter*>(modelProvider_.get()) == nullptr) {
+                auto loaded = modelProvider_->getLoadedModels();
+                for (const auto& name : loaded) {
+                    (void)modelProvider_->unloadModel(name);
+                }
             }
             modelProvider_->shutdown();
             modelProvider_.reset();
@@ -927,6 +1086,10 @@ void ServiceManager::shutdown() {
 
     spdlog::info("[ServiceManager] Phase 7: Shutting down database");
     try {
+        if (readConnectionPool_) {
+            readConnectionPool_->shutdown();
+            readConnectionPool_.reset();
+        }
         if (connectionPool_) {
             connectionPool_->shutdown();
             connectionPool_.reset();
@@ -949,6 +1112,11 @@ void ServiceManager::shutdown() {
     spdlog::info("[ServiceManager] Phase 8.3: Vector search uses VectorDatabase directly");
     contentStore_.reset();
     spdlog::info("[ServiceManager] Phase 8.4: Content store reset");
+
+    spdlog::info("[ServiceManager] Phase 8.4.5: Releasing async strands");
+    initStrand_.reset();
+    pluginStrand_.reset();
+    modelStrand_.reset();
 
     spdlog::info("[ServiceManager] Phase 8.5: Releasing WorkCoordinator");
     workCoordinator_.reset(); // WorkCoordinator destructor will join threads
@@ -1025,6 +1193,8 @@ void ServiceManager::shutdown() {
     } catch (...) {
         spdlog::warn("[ServiceManager] Failed to dispatch ServiceManagerStoppedEvent");
     }
+
+    setOnnxShutdownMarker(false);
 }
 
 // Single-attempt vector database initialization. Safe to call multiple times; only
@@ -1065,30 +1235,33 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
             j["overall"] = ov;
         }
         nlohmann::json rd;
-        rd["ipc_server"] = state.readiness.ipcServerReady.load();
-        rd["content_store"] = state.readiness.contentStoreReady.load();
-        rd["database"] = state.readiness.databaseReady.load();
-        rd["metadata_repo"] = state.readiness.metadataRepoReady.load();
-        rd["search_engine"] = state.readiness.searchEngineReady.load();
-        rd["model_provider"] = state.readiness.modelProviderReady.load();
-        rd["vector_index"] = state.readiness.vectorIndexReady.load();
-        rd["plugins"] = state.readiness.pluginsReady.load();
+        rd[std::string(readiness::kIpcServer)] = state.readiness.ipcServerReady.load();
+        rd[std::string(readiness::kContentStore)] = state.readiness.contentStoreReady.load();
+        rd[std::string(readiness::kDatabase)] = state.readiness.databaseReady.load();
+        rd[std::string(readiness::kMetadataRepo)] = state.readiness.metadataRepoReady.load();
+        rd[std::string(readiness::kSearchEngine)] = state.readiness.searchEngineReady.load();
+        rd[std::string(readiness::kModelProvider)] = state.readiness.modelProviderReady.load();
+        rd[std::string(readiness::kVectorIndex)] = state.readiness.vectorIndexReady.load();
+        rd[std::string(readiness::kPlugins)] = state.readiness.pluginsReady.load();
         // Extended vector DB readiness fields
-        rd["vector_db_init_attempted"] = state.readiness.vectorDbInitAttempted.load();
-        rd["vector_db_ready"] = state.readiness.vectorDbReady.load();
-        rd["vector_db_dim"] = state.readiness.vectorDbDim.load();
+        rd[std::string(readiness::kVectorDbInitAttempted)] =
+            state.readiness.vectorDbInitAttempted.load();
+        rd[std::string(readiness::kVectorDbReady)] = state.readiness.vectorDbReady.load();
+        rd[std::string(readiness::kVectorDbDim)] = state.readiness.vectorDbDim.load();
         j["readiness"] = rd;
         nlohmann::json pr;
-        pr["search_engine"] = state.readiness.searchProgress.load();
-        pr["vector_index"] = state.readiness.vectorIndexProgress.load();
-        pr["model_provider"] = state.readiness.modelLoadProgress.load();
+        pr[std::string(readiness::kSearchEngine)] = state.readiness.searchProgress.load();
+        pr[std::string(readiness::kVectorIndex)] = state.readiness.vectorIndexProgress.load();
+        pr[std::string(readiness::kModelProvider)] = state.readiness.modelLoadProgress.load();
         j["progress"] = pr;
         auto sec_since_start = std::chrono::duration_cast<std::chrono::seconds>(
                                    std::chrono::steady_clock::now() - state.stats.startTime)
                                    .count();
         std::map<std::string, int> expected_s{
-            {"plugins", 1},      {"content_store", 2}, {"database", 2},       {"metadata_repo", 2},
-            {"vector_index", 3}, {"search_engine", 4}, {"model_provider", 20}};
+            {std::string(readiness::kPlugins), 1},       {std::string(readiness::kContentStore), 2},
+            {std::string(readiness::kDatabase), 2},      {std::string(readiness::kMetadataRepo), 2},
+            {std::string(readiness::kVectorIndex), 3},   {std::string(readiness::kSearchEngine), 4},
+            {std::string(readiness::kModelProvider), 20}};
         nlohmann::json eta;
         auto add_eta = [&](const std::string& key, bool ready, int progress) {
             if (ready)
@@ -1102,20 +1275,22 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
                 }
             } catch (...) {
             }
-            int remain_by_pct = std::max(0, exp - (exp * progress) / 100);
+            int remain_by_pct = ServiceManager::computeEtaRemaining(exp, progress);
             int remain_by_elapsed = std::max(0, exp - static_cast<int>(sec_since_start));
             int remain = std::max(remain_by_pct, remain_by_elapsed);
             eta[key] = remain;
         };
-        add_eta("plugins", state.readiness.pluginsReady.load(), 100);
-        add_eta("content_store", state.readiness.contentStoreReady.load(), 100);
-        add_eta("database", state.readiness.databaseReady.load(), 100);
-        add_eta("metadata_repo", state.readiness.metadataRepoReady.load(), 100);
-        add_eta("vector_index", state.readiness.vectorIndexReady.load(),
+        add_eta(std::string(readiness::kPlugins), state.readiness.pluginsReady.load(), 100);
+        add_eta(std::string(readiness::kContentStore), state.readiness.contentStoreReady.load(),
+                100);
+        add_eta(std::string(readiness::kDatabase), state.readiness.databaseReady.load(), 100);
+        add_eta(std::string(readiness::kMetadataRepo), state.readiness.metadataRepoReady.load(),
+                100);
+        add_eta(std::string(readiness::kVectorIndex), state.readiness.vectorIndexReady.load(),
                 state.readiness.vectorIndexProgress.load());
-        add_eta("search_engine", state.readiness.searchEngineReady.load(),
+        add_eta(std::string(readiness::kSearchEngine), state.readiness.searchEngineReady.load(),
                 state.readiness.searchProgress.load());
-        add_eta("model_provider", state.readiness.modelProviderReady.load(),
+        add_eta(std::string(readiness::kModelProvider), state.readiness.modelProviderReady.load(),
                 state.readiness.modelLoadProgress.load());
         j["eta_seconds"] = eta;
         if (!state.initDurationsMs.empty()) {
@@ -1215,7 +1390,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::info("[ServiceManager] Phase: Plugins Ready.");
     try {
         (void)init::record_duration(
-            "plugins",
+            std::string(readiness::kPlugins),
             [&]() -> yams::Result<void> {
                 try {
                     const auto ps = getPluginHostFsmSnapshot();
@@ -1266,7 +1441,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     {
         using T = std::unique_ptr<yams::api::IContentStore>;
         auto storeRes = init::record_duration(
-            "content_store",
+            std::string(readiness::kContentStore),
             [&]() -> yams::Result<T> {
                 return yams::api::ContentStoreBuilder::createDefault(storeRoot);
             },
@@ -1316,7 +1491,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         co_return Error{ErrorCode::OperationCancelled, "FSM dispatch failed during shutdown"};
     }
     bool db_ok = co_await init::await_record_duration(
-        "database",
+        std::string(readiness::kDatabase),
         [&]() -> boost::asio::awaitable<bool> {
             co_return co_await co_openDatabase(dbPath, open_timeout, token);
         },
@@ -1390,11 +1565,59 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             spdlog::warn("Connection pool init failed: {} — continuing degraded",
                          poolInit.error().message);
         } else {
+            // Dual pool is enabled by default for better read/write separation.
+            // Set YAMS_DB_DUAL_POOL=0 to disable.
+            bool dualPoolEnabled = true;
+            if (const char* envDual = std::getenv("YAMS_DB_DUAL_POOL"); envDual && *envDual) {
+                std::string value(envDual);
+                std::transform(value.begin(), value.end(), value.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                dualPoolEnabled =
+                    (value != "0" && value != "false" && value != "off" && value != "no");
+            }
+
+            if (dualPoolEnabled) {
+                auto readCfg = dbPoolCfg;
+                if (const char* envReadMax = std::getenv("YAMS_DB_READ_POOL_MAX");
+                    envReadMax && *envReadMax) {
+                    try {
+                        auto v = static_cast<size_t>(std::stoul(envReadMax));
+                        if (v >= readCfg.minConnections)
+                            readCfg.maxConnections = v;
+                    } catch (...) {
+                    }
+                }
+
+                if (const char* envReadMin = std::getenv("YAMS_DB_READ_POOL_MIN");
+                    envReadMin && *envReadMin) {
+                    try {
+                        auto v = static_cast<size_t>(std::stoul(envReadMin));
+                        if (v > 0)
+                            readCfg.minConnections = v;
+                    } catch (...) {
+                    }
+                }
+
+                readConnectionPool_ =
+                    std::make_shared<metadata::ConnectionPool>(dbPath.string(), readCfg);
+                auto readPoolInit = init::record_duration(
+                    "db_read_pool", [&]() { return readConnectionPool_->initialize(); },
+                    state_.initDurationsMs);
+                if (!readPoolInit) {
+                    spdlog::warn(
+                        "Read connection pool init failed (falling back to single pool): {}",
+                        readPoolInit.error().message);
+                    readConnectionPool_.reset();
+                } else {
+                    spdlog::info("Dual DB pool mode enabled (write/work + read-only)");
+                }
+            }
+
             auto repoRes = init::record_duration(
-                "metadata_repo",
+                std::string(readiness::kMetadataRepo),
                 [&]() -> yams::Result<void> {
-                    metadataRepo_ =
-                        std::make_shared<metadata::MetadataRepository>(*connectionPool_);
+                    metadataRepo_ = std::make_shared<metadata::MetadataRepository>(
+                        *connectionPool_, readConnectionPool_.get());
                     state_.readiness.metadataRepoReady = true;
                     // Initialize component-owned metrics (sync with DB once at startup)
                     metadataRepo_->initializeCounters();
@@ -1668,10 +1891,15 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     "ServiceManager: Model provider ready, embeddings will be generated on-demand");
             } else {
                 spdlog::warn("ServiceManager: No model provider adopted from plugins.");
-                if (config_.enableModelProvider) {
+                state_.readiness.modelProviderReady.store(false, std::memory_order_release);
+                if (config_.enableModelProvider && config_.modelProviderRequired) {
                     co_return Error{ErrorCode::NotInitialized,
                                     "Failed to adopt a model provider from plugins. Check "
                                     "plugin paths and trust settings."};
+                }
+                if (config_.enableModelProvider) {
+                    spdlog::warn("ServiceManager: continuing startup without model provider "
+                                 "(degraded mode; embeddings unavailable)");
                 }
             }
             auto extractorResult = init::step<size_t>(
@@ -2249,15 +2477,8 @@ boost::asio::any_io_executor ServiceManager::getWorkerExecutor() const {
 }
 
 boost::asio::any_io_executor ServiceManager::getCliExecutor() const {
-    if (workCoordinator_) {
-        return workCoordinator_->getPriorityExecutor(WorkCoordinator::Priority::High);
-    }
-    return getWorkerExecutor();
-}
-
-boost::asio::any_io_executor ServiceManager::getBackgroundExecutor() const {
-    if (workCoordinator_) {
-        return workCoordinator_->getPriorityExecutor(WorkCoordinator::Priority::Background);
+    if (cliRequestPool_) {
+        return cliRequestPool_->get_executor();
     }
     return getWorkerExecutor();
 }
@@ -2576,17 +2797,16 @@ size_t ServiceManager::getWorkerQueueDepth() const {
 ServiceManager::SearchLoadMetrics ServiceManager::getSearchLoadMetrics() const {
     SearchLoadMetrics metrics;
 
+    metrics.active = searchActive_.load(std::memory_order_relaxed);
+    metrics.queued = searchQueued_.load(std::memory_order_relaxed);
+    metrics.concurrencyLimit = ResourceGovernor::instance().maxSearchConcurrency();
+
     // Get search engine statistics if available
     auto engine = getSearchEngineSnapshot();
     if (engine) {
         const auto& stats = engine->getStatistics();
 
         // Map SearchEngine::Statistics to SearchLoadMetrics
-        // Note: SearchEngine is synchronous, so "active" and "queued" are conceptual
-        // "active" = 1 if engine is available and serving queries
-        // "queued" = 0 (no queue in synchronous model)
-        metrics.active = 1; // Engine is available
-        metrics.queued = 0; // No queue in synchronous model
         metrics.executed = stats.totalQueries.load();
         metrics.avgLatencyUs = stats.avgQueryTimeMicros.load();
 
@@ -2599,8 +2819,8 @@ ServiceManager::SearchLoadMetrics ServiceManager::getSearchLoadMetrics() const {
             metrics.cacheHitRate = 0.0;
         }
 
-        // Concurrency limit is not applicable in new model, set to 1 (synchronous)
-        metrics.concurrencyLimit = 1;
+    } else {
+        metrics.cacheHitRate = 0.0;
     }
 
     return metrics;
@@ -2633,6 +2853,55 @@ std::size_t ServiceManager::getEmbeddingInFlightJobs() const {
 std::size_t ServiceManager::getEmbeddingQueuedJobs() const {
     if (embeddingService_) {
         return embeddingService_->queuedJobs();
+    }
+    return 0;
+}
+
+std::size_t ServiceManager::getEmbeddingActiveInferSubBatches() const {
+    if (embeddingService_) {
+        return embeddingService_->activeInferSubBatches();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingInferOldestMs() const {
+    if (embeddingService_) {
+        return embeddingService_->inferOldestActiveMs();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingInferStartedCount() const {
+    if (embeddingService_) {
+        return embeddingService_->inferSubBatchStartedCount();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingInferCompletedCount() const {
+    if (embeddingService_) {
+        return embeddingService_->inferSubBatchCompletedCount();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingInferLastMs() const {
+    if (embeddingService_) {
+        return embeddingService_->inferSubBatchLastDurationMs();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingInferMaxMs() const {
+    if (embeddingService_) {
+        return embeddingService_->inferSubBatchMaxDurationMs();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingInferWarnCount() const {
+    if (embeddingService_) {
+        return embeddingService_->inferSubBatchWarnCount();
     }
     return 0;
 }
@@ -2716,7 +2985,32 @@ ServiceManager::co_initDatabase(boost::asio::any_io_executor exec,
         // Create connection pool and metadata repository
         yams::metadata::ConnectionPoolConfig dbCfg{};
         connectionPool_ = std::make_shared<yams::metadata::ConnectionPool>(dbPath.string(), dbCfg);
-        metadataRepo_ = std::make_shared<yams::metadata::MetadataRepository>(*connectionPool_);
+
+        // Dual pool enabled by default for better read/write separation.
+        // Set YAMS_DB_DUAL_POOL=0 to disable.
+        bool dualPoolEnabled = true;
+        if (const char* envDual = std::getenv("YAMS_DB_DUAL_POOL"); envDual && *envDual) {
+            std::string value(envDual);
+            std::transform(value.begin(), value.end(), value.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            dualPoolEnabled = (value != "0" && value != "false" && value != "off" && value != "no");
+        }
+
+        if (dualPoolEnabled) {
+            auto readCfg = dbCfg;
+            readConnectionPool_ =
+                std::make_shared<yams::metadata::ConnectionPool>(dbPath.string(), readCfg);
+            auto readInit = readConnectionPool_->initialize();
+            if (!readInit) {
+                spdlog::warn("[ServiceManager::co_initDatabase] Read pool init failed (single-pool "
+                             "fallback): {}",
+                             readInit.error().message);
+                readConnectionPool_.reset();
+            }
+        }
+
+        metadataRepo_ = std::make_shared<yams::metadata::MetadataRepository>(
+            *connectionPool_, readConnectionPool_.get());
 
         // Mark readiness
         state_.readiness.databaseReady.store(true);
@@ -2828,7 +3122,11 @@ ServiceManager::co_initVectorSystem(boost::asio::any_io_executor exec,
         }
 
         vectorDatabase_ = vectorDb;
-        state_.readiness.vectorDbReady.store(true);
+        // Readiness semantics: false while empty/building; true only when serving (has data).
+        // A freshly initialized DB is empty, but we still mark initAttempted+dim.
+        state_.readiness.vectorDbInitAttempted.store(true, std::memory_order_relaxed);
+        state_.readiness.vectorDbDim.store(static_cast<uint32_t>(dim), std::memory_order_relaxed);
+        state_.readiness.vectorDbReady.store(false, std::memory_order_relaxed);
 
         spdlog::info("[ServiceManager::co_initVectorSystem] Vector system initialized with dim={}",
                      dim);
@@ -2938,17 +3236,67 @@ void ServiceManager::enqueuePostIngest(const std::string& hash, const std::strin
         return;
     }
 
-    // Check admission control - document is stored, post-processing can be retried later
-    if (!ResourceGovernor::instance().canAdmitWork()) {
-        spdlog::debug("[ServiceManager] PostIngest rejected: admission control blocked");
-        return;
-    }
-
     PostIngestQueue::Task task{hash, mime,
                                "", // session
                                std::chrono::steady_clock::now(),
                                PostIngestQueue::Task::Stage::Metadata};
-    postIngest_->tryEnqueue(std::move(task));
+    postIngest_->enqueue(std::move(task));
+}
+
+void ServiceManager::enqueuePostIngestBatch(const std::vector<std::string>& hashes,
+                                            const std::string& mime) {
+    if (!postIngest_ || hashes.empty()) {
+        return;
+    }
+
+    // Keep ingestion durable even when pressure is high: documents are already stored,
+    // so this stage should backpressure instead of dropping.
+    std::vector<PostIngestQueue::Task> tasks;
+    tasks.reserve(hashes.size());
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto& hash : hashes) {
+        if (hash.empty()) {
+            continue;
+        }
+        tasks.push_back(
+            PostIngestQueue::Task{hash, mime, "", now, PostIngestQueue::Task::Stage::Metadata});
+    }
+    if (!tasks.empty()) {
+        postIngest_->enqueueBatch(std::move(tasks));
+    }
+}
+
+void ServiceManager::startRepairService(std::function<size_t()> activeConnFn) {
+    std::lock_guard<std::mutex> lk(repairServiceMutex_);
+    if (std::atomic_load_explicit(&repairService_, std::memory_order_acquire)) {
+        spdlog::debug("[ServiceManager] RepairService already started");
+        return;
+    }
+    RepairService::Config rcfg;
+    rcfg.enable = true;
+    rcfg.dataDir = resolvedDataDir_;
+    rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
+    rcfg.autoRebuildOnDimMismatch = config_.autoRebuildOnDimMismatch;
+
+    auto rs = std::make_shared<RepairService>(this, &state_, std::move(activeConnFn), rcfg);
+    std::atomic_store_explicit(&repairService_, rs, std::memory_order_release);
+    rs->start();
+    spdlog::info("[ServiceManager] RepairService started");
+}
+
+void ServiceManager::stopRepairService() {
+    std::shared_ptr<RepairService> rs;
+    {
+        std::lock_guard<std::mutex> lk(repairServiceMutex_);
+        rs = std::atomic_load_explicit(&repairService_, std::memory_order_acquire);
+        if (!rs) {
+            return;
+        }
+        std::atomic_store_explicit(&repairService_, std::shared_ptr<RepairService>{},
+                                   std::memory_order_release);
+    }
+    rs->stop();
+    spdlog::info("[ServiceManager] RepairService stopped");
 }
 
 } // namespace yams::daemon

@@ -114,6 +114,7 @@ MCPSearchRequest MCPSearchRequest::fromJson(const json& j) {
     req.includeDiff = detail::jsonValueOr(j, "include_diff", false);
     req.useSession = detail::jsonValueOr(j, "use_session", true);
     req.sessionName = j.value("session", std::string{});
+    req.cwd = j.value("cwd", std::string{});
 
     return req;
 }
@@ -136,7 +137,8 @@ json MCPSearchRequest::toJson() const {
                 {"include_patterns", includePatterns},
                 {"tags", tags},
                 {"match_all_tags", matchAllTags},
-                {"include_diff", includeDiff}};
+                {"include_diff", includeDiff},
+                {"cwd", cwd}};
 }
 
 // MCPSearchResponse implementation
@@ -145,6 +147,7 @@ MCPSearchResponse MCPSearchResponse::fromJson(const json& j) {
     resp.total = j.value("total", size_t{0});
     resp.type = j.value("type", std::string{});
     resp.executionTimeMs = j.value("execution_time_ms", uint64_t{0});
+    resp.traceId = j.value("trace_id", std::string{});
 
     detail::readStringArray(j, "paths", resp.paths);
 
@@ -193,6 +196,8 @@ json MCPSearchResponse::toJson() const {
     j["total"] = total;
     j["type"] = type;
     j["execution_time_ms"] = executionTimeMs;
+    if (!traceId.empty())
+        j["trace_id"] = traceId;
 
     if (!paths.empty()) {
         j["paths"] = paths;
@@ -265,6 +270,10 @@ MCPGrepRequest MCPGrepRequest::fromJson(const json& j) {
     req.color = j.value("color", std::string{"auto"});
     req.useSession = j.value("use_session", true);
     req.sessionName = j.value("session", std::string{});
+    req.cwd = j.value("cwd", std::string{});
+
+    detail::readStringArray(j, "tags", req.tags);
+    req.matchAllTags = j.value("match_all_tags", false);
 
     if (j.contains("max_count")) {
         int mc = parse_int_tolerant(j, "max_count", -1);
@@ -294,6 +303,12 @@ json MCPGrepRequest::toJson() const {
     j["color"] = color;
     if (maxCount)
         j["max_count"] = *maxCount;
+    if (!tags.empty())
+        j["tags"] = tags;
+    if (matchAllTags)
+        j["match_all_tags"] = matchAllTags;
+    if (!cwd.empty())
+        j["cwd"] = cwd;
     return j;
 }
 
@@ -396,6 +411,7 @@ MCPDownloadResponse MCPDownloadResponse::fromJson(const json& j) {
     resp.storedPath = j.value("stored_path", std::string{});
     resp.sizeBytes = j.value("size_bytes", uint64_t{0});
     resp.success = j.value("success", false);
+    resp.indexed = j.value("indexed", false);
     if (j.contains("http_status")) {
         resp.httpStatus = j["http_status"].get<int>();
     }
@@ -422,7 +438,8 @@ json MCPDownloadResponse::toJson() const {
            {"hash", hash},
            {"stored_path", storedPath},
            {"size_bytes", sizeBytes},
-           {"success", success}};
+           {"success", success},
+           {"indexed", indexed}};
     if (httpStatus)
         j["http_status"] = *httpStatus;
     if (etag)
@@ -590,6 +607,7 @@ MCPListDocumentsRequest MCPListDocumentsRequest::fromJson(const json& j) {
     req.name = j.value("name", std::string{});
 
     detail::readStringArray(j, "tags", req.tags);
+    req.matchAllTags = j.value("match_all_tags", false);
 
     req.type = j.value("type", std::string{});
     req.mime = j.value("mime", std::string{});
@@ -655,19 +673,13 @@ json MCPSessionUnpinResponse::toJson() const {
 }
 
 json MCPListDocumentsRequest::toJson() const {
-    return json{{"pattern", pattern},
-                {"name", name},
-                {"tags", tags},
-                {"type", type},
-                {"mime", mime},
-                {"extension", extension},
-                {"binary", binary},
-                {"text", text},
-                {"recent", recent},
-                {"limit", limit},
-                {"offset", offset},
-                {"sort_by", sortBy},
-                {"sort_order", sortOrder},
+    return json{{"pattern", pattern},     {"name", name},
+                {"tags", tags},           {"match_all_tags", matchAllTags},
+                {"type", type},           {"mime", mime},
+                {"extension", extension}, {"binary", binary},
+                {"text", text},           {"recent", recent},
+                {"limit", limit},         {"offset", offset},
+                {"sort_by", sortBy},      {"sort_order", sortOrder},
                 {"paths_only", pathsOnly}};
 }
 
@@ -1134,6 +1146,9 @@ json MCPListSnapshotsResponse::toJson() const {
 // MCPGraphRequest implementation
 MCPGraphRequest MCPGraphRequest::fromJson(const json& j) {
     MCPGraphRequest req;
+    req.action = j.value("action", std::string{"query"});
+
+    // Query fields
     req.hash = j.value("hash", std::string{});
     req.name = j.value("name", std::string{});
     req.nodeKey = j.value("node_key", std::string{});
@@ -1151,38 +1166,134 @@ MCPGraphRequest MCPGraphRequest::fromJson(const json& j) {
     req.offset = parse_size_tolerant(j, "offset", 0);
     req.reverse = j.value("reverse", false);
 
-    req.includeNodeProperties = j.value("include_node_properties", false);
-    req.includeEdgeProperties = j.value("include_edge_properties", false);
+    const bool includePropsShorthand = j.value("include_properties", false);
+    req.includeNodeProperties = j.value("include_node_properties", includePropsShorthand);
+    req.includeEdgeProperties = j.value("include_edge_properties", includePropsShorthand);
     req.hydrateFully = j.value("hydrate_fully", true);
 
     req.scopeSnapshot = j.value("scope_snapshot", std::string{});
+
+    // Ingest fields (only relevant when action == "ingest")
+    if (j.contains("nodes") && j["nodes"].is_array()) {
+        for (const auto& n : j["nodes"]) {
+            MCPKgIngestNodeInput node;
+            node.nodeKey = n.value("node_key", std::string{});
+            node.label = n.value("label", std::string{});
+            node.type = n.value("type", std::string{});
+            if (n.contains("properties"))
+                node.properties = n["properties"];
+            req.nodes.push_back(std::move(node));
+        }
+    }
+
+    if (j.contains("edges") && j["edges"].is_array()) {
+        for (const auto& e : j["edges"]) {
+            MCPKgIngestEdgeInput edge;
+            edge.srcNodeKey = e.value("src_node_key", std::string{});
+            edge.dstNodeKey = e.value("dst_node_key", std::string{});
+            edge.relation = e.value("relation", std::string{});
+            edge.weight = e.value("weight", 1.0f);
+            if (e.contains("properties"))
+                edge.properties = e["properties"];
+            req.edges.push_back(std::move(edge));
+        }
+    }
+
+    if (j.contains("aliases") && j["aliases"].is_array()) {
+        for (const auto& a : j["aliases"]) {
+            MCPKgIngestAliasInput alias;
+            alias.nodeKey = a.value("node_key", std::string{});
+            alias.alias = a.value("alias", std::string{});
+            alias.source = a.value("source", std::string{});
+            alias.confidence = a.value("confidence", 1.0f);
+            req.aliases.push_back(std::move(alias));
+        }
+    }
+
+    req.documentHash = j.value("document_hash", std::string{});
+    req.skipExistingNodes = j.value("skip_existing_nodes", true);
+    req.skipExistingEdges = j.value("skip_existing_edges", true);
 
     return req;
 }
 
 json MCPGraphRequest::toJson() const {
-    return json{{"hash", hash},
-                {"name", name},
-                {"node_key", nodeKey},
-                {"node_id", nodeId},
-                {"list_types", listTypes},
-                {"list_type", listType},
-                {"isolated", isolated},
-                {"relation_filters", relationFilters},
-                {"relation", relation},
-                {"depth", depth},
-                {"limit", limit},
-                {"offset", offset},
-                {"reverse", reverse},
-                {"include_node_properties", includeNodeProperties},
-                {"include_edge_properties", includeEdgeProperties},
-                {"hydrate_fully", hydrateFully},
-                {"scope_snapshot", scopeSnapshot}};
+    json j;
+    j["action"] = action;
+
+    // Query fields
+    j["hash"] = hash;
+    j["name"] = name;
+    j["node_key"] = nodeKey;
+    j["node_id"] = nodeId;
+    j["list_types"] = listTypes;
+    j["list_type"] = listType;
+    j["isolated"] = isolated;
+    j["relation_filters"] = relationFilters;
+    j["relation"] = relation;
+    j["depth"] = depth;
+    j["limit"] = limit;
+    j["offset"] = offset;
+    j["reverse"] = reverse;
+    j["include_node_properties"] = includeNodeProperties;
+    j["include_edge_properties"] = includeEdgeProperties;
+    j["hydrate_fully"] = hydrateFully;
+    j["scope_snapshot"] = scopeSnapshot;
+
+    // Ingest fields
+    if (!nodes.empty()) {
+        json jnodes = json::array();
+        for (const auto& n : nodes) {
+            json jn;
+            jn["node_key"] = n.nodeKey;
+            jn["label"] = n.label;
+            jn["type"] = n.type;
+            if (!n.properties.is_null())
+                jn["properties"] = n.properties;
+            jnodes.push_back(std::move(jn));
+        }
+        j["nodes"] = std::move(jnodes);
+    }
+    if (!edges.empty()) {
+        json jedges = json::array();
+        for (const auto& e : edges) {
+            json je;
+            je["src_node_key"] = e.srcNodeKey;
+            je["dst_node_key"] = e.dstNodeKey;
+            je["relation"] = e.relation;
+            je["weight"] = e.weight;
+            if (!e.properties.is_null())
+                je["properties"] = e.properties;
+            jedges.push_back(std::move(je));
+        }
+        j["edges"] = std::move(jedges);
+    }
+    if (!aliases.empty()) {
+        json jaliases = json::array();
+        for (const auto& a : aliases) {
+            json ja;
+            ja["node_key"] = a.nodeKey;
+            ja["alias"] = a.alias;
+            ja["source"] = a.source;
+            ja["confidence"] = a.confidence;
+            jaliases.push_back(std::move(ja));
+        }
+        j["aliases"] = std::move(jaliases);
+    }
+    if (!documentHash.empty())
+        j["document_hash"] = documentHash;
+    j["skip_existing_nodes"] = skipExistingNodes;
+    j["skip_existing_edges"] = skipExistingEdges;
+
+    return j;
 }
 
 // MCPGraphResponse implementation
 MCPGraphResponse MCPGraphResponse::fromJson(const json& j) {
     MCPGraphResponse resp;
+    resp.action = j.value("action", std::string{"query"});
+
+    // Query result fields
     if (j.contains("origin"))
         resp.origin = j["origin"];
     if (j.contains("connected_nodes"))
@@ -1197,23 +1308,50 @@ MCPGraphResponse MCPGraphResponse::fromJson(const json& j) {
     resp.queryTimeMs = j.value("query_time_ms", int64_t{0});
     resp.kgAvailable = j.value("kg_available", true);
     resp.warning = j.value("warning", std::string{});
+
+    // Ingest result fields
+    resp.nodesInserted = j.value("nodes_inserted", uint64_t{0});
+    resp.nodesSkipped = j.value("nodes_skipped", uint64_t{0});
+    resp.edgesInserted = j.value("edges_inserted", uint64_t{0});
+    resp.edgesSkipped = j.value("edges_skipped", uint64_t{0});
+    resp.aliasesInserted = j.value("aliases_inserted", uint64_t{0});
+    resp.aliasesSkipped = j.value("aliases_skipped", uint64_t{0});
+    resp.success = j.value("success", true);
+    detail::readStringArray(j, "errors", resp.errors);
+
     return resp;
 }
 
 json MCPGraphResponse::toJson() const {
     json j;
-    j["origin"] = origin;
-    j["connected_nodes"] = connectedNodes;
-    if (!nodeTypeCounts.is_null() && !nodeTypeCounts.empty())
-        j["node_type_counts"] = nodeTypeCounts;
-    j["total_nodes_found"] = totalNodesFound;
-    j["total_edges_traversed"] = totalEdgesTraversed;
-    j["truncated"] = truncated;
-    j["max_depth_reached"] = maxDepthReached;
-    j["query_time_ms"] = queryTimeMs;
-    j["kg_available"] = kgAvailable;
-    if (!warning.empty())
-        j["warning"] = warning;
+    j["action"] = action;
+
+    if (action == "ingest") {
+        // Ingest results only
+        j["nodes_inserted"] = nodesInserted;
+        j["nodes_skipped"] = nodesSkipped;
+        j["edges_inserted"] = edgesInserted;
+        j["edges_skipped"] = edgesSkipped;
+        j["aliases_inserted"] = aliasesInserted;
+        j["aliases_skipped"] = aliasesSkipped;
+        j["success"] = success;
+        if (!errors.empty())
+            j["errors"] = errors;
+    } else {
+        // Query results
+        j["origin"] = origin;
+        j["connected_nodes"] = connectedNodes;
+        if (!nodeTypeCounts.is_null() && !nodeTypeCounts.empty())
+            j["node_type_counts"] = nodeTypeCounts;
+        j["total_nodes_found"] = totalNodesFound;
+        j["total_edges_traversed"] = totalEdgesTraversed;
+        j["truncated"] = truncated;
+        j["max_depth_reached"] = maxDepthReached;
+        j["query_time_ms"] = queryTimeMs;
+        j["kg_available"] = kgAvailable;
+        if (!warning.empty())
+            j["warning"] = warning;
+    }
     return j;
 }
 

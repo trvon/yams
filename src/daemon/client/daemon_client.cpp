@@ -3,6 +3,7 @@
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/client/ipc_failure.h>
 #include <yams/daemon/client/streaming_handlers.h>
 #include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -345,25 +346,32 @@ std::filesystem::path resolveDataDirCached() {
 }
 } // namespace
 
+// Forward declaration: used during DaemonClient construction for proxy health checks.
+static bool pingDaemonSync(const std::filesystem::path& socketPath);
+
 // DaemonClient implementation
 DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<Impl>(config)) {
     if (pImpl->config_.socketPath.empty()) {
-        // Resolve daemon socket path, then check for proxy socket alongside it.
-        // Priority:
-        //  1) YAMS_PROXY_SOCKET env var (explicit override)
-        //  2) proxy.sock sibling of daemon.sock (auto-discovery)
-        //  3) Fall back to daemon.sock directly
+        // Resolve daemon socket path, then prefer a healthy proxy socket derived from it.
+        // IMPORTANT: do not select the proxy based on filesystem existence alone; stale socket
+        // files are common when the daemon crashes.
         auto daemonSock = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
 
-        std::filesystem::path proxyCandidate;
-        if (const char* env = std::getenv("YAMS_PROXY_SOCKET"); env && *env) {
-            proxyCandidate = env;
-        } else {
-            proxyCandidate = daemonSock.parent_path() / "proxy.sock";
-        }
+        auto deriveProxySock = [](const std::filesystem::path& daemonSocket) {
+            if (daemonSocket.empty())
+                return std::filesystem::path{};
+            auto base = daemonSocket.stem().string();
+            if (base.empty())
+                base = daemonSocket.filename().string();
+            if (base.empty())
+                base = "yams-daemon";
+            return daemonSocket.parent_path() / (base + ".proxy.sock");
+        };
 
-        std::error_code ec;
-        if (!proxyCandidate.empty() && std::filesystem::exists(proxyCandidate, ec)) {
+        const auto proxyCandidate = deriveProxySock(daemonSock);
+
+        // Prefer proxy only if it is connectable; otherwise fall back to the main daemon socket.
+        if (!proxyCandidate.empty() && pingDaemonSync(proxyCandidate)) {
             pImpl->config_.socketPath = proxyCandidate;
         } else {
             pImpl->config_.socketPath = daemonSock;
@@ -750,15 +758,22 @@ boost::asio::awaitable<Result<StatusResponse>> DaemonClient::status() {
 
         lastErr = response.error();
         const std::string& msg = lastErr.message;
-        bool transient = (lastErr.code == ErrorCode::NetworkError) &&
-                         (msg.find("Connection closed") != std::string::npos ||
-                          msg.find("Connection reset") != std::string::npos ||
-                          msg.find("ECONNRESET") != std::string::npos ||
-                          msg.find("EPIPE") != std::string::npos ||
-                          msg.find("Broken pipe") != std::string::npos ||
-                          msg.find("read header failed") != std::string::npos ||
-                          msg.find("read payload failed") != std::string::npos ||
-                          msg.find("Read failed") != std::string::npos);
+        bool transient = false;
+
+        // Prefer stable classification when available.
+        if (auto kindOpt = yams::daemon::parseIpcFailureKind(msg)) {
+            transient = yams::daemon::isTransient(*kindOpt);
+        } else {
+            transient = (lastErr.code == ErrorCode::NetworkError) &&
+                        (msg.find("Connection closed") != std::string::npos ||
+                         msg.find("Connection reset") != std::string::npos ||
+                         msg.find("ECONNRESET") != std::string::npos ||
+                         msg.find("EPIPE") != std::string::npos ||
+                         msg.find("Broken pipe") != std::string::npos ||
+                         msg.find("read header failed") != std::string::npos ||
+                         msg.find("read payload failed") != std::string::npos ||
+                         msg.find("Read failed") != std::string::npos);
+        }
         if (!transient) {
             co_return lastErr;
         }
@@ -1604,6 +1619,53 @@ DaemonClient::callEvents(const EmbedDocumentsRequest& req) {
     if (handler->error.has_value())
         co_return *handler->error;
     co_return handler->events;
+}
+
+boost::asio::awaitable<Result<RepairResponse>>
+DaemonClient::callRepair(const RepairRequest& req,
+                         std::function<void(const RepairEvent&)> onEvent) {
+    struct Handler : public ChunkedResponseHandler {
+        explicit Handler(std::function<void(const RepairEvent&)> cb) : onEvent_(std::move(cb)) {}
+        void onHeaderReceived(const Response& headerResponse) override {
+            if (auto* err = std::get_if<ErrorResponse>(&headerResponse)) {
+                error = Error{err->code, err->message};
+            }
+        }
+        bool onChunkReceived(const Response& r, bool /*isLast*/) override {
+            if (auto* ev = std::get_if<RepairEvent>(&r)) {
+                if (onEvent_)
+                    onEvent_(*ev);
+                return true;
+            }
+            if (auto* fin = std::get_if<RepairResponse>(&r)) {
+                finalResponse = *fin;
+                return true;
+            }
+            if (auto* err = std::get_if<ErrorResponse>(&r)) {
+                error = Error{err->code, err->message};
+                return false;
+            }
+            return true;
+        }
+        void onError(const Error& e) override { error = e; }
+        void onComplete() override {}
+        std::function<void(const RepairEvent&)> onEvent_;
+        std::optional<Error> error;
+        std::optional<RepairResponse> finalResponse;
+    };
+
+    auto handler = std::make_shared<Handler>(std::move(onEvent));
+    auto result = co_await sendRequestStreaming(req, handler);
+    if (!result)
+        co_return result.error();
+    if (handler->error.has_value())
+        co_return *handler->error;
+    if (handler->finalResponse.has_value())
+        co_return *handler->finalResponse;
+    // If no final response was captured, synthesize an empty one
+    RepairResponse empty;
+    empty.success = true;
+    co_return empty;
 }
 
 boost::asio::awaitable<Result<ModelLoadResponse>>

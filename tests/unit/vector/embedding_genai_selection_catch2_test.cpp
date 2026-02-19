@@ -1,67 +1,44 @@
-// Catch2 tests for GenAI embedding selection and fallback
-// Migrated from GTest: embedding_genai_selection_test.cpp
+// Daemon-only embedding backend regression tests
 
 #include <catch2/catch_test_macros.hpp>
+
 #include <yams/vector/embedding_generator.h>
 
-#include <cstdlib>
-#include <filesystem>
-#include <string>
+#include "../../common/test_helpers_catch2.h"
 
 using namespace yams::vector;
-namespace fs = std::filesystem;
 
-namespace {
+TEST_CASE("EmbeddingGenerator defaults to daemon backend", "[vector][embedding][backend]") {
+    EmbeddingConfig cfg;
+    CHECK(cfg.backend == EmbeddingConfig::Backend::Daemon);
 
-bool hasModel(std::string* outMinilm = nullptr) {
-    const char* home = std::getenv("HOME");
-    if (!home) {
-#ifdef _WIN32
-        home = std::getenv("USERPROFILE");
-        if (!home)
-            return false;
-#else
-        return false;
-#endif
-    }
-    fs::path p = fs::path(home) / ".yams" / "models" / "all-MiniLM-L6-v2" / "model.onnx";
-    if (outMinilm)
-        *outMinilm = p.string();
-    return fs::exists(p);
+    EmbeddingGenerator gen(cfg);
+    CHECK(gen.getBackendName().find("Daemon") != std::string::npos);
 }
 
-} // namespace
+TEST_CASE("EmbeddingGenerator treats hybrid as daemon alias", "[vector][embedding][backend]") {
+    EmbeddingConfig cfg;
+    cfg.backend = EmbeddingConfig::Backend::Hybrid;
 
-TEST_CASE("EmbeddingGenAI uses fallback when GenAI unavailable",
-          "[vector][embedding][genai][catch2]") {
-#ifndef YAMS_USE_ONNX_RUNTIME
-    SKIP("ONNX Runtime disabled in this build");
-#endif
+    EmbeddingGenerator gen(cfg);
+    CHECK(gen.getBackendName().find("Daemon") != std::string::npos);
+}
 
-    std::string minilm;
-    if (!hasModel(&minilm)) {
-        SKIP("MiniLM model not found under ~/.yams/models; skipping");
-    }
-
-    // Request GenAI via env; adapter is a stub, so it should fall back to ORT path.
-#ifdef _WIN32
-    _putenv_s("YAMS_ONNX_USE_GENAI", "1");
-#else
-    ::setenv("YAMS_ONNX_USE_GENAI", "1", 1);
-#endif
+TEST_CASE("EmbeddingGenerator daemon backend works with mock provider fallback",
+          "[vector][embedding][backend][synthetic]") {
+    yams::test::ScopedEnvVar inDaemon{"YAMS_IN_DAEMON", std::string{"1"}};
+    yams::test::ScopedEnvVar mockProvider{"YAMS_USE_MOCK_PROVIDER", std::string{"1"}};
 
     EmbeddingConfig cfg;
-    cfg.backend = EmbeddingConfig::Backend::Local;
+    cfg.backend = EmbeddingConfig::Backend::Daemon;
     cfg.model_name = "all-MiniLM-L6-v2";
-    cfg.model_path = minilm;
-    cfg.embedding_dim = 384;
-    cfg.use_genai = true;
+    cfg.batch_size = 8;
 
     EmbeddingGenerator gen(cfg);
     REQUIRE(gen.initialize());
-    INFO("Generator error: " << gen.getLastError());
 
-    auto v = gen.generateEmbedding("hello world");
-    REQUIRE_FALSE(v.empty());
-    CHECK(v.size() == gen.getEmbeddingDimension());
+    auto vectors = gen.generateEmbeddings({"hello", "world"});
+    REQUIRE(vectors.size() == 2);
+    REQUIRE_FALSE(vectors[0].empty());
+    CHECK(gen.getEmbeddingDimension() > 0);
 }

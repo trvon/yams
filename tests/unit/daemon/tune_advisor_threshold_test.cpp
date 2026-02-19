@@ -5,12 +5,14 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/resource/gpu_info.h>
 
 #include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <string>
 
+#include "../../common/env_compat.h"
 #include <yams/compat/unistd.h>
 
 using namespace yams::daemon;
@@ -265,6 +267,85 @@ TEST_CASE("Model eviction threshold override precedence", "[daemon][tune][adviso
     }
 }
 
+TEST_CASE("Governor warning scale percent tuning", "[daemon][tune][advisor][catch2]") {
+    TuneAdvisor::resetGovernorWarningScalePercentOverride();
+
+    SECTION("Default value is 85 percent") {
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 85u);
+    }
+
+    SECTION("Valid env var overrides default") {
+        EnvGuard envGuard("YAMS_GOV_WARNING_SCALE_PCT", "92");
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 92u);
+    }
+
+    SECTION("Invalid env var falls back to default") {
+        EnvGuard envGuard("YAMS_GOV_WARNING_SCALE_PCT", "invalid");
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 85u);
+    }
+
+    SECTION("Out-of-range env var falls back to default") {
+        EnvGuard envGuard("YAMS_GOV_WARNING_SCALE_PCT", "9");
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 85u);
+    }
+
+    SECTION("Programmatic setter overrides env var") {
+        EnvGuard envGuard("YAMS_GOV_WARNING_SCALE_PCT", "90");
+        TuneAdvisor::setGovernorWarningScalePercent(77u);
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 77u);
+    }
+
+    SECTION("Setter clamps values into allowed range") {
+        TuneAdvisor::setGovernorWarningScalePercent(5u);
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 10u);
+
+        TuneAdvisor::setGovernorWarningScalePercent(150u);
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 100u);
+    }
+
+    SECTION("Setter zero resets override") {
+        TuneAdvisor::setGovernorWarningScalePercent(72u);
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 72u);
+
+        TuneAdvisor::setGovernorWarningScalePercent(0u);
+        CHECK(TuneAdvisor::governorWarningScalePercent() == 85u);
+    }
+
+    TuneAdvisor::resetGovernorWarningScalePercentOverride();
+}
+
+TEST_CASE("Connection lifetime seconds env var", "[daemon][tune][advisor][catch2]") {
+    TuneAdvisor::resetConnectionLifetimeSecondsOverride();
+
+    SECTION("Default value is 300 seconds") {
+        CHECK(TuneAdvisor::connectionLifetimeSeconds() == 300);
+    }
+
+    SECTION("Valid env var overrides default") {
+        EnvGuard envGuard("YAMS_CONNECTION_LIFETIME_S", "1800");
+        CHECK(TuneAdvisor::connectionLifetimeSeconds() == 1800);
+    }
+
+    SECTION("Zero env var disables lifetime enforcement") {
+        EnvGuard envGuard("YAMS_CONNECTION_LIFETIME_S", "0");
+        CHECK(TuneAdvisor::connectionLifetimeSeconds() == 0);
+    }
+
+    SECTION("Out-of-range env var falls back to default") {
+        EnvGuard envGuard("YAMS_CONNECTION_LIFETIME_S", "90000");
+        CHECK(TuneAdvisor::connectionLifetimeSeconds() == 300);
+    }
+
+    SECTION("Programmatic setter overrides env") {
+        EnvGuard envGuard("YAMS_CONNECTION_LIFETIME_S", "1800");
+        TuneAdvisor::setConnectionLifetimeSeconds(42);
+        CHECK(TuneAdvisor::connectionLifetimeSeconds() == 42);
+        TuneAdvisor::resetConnectionLifetimeSecondsOverride();
+    }
+
+    TuneAdvisor::resetConnectionLifetimeSecondsOverride();
+}
+
 // =============================================================================
 // Threshold Ordering Invariant Tests
 // =============================================================================
@@ -374,6 +455,29 @@ TEST_CASE("Repair batch size env var overrides", "[daemon][tune][advisor][catch2
     }
 }
 
+TEST_CASE("Embed doc cap resolves to safe default when unset",
+          "[daemon][tune][advisor][embed][catch2]") {
+    struct EmbedCapGuard {
+        std::size_t prev{TuneAdvisor::getEmbedDocCap()};
+        ~EmbedCapGuard() { TuneAdvisor::setEmbedDocCap(prev); }
+    } guard;
+
+    SECTION("Unset cap uses built-in default (no singleton fallback)") {
+        // Ensure no explicit override is active.
+        TuneAdvisor::setEmbedDocCap(0);
+        // Invalid env value should be ignored and still resolve to default.
+        EnvGuard envGuard("YAMS_EMBED_DOC_CAP", "0");
+        CHECK(TuneAdvisor::getEmbedDocCap() == 0u);
+        CHECK(TuneAdvisor::resolvedEmbedDocCap() == TuneAdvisor::kDefaultEmbedDocCap);
+        CHECK(TuneAdvisor::resolvedEmbedDocCap() == 64u);
+    }
+
+    SECTION("Explicit cap overrides default") {
+        TuneAdvisor::setEmbedDocCap(128);
+        CHECK(TuneAdvisor::resolvedEmbedDocCap() == 128u);
+    }
+}
+
 // =============================================================================
 // Worker poll cadence overrides
 // =============================================================================
@@ -412,6 +516,197 @@ TEST_CASE("Worker poll cadence overrides", "[daemon][tune][advisor][catch2]") {
 }
 
 // =============================================================================
+// GPU-Aware Batch Size Tests
+// =============================================================================
+
+TEST_CASE("gpuAwareBatchSize returns sensible values", "[daemon][tune][advisor][catch2]") {
+    SECTION("CPU fallback (0 VRAM) returns 32") {
+        CHECK(TuneAdvisor::gpuAwareBatchSize(0, 768) == 32);
+        CHECK(TuneAdvisor::gpuAwareBatchSize(0, 384) == 32);
+    }
+
+    SECTION("Small VRAM (4 GB) with typical embedding dim") {
+        auto batch = TuneAdvisor::gpuAwareBatchSize(4ULL * 1024 * 1024 * 1024, 768);
+        CHECK(batch >= 8);
+        CHECK(batch <= 256);
+    }
+
+    SECTION("Medium VRAM (8 GB) with small embedding dim") {
+        auto batch = TuneAdvisor::gpuAwareBatchSize(8ULL * 1024 * 1024 * 1024, 384);
+        CHECK(batch >= 8);
+        CHECK(batch <= 256);
+    }
+
+    SECTION("Large VRAM (24 GB) with typical embedding dim") {
+        auto batch = TuneAdvisor::gpuAwareBatchSize(24ULL * 1024 * 1024 * 1024, 768);
+        CHECK(batch >= 8);
+        CHECK(batch <= 256);
+    }
+
+    SECTION("More VRAM produces equal or larger batch for same dim") {
+        auto batchSmall = TuneAdvisor::gpuAwareBatchSize(4ULL * 1024 * 1024 * 1024, 768);
+        auto batchLarge = TuneAdvisor::gpuAwareBatchSize(24ULL * 1024 * 1024 * 1024, 768);
+        CHECK(batchLarge >= batchSmall);
+    }
+
+    SECTION("Larger embedding dim produces equal or smaller batch for same VRAM") {
+        auto batchSmallDim = TuneAdvisor::gpuAwareBatchSize(8ULL * 1024 * 1024 * 1024, 384);
+        auto batchLargeDim = TuneAdvisor::gpuAwareBatchSize(8ULL * 1024 * 1024 * 1024, 1536);
+        CHECK(batchSmallDim >= batchLargeDim);
+    }
+
+    SECTION("Env override YAMS_GPU_BATCH_SIZE takes precedence") {
+        EnvGuard envGuard("YAMS_GPU_BATCH_SIZE", "42");
+        CHECK(TuneAdvisor::gpuAwareBatchSize(8ULL * 1024 * 1024 * 1024, 768) == 42);
+        CHECK(TuneAdvisor::gpuAwareBatchSize(0, 768) == 42);
+    }
+}
+
+// =============================================================================
+// GPU Detection Tests (Apple Silicon sysctl path)
+// =============================================================================
+
+TEST_CASE("detectGpu returns consistent cached result", "[daemon][gpu][catch2]") {
+    using namespace yams::daemon::resource;
+
+    const auto& first = detectGpu();
+    const auto& second = detectGpu();
+
+    // std::call_once caching: same static object returned each time
+    CHECK(&first == &second);
+
+    // Basic structural sanity: fields are default-initialized or populated
+    CHECK(first.detected == second.detected);
+    CHECK(first.name == second.name);
+    CHECK(first.vramBytes == second.vramBytes);
+    CHECK(first.provider == second.provider);
+    CHECK(first.unifiedMemory == second.unifiedMemory);
+}
+
+TEST_CASE("effectiveGpuBatchBudgetBytes applies unified-memory safety defaults",
+          "[daemon][gpu][batch-budget][catch2]") {
+    using namespace yams::daemon::resource;
+
+    constexpr uint64_t GiB = 1024ULL * 1024ULL * 1024ULL;
+
+    SECTION("Dedicated memory uses full detected budget by default") {
+        EnvGuard clear1("YAMS_GPU_BATCH_BUDGET_MB", "");
+        EnvGuard clear2("YAMS_GPU_UNIFIED_BUDGET_MB", "");
+        EnvGuard clear3("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "");
+
+        GpuInfo gpu;
+        gpu.detected = true;
+        gpu.unifiedMemory = false;
+        gpu.provider = "migraphx";
+        gpu.vramBytes = 12ULL * GiB;
+
+        CHECK(effectiveGpuBatchBudgetBytes(gpu) == 12ULL * GiB);
+    }
+
+    SECTION("Unified memory defaults to conservative 4 GiB cap") {
+        EnvGuard clear1("YAMS_GPU_BATCH_BUDGET_MB", "");
+        EnvGuard clear2("YAMS_GPU_UNIFIED_BUDGET_MB", "");
+        EnvGuard clear3("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "");
+
+        GpuInfo gpu;
+        gpu.detected = true;
+        gpu.unifiedMemory = true;
+        gpu.provider = "coreml";
+        gpu.vramBytes = 24ULL * GiB;
+
+        CHECK(effectiveGpuBatchBudgetBytes(gpu) == 4ULL * GiB);
+    }
+
+    SECTION("Unified memory MB override is honored") {
+        EnvGuard clear1("YAMS_GPU_BATCH_BUDGET_MB", "");
+        EnvGuard envMb("YAMS_GPU_UNIFIED_BUDGET_MB", "6144");
+        EnvGuard clear3("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "");
+
+        GpuInfo gpu;
+        gpu.detected = true;
+        gpu.unifiedMemory = true;
+        gpu.provider = "coreml";
+        gpu.vramBytes = 24ULL * GiB;
+
+        CHECK(effectiveGpuBatchBudgetBytes(gpu) == 6ULL * GiB);
+    }
+
+    SECTION("Global budget override takes precedence") {
+        EnvGuard envGlobal("YAMS_GPU_BATCH_BUDGET_MB", "2048");
+        EnvGuard envMb("YAMS_GPU_UNIFIED_BUDGET_MB", "6144");
+        EnvGuard envFrac("YAMS_GPU_UNIFIED_BUDGET_FRACTION", "0.5");
+
+        GpuInfo gpu;
+        gpu.detected = true;
+        gpu.unifiedMemory = true;
+        gpu.provider = "coreml";
+        gpu.vramBytes = 24ULL * GiB;
+
+        CHECK(effectiveGpuBatchBudgetBytes(gpu) == 2ULL * GiB);
+    }
+}
+
+#if defined(__APPLE__) && defined(__aarch64__)
+TEST_CASE("detectAppleSiliconGpu populates all fields", "[daemon][gpu][catch2]") {
+    using namespace yams::daemon::resource;
+
+    GpuInfo info;
+    bool result = detail::detectAppleSiliconGpu(info);
+
+    CHECK(result == true);
+    CHECK(info.detected == true);
+    CHECK(info.provider == "coreml");
+    CHECK(info.unifiedMemory == true);
+
+    // Brand string should contain "Apple" (e.g. "Apple M3 Max")
+    CHECK(info.name.find("Apple") != std::string::npos);
+
+    // VRAM should be populated
+    CHECK(info.vramBytes > 0);
+
+    // Cross-check: read hw.memsize via sysctl, verify vramBytes ≈ 75% of memsize
+    uint64_t memsize = 0;
+    size_t len = sizeof(memsize);
+    REQUIRE(detail::sysctlbyname("hw.memsize", &memsize, &len, nullptr, 0) == 0);
+    REQUIRE(memsize > 0);
+
+    uint64_t expected = static_cast<uint64_t>(static_cast<double>(memsize) * 0.75);
+    double ratio = static_cast<double>(info.vramBytes) / static_cast<double>(expected);
+    CHECK(ratio == Catch::Approx(1.0).margin(0.01));
+
+    // Sanity bounds: > 1 GB and < 1 TB
+    constexpr uint64_t oneGB = 1024ULL * 1024ULL * 1024ULL;
+    constexpr uint64_t oneTB = 1024ULL * oneGB;
+    CHECK(info.vramBytes > oneGB);
+    CHECK(info.vramBytes < oneTB);
+}
+#endif // __APPLE__ && __aarch64__
+
+#if defined(__APPLE__)
+TEST_CASE("sysctlString returns values for valid keys", "[daemon][gpu][catch2]") {
+    using namespace yams::daemon::resource::detail;
+
+    CHECK_FALSE(sysctlString("hw.machine").empty());
+    CHECK_FALSE(sysctlString("machdep.cpu.brand_string").empty());
+
+    // Invalid key should return empty gracefully (no crash)
+    CHECK(sysctlString("totally.invalid.key.xyz").empty());
+}
+#endif // __APPLE__
+
+#if defined(__APPLE__) && !defined(__aarch64__)
+TEST_CASE("detectAppleSiliconGpu returns false on non-ARM64", "[daemon][gpu][catch2]") {
+    using namespace yams::daemon::resource;
+
+    GpuInfo info;
+    bool result = detail::detectAppleSiliconGpu(info);
+
+    CHECK(result == false);
+    CHECK(info.detected == false);
+}
+#endif // __APPLE__ && !__aarch64__
+
+// =============================================================================
 // PostIngestQueue Profile-Aware Concurrency Tests
 // =============================================================================
 
@@ -428,14 +723,13 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
+        // With hw=8, all 6 stages active: totalBudget = max(formula, 6) = 6.
+        // Each stage gets exactly 1 slot (budget distributed evenly).
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEnrichConcurrent() == TuneAdvisor::postSymbolConcurrent() +
-                                                         TuneAdvisor::postEntityConcurrent() +
-                                                         TuneAdvisor::postTitleConcurrent());
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
     }
 
@@ -445,14 +739,13 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
+        // With hw=8, all 6 stages active: totalBudget = max(3, 6) = 6.
+        // Each stage gets exactly 1 slot.
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEnrichConcurrent() == TuneAdvisor::postSymbolConcurrent() +
-                                                         TuneAdvisor::postEntityConcurrent() +
-                                                         TuneAdvisor::postTitleConcurrent());
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
     }
 
@@ -462,29 +755,69 @@ TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         setHardwareConcurrency(8);
 
-        // With hw=8: base=max(2,(8*20)/100)=2, scaleRange=max(1,(8*15)/100)=1
-        // total=2+1=3. Fairness pass grants Title before extra Embed.
+        // With hw=8, round-up division: base=max(2,2)=2, scaleRange=max(1,2)=2.
+        // total=2+2=4. But 6 active stages, total=max(4,6)=6. Each gets 1.
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
         CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEnrichConcurrent() == TuneAdvisor::postSymbolConcurrent() +
-                                                         TuneAdvisor::postEntityConcurrent() +
-                                                         TuneAdvisor::postTitleConcurrent());
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
     }
+}
 
-    SECTION("Unified enrich override controls aggregate enrich budget") {
-        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
-        EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");
-        EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
-        EnvGuard enrichOverrideGuard("YAMS_POST_ENRICH_CONCURRENT", "2");
-        setHardwareConcurrency(8);
+// =============================================================================
+// statusTickMs Default and Override Tests
+// =============================================================================
 
-        CHECK(TuneAdvisor::postEnrichConcurrent() == 2u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() + TuneAdvisor::postEntityConcurrent() +
-                  TuneAdvisor::postTitleConcurrent() ==
-              2u);
+TEST_CASE("statusTickMs defaults to 5", "[daemon][governance][catch2]") {
+    // Ensure no env override is active
+    EnvGuard envGuard("YAMS_STATUS_TICK_MS", "0"); // 0 fails validation, falls through to default
+    // Actually 0 is rejected by the > 0 check, so we need to unset it
+    unsetenv("YAMS_STATUS_TICK_MS");
+    CHECK(TuneAdvisor::statusTickMs() == 5);
+}
+
+TEST_CASE("statusTickMs env var override", "[daemon][governance][catch2]") {
+    SECTION("Valid override is respected") {
+        EnvGuard envGuard("YAMS_STATUS_TICK_MS", "100");
+        CHECK(TuneAdvisor::statusTickMs() == 100);
     }
+
+    SECTION("Zero is rejected, falls back to default") {
+        EnvGuard envGuard("YAMS_STATUS_TICK_MS", "0");
+        CHECK(TuneAdvisor::statusTickMs() == 5);
+    }
+
+    SECTION("10000 or above is rejected") {
+        EnvGuard envGuard("YAMS_STATUS_TICK_MS", "10000");
+        CHECK(TuneAdvisor::statusTickMs() == 5);
+    }
+}
+
+// =============================================================================
+// computeCpuThrottleDelayMs Tests
+// =============================================================================
+
+TEST_CASE("computeCpuThrottleDelayMs returns 0 below threshold", "[daemon][governance][catch2]") {
+    ProfileGuard guard(TuneAdvisor::Profile::Balanced);
+    // Balanced threshold = 50 + 0.5*35 = 67.5%
+    CHECK(TuneAdvisor::computeCpuThrottleDelayMs(60.0) == 0);
+    CHECK(TuneAdvisor::computeCpuThrottleDelayMs(0.0) == 0);
+}
+
+TEST_CASE("computeCpuThrottleDelayMs returns clamped delay above threshold",
+          "[daemon][governance][catch2]") {
+    ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
+    // Aggressive threshold = 50 + 1.0*35 = 85%
+    double threshold = TuneAdvisor::cpuHighThresholdPercent();
+    int32_t delay = TuneAdvisor::computeCpuThrottleDelayMs(threshold + 10.0);
+    CHECK(delay >= 2);
+    CHECK(delay <= 25);
+}
+
+TEST_CASE("computeCpuThrottleDelayMs clamps to max 25ms", "[daemon][governance][catch2]") {
+    // Even at 100% CPU, delay should not exceed 25ms
+    int32_t delay = TuneAdvisor::computeCpuThrottleDelayMs(100.0);
+    CHECK(delay <= 25);
 }

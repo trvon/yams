@@ -31,6 +31,7 @@
 #if !defined(YAMS_WASI)
 #include <yams/downloader/downloader.hpp>
 #endif
+#include <yams/core/uuid.h>
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/mcp_server.h>
 #if !defined(YAMS_WASI)
@@ -157,17 +158,6 @@ static std::string sanitizeName(std::string s) {
         }
     }
     return s;
-}
-
-static std::string shortHash(const std::string& s) {
-    std::uint64_t h = 1469598103934665603ull;
-    for (unsigned char c : s) {
-        h ^= static_cast<std::uint64_t>(c);
-        h *= 1099511628211ull;
-    }
-    std::ostringstream oss;
-    oss << std::hex << std::nouppercase << (h & 0xffffffffull);
-    return oss.str();
 }
 
 // Synchronous pooled_execute is deprecated and returns NotImplemented
@@ -653,6 +643,8 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
       strictProtocol_(false), limitToolResultDup_(false),
       daemonSocketOverride_(std::move(overrideSocket)) {
     (void)executor; // Reserved for future use
+    // Generate unique instance ID for this MCP server connection
+    instanceId_ = yams::core::generateUUID();
     // Ensure logging goes to stderr to keep stdout clean for MCP framing
     if (auto existing = spdlog::get("yams-mcp")) {
         spdlog::set_default_logger(existing);
@@ -985,37 +977,43 @@ void MCPServer::start() {
                     }
                     this->sendProgress("tool", 0.0, std::string("calling ") + toolName,
                                        progressToken);
+
+                    // Keep the server alive while the detached coroutine runs.
+                    // Without this, a fast shutdown (or scope exit) can destroy MCPServer
+                    // while a tool is still executing, leading to use-after-free.
+                    auto self = this->shared_from_this();
+
                     boost::asio::co_spawn(
 #if defined(YAMS_WASI)
                         boost::asio::system_executor(),
 #else
                         yams::daemon::GlobalIOContext::global_executor(),
 #endif
-                        [this, toolName, toolArgs, id_copy,
+                        [self, toolName, toolArgs, id_copy,
                          progressToken]() -> boost::asio::awaitable<void> {
                             if (progressToken)
                                 MCPServer::tlsProgressToken_ = *progressToken;
                             try {
-                                json raw = co_await this->callToolAsync(toolName, toolArgs);
+                                json raw = co_await self->callToolAsync(toolName, toolArgs);
                                 if (raw.is_object() && raw.contains("error")) {
                                     json err = raw["error"];
-                                    this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                    self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
                                                         {"error", err},
                                                         {"id", id_copy}});
                                 } else {
-                                    this->sendResponse(this->createResponse(id_copy, raw));
+                                    self->sendResponse(self->createResponse(id_copy, raw));
                                 }
-                                this->sendProgress("tool", 100.0,
+                                self->sendProgress("tool", 100.0,
                                                    std::string("completed ") + toolName,
                                                    progressToken);
                             } catch (const std::exception& e) {
                                 json err = {{"code", -32603}, {"message", e.what()}};
-                                this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
                                                     {"error", err},
                                                     {"id", id_copy}});
                             } catch (...) {
                                 json err = {{"code", -32603}, {"message", "Tool call failed"}};
-                                this->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
+                                self->sendResponse({{"jsonrpc", protocol::JSONRPC_VERSION},
                                                     {"error", err},
                                                     {"id", id_copy}});
                             }
@@ -1043,12 +1041,15 @@ void MCPServer::start() {
                 }
 #else
                 // Non-WASI: Use async coroutines
+                // Keep the server alive while the detached coroutine runs.
+                auto self = this->shared_from_this();
+
                 boost::asio::co_spawn(
                     yams::daemon::GlobalIOContext::global_executor(),
-                    [this, req = request]() -> boost::asio::awaitable<void> {
-                        auto response = co_await this->handleRequestAsync(req);
+                    [self, req = request]() -> boost::asio::awaitable<void> {
+                        auto response = co_await self->handleRequestAsync(req);
                         if (response) {
-                            this->sendResponse(response.value());
+                            self->sendResponse(response.value());
                         } else {
                             const auto& error = response.error();
                             json errorResponse = {
@@ -1056,7 +1057,7 @@ void MCPServer::start() {
                                 {"error",
                                  {{"code", protocol::INVALID_REQUEST}, {"message", error.message}}},
                                 {"id", req.value("id", nullptr)}};
-                            this->sendResponse(errorResponse);
+                            self->sendResponse(errorResponse);
                         }
                     },
                     boost::asio::detached);
@@ -1532,7 +1533,8 @@ json MCPServer::initialize(const json& params) {
 
     json result = {{"protocolVersion", negotiated},
                    {"serverInfo", {{"name", serverInfo_.name}, {"version", serverInfo_.version}}},
-                   {"capabilities", caps}};
+                   {"capabilities", caps},
+                   {"_meta", {{"instanceId", instanceId_}}}};
 
     // Debug logging to diagnose empty result issues
     spdlog::debug("MCP initialize() result built:");
@@ -1552,6 +1554,16 @@ json MCPServer::listResources() {
     return json{{"resources", json::array()}};
 #else
     json resources = json::array();
+
+    // MCP Apps: include UI resources only when negotiated.
+    if (mcpAppsSupported_.load()) {
+        json ui = uiResourcesAsMcpResources();
+        if (ui.is_array()) {
+            for (auto& item : ui) {
+                resources.push_back(std::move(item));
+            }
+        }
+    }
 
     // Add a resource for the YAMS storage statistics
     resources.push_back({{"uri", "yams://stats"},
@@ -1580,6 +1592,10 @@ json MCPServer::readResource(const std::string& uri) {
     (void)uri;
     throw std::runtime_error("Resources not supported in WASI build");
 #else
+    if (mcpAppsSupported_.load() && isUiResourceUri(uri)) {
+        return readUiResource(uri);
+    }
+
     if (uri == "yams://stats") {
         // Get storage statistics
         if (!store_) {
@@ -1692,11 +1708,162 @@ json MCPServer::readResource(const std::string& uri) {
 #endif
 }
 
+bool MCPServer::isUiResourceUri(const std::string& uri) const {
+    return uri.rfind("ui://", 0) == 0;
+}
+
+void MCPServer::ensureUiResourcesInitialized() {
+    std::call_once(uiResourcesInitOnce_, [this]() {
+        uiResources_.clear();
+
+        auto add = [&](std::string uri, std::string name, std::string desc, std::string html) {
+            UIResource r;
+            r.uri = std::move(uri);
+            r.name = std::move(name);
+            r.description = std::move(desc);
+            r.mimeType = mcpAppsMimeType_.empty() ? "text/html;profile=mcp-app" : mcpAppsMimeType_;
+            r.htmlContent = std::move(html);
+            r.meta = json::object();
+            uiResources_.emplace(r.uri, std::move(r));
+        };
+
+        // Minimal placeholder UI templates (hosts render in sandboxed iframe).
+        // These are intentionally small; Phase 2+ will provide richer apps.
+        add("ui://yams/dashboard", "YAMS Dashboard", "YAMS overview dashboard",
+            "<!doctype html><html><head><meta charset=\"utf-8\" /><title>YAMS Dashboard</title>"
+            "</head><body><h1>YAMS</h1><p>UI is enabled. This is a placeholder dashboard.</p>"
+            "</body></html>");
+
+        add("ui://yams/live-graph", "Live Graph Watcher",
+            "Real-time view of the CWD knowledge graph building",
+            "<!doctype html><html><head><meta charset=\"utf-8\" />"
+            "<title>Live Graph Watcher</title></head><body>"
+            "<h1>Live Graph Watcher</h1>"
+            "<p>Placeholder UI. Intended to visualize nodes/edges as they appear while "
+            "indexing.</p>"
+            "</body></html>");
+
+        add("ui://yams/blackboard", "Blackboard Task Viewer",
+            "View tasks/findings from opencode-blackboard and vscode-blackboard",
+            "<!doctype html><html><head><meta charset=\"utf-8\" />"
+            "<title>Blackboard</title></head><body>"
+            "<h1>Blackboard</h1>"
+            "<p>Placeholder UI. Intended to show tasks/findings and dependency graphs.</p>"
+            "</body></html>");
+    });
+}
+
+json MCPServer::uiResourcesAsMcpResources() {
+    ensureUiResourcesInitialized();
+    json arr = json::array();
+    for (const auto& [uri, r] : uiResources_) {
+        json item;
+        item["uri"] = r.uri;
+        item["name"] = r.name;
+        if (!r.description.empty()) {
+            item["description"] = r.description;
+        }
+        item["mimeType"] = r.mimeType;
+        if (r.meta.is_object() && !r.meta.empty()) {
+            item["_meta"] = r.meta;
+        }
+        arr.push_back(std::move(item));
+    }
+    return arr;
+}
+
+json MCPServer::readUiResource(const std::string& uri) {
+    ensureUiResourcesInitialized();
+    auto it = uiResources_.find(uri);
+    if (it == uiResources_.end()) {
+        throw std::runtime_error("Unknown UI resource URI: " + uri);
+    }
+
+    const auto& r = it->second;
+    json content;
+    content["uri"] = r.uri;
+    content["mimeType"] = r.mimeType;
+    content["text"] = r.htmlContent;
+    if (r.meta.is_object() && !r.meta.empty()) {
+        content["_meta"] = r.meta;
+    }
+    return json{{"contents", json::array({std::move(content)})}};
+}
+
 json MCPServer::listTools() {
     if (!toolRegistry_) {
         return json{{"tools", json::array()}};
     }
-    return toolRegistry_->listTools();
+
+    json out = toolRegistry_->listTools();
+
+    // Protocol-aware shaping for interoperability with strict clients.
+    // - annotations were introduced in 2024-11-05
+    // - title in tool metadata became available in 2025-03-26
+    const bool supportsAnnotations = negotiatedProtocolVersion_ >= "2024-11-05";
+    const bool supportsTitle = negotiatedProtocolVersion_ >= "2025-03-26";
+
+    // Optional compatibility mode: hide dotted tool names from tools/list.
+    // This is useful for clients that validate tool names with a strict regex.
+    const bool hideDottedToolNames = envTruthy(std::getenv("YAMS_MCP_RENAME_DOTTED_TOOLS"));
+
+    if (out.is_object() && out.contains("tools") && out["tools"].is_array()) {
+        json shapedTools = json::array();
+        shapedTools.get_ref<json::array_t&>().reserve(out["tools"].size());
+
+        for (auto& tool : out["tools"]) {
+            if (!tool.is_object()) {
+                continue;
+            }
+            if (hideDottedToolNames && tool.contains("name") && tool["name"].is_string()) {
+                const auto name = tool["name"].get<std::string>();
+                if (name.find('.') != std::string::npos) {
+                    continue;
+                }
+            }
+
+            if (!supportsAnnotations) {
+                tool.erase("annotations");
+            }
+            if (!supportsTitle) {
+                tool.erase("title");
+            }
+
+            shapedTools.push_back(std::move(tool));
+        }
+
+        out["tools"] = std::move(shapedTools);
+    }
+
+    // MCP Apps: when UI is negotiated, link select tools to UI resources.
+    // Tests currently expect nested `_meta.ui.resourceUri`.
+    if (mcpAppsSupported_.load() && out.is_object() && out.contains("tools") &&
+        out["tools"].is_array()) {
+        // Ensure UI resources exist before we reference their URIs.
+        ensureUiResourcesInitialized();
+
+        for (auto& tool : out["tools"]) {
+            if (!tool.is_object() || !tool.contains("name") || !tool["name"].is_string()) {
+                continue;
+            }
+            const std::string name = tool["name"].get<std::string>();
+
+            // Minimal Phase 1 linkage: provide at least one tool with an app UI.
+            // Keep this conservative: the tool remains callable from the model.
+            if (name == "search" || name == "grep" || name == "graph") {
+                // Compatibility: tests expect `_meta.ui.resourceUri`.
+                tool["_meta"]["ui"]["resourceUri"] = "ui://yams/dashboard";
+                tool["_meta"]["ui"]["visibility"] = json::array({"model", "app"});
+
+                // Spec-style keys are often expressed as a single string key containing '/'.
+                // Emit these too so hosts that key off the canonical extension path still work.
+                tool["_meta"]["ui/resourceUri"] = "ui://yams/dashboard";
+                tool["_meta"]["ui/visibility"] = json::array({"model", "app"});
+            }
+        }
+    }
+
+    return out;
 }
 
 json yams::mcp::MCPServer::listPrompts() {
@@ -1961,6 +2128,13 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         dreq.pathPatterns.push_back(pathPattern);
     }
 
+    // CWD scoping: inject glob patterns to restrict results to a directory
+    if (!req.cwd.empty()) {
+        auto cwdPatterns = yams::app::services::utils::buildCwdScopePatterns(req.cwd);
+        dreq.pathPatterns.insert(dreq.pathPatterns.end(), cwdPatterns.begin(), cwdPatterns.end());
+        spdlog::debug("[MCP] Scoping search to CWD: {} ({} patterns)", req.cwd, cwdPatterns.size());
+    }
+
     dreq.tags = req.tags;
     dreq.matchAllTags = req.matchAllTags;
     dreq.limit = req.limit;
@@ -1985,30 +2159,8 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     if (dreq.searchType == "keyword") {
         dreq.similarity = 0.0; // disable vector path
     } else {
-        // Optional: degrade to keyword if provider/index unavailable
-        try {
-            auto st = co_await daemon_client_->status();
-            if (st) {
-                const auto& s = st.value();
-                bool provider_ready = false;
-                for (const auto& p : s.providers) {
-                    if (p.isProvider && p.ready && !p.degraded) {
-                        provider_ready = true;
-                        break;
-                    }
-                }
-                bool vector_ready = true;
-                if (auto it = s.readinessStates.find("vector_index"); it != s.readinessStates.end())
-                    vector_ready = it->second;
-                if (!provider_ready || !vector_ready) {
-                    sendProgress("search", 10.0, "degraded to keyword");
-                    dreq.searchType = "keyword";
-                    dreq.similarity = 0.0;
-                }
-            }
-        } catch (...) {
-            // Best-effort: on status failure keep requested type
-        }
+        // Note: removed pre-flight status check to avoid extra IPC round-trip.
+        // The daemon handles degradation internally; this matches CLI behavior.
     }
 
     MCPSearchResponse out;
@@ -2024,6 +2176,12 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         spdlog::debug("[MCP] search: using session '{}'", __session);
         dreq.useSession = true;
         dreq.sessionName = __session;
+        // Inject instance tag for session-scoped isolation (unless globalSearch)
+        if (!req.tags.empty() || !instanceId_.empty()) {
+            if (!instanceId_.empty() && !dreq.globalSearch) {
+                dreq.tags.push_back("inst:" + instanceId_);
+            }
+        }
     }
 
     // Optional fast-first strategy: quick keyword preview before full hybrid
@@ -2066,40 +2224,8 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     }
 
     // Streaming-only path for search to match CLI and reduce protocol complexity.
-    // Body timeout may be overridden via env YAMS_MCP_SEARCH_BODY_TIMEOUT_MS (default 60000).
-    Result<yams::daemon::SearchResponse> res(Error{ErrorCode::Unknown, "uninitialized"});
-    {
-        int wait_ms = 60000;
-        if (const char* env = std::getenv("YAMS_MCP_SEARCH_BODY_TIMEOUT_MS")) {
-            try {
-                int v = std::stoi(env);
-                if (v > 100)
-                    wait_ms = v;
-            } catch (...) {
-            }
-        }
-        std::promise<Result<yams::daemon::SearchResponse>> prom;
-        auto fut = prom.get_future();
-        boost::asio::any_io_executor exec;
-#if defined(YAMS_WASI)
-        exec = boost::asio::system_executor();
-#else
-        exec = yams::daemon::GlobalIOContext::instance().get_io_context().get_executor();
-#endif
-        boost::asio::co_spawn(
-            exec,
-            [&, pr = std::move(prom)]() mutable -> boost::asio::awaitable<void> {
-                auto sr = co_await daemon_client_->streamingSearch(dreq);
-                pr.set_value(std::move(sr));
-                co_return;
-            },
-            boost::asio::detached);
-        if (fut.wait_for(std::chrono::milliseconds(wait_ms)) == std::future_status::ready) {
-            res = fut.get();
-        } else {
-            res = Error{ErrorCode::Timeout, "Search timed out"};
-        }
-    }
+    // Direct co_await avoids the blocking promise/future pattern that stalls the IO thread.
+    Result<yams::daemon::SearchResponse> res = co_await daemon_client_->streamingSearch(dreq);
     if (!res) {
         co_return res.error();
     }
@@ -2107,6 +2233,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     out.total = r.totalCount;
     out.type = "daemon";
     out.executionTimeMs = r.elapsed.count();
+    out.traceId = r.traceId;
     // When pathsOnly was requested by the MCP client, populate the 'paths' field
     // to mirror CLI behavior and make it easy for clients to consume.
     if (req.pathsOnly) {
@@ -2269,6 +2396,15 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         dreq.recursive = true;
     }
 
+    // CWD scoping: inject glob patterns to restrict results to a directory
+    if (!req.cwd.empty()) {
+        auto cwdPatterns = yams::app::services::utils::buildCwdScopePatterns(req.cwd);
+        dreq.includePatterns.insert(dreq.includePatterns.end(), cwdPatterns.begin(),
+                                    cwdPatterns.end());
+        dreq.recursive = true;
+        spdlog::debug("[MCP] Scoping grep to CWD: {} ({} patterns)", req.cwd, cwdPatterns.size());
+    }
+
     std::vector<std::string> initial_paths = req.paths;
     if (!req.name.empty()) {
         initial_paths.push_back(req.name);
@@ -2308,6 +2444,20 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         }
     }
     dreq.paths.assign(final_paths.begin(), final_paths.end());
+
+    // Pass user-provided tags through to the grep engine
+    if (!req.tags.empty()) {
+        dreq.filterTags.insert(dreq.filterTags.end(), req.tags.begin(), req.tags.end());
+        if (req.matchAllTags) {
+            dreq.matchAllTags = true;
+        }
+    }
+
+    // Inject instance tag for session-scoped grep
+    if (req.useSession && !instanceId_.empty()) {
+        dreq.filterTags.push_back("inst:" + instanceId_);
+        dreq.matchAllTags = true;
+    }
 
     // Session scoping for grep: if no explicit paths, use session patterns
     if (req.useSession && dreq.paths.empty()) {
@@ -2494,6 +2644,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     yams::downloader::DownloaderConfig cfg{};
 
     // Read config and resolve storage path to match CLI behavior
+    std::filesystem::path resolvedDataRoot;
     try {
         namespace fs = std::filesystem;
 
@@ -2580,6 +2731,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 dataRoot = fs::current_path() / "yams_data";
             }
         }
+        resolvedDataRoot = dataRoot;
 
         // Allow explicit overrides via [storage] objects_dir/staging_dir
         fs::path objectsDir;
@@ -2597,6 +2749,16 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             objectsDir = dataRoot / "storage" / "objects";
         if (stagingDir.empty())
             stagingDir = dataRoot / "storage" / "staging";
+
+        // Relative storage paths in config are resolved against data root.
+        if (!resolvedDataRoot.empty()) {
+            if (!objectsDir.empty() && objectsDir.is_relative()) {
+                objectsDir = resolvedDataRoot / objectsDir;
+            }
+            if (!stagingDir.empty() && stagingDir.is_relative()) {
+                stagingDir = resolvedDataRoot / stagingDir;
+            }
+        }
         storage.objectsDir = std::move(objectsDir);
         storage.stagingDir = std::move(stagingDir);
 
@@ -2615,6 +2777,28 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     cfg.resume = dreq.resume;
     cfg.storeOnly = dreq.storeOnly;
 
+    // Align downloader CAS root with daemon content store root so returned hashes are
+    // retrievable by daemon get/cat operations.
+    try {
+        auto sres = co_await daemon_client_->status();
+        if (sres) {
+            const auto& s = sres.value();
+            if (!s.contentStoreRoot.empty()) {
+                namespace fs = std::filesystem;
+                storage.objectsDir = fs::path(s.contentStoreRoot);
+                if (storage.stagingDir.empty()) {
+                    storage.stagingDir = fs::path(s.contentStoreRoot).parent_path() / "staging";
+                }
+                if (verbose) {
+                    spdlog::debug("[MCP] download: using daemon content store root for CAS: '{}'",
+                                  storage.objectsDir.string());
+                }
+            }
+        }
+    } catch (...) {
+        // Best-effort alignment only; fall back to config/env-derived storage roots.
+    }
+
     // Resolve and ensure staging directory exists to avoid regression
     try {
         namespace fs = std::filesystem;
@@ -2630,19 +2814,46 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             // Prefer XDG_STATE_HOME, then HOME, then /tmp
             fs::path staging;
             if (const char* xdgState = std::getenv("XDG_STATE_HOME")) {
-                staging = fs::path(xdgState) / "yams" / "staging" / "downloader";
+                staging = fs::path(xdgState) / "yams" / "staging";
             } else if (const char* homeEnv = std::getenv("HOME")) {
-                staging =
-                    fs::path(homeEnv) / ".local" / "state" / "yams" / "staging" / "downloader";
+                staging = fs::path(homeEnv) / ".local" / "state" / "yams" / "staging";
             } else {
-                staging = fs::path("/tmp") / "yams" / "staging" / "downloader";
+                staging = fs::path("/tmp") / "yams" / "staging";
             }
             storage.stagingDir = staging;
         }
+
+        // Resolve late relative staging path against data root if available.
+        if (storage.stagingDir.is_relative() && !resolvedDataRoot.empty()) {
+            storage.stagingDir = resolvedDataRoot / storage.stagingDir;
+        }
+
         if (!ensure_dir(storage.stagingDir)) {
-            co_return Error{ErrorCode::InternalError,
-                            std::string("Failed to create staging dir: ") +
-                                storage.stagingDir.string()};
+            // Harden against invalid/unwritable config by falling back to a known writable root.
+            fs::path fallbackStaging;
+            if (!resolvedDataRoot.empty()) {
+                fallbackStaging = resolvedDataRoot / "storage" / "staging";
+            }
+            if (fallbackStaging.empty()) {
+                if (const char* xdgState = std::getenv("XDG_STATE_HOME"); xdgState && *xdgState) {
+                    fallbackStaging = fs::path(xdgState) / "yams" / "staging";
+                } else if (const char* homeEnv = std::getenv("HOME"); homeEnv && *homeEnv) {
+                    fallbackStaging = fs::path(homeEnv) / ".local" / "state" / "yams" / "staging";
+                } else {
+                    fallbackStaging = fs::path("/tmp") / "yams" / "staging";
+                }
+            }
+            if (!ensure_dir(fallbackStaging)) {
+                co_return Error{ErrorCode::InternalError,
+                                std::string("Failed to create staging dir: ") +
+                                    storage.stagingDir.string()};
+            }
+            if (verbose) {
+                spdlog::warn("[MCP] download: configured staging dir '{}' is not writable; "
+                             "falling back to '{}'",
+                             storage.stagingDir.string(), fallbackStaging.string());
+            }
+            storage.stagingDir = std::move(fallbackStaging);
         }
 
         // Optionally ensure objectsDir if provided
@@ -2870,6 +3081,10 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             spdlog::error("[MCP] post-index: daemon add failed for path='{}' error='{}'",
                           addReq.path, addres.error().message);
             mcp_response.indexed = false;
+            // Do not expose downloader-local hash as retrievable when indexing failed.
+            // Agents commonly follow download -> get(hash); returning a non-indexed hash causes
+            // repeated "File not found" lookups in daemon CAS.
+            mcp_response.hash.clear();
         } else {
             mcp_response.indexed = true;
             const auto& addok = addres.value();
@@ -3095,6 +3310,22 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     aopts.includePatterns = req.includePatterns;
     aopts.excludePatterns = req.excludePatterns;
     aopts.tags = req.tags;
+    // Inject instance and session tags for isolation
+    if (!instanceId_.empty()) {
+        aopts.tags.push_back("inst:" + instanceId_);
+    }
+    {
+        auto __svc = app::services::makeSessionService(nullptr);
+        auto __sess = __svc->current().value_or("");
+        if (!__sess.empty()) {
+            aopts.tags.push_back("session:" + __sess);
+            aopts.metadata["session_uuid"] = "";
+            if (auto __info = __svc->getSessionInfo(__sess); __info && !__info->uuid.empty()) {
+                aopts.metadata["session_uuid"] = __info->uuid;
+            }
+            aopts.metadata["instance_id"] = instanceId_;
+        }
+    }
     for (const auto& [key, value] : req.metadata.items()) {
         if (value.is_string()) {
             aopts.metadata[key] = value.get<std::string>();
@@ -3292,6 +3523,12 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
         }
     }
     daemon_req.tags = req.tags;
+    daemon_req.matchAllTags = req.matchAllTags;
+    // Inject instance tag for session-scoped list
+    if (req.useSession && !instanceId_.empty()) {
+        daemon_req.tags.push_back("inst:" + instanceId_);
+        daemon_req.matchAllTags = true;
+    }
     daemon_req.fileType = req.type;
     daemon_req.mimeType = req.mime;
     daemon_req.extensions = req.extension;
@@ -3328,6 +3565,8 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     list_opts.limit = daemon_req.limit;
     list_opts.offset = daemon_req.offset;
     list_opts.namePattern = daemon_req.namePattern;
+    list_opts.tags = daemon_req.tags;
+    list_opts.matchAllTags = daemon_req.matchAllTags;
     list_opts.sortBy = daemon_req.sortBy;
     list_opts.reverse = daemon_req.reverse;
     list_opts.sessionId = __session;
@@ -4262,7 +4501,7 @@ MCPServer::handleSessionWatch(const MCPSessionWatchRequest& req) {
         std::string base = root.filename().string();
         if (base.empty())
             base = "project";
-        targetSession = "proj-" + sanitizeName(base) + "-" + shortHash(rootStr);
+        targetSession = "proj-" + sanitizeName(base) + "-" + yams::core::shortHash(rootStr);
     }
 
     bool created = false;
@@ -4325,6 +4564,11 @@ MCPServer::handleSessionWatch(const MCPSessionWatchRequest& req) {
 
 boost::asio::awaitable<Result<MCPGraphResponse>>
 MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
+    // Dispatch ingest action to the dedicated handler
+    if (req.action == "ingest") {
+        co_return co_await handleKgIngest(req);
+    }
+
     if (auto ensure = ensureDaemonClient(); !ensure) {
         co_return ensure.error();
     }
@@ -4431,27 +4675,102 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
     co_return out;
 }
 
+boost::asio::awaitable<Result<MCPGraphResponse>>
+MCPServer::handleKgIngest(const MCPGraphRequest& req) {
+    if (auto ensure = ensureDaemonClient(); !ensure) {
+        co_return ensure.error();
+    }
+
+    // Translate MCP DTO → daemon KgIngestRequest
+    yams::daemon::KgIngestRequest dreq;
+    dreq.documentHash = req.documentHash;
+    dreq.skipExistingNodes = req.skipExistingNodes;
+    dreq.skipExistingEdges = req.skipExistingEdges;
+
+    dreq.nodes.reserve(req.nodes.size());
+    for (const auto& n : req.nodes) {
+        yams::daemon::KgIngestNode dn;
+        dn.nodeKey = n.nodeKey;
+        dn.label = n.label;
+        dn.type = n.type;
+        if (!n.properties.is_null())
+            dn.properties = n.properties.dump();
+        dreq.nodes.push_back(std::move(dn));
+    }
+
+    dreq.edges.reserve(req.edges.size());
+    for (const auto& e : req.edges) {
+        yams::daemon::KgIngestEdge de;
+        de.srcNodeKey = e.srcNodeKey;
+        de.dstNodeKey = e.dstNodeKey;
+        de.relation = e.relation;
+        de.weight = e.weight;
+        if (!e.properties.is_null())
+            de.properties = e.properties.dump();
+        dreq.edges.push_back(std::move(de));
+    }
+
+    dreq.aliases.reserve(req.aliases.size());
+    for (const auto& a : req.aliases) {
+        yams::daemon::KgIngestAlias da;
+        da.nodeKey = a.nodeKey;
+        da.alias = a.alias;
+        da.source = a.source;
+        da.confidence = a.confidence;
+        dreq.aliases.push_back(std::move(da));
+    }
+
+    auto res = co_await daemon_client_->call<yams::daemon::KgIngestRequest>(dreq);
+    if (!res) {
+        co_return res.error();
+    }
+
+    const auto& resp = res.value();
+
+    MCPGraphResponse out;
+    out.action = "ingest";
+    out.nodesInserted = resp.nodesInserted;
+    out.nodesSkipped = resp.nodesSkipped;
+    out.edgesInserted = resp.edgesInserted;
+    out.edgesSkipped = resp.edgesSkipped;
+    out.aliasesInserted = resp.aliasesInserted;
+    out.aliasesSkipped = resp.aliasesSkipped;
+    out.errors = resp.errors;
+    out.success = resp.success;
+
+    co_return out;
+}
+
 void MCPServer::initializeToolRegistry() {
     toolRegistry_ = std::make_unique<ToolRegistry>();
 
     // Define annotation presets for different tool categories (MCP 2024-11-05)
-    ToolAnnotation readOnlyAnnotation{
-        .readOnlyHint = true, .destructiveHint = false, .idempotentHint = true};
-    ToolAnnotation addAnnotation{
-        .readOnlyHint = false, .destructiveHint = false, .idempotentHint = false};
-    ToolAnnotation deleteAnnotation{
-        .readOnlyHint = false, .destructiveHint = true, .idempotentHint = false};
-    ToolAnnotation updateAnnotation{
-        .readOnlyHint = false, .destructiveHint = true, .idempotentHint = true};
-    ToolAnnotation sessionAnnotation{
-        .readOnlyHint = false, .destructiveHint = false, .idempotentHint = false};
+    ToolAnnotation readOnlyAnnotation{.readOnlyHint = true,
+                                      .destructiveHint = false,
+                                      .idempotentHint = true,
+                                      .openWorldHint = false};
+    ToolAnnotation addAnnotation{.readOnlyHint = false,
+                                 .destructiveHint = false,
+                                 .idempotentHint = false,
+                                 .openWorldHint = false};
+    ToolAnnotation deleteAnnotation{.readOnlyHint = false,
+                                    .destructiveHint = true,
+                                    .idempotentHint = false,
+                                    .openWorldHint = false};
+    ToolAnnotation updateAnnotation{.readOnlyHint = false,
+                                    .destructiveHint = true,
+                                    .idempotentHint = true,
+                                    .openWorldHint = false};
+    ToolAnnotation sessionAnnotation{.readOnlyHint = false,
+                                     .destructiveHint = false,
+                                     .idempotentHint = false,
+                                     .openWorldHint = false};
 
     // Non-daemon tool used for protocol feature validation.
     // This stays fully in-process so unit tests can exercise tool result shaping
     // (content + structuredContent gating by negotiated protocol version).
-    toolRegistry_->registerRawTool(
-        "mcp.echo",
-        [this](const json& args) mutable -> boost::asio::awaitable<json> {
+    auto makeEchoHandler = [this]() {
+        return [this](const json& args) mutable -> boost::asio::awaitable<json> {
             try {
                 std::string text;
                 if (args.is_object() && args.contains("text") && args["text"].is_string()) {
@@ -4477,9 +4796,21 @@ void MCPServer::initializeToolRegistry() {
                     json::array({content::text(std::string("Error: ") + e.what())}), std::nullopt,
                     true);
             }
-        },
+        };
+    };
+
+    toolRegistry_->registerRawTool(
+        "mcp.echo", makeEchoHandler(),
         json{{"type", "object"}, {"properties", {{"text", json{{"type", "string"}}}}}},
         "Echo input for MCP protocol testing", "Echo", readOnlyAnnotation);
+
+    // Optional strict-name compatibility alias for clients that reject dotted tool names.
+    if (envTruthy(std::getenv("YAMS_MCP_RENAME_DOTTED_TOOLS"))) {
+        toolRegistry_->registerRawTool(
+            "mcp_echo", makeEchoHandler(),
+            json{{"type", "object"}, {"properties", {{"text", json{{"type", "string"}}}}}},
+            "Echo input for MCP protocol testing", "Echo", readOnlyAnnotation);
+    }
 
     // Debug/compat mode: expose only a minimal tool surface.
     // Some MCP clients validate tool schemas strictly and will drop the entire tools/list
@@ -4581,7 +4912,15 @@ void MCPServer::initializeToolRegistry() {
               {"tags",
                {{"type", "array"},
                 {"items", {{"type", "string"}}},
-                {"description", "Filter by tags (YAMS extension)"}}}}},
+                {"description", "Filter by tags (YAMS extension)"}}},
+              {"match_all_tags",
+               {{"type", "boolean"},
+                {"description", "Require all tags to match (AND logic)"},
+                {"default", false}}},
+              {"cwd",
+               {{"type", "string"},
+                {"description",
+                 "Scope search to files under this directory path (absolute or relative)"}}}}},
             {"required", json::array({"query"})}},
         "Search documents using hybrid search (vector + full-text + knowledge graph)",
         "Search Documents", readOnlyAnnotation);
@@ -4653,7 +4992,19 @@ void MCPServer::initializeToolRegistry() {
                {"fast_first",
                 {{"type", "boolean"},
                  {"description", "Return a fast semantic-first burst"},
-                 {"default", false}}}}},
+                 {"default", false}}},
+               {"tags",
+                {{"type", "array"},
+                 {"items", {{"type", "string"}}},
+                 {"description", "Filter by tags"}}},
+               {"match_all_tags",
+                {{"type", "boolean"},
+                 {"description", "Require all tags to match (AND logic)"},
+                 {"default", false}}},
+               {"cwd",
+                {{"type", "string"},
+                 {"description",
+                  "Scope grep to files under this directory path (absolute or relative)"}}}}},
              {"required", json::array({"pattern"})}},
         "Search documents using regular expressions with grep-like functionality", "Grep Search",
         readOnlyAnnotation);
@@ -4827,6 +5178,10 @@ void MCPServer::initializeToolRegistry() {
                 {{"type", "array"},
                  {"items", {{"type", "string"}}},
                  {"description", "Filter by tags"}}},
+               {"match_all_tags",
+                {{"type", "boolean"},
+                 {"description", "Require all tags to match (AND logic)"},
+                 {"default", false}}},
                {"recent", {{"type", "integer"}, {"description", "Show N most recent documents"}}},
                {"paths_only",
                 {{"type", "boolean"},
@@ -5058,7 +5413,14 @@ void MCPServer::initializeToolRegistry() {
             "graph", [this](const MCPGraphRequest& req) { return handleGraphQuery(req); },
             json{{"type", "object"},
                  {"properties",
-                  {{"hash", {{"type", "string"}, {"description", "Document hash to query from"}}},
+                  {{"action",
+                    {{"type", "string"},
+                     {"description", "Operation: 'query' (default) to traverse/explore the graph, "
+                                     "'ingest' to insert nodes/edges/aliases"},
+                     {"enum", json::array({"query", "ingest"})},
+                     {"default", "query"}}},
+                   // ── Query parameters ──
+                   {"hash", {{"type", "string"}, {"description", "Document hash to query from"}}},
                    {"name", {{"type", "string"}, {"description", "Document name to query from"}}},
                    {"node_key",
                     {{"type", "string"},
@@ -5097,9 +5459,80 @@ void MCPServer::initializeToolRegistry() {
                      {"description", "Include node and edge properties"},
                      {"default", false}}},
                    {"scope_snapshot",
-                    {{"type", "string"}, {"description", "Scope results to specific snapshot"}}}}}},
-            "Query the knowledge graph to explore relationships between documents and entities",
-            "Query Knowledge Graph", readOnlyAnnotation);
+                    {{"type", "string"}, {"description", "Scope results to specific snapshot"}}},
+                   // ── Ingest parameters (used when action == "ingest") ──
+                   {"nodes",
+                    {{"type", "array"},
+                     {"description", "Nodes to ingest (action=ingest)"},
+                     {"items",
+                      {{"type", "object"},
+                       {"properties",
+                        {{"node_key",
+                          {{"type", "string"},
+                           {"description",
+                            "Unique logical key (e.g., 'strongs:H1234', 'lemma:λόγος')"}}},
+                         {"label", {{"type", "string"}, {"description", "Human-readable name"}}},
+                         {"type",
+                          {{"type", "string"},
+                           {"description",
+                            "Node type (e.g., 'token', 'strongs', 'lemma', 'verse')"}}},
+                         {"properties",
+                          {{"type", "object"},
+                           {"description", "Arbitrary properties as JSON object"}}}}},
+                       {"required", json::array({"node_key", "type"})}}}}},
+                   {"edges",
+                    {{"type", "array"},
+                     {"description", "Edges/relationships to ingest (action=ingest)"},
+                     {"items",
+                      {{"type", "object"},
+                       {"properties",
+                        {{"src_node_key", {{"type", "string"}, {"description", "Source node key"}}},
+                         {"dst_node_key",
+                          {{"type", "string"}, {"description", "Destination node key"}}},
+                         {"relation",
+                          {{"type", "string"},
+                           {"description",
+                            "Relation type (e.g., 'HAS_STRONGS', 'HAS_LEMMA', 'CONTAINS')"}}},
+                         {"weight",
+                          {{"type", "number"}, {"description", "Edge weight"}, {"default", 1.0}}},
+                         {"properties",
+                          {{"type", "object"}, {"description", "Arbitrary edge properties"}}}}},
+                       {"required", json::array({"src_node_key", "dst_node_key", "relation"})}}}}},
+                   {"aliases",
+                    {{"type", "array"},
+                     {"description", "Aliases/surface forms to ingest (action=ingest)"},
+                     {"items",
+                      {{"type", "object"},
+                       {"properties",
+                        {{"node_key",
+                          {{"type", "string"}, {"description", "Node key to attach alias to"}}},
+                         {"alias",
+                          {{"type", "string"}, {"description", "Surface form / alias text"}}},
+                         {"source",
+                          {{"type", "string"},
+                           {"description", "Origin system (e.g., 'symphony', 'manual')"}}},
+                         {"confidence",
+                          {{"type", "number"},
+                           {"description", "Confidence [0,1]"},
+                           {"default", 1.0}}}}},
+                       {"required", json::array({"node_key", "alias"})}}}}},
+                   {"document_hash",
+                    {{"type", "string"},
+                     {"description",
+                      "Associate ingested entities with this document (action=ingest)"}}},
+                   {"skip_existing_nodes",
+                    {{"type", "boolean"},
+                     {"description", "Skip nodes that already exist by node_key (action=ingest)"},
+                     {"default", true}}},
+                   {"skip_existing_edges",
+                    {{"type", "boolean"},
+                     {"description",
+                      "Skip edges that already exist by src/dst/relation (action=ingest)"},
+                     {"default", true}}}}}},
+            "Query or mutate the knowledge graph. Use action='query' (default) to explore "
+            "relationships, or action='ingest' to bulk-insert nodes, edges, and aliases "
+            "(e.g., token-to-Strong's/lemma graphs).",
+            "Knowledge Graph", addAnnotation);
     }
 #endif
         }

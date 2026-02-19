@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <array>
 #include <expected>
-#include <format>
 #include <ranges>
 #include <set>
 #include <span>
@@ -701,7 +700,7 @@ SymbolExtractor::Result SymbolExtractor::extract(std::string_view content,
                                                  std::string_view file_path, bool enable_call_graph,
                                                  std::source_location loc) {
     if (!language_) {
-        return tl::unexpected(std::format("No tree-sitter language loaded for {} (at {}:{})",
+        return tl::unexpected(fmt::format("No tree-sitter language loaded for {} (at {}:{})",
                                           language, loc.file_name(), loc.line()));
     }
 
@@ -790,7 +789,7 @@ SymbolExtractor::Result SymbolExtractor::extract(std::string_view content,
     } catch (const std::exception& e) {
         if (ctx.tree)
             ts_tree_delete(ctx.tree);
-        return tl::unexpected(std::format("Extraction exception: {}", e.what()));
+        return tl::unexpected(fmt::format("Extraction exception: {}", e.what()));
     }
 
     if (ctx.tree)
@@ -850,8 +849,7 @@ SymbolExtractor::Result SymbolExtractor::extractClasses(const ExtractionContext&
     return result;
 }
 
-SymbolExtractor::Result
-SymbolExtractor::extractStructs([[maybe_unused]] const ExtractionContext& ctx) {
+SymbolExtractor::Result SymbolExtractor::extractStructs(const ExtractionContext& /*ctx*/) {
     // For C, structs are extracted in the class extraction phase
     // This provides a separate hook for languages where structs are distinct
     return ExtractionResult{};
@@ -1241,7 +1239,6 @@ SymbolExtractor::extractInheritance(const ExtractionContext& ctx,
                         uint32_t base_count = ts_node_child_count(child);
                         for (uint32_t j = 0; j < base_count; ++j) {
                             TSNode base_spec = ts_node_child(child, j);
-
                             // Look for type_identifier in the base specifier
                             std::function<std::string(TSNode)> find_base_type;
                             find_base_type = [&ctx, &find_base_type](TSNode n) -> std::string {

@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <array>
 #include <filesystem>
 #include <random>
 
@@ -19,6 +20,7 @@
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/proto_serializer.h>
+#include <yams/daemon/metric_keys.h>
 #include <yams/daemon/resource/model_provider.h>
 
 #include <boost/asio/co_spawn.hpp>
@@ -172,6 +174,206 @@ TEST_CASE("DaemonMetrics: WAL metrics in GetStats", "[daemon][metrics][wal]") {
     }
 }
 
+TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
+          "[daemon][status][readiness]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_readiness_flags_");
+
+    YamsDaemon daemon(cfg);
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&daemon, &svc, &state);
+
+    StatusRequest req;
+    req.detailed = false;
+    Request r = req;
+
+    boost::asio::io_context ioc;
+    auto fut = boost::asio::co_spawn(ioc, dispatcher.dispatch(r), boost::asio::use_future);
+    ioc.run();
+    auto resp = fut.get();
+
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+    const auto& status = std::get<StatusResponse>(resp);
+
+    const std::array<std::string_view, 20> requiredCoreReadinessKeys = {
+        readiness::kIpcServer,
+        readiness::kContentStore,
+        readiness::kDatabase,
+        readiness::kMetadataRepo,
+        readiness::kSearchEngine,
+        readiness::kModelProvider,
+        readiness::kVectorIndex,
+        readiness::kVectorDb,
+        readiness::kPlugins,
+        readiness::kVectorDbInitAttempted,
+        readiness::kVectorDbReady,
+        readiness::kVectorDbDim,
+        readiness::kEmbeddingReady,
+        readiness::kEmbeddingDegraded,
+        readiness::kPluginsReady,
+        readiness::kPluginsDegraded,
+        readiness::kRepairService,
+        readiness::kSearchEngineBuildReasonInitial,
+        readiness::kSearchEngineBuildReasonRebuild,
+        readiness::kSearchEngineBuildReasonDegraded};
+
+    for (const auto key : requiredCoreReadinessKeys) {
+        INFO("missing readiness key: " << key);
+        REQUIRE(status.readinessStates.count(std::string(key)) > 0);
+    }
+}
+
+TEST_CASE("RequestDispatcher: status includes repair metrics and flags",
+          "[daemon][status][repair]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_repair_metrics_");
+
+    YamsDaemon daemon(cfg);
+    StateComponent state;
+    state.stats.repairQueueDepth.store(7);
+    state.stats.repairBatchesAttempted.store(11);
+    state.stats.repairEmbeddingsGenerated.store(5);
+    state.stats.repairEmbeddingsSkipped.store(2);
+    state.stats.repairFailedOperations.store(1);
+    state.stats.repairIdleTicks.store(99);
+    state.stats.repairBusyTicks.store(33);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&daemon, &svc, &state);
+
+    StatusRequest req;
+    req.detailed = true;
+    Request r = req;
+
+    boost::asio::io_context ioc;
+    auto fut = boost::asio::co_spawn(ioc, dispatcher.dispatch(r), boost::asio::use_future);
+    ioc.run();
+    auto resp = fut.get();
+
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+    const auto& status = std::get<StatusResponse>(resp);
+
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairQueueDepth)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairBatchesAttempted)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairEmbeddingsGenerated)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairEmbeddingsSkipped)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairFailedOperations)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairIdleTicks)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairBusyTicks)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairRunning)) > 0);
+    REQUIRE(status.requestCounts.count(std::string(metrics::kRepairInProgress)) > 0);
+}
+
+TEST_CASE("RequestDispatcher: status responds even when lifecycle not ready",
+          "[daemon][status][readiness]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_not_ready_");
+
+    YamsDaemon daemon(cfg);
+    // Daemon is not started; lifecycle state is expected to be non-ready.
+    {
+        const auto snap = daemon.getLifecycle().snapshot();
+        REQUIRE(snap.state != LifecycleState::Ready);
+        REQUIRE(snap.state != LifecycleState::Degraded);
+    }
+
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&daemon, &svc, &state);
+
+    StatusRequest req;
+    req.detailed = true;
+    Request r = req;
+
+    boost::asio::io_context ioc;
+    auto fut = boost::asio::co_spawn(ioc, dispatcher.dispatch(r), boost::asio::use_future);
+    ioc.run();
+    auto resp = fut.get();
+
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+}
+
+TEST_CASE("DaemonMetrics: snapshot includes canonical readiness flags",
+          "[daemon][metrics][readiness]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_metrics_readiness_flags_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+
+    auto snap = metrics.getSnapshot();
+    REQUIRE(snap != nullptr);
+
+    const std::array<std::string_view, 12> requiredCoreReadinessKeys = {
+        readiness::kIpcServer,     readiness::kContentStore,
+        readiness::kDatabase,      readiness::kMetadataRepo,
+        readiness::kSearchEngine,  readiness::kModelProvider,
+        readiness::kVectorIndex,   readiness::kVectorDb,
+        readiness::kPlugins,       readiness::kVectorDbInitAttempted,
+        readiness::kVectorDbReady, readiness::kVectorDbDim};
+
+    for (const auto key : requiredCoreReadinessKeys) {
+        INFO("missing readiness key: " << key);
+        REQUIRE(snap->readinessStates.count(std::string(key)) > 0);
+    }
+}
+
+TEST_CASE("StatusResponse: post_ingest_rpc requestCounts keys round-trip",
+          "[daemon][status][protocol][post_ingest]") {
+    StatusResponse s{};
+    s.requestCounts["post_ingest_rpc_queued"] = 3;
+    s.requestCounts["post_ingest_rpc_capacity"] = 64;
+    s.requestCounts["post_ingest_rpc_max_per_batch"] = 8;
+
+    Message m{};
+    m.payload = Response{std::in_place_type<StatusResponse>, s};
+
+    auto enc = ProtoSerializer::encode_payload(m);
+    REQUIRE(enc.has_value());
+
+    auto dec = ProtoSerializer::decode_payload(enc.value());
+    REQUIRE(dec.has_value());
+
+    const auto& resp = std::get<Response>(dec.value().payload);
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+
+    const auto& decoded = std::get<StatusResponse>(resp);
+    REQUIRE(decoded.requestCounts.at("post_ingest_rpc_queued") == 3);
+    REQUIRE(decoded.requestCounts.at("post_ingest_rpc_capacity") == 64);
+    REQUIRE(decoded.requestCounts.at("post_ingest_rpc_max_per_batch") == 8);
+}
+
+TEST_CASE("StatusResponse: backpressure requestCounts keys round-trip",
+          "[daemon][status][protocol][post_ingest]") {
+    StatusResponse s{};
+    s.requestCounts["post_ingest_backpressure_rejects"] = 123;
+    s.requestCounts["kg_jobs_depth"] = 3880;
+    s.requestCounts["kg_jobs_capacity"] = 4096;
+    s.requestCounts["kg_jobs_fill_pct"] = 95;
+
+    Message m{};
+    m.payload = Response{std::in_place_type<StatusResponse>, s};
+
+    auto enc = ProtoSerializer::encode_payload(m);
+    REQUIRE(enc.has_value());
+
+    auto dec = ProtoSerializer::decode_payload(enc.value());
+    REQUIRE(dec.has_value());
+
+    const auto& resp = std::get<Response>(dec.value().payload);
+    REQUIRE(std::holds_alternative<StatusResponse>(resp));
+
+    const auto& decoded = std::get<StatusResponse>(resp);
+    REQUIRE(decoded.requestCounts.at("post_ingest_backpressure_rejects") == 123);
+    REQUIRE(decoded.requestCounts.at("kg_jobs_depth") == 3880);
+    REQUIRE(decoded.requestCounts.at("kg_jobs_capacity") == 4096);
+    REQUIRE(decoded.requestCounts.at("kg_jobs_fill_pct") == 95);
+}
+
 // =============================================================================
 // StatusResponse Protocol Serialization Tests
 // =============================================================================
@@ -191,9 +393,6 @@ TEST_CASE("StatusResponse: Protocol serialization", "[daemon][status][protocol]"
         s.lifecycleState = "starting";
         s.lastError = "boom";
         s.requestCounts["worker_threads"] = 4;
-        s.requestCounts["enrich_inflight"] = 3;
-        s.requestCounts["enrich_queue_depth"] = 11;
-        s.requestCounts["post_enrich_limit"] = 5;
 
         // FSM-exported fields
         s.requestCounts["service_fsm_state"] = 3;
@@ -235,9 +434,6 @@ TEST_CASE("StatusResponse: Protocol serialization", "[daemon][status][protocol]"
         // Verify FSM state counts
         REQUIRE(decoded.requestCounts.at("worker_threads") == 4);
         REQUIRE(decoded.requestCounts.at("service_fsm_state") == 3);
-        REQUIRE(decoded.requestCounts.at("enrich_inflight") == 3);
-        REQUIRE(decoded.requestCounts.at("enrich_queue_depth") == 11);
-        REQUIRE(decoded.requestCounts.at("post_enrich_limit") == 5);
 
         // Verify readiness flags
         REQUIRE(decoded.readinessStates.at("embedding_ready") == false);
@@ -322,8 +518,11 @@ TEST_CASE("DaemonMetrics: FSM state export", "[daemon][metrics][fsm]") {
 
     SECTION("Plugin host FSM state is accessible") {
         auto snapshot = svc.getPluginHostFsmSnapshot();
-        // PluginManager initializes host FSM to Ready (with zero plugins loaded)
-        REQUIRE(snapshot.state == PluginHostState::Ready);
+        // When ABI plugins are disabled, PluginManager initializes successfully with
+        // an empty plugin list, transitioning to Ready state. When plugins are enabled
+        // but PluginManager hasn't been created yet, the fallback is NotInitialized.
+        REQUIRE((snapshot.state == PluginHostState::NotInitialized ||
+                 snapshot.state == PluginHostState::Ready));
     }
 }
 
@@ -423,12 +622,28 @@ TEST_CASE("ServiceManager: Search load metrics", "[daemon][metrics][search]") {
 
     SECTION("Search load metrics return valid structure") {
         auto metrics = svc.getSearchLoadMetrics();
-        // Before search engine is built, metrics should still return valid values
-        // (active=1 if engine exists, 0 otherwise)
-        REQUIRE(metrics.active <= 1); // 0 or 1
-        REQUIRE(metrics.queued == 0); // No queue in synchronous model
-        // concurrencyLimit is 1 when engine exists, 0 otherwise
-        REQUIRE(metrics.concurrencyLimit <= 1); // 0 or 1
+        REQUIRE(metrics.active == 0);
+        REQUIRE(metrics.queued == 0);
+        REQUIRE(metrics.concurrencyLimit > 0);
+    }
+
+    SECTION("Search lifecycle counters update load metrics") {
+        svc.onSearchRequestQueued();
+        auto queued = svc.getSearchLoadMetrics();
+        REQUIRE(queued.queued == 1);
+        REQUIRE(queued.active == 0);
+
+        const auto cap = queued.concurrencyLimit;
+        REQUIRE(svc.tryStartSearchRequest(cap));
+
+        auto started = svc.getSearchLoadMetrics();
+        REQUIRE(started.queued == 0);
+        REQUIRE(started.active == 1);
+
+        svc.onSearchRequestFinished();
+        auto finished = svc.getSearchLoadMetrics();
+        REQUIRE(finished.active == 0);
+        REQUIRE(finished.queued == 0);
     }
 }
 

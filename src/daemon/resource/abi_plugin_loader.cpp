@@ -39,6 +39,7 @@ static const char* dlerror() {
 #include <regex>
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/resource/abi_plugin_loader.h>
+#include <yams/daemon/resource/plugin_trust.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host_services.h>
 #include <yams/plugins/abi.h>
@@ -440,11 +441,16 @@ void AbiPluginLoader::loadTrust() {
     if (!in)
         return;
     spdlog::debug("AbiPluginLoader::loadTrust reading file: {}", trustFile_.string());
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty() || line[0] == '#')
-            continue;
-        trusted_.insert(std::filesystem::path(line));
+
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    auto parsed = plugin_trust::parseTrustList(content);
+    for (const auto& raw : parsed) {
+        std::error_code ec;
+        auto canon = std::filesystem::weakly_canonical(raw, ec);
+        if (ec) {
+            canon = raw.lexically_normal();
+        }
+        trusted_.insert(std::move(canon));
     }
     spdlog::debug("AbiPluginLoader::loadTrust loaded {} entries", trusted_.size());
 }
@@ -460,12 +466,16 @@ void AbiPluginLoader::saveTrust() const {
     std::set<fs::path> merged = trusted_;
     if (fs::exists(trustFile_)) {
         std::ifstream infile(trustFile_);
-        std::string line;
-        while (std::getline(infile, line)) {
-            if (!line.empty() && line[0] != '#') {
-                std::error_code ec;
-                merged.insert(fs::weakly_canonical(line, ec));
+        std::string content((std::istreambuf_iterator<char>(infile)),
+                            std::istreambuf_iterator<char>());
+        auto parsed = plugin_trust::parseTrustList(content);
+        for (const auto& raw : parsed) {
+            std::error_code ec;
+            auto canon = fs::weakly_canonical(raw, ec);
+            if (ec) {
+                canon = raw.lexically_normal();
             }
+            merged.insert(std::move(canon));
         }
     }
 
@@ -529,9 +539,7 @@ bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {
                 auto base = std::filesystem::weakly_canonical(cd, ec);
                 auto target = std::filesystem::weakly_canonical(p, ec);
                 if (!ec) {
-                    auto bstr = base.string();
-                    auto tstr = target.string();
-                    if (!bstr.empty() && tstr.rfind(bstr, 0) == 0) {
+                    if (plugin_trust::isPathWithin(base, target)) {
                         return true;
                     }
                 }
@@ -544,9 +552,7 @@ bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {
                 auto base = std::filesystem::weakly_canonical(std::filesystem::path(dir), ec);
                 auto target = std::filesystem::weakly_canonical(p, ec);
                 if (!ec) {
-                    auto bstr = base.string();
-                    auto tstr = target.string();
-                    if (!bstr.empty() && tstr.rfind(bstr, 0) == 0) {
+                    if (plugin_trust::isPathWithin(base, target)) {
                         return true; // implicit trust for override directory
                     }
                 }
@@ -555,10 +561,22 @@ bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {
         }
         return false; // default deny otherwise
     }
-    auto canon = std::filesystem::weakly_canonical(p);
+
+    std::error_code ec;
+    auto canon = std::filesystem::weakly_canonical(p, ec);
+    if (ec) {
+        canon = p.lexically_normal();
+    }
+
     for (const auto& t : trusted_) {
-        if (canon.string().rfind(t.string(), 0) == 0)
-            return true; // prefix match
+        std::error_code tec;
+        auto tcanon = std::filesystem::weakly_canonical(t, tec);
+        if (tec) {
+            tcanon = t.lexically_normal();
+        }
+        if (plugin_trust::isPathWithin(tcanon, canon)) {
+            return true;
+        }
     }
     return false;
 }

@@ -91,6 +91,7 @@ namespace yams::daemon {
 
 class IngestService;
 class GraphComponent;
+class RepairService;
 
 class ServiceManager : public IComponent, public std::enable_shared_from_this<ServiceManager> {
 public:
@@ -100,6 +101,17 @@ public:
 
     // IComponent interface
     const char* getName() const override { return "ServiceManager"; }
+
+    /// Compute ETA remaining seconds from expected duration and progress percentage.
+    /// Uses round-up division to avoid integer truncation on small values.
+    /// Extracted as a static helper for testability.
+    static int computeEtaRemaining(int expectedSeconds, int progressPercent) {
+        if (expectedSeconds <= 0)
+            return 0;
+        int completed = (expectedSeconds * progressPercent + 99) / 100;
+        return std::max(0, expectedSeconds - completed);
+    }
+
     /// Synchronous initialization - validates config, creates directories, prepares resources.
     /// Does NOT start async initialization - call startAsyncInit() after main loop is running.
     Result<void> initialize() override;
@@ -151,11 +163,6 @@ public:
     // Resize the worker pool to a target size; creates pool on demand.
     bool resizeWorkerPool(std::size_t target);
     PostIngestQueue* getPostIngestQueue() const { return postIngest_.get(); }
-    void setPostIngestEmbedFailureCallback(PostIngestQueue::EmbedFailureCallback callback) {
-        if (postIngest_) {
-            postIngest_->setEmbedFailureCallback(std::move(callback));
-        }
-    }
     struct SearchLoadMetrics {
         std::uint32_t active{0};
         std::uint32_t queued{0};
@@ -165,6 +172,52 @@ public:
         std::uint32_t concurrencyLimit{0};
     };
     SearchLoadMetrics getSearchLoadMetrics() const;
+    std::shared_ptr<metadata::ConnectionPool> getWriteConnectionPool() const {
+        return connectionPool_;
+    }
+    std::shared_ptr<metadata::ConnectionPool> getReadConnectionPool() const {
+        return readConnectionPool_;
+    }
+    void onSearchRequestQueued() { searchQueued_.fetch_add(1, std::memory_order_relaxed); }
+    bool tryStartSearchRequest(std::uint32_t concurrencyCap) {
+        std::uint32_t queued = searchQueued_.load(std::memory_order_relaxed);
+        while (queued > 0 && !searchQueued_.compare_exchange_weak(queued, queued - 1,
+                                                                  std::memory_order_relaxed)) {
+        }
+        if (concurrencyCap == 0) {
+            searchActive_.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        std::uint32_t active = searchActive_.load(std::memory_order_relaxed);
+        while (true) {
+            if (active >= concurrencyCap) {
+                return false;
+            }
+            if (searchActive_.compare_exchange_weak(active, active + 1,
+                                                    std::memory_order_relaxed)) {
+                return true;
+            }
+        }
+    }
+    void onSearchRequestFinished() {
+        std::uint32_t active = searchActive_.load(std::memory_order_relaxed);
+        while (active > 0 && !searchActive_.compare_exchange_weak(active, active - 1,
+                                                                  std::memory_order_relaxed)) {
+        }
+    }
+    void onSearchRequestRejected() {
+        std::uint32_t queued = searchQueued_.load(std::memory_order_relaxed);
+        while (queued > 0 && !searchQueued_.compare_exchange_weak(queued, queued - 1,
+                                                                  std::memory_order_relaxed)) {
+        }
+    }
+    std::uint32_t getSearchActiveRequests() const {
+        return searchActive_.load(std::memory_order_relaxed);
+    }
+    void onSnapshotPersisted() { snapshotsPersisted_.fetch_add(1, std::memory_order_relaxed); }
+    std::uint64_t getSnapshotsPersistedCount() const {
+        return snapshotsPersisted_.load(std::memory_order_relaxed);
+    }
     struct IngestMetricsSnapshot {
         std::size_t queued;
         std::size_t active;
@@ -214,6 +267,7 @@ public:
                 ingestWorkerTarget_.load(std::memory_order_relaxed)};
     }
     void enqueuePostIngest(const std::string& hash, const std::string& mime);
+    void enqueuePostIngestBatch(const std::vector<std::string>& hashes, const std::string& mime);
     // Phase 2.4: Delegate to SearchEngineManager
     SearchEngineSnapshot getSearchEngineFsmSnapshot() const {
         return searchEngineManager_.getSnapshot();
@@ -288,6 +342,17 @@ public:
     std::shared_ptr<yams::integrity::RepairManager> getRepairManager() const {
         return repairManager_;
     }
+
+    // RepairService lifecycle (replaces RepairCoordinator)
+    // Note: accessed from multiple threads (daemon loop, tuning tick, request handlers).
+    // Use a shared_ptr snapshot to avoid data races and lifetime issues.
+    std::shared_ptr<RepairService> getRepairServiceShared() const {
+        return std::atomic_load_explicit(&repairService_, std::memory_order_acquire);
+    }
+    RepairService* getRepairService() const { return getRepairServiceShared().get(); }
+    void startRepairService(std::function<size_t()> activeConnFn);
+    void stopRepairService();
+
     void attachWalManager(std::shared_ptr<yams::wal::WALManager> wal) {
         if (!walMetricsProvider_)
             walMetricsProvider_ = std::make_shared<WalMetricsProvider>();
@@ -337,6 +402,13 @@ public:
     // Embedding service metrics accessors
     std::size_t getEmbeddingInFlightJobs() const;
     std::size_t getEmbeddingQueuedJobs() const;
+    std::size_t getEmbeddingActiveInferSubBatches() const;
+    uint64_t getEmbeddingInferOldestMs() const;
+    uint64_t getEmbeddingInferStartedCount() const;
+    uint64_t getEmbeddingInferCompletedCount() const;
+    uint64_t getEmbeddingInferLastMs() const;
+    uint64_t getEmbeddingInferMaxMs() const;
+    uint64_t getEmbeddingInferWarnCount() const;
 
     RetrievalSessionManager* getRetrievalSessionManager() const { return retrievalSessions_.get(); }
 
@@ -368,10 +440,6 @@ public:
         // Fallback: return NotInitialized state if PluginManager not available
         return PluginHostSnapshot{};
     }
-
-    // PBI-008-11: FSM hook scaffolds for session preparation lifecycle (no-op for now)
-    void onPrepareSessionRequested() {};
-    void onPrepareSessionCompleted() {};
 
     // Expose resolved daemon configuration for components that need paths
     const DaemonConfig& getConfig() const { return config_; }
@@ -525,6 +593,7 @@ private:
     std::shared_ptr<api::IContentStore> contentStore_;
     std::shared_ptr<metadata::Database> database_;
     std::shared_ptr<metadata::ConnectionPool> connectionPool_;
+    std::shared_ptr<metadata::ConnectionPool> readConnectionPool_;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<GraphComponent> graphComponent_;
@@ -534,10 +603,6 @@ private:
     // Thread pools: declared early so they destruct LAST (after threads that use them)
     // (reverse order), ensuring coroutines are cancelled before executor dies
     // Deprecated legacy pools removed – now using a single io_context with strands.
-    // std::unique_ptr<boost::asio::thread_pool> initPool_; // removed
-    // std::unique_ptr<boost::asio::thread_pool> modelLoadPool_; // removed
-    // std::unique_ptr<boost::asio::thread_pool> pluginLoadPool_; // removed
-    // std::shared_ptr<WorkerPool> workerPool_; // removed
 
     // Legacy members retained for compatibility during transition
     std::unique_ptr<IngestService> ingestService_;
@@ -558,11 +623,13 @@ private:
     std::atomic<std::size_t> poolActive_{0};
     std::atomic<std::size_t> poolPosted_{0};
     std::atomic<std::size_t> poolCompleted_{0};
-    std::size_t poolThreads_{0};
 
     std::atomic<std::size_t> ingestQueued_{0};
     std::atomic<std::size_t> ingestActive_{0};
     std::atomic<std::size_t> ingestWorkerTarget_{1};
+    std::atomic<std::uint32_t> searchActive_{0};
+    std::atomic<std::uint32_t> searchQueued_{0};
+    std::atomic<std::uint64_t> snapshotsPersisted_{0};
 
     bool embeddingPreloadOnStartup_{false};
 
@@ -597,6 +664,8 @@ private:
     std::unique_ptr<PostIngestQueue> postIngest_;
     std::unique_ptr<EmbeddingService> embeddingService_;
     std::unique_ptr<KGWriteQueue> kgWriteQueue_;
+    std::shared_ptr<RepairService> repairService_;
+    mutable std::mutex repairServiceMutex_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
     bool embeddingsAutoOnAdd_{false};

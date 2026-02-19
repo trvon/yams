@@ -219,12 +219,10 @@ struct ExtendedVideoMetadata : public VideoMetadata {
     }
 
     [[nodiscard]] std::string getDisplayName() const {
-        if (title) {
-            return *title;
-        }
-        if (author && title) {
+        if (author && title)
             return yams::fmt_format("{} - {}", *author, *title);
-        }
+        if (title)
+            return *title;
         return yams::fmt_format("{}x{} {}s", width, height, static_cast<int>(durationSeconds));
     }
 

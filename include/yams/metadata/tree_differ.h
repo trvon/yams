@@ -24,14 +24,14 @@ enum class ChangeType {
  * @brief Record of a single change between snapshots
  */
 struct TreeChange {
-    ChangeType type;
-    std::string oldPath; ///< Path in base snapshot (empty for Added)
-    std::string newPath; ///< Path in target snapshot (empty for Deleted)
-    std::string oldHash; ///< Content hash in base (empty for Added)
-    std::string newHash; ///< Content hash in target (empty for Deleted)
-    uint32_t mode;       ///< File mode (POSIX permissions)
-    bool isDirectory;    ///< True if this is a directory change
-    int64_t size;        ///< File size (-1 for directories)
+    ChangeType type = ChangeType::Added;
+    std::string oldPath;      ///< Path in base snapshot (empty for Added)
+    std::string newPath;      ///< Path in target snapshot (empty for Deleted)
+    std::string oldHash;      ///< Content hash in base (empty for Added)
+    std::string newHash;      ///< Content hash in target (empty for Deleted)
+    uint32_t mode = 0;        ///< File mode (POSIX permissions)
+    bool isDirectory = false; ///< True if this is a directory change
+    int64_t size = -1;        ///< File size (-1 for directories)
 
     TreeChange() = default;
     TreeChange(ChangeType t, std::string op, std::string np, std::string oh, std::string nh,

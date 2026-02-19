@@ -1,4 +1,5 @@
 #include <yams/app/services/services.hpp>
+#include <yams/core/uuid.h>
 #include <yams/app/services/session_service.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/prompt_util.h>
@@ -716,18 +717,6 @@ private:
         return s;
     }
 
-    static std::string shortHash(const std::string& s) {
-        // FNV-1a 64-bit
-        std::uint64_t h = 1469598103934665603ull;
-        for (unsigned char c : s) {
-            h ^= static_cast<std::uint64_t>(c);
-            h *= 1099511628211ull;
-        }
-        std::ostringstream oss;
-        oss << std::hex << std::nouppercase << (h & 0xffffffffull);
-        return oss.str();
-    }
-
     std::string promptForTuningProfile() {
         std::vector<ChoiceItem> items = {
             {"balanced", "Balanced (Recommended)",
@@ -761,7 +750,8 @@ private:
         std::string base = root.filename().string();
         if (base.empty())
             base = "project";
-        std::string sessionName = "proj-" + sanitizeName(base) + "-" + shortHash(root.string());
+        std::string sessionName =
+            "proj-" + sanitizeName(base) + "-" + yams::core::shortHash(root.string());
 
         auto svc = app::services::makeSessionService(nullptr);
         if (!svc)

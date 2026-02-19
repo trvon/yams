@@ -2,14 +2,21 @@
 
 #include <nlohmann/json.hpp>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
+
+#if __APPLE__
+#include <sys/sysctl.h>
+#endif
 
 namespace yams::test {
 
@@ -21,7 +28,8 @@ public:
         std::string unit;
         std::chrono::system_clock::time_point timestamp;
         std::map<std::string, std::string> environment;
-        std::map<std::string, double> metrics; // Additional metrics
+        std::map<std::string, double> metrics;         // Additional metrics
+        std::map<std::string, std::string> attributes; // String-valued metadata
 
         nlohmann::json toJSON() const {
             nlohmann::json j;
@@ -33,6 +41,9 @@ public:
                     .count();
             j["environment"] = environment;
             j["metrics"] = metrics;
+            if (!attributes.empty()) {
+                j["attributes"] = attributes;
+            }
             return j;
         }
 
@@ -47,6 +58,9 @@ public:
             if (j.contains("metrics")) {
                 result.metrics = j["metrics"].get<std::map<std::string, double>>();
             }
+            if (j.contains("attributes")) {
+                result.attributes = j["attributes"].get<std::map<std::string, std::string>>();
+            }
             return result;
         }
     };
@@ -58,6 +72,10 @@ public:
     }
 
     ~BenchmarkTracker() { saveHistory(); }
+
+    // Force writing the history JSON to disk immediately.
+    // This is useful for suites that want to archive the history file before exit.
+    void flushHistory() { saveHistory(); }
 
     void recordResult(const BenchmarkResult& result) {
         results_.push_back(result);
@@ -73,6 +91,29 @@ public:
             std::cerr << "WARNING: Performance regression detected for " << result.name
                       << std::endl;
         }
+    }
+
+    // Best-effort snapshot copy of results/history/environment.
+    // Note: history is also persisted on destruction.
+    void snapshotTo(const std::filesystem::path& outPath) const {
+        nlohmann::json data;
+        data["environment"] = currentEnvironment_;
+        data["results"] = nlohmann::json::array();
+        for (const auto& r : results_) {
+            data["results"].push_back(r.toJSON());
+        }
+        data["history"] = nlohmann::json::object();
+        for (const auto& [name, results] : history_) {
+            data["history"][name] = nlohmann::json::array();
+            for (const auto& r : results) {
+                data["history"][name].push_back(r.toJSON());
+            }
+        }
+
+        std::error_code ec;
+        std::filesystem::create_directories(outPath.parent_path(), ec);
+        std::ofstream file(outPath);
+        file << data.dump(2);
     }
 
     std::vector<BenchmarkResult> getHistory(const std::string& name, size_t limit = 100) {
@@ -363,8 +404,24 @@ private:
             "Debug";
 #endif
 
-        // CPU info would require platform-specific code
         currentEnvironment_["cpu_cores"] = std::to_string(std::thread::hardware_concurrency());
+
+#if __APPLE__
+        {
+            char buf[256];
+            std::size_t len = sizeof(buf);
+            if (::sysctlbyname("machdep.cpu.brand_string", buf, &len, nullptr, 0) == 0 && len > 0) {
+                currentEnvironment_["cpu_model"] = std::string(buf);
+            }
+        }
+        {
+            std::uint64_t mem = 0;
+            std::size_t len = sizeof(mem);
+            if (::sysctlbyname("hw.memsize", &mem, &len, nullptr, 0) == 0 && mem > 0) {
+                currentEnvironment_["mem_bytes"] = std::to_string(mem);
+            }
+        }
+#endif
     }
 
     std::string getCurrentTimestamp() {

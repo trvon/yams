@@ -8,6 +8,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstdlib>
 
 namespace yams::search {
@@ -45,6 +46,18 @@ std::optional<int> getEnvInt(const char* name) {
             return std::stoi(*val);
         } catch (...) {
             return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<bool> getEnvBool(const char* name) {
+    if (auto val = getEnvString(name)) {
+        if (*val == "1" || *val == "true" || *val == "TRUE" || *val == "on" || *val == "ON") {
+            return true;
+        }
+        if (*val == "0" || *val == "false" || *val == "FALSE" || *val == "off" || *val == "OFF") {
+            return false;
         }
     }
     return std::nullopt;
@@ -205,6 +218,47 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.vectorMaxResults = static_cast<size_t>(*vectorMax);
             spdlog::info("SearchEngine vectorMaxResults overridden to {} via env",
                          cfg.vectorMaxResults);
+        }
+
+        if (auto intentAdaptive = getEnvBool("YAMS_SEARCH_ENABLE_INTENT_ADAPTIVE")) {
+            cfg.enableIntentAdaptiveWeighting = *intentAdaptive;
+            spdlog::info("SearchEngine enableIntentAdaptiveWeighting overridden to {} via env",
+                         cfg.enableIntentAdaptiveWeighting);
+        }
+
+        if (auto fieldAware = getEnvBool("YAMS_SEARCH_FIELD_AWARE_WEIGHTING")) {
+            cfg.enableFieldAwareWeightedRrf = *fieldAware;
+            spdlog::info("SearchEngine enableFieldAwareWeightedRrf overridden to {} via env",
+                         cfg.enableFieldAwareWeightedRrf);
+        }
+
+        if (auto lexicalExpansion = getEnvBool("YAMS_SEARCH_ENABLE_LEXICAL_EXPANSION")) {
+            cfg.enableLexicalExpansion = *lexicalExpansion;
+            spdlog::info("SearchEngine enableLexicalExpansion overridden to {} via env",
+                         cfg.enableLexicalExpansion);
+        }
+
+        if (auto lexicalMinHits = getEnvInt("YAMS_SEARCH_LEXICAL_EXPANSION_MIN_HITS")) {
+            cfg.lexicalExpansionMinHits = static_cast<size_t>(std::max(0, *lexicalMinHits));
+            spdlog::info("SearchEngine lexicalExpansionMinHits overridden to {} via env",
+                         cfg.lexicalExpansionMinHits);
+        }
+
+        if (auto lexicalPenalty = getEnvFloat("YAMS_SEARCH_LEXICAL_EXPANSION_PENALTY")) {
+            cfg.lexicalExpansionScorePenalty = std::clamp(*lexicalPenalty, 0.1f, 1.0f);
+            spdlog::info("SearchEngine lexicalExpansionScorePenalty overridden to {:.2f} via env",
+                         cfg.lexicalExpansionScorePenalty);
+        }
+
+        if (auto rerankingEnabled = getEnvBool("YAMS_SEARCH_ENABLE_RERANKING")) {
+            cfg.enableReranking = *rerankingEnabled;
+            spdlog::info("SearchEngine enableReranking overridden to {} via env",
+                         cfg.enableReranking);
+        }
+
+        if (auto rerankTopK = getEnvInt("YAMS_SEARCH_RERANK_TOPK")) {
+            cfg.rerankTopK = static_cast<size_t>(std::max(0, *rerankTopK));
+            spdlog::info("SearchEngine rerankTopK overridden to {} via env", cfg.rerankTopK);
         }
     }
 

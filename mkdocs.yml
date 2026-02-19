@@ -7,8 +7,16 @@ docs_dir: docs
 site_dir: site
 use_directory_urls: true
 
+# Exclude internal planning/working docs from site build.
+exclude_docs: |
+  delivery/**
+  pbi/**
+  testing/CATCH2_PATTERNS.md
+  testing/embedding_dimension_robustness.md
+
 nav:
   - Home: index.md
+  - Newsletter: newsletter.md
   - Get Started:
       - Installation: user_guide/installation.md
       - CLI: user_guide/cli.md
@@ -45,12 +53,7 @@ nav:
               - Contributing: developer/contributing.md
               - Architecture Notes: developer/architecture/README.md
               - Mobile Bindings: developer/mobile-bindings.md
-          - Operations:
-              - Deployment: pbi/operations/deployment.md
-              - Monitoring: pbi/operations/monitoring.md
-              - Backup: pbi/operations/backup.md
-          - Build:
-              - GCC Build: BUILD-GCC.md
+          - Build: BUILD.md
           - Plugins: PLUGINS.md
           - Testing:
               - Coverage Report: testing/coverage_report.md
@@ -75,6 +78,7 @@ theme:
 
 markdown_extensions:
   - admonition
+  - attr_list
   - codehilite
   - toc:
       permalink: true
@@ -101,7 +105,7 @@ extra:
     - icon: fontawesome/solid/envelope
       link: mailto:support@yamsmemory.ai
       name: Email
-  announcement: '<a href="/hosting/managed/">Join Hosting Early Access →</a>'
+  announcement: '<a href="https://trvon.github.io/yams/hosting/managed/">Join Hosting Early Access →</a>'
 
 extra_css:
   - assets/retro.css

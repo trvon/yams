@@ -174,6 +174,21 @@ struct DocumentQueryOptions {
     std::optional<std::string> likePattern;
     // Generic metadata filtering (replaces findDocumentsByCollection)
     std::vector<std::pair<std::string, std::string>> metadataFilters;
+
+    // --- Repair / health-check filters (added for targeted stuck-doc detection) ---
+    /// Filter by extraction status (e.g., Failed, Pending). Multiple values → OR.
+    std::vector<ExtractionStatus> extractionStatuses;
+    /// Filter by repair status (e.g., Processing). Multiple values → OR.
+    std::vector<RepairStatus> repairStatuses;
+    /// Only return docs whose repair_attempts < this value (0 = no filter).
+    int32_t maxRepairAttempts{0};
+    /// Only return docs that have NO matching row in document_content.
+    bool onlyMissingContent{false};
+    /// Only return docs indexed/modified before this epoch-seconds value (for stalled detection).
+    /// Uses COALESCE(NULLIF(indexed_time,0), modified_time) < stalledBefore.
+    std::optional<int64_t> stalledBefore;
+    /// Only return docs whose repair_attempted_at < this epoch-seconds value.
+    std::optional<int64_t> repairAttemptedBefore;
 };
 
 struct MetadataValueCount {
@@ -194,6 +209,11 @@ public:
     virtual Result<std::optional<DocumentInfo>> getDocumentByHash(const std::string& hash) = 0;
     virtual Result<void> updateDocument(const DocumentInfo& info) = 0;
     virtual Result<void> deleteDocument(int64_t id) = 0;
+    /// Batch delete multiple documents by ID in a single transaction (repair optimization)
+    virtual Result<size_t> deleteDocumentsBatch(const std::vector<int64_t>& ids) = 0;
+    /// Batch update MIME types for multiple documents in a single transaction (repair optimization)
+    virtual Result<size_t>
+    updateDocumentsMimeBatch(const std::vector<std::pair<int64_t, std::string>>& idMimePairs) = 0;
 
     // Content operations
     virtual Result<void> insertContent(const DocumentContent& content) = 0;
@@ -397,16 +417,39 @@ public:
  */
 class MetadataRepository : public IMetadataRepository {
 public:
-    explicit MetadataRepository(ConnectionPool& pool);
+    explicit MetadataRepository(ConnectionPool& pool, ConnectionPool* readPool = nullptr);
     ~MetadataRepository()
         override; // Defined in cpp to allow unique_ptr<CorpusStats> with forward decl
 
     // Document operations
     Result<int64_t> insertDocument(const DocumentInfo& info) override;
+
+    /**
+     * @brief Insert a document with metadata and snapshot in a single transaction.
+     *
+     * Combines insertDocument + setMetadataBatch + upsertTreeSnapshot into ONE
+     * BEGIN IMMEDIATE transaction, reducing SQLite lock acquisitions from ~15-20
+     * per document down to 1.  This is the primary optimization for multi-client
+     * ingestion throughput.
+     *
+     * @param info          Document info to insert.
+     * @param tags          Key-value metadata pairs (may be empty).
+     * @param snapshot      Optional snapshot record; its ingestDocumentId is set
+     *                      to the newly inserted docId internally.
+     * @return The document ID (either newly inserted or existing).
+     */
+    Result<int64_t>
+    insertDocumentWithMetadata(const DocumentInfo& info,
+                               const std::vector<std::pair<std::string, MetadataValue>>& tags,
+                               TreeSnapshotRecord* snapshot = nullptr);
+
     Result<std::optional<DocumentInfo>> getDocument(int64_t id) override;
     Result<std::optional<DocumentInfo>> getDocumentByHash(const std::string& hash) override;
     Result<void> updateDocument(const DocumentInfo& info) override;
     Result<void> deleteDocument(int64_t id) override;
+    Result<size_t> deleteDocumentsBatch(const std::vector<int64_t>& ids) override;
+    Result<size_t> updateDocumentsMimeBatch(
+        const std::vector<std::pair<int64_t, std::string>>& idMimePairs) override;
 
     // Content operations
     Result<void> insertContent(const DocumentContent& content) override;
@@ -434,6 +477,10 @@ public:
     // Search history operations
     Result<int64_t> insertSearchHistory(const SearchHistoryEntry& entry) override;
     Result<std::vector<SearchHistoryEntry>> getRecentSearches(int limit = 50) override;
+    Result<int64_t> insertFeedbackEvent(const FeedbackEvent& event);
+    Result<std::vector<FeedbackEvent>> getFeedbackEventsByTrace(const std::string& traceId,
+                                                                int limit = 100);
+    Result<std::vector<FeedbackEvent>> getRecentFeedbackEvents(int limit = 100);
 
     // Saved queries operations
     Result<int64_t> insertSavedQuery(const SavedQuery& query) override;
@@ -656,6 +703,16 @@ public:
     Result<void> finalizeTreeDiff(int64_t diffId, std::size_t changeCount,
                                   std::string_view status) override;
 
+    // --- Repair helpers (non-virtual, concrete-class only) ---
+
+    /// Count documents that have a non-empty file_path but no matching path_tree_nodes entry.
+    /// Uses a single efficient LEFT JOIN anti-join query.
+    Result<uint64_t> countDocsMissingPathTree();
+
+    /// Return documents that have a non-empty file_path but no matching path_tree_nodes entry.
+    /// Uses a single efficient LEFT JOIN anti-join query. Limited to `limit` rows (0 = no limit).
+    Result<std::vector<DocumentInfo>> findDocsMissingPathTree(int limit = 0);
+
 public:
     void setKnowledgeGraphStore(std::shared_ptr<KnowledgeGraphStore> kgStore) {
         kgStore_ = std::move(kgStore);
@@ -669,6 +726,7 @@ public:
 
 private:
     ConnectionPool& pool_;
+    ConnectionPool* readPool_{nullptr};
     bool hasPathIndexing_{false};
     bool pathFtsAvailable_{false};
     std::shared_ptr<KnowledgeGraphStore> kgStore_; // PBI-043: tree diff KG integration
@@ -683,8 +741,13 @@ private:
     // Legacy makeSelect removed; callers now use sql::QuerySpec to build SELECTs
 
     // SymSpell fuzzy search (SQLite-backed)
+    // Note: SymSpellSearch stores a raw sqlite3* that must remain valid for its lifetime.
+    // We keep a dedicated pooled connection alive for the SymSpell index to avoid
+    // holding a pointer to a pooled handle that can be returned to the pool.
+    mutable std::mutex symspellInitMutex_;
+    mutable std::unique_ptr<PooledConnection> symspellConn_;
     mutable std::unique_ptr<search::SymSpellSearch> symspellIndex_;
-    mutable bool symspellInitialized_{false};
+    mutable std::atomic<bool> symspellInitialized_{false};
 
     struct PathCacheEntry {
         std::string path;
@@ -797,7 +860,9 @@ private:
     void invalidateQueryCache() const;
 
     // Helper method to handle nested Result from withConnection with retry for lock errors
-    template <typename T> Result<T> executeQuery(std::function<Result<T>(Database&)> func) {
+    template <typename T>
+    Result<T> executeQueryOnPool(ConnectionPool& pool, std::string_view route,
+                                 std::function<Result<T>(Database&)> func) {
         constexpr int kMaxRetries = 10;   // Increased for heavy concurrent load
         constexpr int kBaseDelayMs = 50;  // Higher base delay for better backoff
         constexpr int kMaxDelayMs = 3000; // Cap delay to prevent very long waits
@@ -806,12 +871,13 @@ private:
         thread_local std::mt19937 rng(std::random_device{}());
 
         for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
-            auto result = pool_.withConnection(func);
+            auto result = pool.withConnection(func);
             if (result.has_value()) {
                 if (attempt > 0) {
                     // Log successful retry at debug level
-                    spdlog::debug("MetadataRepository::executeQuery succeeded after {} retries",
-                                  attempt);
+                    spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' succeeded "
+                                  "after {} retries",
+                                  route, attempt);
                 }
                 if constexpr (std::is_void_v<T>) {
                     return Result<void>();
@@ -835,11 +901,13 @@ private:
                 // Always log operation context for constraint errors (helps debugging)
                 auto op = current_metadata_op();
                 if (isConstraintError || metadata_trace_enabled()) {
-                    spdlog::warn("MetadataRepository::executeQuery op='{}' error: {}",
-                                 op.empty() ? "(unknown)" : op, result.error().message);
+                    spdlog::warn(
+                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' error: {}",
+                        route, op.empty() ? "(unknown)" : op, result.error().message);
                 }
-                spdlog::error("MetadataRepository::executeQuery connection error: {}",
-                              result.error().message);
+                spdlog::error(
+                    "MetadataRepository::executeQueryOnPool route='{}' connection error: {}", route,
+                    result.error().message);
                 return Error{result.error()};
             }
 
@@ -852,7 +920,20 @@ private:
         }
 
         // Should never reach here, but satisfy compiler
-        return Error{ErrorCode::DatabaseError, "executeQuery: unexpected retry loop exit"};
+        return Error{ErrorCode::DatabaseError, "executeQueryOnPool: unexpected retry loop exit"};
+    }
+
+    template <typename T> Result<T> executeReadQuery(std::function<Result<T>(Database&)> func) {
+        ConnectionPool& readPool = (readPool_ != nullptr) ? *readPool_ : pool_;
+        return executeQueryOnPool<T>(readPool, "read", std::move(func));
+    }
+
+    template <typename T> Result<T> executeWriteQuery(std::function<Result<T>(Database&)> func) {
+        return executeQueryOnPool<T>(pool_, "write", std::move(func));
+    }
+
+    template <typename T> Result<T> executeQuery(std::function<Result<T>(Database&)> func) {
+        return executeWriteQuery<T>(std::move(func));
     }
 };
 

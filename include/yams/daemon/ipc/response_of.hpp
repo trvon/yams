@@ -142,6 +142,11 @@ template <> struct ResponseOf<MetadataValueCountsRequest> {
     using type = MetadataValueCountsResponse;
 };
 
+// Document repair (RepairService)
+template <> struct ResponseOf<RepairRequest> {
+    using type = RepairResponse;
+};
+
 // Helper alias
 template <typename Req> using ResponseOfT = typename ResponseOf<Req>::type;
 

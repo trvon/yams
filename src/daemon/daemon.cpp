@@ -15,8 +15,9 @@
 #include <boost/asio/use_future.hpp>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/IOCoordinator.h>
 #include <yams/daemon/components/LifecycleComponent.h>
-#include <yams/daemon/components/RepairCoordinator.h>
+#include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>
@@ -84,10 +85,9 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
         spdlog::debug("TuningManager constructed early in YamsDaemon");
         tuningManager_->setRepairControlHook([this](uint32_t tokens, uint32_t batch) {
             try {
-                std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
-                if (repairCoordinator_) {
-                    repairCoordinator_->setMaintenanceTokens(tokens);
-                    repairCoordinator_->setMaxBatch(batch);
+                if (auto rs = serviceManager_->getRepairServiceShared()) {
+                    rs->setMaintenanceTokens(tokens);
+                    rs->setMaxBatch(batch);
                 }
             } catch (...) {
             }
@@ -232,10 +232,9 @@ Result<void> YamsDaemon::start() {
                                                              serviceManager_->getWorkCoordinator());
             tuningManager_->setRepairControlHook([this](uint32_t tokens, uint32_t batch) {
                 try {
-                    std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
-                    if (repairCoordinator_) {
-                        repairCoordinator_->setMaintenanceTokens(tokens);
-                        repairCoordinator_->setMaxBatch(batch);
+                    if (auto* rs = serviceManager_->getRepairService()) {
+                        rs->setMaintenanceTokens(tokens);
+                        rs->setMaxBatch(batch);
                     }
                 } catch (...) {
                 }
@@ -271,10 +270,33 @@ Result<void> YamsDaemon::start() {
     spdlog::info("[Startup] Phase: FSM BootstrappedEvent");
     lifecycleFsm_.dispatch(BootstrappedEvent{});
 
+    // Create dedicated IOCoordinator before socket server wiring.
+    // Start threads only after acceptors are initialized to avoid kqueue-reactor
+    // descriptor registration races under TSAN.
+    spdlog::info("[Startup] Phase: IOCoordinator Prepare");
+    try {
+        IOCoordinator::Config ioCfg;
+        ioCfg.num_threads = static_cast<size_t>(TuneAdvisor::ioThreadCount());
+        if (ioCfg.num_threads == 0) {
+            ioCfg.num_threads = 2;
+        }
+        ioCoordinator_ = std::make_unique<IOCoordinator>(ioCfg);
+    } catch (const std::exception& e) {
+        running_ = false;
+        return Error{ErrorCode::InternalError,
+                     std::string("Failed to prepare IOCoordinator: ") + e.what()};
+    }
+    spdlog::info("[Startup] Phase: IOCoordinator Prepare OK");
+
     // Start integrated socket server ASAP so status requests work during initialization
     spdlog::info("[Startup] Phase: SocketServer Start");
     SocketServer::Config socketConfig;
     socketConfig.socketPath = config_.socketPath;
+    // Defer read/write timeout selection to SocketServer/TuneAdvisor so
+    // YAMS_IPC_TIMEOUT_MS is honored by default.
+    socketConfig.connectionTimeout = std::chrono::milliseconds(0);
+    socketConfig.maxConnectionLifetime =
+        std::chrono::seconds(TuneAdvisor::connectionLifetimeSeconds());
     // Derive maxConnections from TuneAdvisor (env/config) with a sane computed fallback.
     // Priority:
     //  1) YAMS_MAX_ACTIVE_CONN via TuneAdvisor::maxActiveConn()
@@ -310,21 +332,93 @@ Result<void> YamsDaemon::start() {
         socketConfig.maxConnections = static_cast<std::size_t>(cap);
     }
 
-    // Derive proxy socket path: sibling of daemon socket (e.g. proxy.sock alongside daemon.sock)
+    // Derive proxy socket path from daemon socket to avoid global /tmp/proxy.sock collisions.
     {
-        std::filesystem::path proxyPath;
-        if (const char* env = std::getenv("YAMS_PROXY_SOCKET"); env && *env) {
-            proxyPath = env;
-        } else {
-            proxyPath = socketConfig.socketPath.parent_path() / "proxy.sock";
-        }
-        socketConfig.proxySocketPath = proxyPath;
+        const auto& daemonSocket = socketConfig.socketPath;
+        auto base = daemonSocket.stem().string();
+        if (base.empty())
+            base = daemonSocket.filename().string();
+        if (base.empty())
+            base = "yams-daemon";
+        socketConfig.proxySocketPath = daemonSocket.parent_path() / (base + ".proxy.sock");
     }
 
-    socketServer_ = std::make_unique<SocketServer>(
-        socketConfig, serviceManager_->getWorkCoordinator(), requestDispatcher_.get(), &state_);
+    socketServer_ = std::make_unique<SocketServer>(socketConfig, ioCoordinator_.get(),
+                                                   serviceManager_->getWorkCoordinator(),
+                                                   requestDispatcher_.get(), &state_);
 
-    // Provide SocketServer to DaemonMetrics for connection age tracking
+    if (auto result = socketServer_->start(); !result) {
+        running_ = false;
+        if (ioCoordinator_) {
+            try {
+                ioCoordinator_->stop();
+                ioCoordinator_->join();
+            } catch (...) {
+            }
+            ioCoordinator_.reset();
+        }
+        if (tuningManager_) {
+            try {
+                tuningManager_->stop();
+            } catch (...) {
+            }
+            tuningManager_.reset();
+        }
+        {
+            std::lock_guard<std::mutex> lk(metricsMutex_);
+            metrics_.reset();
+        }
+        serviceManager_->shutdown();
+        lifecycleManager_->shutdown();
+        return Error{ErrorCode::IOError,
+                     "Failed to start socket server: " + result.error().message};
+    }
+    spdlog::info("[Startup] Phase: SocketServer Start OK");
+
+    // Start dedicated IOCoordinator after socket acceptors are initialized.
+    // This avoids reactor descriptor registration races while preserving runtime
+    // I/O isolation from CPU-bound work.
+    spdlog::info("[Startup] Phase: IOCoordinator Start");
+    try {
+        ioCoordinator_->start();
+    } catch (const std::exception& e) {
+        running_ = false;
+        try {
+            if (socketServer_) {
+                (void)socketServer_->stop();
+            }
+        } catch (...) {
+        }
+        if (ioCoordinator_) {
+            try {
+                ioCoordinator_->stop();
+                ioCoordinator_->join();
+            } catch (...) {
+            }
+            ioCoordinator_.reset();
+        }
+        if (tuningManager_) {
+            try {
+                tuningManager_->stop();
+            } catch (...) {
+            }
+            tuningManager_.reset();
+        }
+        {
+            std::lock_guard<std::mutex> lk(metricsMutex_);
+            metrics_.reset();
+        }
+        serviceManager_->shutdown();
+        lifecycleManager_->shutdown();
+        return Error{ErrorCode::InternalError,
+                     std::string("Failed to start IOCoordinator: ") + e.what()};
+    }
+    spdlog::info("[Startup] Phase: IOCoordinator Start OK");
+
+    // Provide SocketServer to DaemonMetrics after start() so proxy socket path is available.
+    // Also start polling immediately so status requests get real snapshots during initialization,
+    // rather than deferring polling until ServiceManager reaches Ready (which can take minutes
+    // for large VectorDB).
     {
         std::shared_ptr<DaemonMetrics> m;
         {
@@ -333,17 +427,10 @@ Result<void> YamsDaemon::start() {
         }
         if (m) {
             m->setSocketServer(socketServer_.get());
+            m->startPolling();
+            spdlog::info("[Startup] DaemonMetrics background polling started (early)");
         }
     }
-
-    if (auto result = socketServer_->start(); !result) {
-        running_ = false;
-        serviceManager_->shutdown();
-        lifecycleManager_->shutdown();
-        return Error{ErrorCode::IOError,
-                     "Failed to start socket server: " + result.error().message};
-    }
-    spdlog::info("[Startup] Phase: SocketServer Start OK");
 
     // Mark IPC as ready now that socket server is running
     state_.readiness.ipcServerReady = true;
@@ -403,7 +490,7 @@ Result<void> YamsDaemon::start() {
         spdlog::warn("Failed to start background tasks: {}", e.what());
     }
 
-    // Defer RepairCoordinator start until lifecycle is Healthy/Ready to avoid competing with init
+    // Defer RepairService start until lifecycle is Healthy/Ready to avoid competing with init
 
     // Bootstrapped event already dispatched before service initialization to prevent race.
 
@@ -450,9 +537,22 @@ void YamsDaemon::runLoop() {
             initHandled_.store(true, std::memory_order_release);
 
             if (snapshot.state == ServiceManagerState::Ready) {
-                spdlog::info(
-                    "[InitWaiter] ServiceManager reached Ready state, dispatching HealthyEvent");
-                lifecycleFsm_.dispatch(HealthyEvent{});
+                const bool providerExpected = config_.enableModelProvider;
+                const bool providerReady =
+                    state_.readiness.modelProviderReady.load(std::memory_order_acquire);
+                if (providerExpected && !providerReady) {
+                    const std::string reason =
+                        "Model provider unavailable; embeddings disabled until provider recovery";
+                    spdlog::warn("[InitWaiter] ServiceManager ready but model provider missing; "
+                                 "dispatching DegradedEvent");
+                    lifecycleFsm_.setSubsystemDegraded("model_provider", true, reason);
+                    lifecycleFsm_.dispatch(DegradedEvent{});
+                } else {
+                    lifecycleFsm_.setSubsystemDegraded("model_provider", false);
+                    spdlog::info("[InitWaiter] ServiceManager reached Ready state, dispatching "
+                                 "HealthyEvent");
+                    lifecycleFsm_.dispatch(HealthyEvent{});
+                }
                 try {
                     std::shared_ptr<DaemonMetrics> m;
                     {
@@ -460,8 +560,8 @@ void YamsDaemon::runLoop() {
                         m = metrics_;
                     }
                     if (m) {
-                        m->startPolling();
-                        spdlog::info("[InitWaiter] DaemonMetrics background polling started");
+                        m->startPolling(); // no-op if already started during early startup
+                        spdlog::info("[InitWaiter] DaemonMetrics polling confirmed active");
                     }
                 } catch (const std::exception& e) {
                     spdlog::warn("[InitWaiter] Failed to start metrics polling: {}", e.what());
@@ -563,43 +663,23 @@ void YamsDaemon::runLoop() {
             reloadRequested_.store(false, std::memory_order_relaxed);
         }
         // Deferred background tasks: require FSM Ready
-        // Note: RepairCoordinator triggers lazy-loading of embeddings/vector DB,
+        // Note: RepairService triggers lazy-loading of embeddings/vector DB,
         // so we start it when FSM is Ready rather than waiting for searchEngineReady.
-        // This breaks the circular dependency where search engine waits for embeddings
-        // which wait for RepairCoordinator which waits for search engine.
         auto snap = lifecycleFsm_.snapshot();
         {
-            std::lock_guard<std::mutex> lk(repairCoordinatorMutex_);
-            spdlog::debug(
-                "[DaemonLoop] FSM state={}, enableAutoRepair={}, repairCoordinator_exists={}",
-                static_cast<int>(snap.state), config_.enableAutoRepair,
-                (repairCoordinator_ != nullptr));
+            auto rs = serviceManager_->getRepairServiceShared();
+            spdlog::debug("[DaemonLoop] FSM state={}, enableAutoRepair={}, repairService_exists={}",
+                          static_cast<int>(snap.state), config_.enableAutoRepair, (rs != nullptr));
             if (snap.state == LifecycleState::Ready) {
-                if (config_.enableAutoRepair && !repairCoordinator_) {
-                    spdlog::info("[DaemonLoop] Starting RepairCoordinator...");
+                if (config_.enableAutoRepair && !rs) {
+                    spdlog::info("[DaemonLoop] Starting RepairService...");
                     try {
-                        RepairCoordinator::Config rcfg;
-                        rcfg.enable = true;
-                        rcfg.dataDir = config_.dataDir;
-                        rcfg.maxBatch = static_cast<std::uint32_t>(config_.autoRepairBatchSize);
-                        rcfg.autoRebuildOnDimMismatch = config_.autoRebuildOnDimMismatch;
                         auto activeFn = [this]() -> size_t {
                             return static_cast<size_t>(state_.stats.activeConnections.load());
                         };
-                        repairCoordinator_ = std::make_unique<RepairCoordinator>(
-                            serviceManager_.get(), &state_, activeFn, rcfg);
-                        repairCoordinator_->start();
-                        if (serviceManager_) {
-                            serviceManager_->setPostIngestEmbedFailureCallback(
-                                [this](const std::vector<std::string>& hashes) {
-                                    std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
-                                    if (repairCoordinator_) {
-                                        repairCoordinator_->enqueueEmbeddingRepair(hashes);
-                                    }
-                                });
-                        }
+                        serviceManager_->startRepairService(std::move(activeFn));
                     } catch (const std::exception& e) {
-                        spdlog::warn("Failed to start RepairCoordinator: {}", e.what());
+                        spdlog::warn("Failed to start RepairService: {}", e.what());
                     }
                 }
 
@@ -611,8 +691,8 @@ void YamsDaemon::runLoop() {
             }
         }
         {
-            std::lock_guard<std::mutex> lk(repairCoordinatorMutex_);
-            if (repairCoordinator_) {
+            auto rs = serviceManager_->getRepairServiceShared();
+            if (rs) {
                 size_t active = static_cast<size_t>(state_.stats.activeConnections.load());
                 uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();
                 auto now = std::chrono::steady_clock::now();
@@ -742,6 +822,30 @@ Result<void> YamsDaemon::stop() {
         state_.readiness.ipcServerReady = false;
     }
 
+    // Stop dedicated IOCoordinator after SocketServer is down.
+    if (ioCoordinator_) {
+        try {
+            spdlog::debug("Stopping IOCoordinator...");
+            ioCoordinator_->stop();
+            ioCoordinator_->join();
+            spdlog::debug("IOCoordinator stopped");
+        } catch (const std::exception& e) {
+            spdlog::warn("IOCoordinator stop exception: {}", e.what());
+        } catch (...) {
+            spdlog::warn("IOCoordinator stop: unknown exception");
+        }
+        ioCoordinator_.reset();
+    }
+
+    // Release metrics before ServiceManager teardown.
+    // DaemonMetrics owns asio strand/executor state bound to WorkCoordinator's io_context.
+    // If metrics is destroyed after ServiceManager::shutdown() tears down WorkCoordinator,
+    // strand service destruction can read freed io_context memory (ASAN UAF).
+    {
+        std::lock_guard<std::mutex> lk(metricsMutex_);
+        metrics_.reset();
+    }
+
     // Stop ServiceManager (this will stop WorkCoordinator's io_context in Phase 4)
     if (serviceManager_) {
         spdlog::debug("Shutting down service manager...");
@@ -751,13 +855,7 @@ Result<void> YamsDaemon::stop() {
 
     // Note: Main loop runs on caller's thread via runLoop(), no daemon thread to join
 
-    {
-        std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
-        if (repairCoordinator_) {
-            repairCoordinator_->stop();
-            repairCoordinator_.reset();
-        }
-    }
+    // RepairService is now owned by ServiceManager; stopped during its Phase 6.0.5
 
     // Metrics already stopped earlier (before ServiceManager)
 
@@ -780,12 +878,6 @@ Result<void> YamsDaemon::stop() {
     // Mark lifecycle stopped
     lifecycleFsm_.dispatch(StoppedEvent{});
 
-    // Now that the daemon is fully stopped (no more request handling), release metrics.
-    {
-        std::lock_guard<std::mutex> lk(metricsMutex_);
-        metrics_.reset();
-    }
-
     spdlog::info("YAMS daemon stopped.");
     return Result<void>();
 }
@@ -793,18 +885,16 @@ Result<void> YamsDaemon::stop() {
 // run() method removed; loop is inlined in start()
 
 void YamsDaemon::onDocumentAdded(const std::string& hash, const std::string& path) {
-    std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
-    if (repairCoordinator_) {
-        RepairCoordinator::DocumentAddedEvent event{hash, path};
-        repairCoordinator_->onDocumentAdded(event);
+    if (auto* rs = serviceManager_->getRepairService()) {
+        RepairService::DocumentAddedEvent event{hash, path};
+        rs->onDocumentAdded(event);
     }
 }
 
 void YamsDaemon::onDocumentRemoved(const std::string& hash) {
-    std::lock_guard<std::mutex> lock(repairCoordinatorMutex_);
-    if (repairCoordinator_) {
-        RepairCoordinator::DocumentRemovedEvent event{hash};
-        repairCoordinator_->onDocumentRemoved(event);
+    if (auto* rs = serviceManager_->getRepairService()) {
+        RepairService::DocumentRemovedEvent event{hash};
+        rs->onDocumentRemoved(event);
     }
 }
 

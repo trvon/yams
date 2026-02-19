@@ -73,10 +73,10 @@ Config example:
 
 | Section | Content |
 |---------|---------|
-| [User Guide](user_guide/) | CLI reference, search, configuration |
-| [Architecture](architecture/) | System design, daemon, search internals |
-| [API](api/) | MCP tools, REST endpoints |
-| [Developer](developer/) | Building, testing, contributing |
+| [User Guide](user_guide/README.md) | CLI reference, search, configuration |
+| [Architecture](architecture/daemon_architecture.md) | System design, daemon, search internals |
+| [API](api/README.md) | MCP tools, REST endpoints |
+| [Developer](developer/setup.md) | Building, testing, contributing |
 
 ## Links
 

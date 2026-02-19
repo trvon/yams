@@ -1,64 +1,39 @@
 # YAMS API Documentation
 
-A concise index for YAMS HTTP API docs. Start here, open the spec, and generate a client if you need one.
+A concise index for YAMS programmatic interfaces (MCP tools + plugin interfaces).
 
 ## What’s here
 
-- OpenAPI spec (authoritative):
-  - [openapi.yaml](./openapi.yaml)
-- Topical guides:
-  - [Search API](./search_api.md)
-  - [Vector Search API](./vector_search_api.md)
-  - [Tree Diff API](./tree_diff_api.md) (PBI-043)
+- MCP / CLI-facing API docs (available now):
+  - [MCP Tools](./mcp_tools.md)
+  - [Graph Adapter v1](./graph_adapter_v1.md)
+  - [Storage Plugin v1](./storage_plugin_v1.md)
 
-If you’re exploring or automating against YAMS via HTTP, read the guides and treat `openapi.yaml` as the source of truth.
+If you’re integrating YAMS today, start with the MCP tools and CLI reference.
 
 ## TL;DR
 
-- View the API quickly:
-  - Drag-and-drop `openapi.yaml` into https://editor.swagger.io/
-  - Or use Redocly locally (if installed): `redocly preview-docs docs/api/openapi.yaml`
-- Generate a client (examples):
-  - With openapi-generator (Homebrew):  
-    `brew install openapi-generator`
-  - TypeScript (fetch):  
-    `openapi-generator generate -i docs/api/openapi.yaml -g typescript-fetch -o ./api-clients/ts`
-  - Python (requests):  
-    `openapi-generator generate -i docs/api/openapi.yaml -g python -o ./api-clients/python`
-  - C++ (cpp-httplib, experimental):  
-    `openapi-generator generate -i docs/api/openapi.yaml -g cpp-httplib -o ./api-clients/cpp`
-- Base URL:
-  - During development, the HTTP server (if enabled) typically runs on localhost. Check your server configuration for the exact host/port.
-- Auth:
-  - See the “security”/“components.securitySchemes” section in `openapi.yaml` for the current scheme(s).
+- MCP tools:
+  - See [MCP Tools](./mcp_tools.md) for the tool surface (names, args, responses).
+- CLI:
+  - See `../user_guide/cli.md` for command-line automation.
 
 ## Quick usage patterns
 
-- cURL shape (consult endpoint/params in the spec or topical guides):
-  - GET with query params:  
-    `curl -sS "<BASE_URL>/api/v1/<resource>?q=..." | jq`
-  - POST with JSON body:  
-    `curl -sS -X POST "<BASE_URL>/api/v1/<resource>" -H "Content-Type: application/json" -d @payload.json | jq`
-  - Auth header (if required):  
-    `-H "Authorization: Bearer <TOKEN>"` or `-H "X-API-Key: <KEY>"` (see spec)
-
-For concrete examples, see:
-- [Search API](./search_api.md)
-- [Vector Search API](./vector_search_api.md)
-- [Tree Diff API](./tree_diff_api.md)
+- For AI / tool integrations, use MCP tools (see `docs/user_guide/mcp.md` + `docs/api/mcp_tools.md`).
+- For CLI automation, use `../user_guide/cli.md`.
 
 ## Development notes
 
-- The HTTP API surface may evolve with releases; `openapi.yaml` in your branch/tag matches that build.
-- If you don’t see a running HTTP server, use:
-  - CLI: `docs/user_guide/cli.md`
-  - MCP server (for AI tools/workflows): `docs/user_guide/mcp.md`
+- If you don’t see a running server, use:
+  - CLI: `../user_guide/cli.md`
+  - MCP server (for AI tools/workflows): `../user_guide/mcp.md`
 
 ## See also
 
 - CLI Reference: `../user_guide/cli.md`
 - Installation: `../user_guide/installation.md`
-- Troubleshooting search: `../troubleshooting/search_issues.md`
+- Troubleshooting: see `../user_guide/cli.md` (common issues + flags)
 
 ---
-This page is an index stub intended to be brief and link-rich. For authoritative details, rely on the OpenAPI spec and topical guides.
+This page is an index stub intended to be brief and link-rich.

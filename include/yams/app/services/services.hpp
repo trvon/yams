@@ -81,6 +81,12 @@ struct NormalizedLookupPath {
 /// Converts relative inputs to absolute canonical form when no glob characters are present.
 NormalizedLookupPath normalizeLookupPath(const std::string& path);
 
+/// Build glob patterns that scope results to files under a given directory.
+/// Resolves relative paths against CWD, normalizes separators, and generates
+/// absolute, no-leading-slash, and basename variants for broad matching.
+/// Used by MCP tools and CLI commands for --cwd / --here scoping.
+std::vector<std::string> buildCwdScopePatterns(const std::string& directory);
+
 } // namespace yams::app::services::utils
 
 namespace yams::app::services {
@@ -900,6 +906,7 @@ struct AddDirectoryRequest {
     bool verify{false};
     // Optional: verify indexes (FTS/vector) presence when enabled
     bool verifyIndexes{false};
+    std::string snapshotId;    // Optional snapshot identifier to apply to this add operation
     std::string snapshotLabel; // Optional human-friendly label for automatic snapshot
 
     // Session-isolated memory (PBI-082)

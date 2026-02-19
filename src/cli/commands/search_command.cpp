@@ -192,6 +192,7 @@ private:
         size_t totalCount{0};
         int64_t elapsedMs{0};
         std::string method{"search"};
+        std::string traceId;
     };
 
     bool shouldShowSpinner() const {
@@ -247,6 +248,8 @@ private:
             output["method"] = ctx.method;
             output["total_results"] = deduplicated.size();
             output["execution_time_ms"] = ctx.elapsedMs;
+            if (!ctx.traceId.empty())
+                output["trace_id"] = ctx.traceId;
 
             nlohmann::json results = nlohmann::json::array();
             for (const auto& item : deduplicated) {
@@ -287,6 +290,10 @@ private:
             std::cout << ui::colorize("(no results)", ui::Ansi::DIM) << std::endl;
             emitTagHint();
             return Result<void>();
+        }
+
+        if (verbose_ && !ctx.traceId.empty()) {
+            std::cout << ui::colorize("trace_id: " + ctx.traceId, ui::Ansi::DIM) << "\n\n";
         }
 
         if (!groupVersions_) {
@@ -1027,31 +1034,14 @@ public:
             }
 
             // CWD scoping: add current directory as a path prefix filter
-            std::string cwdPrefix;
             if (scopeToCwd_) {
                 std::error_code ec;
-                auto cwd = std::filesystem::current_path(ec);
+                auto cwdDir = std::filesystem::current_path(ec).string();
                 if (!ec) {
-                    cwdPrefix = cwd.string();
-                    // Normalize path separators for Windows
-                    std::replace(cwdPrefix.begin(), cwdPrefix.end(), '\\', '/');
-                    if (!cwdPrefix.empty() && cwdPrefix.back() != '/') {
-                        cwdPrefix += '/';
-                    }
-                    // Add glob patterns to match absolute + repo-relative paths under CWD
-                    includeGlobsExpanded.push_back(cwdPrefix + "**/*");
-                    std::string noLeadingSlash = cwdPrefix;
-                    if (!noLeadingSlash.empty() && noLeadingSlash.front() == '/') {
-                        noLeadingSlash.erase(noLeadingSlash.begin());
-                    }
-                    if (!noLeadingSlash.empty()) {
-                        includeGlobsExpanded.push_back(noLeadingSlash + "**/*");
-                    }
-                    auto baseName = std::filesystem::path(cwdPrefix).filename().string();
-                    if (!baseName.empty()) {
-                        includeGlobsExpanded.push_back(baseName + "/**/*");
-                    }
-                    spdlog::debug("[CLI] Scoping search to CWD: {}", cwdPrefix);
+                    auto cwdPats = yams::app::services::utils::buildCwdScopePatterns(cwdDir);
+                    includeGlobsExpanded.insert(includeGlobsExpanded.end(), cwdPats.begin(),
+                                                cwdPats.end());
+                    spdlog::debug("[CLI] Scoping search to CWD: {}", cwdDir);
                 }
             }
 
@@ -1165,6 +1155,7 @@ public:
                 ctx.totalCount = resp.totalCount;
                 ctx.elapsedMs = resp.elapsed.count();
                 ctx.method = "daemon";
+                ctx.traceId = resp.traceId;
 
                 return renderResults(items, ctx);
             };
@@ -1684,6 +1675,7 @@ public:
             ctx.totalCount = resp.totalCount;
             ctx.elapsedMs = resp.elapsed.count();
             ctx.method = "daemon";
+            ctx.traceId = resp.traceId;
 
             return renderResults(items, ctx);
         };

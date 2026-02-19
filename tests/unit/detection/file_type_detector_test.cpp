@@ -1,6 +1,12 @@
 #include <array>
+#include <cstdlib>
+#include <optional>
+#include <string>
+#include <unordered_set>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/detection/file_type_detector.h>
+
+#include "../../common/test_helpers_catch2.h"
 
 #include "detection_test_helpers.h"
 
@@ -110,6 +116,27 @@ TEST_CASE_METHOD(DetectorFixture, "File detection handles missing files", "[dete
     REQUIRE_FALSE(result);
 }
 
+TEST_CASE_METHOD(DetectorFixture, "File detection falls back to extension when confidence low",
+                 "[detection][file]") {
+    auto config = configWithCustomPatterns();
+    config.useLibMagic = false;
+    REQUIRE(detector.initialize(config));
+
+    // Use bytes that won't match common magic numbers.
+    auto path = dir.createBinaryFile("mismatch.pdf",
+                                     std::array<std::byte, 4>{std::byte{0x13}, std::byte{0x37},
+                                                              std::byte{0xC0}, std::byte{0xDE}});
+
+    auto result = detector.detectFromFile(path);
+    REQUIRE(result);
+    const auto sig = result.value();
+    CHECK(sig.mimeType == "application/pdf");
+    CHECK(sig.fileType == "document");
+    CHECK(sig.confidence == 0.6f);
+    CHECK(sig.isBinary);
+    CHECK_FALSE(sig.magicNumber.empty());
+}
+
 TEST_CASE_METHOD(DetectorFixture, "Classification utilities report mime details",
                  "[detection][classification]") {
     auto config = configWithCustomPatterns();
@@ -183,6 +210,30 @@ TEST_CASE_METHOD(DetectorFixture, "Cache can be cleared", "[detection][cache]") 
     CHECK(statsAfter.entries == 0);
 }
 
+TEST_CASE_METHOD(DetectorFixture, "Cache evicts entries when max size reached",
+                 "[detection][cache]") {
+    auto config = configWithCustomPatterns();
+    config.cacheResults = true;
+    config.cacheSize = 1;
+    REQUIRE(detector.initialize(config));
+
+    std::array<std::byte, 4> jpegData{std::byte{0xFF}, std::byte{0xD8}, std::byte{0xFF},
+                                      std::byte{0xE0}};
+    std::array<std::byte, 8> pngData{std::byte{0x89}, std::byte{0x50}, std::byte{0x4E},
+                                     std::byte{0x47}, std::byte{0x0D}, std::byte{0x0A},
+                                     std::byte{0x1A}, std::byte{0x0A}};
+
+    REQUIRE(detector.detectFromBuffer(jpegData));
+    REQUIRE(detector.detectFromBuffer(pngData));
+    REQUIRE(detector.detectFromBuffer(pngData));
+
+    auto stats = detector.getCacheStats();
+    CHECK(stats.maxSize == 1);
+    CHECK(stats.entries <= 1);
+    CHECK(stats.hits >= 1);
+    CHECK(stats.misses >= 2);
+}
+
 TEST_CASE_METHOD(DetectorFixture, "Patterns load from JSON", "[detection][patterns]") {
     auto loadResult = detector.loadPatternsFromFile(dir.validJson());
     REQUIRE(loadResult);
@@ -205,4 +256,58 @@ TEST_CASE("Hex helpers convert values", "[detection][utilities]") {
 
     std::vector<std::byte> expected{std::byte{0xFF}, std::byte{0xD8}, std::byte{0xFF}};
     CHECK(FileTypeDetector::bytesToHex(expected) == "ffd8ff");
+}
+
+TEST_CASE("Hex helpers reject odd-length strings", "[detection][utilities]") {
+    auto bytes = FileTypeDetector::hexToBytes("F");
+    CHECK_FALSE(bytes);
+}
+
+TEST_CASE_METHOD(DetectorFixture, "addPattern rejects invalid input", "[detection][patterns]") {
+    FilePattern pattern;
+    pattern.fileType = "image";
+    pattern.mimeType = "image/jpeg";
+    pattern.description = "invalid";
+    pattern.confidence = 1.0f;
+
+    auto res = detector.addPattern(pattern);
+    CHECK_FALSE(res);
+
+    pattern.pattern = {std::byte{0xFF}};
+    pattern.fileType.clear();
+    res = detector.addPattern(pattern);
+    CHECK_FALSE(res);
+}
+
+TEST_CASE_METHOD(DetectorFixture, "Text extensions include common and additional code types",
+                 "[detection][classification]") {
+    auto exts = detector.getTextExtensions();
+    std::unordered_set<std::string> unique(exts.begin(), exts.end());
+
+    CHECK(unique.size() == exts.size());
+    CHECK(unique.contains(".txt"));
+    CHECK(unique.contains(".json"));
+    CHECK(unique.contains(".tsx"));
+}
+
+TEST_CASE_METHOD(DetectorFixture, "findMagicNumbersFile honors YAMS_DATA_DIR",
+                 "[detection][init]") {
+    const auto expected = dir.createDataFile("magic_numbers.json", "{\"patterns\": []}\n");
+    yams::test::ScopedEnvVar env("YAMS_DATA_DIR", std::optional<std::string>{dir.root().string()});
+    ScopedCurrentPath cwdGuard(dir.root());
+
+    const auto found = FileTypeDetector::findMagicNumbersFile();
+    CHECK(found == expected);
+}
+
+TEST_CASE("initializeWithMagicNumbers is idempotent", "[detection][init]") {
+    TestDirectory dir{};
+    (void)dir.createDataFile("magic_numbers.json", "{\"patterns\": []}\n");
+    yams::test::ScopedEnvVar env("YAMS_DATA_DIR", std::optional<std::string>{dir.root().string()});
+    ScopedCurrentPath cwdGuard(dir.root());
+
+    auto r1 = FileTypeDetector::initializeWithMagicNumbers();
+    REQUIRE(r1);
+    auto r2 = FileTypeDetector::initializeWithMagicNumbers();
+    REQUIRE(r2);
 }

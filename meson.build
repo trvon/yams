@@ -1,5 +1,5 @@
 project('yams', ['cpp', 'c'],
-  version: '0.0.0',
+  version: '0.9.0',
   default_options: [
     'buildtype=release',
     'warning_level=2',
@@ -76,6 +76,12 @@ endif
 
 # --- ThreadSanitizer for race detection ---
 enable_tsan = get_option('enable-tsan')
+enable_asan = get_option('enable-asan')
+
+if enable_tsan and enable_asan
+  error('TSAN and ASAN cannot be enabled in the same build. Configure separate build directories.')
+endif
+
 if enable_tsan
   buildtype = get_option('buildtype')
   # TSan is most useful in debug builds; warn if enabled in release
@@ -93,6 +99,25 @@ if enable_tsan
     message('Note: TSan requires all code (including dependencies) to be compiled with -fsanitize=thread')
   else
     error('ThreadSanitizer requested but compiler does not support -fsanitize=thread')
+  endif
+endif
+
+if enable_asan
+  buildtype = get_option('buildtype')
+  # ASan is most useful in debug builds; warn if enabled in release
+  if buildtype == 'release' or buildtype == 'plain'
+    warning('AddressSanitizer enabled in non-debug build. This will significantly impact performance.')
+  endif
+
+  # Check if compiler supports ASan
+  if cpp.has_argument('-fsanitize=address')
+    # Use additional flags for better stack traces (sanitizer is set via b_sanitize option)
+    asan_extra_flags = ['-fno-omit-frame-pointer']
+    add_project_arguments(asan_extra_flags, language: 'cpp')
+    add_project_arguments(asan_extra_flags, language: 'c')
+    message('AddressSanitizer enabled - memory errors will fail fast')
+  else
+    error('AddressSanitizer requested but compiler does not support -fsanitize=address')
   endif
 endif
 
@@ -195,8 +220,13 @@ if host_machine.system() == 'windows'
 
   # As a last resort, probe the Conan cache directly (~/.conan2/p/**/p/bin) via a tiny Python helper
   py_mod = import('python')
-  python3 = py_mod.find_installation('python3')
-  conan_probe = run_command(python3, ['-c', '''import pathlib, os
+  python3 = py_mod.find_installation('python3', required: false)
+  if not python3.found()
+    python3 = py_mod.find_installation('python', required: false)
+  endif
+
+  if python3.found()
+    conan_probe = run_command(python3, ['-c', '''import pathlib, os
 root = pathlib.Path(os.path.expanduser("~/.conan2/p"))
 dirs = []
 if root.exists():
@@ -207,13 +237,16 @@ if root.exists():
             if dll.exists():
                 dirs.append(str(bin_dir))
 print(";".join(dirs))'''], check: false)
-  if conan_probe.returncode() == 0
-    conan_dirs = conan_probe.stdout().strip().split(';')
-    foreach d : conan_dirs
-      if d != ''
-        onnx_bindir_candidates += [d]
-      endif
-    endforeach
+    if conan_probe.returncode() == 0
+      conan_dirs = conan_probe.stdout().strip().split(';')
+      foreach d : conan_dirs
+        if d != ''
+          onnx_bindir_candidates += [d]
+        endif
+      endforeach
+    endif
+  else
+    message('Python not found (python3/python); skipping Conan cache probe for ONNX Runtime DLLs')
   endif
 
   foreach bindir : onnx_bindir_candidates
@@ -381,7 +414,8 @@ version_header = configure_file(
   install: true,
   install_dir: get_option('includedir') / 'yams',
   configuration: version_config,
-  format: 'cmake', # Simple @VAR@ substitution; header template below.
+  # Header template uses @VAR@ tokens.
+  format: 'meson',
   input: files('include/yams/version_generated.h.in')
 )
 
@@ -455,7 +489,9 @@ else
   if get_option('enable-mobile-bindings')
     subdir('src/mobile')
   endif
-  subdir('src/benchmarks')
+  if get_option('build-benchmarks')
+    subdir('src/benchmarks')
+  endif
 
   if get_option('build-mcp-server')
     subdir('src/mcp')
@@ -477,7 +513,7 @@ endif
 # Tests (enabled by default in Debug builds)
 _tests_opt = get_option('build-tests')
 _buildtype = get_option('buildtype')
-_tests_enabled = (not wasi_enabled) and (_tests_opt or (_buildtype == 'debug'))
+_tests_enabled = (not wasi_enabled) and (_tests_opt or (_buildtype == 'debug' and not get_option('build-fuzzers')))
 if _tests_enabled
   subdir('tests')
 endif
@@ -501,11 +537,22 @@ summary({
 if get_option('b_coverage')
   gcovr = find_program('gcovr', required: false)
   if gcovr.found()
+    _cpp_compiler = meson.get_compiler('cpp')
+    _gcov_executable = 'gcov'
+    if _cpp_compiler.get_id() == 'clang'
+      _llvm_cov = find_program('llvm-cov', required: false)
+      if _llvm_cov.found()
+        _gcov_executable = 'llvm-cov gcov -p'
+      endif
+    endif
+
     coverage_report_target = custom_target('coverage-report',
       output: 'coverage-report.stamp',
       command: [
         gcovr,
         '--root', meson.project_source_root(),
+        '--gcov-executable', _gcov_executable,
+        '--object-directory', meson.project_build_root(),
         '--filter', join_paths(meson.project_source_root(), 'src'),
         '--filter', join_paths(meson.project_source_root(), 'include'),
         '--exclude', join_paths(meson.project_source_root(), 'src', 'benchmarks'),
@@ -522,6 +569,8 @@ if get_option('b_coverage')
       command: [
         gcovr,
         '--root', meson.project_source_root(),
+        '--gcov-executable', _gcov_executable,
+        '--object-directory', meson.project_build_root(),
         '--filter', join_paths(meson.project_source_root(), 'src'),
         '--filter', join_paths(meson.project_source_root(), 'include'),
         '--exclude', join_paths(meson.project_source_root(), 'src', 'benchmarks'),
@@ -533,7 +582,7 @@ if get_option('b_coverage')
       build_always_stale: true,
     )
 
-    message('Coverage reporting configured. Run tests then: ninja -C builddir coverage-report')
+    message('Coverage reporting configured. Run tests then: ninja -C builddir coverage.txt && ninja -C builddir coverage-report.stamp')
   else
     warning('gcovr not found. Install gcovr to generate coverage reports.')
   endif

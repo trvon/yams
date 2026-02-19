@@ -16,6 +16,8 @@ enum class SessionState { NotExists, Closed, Active };
 
 struct SessionInfo {
     std::string name;
+    std::string uuid;       // Unique session identifier (UUID v4)
+    std::string instanceId; // Last instance that opened/created this session
     std::string description;
     SessionState state{SessionState::Closed};
     std::size_t documentCount{0};

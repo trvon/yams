@@ -112,7 +112,7 @@ struct MetadataValue {
     }
 
     // Keep legacy accessors for compatibility
-    [[nodiscard]] std::string asString() const { return value; }
+    [[nodiscard]] const std::string& asString() const { return value; }
     [[nodiscard]] int64_t asInteger() const { return std::stoll(value); }
     [[nodiscard]] double asReal() const { return std::stod(value); }
     [[nodiscard]] bool asBoolean() const { return value == "1"; }
@@ -308,6 +308,21 @@ struct SearchHistoryEntry {
     // Legacy Unix accessor removed
 
     void setQueryTime(int64_t unixTime) { queryTime = yams::features::fromUnixTime(unixTime); }
+};
+
+/**
+ * @brief Append-only retrieval/user feedback event
+ */
+struct FeedbackEvent {
+    int64_t id = 0;                     ///< Database ID
+    std::string eventId;                ///< Stable event UUID
+    std::string traceId;                ///< Retrieval trace correlation ID
+    std::chrono::sys_seconds createdAt; ///< Event timestamp (seconds precision)
+    std::string source;                 ///< Event source (daemon|mcp|cli|user)
+    std::string eventType;              ///< Event type (retrieval_served, ...)
+    std::string payloadJson;            ///< JSON payload for flexible event data
+
+    void setCreatedAt(int64_t unixTime) { createdAt = yams::features::fromUnixTime(unixTime); }
 };
 
 /**
@@ -507,7 +522,7 @@ namespace MetadataValueTypeUtils {
 /**
  * @brief Convert metadata value type to string
  */
-[[nodiscard]] inline std::string toString(MetadataValueType type) {
+[[nodiscard]] inline constexpr std::string_view toStringView(MetadataValueType type) {
     switch (type) {
         case MetadataValueType::String:
             return "string";
@@ -521,6 +536,10 @@ namespace MetadataValueTypeUtils {
             return "boolean";
     }
     return "string";
+}
+
+[[nodiscard]] inline std::string toString(MetadataValueType type) {
+    return std::string(toStringView(type));
 }
 
 /**

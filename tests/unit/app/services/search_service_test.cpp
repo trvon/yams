@@ -525,7 +525,7 @@ TEST_F(SearchServiceTest, DISABLED_PathsOnlyFallbackHandlesLargeCorpora) {
     request.limit = 7;
     request.pathsOnly = true;
     request.fuzzy = false;
-    request.globalSearch = true;  // Enable global search to bypass session filtering
+    request.globalSearch = true; // Enable global search to bypass session filtering
 
     auto result = runAwait(searchService_->search(request));
 

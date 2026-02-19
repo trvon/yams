@@ -24,6 +24,8 @@
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/stream_metrics_registry.h>
+#include <yams/daemon/metric_keys.h>
+#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/search/search_tuner.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
@@ -293,6 +295,18 @@ DaemonMetrics::DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateCom
     cacheMs_ = TuneAdvisor::metricsCacheMs();
 }
 
+void DaemonMetrics::setSocketServer(const SocketServer* socketServer) {
+    {
+        std::unique_lock lock(cacheMutex_);
+        socketServer_ = socketServer;
+
+        // Invalidate snapshot cache so newly-attached SocketServer details (e.g. proxy socket path)
+        // become visible immediately to status callers.
+        cachedSnapshot_.reset();
+        lastUpdate_ = {};
+    }
+}
+
 DaemonMetrics::~DaemonMetrics() {
     stopPolling();
 }
@@ -414,7 +428,21 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                 try {
                     if (services_) {
                         if (auto* searchComp = services_->getSearchComponent()) {
-                            searchComp->checkAndTriggerRebuildIfNeeded();
+                            // Allow disabling rebuild checks for high-scale benchmarks.
+                            // Rebuilds compete with ingestion/post-ingest and can dominate runtime.
+                            bool disableRebuilds = false;
+                            try {
+                                if (const char* env = std::getenv("YAMS_DISABLE_SEARCH_REBUILDS")) {
+                                    std::string v(env);
+                                    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                                    disableRebuilds =
+                                        (v == "1" || v == "true" || v == "yes" || v == "on");
+                                }
+                            } catch (...) {
+                            }
+                            if (!disableRebuilds) {
+                                searchComp->checkAndTriggerRebuildIfNeeded();
+                            }
                         }
                     }
                 } catch (...) {
@@ -624,6 +652,21 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         }
         out.ipcTasksPending = state_->stats.ipcTasksPending.load();
         out.ipcTasksActive = state_->stats.ipcTasksActive.load();
+        out.repairRunning = state_->stats.repairRunning.load(std::memory_order_relaxed);
+        out.repairInProgress = state_->stats.repairInProgress.load(std::memory_order_relaxed);
+        out.repairQueueDepth = state_->stats.repairQueueDepth.load(std::memory_order_relaxed);
+        out.repairBatchesAttempted =
+            state_->stats.repairBatchesAttempted.load(std::memory_order_relaxed);
+        out.repairEmbeddingsGenerated =
+            state_->stats.repairEmbeddingsGenerated.load(std::memory_order_relaxed);
+        out.repairEmbeddingsSkipped =
+            state_->stats.repairEmbeddingsSkipped.load(std::memory_order_relaxed);
+        out.repairFailedOperations =
+            state_->stats.repairFailedOperations.load(std::memory_order_relaxed);
+        out.repairIdleTicks = state_->stats.repairIdleTicks.load(std::memory_order_relaxed);
+        out.repairBusyTicks = state_->stats.repairBusyTicks.load(std::memory_order_relaxed);
+        out.repairTotalBacklog = state_->stats.repairTotalBacklog.load(std::memory_order_relaxed);
+        out.repairProcessed = state_->stats.repairProcessed.load(std::memory_order_relaxed);
     } catch (...) {
     }
 
@@ -641,15 +684,31 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         } else {
             out.ready = false;
         }
-        out.readinessStates["ipc_server"] = state_->readiness.ipcServerReady.load();
-        out.readinessStates["content_store"] = state_->readiness.contentStoreReady.load();
-        out.readinessStates["database"] = state_->readiness.databaseReady.load();
-        out.readinessStates["metadata_repo"] = state_->readiness.metadataRepoReady.load();
-        out.readinessStates["search_engine"] = state_->readiness.searchEngineReady.load();
-        out.readinessStates["model_provider"] = state_->readiness.modelProviderReady.load();
-        out.readinessStates["vector_index"] = state_->readiness.vectorIndexReady.load();
-        out.readinessStates["vector_db"] = state_->readiness.vectorDbReady.load();
-        out.readinessStates["plugins"] = state_->readiness.pluginsReady.load();
+        out.readinessStates[std::string(readiness::kIpcServer)] =
+            state_->readiness.ipcServerReady.load();
+        out.readinessStates[std::string(readiness::kContentStore)] =
+            state_->readiness.contentStoreReady.load();
+        out.readinessStates[std::string(readiness::kDatabase)] =
+            state_->readiness.databaseReady.load();
+        out.readinessStates[std::string(readiness::kMetadataRepo)] =
+            state_->readiness.metadataRepoReady.load();
+        out.readinessStates[std::string(readiness::kSearchEngine)] =
+            state_->readiness.searchEngineReady.load();
+        out.readinessStates[std::string(readiness::kModelProvider)] =
+            state_->readiness.modelProviderReady.load();
+        out.readinessStates[std::string(readiness::kVectorIndex)] =
+            state_->readiness.vectorIndexReady.load();
+        out.readinessStates[std::string(readiness::kVectorDb)] =
+            state_->readiness.vectorDbReady.load();
+        out.readinessStates[std::string(readiness::kVectorDbInitAttempted)] =
+            state_->readiness.vectorDbInitAttempted.load();
+        out.readinessStates[std::string(readiness::kVectorDbReady)] =
+            state_->readiness.vectorDbReady.load();
+        out.readinessStates[std::string(readiness::kVectorDbDim)] =
+            state_->readiness.vectorDbDim.load() > 0;
+        out.readinessStates[std::string(readiness::kPlugins)] =
+            state_->readiness.pluginsReady.load();
+        out.readinessStates[std::string(readiness::kRepairService)] = out.repairRunning;
         // Only include search init progress while not fully ready or when progress < 100%
         const bool searchReady = state_->readiness.searchEngineReady.load();
         const int searchPct = std::clamp<int>(state_->readiness.searchProgress.load(), 0, 100);
@@ -720,6 +779,37 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.postIngestQueued = pq->size();
                 out.postIngestInflight = pq->totalInFlight();
                 out.postIngestCapacity = pq->capacity();
+
+                // KG backpressure observability
+                try {
+                    out.postIngestBackpressureRejects = pq->backpressureRejects();
+                    std::size_t kgDepth = 0;
+                    std::size_t kgCap = 0;
+                    out.kgJobsFillRatio = pq->kgFillRatio(&kgDepth, &kgCap);
+                    out.kgJobsDepth = kgDepth;
+                    out.kgJobsCapacity = kgCap;
+                } catch (...) {
+                }
+
+                // High-priority post-ingest channel for repair/stuck-doc recovery.
+                // Metrics are best-effort: if the channel is disabled (capacity=0) or
+                // not created yet, values remain 0.
+                try {
+                    const std::size_t rpcCap =
+                        static_cast<std::size_t>(TuneAdvisor::postIngestRpcQueueMax());
+                    out.postIngestRpcCapacity = rpcCap;
+                    out.postIngestRpcMaxPerBatch =
+                        static_cast<std::size_t>(TuneAdvisor::postIngestRpcMaxPerBatch());
+                    if (rpcCap > 0) {
+                        auto rpcCh =
+                            InternalEventBus::instance()
+                                .get_channel<InternalEventBus::PostIngestTask>("post_ingest_rpc");
+                        if (rpcCh) {
+                            out.postIngestRpcQueued = rpcCh->size_approx();
+                        }
+                    }
+                } catch (...) {
+                }
                 out.postIngestProcessed = pq->processed();
                 out.postIngestFailed = pq->failed();
                 out.postIngestLatencyMsEma = pq->latencyMsEma();
@@ -727,7 +817,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 // Per-stage inflight counts
                 out.extractionInFlight = pq->extractionInFlight();
                 out.kgInFlight = pq->kgInFlight();
-                out.enrichInFlight = pq->enrichInFlight();
+                out.symbolInFlight = pq->symbolInFlight();
+                out.entityInFlight = pq->entityInFlight();
                 // File/directory add tracking
                 out.filesAdded = pq->filesAdded();
                 out.directoriesAdded = pq->directoriesAdded();
@@ -735,12 +826,36 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.directoriesProcessed = pq->directoriesProcessed();
                 // Per-stage queue depths (approximate, from channel sizes)
                 out.kgQueueDepth = pq->kgQueueDepth();
-                out.enrichQueueDepth =
-                    pq->symbolQueueDepth() + pq->entityQueueDepth() + pq->titleQueueDepth();
+                out.symbolQueueDepth = pq->symbolQueueDepth();
+                out.entityQueueDepth = pq->entityQueueDepth();
+                out.titleQueueDepth = pq->titleQueueDepth();
+                out.titleInFlight = pq->titleInFlight();
+                out.titleConcurrencyLimit = PostIngestQueue::maxTitleConcurrent();
                 // Dynamic concurrency limits (PBI-05a)
                 out.postExtractionLimit = TuneAdvisor::postExtractionConcurrent();
                 out.postKgLimit = TuneAdvisor::postKgConcurrent();
-                out.postEnrichLimit = TuneAdvisor::postEnrichConcurrent();
+                out.postSymbolLimit = TuneAdvisor::postSymbolConcurrent();
+                out.postEntityLimit = TuneAdvisor::postEntityConcurrent();
+                out.postEmbedLimit = TuneAdvisor::postEmbedConcurrent();
+
+                // Gradient limiter per-stage metrics
+                out.gradientLimitersEnabled = TuneAdvisor::enableGradientLimiters();
+                if (out.gradientLimitersEnabled) {
+                    auto readLimiter =
+                        [](GradientLimiter* lim) -> MetricsSnapshot::GradientLimiterMetrics {
+                        if (!lim)
+                            return {};
+                        auto m = lim->metrics();
+                        return {m.limit,    m.smoothedRtt,  m.gradient,
+                                m.inFlight, m.acquireCount, m.rejectCount};
+                    };
+                    out.glExtraction = readLimiter(pq->extractionLimiter());
+                    out.glKg = readLimiter(pq->kgLimiter());
+                    out.glSymbol = readLimiter(pq->symbolLimiter());
+                    out.glEntity = readLimiter(pq->entityLimiter());
+                    out.glTitle = readLimiter(pq->titleLimiter());
+                    out.glEmbed = readLimiter(pq->embedLimiter());
+                }
             }
             auto& bus = InternalEventBus::instance();
             out.kgQueued = bus.kgQueued();
@@ -750,6 +865,14 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             out.entityQueued = bus.entityQueued();
             out.entityDropped = bus.entityDropped();
             out.entityConsumed = bus.entityConsumed();
+            // GC pipeline metrics (from InternalEventBus)
+            out.gcQueued = bus.gcQueued();
+            out.gcDropped = bus.gcDropped();
+            out.gcConsumed = bus.gcConsumed();
+            // Entity graph pipeline metrics (from InternalEventBus)
+            out.entityGraphQueued = bus.entityGraphQueued();
+            out.entityGraphDropped = bus.entityGraphDropped();
+            out.entityGraphConsumed = bus.entityGraphConsumed();
         } else {
             out.workerThreads = std::max(1u, std::thread::hardware_concurrency());
         }
@@ -779,7 +902,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     } catch (...) {
     }
 
-    // FSM/MUX metrics (best-effort)
+    // FSM transport metrics (best-effort)
     try {
         auto fsnap = FsmMetricsRegistry::instance().snapshot();
         out.fsmTransitions = fsnap.transitions;
@@ -788,23 +911,32 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         out.fsmPayloadWrites = fsnap.payloadWrites;
         out.fsmBytesSent = fsnap.bytesSent;
         out.fsmBytesReceived = fsnap.bytesReceived;
-        // Tuning pool sizes
-        try {
-            out.ipcPoolSize = fsnap.ipcPoolSize;
-            out.ioPoolSize = fsnap.ioPoolSize;
-        } catch (...) {
-        }
-        // ResourceGovernor metrics
-        out.governorRssBytes = fsnap.governorRssBytes;
-        out.governorBudgetBytes = fsnap.governorBudgetBytes;
-        out.governorPressureLevel = fsnap.governorPressureLevel;
-        out.governorHeadroomPct = fsnap.governorHeadroomPct;
-        // ONNX concurrency metrics
-        out.onnxTotalSlots = fsnap.onnxTotalSlots;
-        out.onnxUsedSlots = fsnap.onnxUsedSlots;
-        out.onnxGlinerUsed = fsnap.onnxGlinerUsed;
-        out.onnxEmbedUsed = fsnap.onnxEmbedUsed;
-        out.onnxRerankerUsed = fsnap.onnxRerankerUsed;
+        out.fsmTimeouts = fsnap.timeouts;
+        out.fsmRetries = fsnap.retries;
+        out.fsmErrors = fsnap.errors;
+        out.ipcPoolSize = fsnap.ipcPoolSize;
+        out.ioPoolSize = fsnap.ioPoolSize;
+    } catch (...) {
+    }
+
+    // ResourceGovernor metrics (direct query)
+    try {
+        auto govSnap = ResourceGovernor::instance().getSnapshot();
+        out.governorRssBytes = govSnap.rssBytes;
+        out.governorBudgetBytes = govSnap.memoryBudgetBytes;
+        out.governorPressureLevel = static_cast<uint8_t>(govSnap.level);
+        out.governorHeadroomPct = static_cast<uint8_t>(govSnap.scalingHeadroom * 100.0);
+    } catch (...) {
+    }
+
+    // ONNX concurrency metrics (direct query)
+    try {
+        auto onnxSnap = OnnxConcurrencyRegistry::instance().snapshot();
+        out.onnxTotalSlots = onnxSnap.totalSlots;
+        out.onnxUsedSlots = onnxSnap.usedSlots;
+        out.onnxGlinerUsed = onnxSnap.lanes[static_cast<size_t>(OnnxLane::Gliner)].used;
+        out.onnxEmbedUsed = onnxSnap.lanes[static_cast<size_t>(OnnxLane::Embedding)].used;
+        out.onnxRerankerUsed = onnxSnap.lanes[static_cast<size_t>(OnnxLane::Reranker)].used;
     } catch (...) {
     }
 
@@ -818,6 +950,32 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.dbOpenErrors = dbStats.openErrors.load();
                 out.dbMigrationErrors = dbStats.migrationErrors.load();
                 out.dbRepositoryInitErrors = dbStats.repositoryInitErrors.load();
+            }
+
+            if (auto writePool = services_->getWriteConnectionPool()) {
+                const auto stats = writePool->getStats();
+                out.dbWritePoolAvailable = true;
+                out.dbWritePoolTotalConnections = stats.totalConnections;
+                out.dbWritePoolAvailableConnections = stats.availableConnections;
+                out.dbWritePoolActiveConnections = stats.activeConnections;
+                out.dbWritePoolWaitingRequests = stats.waitingRequests;
+                out.dbWritePoolMaxObservedWaiting = stats.maxObservedWaiting;
+                out.dbWritePoolTotalWaitMicros = stats.totalWaitMicros;
+                out.dbWritePoolTimeoutCount = stats.timeoutCount;
+                out.dbWritePoolFailedAcquisitions = stats.failedAcquisitions;
+            }
+
+            if (auto readPool = services_->getReadConnectionPool()) {
+                const auto stats = readPool->getStats();
+                out.dbReadPoolAvailable = true;
+                out.dbReadPoolTotalConnections = stats.totalConnections;
+                out.dbReadPoolAvailableConnections = stats.availableConnections;
+                out.dbReadPoolActiveConnections = stats.activeConnections;
+                out.dbReadPoolWaitingRequests = stats.waitingRequests;
+                out.dbReadPoolMaxObservedWaiting = stats.maxObservedWaiting;
+                out.dbReadPoolTotalWaitMicros = stats.totalWaitMicros;
+                out.dbReadPoolTimeoutCount = stats.timeoutCount;
+                out.dbReadPoolFailedAcquisitions = stats.failedAcquisitions;
             }
         }
     } catch (...) {
@@ -865,7 +1023,8 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         // Deferred ingestion queue depth
         try {
             auto ch = bus.get_or_create_channel<InternalEventBus::StoreDocumentTask>(
-                "store_document_tasks", 4096);
+                "store_document_tasks",
+                static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity()));
             out.deferredQueueDepth = ch->size_approx();
         } catch (...) {
         }
@@ -873,9 +1032,6 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     }
 
     int64_t muxQueuedBytesLocal = 0;
-    uint64_t postIngestQueued = 0;
-    uint64_t postIngestCapacity = 0;
-    uint32_t controlIntervalMs = 0;
     try {
         auto msnap = MuxMetricsRegistry::instance().snapshot();
         out.muxActiveHandlers = msnap.activeHandlers;
@@ -896,15 +1052,20 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
         muxQueuedBytesLocal = msnap.queuedBytes;
     } catch (...) {
     }
-    // Collect load metrics used by unified retry-after policy in ResourceGovernor.
+    // Provide a best-effort retryAfter hint for clients when post-ingest queue is saturated.
     try {
         if (services_) {
             if (auto* pq = services_->getPostIngestQueue()) {
-                postIngestQueued = pq->size();
-                postIngestCapacity = pq->capacity();
+                auto queued = pq->size();
+                auto cap = pq->capacity();
+                if (cap > 0 && queued >= cap) {
+                    // Suggest a small backoff based on tuning control interval
+                    auto cfg = services_->getTuningConfig();
+                    out.retryAfterMs = std::max<uint32_t>(50, cfg.controlIntervalMs / 4);
+                } else {
+                    out.retryAfterMs = 0;
+                }
             }
-            auto cfg = services_->getTuningConfig();
-            controlIntervalMs = cfg.controlIntervalMs;
             auto searchLoad = services_->getSearchLoadMetrics();
             out.searchActive = searchLoad.active;
             out.searchQueued = searchLoad.queued;
@@ -939,20 +1100,24 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.vectorDbDim = state_->readiness.vectorDbDim.load();
             } catch (...) {
             }
-            // Heal/mirror readiness from the actual handle if present: if a live vector DB
-            // instance exists and is initialized, consider it ready even if the flag wasn't
-            // updated earlier (e.g., lock-skips, reordered init). This avoids false negatives in
-            // doctor/status while embeddings and vector storage are operational.
+            // Heal/mirror vector DB readiness from the live handle.
+            // Readiness semantics: false while empty/building; true only when the vector DB
+            // is initialized AND has at least one vector row (serving).
             try {
                 auto vdb = services_->getVectorDatabase();
                 if (vdb && vdb->isInitialized()) {
-                    out.vectorDbReady = true;
-                    // Best-effort: propagate back to state so subsequent snapshots are consistent
+                    const auto dim = vdb->getConfig().embedding_dim;
+                    const auto rows = vdb->getVectorCount();
+                    out.vectorDbReady = (rows > 0);
+                    out.vectorDbInitAttempted = true;
+
+                    // Best-effort: propagate back to state so subsequent snapshots are consistent.
+                    // We intentionally do not mark ready=true just because isInitialized().
                     try {
                         auto& readiness =
                             const_cast<yams::daemon::DaemonReadiness&>(state_->readiness);
-                        readiness.vectorDbReady.store(true, std::memory_order_relaxed);
-                        auto dim = vdb->getConfig().embedding_dim;
+                        readiness.vectorDbInitAttempted.store(true, std::memory_order_relaxed);
+                        readiness.vectorDbReady.store(out.vectorDbReady, std::memory_order_relaxed);
                         if (dim > 0)
                             readiness.vectorDbDim.store(static_cast<uint32_t>(dim),
                                                         std::memory_order_relaxed);
@@ -989,9 +1154,9 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     } catch (...) {
     }
 
-    // Ensure readinessStates["vector_db"] reflects the final vectorDbReady after healing.
+    // Ensure readinessStates[vector_db] reflects the final vectorDbReady after healing.
     try {
-        out.readinessStates["vector_db"] = out.vectorDbReady;
+        out.readinessStates[std::string(readiness::kVectorDb)] = out.vectorDbReady;
     } catch (...) {
     }
 
@@ -1020,6 +1185,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.documentsTotal = cachedDocumentsTotal_;
                 out.documentsIndexed = cachedDocumentsIndexed_;
                 out.documentsContentExtracted = cachedDocumentsExtracted_;
+                out.documentsEmbedded = cachedVectorRows_; // Vector count = embedded docs
             }
             // FTS5 orphan scan metrics from InternalEventBus
             try {
@@ -1322,18 +1488,41 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     } catch (...) {
     }
 
-    // Unified backpressure threshold parsing and retry hint via ResourceGovernor policy
+    // Backpressure threshold parsing and retry hint
     try {
         uint64_t maxWorkerQueue =
             services_ ? TuneAdvisor::maxWorkerQueue(services_->getWorkerThreads()) : 0;
         uint64_t maxMuxBytes = TuneAdvisor::maxMuxBytes();
         uint64_t maxActiveConn = TuneAdvisor::maxActiveConn();
+        // Active conn default 0 = unlimited; we only compute hint, not gating here
+
+        // Current load
         uint64_t queued = services_ ? services_->getWorkerQueueDepth() : 0;
         uint64_t activeConn = state_ ? state_->stats.activeConnections.load() : 0;
 
-        out.retryAfterMs = ResourceGovernor::instance().recommendRetryAfterMs(
-            queued, maxWorkerQueue, muxQueuedBytesLocal, maxMuxBytes, activeConn, maxActiveConn,
-            postIngestQueued, postIngestCapacity, controlIntervalMs);
+        bool bp_worker = (maxWorkerQueue > 0 && queued > maxWorkerQueue);
+        bool bp_mux = (maxMuxBytes > 0 && muxQueuedBytesLocal > static_cast<int64_t>(maxMuxBytes));
+        bool bp_conn = (maxActiveConn > 0 && activeConn > maxActiveConn);
+
+        if (bp_worker || bp_mux || bp_conn) {
+            // Simple retry suggestion: proportional to overload
+            uint32_t base = 100; // 100ms base
+            uint32_t extra = 0;
+            if (bp_worker) {
+                extra += static_cast<uint32_t>(std::min<uint64_t>(queued - maxWorkerQueue, 1000));
+            }
+            if (bp_mux) {
+                // scale by MiB over budget
+                uint64_t over = static_cast<uint64_t>(muxQueuedBytesLocal) - maxMuxBytes;
+                extra += static_cast<uint32_t>(std::min<uint64_t>(over / (256ULL * 1024), 4000));
+            }
+            if (bp_conn) {
+                extra += 200; // flat 200ms if over conn cap
+            }
+            out.retryAfterMs = base + extra;
+        } else {
+            out.retryAfterMs = 0;
+        }
     } catch (...) {
         out.retryAfterMs = 0;
     }

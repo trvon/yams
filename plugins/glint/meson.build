@@ -32,13 +32,19 @@ glint_sources = files(
   'gliner_session.cpp',
 )
 
+if cpp.get_id() == 'msvc' or cpp.get_id() == 'clang-cl'
+  _plugin_std = 'vc++latest'
+else
+  _plugin_std = 'c++23'
+endif
+
 shared_module(
   'yams_glint',
   glint_sources,
   include_directories: [include_directories('../../include')],
   dependencies: glint_deps,
   cpp_args: glint_cpp_args,
-  override_options: ['cpp_std=c++23'],
+  override_options: ['cpp_std=' + _plugin_std],
   build_by_default: true,
   install: true,
   install_dir: plugins_dir,

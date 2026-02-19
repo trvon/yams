@@ -111,39 +111,47 @@ protected:
     uint8_t level_;
 };
 
+} // namespace yams::benchmark
+
 // --- Main Runner ---
 
-int main(int argc, char** argv) {
-    BenchmarkBase::Config config;
-    config.verbose = true;
-    config.benchmark_iterations = 10;
+using yams::benchmark::archiveJsonFileBestEffort;
+using yams::benchmark::BenchmarkBase;
+using yams::benchmark::ChunkingBenchmark;
+using yams::benchmark::CompressionBenchmark;
+using yams::benchmark::HashingBenchmark;
+using yams::benchmark::matchesAnyFilter;
+using yams::benchmark::parseBenchmarkArgs;
+using yams::test::BenchmarkTracker;
 
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--quiet") {
-            config.verbose = false;
-        } else if (arg == "--iterations" && i + 1 < argc) {
-            config.benchmark_iterations = std::stoi(argv[++i]);
-        } else if (arg == "--output" && i + 1 < argc) {
-            config.output_file = argv[++i];
-        }
-    }
+int main(int argc, char** argv) {
+    const auto cli = parseBenchmarkArgs(argc, argv);
+
+    BenchmarkBase::Config config;
+    config.verbose = cli.verbose;
+    config.warmup_iterations = cli.warmupIterations;
+    config.benchmark_iterations = cli.iterations;
+    config.track_memory = cli.trackMemory;
 
     std::cout << "YAMS Core Performance Benchmarks\n";
     std::cout << "====================================\n\n";
 
-    std::filesystem::path outDir = "bench_results";
+    std::filesystem::path outDir = cli.outDir;
     std::error_code ec_mkdir;
     std::filesystem::create_directories(outDir, ec_mkdir);
     if (ec_mkdir) {
         std::cerr << "WARNING: unable to create bench_results directory: " << ec_mkdir.message()
                   << std::endl;
     }
-    if (config.output_file.empty()) {
-        config.output_file = (outDir / "core_benchmarks.json").string();
+    const std::filesystem::path suiteHistoryJson = outDir / "core_benchmarks.json";
+    const std::filesystem::path suiteResultsJsonl = outDir / "core_benchmarks.jsonl";
+    if (cli.outputFile) {
+        config.output_file = cli.outputFile->string();
+    } else {
+        config.output_file = suiteResultsJsonl.string();
     }
 
-    test::BenchmarkTracker tracker(outDir / "core_benchmarks.json");
+    BenchmarkTracker tracker(suiteHistoryJson);
     std::vector<std::unique_ptr<BenchmarkBase>> benchmarks;
 
     // Hashing benchmarks
@@ -151,7 +159,7 @@ int main(int argc, char** argv) {
     benchmarks.push_back(std::make_unique<HashingBenchmark>("SHA256_1MB", 1024 * 1024, config));
 
     // Chunking benchmarks
-    chunking::ChunkingConfig chunkConfig1 = {
+    yams::chunking::ChunkingConfig chunkConfig1 = {
         .minChunkSize = 4096, .targetChunkSize = 16384, .maxChunkSize = 65536};
     benchmarks.push_back(
         std::make_unique<ChunkingBenchmark>("Rabin_1MB", 1024 * 1024, chunkConfig1, config));
@@ -163,8 +171,11 @@ int main(int argc, char** argv) {
         std::make_unique<CompressionBenchmark>("Zstd_1MB_Text_L9", 1024 * 1024, "text", 9, config));
 
     for (auto& benchmark : benchmarks) {
+        if (!matchesAnyFilter(benchmark->name(), cli.filters)) {
+            continue;
+        }
         auto result = benchmark->run();
-        test::BenchmarkTracker::BenchmarkResult trackerResult;
+        BenchmarkTracker::BenchmarkResult trackerResult;
         trackerResult.name = result.name;
         trackerResult.value = result.duration_ms;
         trackerResult.unit = "ms";
@@ -176,10 +187,18 @@ int main(int argc, char** argv) {
     tracker.generateReport(outDir / "core_benchmark_report.json");
     tracker.generateMarkdownReport(outDir / "core_benchmark_report.md");
 
+    if (cli.archive) {
+        tracker.flushHistory();
+        if (auto dir = archiveJsonFileBestEffort(suiteHistoryJson, cli.archiveDir, "core")) {
+            std::error_code ec;
+            std::filesystem::copy_file(suiteResultsJsonl, *dir / suiteResultsJsonl.filename(),
+                                       std::filesystem::copy_options::overwrite_existing, ec);
+            tracker.snapshotTo(*dir / "snapshot.json");
+        }
+    }
+
     std::cout << "\n====================================\n";
     std::cout << "Benchmark complete. Reports generated.\n";
 
     return 0;
 }
-
-} // namespace yams::benchmark

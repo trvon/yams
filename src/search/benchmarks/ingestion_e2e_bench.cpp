@@ -93,6 +93,9 @@ public:
         cfg.pidFile = pid_;
         cfg.logFile = log_;
         cfg.enableModelProvider = true;
+        // Disable auto-repair during benchmarks to avoid background work (per-hash DB checks,
+        // vector cleanup, etc.) affecting ingestion measurements.
+        cfg.enableAutoRepair = false;
 
         // Check if vectors are disabled (FTS-only mode)
         const char* disableVectors = std::getenv("YAMS_DISABLE_VECTORS");
@@ -302,6 +305,9 @@ struct QueueSnapshot {
     uint64_t embed_queued = 0;
     uint64_t embed_consumed = 0;
     uint64_t embed_dropped = 0;
+    uint64_t embed_prepared_docs_queued = 0;
+    uint64_t embed_prepared_chunks_queued = 0;
+    uint64_t embed_hash_only_docs_queued = 0;
     uint64_t fts5_queued = 0;
     uint64_t fts5_consumed = 0;
     uint64_t fts5_dropped = 0;
@@ -321,7 +327,10 @@ struct QueueSnapshot {
              {{"embed",
                {{"queued", embed_queued},
                 {"consumed", embed_consumed},
-                {"dropped", embed_dropped}}},
+                {"dropped", embed_dropped},
+                {"prepared_docs_queued", embed_prepared_docs_queued},
+                {"prepared_chunks_queued", embed_prepared_chunks_queued},
+                {"hash_only_docs_queued", embed_hash_only_docs_queued}}},
               {"fts5",
                {{"queued", fts5_queued}, {"consumed", fts5_consumed}, {"dropped", fts5_dropped}}},
               {"post",
@@ -480,6 +489,9 @@ QueueSnapshot captureQueueSnapshot() {
     snap.embed_queued = bus.embedQueued();
     snap.embed_consumed = bus.embedConsumed();
     snap.embed_dropped = bus.embedDropped();
+    snap.embed_prepared_docs_queued = bus.embedPreparedDocsQueued();
+    snap.embed_prepared_chunks_queued = bus.embedPreparedChunksQueued();
+    snap.embed_hash_only_docs_queued = bus.embedHashOnlyDocsQueued();
 
     snap.fts5_queued = bus.fts5Queued();
     snap.fts5_consumed = bus.fts5Consumed();

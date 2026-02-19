@@ -17,6 +17,8 @@
 #include <fstream>
 #include <string>
 
+#include <yams/vector/document_chunker.h>
+
 using namespace yams::daemon;
 using Catch::Matchers::ContainsSubstring;
 
@@ -95,6 +97,92 @@ struct EnvGuard {
 };
 
 } // namespace
+
+TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy defaults are embedding-safe",
+          "[daemon][components][config][chunking][catch2]") {
+    // Ensure config file discovery doesn't accidentally pick up a user config during local dev.
+    EnvGuard cfg("YAMS_CONFIG_PATH", "");
+
+    auto policy = ConfigResolver::resolveEmbeddingChunkingPolicy();
+    CHECK(policy.strategy == yams::vector::ChunkingStrategy::PARAGRAPH_BASED);
+    CHECK_FALSE(policy.config.preserve_sentences);
+    CHECK_FALSE(policy.config.use_token_count);
+}
+
+TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy supports all embed strategies",
+          "[daemon][components][config][chunking][catch2]") {
+    struct Case {
+        const char* value;
+        yams::vector::ChunkingStrategy expected;
+    };
+
+    const std::vector<Case> cases = {
+        {"fixed", yams::vector::ChunkingStrategy::FIXED_SIZE},
+        {"sentence", yams::vector::ChunkingStrategy::SENTENCE_BASED},
+        {"paragraph", yams::vector::ChunkingStrategy::PARAGRAPH_BASED},
+        {"recursive", yams::vector::ChunkingStrategy::RECURSIVE},
+        {"sliding_window", yams::vector::ChunkingStrategy::SLIDING_WINDOW},
+        {"markdown", yams::vector::ChunkingStrategy::MARKDOWN_AWARE},
+    };
+
+    const std::string sample = "# Title\n\n"
+                               "Intro paragraph with enough text to chunk reasonably. "
+                               "Second sentence here. Third sentence here.\n\n"
+                               "## Section\n"
+                               "- bullet one\n- bullet two\n\n"
+                               "Final paragraph.";
+
+    for (const auto& tc : cases) {
+        DYNAMIC_SECTION("strategy=" << tc.value) {
+            EnvGuard g("YAMS_EMBED_CHUNK_STRATEGY", tc.value);
+
+            auto policy = ConfigResolver::resolveEmbeddingChunkingPolicy();
+            CHECK(policy.strategy == tc.expected);
+
+            auto chunker = yams::vector::createChunker(policy.strategy, policy.config, nullptr);
+            REQUIRE(chunker);
+
+            auto chunks = chunker->chunkDocument(sample, "hash");
+            // Some strategies may return empty and rely on caller fallback, but for this
+            // representative input we expect at least one chunk.
+            REQUIRE_FALSE(chunks.empty());
+
+            for (const auto& c : chunks) {
+                CHECK(c.strategy_used == tc.expected);
+                CHECK_FALSE(c.content.empty());
+            }
+        }
+    }
+}
+
+TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy reads from config file",
+          "[daemon][components][config][chunking][catch2]") {
+    ConfigResolverFixture fx;
+
+    auto configPath = fx.writeToml("config.toml",
+                                   R"TOML(
+[embeddings.chunking]
+strategy = "fixed"
+target = 256
+min = 64
+max = 512
+overlap = 0
+use_tokens = 0
+preserve_sentences = 0
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+
+    auto policy = ConfigResolver::resolveEmbeddingChunkingPolicy();
+    CHECK(policy.strategy == yams::vector::ChunkingStrategy::FIXED_SIZE);
+    CHECK(policy.config.target_chunk_size == 256);
+    CHECK(policy.config.min_chunk_size == 64);
+    CHECK(policy.config.max_chunk_size == 512);
+    CHECK(policy.config.overlap_size == 0);
+    CHECK(policy.config.overlap_percentage == 0.0);
+    CHECK_FALSE(policy.config.use_token_count);
+    CHECK_FALSE(policy.config.preserve_sentences);
+}
 
 TEST_CASE("ConfigResolver::envTruthy correctly parses truthy values",
           "[daemon][components][config][catch2]") {
@@ -317,15 +405,14 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
-        // Efficient profile scale is 0.0, postIngestBatchSize floors to 1
+        // Efficient profile scale is 0.0, old totalBudget = 2
+        // With active-stage floor: total = max(2, 6 active stages) = 6
+        // Each stage gets 1 slot; postIngestBatchSize = max(1, floor(8.0 * 0.0)) = 1
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEnrichConcurrent() == TuneAdvisor::postSymbolConcurrent() +
-                                                         TuneAdvisor::postEntityConcurrent() +
-                                                         TuneAdvisor::postTitleConcurrent());
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 1u);
     }
@@ -336,15 +423,14 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
-        // Balanced profile scale is 0.5, postIngestBatchSize = 8 * 0.5 = 4
+        // Balanced profile scale is 0.5, old totalBudget = 2
+        // With active-stage floor: total = max(2, 6 active stages) = 6
+        // Each stage gets 1 slot; postIngestBatchSize = max(1, floor(8.0 * 0.5)) = 4
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEnrichConcurrent() == TuneAdvisor::postSymbolConcurrent() +
-                                                         TuneAdvisor::postEntityConcurrent() +
-                                                         TuneAdvisor::postTitleConcurrent());
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
+        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 4u);
     }
@@ -355,16 +441,14 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         EnvGuard postIngestGuard("YAMS_POST_INGEST_TOTAL_CONCURRENT", "0");
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(8);
 
-        // Aggressive profile scale is 1.0, postIngestBatchSize = 8 * 1.0 = 8
-        // With 8 threads and Aggressive (60% CPU budget), totalBudget = floor(0.6 * 8) = 4
+        // Aggressive profile scale is 1.0, old totalBudget = 3
+        // With active-stage floor: total = max(3, 6 active stages) = 6
+        // Each stage gets 1 slot; postIngestBatchSize = max(1, floor(8.0 * 1.0)) = 8
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 0u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 0u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 0u);
+        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
+        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
+        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
         CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEnrichConcurrent() == TuneAdvisor::postSymbolConcurrent() +
-                                                         TuneAdvisor::postEntityConcurrent() +
-                                                         TuneAdvisor::postTitleConcurrent());
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
         CHECK(TuneAdvisor::postIngestBatchSize() == 8u);
     }
@@ -380,6 +464,7 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         }
         {
             ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Aggressive);
+            // 40.0 + 1.0 * 20.0 = 60
             CHECK(TuneAdvisor::cpuBudgetPercent() == 60u);
         }
     }

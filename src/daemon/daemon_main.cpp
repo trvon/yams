@@ -313,6 +313,14 @@ int main(int argc, char* argv[]) {
                 if (daemonSection.find("enable") != daemonSection.end()) {
                     config.enableModelProvider = (daemonSection.at("enable") == "true");
                 }
+                if (daemonSection.find("model_provider_required") != daemonSection.end()) {
+                    std::string v = daemonSection.at("model_provider_required");
+                    for (auto& c : v) {
+                        c = static_cast<char>(std::tolower(c));
+                    }
+                    config.modelProviderRequired =
+                        (v == "1" || v == "true" || v == "yes" || v == "on");
+                }
 
                 // Plugin configuration
                 if (config.pluginDir.empty() &&
@@ -322,6 +330,16 @@ int main(int argc, char* argv[]) {
 
                 if (daemonSection.find("auto_load_plugins") != daemonSection.end()) {
                     config.autoLoadPlugins = (daemonSection.at("auto_load_plugins") == "true");
+                }
+
+                // Auto repair (RepairService)
+                if (daemonSection.find("auto_repair") != daemonSection.end()) {
+                    std::string v = daemonSection.at("auto_repair");
+                    for (auto& c : v) {
+                        c = static_cast<char>(std::tolower(c));
+                    }
+                    config.enableAutoRepair =
+                        !(v == "0" || v == "false" || v == "off" || v == "no");
                 }
                 if (daemonSection.find("plugin_name_policy") != daemonSection.end()) {
                     config.pluginNamePolicy = daemonSection.at("plugin_name_policy");
@@ -667,6 +685,58 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            // Apply [gradient_limiter] overrides to TuneAdvisor if present
+            if (tomlConfig.find("gradient_limiter") != tomlConfig.end()) {
+                const auto& gl = tomlConfig.at("gradient_limiter");
+                auto gl_dbl = [&](const char* k) -> std::optional<double> {
+                    auto it = gl.find(k);
+                    if (it == gl.end())
+                        return std::nullopt;
+                    try {
+                        return std::stod(it->second);
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse gradient_limiter.{} as double: {}", k,
+                                     e.what());
+                        return std::nullopt;
+                    }
+                };
+                auto gl_int = [&](const char* k) -> std::optional<uint32_t> {
+                    auto it = gl.find(k);
+                    if (it == gl.end())
+                        return std::nullopt;
+                    try {
+                        return static_cast<uint32_t>(std::stoul(it->second));
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Config: failed to parse gradient_limiter.{} as int: {}", k,
+                                     e.what());
+                        return std::nullopt;
+                    }
+                };
+
+                // enable (bool)
+                if (auto it = gl.find("enable"); it != gl.end()) {
+                    std::string v = it->second;
+                    for (auto& c : v)
+                        c = static_cast<char>(std::tolower(c));
+                    bool en = (v == "1" || v == "true" || v == "on" || v == "yes");
+                    yams::daemon::TuneAdvisor::setEnableGradientLimiters(en);
+                }
+                if (auto v = gl_dbl("smoothing_alpha"))
+                    yams::daemon::TuneAdvisor::setGradientSmoothingAlpha(*v);
+                if (auto v = gl_dbl("long_window_alpha"))
+                    yams::daemon::TuneAdvisor::setGradientLongAlpha(*v);
+                if (auto v = gl_int("warmup_samples"))
+                    yams::daemon::TuneAdvisor::setGradientWarmupSamples(*v);
+                if (auto v = gl_dbl("tolerance"))
+                    yams::daemon::TuneAdvisor::setGradientTolerance(*v);
+                if (auto v = gl_dbl("initial_limit"))
+                    yams::daemon::TuneAdvisor::setGradientInitialLimit(*v);
+                if (auto v = gl_dbl("min_limit"))
+                    yams::daemon::TuneAdvisor::setGradientMinLimit(*v);
+                if (auto v = gl_dbl("max_limit"))
+                    yams::daemon::TuneAdvisor::setGradientMaxLimit(*v);
+            }
+
             // Honor [embeddings].enable=false: hard-disable model provider regardless of [daemon]
             // This prevents startup from waiting on embedding services when embeddings are
             // disabled.
@@ -937,10 +1007,10 @@ int main(int argc, char* argv[]) {
     }
 
     // Configure logging (default to file to preserve logs after daemonizing)
+    const size_t max_size = 10ULL * 1024 * 1024; // 10MB per file
+    const size_t max_files = 5;                  // Keep 5 rotated files
     try {
         // Use rotating file sink to preserve logs across crashes
-        const size_t max_size = 10ULL * 1024 * 1024; // 10MB per file
-        const size_t max_files = 5;                  // Keep 5 rotated files
         auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
             config.logFile.string(), max_size, max_files);
         auto logger = std::make_shared<spdlog::logger>("yams-daemon", rotating_sink);
@@ -951,8 +1021,22 @@ int main(int argc, char* argv[]) {
         spdlog::info("Log rotation enabled: {} (max {}MB x {} files)", config.logFile.string(),
                      max_size / (1024ULL * 1024), max_files);
     } catch (const std::exception& e) {
-        // Fallback silently to default logger - can't log the error yet
         std::cerr << "Warning: log file setup failed, using default logger: " << e.what() << "\n";
+        try {
+            auto fallback = yams::daemon::YamsDaemon::resolveSystemPath(
+                yams::daemon::YamsDaemon::PathType::LogFile);
+            std::error_code ec;
+            std::filesystem::create_directories(fallback.parent_path(), ec);
+            auto rotating_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+                fallback.string(), max_size, max_files);
+            auto logger = std::make_shared<spdlog::logger>("yams-daemon", rotating_sink);
+            spdlog::set_default_logger(logger);
+            spdlog::flush_on(spdlog::level::info);
+            spdlog::warn("Primary log path '{}' unusable ({}); using fallback '{}'",
+                         config.logFile.string(), e.what(), fallback.string());
+        } catch (const std::exception& e2) {
+            std::cerr << "Warning: fallback log file setup failed: " << e2.what() << "\n";
+        }
     }
 
     if (config.logLevel == "trace") {

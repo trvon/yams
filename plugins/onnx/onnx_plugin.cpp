@@ -1,7 +1,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cctype>
 
+#include <spdlog/spdlog.h>
 extern "C" {
 #include <yams/plugins/abi.h>
 #include <yams/plugins/model_provider_v1.h>
@@ -15,13 +17,24 @@ static const char* kManifestJson = R"JSON({
   "name": "onnx",
   "version": "0.2.0",
   "interfaces": [
-    {"id": "model_provider_v1", "version": 3},
+    {"id": "model_provider_v1", "version": 4},
     {"id": "onnx_request_v1", "version": 1}
   ]
-})JSON"; // ABI v1.3 (model_provider_v1 version=3 with reranking) + onnx_request_v1
+})JSON"; // model_provider_v1 v4 + onnx_request_v1
 
 // Lightweight runtime flags
 static bool g_plugin_disabled = false; // set by env at init
+
+static bool envTruthy(const char* value) {
+    if (!value || !*value) {
+        return false;
+    }
+    std::string v(value);
+    for (auto& c : v) {
+        c = static_cast<char>(std::tolower(c));
+    }
+    return v == "1" || v == "true" || v == "yes" || v == "on";
+}
 
 // Forward-declared helpers exposed by model_provider.cpp
 extern "C" const char* yams_onnx_get_health_json_cstr();
@@ -53,17 +66,21 @@ YAMS_PLUGIN_API int yams_plugin_init(const char* config_json, const void* /*host
 
     // Allow disabling the plugin without removing it from disk
     // Check multiple env vars that indicate vectors/ONNX should be disabled
-    if (const char* d = std::getenv("YAMS_ONNX_PLUGIN_DISABLE"); d && *d) {
+    if (const char* d = std::getenv("YAMS_ONNX_PLUGIN_DISABLE"); envTruthy(d)) {
         g_plugin_disabled = true;
+        spdlog::warn("[ONNX Plugin] disabled by YAMS_ONNX_PLUGIN_DISABLE");
     }
-    if (const char* d = std::getenv("YAMS_DISABLE_VECTORS"); d && *d) {
+    if (const char* d = std::getenv("YAMS_DISABLE_VECTORS"); envTruthy(d)) {
         g_plugin_disabled = true;
+        spdlog::warn("[ONNX Plugin] disabled by YAMS_DISABLE_VECTORS");
     }
-    if (const char* d = std::getenv("YAMS_USE_MOCK_PROVIDER"); d && *d) {
+    if (const char* d = std::getenv("YAMS_USE_MOCK_PROVIDER"); envTruthy(d)) {
         g_plugin_disabled = true;
+        spdlog::warn("[ONNX Plugin] disabled by YAMS_USE_MOCK_PROVIDER");
     }
-    if (const char* d = std::getenv("YAMS_SKIP_MODEL_LOADING"); d && *d) {
+    if (const char* d = std::getenv("YAMS_SKIP_MODEL_LOADING"); envTruthy(d)) {
         g_plugin_disabled = true;
+        spdlog::warn("[ONNX Plugin] disabled by YAMS_SKIP_MODEL_LOADING");
     }
     return YAMS_PLUGIN_OK;
 }
@@ -170,10 +187,14 @@ YAMS_PLUGIN_API int yams_plugin_get_interface(const char* id, uint32_t version, 
     if (!id || !out_iface)
         return YAMS_PLUGIN_ERR_INVALID;
     *out_iface = nullptr;
-    if (g_plugin_disabled)
+    if (g_plugin_disabled) {
+        spdlog::warn("[ONNX Plugin] get_interface('{}', v{}) rejected: plugin disabled", id,
+                     version);
         return YAMS_PLUGIN_ERR_NOT_FOUND;
-    // Accept any version >= 1 up to our max (3), to avoid CLI hangs on minor mismatches
-    if ((version >= 1 && version <= 3) && std::strcmp(id, YAMS_IFACE_MODEL_PROVIDER_V1) == 0) {
+    }
+    // Accept any version >= 1 up to our max (v4).
+    if ((version >= 1 && version <= YAMS_IFACE_MODEL_PROVIDER_V1_VERSION) &&
+        std::strcmp(id, YAMS_IFACE_MODEL_PROVIDER_V1) == 0) {
         *out_iface = static_cast<void*>(yams_onnx_get_model_provider());
         return (*out_iface) ? YAMS_PLUGIN_OK : YAMS_PLUGIN_ERR_NOT_FOUND;
     }
@@ -182,6 +203,7 @@ YAMS_PLUGIN_API int yams_plugin_get_interface(const char* id, uint32_t version, 
         *out_iface = static_cast<void*>(&g_req_v1);
         return YAMS_PLUGIN_OK;
     }
+    spdlog::debug("[ONNX Plugin] get_interface('{}', v{}) not available", id, version);
     return YAMS_PLUGIN_ERR_NOT_FOUND;
 }
 

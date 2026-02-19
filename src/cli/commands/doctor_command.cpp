@@ -14,6 +14,7 @@
 #include <yams/config/config_helpers.h>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -76,6 +77,9 @@ static int unsetenv(const char* name) {
 #include <dlfcn.h>
 #include <unistd.h>
 #endif
+#include <atomic>
+#include <csignal>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -84,7 +88,13 @@ static int unsetenv(const char* name) {
 #include <optional>
 #include <regex>
 #include <set>
+#ifndef _WIN32
+#include <signal.h>
+#endif
+#include <sstream>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #ifndef _WIN32
 #include <unistd.h>
@@ -94,6 +104,68 @@ static int unsetenv(const char* name) {
 #include <vector>
 #include <CLI/CLI.hpp>
 #include <yams/plugins/model_provider_v1.h>
+
+namespace {
+std::atomic<bool> g_doctor_cancel_requested{false};
+volatile std::sig_atomic_t g_doctor_sigint_seen = 0;
+
+struct DoctorSignalGuard {
+    DoctorSignalGuard() {
+        g_doctor_cancel_requested.store(false, std::memory_order_relaxed);
+        g_doctor_sigint_seen = 0;
+
+#ifdef _WIN32
+        prevInt_ = std::signal(SIGINT, &DoctorSignalGuard::handler);
+        prevTerm_ = std::signal(SIGTERM, &DoctorSignalGuard::handler);
+#else
+        struct sigaction sa = {};
+        sa.sa_handler = &DoctorSignalGuard::handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        haveInt_ = (sigaction(SIGINT, &sa, &oldInt_) == 0);
+        haveTerm_ = (sigaction(SIGTERM, &sa, &oldTerm_) == 0);
+#endif
+    }
+
+    ~DoctorSignalGuard() {
+#ifdef _WIN32
+        if (prevInt_ != SIG_ERR)
+            std::signal(SIGINT, prevInt_);
+        if (prevTerm_ != SIG_ERR)
+            std::signal(SIGTERM, prevTerm_);
+#else
+        if (haveInt_)
+            (void)sigaction(SIGINT, &oldInt_, nullptr);
+        if (haveTerm_)
+            (void)sigaction(SIGTERM, &oldTerm_, nullptr);
+#endif
+    }
+
+    DoctorSignalGuard(const DoctorSignalGuard&) = delete;
+    DoctorSignalGuard& operator=(const DoctorSignalGuard&) = delete;
+
+    static void handler(int /*sig*/) {
+        g_doctor_cancel_requested.store(true, std::memory_order_relaxed);
+        // Second Ctrl-C should terminate immediately even if we're blocked in RPC.
+        if (g_doctor_sigint_seen) {
+            std::_Exit(130);
+        }
+        g_doctor_sigint_seen = 1;
+    }
+
+private:
+#ifdef _WIN32
+    using SigFn = void (*)(int);
+    SigFn prevInt_{SIG_ERR};
+    SigFn prevTerm_{SIG_ERR};
+#else
+    bool haveInt_{false};
+    bool haveTerm_{false};
+    struct sigaction oldInt_{};
+    struct sigaction oldTerm_{};
+#endif
+};
+} // namespace
 
 namespace yams::cli {
 
@@ -419,6 +491,9 @@ private:
     }
     void runRepair() {
         try {
+            using namespace yams::cli::ui;
+            DoctorSignalGuard signalGuard;
+
             if (fixAll_) {
                 fixEmbeddings_ = true;
                 fixFts5_ = true;
@@ -442,11 +517,12 @@ private:
 
             // Embeddings repair
             if (fixEmbeddings_) {
-                std::cout << "Repair: missing embeddings...\n";
+                std::cout << status_pending("Repairing missing embeddings") << "\n";
                 yams::repair::EmbeddingRepairConfig rcfg;
                 rcfg.batchSize = 32;
                 rcfg.skipExisting = true;
                 rcfg.dataPath = cli_->getDataPath();
+                rcfg.cancelRequested = &g_doctor_cancel_requested;
                 auto emb = cli_->getEmbeddingGenerator();
                 if (!emb) {
                     std::cout << "  Embedding generator unavailable -- ensure model provider is "
@@ -508,8 +584,11 @@ private:
                         }
                     } catch (...) {
                     }
+                    SpinnerRunner spin;
+                    spin.start("Scanning for documents missing embeddings");
                     auto missing = yams::repair::getDocumentsMissingEmbeddings(
                         appCtx->metadataRepo, cli_->getDataPath(), 0);
+                    spin.stop();
                     if (!missing) {
                         std::cout << "  Could not query missing embeddings: "
                                   << missing.error().message << "\n";
@@ -518,8 +597,12 @@ private:
                                   << "\n";
                     } else {
                         bool attemptedDaemon = false;
+                        bool skipDaemon = noDaemonRepair_;
                         {
                             try {
+                                if (skipDaemon) {
+                                    throw std::runtime_error("skipped");
+                                }
                                 yams::daemon::ClientConfig cfg;
                                 if (cli_->hasExplicitDataDir()) {
                                     cfg.dataDir = cli_->getDataPath();
@@ -546,10 +629,14 @@ private:
                                 ed.skipExisting = rcfg.skipExisting;
                                 // Overall wait limit (2x per-request timeout, minimum 30s)
                                 int overall_ms = std::max(30000, 2 * rpc_ms);
+
+                                SpinnerRunner rpcSpin;
+                                rpcSpin.start("Daemon: generating missing embeddings");
                                 auto er =
                                     yams::cli::run_result<yams::daemon::EmbedDocumentsResponse>(
                                         client.streamingEmbedDocuments(ed),
                                         std::chrono::milliseconds(overall_ms));
+                                rpcSpin.stop();
                                 if (er) {
                                     std::cout
                                         << "  "
@@ -581,10 +668,68 @@ private:
                             }
                         }
                         if (!attemptedDaemon) {
+                            const bool tty = stdout_is_tty();
+                            auto started = std::chrono::steady_clock::now();
+                            auto lastPrint = started;
+                            auto onProgress = [&](size_t current, size_t total,
+                                                  const std::string& details) {
+                                auto now = std::chrono::steady_clock::now();
+                                if (!tty && (current % 200 != 0)) {
+                                    return;
+                                }
+                                if (tty && (now - lastPrint) < std::chrono::milliseconds(200)) {
+                                    return;
+                                }
+                                uint64_t elapsed_s = static_cast<uint64_t>(
+                                    std::chrono::duration_cast<std::chrono::seconds>(now - started)
+                                        .count());
+                                std::string detail = details;
+                                if (!detail.empty()) {
+                                    detail = truncate_to_width(detail, 60);
+                                }
+                                std::ostringstream oss;
+                                oss << status_pending("Embeddings") << " ";
+                                if (total > 0) {
+                                    double frac =
+                                        (static_cast<double>(current) / static_cast<double>(total));
+                                    oss << progress_with_stats(frac, 18,
+                                                               std::make_optional(std::make_pair(
+                                                                   static_cast<uint64_t>(current),
+                                                                   static_cast<uint64_t>(total))),
+                                                               "docs");
+                                } else {
+                                    oss << colorize("working", Ansi::DIM);
+                                }
+                                oss << " "
+                                    << colorize("elapsed " + format_duration(elapsed_s), Ansi::DIM);
+                                if (!detail.empty()) {
+                                    oss << " " << colorize(detail, Ansi::DIM);
+                                }
+
+                                if (tty) {
+                                    std::cout << "\r\033[K" << oss.str() << std::flush;
+                                } else {
+                                    std::cout << "  " << oss.str() << "\n" << std::flush;
+                                }
+                                lastPrint = now;
+                            };
+
                             auto stats = yams::repair::repairMissingEmbeddings(
                                 appCtx->store, appCtx->metadataRepo, emb, rcfg, missing.value(),
-                                nullptr, appCtx->contentExtractors);
+                                onProgress, appCtx->contentExtractors);
+
+                            if (tty) {
+                                std::cout << "\n";
+                            }
                             if (!stats) {
+                                if (stats.error().code == ErrorCode::OperationCancelled) {
+                                    std::cout
+                                        << "  "
+                                        << ui::status_warning(
+                                               "Cancelled by user (partial results may exist)")
+                                        << "\n";
+                                    return;
+                                }
                                 std::cout << "  "
                                           << ui::status_error("Embedding repair failed: " +
                                                               stats.error().message)
@@ -623,18 +768,199 @@ private:
 
             // FTS5 rebuild
             if (fixFts5_) {
-                std::cout << "Repair: FTS5 index...\n";
+                std::cout << status_pending("Repairing FTS5 index") << "\n";
                 if (!appCtx->store || !appCtx->metadataRepo) {
                     std::cout << "  Store/Metadata unavailable\n";
                     return;
                 }
+
+                // Prefer daemon repair when available (streaming events). Fall back to local loop.
+                if (!noDaemonRepair_) {
+                    try {
+                        yams::daemon::ClientConfig cfg;
+                        if (cli_->hasExplicitDataDir()) {
+                            cfg.dataDir = cli_->getDataPath();
+                        }
+                        cfg.requestTimeout = std::chrono::milliseconds(600000);
+                        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                        if (leaseRes) {
+                            auto leaseHandle = std::move(leaseRes.value());
+                            auto& client = **leaseHandle;
+
+                            yams::daemon::RepairRequest req;
+                            req.repairFts5 = true;
+                            req.force = true;
+                            req.verbose = false;
+                            req.dryRun = false;
+                            req.foreground = true;
+
+                            const bool tty = stdout_is_tty();
+                            std::string lastOperation;
+                            uint64_t lastProcessed = 0;
+                            auto lastPrint = std::chrono::steady_clock::now();
+
+                            auto onEvent = [&](const yams::daemon::RepairEvent& ev) {
+                                if (ev.operation != lastOperation) {
+                                    if (!lastOperation.empty()) {
+                                        std::cout << "\n";
+                                    }
+                                    lastOperation = ev.operation;
+                                    std::cout << "  "
+                                              << ui::status_pending("Daemon: " + ev.operation)
+                                              << "\n";
+                                    lastProcessed = 0;
+                                }
+
+                                if (ev.phase == "repairing" && ev.total > 0) {
+                                    auto now = std::chrono::steady_clock::now();
+                                    if (tty && (now - lastPrint) < std::chrono::milliseconds(200) &&
+                                        ev.processed == lastProcessed) {
+                                        return;
+                                    }
+                                    lastProcessed = ev.processed;
+                                    lastPrint = now;
+                                    double frac = static_cast<double>(ev.processed) /
+                                                  static_cast<double>(ev.total);
+                                    std::ostringstream oss;
+                                    oss << ui::status_pending("FTS5") << " "
+                                        << ui::progress_with_stats(
+                                               frac, 18,
+                                               std::make_optional(
+                                                   std::make_pair(ev.processed, ev.total)),
+                                               "docs");
+                                    if (tty) {
+                                        std::cout << "\r\033[K" << oss.str() << std::flush;
+                                    }
+                                } else if (ev.phase == "error") {
+                                    std::cout << "  " << ui::status_warning(ev.message) << "\n";
+                                } else if (ev.phase == "completed") {
+                                    if (tty) {
+                                        std::cout << "\n";
+                                    }
+                                    std::cout << "  " << ui::status_ok("Daemon FTS5 repair done")
+                                              << "  processed=" << ev.processed
+                                              << " ok=" << ev.succeeded << " failed=" << ev.failed
+                                              << "\n";
+                                }
+                            };
+
+                            auto rr = yams::cli::run_result<yams::daemon::RepairResponse>(
+                                client.callRepair(req, onEvent), std::chrono::minutes(10));
+                            if (rr) {
+                                return;
+                            }
+                            std::cout << "  "
+                                      << ui::status_warning("Daemon FTS5 repair failed (" +
+                                                            rr.error().message +
+                                                            ") — falling back to local mode")
+                                      << "\n";
+                        }
+                    } catch (const std::exception& ex) {
+                        std::cout << "  "
+                                  << ui::status_warning(
+                                         std::string("Daemon FTS5 repair exception (") + ex.what() +
+                                         ") — falling back to local mode")
+                                  << "\n";
+                    }
+                }
+
+                SpinnerRunner spin;
+                spin.start("Loading document list for FTS5 rebuild");
                 auto docs = metadata::queryDocumentsByPattern(*appCtx->metadataRepo, "%");
+                spin.stop();
                 if (!docs) {
                     std::cout << "  Query failed: " << docs.error().message << "\n";
                     return;
                 }
                 size_t ok = 0, fail = 0, total = docs.value().size(), cur = 0;
+
+                if (total == 0) {
+                    std::cout << "  " << status_ok("No documents to reindex") << "\n";
+                    return;
+                }
+
+                std::cout << "  "
+                          << status_info("Reindexing " +
+                                         format_number(static_cast<uint64_t>(total)) +
+                                         " documents (extract text + index into FTS5)")
+                          << "\n";
+
+                const bool tty = stdout_is_tty();
+                auto started = std::chrono::steady_clock::now();
+                auto lastPrint = started;
+                auto printProgress = [&](bool forceNewline) {
+                    auto now = std::chrono::steady_clock::now();
+                    double elapsed =
+                        std::chrono::duration_cast<std::chrono::duration<double>>(now - started)
+                            .count();
+                    double rate = (elapsed > 0.0) ? (static_cast<double>(cur) / elapsed) : 0.0;
+                    uint64_t elapsed_s = static_cast<uint64_t>(elapsed);
+                    uint64_t eta_s = 0;
+                    if (rate > 0.0 && cur < total) {
+                        eta_s = static_cast<uint64_t>(static_cast<double>(total - cur) / rate);
+                    }
+                    double frac =
+                        (total > 0) ? (static_cast<double>(cur) / static_cast<double>(total)) : 1.0;
+                    std::ostringstream oss;
+                    oss << status_pending("FTS5") << " "
+                        << progress_with_stats(
+                               frac, 18,
+                               std::make_optional(std::make_pair(static_cast<uint64_t>(cur),
+                                                                 static_cast<uint64_t>(total))),
+                               "docs")
+                        << " " << colorize("elapsed " + format_duration(elapsed_s), Ansi::DIM);
+                    if (rate > 0.0) {
+                        std::ostringstream r;
+                        r << std::fixed << std::setprecision(rate < 10.0 ? 1 : 0) << rate;
+                        oss << " " << colorize(r.str() + " docs/s", Ansi::DIM);
+                    }
+                    if (eta_s > 0) {
+                        oss << " " << colorize("eta " + format_duration(eta_s), Ansi::DIM);
+                    }
+
+                    const std::string line = oss.str();
+                    if (tty && !forceNewline) {
+                        std::cout << "\r\033[K" << line << std::flush;
+                    } else {
+                        std::cout << "  " << line << "\n" << std::flush;
+                    }
+                    lastPrint = now;
+                };
+
+                bool cancelled = false;
+                uint64_t truncated = 0;
+
+                auto isTooBigError = [](const std::string& msg) -> bool {
+                    // sqlite3_errstr(SQLITE_TOOBIG) => "string or blob too big"
+                    // Our bind diagnostics also include "limit=<n>" and "len=<n>".
+                    return msg.find("too big") != std::string::npos ||
+                           msg.find("TOOBIG") != std::string::npos;
+                };
+
+                auto parseSqliteLimitLen = [](const std::string& msg) -> std::optional<size_t> {
+                    const std::string key = "limit=";
+                    auto pos = msg.find(key);
+                    if (pos == std::string::npos)
+                        return std::nullopt;
+                    pos += key.size();
+                    size_t end = pos;
+                    while (end < msg.size() && msg[end] >= '0' && msg[end] <= '9') {
+                        ++end;
+                    }
+                    if (end == pos)
+                        return std::nullopt;
+                    try {
+                        return static_cast<size_t>(std::stoull(msg.substr(pos, end - pos)));
+                    } catch (...) {
+                        return std::nullopt;
+                    }
+                };
+
                 for (const auto& d : docs.value()) {
+                    if (g_doctor_cancel_requested.load(std::memory_order_relaxed)) {
+                        cancelled = true;
+                        break;
+                    }
                     ++cur;
                     std::string ext = d.fileExtension;
                     if (!ext.empty() && ext[0] == '.')
@@ -646,7 +972,29 @@ private:
                         if (extracted && !extracted->empty()) {
                             auto ir = appCtx->metadataRepo->indexDocumentContent(
                                 d.id, d.fileName, *extracted, d.mimeType);
-                            if (ir) {
+                            if (!ir && isTooBigError(ir.error().message)) {
+                                // Best-effort retry: index a truncated prefix when SQLite
+                                // length limits would otherwise stall the entire repair.
+                                constexpr size_t kDefaultTruncateBytes = 8 * 1024 * 1024; // 8 MiB
+                                size_t cap = kDefaultTruncateBytes;
+                                if (auto limit = parseSqliteLimitLen(ir.error().message);
+                                    limit && *limit > 1024) {
+                                    cap = std::min(cap, *limit - 1024);
+                                }
+                                if (cap > 0 && extracted->size() > cap) {
+                                    std::string truncatedText = extracted->substr(0, cap);
+                                    auto ir2 = appCtx->metadataRepo->indexDocumentContent(
+                                        d.id, d.fileName, truncatedText, d.mimeType);
+                                    if (ir2) {
+                                        ++ok;
+                                        ++truncated;
+                                    } else {
+                                        ++fail;
+                                    }
+                                } else {
+                                    ++fail;
+                                }
+                            } else if (ir) {
                                 ++ok;
                             } else {
                                 ++fail;
@@ -657,12 +1005,34 @@ private:
                     } catch (...) {
                         ++fail;
                     }
-                    if (total > 0 && cur % 500 == 0)
-                        std::cout << "  ..." << cur << "/" << total << "\n";
+
+                    // Always show forward progress on long-running batches.
+                    // - Count-based update keeps output bounded for fast runs.
+                    // - Time-based heartbeat prevents "hung" perception on slow runs.
+                    auto now = std::chrono::steady_clock::now();
+                    bool countTick = (cur % 500 == 0);
+                    bool timeTick = (now - lastPrint) >= std::chrono::seconds(2);
+                    if (countTick || timeTick) {
+                        printProgress(false);
+                    }
+                }
+
+                if (tty) {
+                    // Ensure the final progress line is terminated.
+                    printProgress(true);
+                }
+
+                if (cancelled) {
+                    std::cout << "  "
+                              << ui::status_warning(
+                                     "Cancelled by user (FTS5 index may be partially rebuilt)")
+                              << "\n";
+                    return;
                 }
                 std::cout << "  "
                           << ui::status_ok("FTS5 reindex complete: ok=" + std::to_string(ok) +
-                                           ", fail=" + std::to_string(fail))
+                                           ", fail=" + std::to_string(fail) +
+                                           ", truncated=" + std::to_string(truncated))
                           << "\n";
             }
         } catch (const std::exception& e) {
@@ -1820,6 +2190,10 @@ private:
         }
 
         bool dbReady = status.vectorDbReady;
+        if (auto it = status.readinessStates.find("vector_db");
+            it != status.readinessStates.end()) {
+            dbReady = it->second;
+        }
         size_t dbDim = status.vectorDbDim;
 
         // Avoid polling in CLI; rely on current daemon status only
@@ -1888,6 +2262,7 @@ private:
     bool fixEmbeddings_{false};
     bool fixFts5_{false};
     bool fixGraph_{false};
+    bool noDaemonRepair_{false};
     bool validateGraph_{false};
     bool fixAll_{false};
     bool fixAllTop_{false};
@@ -1998,6 +2373,8 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     rsub->add_flag("--fts5", fixFts5_, "Rebuild FTS5 text index (best-effort)");
     rsub->add_flag("--graph", fixGraph_, "Construct/repair knowledge graph from tags and metadata");
     rsub->add_flag("--all", fixAll_, "Run all repair operations");
+    rsub->add_flag("--no-daemon", noDaemonRepair_,
+                   "Skip daemon RPC and run local repair only (best-effort)");
     rsub->callback([this]() { runRepair(); });
 
     auto* vsub = doctor->add_subcommand("validate", "Validate knowledge graph health");

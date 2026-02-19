@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <future>
 #include <catch2/catch_test_macros.hpp>
+#include "../../common/env_compat.h"
 #include <yams/compat/unistd.h> // For getpid()
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/plugins/model_provider_v1.h>
@@ -228,6 +229,39 @@ TEST_CASE("Plugin: Error handling and edge cases", "[daemon][plugin][error]") {
             SUCCEED("Trust model: scan restricted");
         }
     }
+}
+
+TEST_CASE("Plugin: provenance root smoke", "[daemon][plugin][provenance]") {
+    IsolatedPluginEnv env;
+
+    auto pluginPath = getOnnxPluginPath();
+    if (!pluginPath || !fs::exists(*pluginPath)) {
+        SKIP("ONNX plugin not available for provenance smoke test");
+    }
+
+    const char* expectedRootEnv = std::getenv("YAMS_EXPECT_PLUGIN_ROOT");
+    if (!expectedRootEnv || !*expectedRootEnv) {
+        SKIP("YAMS_EXPECT_PLUGIN_ROOT not set; skipping provenance root enforcement");
+    }
+
+    const fs::path expectedRoot = fs::weakly_canonical(fs::path(expectedRootEnv));
+
+    AbiPluginHost host(nullptr);
+    host.setTrustFile(env.trustFile);
+    REQUIRE(host.trustAdd(pluginPath->parent_path()));
+
+    auto loaded = host.load(*pluginPath, "{}");
+    REQUIRE(loaded);
+
+    const fs::path actualPath = fs::weakly_canonical(loaded.value().path);
+    INFO("Expected plugin root: " << expectedRoot.string());
+    INFO("Loaded plugin path: " << actualPath.string());
+
+    const std::string expectedRootStr = expectedRoot.string();
+    const std::string actualPathStr = actualPath.string();
+    REQUIRE(actualPathStr.rfind(expectedRootStr, 0) == 0);
+
+    REQUIRE(host.unload(loaded.value().name));
 }
 
 } // namespace yams::daemon

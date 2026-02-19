@@ -6,17 +6,18 @@
  * for fast grep/search. Provides a small facade API used by post-ingest pipeline
  * and repair flows.
  *
- * Jobs are dispatched to WorkCoordinator's shared thread pool for parallel processing.
+ * Jobs are routed through InternalEventBus ("entity_graph_jobs" channel) for
+ * centralized backpressure and observability, then consumed by a channel poller
+ * coroutine running on WorkCoordinator's executor.
  */
 #pragma once
 
 #include <atomic>
-#include <functional>
 #include <memory>
-#include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
+
+#include <boost/asio/awaitable.hpp>
 
 #include <yams/core/types.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -26,27 +27,11 @@ struct yams_symbol_extraction_result_v1;
 struct yams_entity_extraction_result_v2;
 
 namespace yams {
-namespace metadata {
-class MetadataRepository;
-} // namespace metadata
 namespace daemon {
 class ServiceManager;
 class AbiSymbolExtractorAdapter;
 class AbiEntityExtractorAdapter;
 class KGWriteQueue;
-
-/// Per-job cache to avoid redundant KG lookups during extraction.
-/// Scoped to a single populateKnowledgeGraph() call.
-struct ExtractionCache {
-    std::unordered_map<std::string, std::int64_t> nodeKeyToId;
-
-    std::optional<std::int64_t> lookup(const std::string& key) const {
-        auto it = nodeKeyToId.find(key);
-        return it != nodeKeyToId.end() ? std::optional{it->second} : std::nullopt;
-    }
-
-    void insert(const std::string& key, std::int64_t id) { nodeKeyToId[key] = id; }
-};
 
 /**
  * EntityGraphService facade.
@@ -89,11 +74,6 @@ public:
     yams::Result<void> submitExtraction(Job job);
 
     /**
-     * Retroactive scheduling helper (stub). Queues re-extraction across a scope.
-     */
-    yams::Result<void> reextractRange(const std::string& scope);
-
-    /**
      * Stats snapshot for diagnostics.
      */
     struct Stats {
@@ -103,18 +83,9 @@ public:
     };
     Stats getStats() const;
 
-    /**
-     * Materialize derived indices from KG for grep/search (stub; no-op if stores missing).
-     */
-    yams::Result<void> materializeSymbolIndex();
-
-    /**
-     * Minimal read adapters for grep/search (fast path wrappers; stubs for now).
-     */
-    std::vector<std::string> findSymbolsByName(const std::string& name) const;
-
 private:
     bool process(Job& job);
+    boost::asio::awaitable<void> channelPoller();
     // KG population helper: builds rich multi-layered symbol graph
     bool populateKnowledgeGraph(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
                                 const Job& job, const yams_symbol_extraction_result_v1* result);
@@ -128,107 +99,11 @@ private:
                                    const Job& job, const yams_symbol_extraction_result_v1* result,
                                    KGWriteQueue* kgQueue);
 
-    struct ContextNodes {
-        std::optional<std::int64_t> documentNodeId;
-        std::optional<std::int64_t> fileNodeId;
-        std::optional<std::int64_t> directoryNodeId;
-        std::optional<std::int64_t> pathNodeId;
-    };
-
-    struct SymbolNodeBatch {
-        std::vector<std::int64_t> canonicalNodeIds;
-        std::vector<std::int64_t> versionNodeIds;
-        std::vector<std::string> symbolKeys;
-    };
-
-    // WriteBatch type alias for convenience (nested in KnowledgeGraphStore)
-    using WriteBatch = yams::metadata::KnowledgeGraphStore::WriteBatch;
-
-    yams::Result<ContextNodes>
-    resolveContextNodes(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-                        WriteBatch* batch, ExtractionCache& cache, const Job& job,
-                        std::optional<std::int64_t>& documentDbId);
-
-    yams::Result<SymbolNodeBatch>
-    createSymbolNodes(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-                      WriteBatch* batch, ExtractionCache& cache, const Job& job,
-                      const yams_symbol_extraction_result_v1* result);
-
-    yams::Result<void>
-    createSymbolEdges(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-                      WriteBatch* batch, ExtractionCache& cache, const Job& job,
-                      const yams_symbol_extraction_result_v1* result,
-                      const ContextNodes& contextNodes, const SymbolNodeBatch& nodes);
-
-    yams::Result<void> createDocEntities(WriteBatch* batch,
-                                         std::optional<std::int64_t> documentDbId,
-                                         const yams_symbol_extraction_result_v1* result,
-                                         const std::vector<std::int64_t>& symbolNodeIds);
-
-    /**
-     * Generate and store entity embeddings for extracted symbols.
-     * Creates EntityVectorRecords with SIGNATURE embedding type for semantic search.
-     * Non-blocking: skips gracefully if model provider or vector DB is not available.
-     */
-    yams::Result<void> generateEntityEmbeddings(const Job& job,
-                                                const yams_symbol_extraction_result_v1* result,
-                                                const SymbolNodeBatch& symbolNodes);
-
-    /**
-     * Build text representation for a symbol (for embedding generation).
-     * Combines kind, qualified name, parameters, return type, and documentation.
-     */
-    static std::string buildSymbolText(const yams_symbol_extraction_result_v1* result,
-                                       size_t index);
-
     /**
      * Check if content type should use NL entity extraction instead of code symbol extraction.
      * Returns true for text/plain, text/markdown, application/json, and similar NL content.
      */
     static bool isNaturalLanguageContent(const Job& job);
-
-    /**
-     * Process NL content using entity extractor plugins (e.g., Glint for GLiNER).
-     * Extracts named entities (person, organization, location, etc.) from text.
-     */
-    bool processNaturalLanguage(Job& job);
-
-    /**
-     * Populate KG with NL entities (person, organization, location, etc.)
-     */
-    bool populateKnowledgeGraphNL(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-                                  const Job& job, const yams_entity_extraction_result_v2* result,
-                                  const AbiEntityExtractorAdapter* adapter);
-
-    /**
-     * Deferred KG population using batched write queue.
-     * Eliminates lock contention by queuing writes instead of immediate commits.
-     */
-    bool
-    populateKnowledgeGraphNLDeferred(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-                                     const Job& job, const yams_entity_extraction_result_v2* result,
-                                     const AbiEntityExtractorAdapter* adapter,
-                                     KGWriteQueue* kgQueue);
-
-    /**
-     * Create KG nodes for NL entities.
-     */
-    struct EntityNodeBatch {
-        std::vector<std::int64_t> nodeIds;
-        std::vector<std::string> entityKeys;
-    };
-
-    yams::Result<EntityNodeBatch>
-    createEntityNodes(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-                      yams::metadata::KnowledgeGraphStore::WriteBatch* writeBatch, const Job& job,
-                      const yams_entity_extraction_result_v2* result);
-
-    /**
-     * Generate embeddings for NL entities.
-     */
-    yams::Result<void> generateNLEntityEmbeddings(const Job& job,
-                                                  const yams_entity_extraction_result_v2* result,
-                                                  const EntityNodeBatch& entityNodes);
 
     ServiceManager* services_{};
     std::atomic<bool> stop_{false};

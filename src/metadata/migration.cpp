@@ -342,7 +342,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createSymSpellSchema(),
             createTermStatsSchema(),
             repairSymbolMetadataUniqueness(),
-            optimizeValueCountsQuery()};
+            optimizeValueCountsQuery(),
+            createFeedbackEventsSchema()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2423,6 +2424,41 @@ Migration YamsMetadataMigrations::optimizeValueCountsQuery() {
         DROP INDEX IF EXISTS idx_metadata_value_counts_key_count;
         DROP TABLE IF EXISTS metadata_value_counts;
         DROP INDEX IF EXISTS idx_metadata_aggregation_filtered;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createFeedbackEventsSchema() {
+    Migration m;
+    m.version = 28;
+    m.name = "Create feedback events table for retrieval control loop";
+    m.created = std::chrono::system_clock::now();
+
+    m.upSQL = R"(
+        CREATE TABLE IF NOT EXISTS feedback_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL UNIQUE,
+            trace_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload_json TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_feedback_events_trace_id
+            ON feedback_events(trace_id);
+        CREATE INDEX IF NOT EXISTS idx_feedback_events_event_type_time
+            ON feedback_events(event_type, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_feedback_events_created_at
+            ON feedback_events(created_at DESC);
+    )";
+
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_feedback_events_created_at;
+        DROP INDEX IF EXISTS idx_feedback_events_event_type_time;
+        DROP INDEX IF EXISTS idx_feedback_events_trace_id;
+        DROP TABLE IF EXISTS feedback_events;
     )";
 
     return m;

@@ -192,13 +192,13 @@ TEST_CASE("All migrations execute successfully", "[catch2][unit][metadata][migra
         REQUIRE(actual_version > 0); // Sanity check: should have at least one migration
     }
 
-    SECTION("Migration version is at least v27 (value count materialization)") {
-        // This ensures we haven't regressed and lost the metadata value count materialization
+    SECTION("Migration version is at least v28 (feedback events schema)") {
+        // This ensures we haven't regressed and lost the feedback_events schema
         auto result = fixture.applyAllMigrations();
         REQUIRE(result);
 
         int version = result.value();
-        REQUIRE(version >= 27);
+        REQUIRE(version >= 28);
 
         INFO("Current migration version: " << version);
     }

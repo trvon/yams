@@ -2,24 +2,25 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <yams/common/utf8_utils.h>
 #include <chrono>
 #include <filesystem>
-#include <sstream>
 #include <unordered_map>
 #include <boost/asio.hpp>
-#include <yams/common/utf8_utils.h>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_awaitable.hpp>
+#include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
-#include <yams/daemon/resource/abi_entity_extractor_adapter.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
-#include <yams/daemon/resource/model_provider.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/plugins/entity_extractor_v2.h>
 #include <yams/plugins/symbol_extractor_v1.h>
-#include <yams/vector/vector_database.h>
 
 namespace yams::daemon {
 
@@ -30,10 +31,76 @@ EntityGraphService::~EntityGraphService() {
     stop();
 }
 
-void EntityGraphService::start() {}
+void EntityGraphService::start() {
+    if (!services_)
+        return;
+    auto* coordinator = services_->getWorkCoordinator();
+    if (!coordinator)
+        return;
+
+    stop_.store(false);
+    boost::asio::co_spawn(coordinator->getExecutor(), channelPoller(), boost::asio::detached);
+    spdlog::debug("EntityGraphService: channel poller started");
+}
 
 void EntityGraphService::stop() {
     stop_.store(true);
+}
+
+boost::asio::awaitable<void> EntityGraphService::channelPoller() {
+    constexpr std::size_t kChannelCapacity = 4096;
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityGraphJob>(
+            "entity_graph_jobs", kChannelCapacity);
+
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+
+    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10);
+    auto idleDelay = kMinIdleDelay;
+
+    while (!stop_.load(std::memory_order_relaxed)) {
+        bool didWork = false;
+        InternalEventBus::EntityGraphJob busJob;
+
+        while (channel->try_pop(busJob)) {
+            didWork = true;
+
+            Job job;
+            job.documentHash = std::move(busJob.documentHash);
+            job.filePath = std::move(busJob.filePath);
+            job.contentUtf8 = std::move(busJob.contentUtf8);
+            job.language = std::move(busJob.language);
+            job.mimeType = std::move(busJob.mimeType);
+
+            try {
+                if (!process(job))
+                    failed_.fetch_add(1, std::memory_order_relaxed);
+            } catch (const std::exception& e) {
+                spdlog::error("EntityGraphService: exception processing {}: {}", job.filePath,
+                              e.what());
+                failed_.fetch_add(1, std::memory_order_relaxed);
+            } catch (...) {
+                spdlog::error("EntityGraphService: unknown exception processing {}", job.filePath);
+                failed_.fetch_add(1, std::memory_order_relaxed);
+            }
+            processed_.fetch_add(1, std::memory_order_relaxed);
+            InternalEventBus::instance().incEntityGraphConsumed();
+        }
+
+        if (didWork) {
+            idleDelay = kMinIdleDelay;
+            continue;
+        }
+
+        timer.expires_after(idleDelay);
+        co_await timer.async_wait(boost::asio::use_awaitable);
+        if (idleDelay < kMaxIdleDelay) {
+            idleDelay = std::min(idleDelay * 2, kMaxIdleDelay);
+        }
+    }
+
+    spdlog::debug("EntityGraphService: channel poller exited");
 }
 
 Result<void> EntityGraphService::submitExtraction(Job job) {
@@ -43,46 +110,36 @@ Result<void> EntityGraphService::submitExtraction(Job job) {
     if (!services_) {
         return Error{ErrorCode::InternalError, "no_services"};
     }
-    auto* coordinator = services_->getWorkCoordinator();
-    if (!coordinator) {
-        return Error{ErrorCode::InternalError, "no_coordinator"};
-    }
-    accepted_.fetch_add(1, std::memory_order_relaxed);
-    boost::asio::post(coordinator->getExecutor(), [this, j = std::move(job)]() mutable {
-        if (stop_.load(std::memory_order_relaxed))
-            return;
-        try {
-            if (!process(j))
-                failed_.fetch_add(1, std::memory_order_relaxed);
-        } catch (const std::exception& e) {
-            spdlog::error("EntityGraphService: exception processing {}: {}", j.filePath, e.what());
-            failed_.fetch_add(1, std::memory_order_relaxed);
-        } catch (...) {
-            spdlog::error("EntityGraphService: unknown exception processing {}", j.filePath);
-            failed_.fetch_add(1, std::memory_order_relaxed);
-        }
-        processed_.fetch_add(1, std::memory_order_relaxed);
-    });
-    return Result<void>();
-}
 
-Result<void> EntityGraphService::reextractRange(const std::string& /*scope*/) {
-    // TODO: query metadata for scope and enqueue jobs
+    accepted_.fetch_add(1, std::memory_order_relaxed);
+
+    // Route through InternalEventBus for centralized backpressure and observability
+    auto& bus = InternalEventBus::instance();
+    auto filePath = job.filePath; // capture before move
+    InternalEventBus::EntityGraphJob busJob;
+    busJob.documentHash = std::move(job.documentHash);
+    busJob.filePath = std::move(job.filePath);
+    busJob.contentUtf8 = std::move(job.contentUtf8);
+    busJob.language = std::move(job.language);
+    busJob.mimeType = std::move(job.mimeType);
+
+    constexpr std::size_t kChannelCapacity = 4096;
+    auto channel = bus.get_or_create_channel<InternalEventBus::EntityGraphJob>("entity_graph_jobs",
+                                                                               kChannelCapacity);
+
+    if (channel->try_push(std::move(busJob))) {
+        bus.incEntityGraphQueued();
+    } else {
+        bus.incEntityGraphDropped();
+        spdlog::debug("EntityGraphService: channel full, dropping job for {}", filePath);
+    }
+
     return Result<void>();
 }
 
 EntityGraphService::Stats EntityGraphService::getStats() const {
     return {accepted_.load(std::memory_order_relaxed), processed_.load(std::memory_order_relaxed),
             failed_.load(std::memory_order_relaxed)};
-}
-
-Result<void> EntityGraphService::materializeSymbolIndex() {
-    // TODO: read KG and populate symbol_metadata derived table (or refresh views)
-    return Result<void>();
-}
-
-std::vector<std::string> EntityGraphService::findSymbolsByName(const std::string& /*name*/) const {
-    return {};
 }
 
 bool EntityGraphService::process(Job& job) {
@@ -142,8 +199,8 @@ bool EntityGraphService::process(Job& job) {
         return false;
     }
 
-    spdlog::info("EntityGraphService: extracted {} symbols from {} (lang={})", result->symbol_count,
-                 job.filePath, job.language);
+    spdlog::debug("EntityGraphService: extracted {} symbols from {} (lang={})",
+                  result->symbol_count, job.filePath, job.language);
 
     // Populate KG with rich symbol relationships
     bool success = populateKnowledgeGraph(kg, job, result);
@@ -182,8 +239,8 @@ bool EntityGraphService::populateKnowledgeGraph(
         return true; // No symbols to process
     }
 
-    spdlog::info("EntityGraphService: received {} symbols, {} relations from {}",
-                 result->symbol_count, result->relation_count, job.filePath);
+    spdlog::debug("EntityGraphService: received {} symbols, {} relations from {}",
+                  result->symbol_count, result->relation_count, job.filePath);
 
     // Require KGWriteQueue - batched writes only (no fallback to per-document commits)
     KGWriteQueue* kgQueue = services_ ? services_->getKgWriteQueue() : nullptr;
@@ -628,8 +685,8 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
             return false;
         }
 
-        spdlog::info("EntityGraphService: queued KG batch with {} symbols from {}",
-                     result->symbol_count, job.filePath);
+        spdlog::debug("EntityGraphService: queued KG batch with {} symbols from {}",
+                      result->symbol_count, job.filePath);
 
         // Generate entity embeddings (runs after batch committed, non-blocking)
         // Note: symbolNodes needed for embeddings but we don't have IDs in deferred path
@@ -640,757 +697,6 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
         spdlog::warn("EntityGraphService: exception queueing symbol KG batch: {}", e.what());
         return false;
     }
-}
-
-yams::Result<EntityGraphService::ContextNodes> EntityGraphService::resolveContextNodes(
-    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, WriteBatch* batch,
-    ExtractionCache& cache, const Job& job, std::optional<std::int64_t>& documentDbId) {
-    ContextNodes contextNodes;
-
-    if (!job.documentHash.empty()) {
-        auto docDbIdResult = kg->getDocumentIdByHash(job.documentHash);
-        if (docDbIdResult.has_value()) {
-            documentDbId = docDbIdResult.value();
-
-            yams::metadata::KGNode docNode;
-            docNode.nodeKey = "doc:" + job.documentHash;
-            docNode.label = job.filePath;
-            docNode.type = "document";
-            nlohmann::json docProps;
-            docProps["hash"] = job.documentHash;
-            docProps["path"] = job.filePath;
-            docProps["language"] = job.language;
-            docNode.properties = docProps.dump();
-
-            auto docNodeResult = batch->upsertNode(docNode);
-            if (docNodeResult.has_value()) {
-                contextNodes.documentNodeId = docNodeResult.value();
-                cache.insert(docNode.nodeKey, docNodeResult.value());
-            }
-        }
-    }
-
-    if (!job.filePath.empty()) {
-        yams::metadata::KGNode fileNode;
-        fileNode.nodeKey = "file:" + job.filePath;
-        fileNode.label = job.filePath;
-        fileNode.type = "file";
-        nlohmann::json fileProps;
-        fileProps["path"] = job.filePath;
-        fileProps["language"] = job.language;
-        if (!job.filePath.empty()) {
-            fileProps["basename"] = std::filesystem::path(job.filePath).filename().string();
-        }
-        if (!job.documentHash.empty()) {
-            fileProps["current_hash"] = job.documentHash;
-        }
-        fileNode.properties = fileProps.dump();
-
-        auto fileNodeResult = batch->upsertNode(fileNode);
-        if (fileNodeResult.has_value()) {
-            contextNodes.fileNodeId = fileNodeResult.value();
-            cache.insert(fileNode.nodeKey, fileNodeResult.value());
-        }
-    }
-
-    if (!job.filePath.empty() && !job.documentHash.empty()) {
-        yams::metadata::PathNodeDescriptor descriptor;
-        descriptor.snapshotId = job.documentHash;
-        descriptor.path = job.filePath;
-        descriptor.rootTreeHash = "";
-        descriptor.isDirectory = false;
-        // Note: ensurePathNode still uses the kg interface (not batch) as it has complex logic
-        auto pathNodeRes = kg->ensurePathNode(descriptor);
-        if (pathNodeRes.has_value()) {
-            contextNodes.pathNodeId = pathNodeRes.value();
-        }
-    }
-
-    if (contextNodes.fileNodeId.has_value() && contextNodes.documentNodeId.has_value()) {
-        yams::metadata::KGEdge fileDocEdge;
-        fileDocEdge.srcNodeId = contextNodes.fileNodeId.value();
-        fileDocEdge.dstNodeId = contextNodes.documentNodeId.value();
-        fileDocEdge.relation = "has_version";
-        fileDocEdge.weight = 1.0f;
-        nlohmann::json edgeProps;
-        edgeProps["timestamp"] = std::chrono::system_clock::now().time_since_epoch().count();
-        fileDocEdge.properties = edgeProps.dump();
-        batch->addEdge(fileDocEdge);
-    }
-
-    if (!job.filePath.empty()) {
-        size_t lastSlash = job.filePath.rfind('/');
-        if (lastSlash != std::string::npos) {
-            std::string dirPath = job.filePath.substr(0, lastSlash);
-
-            yams::metadata::KGNode dirNode;
-            dirNode.nodeKey = "dir:" + dirPath;
-            dirNode.label = dirPath;
-            dirNode.type = "directory";
-            nlohmann::json dirProps;
-            dirProps["path"] = dirPath;
-            dirNode.properties = dirProps.dump();
-
-            auto dirNodeResult = batch->upsertNode(dirNode);
-            if (dirNodeResult.has_value()) {
-                contextNodes.directoryNodeId = dirNodeResult.value();
-                cache.insert(dirNode.nodeKey, dirNodeResult.value());
-
-                if (contextNodes.fileNodeId.has_value()) {
-                    yams::metadata::KGEdge dirFileEdge;
-                    dirFileEdge.srcNodeId = contextNodes.directoryNodeId.value();
-                    dirFileEdge.dstNodeId = contextNodes.fileNodeId.value();
-                    dirFileEdge.relation = "contains";
-                    dirFileEdge.weight = 1.0f;
-                    batch->addEdge(dirFileEdge);
-                }
-            }
-        }
-    }
-
-    return contextNodes;
-}
-
-yams::Result<EntityGraphService::SymbolNodeBatch> EntityGraphService::createSymbolNodes(
-    [[maybe_unused]] const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-    WriteBatch* batch, ExtractionCache& cache, const Job& job,
-    const yams_symbol_extraction_result_v1* result) {
-    std::vector<yams::metadata::KGNode> symbolNodes;
-    std::vector<yams::metadata::KGNode> versionNodes;
-    symbolNodes.reserve(result->symbol_count);
-    versionNodes.reserve(result->symbol_count);
-
-    SymbolNodeBatch nodeBatch;
-    nodeBatch.symbolKeys.reserve(result->symbol_count);
-
-    auto now = std::chrono::system_clock::now().time_since_epoch().count();
-    const bool hasSnapshot = !job.documentHash.empty();
-
-    for (size_t i = 0; i < result->symbol_count; ++i) {
-        const auto& sym = result->symbols[i];
-
-        yams::metadata::KGNode canonicalNode;
-        std::string qualName = sym.qualified_name ? std::string(sym.qualified_name)
-                                                  : (sym.name ? std::string(sym.name) : "");
-        std::string kind = sym.kind ? std::string(sym.kind) : "symbol";
-        std::string canonicalKey = kind + ":" + qualName + "@" + job.filePath;
-        canonicalNode.nodeKey = canonicalKey;
-        canonicalNode.label = sym.name ? std::string(sym.name) : qualName;
-        canonicalNode.type = kind;
-
-        nlohmann::json canonicalProps;
-        canonicalProps["qualified_name"] = qualName;
-        canonicalProps["simple_name"] = sym.name ? std::string(sym.name) : "";
-        canonicalProps["file_path"] = sym.file_path ? std::string(sym.file_path) : job.filePath;
-        canonicalProps["language"] = job.language;
-        canonicalNode.properties = canonicalProps.dump();
-
-        symbolNodes.push_back(std::move(canonicalNode));
-        nodeBatch.symbolKeys.push_back(qualName);
-
-        if (hasSnapshot) {
-            yams::metadata::KGNode versionNode;
-            versionNode.nodeKey = canonicalKey + "@snap:" + job.documentHash;
-            versionNode.label = sym.name ? std::string(sym.name) : qualName;
-            versionNode.type = kind + "_version";
-
-            nlohmann::json props;
-            props["qualified_name"] = qualName;
-            props["simple_name"] = sym.name ? std::string(sym.name) : "";
-            props["file_path"] = sym.file_path ? std::string(sym.file_path) : job.filePath;
-            props["language"] = job.language;
-            props["start_line"] = sym.start_line;
-            props["end_line"] = sym.end_line;
-            props["start_offset"] = sym.start_offset;
-            props["end_offset"] = sym.end_offset;
-            props["last_seen"] = now;
-            props["snapshot_id"] = job.documentHash;
-            props["document_hash"] = job.documentHash;
-            props["canonical_key"] = canonicalKey;
-            props["kind"] = kind;
-
-            if (sym.return_type)
-                props["return_type"] = std::string(sym.return_type);
-            if (sym.documentation)
-                props["documentation"] = std::string(sym.documentation);
-            if (sym.parameters && sym.parameter_count > 0) {
-                nlohmann::json params = nlohmann::json::array();
-                for (size_t p = 0; p < sym.parameter_count; ++p) {
-                    if (sym.parameters[p])
-                        params.push_back(std::string(sym.parameters[p]));
-                }
-                props["parameters"] = params;
-            }
-
-            versionNode.properties = props.dump();
-            versionNodes.push_back(std::move(versionNode));
-        }
-    }
-
-    auto canonicalIdsRes = batch->upsertNodes(symbolNodes);
-    if (!canonicalIdsRes) {
-        return canonicalIdsRes.error();
-    }
-
-    nodeBatch.canonicalNodeIds = canonicalIdsRes.value();
-
-    // Cache the canonical node keys
-    for (size_t i = 0; i < symbolNodes.size(); ++i) {
-        cache.insert(symbolNodes[i].nodeKey, nodeBatch.canonicalNodeIds[i]);
-    }
-
-    if (hasSnapshot) {
-        auto versionIdsRes = batch->upsertNodes(versionNodes);
-        if (!versionIdsRes) {
-            return versionIdsRes.error();
-        }
-        nodeBatch.versionNodeIds = versionIdsRes.value();
-
-        // Cache the version node keys
-        for (size_t i = 0; i < versionNodes.size(); ++i) {
-            cache.insert(versionNodes[i].nodeKey, nodeBatch.versionNodeIds[i]);
-        }
-    } else {
-        nodeBatch.versionNodeIds = nodeBatch.canonicalNodeIds;
-    }
-
-    // Populate symbol_metadata table for fast SQL-based filtering
-    if (hasSnapshot) {
-        std::vector<yams::metadata::SymbolMetadata> symbolMetadata;
-        symbolMetadata.reserve(result->symbol_count);
-
-        for (size_t i = 0; i < result->symbol_count; ++i) {
-            const auto& sym = result->symbols[i];
-
-            yams::metadata::SymbolMetadata meta;
-            meta.documentHash = job.documentHash;
-            meta.filePath = sym.file_path ? std::string(sym.file_path) : job.filePath;
-            meta.symbolName = sym.name ? std::string(sym.name) : "";
-            meta.qualifiedName = sym.qualified_name ? std::string(sym.qualified_name)
-                                                    : (sym.name ? std::string(sym.name) : "");
-            meta.kind = sym.kind ? std::string(sym.kind) : "symbol";
-            meta.startLine = sym.start_line;
-            meta.endLine = sym.end_line;
-            meta.startOffset = sym.start_offset;
-            meta.endOffset = sym.end_offset;
-
-            if (sym.return_type)
-                meta.returnType = std::string(sym.return_type);
-            if (sym.documentation)
-                meta.documentation = std::string(sym.documentation);
-            if (sym.parameters && sym.parameter_count > 0) {
-                std::string params;
-                for (size_t p = 0; p < sym.parameter_count; ++p) {
-                    if (sym.parameters[p]) {
-                        if (!params.empty())
-                            params += ", ";
-                        params += sym.parameters[p];
-                    }
-                }
-                meta.parameters = params;
-            }
-
-            symbolMetadata.push_back(std::move(meta));
-        }
-
-        auto metaRes = batch->upsertSymbolMetadata(symbolMetadata);
-        if (!metaRes) {
-            spdlog::warn("Failed to upsert symbol_metadata for {}: {}", job.filePath,
-                         metaRes.error().message);
-            // Non-fatal: continue even if symbol_metadata fails
-        }
-    }
-
-    return nodeBatch;
-}
-
-yams::Result<void> EntityGraphService::createSymbolEdges(
-    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, WriteBatch* batch,
-    ExtractionCache& cache, const Job& job, const yams_symbol_extraction_result_v1* result,
-    const ContextNodes& contextNodes, const SymbolNodeBatch& nodes) {
-    // Aliases
-    std::vector<yams::metadata::KGAlias> aliases;
-    for (size_t i = 0; i < result->symbol_count; ++i) {
-        const auto& sym = result->symbols[i];
-        std::int64_t nodeId = nodes.canonicalNodeIds[i];
-
-        if (sym.name) {
-            yams::metadata::KGAlias alias;
-            alias.nodeId = nodeId;
-            alias.alias = std::string(sym.name);
-            alias.source = "symbol_name";
-            alias.confidence = 1.0f;
-            aliases.push_back(alias);
-        }
-        if (sym.qualified_name && sym.qualified_name != sym.name) {
-            yams::metadata::KGAlias alias;
-            alias.nodeId = nodeId;
-            alias.alias = std::string(sym.qualified_name);
-            alias.source = "qualified_name";
-            alias.confidence = 1.0f;
-            aliases.push_back(alias);
-        }
-        if (sym.qualified_name) {
-            std::string qn(sym.qualified_name);
-            size_t pos = 0;
-            while ((pos = qn.find("::", pos)) != std::string::npos) {
-                std::string partial = qn.substr(pos + 2);
-                if (!partial.empty() && partial != sym.name) {
-                    yams::metadata::KGAlias alias;
-                    alias.nodeId = nodeId;
-                    alias.alias = partial;
-                    alias.source = "partial_qualified";
-                    alias.confidence = 0.8f;
-                    aliases.push_back(alias);
-                }
-                pos += 2;
-            }
-        }
-    }
-    if (!aliases.empty()) {
-        batch->addAliases(aliases);
-    }
-
-    // Context Edges
-    std::vector<yams::metadata::KGEdge> contextEdges;
-    for (size_t i = 0; i < nodes.versionNodeIds.size(); ++i) {
-        std::int64_t symNodeId = nodes.versionNodeIds[i];
-        if (contextNodes.documentNodeId.has_value()) {
-            nlohmann::json edgeProps;
-            edgeProps["line_start"] = result->symbols[i].start_line;
-            edgeProps["line_end"] = result->symbols[i].end_line;
-            if (!job.documentHash.empty())
-                edgeProps["snapshot_id"] = job.documentHash;
-            yams::metadata::KGEdge edge;
-            edge.srcNodeId = symNodeId;
-            edge.dstNodeId = contextNodes.documentNodeId.value();
-            edge.relation = "defined_in";
-            edge.weight = 1.0f;
-            edge.properties = edgeProps.dump();
-            contextEdges.push_back(edge);
-        }
-        if (contextNodes.pathNodeId.has_value()) {
-            yams::metadata::KGEdge edge;
-            edge.srcNodeId = symNodeId;
-            edge.dstNodeId = contextNodes.pathNodeId.value();
-            edge.relation = "located_in";
-            edge.weight = 1.0f;
-            contextEdges.push_back(edge);
-        } else if (contextNodes.fileNodeId.has_value()) {
-            yams::metadata::KGEdge edge;
-            edge.srcNodeId = symNodeId;
-            edge.dstNodeId = contextNodes.fileNodeId.value();
-            edge.relation = "located_in";
-            edge.weight = 1.0f;
-            contextEdges.push_back(edge);
-        }
-        if (contextNodes.directoryNodeId.has_value()) {
-            yams::metadata::KGEdge edge;
-            edge.srcNodeId = symNodeId;
-            edge.dstNodeId = contextNodes.directoryNodeId.value();
-            edge.relation = "scoped_by";
-            edge.weight = 0.5f;
-            contextEdges.push_back(edge);
-        }
-    }
-    if (!contextEdges.empty()) {
-        batch->addEdgesUnique(contextEdges);
-    }
-
-    // File/Path containment edges: file/path -> symbol
-    std::vector<yams::metadata::KGEdge> containmentEdges;
-    containmentEdges.reserve(nodes.versionNodeIds.size());
-    std::optional<std::int64_t> containerId;
-    if (contextNodes.fileNodeId.has_value()) {
-        containerId = contextNodes.fileNodeId;
-    } else if (contextNodes.pathNodeId.has_value()) {
-        containerId = contextNodes.pathNodeId;
-    }
-    if (containerId.has_value()) {
-        for (size_t i = 0; i < nodes.versionNodeIds.size(); ++i) {
-            nlohmann::json edgeProps;
-            edgeProps["line_start"] = result->symbols[i].start_line;
-            edgeProps["line_end"] = result->symbols[i].end_line;
-            if (!job.documentHash.empty())
-                edgeProps["snapshot_id"] = job.documentHash;
-            yams::metadata::KGEdge edge;
-            edge.srcNodeId = containerId.value();
-            edge.dstNodeId = nodes.versionNodeIds[i];
-            edge.relation = "contains";
-            edge.weight = 1.0f;
-            edge.properties = edgeProps.dump();
-            containmentEdges.push_back(edge);
-        }
-    }
-    if (!containmentEdges.empty()) {
-        batch->addEdgesUnique(containmentEdges);
-    }
-
-    // Canonical -> version edges for snapshot tracking
-    if (!job.documentHash.empty()) {
-        std::vector<yams::metadata::KGEdge> versionEdges;
-        versionEdges.reserve(nodes.canonicalNodeIds.size());
-        for (size_t i = 0; i < nodes.canonicalNodeIds.size(); ++i) {
-            yams::metadata::KGEdge edge;
-            edge.srcNodeId = nodes.canonicalNodeIds[i];
-            edge.dstNodeId = nodes.versionNodeIds[i];
-            edge.relation = "observed_as";
-            edge.weight = 1.0f;
-            nlohmann::json props;
-            props["snapshot_id"] = job.documentHash;
-            props["document_hash"] = job.documentHash;
-            edge.properties = props.dump();
-            versionEdges.push_back(edge);
-        }
-        batch->addEdgesUnique(versionEdges);
-    }
-
-    // Symbol-to-symbol Edges
-    if (result->relation_count > 0) {
-        std::unordered_map<std::string, std::int64_t> qualNameToId;
-        for (size_t i = 0; i < nodes.symbolKeys.size(); ++i) {
-            qualNameToId[nodes.symbolKeys[i]] = nodes.versionNodeIds[i];
-        }
-
-        std::vector<yams::metadata::KGEdge> symbolEdges;
-        auto now = std::chrono::system_clock::now().time_since_epoch().count();
-
-        // Helper to resolve symbol/alias to node ID (uses cache first, then KG)
-        auto resolveSymbolNodeId = [&](const std::string& key) -> std::optional<std::int64_t> {
-            // Check local map first
-            auto it = qualNameToId.find(key);
-            if (it != qualNameToId.end())
-                return it->second;
-            // Check cache
-            if (auto cached = cache.lookup(key))
-                return cached;
-            // Fall back to KG alias resolution
-            auto aliasRes = kg->resolveAliasExact(key, 1);
-            if (aliasRes.has_value() && !aliasRes.value().empty()) {
-                auto nodeId = aliasRes.value()[0].nodeId;
-                cache.insert(key, nodeId);
-                return nodeId;
-            }
-            return std::nullopt;
-        };
-
-        auto resolveOrCreatePathNode = [&](const std::string& path) -> std::optional<std::int64_t> {
-            if (job.documentHash.empty()) {
-                return std::nullopt;
-            }
-            // Check cache first
-            std::string cacheKey = "path:" + job.documentHash + ":" + path;
-            if (auto cached = cache.lookup(cacheKey))
-                return cached;
-            // Use KG's ensurePathNode (complex logic, not batched)
-            yams::metadata::PathNodeDescriptor descriptor;
-            descriptor.snapshotId = job.documentHash;
-            descriptor.path = path;
-            descriptor.rootTreeHash = "";
-            descriptor.isDirectory = false;
-            auto nodeRes = kg->ensurePathNode(descriptor);
-            if (nodeRes.has_value()) {
-                cache.insert(cacheKey, nodeRes.value());
-                return nodeRes.value();
-            }
-            return std::nullopt;
-        };
-
-        // Helper to resolve/create file node for includes
-        auto resolveOrCreateFileNode = [&](const std::string& path) -> std::optional<std::int64_t> {
-            std::string nodeKey = "file:" + path;
-            // Check cache first
-            if (auto cached = cache.lookup(nodeKey))
-                return cached;
-            // First try to find existing file node
-            auto existingRes = kg->getNodeByKey(nodeKey);
-            if (existingRes.has_value() && existingRes.value().has_value()) {
-                auto nodeId = existingRes.value().value().id;
-                cache.insert(nodeKey, nodeId);
-                return nodeId;
-            }
-
-            // Create a placeholder file node for the included file via batch
-            yams::metadata::KGNode fileNode;
-            fileNode.nodeKey = nodeKey;
-            fileNode.label = path;
-            fileNode.type = "file";
-            nlohmann::json fileProps;
-            fileProps["path"] = path;
-            fileProps["is_external"] = true; // Mark as external/unresolved
-            fileNode.properties = fileProps.dump();
-
-            auto newNodeRes = batch->upsertNode(fileNode);
-            if (newNodeRes.has_value()) {
-                cache.insert(nodeKey, newNodeRes.value());
-                return newNodeRes.value();
-            }
-            return std::nullopt;
-        };
-
-        for (size_t i = 0; i < result->relation_count; ++i) {
-            const auto& rel = result->relations[i];
-            if (!rel.src_symbol || !rel.dst_symbol || !rel.kind)
-                continue;
-
-            std::string src(rel.src_symbol);
-            std::string dst(rel.dst_symbol);
-            std::string kind(rel.kind);
-
-            std::optional<std::int64_t> srcNodeIdOpt;
-            std::optional<std::int64_t> dstNodeIdOpt;
-
-            if (kind == "includes") {
-                // For includes: src is the source file, dst is the included file/module
-                // Use the current file node as source
-                if (contextNodes.pathNodeId.has_value()) {
-                    srcNodeIdOpt = contextNodes.pathNodeId;
-                } else {
-                    srcNodeIdOpt = contextNodes.fileNodeId;
-                }
-                if (auto pathNode = resolveOrCreatePathNode(dst)) {
-                    dstNodeIdOpt = pathNode;
-                } else {
-                    dstNodeIdOpt = resolveOrCreateFileNode(dst);
-                }
-            } else {
-                // For calls, inherits, implements: resolve as symbols
-                srcNodeIdOpt = resolveSymbolNodeId(src);
-                dstNodeIdOpt = resolveSymbolNodeId(dst);
-            }
-
-            if (srcNodeIdOpt && dstNodeIdOpt) {
-                nlohmann::json relProps;
-                relProps["source_file"] = job.filePath;
-                if (!job.documentHash.empty())
-                    relProps["snapshot_id"] = job.documentHash;
-                relProps["timestamp"] = now;
-                yams::metadata::KGEdge edge;
-                edge.srcNodeId = *srcNodeIdOpt;
-                edge.dstNodeId = *dstNodeIdOpt;
-                edge.relation = kind;
-                edge.weight = static_cast<float>(rel.weight);
-                edge.properties = relProps.dump();
-                symbolEdges.push_back(edge);
-            }
-        }
-        if (!symbolEdges.empty()) {
-            spdlog::info("EntityGraphService: creating {} symbol/include edges",
-                         symbolEdges.size());
-            batch->addEdgesUnique(symbolEdges);
-        }
-    }
-
-    return yams::Result<void>();
-}
-
-yams::Result<void>
-EntityGraphService::createDocEntities(WriteBatch* batch, std::optional<std::int64_t> documentDbId,
-                                      const yams_symbol_extraction_result_v1* result,
-                                      const std::vector<std::int64_t>& symbolNodeIds) {
-    if (documentDbId.has_value()) {
-        std::vector<yams::metadata::DocEntity> docEntities;
-        docEntities.reserve(symbolNodeIds.size());
-        for (size_t i = 0; i < symbolNodeIds.size(); ++i) {
-            const auto& sym = result->symbols[i];
-
-            yams::metadata::DocEntity entity;
-            entity.documentId = documentDbId.value();
-            entity.entityText = sym.qualified_name ? std::string(sym.qualified_name)
-                                                   : (sym.name ? std::string(sym.name) : "");
-            entity.nodeId = symbolNodeIds[i];
-            entity.startOffset = sym.start_offset;
-            entity.endOffset = sym.end_offset;
-            entity.confidence = 1.0f;
-            entity.extractor = "symbol_extractor_v1";
-            docEntities.push_back(entity);
-        }
-
-        if (!docEntities.empty()) {
-            batch->deleteDocEntitiesForDocument(documentDbId.value());
-            return batch->addDocEntities(docEntities);
-        }
-    }
-    return yams::Result<void>();
-}
-
-std::string EntityGraphService::buildSymbolText(const yams_symbol_extraction_result_v1* result,
-                                                size_t index) {
-    if (!result || index >= result->symbol_count) {
-        return "";
-    }
-
-    const auto& sym = result->symbols[index];
-    std::ostringstream oss;
-
-    // Kind (function, class, method, etc.)
-    if (sym.kind) {
-        oss << sym.kind << " ";
-    }
-
-    // Qualified name or simple name
-    if (sym.qualified_name) {
-        oss << sym.qualified_name;
-    } else if (sym.name) {
-        oss << sym.name;
-    }
-
-    // Parameters (for functions/methods)
-    if (sym.parameters && sym.parameter_count > 0) {
-        oss << "(";
-        for (size_t p = 0; p < sym.parameter_count; ++p) {
-            if (p > 0)
-                oss << ", ";
-            if (sym.parameters[p])
-                oss << sym.parameters[p];
-        }
-        oss << ")";
-    }
-
-    // Return type
-    if (sym.return_type) {
-        oss << " -> " << sym.return_type;
-    }
-
-    // Documentation (truncated to avoid excessive embedding text)
-    if (sym.documentation) {
-        std::string doc(sym.documentation);
-        constexpr size_t kMaxDocLength = 500;
-        if (doc.size() > kMaxDocLength) {
-            doc = doc.substr(0, kMaxDocLength) + "...";
-        }
-        oss << " // " << doc;
-    }
-
-    return oss.str();
-}
-
-yams::Result<void>
-EntityGraphService::generateEntityEmbeddings(const Job& job,
-                                             const yams_symbol_extraction_result_v1* result,
-                                             const SymbolNodeBatch& symbolNodes) {
-    if (!services_) {
-        return Result<void>(); // No services, skip silently
-    }
-
-    auto vdb = services_->getVectorDatabase();
-    auto provider = services_->getModelProvider();
-
-    if (!vdb) {
-        spdlog::debug("EntityGraphService: no vector database, skipping entity embeddings");
-        return Result<void>();
-    }
-
-    if (!provider || !provider->isAvailable()) {
-        spdlog::debug(
-            "EntityGraphService: no model provider available, skipping entity embeddings");
-        return Result<void>();
-    }
-
-    if (!result || result->symbol_count == 0) {
-        return Result<void>();
-    }
-
-    // Get the embedding model name
-    std::string modelName = services_->getEmbeddingModelName();
-    if (modelName.empty()) {
-        auto loadedModels = provider->getLoadedModels();
-        if (loadedModels.empty()) {
-            spdlog::debug(
-                "EntityGraphService: no embedding model loaded, skipping entity embeddings");
-            return Result<void>();
-        }
-        modelName = loadedModels[0];
-    }
-
-    // Build text representations for each symbol
-    std::vector<std::string> texts;
-    texts.reserve(result->symbol_count);
-    for (size_t i = 0; i < result->symbol_count; ++i) {
-        texts.push_back(buildSymbolText(result, i));
-    }
-
-    // Filter out empty texts and track indices
-    std::vector<std::string> nonEmptyTexts;
-    std::vector<size_t> originalIndices;
-    nonEmptyTexts.reserve(texts.size());
-    originalIndices.reserve(texts.size());
-    for (size_t i = 0; i < texts.size(); ++i) {
-        if (!texts[i].empty()) {
-            nonEmptyTexts.push_back(texts[i]);
-            originalIndices.push_back(i);
-        }
-    }
-
-    if (nonEmptyTexts.empty()) {
-        return Result<void>();
-    }
-
-    // Generate embeddings in batch
-    auto embedResult = provider->generateBatchEmbeddingsFor(modelName, nonEmptyTexts);
-    if (!embedResult) {
-        spdlog::warn("EntityGraphService: failed to generate entity embeddings: {}",
-                     embedResult.error().message);
-        return embedResult.error();
-    }
-
-    const auto& embeddings = embedResult.value();
-    if (embeddings.size() != nonEmptyTexts.size()) {
-        spdlog::warn("EntityGraphService: embedding count mismatch ({} vs {})", embeddings.size(),
-                     nonEmptyTexts.size());
-        return Error{ErrorCode::InternalError, "embedding count mismatch"};
-    }
-
-    // Get model info for versioning
-    std::string modelVersion;
-    auto modelInfo = provider->getModelInfo(modelName);
-    if (modelInfo) {
-        modelVersion = std::to_string(modelInfo.value().embeddingDim); // Use dim as pseudo-version
-    }
-
-    // Create EntityVectorRecords
-    std::vector<vector::EntityVectorRecord> records;
-    records.reserve(embeddings.size());
-
-    for (size_t i = 0; i < embeddings.size(); ++i) {
-        size_t origIdx = originalIndices[i];
-        const auto& sym = result->symbols[origIdx];
-
-        vector::EntityVectorRecord rec;
-        // Use the symbol key from SymbolNodeBatch (qualified name)
-        rec.node_key = symbolNodes.symbolKeys[origIdx];
-        rec.embedding_type = vector::EntityEmbeddingType::SIGNATURE;
-        rec.embedding = embeddings[i];
-        rec.content = nonEmptyTexts[i];
-        rec.model_id = modelName;
-        rec.model_version = modelVersion;
-        rec.embedded_at = std::chrono::system_clock::now();
-        rec.is_stale = false;
-
-        // Metadata from symbol
-        rec.node_type = sym.kind ? std::string(sym.kind) : "symbol";
-        rec.qualified_name = sym.qualified_name ? std::string(sym.qualified_name)
-                                                : (sym.name ? std::string(sym.name) : "");
-        rec.file_path = job.filePath;
-        rec.document_hash = job.documentHash;
-
-        records.push_back(std::move(rec));
-    }
-
-    // Insert into vector database
-    auto insertResult = vdb->insertEntityVectorsBatch(records);
-    if (!insertResult) {
-        spdlog::warn("EntityGraphService: failed to insert entity vectors: {}",
-                     insertResult.error().message);
-        if (insertResult.error().message.find("database is locked") != std::string::npos) {
-            TuneAdvisor::reportDbLockError();
-        }
-        return insertResult.error();
-    }
-
-    spdlog::info("EntityGraphService: generated {} entity embeddings for {}", records.size(),
-                 job.filePath);
-    return Result<void>();
 }
 
 // ============================================================================
@@ -1422,513 +728,6 @@ bool EntityGraphService::isNaturalLanguageContent(const Job& job) {
     }
 
     return false;
-}
-
-bool EntityGraphService::processNaturalLanguage(Job& job) {
-    if (!services_)
-        return false;
-
-    auto kg = services_->getKgStore();
-    if (!kg) {
-        spdlog::debug("EntityGraphService: no KG store for NL extraction");
-        return true;
-    }
-
-    // Find an entity extractor that supports the content type
-    const auto& extractors = services_->getEntityExtractors();
-    const AbiEntityExtractorAdapter* adapter = nullptr;
-
-    // Determine content type to check
-    std::string contentType = job.mimeType;
-    if (contentType.empty()) {
-        // Infer from extension
-        std::filesystem::path p(job.filePath);
-        std::string ext = p.extension().string();
-        if (ext == ".md" || ext == ".markdown") {
-            contentType = "text/markdown";
-        } else if (ext == ".json" || ext == ".jsonl") {
-            contentType = "application/json";
-        } else {
-            contentType = "text/plain";
-        }
-    }
-
-    for (const auto& ex : extractors) {
-        if (ex && ex->supportsContentType(contentType)) {
-            adapter = ex.get();
-            break;
-        }
-    }
-
-    if (!adapter) {
-        spdlog::debug("EntityGraphService: no NL extractor for content_type='{}' (skip)",
-                      contentType);
-        return true; // not an error
-    }
-
-    // Extract entities
-    auto* result =
-        adapter->extract(job.contentUtf8, nullptr, 0, job.language.c_str(), job.filePath.c_str());
-    if (!result) {
-        spdlog::warn("EntityGraphService: NL extraction failed for {}", job.filePath);
-        // Record failed state
-        if (!job.documentHash.empty()) {
-            metadata::SymbolExtractionState state;
-            state.extractorId = adapter->getExtractorId();
-            state.extractedAt = std::chrono::duration_cast<std::chrono::seconds>(
-                                    std::chrono::system_clock::now().time_since_epoch())
-                                    .count();
-            state.status = "failed";
-            state.entityCount = 0;
-            state.errorMessage = "NL extraction returned null";
-            kg->upsertSymbolExtractionState(job.documentHash, state);
-        }
-        return false;
-    }
-
-    // Check for extraction error
-    if (result->error) {
-        spdlog::warn("EntityGraphService: NL extraction error for {}: {}", job.filePath,
-                     result->error);
-        adapter->freeResult(result);
-        return false;
-    }
-
-    spdlog::info("EntityGraphService: extracted {} NL entities from {} (type={})",
-                 result->entity_count, job.filePath, contentType);
-
-    // Populate KG with NL entities
-    bool success = populateKnowledgeGraphNL(kg, job, result, adapter);
-
-    // Record extraction state
-    if (!job.documentHash.empty()) {
-        metadata::SymbolExtractionState state;
-        state.extractorId = adapter->getExtractorId();
-        state.extractedAt = std::chrono::duration_cast<std::chrono::seconds>(
-                                std::chrono::system_clock::now().time_since_epoch())
-                                .count();
-        state.status = success ? "complete" : "failed";
-        state.entityCount = static_cast<std::int64_t>(result->entity_count);
-        kg->upsertSymbolExtractionState(job.documentHash, state);
-    }
-
-    adapter->freeResult(result);
-    return success;
-}
-
-bool EntityGraphService::populateKnowledgeGraphNL(
-    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
-    const yams_entity_extraction_result_v2* result, const AbiEntityExtractorAdapter* adapter) {
-    if (!result || result->entity_count == 0) {
-        return true; // No entities to process
-    }
-
-    spdlog::info("EntityGraphService: populating KG with {} NL entities from {}",
-                 result->entity_count, job.filePath);
-
-    // Require KGWriteQueue - batched writes only (no fallback to per-document commits)
-    KGWriteQueue* kgQueue = services_ ? services_->getKgWriteQueue() : nullptr;
-    if (!kgQueue) {
-        spdlog::error("EntityGraphService: KGWriteQueue not available, cannot process NL entities");
-        return false;
-    }
-
-    return populateKnowledgeGraphNLDeferred(kg, job, result, adapter, kgQueue);
-}
-
-bool EntityGraphService::populateKnowledgeGraphNLDeferred(
-    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg, const Job& job,
-    const yams_entity_extraction_result_v2* result, const AbiEntityExtractorAdapter* adapter,
-    KGWriteQueue* kgQueue) {
-    // Build a DeferredKGBatch with all operations using nodeKey references
-    // This eliminates lock contention by batching writes from multiple documents
-    auto batch = std::make_unique<DeferredKGBatch>();
-    batch->sourceFile = job.filePath;
-
-    auto now = std::chrono::system_clock::now().time_since_epoch().count();
-
-    // Get document database ID for doc entities (read operation, safe)
-    std::optional<std::int64_t> documentDbId;
-    if (!job.documentHash.empty()) {
-        auto docDbIdResult = kg->getDocumentIdByHash(job.documentHash);
-        if (docDbIdResult.has_value()) {
-            documentDbId = docDbIdResult.value();
-            batch->documentIdToDelete = documentDbId; // Delete old doc entities
-        }
-    }
-
-    // Build document context node
-    std::string docNodeKey;
-    if (!job.documentHash.empty()) {
-        docNodeKey = "doc:" + job.documentHash;
-
-        yams::metadata::KGNode docNode;
-        docNode.nodeKey = docNodeKey;
-        docNode.label = common::sanitizeUtf8(job.filePath);
-        docNode.type = "document";
-        nlohmann::json docProps;
-        docProps["hash"] = job.documentHash;
-        docProps["path"] = common::sanitizeUtf8(job.filePath);
-        docProps["language"] = common::sanitizeUtf8(job.language);
-        docNode.properties = docProps.dump();
-        batch->nodes.push_back(std::move(docNode));
-    }
-
-    // Build file context node
-    std::string fileNodeKey;
-    if (!job.filePath.empty()) {
-        fileNodeKey = "file:" + job.filePath;
-
-        yams::metadata::KGNode fileNode;
-        fileNode.nodeKey = fileNodeKey;
-        fileNode.label = common::sanitizeUtf8(job.filePath);
-        fileNode.type = "file";
-        nlohmann::json fileProps;
-        fileProps["path"] = common::sanitizeUtf8(job.filePath);
-        fileProps["language"] = common::sanitizeUtf8(job.language);
-        if (!job.filePath.empty()) {
-            fileProps["basename"] =
-                common::sanitizeUtf8(std::filesystem::path(job.filePath).filename().string());
-        }
-        if (!job.documentHash.empty()) {
-            fileProps["current_hash"] = job.documentHash;
-        }
-        fileNode.properties = fileProps.dump();
-        batch->nodes.push_back(std::move(fileNode));
-    }
-
-    // Build entity nodes and collect their keys
-    std::vector<std::string> entityNodeKeys;
-    entityNodeKeys.reserve(result->entity_count);
-
-    for (size_t i = 0; i < result->entity_count; ++i) {
-        const auto& ent = result->entities[i];
-
-        // Sanitize entity text to ensure valid UTF-8 (prevents json.exception.type_error.316)
-        std::string text = ent.text ? common::sanitizeUtf8(ent.text) : "";
-        std::string type = ent.type ? common::sanitizeUtf8(ent.type) : "entity";
-
-        // Normalize text for canonical matching
-        std::string normalizedText = text;
-        std::transform(normalizedText.begin(), normalizedText.end(), normalizedText.begin(),
-                       ::tolower);
-
-        std::string nodeKey = "nl_entity:" + type + ":" + normalizedText;
-        entityNodeKeys.push_back(nodeKey);
-
-        yams::metadata::KGNode node;
-        node.nodeKey = nodeKey;
-        node.label = text;
-        node.type = type;
-
-        nlohmann::json props;
-        props["entity_text"] = text;
-        props["entity_type"] = type;
-        props["confidence"] = ent.confidence;
-        props["first_seen_file"] = common::sanitizeUtf8(job.filePath);
-        props["last_seen"] = now;
-        if (!job.documentHash.empty()) {
-            props["first_seen_hash"] = job.documentHash;
-        }
-        if (ent.properties_json) {
-            try {
-                auto extraProps = nlohmann::json::parse(ent.properties_json);
-                for (auto& [key, val] : extraProps.items()) {
-                    props[key] = val;
-                }
-            } catch (...) {
-            }
-        }
-        node.properties = props.dump();
-        batch->nodes.push_back(std::move(node));
-
-        // Add alias for entity text
-        if (ent.text) {
-            yams::metadata::KGAlias alias;
-            alias.nodeId = 0; // Will be resolved by queue
-            alias.alias = text;
-            alias.source = "nl_entity_text";
-            alias.confidence = ent.confidence;
-            // Note: aliases need nodeId, but we can't set it here.
-            // For now, skip aliases in deferred path (they'll be added by upsertNodes)
-        }
-    }
-
-    // Build deferred edges (entity -> document/file)
-    std::string targetNodeKey = !docNodeKey.empty() ? docNodeKey : fileNodeKey;
-    if (!targetNodeKey.empty()) {
-        for (size_t i = 0; i < result->entity_count; ++i) {
-            const auto& ent = result->entities[i];
-
-            DeferredEdge edge;
-            edge.srcNodeKey = entityNodeKeys[i];
-            edge.dstNodeKey = targetNodeKey;
-            edge.relation = "mentioned_in";
-            edge.weight = ent.confidence;
-
-            nlohmann::json edgeProps;
-            edgeProps["start_offset"] = ent.start_offset;
-            edgeProps["end_offset"] = ent.end_offset;
-            edgeProps["confidence"] = ent.confidence;
-            if (!job.documentHash.empty()) {
-                edgeProps["snapshot_id"] = job.documentHash;
-            }
-            edge.properties = edgeProps.dump();
-
-            batch->deferredEdges.push_back(std::move(edge));
-        }
-    }
-
-    // Build deferred doc entities
-    if (documentDbId.has_value()) {
-        for (size_t i = 0; i < result->entity_count; ++i) {
-            const auto& ent = result->entities[i];
-
-            DeferredDocEntity docEnt;
-            docEnt.documentId = documentDbId.value();
-            docEnt.entityText = ent.text ? std::string(ent.text) : "";
-            docEnt.nodeKey = entityNodeKeys[i];
-            docEnt.startOffset = ent.start_offset;
-            docEnt.endOffset = ent.end_offset;
-            docEnt.confidence = ent.confidence;
-            docEnt.extractor = adapter->getExtractorId();
-            batch->deferredDocEntities.push_back(std::move(docEnt));
-        }
-    }
-
-    // Enqueue the batch and wait for completion
-    try {
-        auto future = kgQueue->enqueue(std::move(batch));
-
-        // Wait for the batch to be committed (with timeout)
-        auto status = future.wait_for(std::chrono::seconds(60));
-        if (status == std::future_status::timeout) {
-            spdlog::warn("EntityGraphService: KG write queue timeout for {}", job.filePath);
-            return false;
-        }
-
-        auto commitResult = future.get();
-        if (!commitResult) {
-            spdlog::warn("EntityGraphService: KG write queue failed for {}: {}", job.filePath,
-                         commitResult.error().message);
-            if (commitResult.error().message.find("database is locked") != std::string::npos) {
-                TuneAdvisor::reportDbLockError();
-            }
-            return false;
-        }
-
-        spdlog::info("EntityGraphService: queued KG batch with {} NL entities from {}",
-                     result->entity_count, job.filePath);
-        return true;
-
-    } catch (const std::exception& e) {
-        spdlog::warn("EntityGraphService: exception queueing NL KG batch: {}", e.what());
-        return false;
-    }
-}
-
-yams::Result<EntityGraphService::EntityNodeBatch> EntityGraphService::createEntityNodes(
-    const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-    yams::metadata::KnowledgeGraphStore::WriteBatch* writeBatch, const Job& job,
-    const yams_entity_extraction_result_v2* result) {
-    EntityNodeBatch nodeBatch;
-    if (!result || result->entity_count == 0) {
-        return nodeBatch;
-    }
-
-    std::vector<yams::metadata::KGNode> nodes;
-    nodes.reserve(result->entity_count);
-    nodeBatch.entityKeys.reserve(result->entity_count);
-
-    auto now = std::chrono::system_clock::now().time_since_epoch().count();
-
-    for (size_t i = 0; i < result->entity_count; ++i) {
-        const auto& ent = result->entities[i];
-
-        // Sanitize entity text to ensure valid UTF-8 (prevents json.exception.type_error.316)
-        std::string text = ent.text ? common::sanitizeUtf8(ent.text) : "";
-        std::string type = ent.type ? common::sanitizeUtf8(ent.type) : "entity";
-
-        // Create canonical node key: type:normalized_text
-        // Normalize text for canonical matching (lowercase, trim)
-        std::string normalizedText = text;
-        std::transform(normalizedText.begin(), normalizedText.end(), normalizedText.begin(),
-                       ::tolower);
-
-        std::string nodeKey = "nl_entity:" + type + ":" + normalizedText;
-
-        yams::metadata::KGNode node;
-        node.nodeKey = nodeKey;
-        node.label = text;
-        node.type = type;
-
-        nlohmann::json props;
-        props["entity_text"] = text;
-        props["entity_type"] = type;
-        props["confidence"] = ent.confidence;
-        props["first_seen_file"] = common::sanitizeUtf8(job.filePath);
-        props["last_seen"] = now;
-        if (!job.documentHash.empty()) {
-            props["first_seen_hash"] = job.documentHash;
-        }
-        if (ent.properties_json) {
-            try {
-                auto extraProps = nlohmann::json::parse(ent.properties_json);
-                for (auto& [key, val] : extraProps.items()) {
-                    props[key] = val;
-                }
-            } catch (...) {
-            }
-        }
-        node.properties = props.dump();
-
-        nodes.push_back(std::move(node));
-        nodeBatch.entityKeys.push_back(nodeKey);
-    }
-
-    auto nodeIdsRes = writeBatch ? writeBatch->upsertNodes(nodes) : kg->upsertNodes(nodes);
-    if (!nodeIdsRes) {
-        return nodeIdsRes.error();
-    }
-
-    nodeBatch.nodeIds = nodeIdsRes.value();
-
-    // Add aliases for entity text (for search)
-    std::vector<yams::metadata::KGAlias> aliases;
-    for (size_t i = 0; i < result->entity_count; ++i) {
-        const auto& ent = result->entities[i];
-        if (!ent.text)
-            continue;
-
-        yams::metadata::KGAlias alias;
-        alias.nodeId = nodeBatch.nodeIds[i];
-        alias.alias = common::sanitizeUtf8(ent.text);
-        alias.source = "nl_entity_text";
-        alias.confidence = ent.confidence;
-        aliases.push_back(alias);
-    }
-
-    if (!aliases.empty()) {
-        if (writeBatch) {
-            writeBatch->addAliases(aliases);
-        } else {
-            kg->addAliases(aliases);
-        }
-    }
-
-    return nodeBatch;
-}
-
-yams::Result<void>
-EntityGraphService::generateNLEntityEmbeddings(const Job& job,
-                                               const yams_entity_extraction_result_v2* result,
-                                               const EntityNodeBatch& entityNodes) {
-    if (!services_) {
-        return Result<void>();
-    }
-
-    auto vdb = services_->getVectorDatabase();
-    auto provider = services_->getModelProvider();
-
-    if (!vdb) {
-        return Error{ErrorCode::NotFound, "no vector database"};
-    }
-
-    if (!provider || !provider->isAvailable()) {
-        return Error{ErrorCode::NotFound, "no model provider"};
-    }
-
-    if (!result || result->entity_count == 0) {
-        return Result<void>();
-    }
-
-    std::string modelName = services_->getEmbeddingModelName();
-    if (modelName.empty()) {
-        auto loadedModels = provider->getLoadedModels();
-        if (loadedModels.empty()) {
-            return Error{ErrorCode::NotFound, "no embedding model"};
-        }
-        modelName = loadedModels[0];
-    }
-
-    // Build text representations for entities
-    std::vector<std::string> texts;
-    std::vector<size_t> originalIndices;
-    texts.reserve(result->entity_count);
-    originalIndices.reserve(result->entity_count);
-
-    for (size_t i = 0; i < result->entity_count; ++i) {
-        const auto& ent = result->entities[i];
-        if (!ent.text)
-            continue;
-
-        // Format: "TYPE: text"
-        std::string text;
-        if (ent.type) {
-            text = std::string(ent.type) + ": " + std::string(ent.text);
-        } else {
-            text = std::string(ent.text);
-        }
-
-        texts.push_back(text);
-        originalIndices.push_back(i);
-    }
-
-    if (texts.empty()) {
-        return Result<void>();
-    }
-
-    // Generate embeddings
-    auto embedResult = provider->generateBatchEmbeddingsFor(modelName, texts);
-    if (!embedResult) {
-        return embedResult.error();
-    }
-
-    const auto& embeddings = embedResult.value();
-    if (embeddings.size() != texts.size()) {
-        return Error{ErrorCode::InternalError, "embedding count mismatch"};
-    }
-
-    // Create EntityVectorRecords
-    std::vector<vector::EntityVectorRecord> records;
-    records.reserve(embeddings.size());
-
-    std::string modelVersion;
-    auto modelInfo = provider->getModelInfo(modelName);
-    if (modelInfo) {
-        modelVersion = std::to_string(modelInfo.value().embeddingDim);
-    }
-
-    for (size_t i = 0; i < embeddings.size(); ++i) {
-        size_t origIdx = originalIndices[i];
-        const auto& ent = result->entities[origIdx];
-
-        vector::EntityVectorRecord rec;
-        rec.node_key = entityNodes.entityKeys[origIdx];
-        rec.embedding_type = vector::EntityEmbeddingType::SIGNATURE;
-        rec.embedding = embeddings[i];
-        rec.content = texts[i];
-        rec.model_id = modelName;
-        rec.model_version = modelVersion;
-        rec.embedded_at = std::chrono::system_clock::now();
-        rec.is_stale = false;
-
-        rec.node_type = ent.type ? std::string(ent.type) : "entity";
-        rec.qualified_name = ent.text ? std::string(ent.text) : "";
-        rec.file_path = job.filePath;
-        rec.document_hash = job.documentHash;
-
-        records.push_back(std::move(rec));
-    }
-
-    auto insertResult = vdb->insertEntityVectorsBatch(records);
-    if (!insertResult) {
-        return insertResult.error();
-    }
-
-    spdlog::info("EntityGraphService: generated {} NL entity embeddings for {}", records.size(),
-                 job.filePath);
-    return Result<void>();
 }
 
 } // namespace yams::daemon

@@ -2,12 +2,13 @@
 
 #include <cstdio>
 #include <expected>
-#include <format>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
+
+#include <fmt/format.h>
 
 #include <yams/compat/dlfcn.h>
 #include <yams/config/config_helpers.h>
@@ -156,6 +157,8 @@ std::vector<std::string> GrammarLoader::getLibraryCandidates(std::string_view la
     lib_names.push_back(underscore_name + ".so");
 #endif
 
+    candidates.reserve(search_paths.size() * lib_names.size());
+
     // For each search path, add all library name variants
     for (const auto& base_path : search_paths) {
         if (!std::filesystem::exists(base_path))
@@ -174,20 +177,23 @@ GrammarLoader::loadGrammar(std::string_view language) {
     const auto* spec = findSpec(language);
     if (!spec) {
         return tl::unexpected(GrammarLoadError{
-            GrammarLoadError::NOT_FOUND, std::format("Language '{}' not supported", language)});
+            GrammarLoadError::NOT_FOUND, fmt::format("Language '{}' not supported", language)});
     }
 
     auto candidates = getLibraryCandidates(language);
     if (candidates.empty()) {
         return tl::unexpected(
             GrammarLoadError{GrammarLoadError::NOT_FOUND,
-                             std::format("No library candidates for language '{}'", language)});
+                             fmt::format("No library candidates for language '{}'", language)});
     }
 
     // Try each candidate
-    std::vector<std::string> tried_paths;
+    std::string tried_join;
     for (const auto& candidate : candidates) {
-        tried_paths.push_back(candidate);
+        if (!tried_join.empty()) {
+            tried_join += ", ";
+        }
+        tried_join += candidate;
 
         std::fprintf(stderr, "[yams] trying grammar candidate: %s\n", candidate.c_str());
         void* handle = dlopen(candidate.c_str(), RTLD_LAZY | RTLD_LOCAL);
@@ -211,15 +217,9 @@ GrammarLoader::loadGrammar(std::string_view language) {
     }
 
     // All candidates failed
-    std::string tried_join;
-    for (size_t i = 0; i < tried_paths.size(); ++i) {
-        tried_join += tried_paths[i];
-        if (i + 1 < tried_paths.size())
-            tried_join += ", ";
-    }
     return tl::unexpected(GrammarLoadError{
         GrammarLoadError::LOAD_FAILED,
-        std::format("Failed to load grammar for '{}'. Tried: {}", language, tried_join)});
+        fmt::format("Failed to load grammar for '{}'. Tried: {}", language, tried_join)});
 }
 
 bool GrammarLoader::grammarExists(std::string_view language) const {
@@ -257,7 +257,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
                      [language](const auto& repo) { return repo.language == language; });
 
     if (repo_info == std::end(kGrammarRepos)) {
-        return tl::unexpected(std::format("Language '{}' auto-download not supported", language));
+        return tl::unexpected(fmt::format("Language '{}' auto-download not supported", language));
     }
 
     auto grammar_path =
@@ -266,7 +266,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
 
     // Create temp directory for build
     auto temp_dir =
-        std::filesystem::temp_directory_path() / std::format("yams-grammar-build-{}", language);
+        std::filesystem::temp_directory_path() / fmt::format("yams-grammar-build-{}", language);
     std::filesystem::create_directories(temp_dir);
 
     // Cleanup guard
@@ -280,7 +280,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
     try {
         // Clone repository
         std::string clone_cmd =
-            std::format("cd {} && git clone --depth 1 https://github.com/{} tree-sitter-{}",
+            fmt::format("cd {} && git clone --depth 1 https://github.com/{} tree-sitter-{}",
                         temp_dir.string(), repo_info->repo, language);
 
         std::cout << "🔄 Cloning grammar repository..." << std::endl;
@@ -290,7 +290,7 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
         }
 
         // Build grammar (portable)
-        auto build_dir = temp_dir / std::format("tree-sitter-{}", language);
+        auto build_dir = temp_dir / fmt::format("tree-sitter-{}", language);
 
         // Special handling for TypeScript which has subdirectories
         if (language == "typescript") {
@@ -321,13 +321,13 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
         }
 
 #ifdef __APPLE__
-        std::string lib_name = std::format("libtree-sitter-{}.dylib", language);
+        std::string lib_name = fmt::format("libtree-sitter-{}.dylib", language);
         std::string flags = "-dynamiclib";
 #elif defined(_WIN32)
-        std::string lib_name = std::format("tree-sitter-{}.dll", language);
+        std::string lib_name = fmt::format("tree-sitter-{}.dll", language);
         std::string flags = "-shared";
 #else
-        std::string lib_name = std::format("libtree-sitter-{}.so", language);
+        std::string lib_name = fmt::format("libtree-sitter-{}.so", language);
         std::string flags = "-shared -fPIC";
 #endif
 
@@ -402,11 +402,11 @@ GrammarDownloader::downloadGrammar(std::string_view language) {
 
         // Find built library
 #ifdef __APPLE__
-        auto built_lib = build_dir / std::format("libtree-sitter-{}.dylib", language);
+        auto built_lib = build_dir / fmt::format("libtree-sitter-{}.dylib", language);
 #elif defined(_WIN32)
-        auto built_lib = build_dir / std::format("tree-sitter-{}.dll", language);
+        auto built_lib = build_dir / fmt::format("tree-sitter-{}.dll", language);
 #else
-        auto built_lib = build_dir / std::format("libtree-sitter-{}.so", language);
+        auto built_lib = build_dir / fmt::format("libtree-sitter-{}.so", language);
 #endif
 
         if (!std::filesystem::exists(built_lib)) {

@@ -96,13 +96,13 @@ struct VectorRecord {
  * Used for semantic search over code symbols, functions, classes, etc.
  */
 struct EntityVectorRecord {
-    int64_t rowid = 0;                  // Database row ID (0 = new record)
-    std::string node_key;               // KG node key (e.g., "function:foo@src/bar.cpp")
-    EntityEmbeddingType embedding_type; // What was embedded (signature, docs, etc.)
-    std::vector<float> embedding;       // Embedding vector
-    std::string content;                // Text that was embedded
-    std::string model_id;               // Model identifier
-    std::string model_version;          // Model version
+    int64_t rowid = 0;    // Database row ID (0 = new record)
+    std::string node_key; // KG node key (e.g., "function:foo@src/bar.cpp")
+    EntityEmbeddingType embedding_type = EntityEmbeddingType::SIGNATURE; // What was embedded
+    std::vector<float> embedding;                                        // Embedding vector
+    std::string content;                                                 // Text that was embedded
+    std::string model_id;                                                // Model identifier
+    std::string model_version;                                           // Model version
     std::chrono::system_clock::time_point embedded_at;
     bool is_stale = false;        // Mark for re-embedding
     float relevance_score = 0.0f; // For search results

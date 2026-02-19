@@ -3,6 +3,7 @@
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/daemon/client/daemon_client.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
@@ -42,7 +43,11 @@ namespace {
 using yams::ErrorCode;
 using yams::Result;
 using yams::app::services::AppContext;
+using yams::app::services::DeleteByNameRequest;
+using yams::app::services::DeleteByNameResponse;
 using yams::app::services::DocumentEntry;
+using yams::app::services::DownloadServiceRequest;
+using yams::app::services::DownloadServiceResponse;
 using yams::app::services::GrepRequest;
 using yams::app::services::GrepResponse;
 using yams::app::services::ListDocumentsRequest;
@@ -53,6 +58,8 @@ using yams::app::services::RetrieveDocumentRequest;
 using yams::app::services::RetrieveDocumentResponse;
 using yams::app::services::StoreDocumentRequest;
 using yams::app::services::StoreDocumentResponse;
+using yams::app::services::UpdateMetadataRequest;
+using yams::app::services::UpdateMetadataResponse;
 using yams::metadata::ConnectionMode;
 using yams::metadata::ConnectionPool;
 using yams::metadata::ConnectionPoolConfig;
@@ -137,6 +144,11 @@ yams_mobile_status validate_config_header(const yams_mobile_context_config* conf
     }
     if (config->flags != 0U) {
         set_last_error("yams_mobile_context_config.flags must be zero");
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+    if (config->backend_mode != YAMS_MOBILE_BACKEND_EMBEDDED &&
+        config->backend_mode != YAMS_MOBILE_BACKEND_DAEMON) {
+        set_last_error("yams_mobile_context_config.backend_mode must be embedded or daemon");
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     }
     return YAMS_MOBILE_STATUS_OK;
@@ -415,8 +427,10 @@ struct MobileContextConfig {
     std::filesystem::path working_directory;
     std::filesystem::path cache_directory;
     std::filesystem::path storage_directory;
+    std::filesystem::path daemon_socket_path;
     uint32_t max_worker_threads = 0;
     uint32_t flags = 0;
+    uint32_t backend_mode = YAMS_MOBILE_BACKEND_EMBEDDED;
     std::uint32_t api_version = kPackedVersion;
     TelemetrySinkType telemetry_sink = TelemetrySinkType::None;
     std::string telemetry_file_path;
@@ -433,10 +447,70 @@ struct MobileState {
     std::shared_ptr<yams::app::services::IDocumentService> document_service;
     std::shared_ptr<yams::app::services::ISearchService> search_service;
     std::shared_ptr<yams::app::services::IGrepService> grep_service;
+    std::shared_ptr<yams::app::services::IDownloadService> download_service;
+    std::shared_ptr<yams::daemon::DaemonClient> daemon_client;
     TelemetrySinkType telemetry_sink = TelemetrySinkType::None;
     std::ofstream telemetry_stream;
     std::mutex telemetry_mutex;
 };
+
+template <typename Req>
+Result<yams::daemon::ResponseOfT<Req>> daemon_call(MobileState& state, Req req) {
+    if (!state.daemon_client || !state.worker_pool) {
+        return yams::Error{ErrorCode::NotInitialized, "daemon client not initialized"};
+    }
+
+    using Resp = yams::daemon::ResponseOfT<Req>;
+    auto promise = std::make_shared<std::promise<Result<Resp>>>();
+    auto future = promise->get_future();
+    auto client = state.daemon_client;
+
+    boost::asio::co_spawn(
+        state.worker_pool->get_executor(),
+        [client, req = std::move(req), promise]() mutable -> boost::asio::awaitable<void> {
+            try {
+                auto result = co_await client->call<Req>(req);
+                promise->set_value(std::move(result));
+            } catch (...) {
+                try {
+                    promise->set_exception(std::current_exception());
+                } catch (...) {
+                }
+            }
+            co_return;
+        },
+        boost::asio::detached);
+
+    return future.get();
+}
+
+Result<void> daemon_connect(MobileState& state) {
+    if (!state.daemon_client || !state.worker_pool) {
+        return yams::Error{ErrorCode::NotInitialized, "daemon client not initialized"};
+    }
+
+    auto promise = std::make_shared<std::promise<Result<void>>>();
+    auto future = promise->get_future();
+    auto client = state.daemon_client;
+
+    boost::asio::co_spawn(
+        state.worker_pool->get_executor(),
+        [client, promise]() mutable -> boost::asio::awaitable<void> {
+            try {
+                auto result = co_await client->connect();
+                promise->set_value(std::move(result));
+            } catch (...) {
+                try {
+                    promise->set_exception(std::current_exception());
+                } catch (...) {
+                }
+            }
+            co_return;
+        },
+        boost::asio::detached);
+
+    return future.get();
+}
 
 void emit_telemetry(MobileState& state, const nlohmann::json& payload) {
     if (state.telemetry_sink == TelemetrySinkType::None)
@@ -470,10 +544,16 @@ struct yams_mobile_context_t {
 
 struct yams_mobile_grep_result_t {
     yams::app::services::GrepResponse response;
+    std::string json;
+    std::string stats_json;
+    bool pre_serialized = false;
 };
 
 struct yams_mobile_search_result_t {
     yams::app::services::SearchResponse response;
+    std::string json;
+    std::string stats_json;
+    bool pre_serialized = false;
 };
 
 struct yams_mobile_metadata_result_t {
@@ -491,6 +571,18 @@ struct yams_mobile_list_result_t {
 struct yams_mobile_document_get_result_t {
     std::string json;
     std::string content;
+};
+
+struct yams_mobile_update_result_t {
+    std::string json;
+};
+
+struct yams_mobile_delete_result_t {
+    std::string json;
+};
+
+struct yams_mobile_graph_query_result_t {
+    std::string json;
 };
 
 YAMS_MOBILE_API yams_mobile_version_info yams_mobile_get_version(void) {
@@ -526,7 +618,12 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
         ctx->state.config.storage_directory = ctx->state.config.working_directory / "storage";
         ctx->state.config.max_worker_threads = config->max_worker_threads;
         ctx->state.config.flags = config->flags;
+        ctx->state.config.backend_mode = config->backend_mode;
         ctx->state.config.api_version = config->version != 0U ? config->version : kPackedVersion;
+        if (config->daemon_socket_path && *config->daemon_socket_path) {
+            ctx->state.config.daemon_socket_path =
+                std::filesystem::path(config->daemon_socket_path);
+        }
 
         if (config->telemetry_sink && *config->telemetry_sink) {
             std::string sink = config->telemetry_sink;
@@ -554,7 +651,9 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
         std::error_code ec;
         std::filesystem::create_directories(ctx->state.config.working_directory, ec);
         std::filesystem::create_directories(ctx->state.config.cache_directory, ec);
-        std::filesystem::create_directories(ctx->state.config.storage_directory, ec);
+        if (ctx->state.config.backend_mode == YAMS_MOBILE_BACKEND_EMBEDDED) {
+            std::filesystem::create_directories(ctx->state.config.storage_directory, ec);
+        }
 
         // Thread pool / executor
         auto threads = ctx->state.config.max_worker_threads;
@@ -562,53 +661,72 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
             threads = std::max<uint32_t>(1, std::thread::hardware_concurrency());
         ctx->state.worker_pool = std::make_unique<boost::asio::thread_pool>(threads);
 
-        // Metadata database
-        auto db = std::make_unique<Database>();
-        auto dbPath = ctx->state.config.working_directory / "yams_mobile.db";
-        auto open = db->open(dbPath.string(), ConnectionMode::Create);
-        if (!open) {
-            set_last_error(open.error().message);
-            return map_error_code(open.error().code);
+        if (ctx->state.config.backend_mode == YAMS_MOBILE_BACKEND_DAEMON) {
+            yams::daemon::ClientConfig clientConfig;
+            clientConfig.autoStart = false;
+            clientConfig.executor = ctx->state.worker_pool->get_executor();
+            if (!ctx->state.config.daemon_socket_path.empty()) {
+                clientConfig.socketPath = ctx->state.config.daemon_socket_path;
+            }
+
+            ctx->state.daemon_client = std::make_shared<yams::daemon::DaemonClient>(clientConfig);
+            auto connectRes = daemon_connect(ctx->state);
+            if (!connectRes) {
+                set_last_error(connectRes.error().message);
+                return map_error_code(connectRes.error().code);
+            }
+        } else {
+            // Metadata database
+            auto db = std::make_unique<Database>();
+            auto dbPath = ctx->state.config.working_directory / "yams_mobile.db";
+            auto open = db->open(dbPath.string(), ConnectionMode::Create);
+            if (!open) {
+                set_last_error(open.error().message);
+                return map_error_code(open.error().code);
+            }
+
+            ctx->state.database = std::move(db);
+            ctx->state.connection_pool =
+                std::make_unique<ConnectionPool>(dbPath.string(), ConnectionPoolConfig{});
+            ctx->state.metadata_repo =
+                std::make_shared<MetadataRepository>(*ctx->state.connection_pool);
+
+            MigrationManager migrator(*ctx->state.database);
+            auto initRes = migrator.initialize();
+            if (!initRes) {
+                set_last_error(initRes.error().message);
+                return map_error_code(initRes.error().code);
+            }
+            migrator.registerMigrations(YamsMetadataMigrations::getAllMigrations());
+            auto migrateRes = migrator.migrate();
+            if (!migrateRes) {
+                set_last_error(migrateRes.error().message);
+                return map_error_code(migrateRes.error().code);
+            }
+
+            // Content store
+            yams::api::ContentStoreBuilder builder;
+            auto storeRes = builder.withStoragePath(ctx->state.config.storage_directory).build();
+            if (!storeRes) {
+                set_last_error(storeRes.error().message);
+                return map_error_code(storeRes.error().code);
+            }
+            ctx->state.content_store = to_shared(std::move(storeRes.value()));
+
+            // App context wiring
+            ctx->state.app_context.store = ctx->state.content_store;
+            ctx->state.app_context.metadataRepo = ctx->state.metadata_repo;
+            ctx->state.app_context.workerExecutor = ctx->state.worker_pool->get_executor();
+
+            // Services
+            ctx->state.document_service =
+                yams::app::services::makeDocumentService(ctx->state.app_context);
+            ctx->state.search_service =
+                yams::app::services::makeSearchService(ctx->state.app_context);
+            ctx->state.grep_service = yams::app::services::makeGrepService(ctx->state.app_context);
+            ctx->state.download_service =
+                yams::app::services::makeDownloadService(ctx->state.app_context);
         }
-
-        ctx->state.database = std::move(db);
-        ctx->state.connection_pool =
-            std::make_unique<ConnectionPool>(dbPath.string(), ConnectionPoolConfig{});
-        ctx->state.metadata_repo =
-            std::make_shared<MetadataRepository>(*ctx->state.connection_pool);
-
-        MigrationManager migrator(*ctx->state.database);
-        auto initRes = migrator.initialize();
-        if (!initRes) {
-            set_last_error(initRes.error().message);
-            return map_error_code(initRes.error().code);
-        }
-        migrator.registerMigrations(YamsMetadataMigrations::getAllMigrations());
-        auto migrateRes = migrator.migrate();
-        if (!migrateRes) {
-            set_last_error(migrateRes.error().message);
-            return map_error_code(migrateRes.error().code);
-        }
-
-        // Content store
-        yams::api::ContentStoreBuilder builder;
-        auto storeRes = builder.withStoragePath(ctx->state.config.storage_directory).build();
-        if (!storeRes) {
-            set_last_error(storeRes.error().message);
-            return map_error_code(storeRes.error().code);
-        }
-        ctx->state.content_store = to_shared(std::move(storeRes.value()));
-
-        // App context wiring
-        ctx->state.app_context.store = ctx->state.content_store;
-        ctx->state.app_context.metadataRepo = ctx->state.metadata_repo;
-        ctx->state.app_context.workerExecutor = ctx->state.worker_pool->get_executor();
-
-        // Services
-        ctx->state.document_service =
-            yams::app::services::makeDocumentService(ctx->state.app_context);
-        ctx->state.search_service = yams::app::services::makeSearchService(ctx->state.app_context);
-        ctx->state.grep_service = yams::app::services::makeGrepService(ctx->state.app_context);
 
         ctx->state.telemetry_sink = ctx->state.config.telemetry_sink;
         if (ctx->state.telemetry_sink == TelemetrySinkType::File) {
@@ -656,6 +774,96 @@ yams_mobile_grep_execute(yams_mobile_context_t* ctx, const yams_mobile_grep_requ
     if (auto status = validate_request_header(&request->header, "grep");
         status != YAMS_MOBILE_STATUS_OK)
         return status;
+
+    // Daemon mode
+    if (ctx->state.daemon_client) {
+        yams::daemon::GrepRequest dreq;
+        dreq.pattern = request->pattern ? request->pattern : "";
+        dreq.literalText = request->literal != 0;
+        dreq.caseInsensitive = request->ignore_case != 0;
+        dreq.wholeWord = request->word_boundary != 0;
+        dreq.maxMatches = request->max_matches;
+
+        auto result = daemon_call(ctx->state, std::move(dreq));
+        if (!result) {
+            set_last_error(result.error().message);
+            return map_error_code(result.error().code);
+        }
+
+        auto& resp = result.value();
+        nlohmann::json root;
+        root["totalMatches"] = resp.totalMatches;
+        root["filesSearched"] = resp.filesSearched;
+        root["regexMatches"] = resp.regexMatches;
+        root["semanticMatches"] = resp.semanticMatches;
+        root["executionTimeMs"] = resp.executionTimeMs;
+        if (!resp.queryInfo.empty())
+            root["queryInfo"] = resp.queryInfo;
+        if (!resp.searchStats.empty())
+            root["stats"] = resp.searchStats;
+
+        // Group matches by file for consistent JSON format
+        std::unordered_map<std::string, nlohmann::json> fileMap;
+        for (const auto& m : resp.matches) {
+            auto& entry = fileMap[m.file];
+            if (!entry.contains("file")) {
+                entry["file"] = m.file;
+                entry["fileName"] = m.file;
+                entry["matchCount"] = 0;
+                entry["matches"] = nlohmann::json::array();
+            }
+            nlohmann::json mj;
+            mj["lineNumber"] = m.lineNumber;
+            mj["line"] = m.line;
+            if (!m.contextBefore.empty())
+                mj["before"] = m.contextBefore;
+            if (!m.contextAfter.empty())
+                mj["after"] = m.contextAfter;
+            if (!m.matchType.empty())
+                mj["matchType"] = m.matchType;
+            mj["confidence"] = m.confidence;
+            entry["matches"].push_back(std::move(mj));
+            entry["matchCount"] = entry["matches"].size();
+        }
+        nlohmann::json files = nlohmann::json::array();
+        for (auto& [_, entry] : fileMap)
+            files.push_back(std::move(entry));
+        root["files"] = std::move(files);
+        if (!resp.filesWith.empty())
+            root["filesWith"] = resp.filesWith;
+        if (!resp.filesWithout.empty())
+            root["filesWithout"] = resp.filesWithout;
+        if (!resp.pathsOnly.empty())
+            root["pathsOnly"] = resp.pathsOnly;
+
+        nlohmann::json statsJson;
+        statsJson["executionTimeMs"] = resp.executionTimeMs;
+        statsJson["totalMatches"] = resp.totalMatches;
+        statsJson["filesSearched"] = resp.filesSearched;
+        if (!resp.searchStats.empty())
+            statsJson["stats"] = resp.searchStats;
+
+        if (out_result) {
+            auto wrapper = std::make_unique<yams_mobile_grep_result_t>();
+            wrapper->json = root.dump();
+            wrapper->stats_json = statsJson.dump();
+            wrapper->pre_serialized = true;
+            *out_result = wrapper.release();
+        }
+
+        nlohmann::json telemetry;
+        telemetry["event"] = "grep";
+        telemetry["timestamp"] = iso_timestamp_now();
+        telemetry["executionTimeMs"] = resp.executionTimeMs;
+        telemetry["totalMatches"] = resp.totalMatches;
+        telemetry["filesSearched"] = resp.filesSearched;
+        emit_telemetry(ctx->state, telemetry);
+
+        set_last_error("");
+        return YAMS_MOBILE_STATUS_OK;
+    }
+
+    // Embedded mode
     auto service = ctx->state.grep_service;
     if (!service) {
         set_last_error("grep service not initialized");
@@ -712,6 +920,73 @@ yams_mobile_search_execute(yams_mobile_context_t* ctx, const yams_mobile_search_
     if (auto status = validate_request_header(&request->header, "search");
         status != YAMS_MOBILE_STATUS_OK)
         return status;
+
+    // Daemon mode
+    if (ctx->state.daemon_client) {
+        yams::daemon::SearchRequest dreq;
+        dreq.query = request->query ? request->query : "";
+        dreq.limit = request->limit;
+        dreq.pathsOnly = request->paths_only != 0;
+        dreq.searchType = request->semantic ? "semantic" : "hybrid";
+        if (request->tags && request->tag_count > 0) {
+            for (size_t i = 0; i < request->tag_count; ++i) {
+                if (request->tags[i])
+                    dreq.tags.emplace_back(request->tags[i]);
+            }
+        }
+
+        auto result = daemon_call(ctx->state, std::move(dreq));
+        if (!result) {
+            set_last_error(result.error().message);
+            return map_error_code(result.error().code);
+        }
+
+        auto& resp = result.value();
+        nlohmann::json root;
+        root["total"] = resp.totalCount;
+        root["executionTimeMs"] = resp.elapsed.count();
+        if (!resp.traceId.empty())
+            root["traceId"] = resp.traceId;
+
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& item : resp.results) {
+            nlohmann::json entry;
+            entry["id"] = item.id;
+            entry["path"] = item.path;
+            entry["title"] = item.title;
+            if (!item.snippet.empty())
+                entry["snippet"] = item.snippet;
+            entry["score"] = item.score;
+            if (!item.metadata.empty())
+                entry["metadata"] = item.metadata;
+            arr.push_back(std::move(entry));
+        }
+        root["results"] = std::move(arr);
+
+        nlohmann::json statsJson;
+        statsJson["executionTimeMs"] = resp.elapsed.count();
+        statsJson["total"] = resp.totalCount;
+
+        if (out_result) {
+            auto wrapper = std::make_unique<yams_mobile_search_result_t>();
+            wrapper->json = root.dump();
+            wrapper->stats_json = statsJson.dump();
+            wrapper->pre_serialized = true;
+            *out_result = wrapper.release();
+        }
+
+        nlohmann::json telemetry;
+        telemetry["event"] = "search";
+        telemetry["timestamp"] = iso_timestamp_now();
+        telemetry["executionTimeMs"] = resp.elapsed.count();
+        telemetry["total"] = resp.totalCount;
+        emit_telemetry(ctx->state, telemetry);
+
+        set_last_error("");
+        return YAMS_MOBILE_STATUS_OK;
+    }
+
+    // Embedded mode
     auto service = ctx->state.search_service;
     if (!service) {
         set_last_error("search service not initialized");
@@ -798,6 +1073,35 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_store_document(
     if (auto status = validate_request_header(&request->header, "store_document");
         status != YAMS_MOBILE_STATUS_OK)
         return status;
+
+    // Daemon mode
+    if (ctx->state.daemon_client) {
+        yams::daemon::AddDocumentRequest dreq;
+        if (request->path)
+            dreq.path = request->path;
+        if (request->tags && request->tag_count > 0) {
+            for (size_t i = 0; i < request->tag_count; ++i) {
+                if (request->tags[i])
+                    dreq.tags.emplace_back(request->tags[i]);
+            }
+        }
+
+        auto result = daemon_call(ctx->state, std::move(dreq));
+        if (!result) {
+            set_last_error(result.error().message);
+            return map_error_code(result.error().code);
+        }
+
+        if (out_hash) {
+            g_temp_string = result.value().hash;
+            out_hash->data = g_temp_string.c_str();
+            out_hash->length = g_temp_string.size();
+        }
+        set_last_error("");
+        return YAMS_MOBILE_STATUS_OK;
+    }
+
+    // Embedded mode
     auto service = ctx->state.document_service;
     if (!service) {
         set_last_error("document service not initialized");
@@ -835,6 +1139,31 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_remove_document(yams_mobile_conte
         set_last_error("invalid arguments");
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     }
+
+    // Daemon mode
+    if (ctx->state.daemon_client) {
+        yams::daemon::DeleteRequest dreq;
+        dreq.hash = document_hash;
+
+        auto result = daemon_call(ctx->state, std::move(dreq));
+        if (!result) {
+            set_last_error(result.error().message);
+            return map_error_code(result.error().code);
+        }
+
+        if (result.value().failureCount > 0) {
+            std::string errMsg = "delete failed";
+            if (!result.value().results.empty() && !result.value().results[0].error.empty())
+                errMsg = result.value().results[0].error;
+            set_last_error(errMsg);
+            return YAMS_MOBILE_STATUS_INTERNAL_ERROR;
+        }
+
+        set_last_error("");
+        return YAMS_MOBILE_STATUS_OK;
+    }
+
+    // Embedded mode
     auto repo = ctx->state.metadata_repo;
     auto store = ctx->state.content_store;
     if (!repo || !store) {
@@ -869,6 +1198,560 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_remove_document(yams_mobile_conte
     return YAMS_MOBILE_STATUS_OK;
 }
 
+YAMS_MOBILE_API yams_mobile_status yams_mobile_download(yams_mobile_context_t* ctx,
+                                                        const yams_mobile_download_request* request,
+                                                        yams_mobile_string_view* out_hash) {
+    if (out_hash) {
+        out_hash->data = nullptr;
+        out_hash->length = 0;
+    }
+    if (!ctx || !request) {
+        set_last_error("invalid arguments");
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+    if (auto status = validate_request_header(&request->header, "download");
+        status != YAMS_MOBILE_STATUS_OK)
+        return status;
+    if (!request->url || *request->url == '\0') {
+        set_last_error("download url is required");
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+    if (request->metadata_count > 0 && (!request->metadata_keys || !request->metadata_values)) {
+        set_last_error("metadata keys and values are required when metadata_count > 0");
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+
+    // Daemon mode
+    if (ctx->state.daemon_client) {
+        yams::daemon::DownloadRequest dreq;
+        dreq.url = request->url;
+        if (request->tags && request->tag_count > 0) {
+            dreq.tags.reserve(request->tag_count);
+            for (size_t i = 0; i < request->tag_count; ++i) {
+                if (request->tags[i])
+                    dreq.tags.emplace_back(request->tags[i]);
+            }
+        }
+        for (size_t i = 0; i < request->metadata_count; ++i) {
+            const char* key = request->metadata_keys[i];
+            const char* value = request->metadata_values[i];
+            if (!key || *key == '\0')
+                continue;
+            dreq.metadata[std::string(key)] = value ? std::string(value) : std::string();
+        }
+
+        auto result = daemon_call(ctx->state, std::move(dreq));
+        if (!result) {
+            set_last_error(result.error().message);
+            return map_error_code(result.error().code);
+        }
+
+        if (!result.value().success) {
+            set_last_error(result.value().error.empty() ? "download failed" : result.value().error);
+            return YAMS_MOBILE_STATUS_INTERNAL_ERROR;
+        }
+
+        if (out_hash) {
+            g_temp_string = result.value().hash;
+            out_hash->data = g_temp_string.c_str();
+            out_hash->length = g_temp_string.size();
+        }
+
+        nlohmann::json telemetry;
+        telemetry["event"] = "download";
+        telemetry["timestamp"] = iso_timestamp_now();
+        telemetry["url"] = result.value().url;
+        telemetry["hash"] = result.value().hash;
+        telemetry["success"] = result.value().success;
+        telemetry["sizeBytes"] = result.value().size;
+        emit_telemetry(ctx->state, telemetry);
+
+        set_last_error("");
+        return YAMS_MOBILE_STATUS_OK;
+    }
+
+    // Embedded mode
+    auto service = ctx->state.download_service;
+    if (!service) {
+        set_last_error("download service not initialized");
+        return YAMS_MOBILE_STATUS_NOT_INITIALIZED;
+    }
+
+    DownloadServiceRequest req;
+    req.url = request->url;
+    if (request->timeout_ms > 0) {
+        req.timeout = std::chrono::milliseconds(request->timeout_ms);
+    }
+    req.overwrite = request->overwrite != 0 ? yams::downloader::OverwritePolicy::Always
+                                            : yams::downloader::OverwritePolicy::Never;
+
+    if (request->tags && request->tag_count > 0) {
+        req.tags.reserve(request->tag_count);
+        for (size_t i = 0; i < request->tag_count; ++i) {
+            if (request->tags[i])
+                req.tags.emplace_back(request->tags[i]);
+        }
+    }
+
+    for (size_t i = 0; i < request->metadata_count; ++i) {
+        const char* key = request->metadata_keys[i];
+        const char* value = request->metadata_values[i];
+        if (!key || *key == '\0')
+            continue;
+        req.metadata[std::string(key)] = value ? std::string(value) : std::string();
+    }
+
+    auto result = service->download(req);
+    if (!result) {
+        set_last_error(result.error().message);
+        return map_error_code(result.error().code);
+    }
+
+    if (out_hash) {
+        g_temp_string = result.value().hash;
+        out_hash->data = g_temp_string.c_str();
+        out_hash->length = g_temp_string.size();
+    }
+
+    nlohmann::json telemetry;
+    telemetry["event"] = "download";
+    telemetry["timestamp"] = iso_timestamp_now();
+    telemetry["url"] = result.value().url;
+    telemetry["hash"] = result.value().hash;
+    telemetry["success"] = result.value().success;
+    telemetry["sizeBytes"] = result.value().sizeBytes;
+    emit_telemetry(ctx->state, telemetry);
+
+    set_last_error("");
+    return YAMS_MOBILE_STATUS_OK;
+}
+
+YAMS_MOBILE_API yams_mobile_status
+yams_mobile_update_document(yams_mobile_context_t* ctx, const yams_mobile_update_request* request,
+                            yams_mobile_update_result_t** out_result) {
+    if (out_result)
+        *out_result = nullptr;
+    if (!ctx || !request) {
+        set_last_error("invalid arguments");
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+    if (auto status = validate_request_header(&request->header, "update_document");
+        status != YAMS_MOBILE_STATUS_OK)
+        return status;
+    if ((!request->hash || *request->hash == '\0') && (!request->name || *request->name == '\0')) {
+        set_last_error("hash or name is required");
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+    if (request->metadata_count > 0 && (!request->metadata_keys || !request->metadata_values)) {
+        set_last_error("metadata keys and values are required when metadata_count > 0");
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+
+    // Daemon mode
+    if (ctx->state.daemon_client) {
+        yams::daemon::UpdateDocumentRequest dreq;
+        if (request->hash)
+            dreq.hash = request->hash;
+        if (request->name)
+            dreq.name = request->name;
+        if (request->add_tags && request->add_tag_count > 0) {
+            dreq.addTags.reserve(request->add_tag_count);
+            for (size_t i = 0; i < request->add_tag_count; ++i) {
+                if (request->add_tags[i])
+                    dreq.addTags.emplace_back(request->add_tags[i]);
+            }
+        }
+        if (request->remove_tags && request->remove_tag_count > 0) {
+            dreq.removeTags.reserve(request->remove_tag_count);
+            for (size_t i = 0; i < request->remove_tag_count; ++i) {
+                if (request->remove_tags[i])
+                    dreq.removeTags.emplace_back(request->remove_tags[i]);
+            }
+        }
+        for (size_t i = 0; i < request->metadata_count; ++i) {
+            const char* key = request->metadata_keys[i];
+            const char* value = request->metadata_values[i];
+            if (!key || *key == '\0')
+                continue;
+            dreq.metadata[std::string(key)] = value ? std::string(value) : std::string();
+        }
+
+        auto result = daemon_call(ctx->state, std::move(dreq));
+        if (!result) {
+            set_last_error(result.error().message);
+            return map_error_code(result.error().code);
+        }
+
+        auto& resp = result.value();
+        auto wrapper = std::make_unique<yams_mobile_update_result_t>();
+        nlohmann::json j;
+        j["success"] = resp.contentUpdated || resp.metadataUpdated || resp.tagsUpdated;
+        j["hash"] = resp.hash;
+        j["contentUpdated"] = resp.contentUpdated;
+        j["metadataUpdated"] = resp.metadataUpdated;
+        j["tagsUpdated"] = resp.tagsUpdated;
+        wrapper->json = j.dump();
+        if (out_result)
+            *out_result = wrapper.release();
+
+        set_last_error("");
+        return YAMS_MOBILE_STATUS_OK;
+    }
+
+    // Embedded mode
+    auto service = ctx->state.document_service;
+    if (!service) {
+        set_last_error("document service not initialized");
+        return YAMS_MOBILE_STATUS_NOT_INITIALIZED;
+    }
+
+    UpdateMetadataRequest req;
+    if (request->hash)
+        req.hash = request->hash;
+    if (request->name)
+        req.name = request->name;
+
+    if (request->add_tags && request->add_tag_count > 0) {
+        req.addTags.reserve(request->add_tag_count);
+        for (size_t i = 0; i < request->add_tag_count; ++i) {
+            if (request->add_tags[i])
+                req.addTags.emplace_back(request->add_tags[i]);
+        }
+    }
+
+    if (request->remove_tags && request->remove_tag_count > 0) {
+        req.removeTags.reserve(request->remove_tag_count);
+        for (size_t i = 0; i < request->remove_tag_count; ++i) {
+            if (request->remove_tags[i])
+                req.removeTags.emplace_back(request->remove_tags[i]);
+        }
+    }
+
+    for (size_t i = 0; i < request->metadata_count; ++i) {
+        const char* key = request->metadata_keys[i];
+        const char* value = request->metadata_values[i];
+        if (!key || *key == '\0')
+            continue;
+        req.keyValues[std::string(key)] = value ? std::string(value) : std::string();
+    }
+
+    auto result = service->updateMetadata(req);
+    if (!result) {
+        set_last_error(result.error().message);
+        return map_error_code(result.error().code);
+    }
+
+    auto wrapper = std::make_unique<yams_mobile_update_result_t>();
+    nlohmann::json j;
+    j["success"] = result.value().success;
+    j["hash"] = result.value().hash;
+    j["updatesApplied"] = static_cast<std::uint64_t>(result.value().updatesApplied);
+    j["contentUpdated"] = result.value().contentUpdated;
+    j["tagsAdded"] = static_cast<std::uint64_t>(result.value().tagsAdded);
+    j["tagsRemoved"] = static_cast<std::uint64_t>(result.value().tagsRemoved);
+    if (result.value().documentId)
+        j["documentId"] = *result.value().documentId;
+    if (!result.value().backupHash.empty())
+        j["backupHash"] = result.value().backupHash;
+    wrapper->json = j.dump();
+
+    if (out_result)
+        *out_result = wrapper.release();
+
+    set_last_error("");
+    return YAMS_MOBILE_STATUS_OK;
+}
+
+YAMS_MOBILE_API void yams_mobile_update_result_destroy(yams_mobile_update_result_t* result) {
+    delete result;
+}
+
+YAMS_MOBILE_API yams_mobile_string_view
+yams_mobile_update_result_json(const yams_mobile_update_result_t* result) {
+    if (!result)
+        return {nullptr, 0};
+    return {result->json.c_str(), result->json.size()};
+}
+
+YAMS_MOBILE_API yams_mobile_status
+yams_mobile_delete_by_name(yams_mobile_context_t* ctx, const yams_mobile_delete_request* request,
+                           yams_mobile_delete_result_t** out_result) {
+    if (out_result)
+        *out_result = nullptr;
+    if (!ctx || !request) {
+        set_last_error("invalid arguments");
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+    if (auto status = validate_request_header(&request->header, "delete_by_name");
+        status != YAMS_MOBILE_STATUS_OK)
+        return status;
+
+    // Daemon mode - uses DeleteRequest with name/hash/pattern
+    if (ctx->state.daemon_client) {
+        yams::daemon::DeleteRequest dreq;
+        if (request->hash)
+            dreq.hash = request->hash;
+        if (request->name)
+            dreq.name = request->name;
+        if (request->pattern)
+            dreq.pattern = request->pattern;
+        dreq.dryRun = request->dry_run != 0;
+
+        if (dreq.hash.empty() && dreq.name.empty() && dreq.pattern.empty()) {
+            set_last_error("hash, name, or pattern is required");
+            return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+        }
+
+        auto result = daemon_call(ctx->state, std::move(dreq));
+        if (!result) {
+            set_last_error(result.error().message);
+            return map_error_code(result.error().code);
+        }
+
+        auto& resp = result.value();
+        auto wrapper = std::make_unique<yams_mobile_delete_result_t>();
+        nlohmann::json j;
+        j["dryRun"] = resp.dryRun;
+        j["count"] = resp.successCount;
+
+        nlohmann::json deleted = nlohmann::json::array();
+        nlohmann::json errors = nlohmann::json::array();
+        for (const auto& entry : resp.results) {
+            nlohmann::json item;
+            item["name"] = entry.name;
+            item["hash"] = entry.hash;
+            item["deleted"] = entry.success;
+            if (!entry.error.empty())
+                item["error"] = entry.error;
+            if (entry.success)
+                deleted.push_back(std::move(item));
+            else
+                errors.push_back(std::move(item));
+        }
+        j["deleted"] = std::move(deleted);
+        j["errors"] = std::move(errors);
+        wrapper->json = j.dump();
+        if (out_result)
+            *out_result = wrapper.release();
+
+        set_last_error("");
+        return YAMS_MOBILE_STATUS_OK;
+    }
+
+    // Embedded mode
+    auto service = ctx->state.document_service;
+    if (!service) {
+        set_last_error("document service not initialized");
+        return YAMS_MOBILE_STATUS_NOT_INITIALIZED;
+    }
+
+    DeleteByNameRequest req;
+    if (request->hash)
+        req.hash = request->hash;
+    if (request->name)
+        req.name = request->name;
+    if (request->pattern)
+        req.pattern = request->pattern;
+    req.dryRun = request->dry_run != 0;
+
+    if (req.hash.empty() && req.name.empty() && req.pattern.empty()) {
+        set_last_error("hash, name, or pattern is required");
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+
+    auto result = service->deleteByName(req);
+    if (!result) {
+        set_last_error(result.error().message);
+        return map_error_code(result.error().code);
+    }
+
+    auto wrapper = std::make_unique<yams_mobile_delete_result_t>();
+    nlohmann::json j;
+    j["dryRun"] = result.value().dryRun;
+    j["count"] = static_cast<std::uint64_t>(result.value().count);
+
+    nlohmann::json deleted = nlohmann::json::array();
+    for (const auto& entry : result.value().deleted) {
+        nlohmann::json item;
+        item["name"] = entry.name;
+        item["hash"] = entry.hash;
+        item["deleted"] = entry.deleted;
+        if (entry.error)
+            item["error"] = *entry.error;
+        deleted.push_back(std::move(item));
+    }
+    j["deleted"] = std::move(deleted);
+
+    nlohmann::json errors = nlohmann::json::array();
+    for (const auto& entry : result.value().errors) {
+        nlohmann::json item;
+        item["name"] = entry.name;
+        item["hash"] = entry.hash;
+        item["deleted"] = entry.deleted;
+        if (entry.error)
+            item["error"] = *entry.error;
+        errors.push_back(std::move(item));
+    }
+    j["errors"] = std::move(errors);
+
+    wrapper->json = j.dump();
+    if (out_result)
+        *out_result = wrapper.release();
+
+    set_last_error("");
+    return YAMS_MOBILE_STATUS_OK;
+}
+
+YAMS_MOBILE_API void yams_mobile_delete_result_destroy(yams_mobile_delete_result_t* result) {
+    delete result;
+}
+
+YAMS_MOBILE_API yams_mobile_string_view
+yams_mobile_delete_result_json(const yams_mobile_delete_result_t* result) {
+    if (!result)
+        return {nullptr, 0};
+    return {result->json.c_str(), result->json.size()};
+}
+
+YAMS_MOBILE_API yams_mobile_status
+yams_mobile_graph_query(yams_mobile_context_t* ctx, const yams_mobile_graph_query_request* request,
+                        yams_mobile_graph_query_result_t** out_result) {
+    if (out_result)
+        *out_result = nullptr;
+    if (!ctx || !request) {
+        set_last_error("invalid arguments");
+        return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
+    }
+    if (auto status = validate_request_header(&request->header, "graph_query");
+        status != YAMS_MOBILE_STATUS_OK)
+        return status;
+
+    if (!ctx->state.daemon_client) {
+        set_last_error("graph query currently requires daemon backend mode");
+        return YAMS_MOBILE_STATUS_UNAVAILABLE;
+    }
+
+    yams::daemon::GraphQueryRequest req;
+    if (request->document_hash)
+        req.documentHash = request->document_hash;
+    if (request->document_name)
+        req.documentName = request->document_name;
+    if (request->snapshot_id)
+        req.snapshotId = request->snapshot_id;
+    req.nodeId = request->node_id;
+    req.maxDepth = request->max_depth > 0 ? request->max_depth : 1;
+    req.maxResults = request->max_results > 0 ? request->max_results : 200;
+    req.offset = request->offset;
+    req.limit = request->limit > 0 ? request->limit : 100;
+    req.reverseTraversal = request->reverse_traversal != 0;
+    req.includeEdgeProperties = request->include_edge_properties != 0;
+    req.includeNodeProperties = request->include_node_properties != 0;
+
+    if (request->relation_filters && request->relation_filter_count > 0) {
+        req.relationFilters.reserve(request->relation_filter_count);
+        for (size_t i = 0; i < request->relation_filter_count; ++i) {
+            if (request->relation_filters[i])
+                req.relationFilters.emplace_back(request->relation_filters[i]);
+        }
+    }
+
+    auto result = daemon_call(ctx->state, std::move(req));
+    if (!result) {
+        set_last_error(result.error().message);
+        return map_error_code(result.error().code);
+    }
+
+    nlohmann::json root;
+    root["totalNodesFound"] = result.value().totalNodesFound;
+    root["totalEdgesTraversed"] = result.value().totalEdgesTraversed;
+    root["truncated"] = result.value().truncated;
+    root["maxDepthReached"] = result.value().maxDepthReached;
+    root["queryTimeMs"] = result.value().queryTimeMs;
+    root["kgAvailable"] = result.value().kgAvailable;
+    if (!result.value().warning.empty())
+        root["warning"] = result.value().warning;
+
+    nlohmann::json origin;
+    origin["nodeId"] = result.value().originNode.nodeId;
+    origin["nodeKey"] = result.value().originNode.nodeKey;
+    origin["label"] = result.value().originNode.label;
+    origin["type"] = result.value().originNode.type;
+    origin["documentHash"] = result.value().originNode.documentHash;
+    origin["documentPath"] = result.value().originNode.documentPath;
+    origin["snapshotId"] = result.value().originNode.snapshotId;
+    origin["distance"] = result.value().originNode.distance;
+    if (!result.value().originNode.properties.empty())
+        origin["properties"] = result.value().originNode.properties;
+    root["originNode"] = std::move(origin);
+
+    nlohmann::json nodes = nlohmann::json::array();
+    for (const auto& node : result.value().connectedNodes) {
+        nlohmann::json n;
+        n["nodeId"] = node.nodeId;
+        n["nodeKey"] = node.nodeKey;
+        n["label"] = node.label;
+        n["type"] = node.type;
+        n["documentHash"] = node.documentHash;
+        n["documentPath"] = node.documentPath;
+        n["snapshotId"] = node.snapshotId;
+        n["distance"] = node.distance;
+        if (!node.properties.empty())
+            n["properties"] = node.properties;
+        nodes.push_back(std::move(n));
+    }
+    root["connectedNodes"] = std::move(nodes);
+
+    nlohmann::json edges = nlohmann::json::array();
+    for (const auto& edge : result.value().edges) {
+        nlohmann::json e;
+        e["edgeId"] = edge.edgeId;
+        e["srcNodeId"] = edge.srcNodeId;
+        e["dstNodeId"] = edge.dstNodeId;
+        e["relation"] = edge.relation;
+        e["weight"] = edge.weight;
+        if (!edge.properties.empty())
+            e["properties"] = edge.properties;
+        edges.push_back(std::move(e));
+    }
+    root["edges"] = std::move(edges);
+
+    if (!result.value().nodeTypeCounts.empty()) {
+        nlohmann::json counts = nlohmann::json::array();
+        for (const auto& [type, count] : result.value().nodeTypeCounts) {
+            counts.push_back({{"type", type}, {"count", count}});
+        }
+        root["nodeTypeCounts"] = std::move(counts);
+    }
+
+    if (!result.value().relationTypeCounts.empty()) {
+        nlohmann::json counts = nlohmann::json::array();
+        for (const auto& [relation, count] : result.value().relationTypeCounts) {
+            counts.push_back({{"relation", relation}, {"count", count}});
+        }
+        root["relationTypeCounts"] = std::move(counts);
+    }
+
+    auto wrapper = std::make_unique<yams_mobile_graph_query_result_t>();
+    wrapper->json = root.dump();
+    if (out_result)
+        *out_result = wrapper.release();
+
+    set_last_error("");
+    return YAMS_MOBILE_STATUS_OK;
+}
+
+YAMS_MOBILE_API void
+yams_mobile_graph_query_result_destroy(yams_mobile_graph_query_result_t* result) {
+    delete result;
+}
+
+YAMS_MOBILE_API yams_mobile_string_view
+yams_mobile_graph_query_result_json(const yams_mobile_graph_query_result_t* result) {
+    if (!result)
+        return {nullptr, 0};
+    return {result->json.c_str(), result->json.size()};
+}
+
 YAMS_MOBILE_API yams_mobile_status
 yams_mobile_get_metadata(yams_mobile_context_t* ctx, const yams_mobile_metadata_request* request,
                          yams_mobile_metadata_result_t** out_result) {
@@ -878,6 +1761,92 @@ yams_mobile_get_metadata(yams_mobile_context_t* ctx, const yams_mobile_metadata_
         set_last_error("context is null");
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     }
+
+    // Daemon mode — use GetRequest with metadataOnly or ListRequest for pattern
+    if (ctx->state.daemon_client) {
+        if (request) {
+            if (auto status = validate_request_header(&request->header, "get_metadata");
+                status != YAMS_MOBILE_STATUS_OK)
+                return status;
+        }
+
+        if (request && request->document_hash && *request->document_hash) {
+            // Single document by hash
+            yams::daemon::GetRequest dreq;
+            dreq.hash = request->document_hash;
+            dreq.metadataOnly = true;
+
+            auto result = daemon_call(ctx->state, std::move(dreq));
+            if (!result) {
+                set_last_error(result.error().message);
+                return map_error_code(result.error().code);
+            }
+
+            auto& resp = result.value();
+            nlohmann::json root = nlohmann::json::array();
+            if (!resp.hash.empty()) {
+                nlohmann::json entry;
+                entry["id"] = 0;
+                entry["path"] = resp.path;
+                entry["name"] = resp.name;
+                entry["hash"] = resp.hash;
+                entry["size"] = resp.size;
+                entry["mime"] = resp.mimeType;
+                if (!resp.metadata.empty())
+                    entry["metadata"] = resp.metadata;
+                root.push_back(std::move(entry));
+            }
+
+            if (out_result) {
+                auto res = std::make_unique<yams_mobile_metadata_result_t>();
+                res->json = root.dump();
+                *out_result = res.release();
+            }
+            set_last_error("");
+            return YAMS_MOBILE_STATUS_OK;
+        } else {
+            // Pattern-based listing
+            yams::daemon::ListRequest dreq;
+            dreq.showMetadata = true;
+            dreq.showTags = true;
+            dreq.limit = 1000;
+            if (request && request->path && *request->path)
+                dreq.namePattern = request->path;
+
+            auto result = daemon_call(ctx->state, std::move(dreq));
+            if (!result) {
+                set_last_error(result.error().message);
+                return map_error_code(result.error().code);
+            }
+
+            auto& resp = result.value();
+            nlohmann::json root = nlohmann::json::array();
+            for (const auto& item : resp.items) {
+                nlohmann::json entry;
+                entry["id"] = 0;
+                entry["path"] = item.path;
+                entry["name"] = item.name;
+                entry["hash"] = item.hash;
+                entry["size"] = item.size;
+                entry["mime"] = item.mimeType;
+                if (!item.tags.empty())
+                    entry["tags"] = item.tags;
+                if (!item.metadata.empty())
+                    entry["metadata"] = item.metadata;
+                root.push_back(std::move(entry));
+            }
+
+            if (out_result) {
+                auto res = std::make_unique<yams_mobile_metadata_result_t>();
+                res->json = root.dump();
+                *out_result = res.release();
+            }
+            set_last_error("");
+            return YAMS_MOBILE_STATUS_OK;
+        }
+    }
+
+    // Embedded mode
     auto repo = ctx->state.metadata_repo;
     if (!repo) {
         set_last_error("metadata repository not initialized");
@@ -960,6 +1929,40 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_get_vector_status(
         set_last_error("context is null");
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     }
+
+    // Daemon mode — use GetStatsRequest
+    if (ctx->state.daemon_client) {
+        if (request) {
+            if (auto status = validate_request_header(&request->header, "get_vector_status");
+                status != YAMS_MOBILE_STATUS_OK)
+                return status;
+        }
+
+        yams::daemon::GetStatsRequest dreq;
+        auto result = daemon_call(ctx->state, std::move(dreq));
+        if (!result) {
+            set_last_error(result.error().message);
+            return map_error_code(result.error().code);
+        }
+
+        auto& resp = result.value();
+        nlohmann::json j;
+        j["documents"] = resp.totalDocuments;
+        j["storageBytes"] = resp.totalSize;
+        j["dedupBytes"] = static_cast<std::uint64_t>(
+            resp.compressionRatio > 0.0 ? resp.totalSize * resp.compressionRatio : 0);
+        j["warmupRequested"] = (request && request->warmup != 0);
+
+        if (out_result) {
+            auto res = std::make_unique<yams_mobile_vector_status_result_t>();
+            res->json = j.dump();
+            *out_result = res.release();
+        }
+        set_last_error("");
+        return YAMS_MOBILE_STATUS_OK;
+    }
+
+    // Embedded mode
     auto repo = ctx->state.metadata_repo;
     auto store = ctx->state.content_store;
     if (!repo || !store) {
@@ -1008,6 +2011,94 @@ yams_mobile_list_documents(yams_mobile_context_t* ctx, const yams_mobile_list_re
         set_last_error("context is null");
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     }
+
+    // Daemon mode
+    if (ctx->state.daemon_client) {
+        if (request) {
+            if (auto status = validate_request_header(&request->header, "list_documents");
+                status != YAMS_MOBILE_STATUS_OK)
+                return status;
+        }
+
+        yams::daemon::ListRequest dreq;
+        dreq.limit = 100;
+        dreq.offset = 0;
+        if (request) {
+            if (request->pattern && *request->pattern)
+                dreq.namePattern = request->pattern;
+            if (request->limit > 0)
+                dreq.limit = request->limit;
+            if (request->offset > 0)
+                dreq.offset = static_cast<int>(request->offset);
+            dreq.pathsOnly = request->paths_only != 0;
+            dreq.matchAllTags = request->match_all_tags != 0;
+            if (request->tags && request->tag_count > 0) {
+                for (size_t i = 0; i < request->tag_count; ++i) {
+                    if (request->tags[i])
+                        dreq.tags.emplace_back(request->tags[i]);
+                }
+            }
+        }
+
+        auto result = daemon_call(ctx->state, std::move(dreq));
+        if (!result) {
+            set_last_error(result.error().message);
+            return map_error_code(result.error().code);
+        }
+
+        auto& resp = result.value();
+        nlohmann::json root;
+        root["count"] = resp.items.size();
+        root["totalFound"] = resp.totalCount;
+        root["hasMore"] = resp.items.size() < resp.totalCount;
+
+        nlohmann::json docs = nlohmann::json::array();
+        for (const auto& item : resp.items) {
+            nlohmann::json entry;
+            entry["name"] = item.name;
+            entry["fileName"] = item.fileName;
+            entry["hash"] = item.hash;
+            entry["path"] = item.path;
+            entry["size"] = item.size;
+            entry["mimeType"] = item.mimeType;
+            entry["fileType"] = item.fileType;
+            entry["extension"] = item.extension;
+            entry["created"] = item.created;
+            entry["modified"] = item.modified;
+            entry["indexed"] = item.indexed;
+            if (!item.tags.empty())
+                entry["tags"] = item.tags;
+            if (!item.metadata.empty())
+                entry["metadata"] = item.metadata;
+            if (!item.snippet.empty())
+                entry["snippet"] = item.snippet;
+            if (!item.changeType.empty())
+                entry["changeType"] = item.changeType;
+            if (!item.matchReason.empty())
+                entry["matchReason"] = item.matchReason;
+            if (item.relevanceScore != 0.0)
+                entry["relevanceScore"] = item.relevanceScore;
+            docs.push_back(std::move(entry));
+        }
+        root["documents"] = std::move(docs);
+
+        auto wrapper = std::make_unique<yams_mobile_list_result_t>();
+        wrapper->json = root.dump();
+        if (out_result)
+            *out_result = wrapper.release();
+
+        nlohmann::json telemetry;
+        telemetry["event"] = "list";
+        telemetry["timestamp"] = iso_timestamp_now();
+        telemetry["count"] = resp.items.size();
+        telemetry["totalFound"] = resp.totalCount;
+        emit_telemetry(ctx->state, telemetry);
+
+        set_last_error("");
+        return YAMS_MOBILE_STATUS_OK;
+    }
+
+    // Embedded mode
     auto service = ctx->state.document_service;
     if (!service) {
         set_last_error("document service not initialized");
@@ -1077,6 +2168,96 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_get_document(
         set_last_error("context is null");
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
     }
+
+    // Daemon mode
+    if (ctx->state.daemon_client) {
+        if (request) {
+            if (auto status = validate_request_header(&request->header, "get_document");
+                status != YAMS_MOBILE_STATUS_OK)
+                return status;
+        }
+
+        yams::daemon::GetRequest dreq;
+        if (request) {
+            if (request->document_hash && *request->document_hash)
+                dreq.hash = request->document_hash;
+            else if (request->name && *request->name) {
+                dreq.name = request->name;
+                dreq.byName = true;
+            }
+            dreq.metadataOnly = request->metadata_only != 0;
+            dreq.raw = request->raw != 0;
+            dreq.extract = request->include_extracted_text != 0 && !dreq.raw;
+            dreq.latest = request->latest != 0;
+            dreq.oldest = request->oldest != 0;
+            if (request->max_bytes > 0)
+                dreq.maxBytes = request->max_bytes;
+            if (dreq.metadataOnly)
+                dreq.raw = false;
+        }
+
+        auto result = daemon_call(ctx->state, std::move(dreq));
+        if (!result) {
+            set_last_error(result.error().message);
+            return map_error_code(result.error().code);
+        }
+
+        auto& resp = result.value();
+        nlohmann::json root;
+        root["totalFound"] = 1;
+        root["hasMore"] = false;
+        root["graphEnabled"] = resp.graphEnabled;
+        root["totalBytes"] = resp.totalBytes;
+        if (resp.outputWritten)
+            root["outputWritten"] = true;
+
+        nlohmann::json doc;
+        doc["hash"] = resp.hash;
+        doc["path"] = resp.path;
+        doc["name"] = resp.name;
+        doc["fileName"] = resp.fileName;
+        doc["mimeType"] = resp.mimeType;
+        doc["fileType"] = resp.fileType;
+        doc["size"] = resp.size;
+        doc["created"] = resp.created;
+        doc["modified"] = resp.modified;
+        doc["indexed"] = resp.indexed;
+        if (!resp.metadata.empty())
+            doc["metadata"] = resp.metadata;
+        root["document"] = std::move(doc);
+
+        if (!resp.related.empty()) {
+            nlohmann::json relArr = nlohmann::json::array();
+            for (const auto& rel : resp.related) {
+                nlohmann::json r;
+                r["hash"] = rel.hash;
+                r["path"] = rel.path;
+                r["name"] = rel.name;
+                r["distance"] = rel.distance;
+                r["relevanceScore"] = rel.relevanceScore;
+                relArr.push_back(std::move(r));
+            }
+            root["related"] = std::move(relArr);
+        }
+
+        auto wrapper = std::make_unique<yams_mobile_document_get_result_t>();
+        wrapper->json = root.dump();
+        if (resp.hasContent && !resp.content.empty())
+            wrapper->content = resp.content;
+        if (out_result)
+            *out_result = wrapper.release();
+
+        nlohmann::json telemetry;
+        telemetry["event"] = "get";
+        telemetry["timestamp"] = iso_timestamp_now();
+        telemetry["hasDocument"] = !resp.hash.empty();
+        emit_telemetry(ctx->state, telemetry);
+
+        set_last_error("");
+        return YAMS_MOBILE_STATUS_OK;
+    }
+
+    // Embedded mode
     auto service = ctx->state.document_service;
     if (!service) {
         set_last_error("document service not initialized");
@@ -1163,6 +2344,9 @@ YAMS_MOBILE_API yams_mobile_string_view
 yams_mobile_grep_result_stats_json(const yams_mobile_grep_result_t* result) {
     if (!result)
         return {nullptr, 0};
+    if (result->pre_serialized) {
+        return {result->stats_json.c_str(), result->stats_json.size()};
+    }
     nlohmann::json j;
     j["executionTimeMs"] = result->response.executionTimeMs;
     j["totalMatches"] = result->response.totalMatches;
@@ -1176,6 +2360,9 @@ YAMS_MOBILE_API yams_mobile_string_view
 yams_mobile_search_result_stats_json(const yams_mobile_search_result_t* result) {
     if (!result)
         return {nullptr, 0};
+    if (result->pre_serialized) {
+        return {result->stats_json.c_str(), result->stats_json.size()};
+    }
     nlohmann::json j;
     j["executionTimeMs"] = result->response.executionTimeMs;
     j["total"] = result->response.total;
@@ -1190,6 +2377,9 @@ YAMS_MOBILE_API yams_mobile_string_view
 yams_mobile_search_result_json(const yams_mobile_search_result_t* result) {
     if (!result)
         return {nullptr, 0};
+    if (result->pre_serialized) {
+        return {result->json.c_str(), result->json.size()};
+    }
 
     nlohmann::json root;
     root["total"] = result->response.total;
@@ -1271,6 +2461,9 @@ YAMS_MOBILE_API yams_mobile_string_view
 yams_mobile_grep_result_json(const yams_mobile_grep_result_t* result) {
     if (!result)
         return {nullptr, 0};
+    if (result->pre_serialized) {
+        return {result->json.c_str(), result->json.size()};
+    }
 
     nlohmann::json root;
     root["totalMatches"] = static_cast<std::uint64_t>(result->response.totalMatches);

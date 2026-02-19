@@ -7,13 +7,16 @@
 #include <atomic>
 #include <condition_variable>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <boost/asio/thread_pool.hpp>
 
 // Forward declaration for ONNX Runtime
 namespace Ort {
@@ -65,6 +68,11 @@ public:
     std::string getName() const { return info_.name; }
     size_t getEmbeddingDim() const { return info_.embeddingDim; }
     size_t getMaxSequenceLength() const { return info_.maxSequenceLength; }
+    std::string getExecutionProvider() const;
+    size_t getLearnedBatchLimit() const;
+
+    Result<void> setThreading(int intraThreads, int interThreads);
+    std::pair<int, int> getThreading() const;
 
     // Statistics
     size_t getRequestCount() const { return info_.requestCount.load(); }
@@ -112,6 +120,8 @@ struct ModelPoolConfig {
     // Performance
     bool enableGPU = false;
     int numThreads = 4;
+    bool asyncLoading = false;    // When true, schedule loads on a worker pool
+    size_t loadWorkerThreads = 2; // Worker threads for async loading
 };
 
 // ============================================================================
@@ -155,7 +165,7 @@ public:
     // ========================================================================
 
     // Load a model into the pool
-    Result<void> loadModel(const std::string& modelName);
+    Result<void> loadModel(const std::string& modelName, bool wait = true);
 
     // Unload a model from the pool
     Result<void> unloadModel(const std::string& modelName);
@@ -166,6 +176,9 @@ public:
     // Warm up the pool for a specific model by acquiring a session and doing a dummy inference
     // This triggers lazy loading so subsequent real requests are faster
     Result<void> warmupModel(const std::string& modelName);
+
+    Result<void> setModelThreading(const std::string& modelName, int intraThreads, int interThreads,
+                                   bool applyNow = true);
 
     // Evict least recently used models
     void evictLRU(size_t numToEvict = 1);
@@ -202,6 +215,7 @@ public:
 
     // Get the configured models root directory
     const std::string& getModelsRoot() const { return config_.modelsRoot; }
+    bool isAsyncLoadingEnabled() const { return config_.asyncLoading; }
 
 private:
     // Model registry entry
@@ -219,6 +233,8 @@ private:
 
     // Create a new model session
     Result<ModelSessionPtr> createModelSession(const std::string& modelName);
+    Result<void> loadModelSync(const std::string& modelName);
+    Result<void> scheduleLoad(const std::string& modelName);
 
     // Update access statistics
     void updateAccessStats(const std::string& modelName);
@@ -237,6 +253,7 @@ private:
     std::unordered_set<std::string> loadingModels_; // Models currently being loaded
     std::unordered_map<std::string, ModelEntry> models_;
     std::unordered_map<std::string, ResolutionHints> modelHints_;
+    std::unordered_map<std::string, std::pair<int, int>> threadingOverrides_;
 
     // Statistics
     std::atomic<size_t> totalRequests_{0};
@@ -247,12 +264,15 @@ private:
     // ONNX Runtime environment (shared across all models)
     std::shared_ptr<Ort::Env> ortEnv_;
     std::shared_ptr<Ort::SessionOptions> sessionOptions_;
+    bool runtimeGpuEnabled_ = false;
 
     bool initialized_ = false;
     std::atomic<bool> shutdown_{false}; // Guard against double-shutdown
 
     // Background preload thread (must be joined before destruction)
     std::thread preloadThread_;
+    std::unique_ptr<boost::asio::thread_pool> loadPool_;
+    std::unordered_map<std::string, std::shared_future<Result<void>>> loadingFutures_;
 };
 
 } // namespace yams::daemon

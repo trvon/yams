@@ -73,16 +73,13 @@ public:
         bool enable_streaming = true; // Use streaming response model
         bool enable_multiplexing =
             true; // Default: allow multiple concurrent requests per connection
-        size_t chunk_size = 512 * 1024;   // Default chunk size (512KB, increased)
-        size_t header_flush_delay_ms = 0; // Time to wait before flushing header (0 = immediate)
-        size_t chunk_flush_delay_ms = 0;  // Time to wait before flushing chunks (0 = immediate)
+        size_t chunk_size = 512 * 1024;         // Default chunk size (512KB, increased)
         std::chrono::seconds write_timeout{30}; // Timeout for write operations
         std::chrono::seconds read_timeout{30};  // Timeout for read operations
         std::chrono::milliseconds stream_chunk_timeout{
             30000};                        // Timeout for next_chunk() (30s default)
         bool auto_detect_streaming = true; // Auto-detect requests that benefit from streaming
         bool force_streaming = false;      // Force streaming for all responses
-        size_t streaming_threshold = 1024 * 1024; // Size threshold for auto-streaming (1MB)
         // Close strategy: with multiplexing enabled, prefer persistent connections to
         // avoid mid-flight truncation that can manifest as EPIPE/ECONNRESET when the
         // peer queues multiple requests. Default to keep-alive; callers may override.
@@ -150,13 +147,44 @@ public:
 
     // Simple interface for handling raw request data (for use with native Boost.ASIO)
     [[nodiscard]] boost::asio::awaitable<std::vector<uint8_t>>
-    handle_request(const std::vector<uint8_t>& request_data, yams::compat::stop_token token);
+    handle_request(std::vector<uint8_t> request_data, yams::compat::stop_token token);
 
     // Handle a streaming response
     [[nodiscard]] boost::asio::awaitable<Result<void>>
     handle_streaming_request(boost::asio::local::stream_protocol::socket& socket,
                              const Request& request, uint64_t request_id,
                              ConnectionFsm* fsm = nullptr, bool client_expects_streaming = false);
+
+#if defined(YAMS_TESTING)
+    // Test-only hooks for deterministic mux queue/writer repro.
+    // These avoid preprocessor hacks (e.g., redefining private/public) that can break STL headers.
+    struct TestingMuxSnapshot {
+        size_t active{0};
+        size_t queues{0};
+        size_t total_queued_bytes{0};
+        bool writer_running{false};
+    };
+
+    [[nodiscard]] TestingMuxSnapshot testing_mux_snapshot() const {
+        std::lock_guard<std::mutex> lock(rr_mutex_);
+        return TestingMuxSnapshot{
+            .active = rr_active_.size(),
+            .queues = rr_queues_.size(),
+            .total_queued_bytes = total_queued_bytes_,
+            .writer_running = writer_running_,
+        };
+    }
+
+    [[nodiscard]] Result<bool> testing_enqueue_frame_sync(uint64_t request_id,
+                                                          std::vector<uint8_t> frame, bool last) {
+        return enqueue_frame_sync(request_id, std::move(frame), last, nullptr);
+    }
+
+    [[nodiscard]] boost::asio::awaitable<void>
+    testing_writer_drain(boost::asio::local::stream_protocol::socket& socket) {
+        co_await writer_drain(socket, nullptr);
+    }
+#endif
 
 private:
     // Minimal streaming path used before services are ready: emits header then
@@ -187,9 +215,6 @@ private:
     stream_chunks(boost::asio::local::stream_protocol::socket& socket, const Request& request,
                   uint64_t request_id, std::shared_ptr<RequestProcessor> processor,
                   ConnectionFsm* fsm = nullptr);
-
-    // Determine if a request should be streamed based on config and request type
-    [[nodiscard]] bool should_stream_request(const Request& request) const;
 
     // Statistics
     struct Stats {
@@ -234,9 +259,6 @@ private:
         std::chrono::nanoseconds min_latency{std::chrono::nanoseconds::max()};
         std::chrono::nanoseconds max_latency{0};
     };
-    [[nodiscard]] boost::asio::awaitable<Result<Message>>
-    read_message(boost::asio::local::stream_protocol::socket& socket, FrameReader& reader);
-
     [[nodiscard]] boost::asio::awaitable<Result<void>>
     write_message(boost::asio::local::stream_protocol::socket& socket, const Message& message);
 
@@ -256,10 +278,6 @@ private:
 
     // Check if the processor can handle streaming for this request
     [[nodiscard]] bool can_stream_request(const Request& request) const;
-
-    // Helper method to accumulate chunks for bounded memory usage
-    [[nodiscard]] boost::asio::awaitable<std::vector<Response>>
-    collect_limited_chunks(const Request& request, size_t max_chunks = 1000);
 
     // Send an error response. If request_id is provided, the error will be correlated
     // with that request; otherwise 0 indicates an out-of-band error and callers should
@@ -296,14 +314,6 @@ private:
     bool writer_running_{false};
     size_t total_queued_bytes_{0};
 
-    // Per-request lifecycle/metrics
-    /* moved to request_context.h */ struct RequestContext_REMOVED {
-        std::chrono::steady_clock::time_point start;
-        std::atomic<bool> completed{false};
-        std::atomic<bool> canceled{false};
-        std::atomic<size_t> frames_enqueued{0};
-        std::atomic<size_t> bytes_enqueued{0};
-    };
     std::mutex ctx_mtx_;
     std::unordered_map<uint64_t, std::shared_ptr<RequestContext>> contexts_;
 
@@ -318,95 +328,5 @@ private:
 };
 
 inline RequestHandler::Config::Config() = default;
-
-// Request router for dispatching to specific handlers
-class RequestRouter : public RequestProcessor {
-public:
-    using Handler = std::function<boost::asio::awaitable<Response>(const Request&)>;
-
-    // Register handlers for specific request types
-    template <typename T> void register_handler(Handler handler) {
-        handlers_[typeid(T).hash_code()] = std::move(handler);
-    }
-
-    [[nodiscard]] boost::asio::awaitable<Response> process(const Request& request) override;
-
-private:
-    std::unordered_map<size_t, Handler> handlers_;
-
-    [[nodiscard]] size_t get_request_type_hash(const Request& request) const;
-};
-
-// Middleware for request processing pipeline
-class RequestMiddleware {
-public:
-    virtual ~RequestMiddleware() = default;
-
-    using Next = std::function<boost::asio::awaitable<Response>(const Request&)>;
-
-    [[nodiscard]] virtual boost::asio::awaitable<Response> process(const Request& request,
-                                                                   Next next) = 0;
-};
-
-// Pipeline of middleware
-class MiddlewarePipeline : public RequestProcessor {
-public:
-    void add(std::shared_ptr<RequestMiddleware> middleware) {
-        middleware_.push_back(std::move(middleware));
-    }
-
-    void set_final_handler(RequestHandler::ProcessorFunc handler) {
-        final_handler_ = std::move(handler);
-    }
-
-    [[nodiscard]] boost::asio::awaitable<Response> process(const Request& request) override;
-
-private:
-    std::vector<std::shared_ptr<RequestMiddleware>> middleware_;
-    RequestHandler::ProcessorFunc final_handler_;
-};
-
-// Logging middleware
-class LoggingMiddleware : public RequestMiddleware {
-public:
-    [[nodiscard]] boost::asio::awaitable<Response> process(const Request& request,
-                                                           Next next) override;
-};
-
-// Rate limiting middleware
-class RateLimitMiddleware : public RequestMiddleware {
-public:
-    struct Config {
-        size_t requests_per_second;
-        size_t burst_size;
-
-        Config() : requests_per_second(100), burst_size(200) {}
-    };
-
-    explicit RateLimitMiddleware(Config config = {});
-
-    [[nodiscard]] boost::asio::awaitable<Response> process(const Request& request,
-                                                           Next next) override;
-
-private:
-    Config config_;
-    std::atomic<size_t> tokens_;
-    std::chrono::steady_clock::time_point last_refill_;
-    std::mutex refill_mutex_;
-};
-
-// Authentication middleware
-class AuthMiddleware : public RequestMiddleware {
-public:
-    using Validator = std::function<boost::asio::awaitable<bool>(const std::string&)>;
-
-    explicit AuthMiddleware(Validator validator) : validator_(std::move(validator)) {}
-
-    [[nodiscard]] boost::asio::awaitable<Response> process(const Request& request,
-                                                           Next next) override;
-
-private:
-    Validator validator_;
-};
 
 } // namespace yams::daemon

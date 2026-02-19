@@ -1307,7 +1307,25 @@ public:
                 for (auto& c : v)
                     c = static_cast<char>(std::tolower(c));
                 if (!v.empty() && v != "0" && v != "false" && v != "off" && v != "no") {
-                    fallback_provider_ = yams::ml::createEmbeddingProvider();
+                    auto isTruthy = [](const char* value) {
+                        if (!value || !*value) {
+                            return false;
+                        }
+                        std::string normalized(value);
+                        for (auto& c : normalized) {
+                            c = static_cast<char>(std::tolower(c));
+                        }
+                        return normalized != "0" && normalized != "false" && normalized != "off" &&
+                               normalized != "no";
+                    };
+
+                    // In synthetic/unit tests we intentionally force a deterministic mock provider
+                    // while running in-daemon mode.
+                    if (isTruthy(std::getenv("YAMS_USE_MOCK_PROVIDER"))) {
+                        fallback_provider_ = yams::ml::createEmbeddingProvider("Mock");
+                    } else {
+                        fallback_provider_ = yams::ml::createEmbeddingProvider();
+                    }
                     if (fallback_provider_ && fallback_provider_->isAvailable()) {
                         auto initRes = fallback_provider_->initialize();
                         if (!initRes) {
@@ -1577,10 +1595,14 @@ public:
                 spdlog::warn(
                     "[Embedding][Daemon] Batch embeddings failed (code={}, msg='{}') on attempt {}",
                     static_cast<int>(lastError.code), lastError.message, attempt);
-                // Retry only on transient/network/timeout-like failures
+                // Retry on transient/network/timeout-like failures AND plugin/resource errors
+                // InternalError (code=17): transient plugin failures (e.g. ONNX model busy)
+                // ResourceExhausted: ONNX slot contention under concurrent load
                 const bool canRetry = lastError.code == ErrorCode::Timeout ||
                                       lastError.code == ErrorCode::NetworkError ||
-                                      lastError.code == ErrorCode::InvalidState;
+                                      lastError.code == ErrorCode::InvalidState ||
+                                      lastError.code == ErrorCode::InternalError ||
+                                      lastError.code == ErrorCode::ResourceExhausted;
                 if (!canRetry)
                     break;
                 // Exponential backoff: 100ms, 200ms, 400ms, 800ms
@@ -1702,7 +1724,7 @@ public:
             return true;
         }
 
-        spdlog::error("HybridBackend: Daemon not available - start with 'yams daemon start'");
+        spdlog::error("HybridBackend: daemon unavailable (legacy alias of daemon backend)");
         return false;
     }
 
@@ -1798,13 +1820,10 @@ class EmbeddingGenerator::Impl {
 public:
     explicit Impl(const EmbeddingConfig& config) : config_(config) {
         switch (config.backend) {
-            case EmbeddingConfig::Backend::Local:
             case EmbeddingConfig::Backend::Daemon:
-                backend_ = std::make_unique<DaemonBackend>(config);
-                break;
             case EmbeddingConfig::Backend::Hybrid:
             default:
-                backend_ = std::make_unique<HybridBackend>(config);
+                backend_ = std::make_unique<DaemonBackend>(config);
                 break;
         }
     }
@@ -1986,36 +2005,41 @@ private:
     struct ConcurrencyGuard final {
         ConcurrencyGuard() { lock(); }
         ~ConcurrencyGuard() { unlock(); }
+        static int resolve_cap() {
+            int cap = 0;
+            try {
+                cap = static_cast<int>(yams::daemon::TuneAdvisor::getEmbedMaxConcurrency());
+            } catch (...) {
+            }
+            if (cap <= 0) {
+                cap = std::max(1u, std::thread::hardware_concurrency());
+            }
+            return std::max(1, cap);
+        }
         static void init_from_env_once() {
             static std::once_flag once;
             std::call_once(once, []() {
-                int cap = 0;
-                // Prefer centralized TuneAdvisor when available
-                try {
-                    cap = static_cast<int>(yams::daemon::TuneAdvisor::getEmbedMaxConcurrency());
-                } catch (...) {
-                }
-                if (cap <= 0) {
-                    int def = std::max(2u, std::thread::hardware_concurrency());
-                    cap = def;
-                    try {
-                        if (const char* s = std::getenv("YAMS_EMBED_MAX_CONCURRENCY")) {
-                            int v = std::stoi(s);
-                            if (v > 0 && v < 1024)
-                                cap = v;
-                        }
-                    } catch (...) {
-                    }
-                }
+                const int cap = resolve_cap();
                 g_max_concurrency_.store(cap, std::memory_order_relaxed);
                 spdlog::info("EmbeddingGenerator: max concurrency set to {}", cap);
             });
         }
+        static int refresh_cap_locked() {
+            const int desired = resolve_cap();
+            const int current = g_max_concurrency_.load(std::memory_order_relaxed);
+            if (desired != current) {
+                g_max_concurrency_.store(desired, std::memory_order_relaxed);
+                g_cv_.notify_all();
+                return desired;
+            }
+            return current;
+        }
         static void lock() {
             std::unique_lock<std::mutex> lk(g_mtx_);
-            const int cap = g_max_concurrency_.load(std::memory_order_relaxed);
+            int cap = refresh_cap_locked();
             while (g_active_ >= cap) {
                 g_cv_.wait(lk);
+                cap = refresh_cap_locked();
             }
             ++g_active_;
         }

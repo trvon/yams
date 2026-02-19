@@ -103,3 +103,33 @@ TEST_CASE("DaemonCommand - parses equals-style flags with help", "[cli][daemon][
         FAIL("Unexpected parse error: " << parseErrorMsg);
     }
 }
+
+TEST_CASE("DaemonCommand - parses status detailed UX flags", "[cli][daemon][catch2]") {
+    CLI::App app{"yams"};
+    auto daemonCmd = yams::cli::createDaemonCommand();
+    daemonCmd->registerCommand(app, /*cli*/ nullptr);
+
+    std::vector<const char*> argv = {
+        "yams",  "daemon", "status", "--socket=/tmp/yams-test.sock", "-d",
+        "--help" // ensure callback is not executed
+    };
+
+    bool gotHelp = false;
+    bool gotParseError = false;
+    std::string parseErrorMsg;
+
+    try {
+        app.parse(static_cast<int>(argv.size()), const_cast<char**>(argv.data()));
+        FAIL("Expected CLI::CallForHelp to be thrown");
+    } catch (const CLI::CallForHelp&) {
+        gotHelp = true;
+    } catch (const CLI::ParseError& e) {
+        gotParseError = true;
+        parseErrorMsg = e.what();
+    }
+
+    CHECK(gotHelp);
+    if (gotParseError) {
+        FAIL("Unexpected parse error: " << parseErrorMsg);
+    }
+}

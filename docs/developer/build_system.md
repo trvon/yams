@@ -77,7 +77,7 @@ meson test -C builddir
 ```pwsh
 # Export local recipes (required once)
 conan export conan/qpdf --name=qpdf --version=11.9.0
-conan export conan/onnxruntime --name=onnxruntime --version=1.23.2
+conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
 
 # Debug dependencies
 conan install . -of build\debug `
@@ -95,7 +95,7 @@ meson compile -C builddir
 meson test -C builddir
 ```
 
-See [setup.sh](../../setup.sh) / [setup.ps1](../../setup.ps1) for environment variables and advanced options.
+See the repo `setup.sh` / `setup.ps1` for environment variables and advanced options.
 
 ## 5. ONNX / GenAI Paths
 Options (Conan scope):
@@ -208,7 +208,7 @@ Examples:
 - `metadata_repository_cache` - Metadata repository caching
 - `daemon_warm_latency` - Daemon warm start latency benchmark
 
-**Note**: See `docs/delivery/064/` (PBI-064) for test organization standardization in progress.
+**Note**: Test organization and suite naming are being standardized; treat suite labels as best-effort until this work completes.
 
 ## 8. Key Build Options
 
@@ -278,7 +278,7 @@ Out-of-source only. Keep Release for perf/benchmarks; iterate in Debug. Avoid co
 - Clear categorization: unit/integration/bench/acceptance
 - Removal of temporal coupling (no PBI numbers in test names)
 
-See `docs/delivery/064/prd.md` for the full plan.
+See the repository issues/PRs for the current plan and status.
 
 ### Current Test Listing
 

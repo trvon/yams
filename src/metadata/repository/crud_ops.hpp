@@ -422,33 +422,29 @@ public:
 
         // Bind all non-PK columns first, then PK for WHERE clause
         int idx = 1;
-        constexpr auto& cols = Traits::columns;
+
         constexpr auto N = std::tuple_size_v<typename Traits::columns_tuple>;
 
-        // Bind SET columns (non-PK)
-        [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+        auto bindByPkFlag = [&]<std::size_t... Is>(std::index_sequence<Is...>, bool wantPk) {
+            Result<void> bindResult{};
             (([&] {
-                 constexpr auto& col = std::get<Is>(cols);
-                 if constexpr (!col.isPrimaryKey) {
-                     auto result = stmt.bind(idx++, entity.*(col.member));
-                     if (!result.has_value()) {
-                         return; // Will be caught by outer error handling
-                     }
+                 if (!bindResult) {
+                     return;
                  }
+                 using Col = std::tuple_element_t<Is, typename Traits::columns_tuple>;
+                 const auto& col = std::get<Is>(Traits::columns);
+                 if (Col::kIsPrimaryKey != wantPk) {
+                     return;
+                 }
+                 bindResult = stmt.bind(idx++, entity.*(col.member));
              }()),
              ...);
-        }(std::make_index_sequence<N>{});
+            return bindResult;
+        };
 
-        // Bind WHERE clause (PK)
-        [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-            (([&] {
-                 constexpr auto& col = std::get<Is>(cols);
-                 if constexpr (col.isPrimaryKey) {
-                     stmt.bind(idx++, entity.*(col.member));
-                 }
-             }()),
-             ...);
-        }(std::make_index_sequence<N>{});
+        // Bind SET columns (non-PK) then WHERE clause (PK)
+        YAMS_TRY(bindByPkFlag(std::make_index_sequence<N>{}, false));
+        YAMS_TRY(bindByPkFlag(std::make_index_sequence<N>{}, true));
 
         return stmt.execute();
     }
@@ -634,8 +630,8 @@ public:
             size_t count = 0;
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                 (([&] {
-                     constexpr auto& col = std::get<Is>(cols);
-                     if constexpr (!(col.autoIncrement && col.isPrimaryKey)) {
+                     using Col = std::tuple_element_t<Is, typename Traits::columns_tuple>;
+                     if constexpr (!(Col::kAutoIncrement && Col::kIsPrimaryKey)) {
                          ++count;
                      }
                  }()),
@@ -665,8 +661,9 @@ public:
 
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                 (([&] {
+                     using Col = std::tuple_element_t<Is, typename Traits::columns_tuple>;
                      constexpr auto& col = std::get<Is>(cols);
-                     if constexpr (!(col.autoIncrement && col.isPrimaryKey)) {
+                     if constexpr (!(Col::kAutoIncrement && Col::kIsPrimaryKey)) {
                          if (!first) {
                              columns += ", ";
                              singleRow += ", ";
@@ -697,8 +694,9 @@ public:
                 const auto& entity = entities[i];
                 [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                     (([&] {
+                         using Col = std::tuple_element_t<Is, typename Traits::columns_tuple>;
                          constexpr auto& col = std::get<Is>(cols);
-                         if constexpr (!(col.autoIncrement && col.isPrimaryKey)) {
+                         if constexpr (!(Col::kAutoIncrement && Col::kIsPrimaryKey)) {
                              stmt.bind(idx++, entity.*(col.member));
                          }
                      }()),
@@ -752,30 +750,55 @@ public:
              ...);
         }(std::make_index_sequence<N>{});
 
-        std::string sql = "INSERT OR REPLACE INTO " + std::string(Traits::table) + " (" + columns +
-                          ") VALUES (" + placeholders + ")";
+        // Batch using a multi-row INSERT OR REPLACE to reduce per-row overhead.
+        // Keep a conservative parameter cap (SQLite default is 999).
+        constexpr size_t kMaxParamsPerStmt = 900;
+        const size_t colsPerRow = static_cast<size_t>(N);
+        const size_t maxRowsPerStmt = std::max<size_t>(1, kMaxParamsPerStmt / colsPerRow);
 
         YAMS_TRY(db.beginTransaction());
         auto rollback = scope_exit([&db]() { db.rollback(); });
 
-        YAMS_TRY_UNWRAP(stmt, db.prepare(sql));
         int64_t affected = 0;
+        for (size_t start = 0; start < entities.size(); start += maxRowsPerStmt) {
+            const size_t end = std::min(start + maxRowsPerStmt, entities.size());
+            const size_t batchSize = end - start;
 
-        for (const auto& entity : entities) {
-            YAMS_TRY(stmt.reset());
+            // Build VALUES list: (?,?,?,?),(?,?,?,?),...
+            std::string values;
+            values.reserve(batchSize * (placeholders.size() + 3));
+            for (size_t i = 0; i < batchSize; ++i) {
+                if (i > 0)
+                    values += ", ";
+                values += "(" + placeholders + ")";
+            }
 
-            // Bind ALL columns for upsert (including PK)
+            std::string sql = "INSERT OR REPLACE INTO " + std::string(Traits::table) + " (" +
+                              columns + ") VALUES " + values;
+
+            YAMS_TRY_UNWRAP(stmt, db.prepare(sql));
+
             int idx = 1;
-            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-                (([&] {
-                     constexpr auto& col = std::get<Is>(cols);
-                     stmt.bind(idx++, entity.*(col.member));
-                 }()),
-                 ...);
-            }(std::make_index_sequence<N>{});
+            for (size_t i = start; i < end; ++i) {
+                const auto& entity = entities[i];
+                Result<void> bindResult{};
+
+                [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                    (([&] {
+                         if (!bindResult) {
+                             return;
+                         }
+                         const auto& col = std::get<Is>(cols);
+                         bindResult = stmt.bind(idx++, entity.*(col.member));
+                     }()),
+                     ...);
+                }(std::make_index_sequence<N>{});
+
+                YAMS_TRY(bindResult);
+            }
 
             YAMS_TRY(stmt.execute());
-            ++affected;
+            affected += static_cast<int64_t>(batchSize);
         }
 
         rollback.dismiss();
@@ -797,7 +820,6 @@ public:
      */
     Result<void> upsertOnConflict(Database& db, const Entity& entity,
                                   std::string_view conflictColumn) {
-        constexpr auto& cols = Traits::columns;
         constexpr auto N = std::tuple_size_v<typename Traits::columns_tuple>;
 
         // Build column list and placeholders
@@ -809,9 +831,10 @@ public:
 
         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
             (([&] {
-                 constexpr auto& col = std::get<Is>(cols);
+                 const auto& col = std::get<Is>(Traits::columns);
                  // Skip auto-increment PK for INSERT
-                 if constexpr (!(col.autoIncrement && col.isPrimaryKey)) {
+                 using Col = std::tuple_element_t<Is, typename Traits::columns_tuple>;
+                 if (!(Col::kAutoIncrement && Col::kIsPrimaryKey)) {
                      if (!first) {
                          columns += ", ";
                          placeholders += ", ";
@@ -860,7 +883,6 @@ public:
             return int64_t{0};
         }
 
-        constexpr auto& cols = Traits::columns;
         constexpr auto N = std::tuple_size_v<typename Traits::columns_tuple>;
 
         // Build SQL once
@@ -872,8 +894,9 @@ public:
 
         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
             (([&] {
-                 constexpr auto& col = std::get<Is>(cols);
-                 if constexpr (!(col.autoIncrement && col.isPrimaryKey)) {
+                 const auto& col = std::get<Is>(Traits::columns);
+                 using Col = std::tuple_element_t<Is, typename Traits::columns_tuple>;
+                 if (!(Col::kAutoIncrement && Col::kIsPrimaryKey)) {
                      if (!first) {
                          columns += ", ";
                          placeholders += ", ";
@@ -943,30 +966,28 @@ public:
 
             // Bind SET columns (non-PK) first, then PK for WHERE clause
             int idx = 1;
-            constexpr auto& cols = Traits::columns;
+
             constexpr auto N = std::tuple_size_v<typename Traits::columns_tuple>;
 
-            // Bind SET columns (non-PK)
-            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            auto bindByPkFlag = [&]<std::size_t... Is>(std::index_sequence<Is...>, bool wantPk) {
+                Result<void> bindResult{};
                 (([&] {
-                     constexpr auto& col = std::get<Is>(cols);
-                     if constexpr (!col.isPrimaryKey) {
-                         stmt.bind(idx++, entity.*(col.member));
+                     if (!bindResult) {
+                         return;
                      }
+                     using Col = std::tuple_element_t<Is, typename Traits::columns_tuple>;
+                     const auto& col = std::get<Is>(Traits::columns);
+                     if (Col::kIsPrimaryKey != wantPk) {
+                         return;
+                     }
+                     bindResult = stmt.bind(idx++, entity.*(col.member));
                  }()),
                  ...);
-            }(std::make_index_sequence<N>{});
+                return bindResult;
+            };
 
-            // Bind WHERE clause (PK)
-            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-                (([&] {
-                     constexpr auto& col = std::get<Is>(cols);
-                     if constexpr (col.isPrimaryKey) {
-                         stmt.bind(idx++, entity.*(col.member));
-                     }
-                 }()),
-                 ...);
-            }(std::make_index_sequence<N>{});
+            YAMS_TRY(bindByPkFlag(std::make_index_sequence<N>{}, false));
+            YAMS_TRY(bindByPkFlag(std::make_index_sequence<N>{}, true));
 
             YAMS_TRY(stmt.execute());
             updated += db.changes();

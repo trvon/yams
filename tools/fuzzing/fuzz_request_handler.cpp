@@ -3,8 +3,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <span>
+#include <algorithm>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -32,11 +34,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     // Test 1: Parse and validate framed messages
     {
         MessageFramer framer;
-        auto frame_result = framer.parse_frame(std::span<const uint8_t>(data, size));
-        if (frame_result) {
-            auto msg_result = framer.parse_frame(frame_result.value());
-            (void)msg_result;
-        }
+        auto msg_result = framer.parse_frame(std::span<const uint8_t>(data, size));
+        (void)msg_result;
     }
 
     // Test 2: Feed data to FrameReader and try request handling
@@ -48,9 +47,9 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         if (frame_result) {
             // Try to parse as a complete message
             auto decode_result = ProtoSerializer::decode_payload(frame_result.value());
-            if (decode_result && std::holds_alternative<Request>(decode_result->payload)) {
+            if (decode_result && std::holds_alternative<Request>(decode_result.value().payload)) {
                 // Successfully decoded a request - this tests the full parse path
-                const auto& request = std::get<Request>(decode_result->payload);
+                const auto& request = std::get<Request>(decode_result.value().payload);
                 (void)request;
             }
         }
@@ -118,7 +117,9 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         // Try to frame a message with fuzz data
         if (size > 4) {
             Message msg;
-            msg.requestId = *reinterpret_cast<const uint64_t*>(data);
+            uint64_t request_id = 0;
+            std::memcpy(&request_id, data, std::min(size, sizeof(request_id)));
+            msg.requestId = request_id;
 
             // Create a simple request
             PingRequest ping;
@@ -130,11 +131,10 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
                 bool is_streaming = (size > 8) ? (data[8] & 1) : false;
                 bool is_last_chunk = (size > 9) ? (data[9] & 1) : true;
 
-                auto frame_result = framer.create_frame(msg.requestId, encode_result.value(),
-                                                        is_streaming, is_last_chunk);
+                auto frame_result = is_streaming ? framer.frame_message_chunk(msg, is_last_chunk)
+                                                 : framer.frame_message(msg);
 
                 if (frame_result) {
-                    // Try to parse what we just created
                     auto parse_result = framer.parse_frame(frame_result.value());
                     (void)parse_result;
                 }

@@ -178,7 +178,7 @@ export YAMS_CONNECTION_LIFETIME_S=0
 
 ### Configuration Reference
 
-See [include/yams/config/config_defaults.h](../../include/yams/config/config_defaults.h) for available keys.
+See the repo `include/yams/config/config_defaults.h` for available keys.
 
 | Area | Config Key | Effect | When to Adjust |
 |------|-----------|--------|----------------|
@@ -248,7 +248,7 @@ yams stats -v       # Detailed metrics
 - Latency: p50/p95/p99
 - Resources: CPU, RSS, IO wait, disk latency (p99)
 
-See [src/daemon/components/DaemonMetrics.cpp](../../src/daemon/components/DaemonMetrics.cpp) for implementation.
+See the repo `src/daemon/components/DaemonMetrics.cpp` for implementation.
 
 ## Security
 

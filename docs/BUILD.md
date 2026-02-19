@@ -121,7 +121,7 @@ meson compile -C build/release
 ```pwsh
 # Export local Conan recipes (required once)
 conan export conan/qpdf --name=qpdf --version=11.9.0
-conan export conan/onnxruntime --name=onnxruntime --version=1.23.2
+conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
 
 conan install . -of build\release `
   -pr:h conan/profiles/host-windows-msvc -pr:b default `
@@ -175,7 +175,7 @@ Boost 1.85 requires VS 2022 toolset (v143). If using VS 2025:
 
 ```pwsh
 conan export conan/qpdf --name=qpdf --version=11.9.0
-conan export conan/onnxruntime --name=onnxruntime --version=1.23.2
+conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
 ```
 
 ### Missing dependencies

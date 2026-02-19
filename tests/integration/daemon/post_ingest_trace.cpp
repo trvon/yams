@@ -12,6 +12,7 @@
 #include <iostream>
 #include <thread>
 
+#include "../../common/env_compat.h"
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 #include <yams/compat/unistd.h>

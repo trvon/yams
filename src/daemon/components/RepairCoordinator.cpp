@@ -16,8 +16,8 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <boost/asio/system_executor.hpp>
 #include <boost/asio/this_coro.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <yams/core/repair_fsm.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/ConfigResolver.h>
@@ -49,6 +49,39 @@ bool vectorsDisabledByEnv() {
     }
     return false;
 }
+
+// Shared thread pool for all RepairCoordinator instances
+// Profile-aware thread count: uses repairTokensIdle + 1 for DB queries
+// Static singleton - threads are lazily initialized
+struct RepairThreadPool {
+    std::unique_ptr<boost::asio::thread_pool> pool_;
+    std::once_flag init_flag_;
+
+    static RepairThreadPool& instance() {
+        static RepairThreadPool instance;
+        return instance;
+    }
+
+    boost::asio::any_io_executor get_executor() {
+        std::call_once(init_flag_, [this]() {
+            uint32_t threads = TuneAdvisor::repairTokensIdle();
+            if (threads < 1)
+                threads = 1;
+            // Add 1 extra thread for DB query coordination
+            threads = std::max(threads + 1, 2u);
+            pool_ = std::make_unique<boost::asio::thread_pool>(threads);
+            spdlog::debug("[RepairThreadPool] Initialized with {} threads", threads);
+        });
+        return pool_->get_executor();
+    }
+
+    // No explicit join in destructor to avoid double-free during static destruction
+    // The OS will clean up threads when the process exits
+    ~RepairThreadPool() = default;
+
+private:
+    RepairThreadPool() = default;
+};
 
 /**
  * @brief Build extension-to-language map from loaded symbol extractor plugins
@@ -197,7 +230,7 @@ void RepairCoordinator::start() {
     shutdownState_->running.store(true, std::memory_order_relaxed);
     shutdownState_->config = cfg_;
 
-    auto exec = services_ ? services_->getBackgroundExecutor() : boost::asio::system_executor();
+    auto exec = RepairThreadPool::instance().get_executor();
     auto shutdownState = shutdownState_;
     auto* self = this;
 
@@ -242,7 +275,7 @@ void RepairCoordinator::start() {
             "path_tree_repair_jobs", 32);
     InternalEventBus::PathTreeJob initialPathTreeJob{1, true}; // requestId=1, runOnce=true
     if (!pathTreeQueue->try_push(initialPathTreeJob)) {
-        spdlog::warn("RepairCoordinator: failed to enqueue initial PathTreeRepair job");
+        spdlog::debug("RepairCoordinator: failed to enqueue initial PathTreeRepair job");
     }
 }
 
@@ -261,7 +294,7 @@ void RepairCoordinator::stop() {
             return shutdownState_->finished.load(std::memory_order_relaxed);
         });
         if (!completed) {
-            spdlog::warn("RepairCoordinator::stop() - coroutine did not finish within timeout");
+            spdlog::debug("RepairCoordinator::stop() - coroutine did not finish within timeout");
         } else {
             spdlog::debug("RepairCoordinator::stop() - coroutine finished");
         }
@@ -274,7 +307,13 @@ void RepairCoordinator::stop() {
 bool RepairCoordinator::maintenance_allowed() const {
     if (!activeConnFn_)
         return false;
-    return activeConnFn_() == 0;
+
+    size_t active = activeConnFn_();
+    if (active == 0)
+        return true;
+
+    // If busy, check if we have tokens for cooperative repair
+    return TuneAdvisor::repairTokensBusy() > 0;
 }
 
 void RepairCoordinator::onDocumentAdded(const DocumentAddedEvent& event) {
@@ -423,6 +462,342 @@ void RepairCoordinator::onDocumentRemoved(const DocumentRemovedEvent& event) {
 
     // For now, just log - in future could clean up orphaned embeddings
     spdlog::debug("RepairCoordinator: document {} removed", event.hash);
+
+    if (services_) {
+        auto vectorDb = services_->getVectorDatabase();
+        if (vectorDb) {
+            // Spawn a detached task to cleanup vectors without blocking the event bus
+            boost::asio::co_spawn(
+                RepairThreadPool::instance().get_executor(),
+                [vectorDb, hash = event.hash]() -> boost::asio::awaitable<void> {
+                    try {
+                        // vectorDb is captured by value (shared_ptr), ensuring it stays alive
+                        if (vectorDb->deleteVectorsByDocument(hash)) {
+                            spdlog::debug("RepairCoordinator: removed vectors for {}", hash);
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::warn("RepairCoordinator: failed to remove vectors for {}: {}", hash,
+                                     e.what());
+                    }
+                    co_return;
+                },
+                boost::asio::detached);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extracted helpers for runAsync readability
+// ---------------------------------------------------------------------------
+
+boost::asio::awaitable<void> RepairCoordinator::processPathTreeRepair() {
+    using namespace std::chrono_literals;
+    boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+
+    auto repairMgr = services_ ? services_->getRepairManager() : nullptr;
+    auto metaRepo = services_ ? services_->getMetadataRepo() : nullptr;
+
+    if (!repairMgr || !metaRepo) {
+        spdlog::warn("RepairCoordinator: services unavailable for PathTreeRepair");
+        co_return;
+    }
+
+    try {
+        auto docsResult = metaRepo->queryDocuments(metadata::DocumentQueryOptions{});
+        if (!docsResult || docsResult.value().empty()) {
+            spdlog::debug("RepairCoordinator: PathTreeRepair - no documents to scan");
+            co_return;
+        }
+
+        spdlog::debug("RepairCoordinator: PathTreeRepair scanning {} documents",
+                      docsResult.value().size());
+
+        uint64_t created = 0;
+        uint64_t errors = 0;
+        uint64_t scanned = 0;
+        const size_t batchSize = TuneAdvisor::repairStartupBatchSize();
+
+        for (size_t i = 0; i < docsResult.value().size(); i += batchSize) {
+            if (!running_.load(std::memory_order_relaxed)) {
+                spdlog::debug("RepairCoordinator: PathTreeRepair interrupted");
+                break;
+            }
+
+            size_t batchEnd = std::min(i + batchSize, docsResult.value().size());
+            for (size_t j = i; j < batchEnd; ++j) {
+                const auto& doc = docsResult.value()[j];
+                if (doc.filePath.empty()) {
+                    continue;
+                }
+
+                auto existingNode = metaRepo->findPathTreeNodeByFullPath(doc.filePath);
+                if (existingNode && existingNode.value().has_value()) {
+                    continue;
+                }
+
+                try {
+                    auto treeRes = metaRepo->upsertPathTreeForDocument(doc, doc.id, true,
+                                                                       std::span<const float>());
+                    if (treeRes) {
+                        ++created;
+                    } else {
+                        ++errors;
+                    }
+                } catch (const std::exception&) {
+                    ++errors;
+                }
+                ++scanned;
+
+                if (scanned % 500 == 0) {
+                    spdlog::debug("RepairCoordinator: PathTreeRepair progress: {}/{}", scanned,
+                                  docsResult.value().size());
+                }
+            }
+
+            // Yield between batches to avoid blocking
+            timer.expires_after(10ms);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
+
+        spdlog::debug(
+            "RepairCoordinator: PathTreeRepair complete (scanned={}, created={}, errors={})",
+            scanned, created, errors);
+    } catch (const std::exception& e) {
+        spdlog::debug("RepairCoordinator: PathTreeRepair exception: {}", e.what());
+    }
+}
+
+void RepairCoordinator::performVectorCleanup() {
+    if (vectorsDisabledByEnv()) {
+        spdlog::debug("RepairCoordinator: skipping vector cleanup (vectors disabled)");
+        return;
+    }
+
+    try {
+        auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
+        if (vectorDb) {
+            auto cleanup = vectorDb->cleanupOrphanRows();
+            if (cleanup) {
+                spdlog::debug("RepairCoordinator: cleaned vector orphans (metadata_removed={}, "
+                              "embeddings_removed={}, metadata_backfilled={})",
+                              cleanup.value().metadata_removed, cleanup.value().embeddings_removed,
+                              cleanup.value().metadata_backfilled);
+            } else {
+                spdlog::warn("RepairCoordinator: vector orphan cleanup failed: {}",
+                             cleanup.error().message);
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("RepairCoordinator: vector orphan cleanup exception: {}", e.what());
+    } catch (...) {
+        spdlog::warn("RepairCoordinator: vector orphan cleanup exception (unknown)");
+    }
+}
+
+boost::asio::awaitable<void> RepairCoordinator::spawnInitialScan() {
+    try {
+        auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+        if (!meta) {
+            co_return;
+        }
+
+        const bool vectorsDisabled = vectorsDisabledByEnv();
+        const size_t batchSize = TuneAdvisor::repairStartupBatchSize();
+        size_t offset = 0;
+        size_t totalEnqueued = 0;
+
+        while (running_.load(std::memory_order_relaxed)) {
+            metadata::DocumentQueryOptions opts;
+            opts.limit = static_cast<int>(batchSize);
+            opts.offset = static_cast<int>(offset);
+            auto batchDocs = meta->queryDocuments(opts);
+
+            if (!batchDocs || batchDocs.value().empty()) {
+                break;
+            }
+
+            size_t batchEnqueued = 0;
+            {
+                std::lock_guard<std::mutex> ql(queueMutex_);
+                for (const auto& d : batchDocs.value()) {
+                    if (!running_.load(std::memory_order_relaxed))
+                        break;
+
+                    if (d.repairStatus == yams::metadata::RepairStatus::Completed ||
+                        d.repairStatus == yams::metadata::RepairStatus::Processing) {
+                        continue;
+                    }
+
+                    bool missingEmb = false;
+                    if (!vectorsDisabled) {
+                        auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(d.sha256Hash);
+                        missingEmb = !hasEmbedRes || !hasEmbedRes.value();
+                    }
+                    const bool missingFts =
+                        (!d.contentExtracted) ||
+                        (d.extractionStatus != yams::metadata::ExtractionStatus::Success);
+
+                    if (missingEmb || missingFts) {
+                        if (pendingSet_.find(d.sha256Hash) == pendingSet_.end()) {
+                            pendingSet_.insert(d.sha256Hash);
+                            pendingDocuments_.push(d.sha256Hash);
+                            ++batchEnqueued;
+                        }
+                    }
+                }
+            }
+
+            totalEnqueued += batchEnqueued;
+            offset += batchDocs.value().size();
+
+            co_await boost::asio::post(co_await boost::asio::this_coro::executor,
+                                       boost::asio::use_awaitable);
+
+            if (batchDocs.value().size() < batchSize) {
+                break;
+            }
+        }
+
+        if (totalEnqueued > 0) {
+            totalBacklog_.store(totalEnqueued, std::memory_order_relaxed);
+            processed_.store(0, std::memory_order_relaxed);
+            spdlog::debug(
+                "RepairCoordinator: async scan complete, queued {} documents from {} total",
+                totalEnqueued, offset);
+        } else {
+            spdlog::debug(
+                "RepairCoordinator: async scan complete, no documents need repair (scanned {})",
+                offset);
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("RepairCoordinator: async scan exception: {}", e.what());
+    }
+    co_return;
+}
+
+RepairCoordinator::MissingWorkResult
+RepairCoordinator::detectMissingWork(const std::vector<std::string>& batch) {
+    MissingWorkResult result;
+
+    auto content = services_ ? services_->getContentStore() : nullptr;
+    auto meta_repo = services_ ? services_->getMetadataRepo() : nullptr;
+    if (!(content && meta_repo)) {
+        return result;
+    }
+
+    // Detect documents missing embeddings
+    if (!vectorsDisabledByEnv() && meta_repo) {
+        for (const auto& hash : batch) {
+            auto hasEmbedRes = meta_repo->hasDocumentEmbeddingByHash(hash);
+            if (!hasEmbedRes || !hasEmbedRes.value())
+                result.missingEmbeddings.push_back(hash);
+        }
+
+        if (!result.missingEmbeddings.empty()) {
+            auto provider = services_ ? services_->getModelProvider() : nullptr;
+            auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
+
+            if (provider && provider->isAvailable()) {
+                size_t modelDim = 0;
+                if (services_) {
+                    const auto preferredModel = services_->resolvePreferredModel();
+                    if (!preferredModel.empty()) {
+                        modelDim = provider->getEmbeddingDim(preferredModel);
+                    }
+                }
+                if (modelDim == 0) {
+                    modelDim = provider->getEmbeddingDim("");
+                }
+
+                size_t storedDim = 0;
+                if (vectorDb) {
+                    storedDim = vectorDb->getConfig().embedding_dim;
+                }
+
+                if (modelDim > 0 && storedDim > 0 && modelDim != storedDim) {
+                    if (cfg_.autoRebuildOnDimMismatch && !dimMismatchRebuildDone_.exchange(true)) {
+                        spdlog::warn(
+                            "RepairCoordinator: rebuilding vectors (model dim {} != db dim {})",
+                            modelDim, storedDim);
+                        if (vectorDb) {
+                            try {
+                                const auto dbPath = vectorDb->getConfig().database_path;
+                                yams::vector::SqliteVecBackend backend;
+                                auto initRes = backend.initialize(dbPath);
+                                if (!initRes) {
+                                    spdlog::warn("RepairCoordinator: open vectors DB failed: {}",
+                                                 initRes.error().message);
+                                } else {
+                                    auto dropRes = backend.dropTables();
+                                    if (!dropRes) {
+                                        spdlog::warn("RepairCoordinator: dropTables failed: {}",
+                                                     dropRes.error().message);
+                                    } else {
+                                        auto createRes = backend.createTables(modelDim);
+                                        if (!createRes) {
+                                            spdlog::warn(
+                                                "RepairCoordinator: createTables failed: {}",
+                                                createRes.error().message);
+                                        } else {
+                                            ConfigResolver::writeVectorSentinel(
+                                                cfg_.dataDir, modelDim, "vec0", 1);
+                                            spdlog::debug("RepairCoordinator: vector schema "
+                                                          "rebuilt to dim {}",
+                                                          modelDim);
+                                        }
+                                    }
+                                }
+                                backend.close();
+                            } catch (const std::exception& e) {
+                                spdlog::warn("RepairCoordinator: rebuild failed: {}", e.what());
+                            } catch (...) {
+                                spdlog::warn("RepairCoordinator: rebuild failed (unknown error)");
+                            }
+                        }
+                    } else {
+                        spdlog::debug(
+                            "RepairCoordinator: skipping embedding repair - model dimension "
+                            "({}) differs from DB dimension ({}). Use 'yams repair "
+                            "--rebuild-vectors' to migrate.",
+                            modelDim, storedDim);
+                        result.missingEmbeddings.clear();
+                    }
+                } else {
+                    spdlog::debug(
+                        "RepairCoordinator: {} docs need embeddings, model provider ready (dim={})",
+                        result.missingEmbeddings.size(), modelDim);
+                }
+            }
+        }
+    }
+
+    // Detect documents missing FTS5 content
+    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    if (meta) {
+        auto customExtractors = services_
+                                    ? services_->getContentExtractors()
+                                    : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
+
+        for (const auto& hash : batch) {
+            auto docRes = meta->getDocumentByHash(hash);
+            if (docRes && docRes.value().has_value()) {
+                const auto& d = docRes.value().value();
+                if (d.repairStatus == yams::metadata::RepairStatus::Completed ||
+                    d.repairStatus == yams::metadata::RepairStatus::Processing) {
+                    continue;
+                }
+                if (!d.contentExtracted ||
+                    d.extractionStatus != yams::metadata::ExtractionStatus::Success) {
+                    if (canExtractDocument(d.mimeType, d.fileExtension, customExtractors, content,
+                                           hash)) {
+                        result.missingFts5.push_back(hash);
+                    }
+                }
+            }
+        }
+    }
+
+    return result;
 }
 
 boost::asio::awaitable<void>
@@ -463,22 +838,6 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
 
     while (running_.load(std::memory_order_relaxed) &&
            shutdownState_->running.load(std::memory_order_acquire)) {
-        // Dynamic throttling: Check if daemon is busy
-        if (activeConnFn_ && TuneAdvisor::repairTokensBusy() == 0) {
-            size_t active = activeConnFn_();
-            if (active >= TuneAdvisor::repairBusyConnThreshold()) {
-                spdlog::debug("RepairCoordinator: pausing (busy with {} connections)", active);
-                try {
-                    timer.expires_after(
-                        std::chrono::milliseconds(TuneAdvisor::repairDegradeHoldMs()));
-                    co_await timer.async_wait(boost::asio::use_awaitable);
-                } catch (...) {
-                    // Ignore cancellation/errors
-                }
-                continue;
-            }
-        }
-
         // Update FSM hints with current running state
         core::RepairFsm::SchedulingHints hints;
         hints.closing = !running_.load(std::memory_order_relaxed) ||
@@ -516,8 +875,8 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                 // We need to refactor this - for now, we can't easily get IStorageEngine from
                 // IContentStore The proper fix is to make ServiceManager expose getStorageEngine()
                 // TODO PBI-062-4: Add getStorageEngine() to ServiceManager
-                spdlog::warn("RepairCoordinator: prune job {} - storage engine access needed",
-                             pruneJob.requestId);
+                spdlog::debug("RepairCoordinator: prune job {} - storage engine access needed",
+                              pruneJob.requestId);
                 spdlog::debug(
                     "RepairCoordinator: prune job {} queued but needs storage engine refactor",
                     pruneJob.requestId);
@@ -536,83 +895,7 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                 didWork = true;
                 spdlog::debug("RepairCoordinator: processing PathTreeRepair job");
                 InternalEventBus::instance().incPostConsumed();
-
-                auto repairMgr = services_ ? services_->getRepairManager() : nullptr;
-                auto metaRepo = services_ ? services_->getMetadataRepo() : nullptr;
-
-                if (!repairMgr || !metaRepo) {
-                    spdlog::warn("RepairCoordinator: services unavailable for PathTreeRepair");
-                } else {
-                    // Run PathTreeRepair with batch processing and yields
-                    try {
-                        auto docsResult =
-                            metaRepo->queryDocuments(metadata::DocumentQueryOptions{});
-                        if (docsResult && !docsResult.value().empty()) {
-                            spdlog::info("RepairCoordinator: PathTreeRepair scanning {} documents",
-                                         docsResult.value().size());
-
-                            uint64_t created = 0;
-                            uint64_t errors = 0;
-                            uint64_t scanned = 0;
-                            const size_t batchSize = TuneAdvisor::repairStartupBatchSize();
-
-                            for (size_t i = 0; i < docsResult.value().size(); i += batchSize) {
-                                if (!running_.load(std::memory_order_relaxed)) {
-                                    spdlog::debug("RepairCoordinator: PathTreeRepair interrupted");
-                                    break;
-                                }
-
-                                size_t batchEnd =
-                                    std::min(i + batchSize, docsResult.value().size());
-                                for (size_t j = i; j < batchEnd; ++j) {
-                                    const auto& doc = docsResult.value()[j];
-                                    if (doc.filePath.empty()) {
-                                        continue;
-                                    }
-
-                                    auto existingNode =
-                                        metaRepo->findPathTreeNodeByFullPath(doc.filePath);
-                                    if (existingNode && existingNode.value().has_value()) {
-                                        continue;
-                                    }
-
-                                    try {
-                                        auto treeRes = metaRepo->upsertPathTreeForDocument(
-                                            doc, doc.id, true, std::span<const float>());
-                                        if (treeRes) {
-                                            ++created;
-                                        } else {
-                                            ++errors;
-                                        }
-                                    } catch (const std::exception& e) {
-                                        ++errors;
-                                    }
-                                    ++scanned;
-
-                                    // Progress logging every 500 docs
-                                    if (scanned % 500 == 0) {
-                                        spdlog::debug(
-                                            "RepairCoordinator: PathTreeRepair progress: {}/{}",
-                                            scanned, docsResult.value().size());
-                                    }
-                                }
-
-                                // Yield between batches to avoid blocking
-                                timer.expires_after(10ms);
-                                co_await timer.async_wait(boost::asio::use_awaitable);
-                            }
-
-                            spdlog::info("RepairCoordinator: PathTreeRepair complete (scanned={}, "
-                                         "created={}, errors={})",
-                                         scanned, created, errors);
-                        } else {
-                            spdlog::debug(
-                                "RepairCoordinator: PathTreeRepair - no documents to scan");
-                        }
-                    } catch (const std::exception& e) {
-                        spdlog::warn("RepairCoordinator: PathTreeRepair exception: {}", e.what());
-                    }
-                }
+                co_await processPathTreeRepair();
                 pathTreeRepairDone = true;
             }
         }
@@ -627,33 +910,7 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
         }
 
         if (!vectorCleanupDone && maintenance_allowed()) {
-            // Skip vector cleanup if vectors are disabled via environment
-            if (vectorsDisabledByEnv()) {
-                spdlog::debug("RepairCoordinator: skipping vector cleanup (vectors disabled)");
-                vectorCleanupDone = true;
-            } else
-                try {
-                    auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
-                    if (vectorDb) {
-                        auto cleanup = vectorDb->cleanupOrphanRows();
-                        if (cleanup) {
-                            spdlog::info(
-                                "RepairCoordinator: cleaned vector orphans (metadata_removed={}, "
-                                "embeddings_removed={}, metadata_backfilled={})",
-                                cleanup.value().metadata_removed,
-                                cleanup.value().embeddings_removed,
-                                cleanup.value().metadata_backfilled);
-                        } else {
-                            spdlog::warn("RepairCoordinator: vector orphan cleanup failed: {}",
-                                         cleanup.error().message);
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("RepairCoordinator: vector orphan cleanup exception: {}",
-                                 e.what());
-                } catch (...) {
-                    spdlog::warn("RepairCoordinator: vector orphan cleanup exception (unknown)");
-                }
+            performVectorCleanup();
             vectorCleanupDone = true;
         }
 
@@ -669,109 +926,10 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
             } else if (maintenance_allowed()) {
                 spdlog::debug(
                     "RepairCoordinator: starting async initial scan (batched, non-blocking)");
-                // Spawn async scan on background-priority executor to avoid blocking this
-                // coroutine
-                auto scanExec =
-                    services_ ? services_->getBackgroundExecutor() : boost::asio::system_executor();
+                auto scanExec = RepairThreadPool::instance().get_executor();
                 boost::asio::co_spawn(
                     scanExec,
-                    [this]() -> boost::asio::awaitable<void> {
-                        try {
-                            auto meta = services_ ? services_->getMetadataRepo() : nullptr;
-                            if (!meta) {
-                                co_return;
-                            }
-
-                            // Check vector availability (skip if disabled)
-                            const bool vectorsDisabled = vectorsDisabledByEnv();
-
-                            // Use smaller batch size during startup to reduce load
-                            const size_t batchSize = TuneAdvisor::repairStartupBatchSize();
-                            size_t offset = 0;
-                            size_t totalEnqueued = 0;
-
-                            while (running_.load(std::memory_order_relaxed)) {
-                                // Query batch of documents (limit + offset)
-                                metadata::DocumentQueryOptions opts;
-                                opts.limit = static_cast<int>(batchSize);
-                                opts.offset = static_cast<int>(offset);
-                                auto batchDocs = meta->queryDocuments(opts);
-
-                                if (!batchDocs || batchDocs.value().empty()) {
-                                    break; // No more documents
-                                }
-
-                                size_t batchEnqueued = 0;
-                                {
-                                    std::lock_guard<std::mutex> ql(queueMutex_);
-                                    for (const auto& d : batchDocs.value()) {
-                                        if (!running_.load(std::memory_order_relaxed))
-                                            break;
-
-                                        // Skip documents already processed or in progress
-                                        if (d.repairStatus ==
-                                                yams::metadata::RepairStatus::Completed ||
-                                            d.repairStatus ==
-                                                yams::metadata::RepairStatus::Processing) {
-                                            continue;
-                                        }
-
-                                        // Check if document needs repair
-                                        // Use metadata repo instead of VectorDB to avoid mutex
-                                        // contention
-                                        bool missingEmb = false;
-                                        if (!vectorsDisabled) {
-                                            auto hasEmbedRes =
-                                                meta->hasDocumentEmbeddingByHash(d.sha256Hash);
-                                            missingEmb = !hasEmbedRes || !hasEmbedRes.value();
-                                        }
-                                        const bool missingFts =
-                                            (!d.contentExtracted) ||
-                                            (d.extractionStatus !=
-                                             yams::metadata::ExtractionStatus::Success);
-
-                                        if (missingEmb || missingFts) {
-                                            // Deduplicate: only enqueue if not already in queue
-                                            if (pendingSet_.find(d.sha256Hash) ==
-                                                pendingSet_.end()) {
-                                                pendingSet_.insert(d.sha256Hash);
-                                                pendingDocuments_.push(d.sha256Hash);
-                                                ++batchEnqueued;
-                                            }
-                                        }
-                                    }
-                                }
-
-                                totalEnqueued += batchEnqueued;
-                                offset += batchDocs.value().size();
-
-                                // Yield between batches to let other work proceed
-                                co_await boost::asio::post(
-                                    co_await boost::asio::this_coro::executor,
-                                    boost::asio::use_awaitable);
-
-                                // Stop if batch was incomplete (reached end)
-                                if (batchDocs.value().size() < batchSize) {
-                                    break;
-                                }
-                            }
-
-                            if (totalEnqueued > 0) {
-                                totalBacklog_.store(totalEnqueued, std::memory_order_relaxed);
-                                processed_.store(0, std::memory_order_relaxed);
-                                spdlog::debug("RepairCoordinator: async scan complete, queued "
-                                              "{} documents from {} total",
-                                              totalEnqueued, offset);
-                            } else {
-                                spdlog::debug("RepairCoordinator: async scan complete, no "
-                                              "documents need repair (scanned {})",
-                                              offset);
-                            }
-                        } catch (const std::exception& e) {
-                            spdlog::warn("RepairCoordinator: async scan exception: {}", e.what());
-                        }
-                        co_return;
-                    },
+                    [this]() -> boost::asio::awaitable<void> { co_await spawnInitialScan(); },
                     boost::asio::detached);
                 initialScanEnqueued = true;
             }
@@ -814,144 +972,8 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
         if (state_)
             state_->stats.repairIdleTicks++;
 
-        // Verify required services are available
-        auto content = services_ ? services_->getContentStore() : nullptr;
+        auto [missingEmbeddings, missingFts5] = detectMissingWork(batch);
         auto meta_repo = services_ ? services_->getMetadataRepo() : nullptr;
-        if (!(content && meta_repo)) {
-            continue;
-        }
-
-        // Detect documents missing embeddings (vector repair)
-        // Skip if vectors are disabled via environment
-        // Use metadata repository instead of VectorDatabase to avoid mutex contention
-        std::vector<std::string> missingEmbeddings;
-        if (!vectorsDisabledByEnv() && meta_repo) {
-            for (const auto& hash : batch) {
-                auto hasEmbedRes = meta_repo->hasDocumentEmbeddingByHash(hash);
-                if (!hasEmbedRes || !hasEmbedRes.value())
-                    missingEmbeddings.push_back(hash);
-            }
-
-            // Check if model provider is available for embedding generation
-            // and that model dimensions match the vector DB dimensions
-            if (!missingEmbeddings.empty()) {
-                auto provider = services_ ? services_->getModelProvider() : nullptr;
-                auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
-
-                if (provider && provider->isAvailable()) {
-                    // Get model dimension using preferred model if available.
-                    size_t modelDim = 0;
-                    if (services_) {
-                        const auto preferredModel = services_->resolvePreferredModel();
-                        if (!preferredModel.empty()) {
-                            modelDim = provider->getEmbeddingDim(preferredModel);
-                        }
-                    }
-                    if (modelDim == 0) {
-                        modelDim = provider->getEmbeddingDim("");
-                    }
-
-                    // Get vector DB stored dimension
-                    size_t storedDim = 0;
-                    if (vectorDb) {
-                        storedDim = vectorDb->getConfig().embedding_dim;
-                    }
-
-                    // Skip embedding repair if dimensions mismatch
-                    if (modelDim > 0 && storedDim > 0 && modelDim != storedDim) {
-                        if (cfg_.autoRebuildOnDimMismatch &&
-                            !dimMismatchRebuildDone_.exchange(true)) {
-                            spdlog::warn(
-                                "RepairCoordinator: rebuilding vectors (model dim {} != db dim "
-                                "{})",
-                                modelDim, storedDim);
-                            if (vectorDb) {
-                                try {
-                                    const auto dbPath = vectorDb->getConfig().database_path;
-                                    yams::vector::SqliteVecBackend backend;
-                                    auto initRes = backend.initialize(dbPath);
-                                    if (!initRes) {
-                                        spdlog::warn(
-                                            "RepairCoordinator: open vectors DB failed: {}",
-                                            initRes.error().message);
-                                    } else {
-                                        auto dropRes = backend.dropTables();
-                                        if (!dropRes) {
-                                            spdlog::warn("RepairCoordinator: dropTables failed: {}",
-                                                         dropRes.error().message);
-                                        } else {
-                                            auto createRes = backend.createTables(modelDim);
-                                            if (!createRes) {
-                                                spdlog::warn(
-                                                    "RepairCoordinator: createTables failed: {}",
-                                                    createRes.error().message);
-                                            } else {
-                                                ConfigResolver::writeVectorSentinel(
-                                                    cfg_.dataDir, modelDim, "vec0", 1);
-                                                spdlog::info(
-                                                    "RepairCoordinator: vector schema rebuilt to "
-                                                    "dim {}",
-                                                    modelDim);
-                                            }
-                                        }
-                                    }
-                                    backend.close();
-                                } catch (const std::exception& e) {
-                                    spdlog::warn("RepairCoordinator: rebuild failed: {}", e.what());
-                                } catch (...) {
-                                    spdlog::warn(
-                                        "RepairCoordinator: rebuild failed (unknown error)");
-                                }
-                            }
-                        } else {
-                            spdlog::warn(
-                                "RepairCoordinator: skipping embedding repair - model dimension "
-                                "({}) differs from DB dimension ({}). Use 'yams repair "
-                                "--rebuild-vectors' to migrate.",
-                                modelDim, storedDim);
-                            missingEmbeddings.clear();
-                        }
-                    } else {
-                        spdlog::debug(
-                            "RepairCoordinator: {} docs need embeddings, model provider ready "
-                            "(dim={})",
-                            missingEmbeddings.size(), modelDim);
-                    }
-                }
-            }
-        }
-
-        // Detect documents missing FTS5 content (symbolic repair)
-        std::vector<std::string> missingFts5;
-        auto meta = services_ ? services_->getMetadataRepo() : nullptr;
-        if (meta) {
-            // Get custom extractors to check if we can handle non-text files
-            auto customExtractors =
-                services_ ? services_->getContentExtractors()
-                          : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
-
-            for (const auto& hash : batch) {
-                auto docRes = meta->getDocumentByHash(hash);
-                if (docRes && docRes.value().has_value()) {
-                    const auto& d = docRes.value().value();
-                    // Skip documents already processed or in progress
-                    if (d.repairStatus == yams::metadata::RepairStatus::Completed ||
-                        d.repairStatus == yams::metadata::RepairStatus::Processing) {
-                        continue;
-                    }
-                    // Check if FTS5 content needs extraction
-                    if (!d.contentExtracted ||
-                        d.extractionStatus != yams::metadata::ExtractionStatus::Success) {
-                        // Only queue if extractable (uses FileTypeDetector + magic_numbers.hpp +
-                        // plugins)
-                        if (canExtractDocument(d.mimeType, d.fileExtension, customExtractors,
-                                               content, hash)) {
-                            missingFts5.push_back(hash);
-                        }
-                    }
-                }
-            }
-        }
 
         // Queue embedding repair job with backpressure handling
         if (!missingEmbeddings.empty()) {
@@ -964,8 +986,8 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                 auto statusRes = meta_repo->batchUpdateDocumentRepairStatuses(
                     missingEmbeddings, yams::metadata::RepairStatus::Processing);
                 if (!statusRes) {
-                    spdlog::warn("RepairCoordinator: failed to set Processing status: {}",
-                                 statusRes.error().message);
+                    spdlog::debug("RepairCoordinator: failed to set Processing status: {}",
+                                  statusRes.error().message);
                 }
             }
 
@@ -973,9 +995,10 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
                                            static_cast<uint32_t>(shutdownState->config.maxBatch),
                                            true, std::string{}};
 
+            const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
             static std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedQ =
                 InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-                    "embed_jobs", 1024);
+                    "embed_jobs", embedCap);
 
             // Queue with backoff (goal: healthy DB, not speed)
             bool queued = co_await queueWithBackoff(embedQ, std::move(job), timer, running_,
@@ -994,6 +1017,7 @@ RepairCoordinator::runAsync(std::shared_ptr<ShutdownState> shutdownState) {
         if (!missingFts5.empty() && allowFts5) {
             InternalEventBus::Fts5Job ftsJob{
                 .hashes = missingFts5,
+                .ids = {},
                 .batchSize = static_cast<uint32_t>(shutdownState->config.maxBatch),
                 .operation = InternalEventBus::Fts5Operation::ExtractAndIndex};
 

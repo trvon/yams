@@ -7,6 +7,7 @@
 #include <sstream>
 #include <thread>
 #include <yams/app/services/services.hpp>
+#include <yams/core/uuid.h>
 #include <yams/common/pattern_utils.h>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/crypto/hasher.h>
@@ -230,8 +231,10 @@ public:
             spdlog::info("[IndexingService] addDirectory: collected {} candidate files under '{}'",
                          entries.size(), req.directoryPath);
 
-            // Generate automatic snapshot ID BEFORE processing files so each file gets tagged
-            std::string snapshotId = generateSnapshotId();
+            // Use caller-provided snapshot ID when available; otherwise generate one.
+            // Generate before processing files so each stored file is tagged consistently.
+            std::string snapshotId =
+                req.snapshotId.empty() ? yams::core::generateSnapshotId() : req.snapshotId;
             spdlog::info("[IndexingService] Generated snapshot ID: {}", snapshotId);
 
             const std::size_t backlog = entries.size();
@@ -429,30 +432,6 @@ public:
 
 private:
     AppContext ctx_;
-
-    /**
-     * Generate ISO 8601 timestamp-based snapshot ID with microsecond precision.
-     * Format: 2025-10-01T14:30:00.123456Z
-     */
-    std::string generateSnapshotId() const {
-        auto now = std::chrono::system_clock::now();
-        auto time_t_now = std::chrono::system_clock::to_time_t(now);
-        auto micros =
-            std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count() %
-            1000000;
-
-        std::tm tm_utc;
-#ifdef _WIN32
-        gmtime_s(&tm_utc, &time_t_now);
-#else
-        gmtime_r(&time_t_now, &tm_utc);
-#endif
-
-        std::ostringstream oss;
-        oss << std::put_time(&tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0')
-            << std::setw(6) << micros << 'Z';
-        return oss.str();
-    }
 
     /**
      * Detect git repository metadata (commit hash, branch, remote URL).

@@ -1,6 +1,9 @@
 #include <yams/daemon/resource/onnx_reranker_session.h>
 #include <yams/vector/embedding_generator.h>
 
+#include "onnx_gpu_provider.h"
+#include <yams/daemon/resource/gpu_info.h>
+
 #include <nlohmann/json.hpp>
 #include <onnxruntime_cxx_api.h>
 #include <spdlog/spdlog.h>
@@ -28,11 +31,11 @@ static Ort::Env& get_reranker_ort_env() {
         spdlog::info("[Reranker] Initializing global Ort::Env");
 
         OrtThreadingOptions* threading_options = nullptr;
-        Ort::GetApi().CreateThreadingOptions(&threading_options);
+        (void)Ort::GetApi().CreateThreadingOptions(&threading_options);
         if (threading_options) {
-            Ort::GetApi().SetGlobalIntraOpNumThreads(threading_options, 1);
-            Ort::GetApi().SetGlobalInterOpNumThreads(threading_options, 1);
-            Ort::GetApi().SetGlobalSpinControl(threading_options, 0);
+            (void)Ort::GetApi().SetGlobalIntraOpNumThreads(threading_options, 1);
+            (void)Ort::GetApi().SetGlobalInterOpNumThreads(threading_options, 1);
+            (void)Ort::GetApi().SetGlobalSpinControl(threading_options, 0);
 
             g_reranker_onnx_env =
                 new Ort::Env(threading_options, ORT_LOGGING_LEVEL_WARNING, "YamsReranker");
@@ -92,6 +95,16 @@ public:
         sessionOptions_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_BASIC);
         sessionOptions_->EnableMemPattern();
         sessionOptions_->EnableCpuMemArena();
+
+        // Attach GPU provider only if GPU is detected
+        const auto& gpuInfo = resource::detectGpu();
+        if (gpuInfo.detected) {
+            std::string ep = onnx_util::appendGpuProvider(*sessionOptions_);
+            spdlog::info("[Reranker] GPU detected ({}), using {} execution provider", gpuInfo.name,
+                         ep);
+        } else {
+            spdlog::debug("[Reranker] No GPU detected, using CPU execution provider");
+        }
 
         spdlog::info("[Reranker] SessionOptions configured: intra-op={}", intra);
     }
@@ -234,7 +247,6 @@ private:
         tokenTypeIds.push_back(1);
 
         // Pad to max sequence length
-        size_t seqLen = inputIds.size();
         while (inputIds.size() < maxSequenceLength_) {
             inputIds.push_back(PAD);
             tokenTypeIds.push_back(0);

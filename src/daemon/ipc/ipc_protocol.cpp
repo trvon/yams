@@ -195,6 +195,10 @@ template <> struct MessageTypeTraits<BatchRequest> {
     static constexpr MessageType value = MessageType::BatchRequest;
     static constexpr const char* name = "Batch";
 };
+template <> struct MessageTypeTraits<RepairRequest> {
+    static constexpr MessageType value = MessageType::RepairRequest_MsgType;
+    static constexpr const char* name = "Repair";
+};
 
 // Response type mappings
 template <> struct MessageTypeTraits<SearchResponse> {
@@ -324,32 +328,187 @@ template <> struct MessageTypeTraits<MetadataValueCountsResponse> {
 template <> struct MessageTypeTraits<BatchResponse> {
     static constexpr MessageType value = MessageType::BatchResponse;
 };
+template <> struct MessageTypeTraits<RepairResponse> {
+    static constexpr MessageType value = MessageType::RepairResponse_MsgType;
+};
+template <> struct MessageTypeTraits<RepairEvent> {
+    static constexpr MessageType value = MessageType::RepairEvent_MsgType;
+};
+
+static constexpr MessageType kRequestTypeMap[] = {
+    MessageType::SearchRequest,              // 0
+    MessageType::GetRequest,                 // 1
+    MessageType::GetInitRequest,             // 2
+    MessageType::GetChunkRequest,            // 3
+    MessageType::GetEndRequest,              // 4
+    MessageType::DeleteRequest,              // 5
+    MessageType::ListRequest,                // 6
+    MessageType::ShutdownRequest,            // 7
+    MessageType::StatusRequest,              // 8
+    MessageType::PingRequest,                // 9
+    MessageType::GenerateEmbeddingRequest,   // 10
+    MessageType::BatchEmbeddingRequest,      // 11
+    MessageType::LoadModelRequest,           // 12
+    MessageType::UnloadModelRequest,         // 13
+    MessageType::ModelStatusRequest,         // 14
+    MessageType::AddDocumentRequest,         // 15
+    MessageType::GrepRequest,                // 16
+    MessageType::UpdateDocumentRequest,      // 17
+    MessageType::DownloadRequest,            // 18
+    MessageType::GetStatsRequest,            // 19
+    MessageType::PrepareSessionRequest,      // 20
+    MessageType::EmbedDocumentsRequest,      // 21
+    MessageType::PluginScanRequest,          // 22
+    MessageType::PluginLoadRequest,          // 23
+    MessageType::PluginUnloadRequest,        // 24
+    MessageType::PluginTrustListRequest,     // 25
+    MessageType::PluginTrustAddRequest,      // 26
+    MessageType::PluginTrustRemoveRequest,   // 27
+    MessageType::CancelRequest,              // 28
+    MessageType::CatRequest,                 // 29
+    MessageType::ListSessionsRequest,        // 30
+    MessageType::UseSessionRequest,          // 31
+    MessageType::AddPathSelectorRequest,     // 32
+    MessageType::RemovePathSelectorRequest,  // 33
+    MessageType::ListTreeDiffRequest,        // 34
+    MessageType::FileHistoryRequest,         // 35
+    MessageType::PruneRequest,               // 36
+    MessageType::ListSnapshotsRequest,       // 37
+    MessageType::RestoreCollectionRequest,   // 38
+    MessageType::RestoreSnapshotRequest,     // 39
+    MessageType::GraphQueryRequest,          // 40
+    MessageType::GraphPathHistoryRequest,    // 41
+    MessageType::GraphRepairRequest,         // 42
+    MessageType::GraphValidateRequest,       // 43
+    MessageType::KgIngestRequest,            // 44
+    MessageType::MetadataValueCountsRequest, // 45
+    MessageType::BatchRequest,               // 46
+    MessageType::RepairRequest_MsgType       // 47 (RepairRequest)
+};
+
+// MUST MATCH Request std::variant order in ipc_protocol.h
+static constexpr const char* kRequestNameMap[] = {
+    "Search",              // 0
+    "Get",                 // 1
+    "GetInit",             // 2
+    "GetChunk",            // 3
+    "GetEnd",              // 4
+    "Delete",              // 5
+    "List",                // 6
+    "Shutdown",            // 7
+    "Status",              // 8
+    "Ping",                // 9
+    "GenerateEmbedding",   // 10
+    "BatchEmbedding",      // 11
+    "LoadModel",           // 12
+    "UnloadModel",         // 13
+    "ModelStatus",         // 14
+    "AddDocument",         // 15
+    "Grep",                // 16
+    "UpdateDocument",      // 17
+    "Download",            // 18
+    "GetStats",            // 19
+    "PrepareSession",      // 20
+    "EmbedDocuments",      // 21
+    "PluginScan",          // 22
+    "PluginLoad",          // 23
+    "PluginUnload",        // 24
+    "PluginTrustList",     // 25
+    "PluginTrustAdd",      // 26
+    "PluginTrustRemove",   // 27
+    "Cancel",              // 28
+    "Cat",                 // 29
+    "ListSessions",        // 30
+    "UseSession",          // 31
+    "AddPathSelector",     // 32
+    "RemovePathSelector",  // 33
+    "ListTreeDiff",        // 34
+    "FileHistory",         // 35
+    "Prune",               // 36
+    "ListSnapshots",       // 37
+    "RestoreCollection",   // 38
+    "RestoreSnapshot",     // 39
+    "GraphQuery",          // 40
+    "GraphPathHistory",    // 41
+    "GraphRepair",         // 42
+    "GraphValidate",       // 43
+    "KgIngest",            // 44
+    "MetadataValueCounts", // 45
+    "Batch",               // 46
+    "Repair"               // 47
+};
+
+// MUST MATCH Response std::variant order in ipc_protocol.h
+static constexpr MessageType kResponseTypeMap[] = {
+    MessageType::SearchResponse,              // 0
+    MessageType::AddResponse,                 // 1
+    MessageType::GetResponse,                 // 2
+    MessageType::GetInitResponse,             // 3
+    MessageType::GetChunkResponse,            // 4
+    MessageType::StatusResponse,              // 5
+    MessageType::SuccessResponse,             // 6
+    MessageType::ErrorResponse,               // 7
+    MessageType::PongResponse,                // 8
+    MessageType::EmbeddingResponse,           // 9
+    MessageType::BatchEmbeddingResponse,      // 10
+    MessageType::ModelLoadResponse,           // 11
+    MessageType::ModelStatusResponse,         // 12
+    MessageType::ListResponse,                // 13
+    MessageType::AddDocumentResponse,         // 14
+    MessageType::GrepResponse,                // 15
+    MessageType::UpdateDocumentResponse,      // 16
+    MessageType::GetStatsResponse,            // 17
+    MessageType::DownloadResponse,            // 18
+    MessageType::DeleteResponse,              // 19
+    MessageType::PrepareSessionResponse,      // 20
+    MessageType::EmbedDocumentsResponse,      // 21
+    MessageType::PluginScanResponse,          // 22
+    MessageType::PluginLoadResponse,          // 23
+    MessageType::PluginTrustListResponse,     // 24
+    MessageType::CatResponse,                 // 25
+    MessageType::ListSessionsResponse,        // 26
+    MessageType::ListTreeDiffResponse,        // 27
+    MessageType::FileHistoryResponse,         // 28
+    MessageType::PruneResponse,               // 29
+    MessageType::ListSnapshotsResponse,       // 30
+    MessageType::RestoreCollectionResponse,   // 31
+    MessageType::RestoreSnapshotResponse,     // 32
+    MessageType::GraphQueryResponse,          // 33
+    MessageType::GraphPathHistoryResponse,    // 34
+    MessageType::GraphRepairResponse,         // 35
+    MessageType::GraphValidateResponse,       // 36
+    MessageType::KgIngestResponse,            // 37
+    MessageType::MetadataValueCountsResponse, // 38
+    MessageType::BatchResponse,               // 39
+    MessageType::EmbeddingEvent,              // 40
+    MessageType::ModelLoadEvent,              // 41
+    MessageType::RepairResponse_MsgType,      // 42
+    MessageType::RepairEvent_MsgType          // 43
+};
 
 MessageType getMessageType(const Request& req) {
-    return std::visit(
-        [](auto&& r) -> MessageType {
-            using T = std::decay_t<decltype(r)>;
-            return MessageTypeTraits<T>::value;
-        },
-        req);
+    const size_t idx = req.index();
+    if (idx < std::size(kRequestTypeMap)) {
+        return kRequestTypeMap[idx];
+    }
+    // Fallback should be impossible if tables are kept in sync
+    return MessageType(0);
 }
 
 MessageType getMessageType(const Response& res) {
-    return std::visit(
-        [](auto&& r) -> MessageType {
-            using T = std::decay_t<decltype(r)>;
-            return MessageTypeTraits<T>::value;
-        },
-        res);
+    const size_t idx = res.index();
+    if (idx < std::size(kResponseTypeMap)) {
+        return kResponseTypeMap[idx];
+    }
+    return MessageType(0);
 }
 
 std::string getRequestName(const Request& req) {
-    return std::visit(
-        [](auto&& r) -> std::string {
-            using T = std::decay_t<decltype(r)>;
-            return MessageTypeTraits<T>::name;
-        },
-        req);
+    const size_t idx = req.index();
+    if (idx < std::size(kRequestNameMap)) {
+        return kRequestNameMap[idx];
+    }
+    return "Unknown";
 }
 
 } // namespace yams::daemon

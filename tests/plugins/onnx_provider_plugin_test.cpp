@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include "../common/env_compat.h"
 #include <gtest/gtest.h>
 #include <yams/compat/dlfcn.h>
 #include <yams/compat/unistd.h>

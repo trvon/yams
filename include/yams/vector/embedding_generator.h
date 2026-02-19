@@ -20,13 +20,12 @@ namespace yams::vector {
 struct EmbeddingConfig {
     // Backend selection
     enum class Backend {
-        Local,  // Use local ONNX runtime
         Daemon, // Use daemon service
-        Hybrid  // Try daemon first, fallback to local
+        Hybrid  // Legacy alias; treated as daemon-only
     };
-    Backend backend = Backend::Hybrid; // Default to hybrid for best performance
+    Backend backend = Backend::Daemon; // Daemon-only embedding path
 
-    // Model configuration (used by all backends)
+    // Model configuration (used by daemon and fallback/mock providers)
     std::string model_name = "all-MiniLM-L6-v2";
     size_t max_sequence_length = 512;
     size_t embedding_dim = 384;
@@ -35,11 +34,12 @@ struct EmbeddingConfig {
     float padding_token_id = 0.0f;
     float unk_token_id = 1.0f;
 
-    // Local backend settings
+    // Model/runtime settings retained for compatibility with provider adapters
     std::string model_path = "models/all-MiniLM-L6-v2.onnx";
     std::string tokenizer_path = "models/tokenizer.json";
     bool enable_gpu = false;
-    int num_threads = -1; // -1 for auto-detect
+    int num_threads = -1;      // -1 for auto-detect
+    int inter_op_threads = -1; // -1 for auto-detect
     // Optional: prefer ONNX GenAI pipeline when available (gated behind ONNX support)
     bool use_genai = true; // default prefer GenAI; env YAMS_ONNX_USE_GENAI=0 disables
 

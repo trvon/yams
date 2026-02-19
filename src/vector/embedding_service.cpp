@@ -36,15 +36,55 @@
 #endif
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/resource/gpu_info.h>
 #include <yams/integrity/repair_utils.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/vector/dim_resolver.h>
 #include <yams/vector/dynamic_batcher.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/embedding_service.h>
+#include <yams/vector/embedding_service_test_hooks.h>
 #include <yams/vector/vector_database.h>
 
 namespace yams::vector {
+
+namespace testing {
+
+std::vector<std::vector<float>> generateEmbeddingsAdaptiveSplit(
+    const std::vector<std::string>& texts,
+    const std::function<std::vector<std::vector<float>>(const std::vector<std::string>&)>&
+        generator) {
+    if (texts.empty()) {
+        return {};
+    }
+
+    std::function<std::vector<std::vector<float>>(const std::vector<std::string>&, size_t)> run;
+    run = [&](const std::vector<std::string>& batch,
+              size_t depth) -> std::vector<std::vector<float>> {
+        auto out = generator(batch);
+        if (!out.empty() || batch.size() <= 1 || depth == 0) {
+            return out;
+        }
+
+        const size_t mid = batch.size() / 2;
+        auto left = run(std::vector<std::string>(batch.begin(), batch.begin() + mid), depth - 1);
+        auto right = run(std::vector<std::string>(batch.begin() + mid, batch.end()), depth - 1);
+
+        if (left.empty() && right.empty()) {
+            return {};
+        }
+
+        std::vector<std::vector<float>> merged;
+        merged.reserve(left.size() + right.size());
+        merged.insert(merged.end(), left.begin(), left.end());
+        merged.insert(merged.end(), right.begin(), right.end());
+        return merged;
+    };
+
+    return run(texts, 32);
+}
+
+} // namespace testing
 
 namespace fs = std::filesystem;
 
@@ -622,21 +662,17 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
         embConfig.embedding_dim = provDim > 0 ? provDim : targetDbDim;
 
         // Backend selection override via environment or special model name
+        embConfig.backend = vector::EmbeddingConfig::Backend::Daemon;
         if (const char* be = std::getenv("YAMS_EMBED_BACKEND")) {
             std::string s(be);
             for (auto& c : s)
                 c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
-            if (s == "local")
-                embConfig.backend = vector::EmbeddingConfig::Backend::Local;
-            else if (s == "daemon")
-                embConfig.backend = vector::EmbeddingConfig::Backend::Daemon;
-            else
-                embConfig.backend = vector::EmbeddingConfig::Backend::Hybrid;
-        } else {
-            // Heuristic: if selected model indicates plugin/daemon usage, prefer Daemon backend
-            if (selectedModel == "onnx_plugin" || selectedModel == "daemon" ||
-                selectedModel.find("plugin") != std::string::npos) {
-                embConfig.backend = vector::EmbeddingConfig::Backend::Daemon;
+            if (s != "daemon" && s != "hybrid" && s != "local") {
+                spdlog::warn("EmbeddingService: unsupported YAMS_EMBED_BACKEND='{}'; using daemon",
+                             s);
+            } else if (s == "local") {
+                spdlog::warn("EmbeddingService: YAMS_EMBED_BACKEND=local is deprecated; using "
+                             "daemon backend");
             }
         }
 
@@ -658,7 +694,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
             modelMaxSeq = 512;
         vdbConfig.embedding_dim =
             yams::vector::dimres::resolve_dim(dataPath_, actualDim, actualDim);
-        spdlog::info("EmbeddingService: model={} dim={} max_seq={} backend=Hybrid", selectedModel,
+        spdlog::info("EmbeddingService: model={} dim={} max_seq={} backend=Daemon", selectedModel,
                      actualDim, modelMaxSeq);
 
         auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
@@ -731,16 +767,52 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
             if (capTa > 0)
                 bcfg.advisoryDocCap = capTa;
         }
+        // GPU-aware token budget scaling
+        {
+            const auto& gpu = yams::daemon::resource::detectGpu();
+            const uint64_t effectiveBudgetBytes =
+                yams::daemon::resource::effectiveGpuBatchBudgetBytes(gpu);
+            if (gpu.detected && effectiveBudgetBytes > 0) {
+                const bool unifiedMemory = gpu.unifiedMemory;
+                // Scale max tokens based on effective GPU budget.
+                // Dedicated-memory backends retain wider scaling, while unified-memory
+                // backends (CoreML/Apple Silicon) use a conservative range.
+                const double budgetScale =
+                    static_cast<double>(effectiveBudgetBytes) / (8.0 * 1024 * 1024 * 1024);
+                const double minScale = unifiedMemory ? 0.125 : 0.25;
+                const double maxScale = unifiedMemory ? 1.0 : 4.0;
+                const double baseTokens = unifiedMemory ? 131072.0 : 262144.0;
+                const double profileScale = yams::daemon::TuneAdvisor::profileScale();
+                // Efficient -> 25% of VRAM-based budget, Balanced -> 62.5%, Aggressive -> 100%
+                const double profileFactor = 0.25 + 0.75 * std::clamp(profileScale, 0.0, 1.0);
+                bcfg.maxTokens = static_cast<size_t>(
+                    baseTokens * std::clamp(budgetScale, minScale, maxScale) * profileFactor);
+                spdlog::debug(
+                    "[Embedding] GPU detected: {} (reported={:.1f} GB, effective={:.1f} "
+                    "GB, memory_model={}), profile_scale={:.2f}, maxTokens={}",
+                    gpu.name, static_cast<double>(gpu.vramBytes) / (1024.0 * 1024.0 * 1024.0),
+                    static_cast<double>(effectiveBudgetBytes) / (1024.0 * 1024.0 * 1024.0),
+                    unifiedMemory ? "unified" : "dedicated", profileScale, bcfg.maxTokens);
+            }
+        }
+
         DynamicBatcher batcher{bcfg};
 
         size_t processed = 0;
         size_t skipped = 0;
         size_t failed = 0;
 
+        // Circuit breaker: abort after too many consecutive or total failures
+        constexpr size_t kMaxConsecutiveFailures = 10;
+        constexpr double kMaxFailureRate = 0.80;
+        constexpr size_t kMinAttemptsForRate = 50;
+        size_t consecutiveFailures = 0;
+        bool circuitBroken = false;
+
         // Allow configurable pause between batches to reduce sustained CPU pressure
         unsigned pause_ms = yams::daemon::TuneAdvisor::getEmbedPauseMs();
 
-        for (size_t i = 0; i < documentHashes.size();) {
+        for (size_t i = 0; i < documentHashes.size() && !circuitBroken;) {
             std::vector<std::string> texts;
             std::vector<std::string> hashes;
 
@@ -771,35 +843,38 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
             i += selected; // advance window over input set
 
             if (!texts.empty()) {
-                // Generate embeddings with adaptive split on failure
-                std::function<std::vector<std::vector<float>>(const std::vector<std::string>&)>
-                    generate_with_adapt;
-                generate_with_adapt =
-                    [&](const std::vector<std::string>& in) -> std::vector<std::vector<float>> {
-                    auto out = embGenerator->generateEmbeddings(in);
-                    if (!out.empty() || in.size() <= 1)
-                        return out;
-                    // Split and try halves to mitigate transient/OOM issues
-                    size_t mid = in.size() / 2;
-                    auto left =
-                        generate_with_adapt(std::vector<std::string>(in.begin(), in.begin() + mid));
-                    auto right =
-                        generate_with_adapt(std::vector<std::string>(in.begin() + mid, in.end()));
-                    if (left.empty() && right.empty())
-                        return {};
-                    std::vector<std::vector<float>> merged;
-                    merged.reserve(left.size() + right.size());
-                    merged.insert(merged.end(), left.begin(), left.end());
-                    merged.insert(merged.end(), right.begin(), right.end());
-                    return merged;
-                };
-
-                auto embeddings = generate_with_adapt(texts);
+                auto embeddings = testing::generateEmbeddingsAdaptiveSplit(
+                    texts, [&](const std::vector<std::string>& batch) {
+                        return embGenerator->generateEmbeddings(batch);
+                    });
                 if (embeddings.empty()) {
                     failed += texts.size();
                     batcher.onFailure();
+                    consecutiveFailures++;
+                    if (consecutiveFailures >= kMaxConsecutiveFailures) {
+                        spdlog::error(
+                            "[EmbeddingService] circuit breaker: {} consecutive failures, "
+                            "aborting repair batch (processed={} failed={})",
+                            consecutiveFailures, processed, failed);
+                        circuitBroken = true;
+                    }
+                    // Check overall failure rate after sufficient attempts
+                    if (!circuitBroken) {
+                        size_t totalAttempted = processed + failed;
+                        if (totalAttempted >= kMinAttemptsForRate) {
+                            double failRate =
+                                static_cast<double>(failed) / static_cast<double>(totalAttempted);
+                            if (failRate > kMaxFailureRate) {
+                                spdlog::error("[EmbeddingService] circuit breaker: {:.0f}% failure "
+                                              "rate exceeds 80% threshold (processed={} failed={})",
+                                              failRate * 100.0, processed, failed);
+                                circuitBroken = true;
+                            }
+                        }
+                    }
                     continue;
                 }
+                consecutiveFailures = 0; // reset on success
 
                 // Store embeddings in vector database using batch insert for fewer transactions
                 std::vector<vector::VectorRecord> records;
@@ -810,9 +885,10 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
 
                     vector::VectorRecord record;
                     record.document_hash = hashes[k];
-                    record.chunk_id = vector::utils::generateChunkId(hashes[k], 0);
+                    record.chunk_id = vector::utils::generateChunkId(hashes[k], 999999);
                     record.embedding = embeddings[k];
                     record.content = texts[k].substr(0, 1000); // Store snippet
+                    record.level = vector::EmbeddingLevel::DOCUMENT;
 
                     // Add metadata if document exists
                     if (docResult && docResult.value()) {

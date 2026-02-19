@@ -2,7 +2,7 @@
 # Phase 3, Step 4: Path-tree grep integration tests
 
 dbg = (get_option('buildtype') == 'debug')
-if (get_option('enable-integration-tests') or dbg) and tests_has_cli
+if (get_option('enable-integration-tests') or dbg) and tests_has_cli and gtest_dep.found()
   cli_integration_srcs = files(
     'grep_path_tree_test.cpp',
   )
@@ -24,5 +24,9 @@ if (get_option('enable-integration-tests') or dbg) and tests_has_cli
     timeout: get_option('integration-timeout'),
   )
 elif get_option('enable-integration-tests')
-  message('integration_cli suite disabled (cli not built).')
+  if not gtest_dep.found()
+    message('integration_cli suite disabled (GTest not found).')
+  else
+    message('integration_cli suite disabled (cli not built).')
+  endif
 endif

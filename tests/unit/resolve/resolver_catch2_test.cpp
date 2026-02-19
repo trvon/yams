@@ -58,6 +58,13 @@ public:
         return Error{ErrorCode::NotImplemented, "NI"};
     }
     Result<void> deleteDocument(int64_t) override { return Error{ErrorCode::NotImplemented, "NI"}; }
+    Result<size_t> deleteDocumentsBatch(const std::vector<int64_t>&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
+    Result<size_t>
+    updateDocumentsMimeBatch(const std::vector<std::pair<int64_t, std::string>>&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
 
     // Content operations (unused)
     Result<void> insertContent(const yams::metadata::DocumentContent&) override {

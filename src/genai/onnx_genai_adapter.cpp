@@ -2,8 +2,8 @@
 #include <algorithm>
 #include <string>
 #include <vector>
-#include <yams/genai/onnx_genai_adapter.h>
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
+#include <yams/genai/onnx_genai_adapter.h>
 #include <yams/vector/embedding_generator.h>
 
 #if defined(YAMS_GENAI_RUNTIME_PRESENT)
@@ -46,7 +46,7 @@ bool OnnxGenAIAdapter::init(const std::string& model_id_or_path, const Options& 
     try {
         // Initialize minimal local pipeline using existing ONNX path; no env guards.
         auto& c = impl_->cfg;
-        c.backend = yams::vector::EmbeddingConfig::Backend::Local;
+        c.backend = yams::vector::EmbeddingConfig::Backend::Daemon;
         c.model_name = model_id_or_path;
         c.model_path.clear();
         if (Impl::looks_like_path(model_id_or_path)) {

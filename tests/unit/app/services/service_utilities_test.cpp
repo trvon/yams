@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include "../../../common/env_compat.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
@@ -72,6 +73,25 @@ TEST_CASE("SessionService - Configuration and State", "[session][service][config
         svc->removePathSelector("src/**/*.cpp");
         sels = svc->listPathSelectors("unittest");
         CHECK(sels.empty());
+    }
+
+    SECTION("Session create generates UUID") {
+        auto uniqueSuffix =
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        auto root = std::filesystem::temp_directory_path() / ("yams_uuid_test_" + uniqueSuffix);
+        std::filesystem::create_directories(root);
+        setenv("XDG_STATE_HOME", root.string().c_str(), 1);
+
+        AppContext ctx;
+        auto svc = makeSessionService(&ctx);
+        REQUIRE(svc);
+
+        svc->create("uuid-test", "uuid test session");
+        auto info = svc->getSessionInfo("uuid-test");
+        REQUIRE(info.has_value());
+        CHECK_FALSE(info->uuid.empty());
+        CHECK(info->uuid.size() == 36);
+        CHECK(info->uuid.find('-') != std::string::npos);
     }
 
     SECTION("Materialized view listing") {

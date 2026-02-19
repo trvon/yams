@@ -8,6 +8,8 @@
 #include <optional>
 #include <string>
 
+#include <yams/vector/document_chunker.h>
+
 namespace yams::daemon {
 
 struct DaemonConfig; // Forward declaration
@@ -27,6 +29,23 @@ struct DaemonConfig; // Forward declaration
  */
 class ConfigResolver {
 public:
+    struct EmbeddingSelectionPolicy {
+        enum class Strategy { Ranked, IntroHeadings };
+        enum class Mode { Full, Budgeted, Adaptive };
+        Strategy strategy{Strategy::Ranked};
+        Mode mode{Mode::Budgeted};
+        std::size_t maxChunksPerDoc{8};
+        std::size_t maxCharsPerDoc{24000};
+        double headingBoost{1.25};
+        double introBoost{0.75};
+    };
+
+    struct EmbeddingChunkingPolicy {
+        yams::vector::ChunkingStrategy strategy{yams::vector::ChunkingStrategy::PARAGRAPH_BASED};
+        yams::vector::ChunkingConfig config{};
+        bool overridden{false};
+    };
+
     ConfigResolver() = delete; // Static-only class
 
     /**
@@ -146,6 +165,52 @@ public:
      * @return true if preload is enabled
      */
     static bool detectEmbeddingPreloadFlag(const DaemonConfig& config);
+
+    /**
+     * @brief Resolve embedding chunk-selection policy from config with env overrides.
+     *
+     * Config keys:
+     * - embeddings.selection.strategy = ranked|intro_headings
+     * - embeddings.selection.mode = full|budgeted|adaptive
+     * - embeddings.selection.max_chunks_per_doc = int
+     * - embeddings.selection.max_chars_per_doc = int
+     * - embeddings.selection.heading_boost = float
+     * - embeddings.selection.intro_boost = float
+     *
+     * Environment overrides:
+     * - YAMS_EMBED_SELECTION_STRATEGY
+     * - YAMS_EMBED_SELECTION_MODE
+     * - YAMS_EMBED_MAX_CHUNKS_PER_DOC
+     * - YAMS_EMBED_MAX_CHARS_PER_DOC
+     * - YAMS_EMBED_SELECTION_HEADING_BOOST
+     * - YAMS_EMBED_SELECTION_INTRO_BOOST
+     */
+    static EmbeddingSelectionPolicy resolveEmbeddingSelectionPolicy();
+
+    /**
+     * @brief Resolve embedding chunking policy from config with env overrides.
+     *
+     * Config keys:
+     * - embeddings.chunking.strategy = fixed|sentence|paragraph|recursive|sliding_window|markdown
+     * - embeddings.chunking.use_tokens = 0|1
+     * - embeddings.chunking.target = int
+     * - embeddings.chunking.max = int
+     * - embeddings.chunking.min = int
+     * - embeddings.chunking.overlap = int
+     * - embeddings.chunking.overlap_pct = float (0..1)
+     * - embeddings.chunking.preserve_sentences = 0|1
+     *
+     * Environment overrides (backwards-compatible):
+     * - YAMS_EMBED_CHUNK_STRATEGY
+     * - YAMS_EMBED_CHUNK_USE_TOKENS
+     * - YAMS_EMBED_CHUNK_TARGET
+     * - YAMS_EMBED_CHUNK_MAX
+     * - YAMS_EMBED_CHUNK_MIN
+     * - YAMS_EMBED_CHUNK_OVERLAP
+     * - YAMS_EMBED_CHUNK_OVERLAP_PCT
+     * - YAMS_EMBED_CHUNK_PRESERVE_SENTENCES
+     */
+    static EmbeddingChunkingPolicy resolveEmbeddingChunkingPolicy();
 
     /**
      * @brief Read an integer timeout from environment with bounds.

@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "../../common/env_compat.h"
 #include <yams/compat/unistd.h>
 
 using namespace yams::daemon;
@@ -237,61 +238,108 @@ TEST_CASE("ResourceGovernor scaling caps are queryable", "[daemon][governance][c
     (void)maxKg;
 }
 
-TEST_CASE("ResourceGovernor applies DB contention caps", "[daemon][governance][catch2]") {
+TEST_CASE("ResourceGovernor Warning caps honor configurable scale percent",
+          "[daemon][governance][catch2]") {
     auto& governor = ResourceGovernor::instance();
+    TuneAdvisor::resetGovernorWarningScalePercentOverride();
 
-    governor.reportDbLockContention(0, 10);
-    CHECK(governor.capKgConcurrencyForDbContention(8) == 8);
-    CHECK(governor.capEmbedConcurrencyForDbContention(8) == 8);
+    auto expectedScaled = [](uint32_t current, uint32_t percent) -> uint32_t {
+        if (current == 0) {
+            return 0;
+        }
+        uint32_t scaled =
+            static_cast<uint32_t>((static_cast<uint64_t>(current) * percent + 99u) / 100u);
+        return std::min(current, std::max(1u, scaled));
+    };
 
-    governor.reportDbLockContention(11, 10);
-    CHECK(governor.capKgConcurrencyForDbContention(8) == 4);
-    CHECK(governor.capEmbedConcurrencyForDbContention(8) == 2);
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    auto normal = governor.getScalingCaps();
 
-    governor.reportDbLockContention(25, 10);
-    CHECK(governor.capKgConcurrencyForDbContention(8) == 2);
-    CHECK(governor.capEmbedConcurrencyForDbContention(8) == 1);
+    TuneAdvisor::setGovernorWarningScalePercent(90u);
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Warning);
+    auto warning90 = governor.getScalingCaps();
 
-    governor.reportDbLockContention(0, 10);
+    CHECK(warning90.ingestWorkers == expectedScaled(normal.ingestWorkers, 90u));
+    CHECK(warning90.searchConcurrency == expectedScaled(normal.searchConcurrency, 90u));
+    CHECK(warning90.extractionConcurrency == expectedScaled(normal.extractionConcurrency, 90u));
+    CHECK(warning90.kgConcurrency == expectedScaled(normal.kgConcurrency, 90u));
+    CHECK(warning90.symbolConcurrency == expectedScaled(normal.symbolConcurrency, 90u));
+    CHECK(warning90.entityConcurrency == expectedScaled(normal.entityConcurrency, 90u));
+    CHECK(warning90.titleConcurrency == expectedScaled(normal.titleConcurrency, 90u));
+    CHECK(warning90.embedConcurrency == expectedScaled(normal.embedConcurrency, 90u));
+    CHECK_FALSE(warning90.allowModelLoads);
+    CHECK(warning90.allowNewIngest);
+
+    TuneAdvisor::setGovernorWarningScalePercent(70u);
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Warning);
+    auto warning70 = governor.getScalingCaps();
+    CHECK(warning70.ingestWorkers == expectedScaled(normal.ingestWorkers, 70u));
+    CHECK(warning70.searchConcurrency == expectedScaled(normal.searchConcurrency, 70u));
+
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    TuneAdvisor::resetGovernorWarningScalePercentOverride();
 }
 
-TEST_CASE("ResourceGovernor recommends connection slot targets with hysteresis",
+TEST_CASE("ResourceGovernor de-escalation hysteresis differentiates CPU and memory pressure",
           "[daemon][governance][catch2]") {
     auto& governor = ResourceGovernor::instance();
 
-    const uint32_t current = 20;
-    const uint32_t minSlots = 8;
-    const uint32_t maxSlots = 64;
-    const uint32_t step = 4;
+    // Save and restore tunables touched by this test.
+    const double prevWarning = TuneAdvisor::memoryWarningThreshold();
+    const double prevCritical = TuneAdvisor::memoryCriticalThreshold();
+    const double prevEmergency = TuneAdvisor::memoryEmergencyThreshold();
+    const uint32_t prevMemHys = TuneAdvisor::memoryHysteresisMs();
+    const uint32_t prevCpuHys = TuneAdvisor::cpuLevelHysteresisMs();
 
-    // Need sustained high utilization before growth.
-    CHECK(governor.recommendConnectionSlotTarget(current, 19, minSlots, maxSlots, step, 3) ==
-          current);
-    CHECK(governor.recommendConnectionSlotTarget(current, 19, minSlots, maxSlots, step, 3) ==
-          current);
-    CHECK(governor.recommendConnectionSlotTarget(current, 19, minSlots, maxSlots, step, 3) >=
-          current);
+    TuneAdvisor::setMemoryWarningThreshold(0.70);
+    TuneAdvisor::setMemoryCriticalThreshold(0.90);
+    TuneAdvisor::setMemoryEmergencyThreshold(0.97);
+    TuneAdvisor::setMemoryHysteresisMs(500);
+    TuneAdvisor::setCpuLevelHysteresisMs(100);
 
-    // Need sustained low utilization before shrink (and only when active > 0).
-    CHECK(governor.recommendConnectionSlotTarget(current, 1, minSlots, maxSlots, step, 3) ==
-          current);
-    CHECK(governor.recommendConnectionSlotTarget(current, 1, minSlots, maxSlots, step, 3) ==
-          current);
-    CHECK(governor.recommendConnectionSlotTarget(current, 1, minSlots, maxSlots, step, 3) <=
-          current);
-}
+    const auto t0 = std::chrono::steady_clock::now();
 
-TEST_CASE("ResourceGovernor recommends retry-after from overload signals",
-          "[daemon][governance][catch2]") {
-    auto& governor = ResourceGovernor::instance();
+    SECTION("CPU-driven de-escalation uses cpu-level hysteresis") {
+        governor.testing_setPressureState(ResourcePressureLevel::Warning, t0);
 
-    const auto none =
-        governor.recommendRetryAfterMs(0, 100, 0, 1024ULL * 1024ULL, 0, 1000, 0, 1000, 250);
-    CHECK(none == 0);
+        ResourceSnapshot snap{};
+        snap.memoryPressure = 0.30; // no memory pressure
+        snap.cpuUsagePercent = 0.0;
+        snap.embedQueued = 0;
 
-    const auto overloaded = governor.recommendRetryAfterMs(
-        250, 100, 3LL * 1024LL * 1024LL, 1024ULL * 1024ULL, 1500, 1000, 1000, 1000, 400);
-    CHECK(overloaded > 0);
+        snap.timestamp = t0;
+        CHECK(governor.testing_computeLevel(snap) == ResourcePressureLevel::Warning);
+
+        snap.timestamp = t0 + std::chrono::milliseconds(150);
+        CHECK(governor.testing_computeLevel(snap) == ResourcePressureLevel::Normal);
+    }
+
+    SECTION("Memory-driven de-escalation keeps conservative 2x hysteresis") {
+        governor.testing_setPressureState(ResourcePressureLevel::Critical, t0);
+
+        ResourceSnapshot snap{};
+        snap.memoryPressure = 0.80; // warning-level memory pressure (below critical)
+        snap.cpuUsagePercent = 0.0;
+        snap.embedQueued = 0;
+
+        snap.timestamp = t0;
+        CHECK(governor.testing_computeLevel(snap) == ResourcePressureLevel::Critical);
+
+        snap.timestamp = t0 + std::chrono::milliseconds(600);
+        CHECK(governor.testing_computeLevel(snap) == ResourcePressureLevel::Critical);
+
+        snap.timestamp = t0 + std::chrono::milliseconds(1100);
+        CHECK(governor.testing_computeLevel(snap) == ResourcePressureLevel::Warning);
+    }
+
+    // Restore original values.
+    TuneAdvisor::setMemoryWarningThreshold(prevWarning);
+    TuneAdvisor::setMemoryCriticalThreshold(prevCritical);
+    TuneAdvisor::setMemoryEmergencyThreshold(prevEmergency);
+    TuneAdvisor::setMemoryHysteresisMs(prevMemHys);
+    TuneAdvisor::setCpuLevelHysteresisMs(prevCpuHys);
+    governor.testing_setPressureState(ResourcePressureLevel::Normal,
+                                      std::chrono::steady_clock::now());
 }
 
 TEST_CASE("ResourceGovernor snapshot contains valid metrics", "[daemon][governance][catch2]") {
@@ -603,4 +651,154 @@ TEST_CASE("Memory thresholds maintain ordering invariant", "[daemon][governance]
         CHECK(TuneAdvisor::modelEvictCriticalThreshold() <
               TuneAdvisor::modelEvictEmergencyThreshold());
     }
+}
+
+// =============================================================================
+// Scaling Caps Pressure Level Tests (testing_updateScalingCaps)
+// =============================================================================
+
+TEST_CASE("ResourceGovernor scaling caps change at Warning level", "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    // Record caps at Normal
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    auto normalCaps = governor.getScalingCaps();
+
+    // Update to Warning
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Warning);
+    auto warningCaps = governor.getScalingCaps();
+
+    // Warning should have equal or lower caps
+    CHECK(warningCaps.ingestWorkers <= normalCaps.ingestWorkers);
+    CHECK(warningCaps.searchConcurrency <= normalCaps.searchConcurrency);
+    CHECK(warningCaps.extractionConcurrency <= normalCaps.extractionConcurrency);
+    CHECK(warningCaps.kgConcurrency <= normalCaps.kgConcurrency);
+    CHECK(warningCaps.embedConcurrency <= normalCaps.embedConcurrency);
+    // Warning blocks model loads but still allows ingest
+    CHECK_FALSE(warningCaps.allowModelLoads);
+    CHECK(warningCaps.allowNewIngest);
+
+    // Restore Normal
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+}
+
+TEST_CASE("ResourceGovernor scaling caps at Critical level", "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    // Record Normal caps for comparison
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    auto normalCaps = governor.getScalingCaps();
+
+    // Update to Critical
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Critical);
+    auto criticalCaps = governor.getScalingCaps();
+
+    // Critical should have even lower caps than Warning
+    CHECK(criticalCaps.ingestWorkers <= normalCaps.ingestWorkers);
+    CHECK(criticalCaps.searchConcurrency <= normalCaps.searchConcurrency);
+    // Critical blocks model loads
+    CHECK_FALSE(criticalCaps.allowModelLoads);
+    // Critical still allows ingest (only Emergency blocks it)
+    CHECK(criticalCaps.allowNewIngest);
+
+    // Restore Normal
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+}
+
+TEST_CASE("ResourceGovernor scaling caps at Emergency level", "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    // Update to Emergency
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+    auto emergencyCaps = governor.getScalingCaps();
+
+    // Emergency should halt new ingest
+    CHECK_FALSE(emergencyCaps.allowNewIngest);
+    CHECK_FALSE(emergencyCaps.allowModelLoads);
+    // Embed concurrency should be 0
+    CHECK(emergencyCaps.embedConcurrency == 0);
+    // Extraction concurrency should be 0
+    CHECK(emergencyCaps.extractionConcurrency == 0);
+
+    // Restore Normal
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+}
+
+TEST_CASE("ResourceGovernor caps restore to full after returning to Normal",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    // Record Normal caps
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    auto normalCaps = governor.getScalingCaps();
+
+    // Go through Emergency and back to Normal
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    auto restoredCaps = governor.getScalingCaps();
+
+    // Should be back to full values
+    CHECK(restoredCaps.ingestWorkers == normalCaps.ingestWorkers);
+    CHECK(restoredCaps.searchConcurrency == normalCaps.searchConcurrency);
+    CHECK(restoredCaps.extractionConcurrency == normalCaps.extractionConcurrency);
+    CHECK(restoredCaps.kgConcurrency == normalCaps.kgConcurrency);
+    CHECK(restoredCaps.embedConcurrency == normalCaps.embedConcurrency);
+    CHECK(restoredCaps.allowModelLoads);
+    CHECK(restoredCaps.allowNewIngest);
+}
+
+TEST_CASE("ResourceGovernor caps ordering: Normal >= Emergency (endpoints)",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    auto normal = governor.getScalingCaps();
+
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+    auto emergency = governor.getScalingCaps();
+
+    // Normal should always be >= Emergency across all dimensions
+    CHECK(normal.ingestWorkers >= emergency.ingestWorkers);
+    CHECK(normal.embedConcurrency >= emergency.embedConcurrency);
+    CHECK(normal.extractionConcurrency >= emergency.extractionConcurrency);
+    CHECK(normal.searchConcurrency >= emergency.searchConcurrency);
+    CHECK(normal.kgConcurrency >= emergency.kgConcurrency);
+
+    // Normal allows everything, Emergency blocks
+    CHECK(normal.allowModelLoads);
+    CHECK(normal.allowNewIngest);
+    CHECK_FALSE(emergency.allowModelLoads);
+    CHECK_FALSE(emergency.allowNewIngest);
+
+    // Restore Normal
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+}
+
+// =============================================================================
+// ResourceGovernor Tick and Admission Control Tests
+// =============================================================================
+
+TEST_CASE("ResourceGovernor tick is callable without ServiceManager",
+          "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+    // tick(nullptr) should not crash — it just skips SM metric collection
+    auto snap = governor.tick(nullptr);
+    CHECK(snap.timestamp.time_since_epoch().count() > 0);
+    // RSS should be readable (we're a running process)
+    CHECK(snap.rssBytes > 0);
+}
+
+TEST_CASE("ResourceGovernor canAdmitWork blocked at Emergency", "[daemon][governance][catch2]") {
+    auto& governor = ResourceGovernor::instance();
+
+    // At Normal, work should be admitted
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
+    CHECK(governor.getScalingCaps().allowNewIngest);
+
+    // At Emergency, allowNewIngest is false
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Emergency);
+    CHECK_FALSE(governor.getScalingCaps().allowNewIngest);
+
+    // Restore
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
 }

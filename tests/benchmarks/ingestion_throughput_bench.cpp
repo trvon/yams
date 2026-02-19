@@ -17,6 +17,8 @@
 #include <vector>
 #include <yams/compat/unistd.h>
 
+#include "../common/test_helpers_catch2.h"
+
 #include <nlohmann/json.hpp>
 #include <numeric>
 #include <unordered_map>
@@ -341,8 +343,9 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
                      int iteration) {
     (void)datasetCount;
 
-    fs::path baseDataDir = fs::temp_directory_path() / "yams_ingest_bench";
-    fs::path runDataDir = baseDataDir / (run.label + "_" + std::to_string(iteration));
+    // Use a unique temp directory per run to avoid cross-process collisions.
+    fs::path runDataDir = yams::test::make_temp_dir("yams_ingest_bench_") /
+                          (run.label + "_" + std::to_string(iteration));
     fs::create_directories(runDataDir);
 
     std::string workerStr = std::to_string(std::max(1, run.workers));

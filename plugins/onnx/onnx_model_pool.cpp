@@ -3,11 +3,27 @@
 #include <yams/daemon/resource/onnx_model_pool.h>
 #include <yams/vector/embedding_generator.h>
 
+#include "onnx_gpu_provider.h"
+#include <yams/daemon/resource/gpu_info.h>
+
 #include <nlohmann/json.hpp>
 #include <onnxruntime_cxx_api.h>
 #include <spdlog/spdlog.h>
 #include <filesystem>
 #include <mutex>
+#include <sstream>
+#include <boost/asio/post.hpp>
+#include <boost/asio/thread_pool.hpp>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <windows.h>
+#include <sys/stat.h>
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 
 // GPU execution provider headers - conditionally included based on Conan build options
 // Note: Prebuilt ONNX Runtime binaries from GitHub releases use the C API for providers.
@@ -34,7 +50,7 @@ static Ort::Env& get_global_ort_env() {
         spdlog::info("[ONNX] Initializing global Ort::Env (thread-safe, single instance)");
 
         OrtThreadingOptions* threading_options = nullptr;
-        Ort::GetApi().CreateThreadingOptions(&threading_options);
+        (void)Ort::GetApi().CreateThreadingOptions(&threading_options);
         if (threading_options) {
             unsigned hw_threads = std::thread::hardware_concurrency();
             if (hw_threads == 0)
@@ -51,9 +67,9 @@ static Ort::Env& get_global_ort_env() {
             spdlog::info("[ONNX] Using multi-threaded global Ort::Env (intra={}, inter={})",
                          intra_threads, inter_threads);
 #endif
-            Ort::GetApi().SetGlobalIntraOpNumThreads(threading_options, intra_threads);
-            Ort::GetApi().SetGlobalInterOpNumThreads(threading_options, inter_threads);
-            Ort::GetApi().SetGlobalSpinControl(threading_options, 0);
+            (void)Ort::GetApi().SetGlobalIntraOpNumThreads(threading_options, intra_threads);
+            (void)Ort::GetApi().SetGlobalInterOpNumThreads(threading_options, inter_threads);
+            (void)Ort::GetApi().SetGlobalSpinControl(threading_options, 0);
 
             g_onnx_env = new Ort::Env(threading_options, ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
             Ort::GetApi().ReleaseThreadingOptions(threading_options);
@@ -78,12 +94,192 @@ static Ort::Env& get_global_ort_env() {
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <thread>
 #include <unordered_map>
 
 namespace yams::daemon {
 
 namespace fs = std::filesystem;
+
+namespace {
+
+bool envTruthy(const char* value) {
+    if (!value || !*value) {
+        return false;
+    }
+    std::string v(value);
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
+
+bool allowGpuAutoUnload() {
+    return envTruthy(std::getenv("YAMS_ONNX_GPU_AUTO_UNLOAD"));
+}
+
+int envIntOr(const char* name, int fallback) {
+    if (const char* value = std::getenv(name)) {
+        try {
+            return std::stoi(value);
+        } catch (...) {
+        }
+    }
+    return fallback;
+}
+
+bool gpuProcessLockEnabled() {
+    if (const char* v = std::getenv("YAMS_GPU_PROCESS_LOCK")) {
+        return envTruthy(v);
+    }
+    if (const char* v = std::getenv("YAMS_MIGRAPHX_PROCESS_LOCK")) {
+        return envTruthy(v);
+    }
+    return true;
+}
+
+std::filesystem::path resolveGpuProcessLockPath() {
+    if (const char* configured = std::getenv("YAMS_GPU_LOCK_PATH"); configured && *configured) {
+        std::filesystem::path path(configured);
+        if (path.extension() == ".lock") {
+            return path;
+        }
+        auto devEnv = std::getenv("YAMS_GPU_DEVICE_ID");
+        int deviceId = devEnv ? std::stoi(devEnv) : 0;
+        return path / ("yams-gpu-device-" + std::to_string(deviceId) + ".lock");
+    }
+
+    if (const char* configured = std::getenv("YAMS_MIGRAPHX_LOCK_PATH");
+        configured && *configured) {
+        std::filesystem::path path(configured);
+        if (path.extension() == ".lock") {
+            return path;
+        }
+        return path / "migraphx.lock"; // Fallback legacy behavior if needed, or just standard
+    }
+
+    int deviceId = envIntOr("YAMS_GPU_DEVICE_ID", -1);
+    if (deviceId < 0) {
+        deviceId = envIntOr("YAMS_MIGRAPHX_DEVICE_ID", 0);
+    }
+    return std::filesystem::temp_directory_path() /
+           ("yams-gpu-device-" + std::to_string(deviceId) + ".lock");
+}
+
+class ScopedProcessFileLock {
+public:
+    explicit ScopedProcessFileLock(const std::filesystem::path& path) : path_(path) {
+        std::error_code ec;
+        auto parent = path_.parent_path();
+        if (!parent.empty()) {
+            std::filesystem::create_directories(parent, ec);
+        }
+
+#ifdef _WIN32
+        fd_ = _open(path_.string().c_str(), _O_CREAT | _O_RDWR | _O_BINARY, _S_IREAD | _S_IWRITE);
+        if (fd_ < 0) {
+            return;
+        }
+        hFile_ = reinterpret_cast<HANDLE>(_get_osfhandle(fd_));
+        if (hFile_ == INVALID_HANDLE_VALUE) {
+            _close(fd_);
+            fd_ = -1;
+            return;
+        }
+        OVERLAPPED overlapped = {0};
+        if (!LockFileEx(hFile_, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped)) {
+            _close(fd_);
+            fd_ = -1;
+            hFile_ = INVALID_HANDLE_VALUE;
+            return;
+        }
+#else
+        fd_ = ::open(path_.c_str(), O_CREAT | O_RDWR, 0644);
+        if (fd_ < 0) {
+            return;
+        }
+        if (::flock(fd_, LOCK_EX) != 0) {
+            ::close(fd_);
+            fd_ = -1;
+            return;
+        }
+#endif
+    }
+
+    ScopedProcessFileLock(const ScopedProcessFileLock&) = delete;
+    ScopedProcessFileLock& operator=(const ScopedProcessFileLock&) = delete;
+
+    bool locked() const { return fd_ >= 0; }
+
+    ~ScopedProcessFileLock() {
+        if (fd_ < 0) {
+            return;
+        }
+#ifdef _WIN32
+        if (hFile_ != INVALID_HANDLE_VALUE) {
+            OVERLAPPED overlapped = {0};
+            (void)UnlockFileEx(hFile_, 0, 1, 0, &overlapped);
+        }
+        _close(fd_);
+#else
+        (void)::flock(fd_, LOCK_UN);
+        ::close(fd_);
+#endif
+    }
+
+private:
+    std::filesystem::path path_;
+    int fd_{-1};
+#ifdef _WIN32
+    HANDLE hFile_{INVALID_HANDLE_VALUE};
+#endif
+};
+
+size_t& gpuProcessLockDepth() {
+    static thread_local size_t depth = 0;
+    return depth;
+}
+
+std::string providerBatchLimitKey(const std::string& modelName, const std::string& provider) {
+    std::string providerLower = provider;
+    std::transform(providerLower.begin(), providerLower.end(), providerLower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return modelName + "|" + providerLower;
+}
+
+std::recursive_mutex& sharedBatchLimitMutex() {
+    static auto* mu = new std::recursive_mutex();
+    return *mu;
+}
+
+std::unordered_map<std::string, size_t>& sharedBatchLimitMap() {
+    static auto* caps = new std::unordered_map<std::string, size_t>();
+    return *caps;
+}
+
+size_t loadSharedBatchLimit(const std::string& modelName, const std::string& provider) {
+    const std::string key = providerBatchLimitKey(modelName, provider);
+    std::lock_guard<std::recursive_mutex> lock(sharedBatchLimitMutex());
+    const auto& caps = sharedBatchLimitMap();
+    const auto it = caps.find(key);
+    return (it == caps.end()) ? 0 : it->second;
+}
+
+size_t mergeSharedBatchLimit(const std::string& modelName, const std::string& provider,
+                             size_t observedCap) {
+    if (observedCap == 0) {
+        return 0;
+    }
+    const std::string key = providerBatchLimitKey(modelName, provider);
+    std::lock_guard<std::recursive_mutex> lock(sharedBatchLimitMutex());
+    auto& caps = sharedBatchLimitMap();
+    const auto it = caps.find(key);
+    const size_t merged = (it == caps.end()) ? observedCap : std::min(it->second, observedCap);
+    caps[key] = merged;
+    return merged;
+}
+
+} // namespace
 
 // ============================================================================
 // OnnxModelSession Implementation
@@ -94,6 +290,14 @@ public:
     Impl(const std::string& modelPath, const std::string& modelName,
          const vector::EmbeddingConfig& config)
         : modelPath_(modelPath), modelName_(modelName), config_(config), preprocessor_(config) {
+        // Check if dynamic padding is disabled via environment variable
+        if (const char* dp = std::getenv("YAMS_ONNX_DYNAMIC_PADDING")) {
+            std::string val(dp);
+            std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+            if (val == "0" || val == "false" || val == "no" || val == "off") {
+                dynamicPaddingEnabled_ = false;
+            }
+        }
 #ifdef GTEST_API_
         // Check if we should skip model loading in test mode
         if (yams::test::shouldSkipModelLoading()) {
@@ -178,7 +382,10 @@ public:
         int intra = config.num_threads > 0 ? config.num_threads : intra_default;
         intra = detect_threads("YAMS_ONNX_INTRA_OP_THREADS", intra);
 #endif
-        int inter = detect_threads("YAMS_ONNX_INTER_OP_THREADS", inter_default);
+        int inter = config.inter_op_threads > 0 ? config.inter_op_threads : inter_default;
+        inter = detect_threads("YAMS_ONNX_INTER_OP_THREADS", inter);
+        configuredIntraThreads_ = intra;
+        configuredInterThreads_ = inter;
         sessionOptions_->SetIntraOpNumThreads(intra);
         sessionOptions_->SetInterOpNumThreads(inter);
 
@@ -297,6 +504,41 @@ public:
             return Result<void>();
         }
 
+        auto providerLower = actualExecutionProvider_;
+        std::transform(providerLower.begin(), providerLower.end(), providerLower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const bool usesMigraphxProvider = providerLower.find("migraphx") != std::string::npos;
+
+        std::unique_lock<std::recursive_mutex> gpuLoadLock;
+        std::unique_ptr<ScopedProcessFileLock> gpuProcessLoadLock;
+
+        bool usesGpuProvider = false;
+        if (providerLower.find("migraphx") != std::string::npos ||
+            providerLower.find("cuda") != std::string::npos ||
+            providerLower.find("dml") != std::string::npos ||
+            providerLower.find("directml") != std::string::npos) {
+            usesGpuProvider = true;
+        }
+
+        if (usesGpuProvider) {
+            // Serialize GPU load paths to avoid non-deterministic GPU faults during startup.
+            static std::recursive_mutex* g_gpu_load_mutex = new std::recursive_mutex();
+            gpuLoadLock = std::unique_lock<std::recursive_mutex>(*g_gpu_load_mutex);
+            spdlog::debug("[ONNX] GPU load gate acquired for '{}'", modelName_);
+
+            if (gpuProcessLockEnabled()) {
+                const auto processLockPath = resolveGpuProcessLockPath();
+                gpuProcessLoadLock = std::make_unique<ScopedProcessFileLock>(processLockPath);
+                if (gpuProcessLoadLock->locked()) {
+                    spdlog::debug("[ONNX] GPU process load lock acquired: {}",
+                                  processLockPath.string());
+                } else {
+                    spdlog::warn("[ONNX] Failed to acquire GPU process load lock: {}",
+                                 processLockPath.string());
+                }
+            }
+        }
+
         try {
 #ifdef YAMS_ENABLE_ONNX_GENAI
             if (genai_) {
@@ -386,6 +628,7 @@ public:
                             auto seq = inShape[1];
                             if (seq > 0) {
                                 maxSequenceLength_ = static_cast<size_t>(seq);
+                                hasFixedInputShape_ = true;
                             }
                         }
                     } catch (const std::exception& e) {
@@ -592,99 +835,160 @@ public:
 
     bool isValid() const { return test_mode_ ? isLoaded_ : (isLoaded_ && session_ != nullptr); }
 
+    std::pair<int, int> getThreading() const {
+        return {configuredIntraThreads_, configuredInterThreads_};
+    }
+
+    size_t getLearnedBatchLimit() const {
+        return providerBatchLimit_.load(std::memory_order_relaxed);
+    }
+
+    Result<void> setThreading(int intraThreads, int interThreads) {
+        auto valid = [](int value) { return value == -1 || (value >= 1 && value <= 64); };
+        if (!valid(intraThreads) || !valid(interThreads)) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Threading values must be -1 or in range [1, 64]"};
+        }
+
+        if (intraThreads > 0) {
+            config_.num_threads = intraThreads;
+        }
+        if (interThreads > 0) {
+            config_.inter_op_threads = interThreads;
+        }
+
+        configuredIntraThreads_ =
+            (config_.num_threads > 0) ? config_.num_threads : configuredIntraThreads_;
+        configuredInterThreads_ =
+            (config_.inter_op_threads > 0) ? config_.inter_op_threads : configuredInterThreads_;
+        if (sessionOptions_) {
+            sessionOptions_->SetIntraOpNumThreads(configuredIntraThreads_);
+            sessionOptions_->SetInterOpNumThreads(configuredInterThreads_);
+        }
+
+        // Force lazy reload on next inference with updated threading.
+        session_.reset();
+        isLoaded_ = false;
+
+        return Result<void>();
+    }
+
     size_t getEmbeddingDim() const { return embeddingDim_; }
     size_t getMaxSequenceLength() const { return maxSequenceLength_; }
+    const std::string& getExecutionProvider() const { return actualExecutionProvider_; }
 
 private:
-    // Append GPU execution provider to session options based on build configuration
-    // Uses the ONNX Runtime C API which is available in prebuilt binaries
     void appendGpuExecutionProvider() {
-#if defined(YAMS_ONNX_CUDA_ENABLED)
-        // CUDA execution provider (NVIDIA GPUs)
-        // Use the C API function available in prebuilt binaries
-        try {
-            OrtCUDAProviderOptions cuda_options{};
-            cuda_options.device_id = 0;
-            cuda_options.arena_extend_strategy = 0; // kNextPowerOfTwo
-            cuda_options.gpu_mem_limit = SIZE_MAX;  // Use all available GPU memory
-            cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
-            cuda_options.do_copy_in_default_stream = 1;
+        std::string cacheDir;
+        if (!modelPath_.empty()) {
+            auto parentDir = fs::path(modelPath_).parent_path();
+            if (fs::exists(parentDir)) {
+                cacheDir = parentDir.string();
+            }
+        }
+        actualExecutionProvider_ = onnx_util::appendGpuProvider(*sessionOptions_, cacheDir);
+    }
 
-            sessionOptions_->AppendExecutionProvider_CUDA(cuda_options);
-            spdlog::info("[ONNX] CUDA execution provider enabled (device_id=0)");
-        } catch (const Ort::Exception& e) {
-            spdlog::warn("[ONNX] Failed to enable CUDA provider: {}. Falling back to CPU.",
-                         e.what());
-        }
-#elif defined(YAMS_ONNX_DIRECTML_ENABLED)
-        // DirectML execution provider (Windows, any DX12 GPU)
-        try {
-            // Use generic AppendExecutionProvider for DML
-            sessionOptions_->AppendExecutionProvider("DML");
-            spdlog::info("[ONNX] DirectML execution provider enabled");
-        } catch (const Ort::Exception& e) {
-            spdlog::warn("[ONNX] Failed to enable DirectML provider: {}. Falling back to CPU.",
-                         e.what());
-        }
-#elif defined(YAMS_ONNX_COREML_ENABLED)
-        // CoreML execution provider (macOS, Apple Silicon + Neural Engine)
-        // The prebuilt macOS ONNX Runtime binaries include CoreML support
-        try {
-            // CoreML provider options (empty map uses defaults: GPU + Neural Engine)
-            // Available options: "MLComputeUnits" = "CPUAndGPU" | "CPUOnly" | "CPUAndNeuralEngine"
-            // | "All"
-            std::unordered_map<std::string, std::string> coreml_options;
-            coreml_options["MLComputeUnits"] = "All"; // Use CPU, GPU, and Neural Engine
+    struct GpuInferenceGuard {
+        std::unique_lock<std::recursive_mutex> threadLock;
+        std::unique_ptr<ScopedProcessFileLock> processLock;
+        bool depthIncremented{false};
 
-            sessionOptions_->AppendExecutionProvider("CoreML", coreml_options);
-            spdlog::info("[ONNX] CoreML execution provider enabled (Neural Engine + GPU)");
-        } catch (const Ort::Exception& e) {
-            spdlog::warn("[ONNX] Failed to enable CoreML provider: {}. Falling back to CPU.",
-                         e.what());
-        } catch (const std::exception& e) {
-            spdlog::warn("[ONNX] Failed to enable CoreML provider: {}. Falling back to CPU.",
-                         e.what());
-        }
-#elif defined(YAMS_ONNX_MIGRAPHX_ENABLED)
-        // MIGraphX execution provider (Linux, AMD GPUs via ROCm)
-        try {
-            OrtMIGraphXProviderOptions migraphx_options{};
-            migraphx_options.device_id = 0;
+        GpuInferenceGuard() = default;
+        GpuInferenceGuard(const GpuInferenceGuard&) = delete;
+        GpuInferenceGuard& operator=(const GpuInferenceGuard&) = delete;
+        GpuInferenceGuard(GpuInferenceGuard&&) noexcept = default;
+        GpuInferenceGuard& operator=(GpuInferenceGuard&&) noexcept = default;
 
-            sessionOptions_->AppendExecutionProvider_MIGraphX(migraphx_options);
-            spdlog::info("[ONNX] MIGraphX execution provider enabled (AMD GPU via ROCm)");
-        } catch (const Ort::Exception& e) {
-            spdlog::warn("[ONNX] Failed to enable MIGraphX provider: {}. Falling back to CPU.",
-                         e.what());
+        ~GpuInferenceGuard() {
+            if (depthIncremented) {
+                auto& depth = gpuProcessLockDepth();
+                if (depth > 0) {
+                    --depth;
+                }
+            }
         }
-#else
-        // No GPU provider compiled in
-        spdlog::warn("[ONNX] GPU requested but no GPU provider compiled. "
-                     "Rebuild with -Dwith_gpu=cuda|directml|coreml|migraphx");
-#endif
+    };
+
+    GpuInferenceGuard acquireGpuInferenceLock() const {
+        GpuInferenceGuard guard;
+        std::string providerLower = actualExecutionProvider_;
+        std::transform(providerLower.begin(), providerLower.end(), providerLower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        bool usesGpuProvider = false;
+        if (providerLower.find("migraphx") != std::string::npos ||
+            providerLower.find("cuda") != std::string::npos ||
+            providerLower.find("dml") != std::string::npos ||
+            providerLower.find("directml") != std::string::npos) {
+            usesGpuProvider = true;
+        }
+        if (!usesGpuProvider) {
+            return guard;
+        }
+
+        static std::recursive_mutex* g_gpu_infer_mutex = new std::recursive_mutex();
+        guard.threadLock = std::unique_lock<std::recursive_mutex>(*g_gpu_infer_mutex);
+
+        if (!gpuProcessLockEnabled()) {
+            return guard;
+        }
+
+        auto& depth = gpuProcessLockDepth();
+        ++depth;
+        guard.depthIncremented = true;
+        if (depth > 1) {
+            return guard;
+        }
+
+        const auto processLockPath = resolveGpuProcessLockPath();
+        guard.processLock = std::make_unique<ScopedProcessFileLock>(processLockPath);
+        if (!guard.processLock->locked()) {
+            spdlog::warn("[ONNX] Failed to acquire GPU process inference lock: {}",
+                         processLockPath.string());
+            guard.processLock.reset();
+        }
+        return guard;
     }
 
     // GenAI adapter (optional)
 #ifdef YAMS_ENABLE_ONNX_GENAI
     std::unique_ptr<OnnxGenAIAdapter> genai_;
 #endif
-    // Helper that performs tokenization + ONNX run + pooling for single input
+    // Align a sequence length up to a SIMD-friendly multiple (AVX: 8 x int32, NEON: 4).
+    static size_t alignSeqLen(size_t len, size_t alignment = 8) {
+        return ((len + alignment - 1) / alignment) * alignment;
+    }
+
     Result<std::vector<float>> runOnnx(const std::string& t) {
+        auto gpuInferenceLock = acquireGpuInferenceLock();
+
         const size_t seq_len = maxSequenceLength_ > 0 ? maxSequenceLength_ : 512;
         auto tokens = preprocessor_.tokenize(t);
         tokens = preprocessor_.truncateTokens(tokens, seq_len);
-        tokens = preprocessor_.padTokens(tokens, seq_len);
+
+        // Dynamic padding: pad to aligned actual length instead of model max
+        size_t effective_seq_len = seq_len;
+        if (dynamicPaddingEnabled_ && !hasFixedInputShape_) {
+            effective_seq_len = std::min(alignSeqLen(tokens.size()), seq_len);
+            if (effective_seq_len == 0)
+                effective_seq_len = 1;
+            spdlog::debug("[ONNX] Dynamic padding (single): actual={} effective={} (model_max={})",
+                          tokens.size(), effective_seq_len, seq_len);
+        }
+
+        tokens = preprocessor_.padTokens(tokens, effective_seq_len);
         auto attention_mask = preprocessor_.generateAttentionMask(tokens);
 
-        std::vector<int64_t> input_shape = {1, static_cast<int64_t>(seq_len)};
-        const size_t input_tensor_size = seq_len;
+        std::vector<int64_t> input_shape = {1, static_cast<int64_t>(effective_seq_len)};
+        const size_t input_tensor_size = effective_seq_len;
         auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
         // Cap token ids to model vocab; Nomic uses 30528, MiniLM/mpnet ~30522
         const int64_t MAX_TOKEN_ID = 30527;
         const int64_t UNK_TOKEN_ID = 100;
         std::vector<int64_t> tokens_i64;
-        tokens_i64.reserve(seq_len);
+        tokens_i64.reserve(effective_seq_len);
         for (auto v : tokens) {
             tokens_i64.push_back((v < 0 || v > MAX_TOKEN_ID) ? UNK_TOKEN_ID
                                                              : static_cast<int64_t>(v));
@@ -698,7 +1002,7 @@ private:
             memory_info, mask_i64.data(), input_tensor_size, input_shape.data(), 2));
         std::vector<int64_t> token_type_ids;
         if (inputNames_.size() >= 3) {
-            token_type_ids.resize(seq_len, 0);
+            token_type_ids.resize(effective_seq_len, 0);
             input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
                 memory_info, token_type_ids.data(), input_tensor_size, input_shape.data(), 2));
         }
@@ -806,30 +1110,84 @@ private:
         return Error{ErrorCode::InvalidData, "Unexpected output tensor rank"};
     }
 
-    // Helper that performs batched tokenization + single ONNX run + pooling
     Result<std::vector<std::vector<float>>> runOnnxBatch(const std::vector<std::string>& texts) {
+        auto gpuInferenceLock = acquireGpuInferenceLock();
+
         if (texts.empty())
             return std::vector<std::vector<float>>{};
+
+        if (providerBatchLimit_.load(std::memory_order_relaxed) == 0) {
+            const size_t sharedCap = loadSharedBatchLimit(modelName_, actualExecutionProvider_);
+            if (sharedCap > 0) {
+                providerBatchLimit_.store(sharedCap, std::memory_order_relaxed);
+                const auto currentCap = TuneAdvisor::getEmbedDocCap();
+                if (currentCap == 0 || currentCap > sharedCap) {
+                    TuneAdvisor::setEmbedDocCap(sharedCap);
+                }
+            }
+        }
+
+        const size_t requestedBatchSize = texts.size();
+        const size_t learnedBatchCap = providerBatchLimit_.load(std::memory_order_relaxed);
+        if (learnedBatchCap > 0 && requestedBatchSize > learnedBatchCap) {
+            std::vector<std::vector<float>> merged;
+            merged.reserve(requestedBatchSize);
+            for (size_t offset = 0; offset < requestedBatchSize; offset += learnedBatchCap) {
+                const size_t count =
+                    std::min(learnedBatchCap, static_cast<size_t>(requestedBatchSize - offset));
+                std::vector<std::string> chunk;
+                chunk.reserve(count);
+                for (size_t i = 0; i < count; ++i) {
+                    chunk.push_back(texts[offset + i]);
+                }
+                auto chunkResult = runOnnxBatch(chunk);
+                if (!chunkResult) {
+                    return chunkResult.error();
+                }
+                auto& vectors = chunkResult.value();
+                merged.insert(merged.end(), std::make_move_iterator(vectors.begin()),
+                              std::make_move_iterator(vectors.end()));
+            }
+            return merged;
+        }
+
         const size_t seq_len = maxSequenceLength_ > 0 ? maxSequenceLength_ : 512;
 
-        // Tokenize all inputs
+        // Pass 1: tokenize + truncate (no padding yet)
         std::vector<std::vector<int32_t>> token_seqs;
         token_seqs.reserve(texts.size());
-        std::vector<std::vector<int32_t>> masks;
-        masks.reserve(texts.size());
         for (const auto& t : texts) {
             auto tokens = preprocessor_.tokenize(t);
             tokens = preprocessor_.truncateTokens(tokens, seq_len);
-            tokens = preprocessor_.padTokens(tokens, seq_len);
-            auto mask = preprocessor_.generateAttentionMask(tokens);
             token_seqs.push_back(std::move(tokens));
-            masks.push_back(std::move(mask));
+        }
+
+        // Determine effective padding length
+        size_t effective_seq_len = seq_len;
+        if (dynamicPaddingEnabled_ && !hasFixedInputShape_) {
+            size_t max_actual = 0;
+            for (const auto& toks : token_seqs)
+                max_actual = std::max(max_actual, toks.size());
+            effective_seq_len = std::min(alignSeqLen(max_actual), seq_len);
+            if (effective_seq_len == 0)
+                effective_seq_len = 1;
+            spdlog::debug("[ONNX] Dynamic padding: B={} max_actual={} effective={} (model_max={})",
+                          texts.size(), max_actual, effective_seq_len, seq_len);
+        }
+
+        // Pass 2: pad to effective_seq_len + generate masks
+        std::vector<std::vector<int32_t>> masks;
+        masks.reserve(texts.size());
+        for (auto& toks : token_seqs) {
+            toks = preprocessor_.padTokens(toks, effective_seq_len);
+            masks.push_back(preprocessor_.generateAttentionMask(toks));
         }
 
         // Prepare batched tensors [B, S]
         const size_t B = texts.size();
-        std::vector<int64_t> input_shape = {static_cast<int64_t>(B), static_cast<int64_t>(seq_len)};
-        const size_t tensor_size = B * seq_len;
+        std::vector<int64_t> input_shape = {static_cast<int64_t>(B),
+                                            static_cast<int64_t>(effective_seq_len)};
+        const size_t tensor_size = B * effective_seq_len;
         auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
         const int64_t MAX_TOKEN_ID = 30527;
@@ -841,12 +1199,12 @@ private:
         for (size_t i = 0; i < B; ++i) {
             const auto& toks = token_seqs[i];
             const auto& m = masks[i];
-            for (size_t j = 0; j < seq_len && j < toks.size(); ++j) {
+            for (size_t j = 0; j < effective_seq_len && j < toks.size(); ++j) {
                 int64_t v = toks[j];
                 tokens_batched.push_back((v < 0 || v > MAX_TOKEN_ID) ? UNK_TOKEN_ID : v);
                 masks_batched.push_back(static_cast<int64_t>(m[j]));
             }
-            for (size_t j = toks.size(); j < seq_len; ++j) {
+            for (size_t j = toks.size(); j < effective_seq_len; ++j) {
                 tokens_batched.push_back(UNK_TOKEN_ID);
                 masks_batched.push_back(0);
             }
@@ -921,15 +1279,119 @@ private:
 
         auto& out = outputs[0];
         auto shape = out.GetTensorTypeAndShapeInfo().GetShape();
-        const size_t hidden_dim = embeddingDim_;
+        // Some execution providers can leave output dims unknown until the first Run.
+        // If we don't know the embedding dim yet, infer it from the first output tensor.
+        size_t hidden_dim = embeddingDim_;
         std::vector<std::vector<float>> result;
         if (shape.size() == 3) {
             // [B, S, D]
-            const size_t BB = static_cast<size_t>(shape[0]);
-            const size_t SS = static_cast<size_t>(shape[1]);
-            const size_t DD = static_cast<size_t>(shape[2]);
-            if (BB != B || DD != hidden_dim)
-                return Error{ErrorCode::InvalidData, "Output shape mismatch"};
+            const int64_t b0 = shape[0];
+            const int64_t s1 = shape[1];
+            const int64_t d2 = shape[2];
+            const size_t SS = (s1 > 0) ? static_cast<size_t>(s1) : maxSequenceLength_;
+            const size_t DD = (d2 > 0) ? static_cast<size_t>(d2) : 0;
+            if (hidden_dim == 0 && DD > 0) {
+                hidden_dim = DD;
+                embeddingDim_ = hidden_dim;
+            }
+
+            if (b0 > 0 && static_cast<size_t>(b0) < B && (hidden_dim == 0 || DD == hidden_dim)) {
+                const size_t observedCap = static_cast<size_t>(b0);
+                const size_t mergedCap =
+                    mergeSharedBatchLimit(modelName_, actualExecutionProvider_, observedCap);
+                if (mergedCap > 0) {
+                    providerBatchLimit_.store(mergedCap, std::memory_order_relaxed);
+                    const auto currentCap = TuneAdvisor::getEmbedDocCap();
+                    if (currentCap == 0 || currentCap > mergedCap) {
+                        TuneAdvisor::setEmbedDocCap(mergedCap);
+                    }
+                }
+                spdlog::warn(
+                    "[ONNX] Provider returned smaller batch than requested: requested_B={} "
+                    "output_B={} (learned_cap={}), processing partial result + chunking remainder",
+                    B, observedCap, mergedCap);
+
+                std::vector<std::vector<float>> partial(observedCap,
+                                                        std::vector<float>(hidden_dim, 0.0f));
+                const float* data = out.GetTensorData<float>();
+                for (size_t b = 0; b < observedCap; ++b) {
+                    auto& emb = partial[b];
+                    if (pooling_mode_ == Pooling::CLS) {
+                        const size_t off = b * SS * DD;
+                        for (size_t d = 0; d < DD; ++d)
+                            emb[d] = data[off + d];
+                    } else if (pooling_mode_ == Pooling::MAX) {
+                        for (size_t i = 0; i < std::min(SS, masks[b].size()); ++i) {
+                            if (masks[b][i] <= 0)
+                                continue;
+                            const size_t off = b * SS * DD + i * DD;
+                            for (size_t d = 0; d < DD; ++d)
+                                emb[d] = std::max(emb[d], data[off + d]);
+                        }
+                    } else {
+                        float total = 0.0f;
+                        for (size_t i = 0; i < std::min(SS, masks[b].size()); ++i) {
+                            float w = static_cast<float>(masks[b][i]);
+                            if (w <= 0.0f) {
+                                continue;
+                            }
+                            total += w;
+                            const size_t off = b * SS * DD + i * DD;
+                            for (size_t d = 0; d < DD; ++d)
+                                emb[d] += data[off + d] * w;
+                        }
+                        if (total > 0.0f) {
+                            for (auto& v : emb)
+                                v = static_cast<float>(v / total);
+                        }
+                    }
+                    if (normalize_) {
+                        double norm = 0.0;
+                        for (auto v : emb) {
+                            const double dv = static_cast<double>(v);
+                            norm += dv * dv;
+                        }
+                        norm = std::sqrt(norm);
+                        if (norm > 1e-8) {
+                            for (auto& v : emb)
+                                v = static_cast<float>(v / norm);
+                        } else {
+                            std::fill(emb.begin(), emb.end(), 0.0f);
+                        }
+                    }
+                }
+
+                std::vector<std::string> remainder;
+                remainder.reserve(B - observedCap);
+                for (size_t idx = observedCap; idx < B; ++idx) {
+                    remainder.push_back(texts[idx]);
+                }
+                if (!remainder.empty()) {
+                    auto rem = runOnnxBatch(remainder);
+                    if (!rem) {
+                        return rem.error();
+                    }
+                    auto& remVals = rem.value();
+                    partial.insert(partial.end(), std::make_move_iterator(remVals.begin()),
+                                   std::make_move_iterator(remVals.end()));
+                }
+                return partial;
+            }
+
+            if (hidden_dim > 0 && d2 > 0 && DD != hidden_dim) {
+                std::ostringstream oss;
+                oss << "Output shape mismatch: expected [B,S,D] with B=" << B;
+                if (hidden_dim > 0) {
+                    oss << " D=" << hidden_dim;
+                }
+                oss << ", got [" << b0 << "," << s1 << "," << d2 << "]";
+                return Error{ErrorCode::InvalidData, oss.str()};
+            }
+            if (b0 > 0 && static_cast<size_t>(b0) > B) {
+                spdlog::debug("[ONNX] Provider returned padded batch output: requested_B={} "
+                              "output_B={} (using first B)",
+                              B, b0);
+            }
             const float* data = out.GetTensorData<float>();
             result.resize(B, std::vector<float>(hidden_dim, 0.0f));
             for (size_t b = 0; b < B; ++b) {
@@ -982,10 +1444,82 @@ private:
         }
         if (shape.size() == 2) {
             // [B, D]
-            const size_t BB = static_cast<size_t>(shape[0]);
-            const size_t DD = static_cast<size_t>(shape[1]);
-            if (BB != B || DD != hidden_dim)
-                return Error{ErrorCode::InvalidData, "Output shape mismatch"};
+            const int64_t b0 = shape[0];
+            const int64_t d1 = shape[1];
+            const size_t DD = (d1 > 0) ? static_cast<size_t>(d1) : 0;
+            if (hidden_dim == 0 && DD > 0) {
+                hidden_dim = DD;
+                embeddingDim_ = hidden_dim;
+            }
+
+            if (b0 > 0 && static_cast<size_t>(b0) < B && (hidden_dim == 0 || DD == hidden_dim)) {
+                const size_t observedCap = static_cast<size_t>(b0);
+                const size_t mergedCap =
+                    mergeSharedBatchLimit(modelName_, actualExecutionProvider_, observedCap);
+                if (mergedCap > 0) {
+                    providerBatchLimit_.store(mergedCap, std::memory_order_relaxed);
+                    const auto currentCap = TuneAdvisor::getEmbedDocCap();
+                    if (currentCap == 0 || currentCap > mergedCap) {
+                        TuneAdvisor::setEmbedDocCap(mergedCap);
+                    }
+                }
+                spdlog::warn(
+                    "[ONNX] Provider returned smaller batch than requested: requested_B={} "
+                    "output_B={} (learned_cap={}), processing partial result + chunking remainder",
+                    B, observedCap, mergedCap);
+
+                std::vector<std::vector<float>> partial;
+                partial.reserve(B);
+                const float* data = out.GetTensorData<float>();
+                for (size_t b = 0; b < observedCap; ++b) {
+                    partial.emplace_back(data + b * DD, data + (b + 1) * DD);
+                    if (normalize_) {
+                        double norm = 0.0;
+                        for (auto v : partial.back()) {
+                            const double dv = static_cast<double>(v);
+                            norm += dv * dv;
+                        }
+                        norm = std::sqrt(norm);
+                        if (norm > 1e-8) {
+                            for (auto& v : partial.back())
+                                v = static_cast<float>(v / norm);
+                        } else {
+                            std::fill(partial.back().begin(), partial.back().end(), 0.0f);
+                        }
+                    }
+                }
+
+                std::vector<std::string> remainder;
+                remainder.reserve(B - observedCap);
+                for (size_t idx = observedCap; idx < B; ++idx) {
+                    remainder.push_back(texts[idx]);
+                }
+                if (!remainder.empty()) {
+                    auto rem = runOnnxBatch(remainder);
+                    if (!rem) {
+                        return rem.error();
+                    }
+                    auto& remVals = rem.value();
+                    partial.insert(partial.end(), std::make_move_iterator(remVals.begin()),
+                                   std::make_move_iterator(remVals.end()));
+                }
+                return partial;
+            }
+
+            if (hidden_dim > 0 && d1 > 0 && DD != hidden_dim) {
+                std::ostringstream oss;
+                oss << "Output shape mismatch: expected [B,D] with B=" << B;
+                if (hidden_dim > 0) {
+                    oss << " D=" << hidden_dim;
+                }
+                oss << ", got [" << b0 << "," << d1 << "]";
+                return Error{ErrorCode::InvalidData, oss.str()};
+            }
+            if (b0 > 0 && static_cast<size_t>(b0) > B) {
+                spdlog::debug("[ONNX] Provider returned padded batch output: requested_B={} "
+                              "output_B={} (using first B)",
+                              B, b0);
+            }
             const float* data = out.GetTensorData<float>();
             result.resize(B);
             for (size_t b = 0; b < B; ++b) {
@@ -1019,13 +1553,20 @@ private:
     std::unique_ptr<Ort::SessionOptions> sessionOptions_;
     std::unique_ptr<Ort::Session> session_;
 
+    std::string actualExecutionProvider_{"cpu"};
+
     std::vector<std::string> inputNames_;
     std::vector<std::string> outputNames_;
 
     size_t embeddingDim_ = 0;
     size_t maxSequenceLength_ = 512;
+    bool hasFixedInputShape_ = false; // true when ONNX model input dim[1] > 0
     bool isLoaded_ = false;
     bool test_mode_ = false;
+    bool dynamicPaddingEnabled_ = true; // controlled by YAMS_ONNX_DYNAMIC_PADDING
+    std::atomic<size_t> providerBatchLimit_{0};
+    int configuredIntraThreads_{1};
+    int configuredInterThreads_{1};
 
     enum class Pooling { MEAN, CLS, MAX };
     Pooling pooling_mode_ = Pooling::MEAN;
@@ -1083,16 +1624,20 @@ private:
                 if (j.contains("normalize_embeddings") && j["normalize_embeddings"].is_boolean()) {
                     normalize_ = j["normalize_embeddings"].get<bool>();
                 }
-                if (j.contains("embedding_dimension") &&
-                    j["embedding_dimension"].is_number_integer()) {
-                    embeddingDim_ = static_cast<size_t>(j["embedding_dimension"].get<int>());
-                }
-                // Hidden size often present in HF config (standard models use hidden_size,
-                // Nomic models use n_embd)
-                if (j.contains("hidden_size") && j["hidden_size"].is_number_integer()) {
-                    embeddingDim_ = static_cast<size_t>(j["hidden_size"].get<int>());
-                } else if (j.contains("n_embd") && j["n_embd"].is_number_integer()) {
-                    embeddingDim_ = static_cast<size_t>(j["n_embd"].get<int>());
+                // Only use config hints for embedding dimension when we could not infer it from
+                // the ONNX graph output shape. The ONNX output tensor is authoritative.
+                if (embeddingDim_ == 0) {
+                    if (j.contains("embedding_dimension") &&
+                        j["embedding_dimension"].is_number_integer()) {
+                        embeddingDim_ = static_cast<size_t>(j["embedding_dimension"].get<int>());
+                    }
+                    // Hidden size often present in HF config (standard models use hidden_size,
+                    // Nomic models use n_embd)
+                    if (j.contains("hidden_size") && j["hidden_size"].is_number_integer()) {
+                        embeddingDim_ = static_cast<size_t>(j["hidden_size"].get<int>());
+                    } else if (j.contains("n_embd") && j["n_embd"].is_number_integer()) {
+                        embeddingDim_ = static_cast<size_t>(j["n_embd"].get<int>());
+                    }
                 }
                 // Nomic-specific hints via architectures
                 try {
@@ -1195,6 +1740,22 @@ bool OnnxModelSession::isValid() const {
     return pImpl->isValid();
 }
 
+std::string OnnxModelSession::getExecutionProvider() const {
+    return pImpl->getExecutionProvider();
+}
+
+size_t OnnxModelSession::getLearnedBatchLimit() const {
+    return pImpl->getLearnedBatchLimit();
+}
+
+Result<void> OnnxModelSession::setThreading(int intraThreads, int interThreads) {
+    return pImpl->setThreading(intraThreads, interThreads);
+}
+
+std::pair<int, int> OnnxModelSession::getThreading() const {
+    return pImpl->getThreading();
+}
+
 // ============================================================================
 // OnnxModelPool Implementation
 // ============================================================================
@@ -1206,6 +1767,12 @@ OnnxModelPool::OnnxModelPool(const ModelPoolConfig& config) : config_(config) {
         std::getenv("YAMS_TEST_MODE")) {
         spdlog::warn("[ONNX] Mock provider mode enabled; skipping global ONNX environment init");
         return;
+    }
+
+    if (config_.asyncLoading) {
+        size_t threads = config_.loadWorkerThreads > 0 ? config_.loadWorkerThreads : 1;
+        loadPool_ = std::make_unique<boost::asio::thread_pool>(threads);
+        spdlog::info("[ONNX] Async model loading enabled (threads={})", threads);
     }
 
     // NOTE: We do NOT create a separate Ort::Env here.
@@ -1221,9 +1788,17 @@ OnnxModelPool::OnnxModelPool(const ModelPoolConfig& config) : config_(config) {
         spdlog::info(
             "[ONNX] Pool: Using shared global Ort::Env (sessions use single-threaded execution)");
 
+        runtimeGpuEnabled_ = false;
         if (config.enableGPU) {
-            // TODO: Add GPU provider configuration
-            spdlog::info("GPU support requested but not yet implemented");
+            const auto& gpu = yams::daemon::resource::detectGpu();
+            if (gpu.detected) {
+                runtimeGpuEnabled_ = true;
+                spdlog::info("[ONNX] GPU enabled: {} ({:.1f} GB VRAM, provider={})", gpu.name,
+                             static_cast<double>(gpu.vramBytes) / (1024.0 * 1024.0 * 1024.0),
+                             gpu.provider);
+            } else {
+                spdlog::info("[ONNX] GPU requested but no GPU detected (will use CPU)");
+            }
         }
     } catch (const std::exception& e) {
         // Do not crash the daemon if runtime init fails; log and continue.
@@ -1279,31 +1854,51 @@ Result<void> OnnxModelPool::initialize() {
         // Launch preloading in background thread to avoid blocking
         // Store the thread so we can join it during shutdown
         preloadThread_ = std::thread([this]() {
-            spdlog::info("Starting background model preloading");
-            // Check shutdown flag periodically during preload
-            for (const auto& modelName : config_.preloadModels) {
-                if (shutdown_.load(std::memory_order_acquire)) {
-                    spdlog::info("Background preloading interrupted by shutdown");
-                    return;
-                }
-                auto result = loadModel(modelName);
-                if (!result) {
-                    spdlog::warn("Failed to preload model {}: {}", modelName,
-                                 result.error().message);
-                } else {
-                    // Warm up the model to trigger lazy loading
-                    // This ensures the first real inference request is fast
-                    spdlog::info("Warming up preloaded model: {}", modelName);
-                    auto warmupResult = warmupModel(modelName);
-                    if (!warmupResult) {
-                        spdlog::warn("Failed to warm up model {}: {}", modelName,
-                                     warmupResult.error().message);
+            try {
+                spdlog::info("Starting background model preloading");
+                // Check shutdown flag periodically during preload
+                for (const auto& modelName : config_.preloadModels) {
+                    if (shutdown_.load(std::memory_order_acquire)) {
+                        spdlog::info("Background preloading interrupted by shutdown");
+                        return;
+                    }
+                    auto result = loadModel(modelName);
+                    if (!result) {
+                        spdlog::warn("Failed to preload model {}: {}", modelName,
+                                     result.error().message);
+                    } else {
+                        // Warm up the model to trigger lazy loading
+                        // This ensures the first real inference request is fast
+                        spdlog::info("Warming up preloaded model: {}", modelName);
+                        auto warmupResult = warmupModel(modelName);
+                        if (!warmupResult) {
+                            spdlog::warn("Failed to warm up model {}: {}", modelName,
+                                         warmupResult.error().message);
+                        }
                     }
                 }
+                // Clear startup mode - normal pool sizing now applies to new models
+                TuneAdvisor::setOnnxStartupMode(false);
+                spdlog::info("Background model preloading completed");
+            } catch (const std::exception& e) {
+                try {
+                    spdlog::error("[ONNX] Background preload crashed: {}", e.what());
+                } catch (...) {
+                }
+                try {
+                    TuneAdvisor::setOnnxStartupMode(false);
+                } catch (...) {
+                }
+            } catch (...) {
+                try {
+                    spdlog::error("[ONNX] Background preload crashed with unknown exception");
+                } catch (...) {
+                }
+                try {
+                    TuneAdvisor::setOnnxStartupMode(false);
+                } catch (...) {
+                }
             }
-            // Clear startup mode - normal pool sizing now applies to new models
-            TuneAdvisor::setOnnxStartupMode(false);
-            spdlog::info("Background model preloading completed");
         });
     } else {
         // No preload configured - clear startup mode immediately
@@ -1339,6 +1934,11 @@ void OnnxModelPool::shutdown() {
         }
     }
 
+    if (loadPool_) {
+        loadPool_->join();
+        loadPool_.reset();
+    }
+
     try {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -1346,6 +1946,8 @@ void OnnxModelPool::shutdown() {
             spdlog::info("Shutting down ONNX model pool");
         } catch (...) {
         }
+
+        loadingFutures_.clear();
 
         for (auto& [name, entry] : models_) {
             if (entry.pool) {
@@ -1409,8 +2011,28 @@ Result<OnnxModelPool::ModelHandle> OnnxModelPool::acquireModel(const std::string
     cacheMisses_++;
 
     // Model not loaded, need to load it
-    if (auto result = loadModel(modelName); !result) {
-        return result.error();
+    if (config_.asyncLoading) {
+        if (auto result = loadModel(modelName, /*wait=*/false); !result) {
+            return result.error();
+        }
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            auto it = loadingFutures_.find(modelName);
+            if (it != loadingFutures_.end()) {
+                if (it->second.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+                    return Error{ErrorCode::OperationInProgress, "Model loading in background"};
+                }
+                auto res = it->second.get();
+                loadingFutures_.erase(it);
+                if (!res) {
+                    return res.error();
+                }
+            }
+        }
+    } else {
+        if (auto result = loadModel(modelName); !result) {
+            return result.error();
+        }
     }
 
     // Try again after loading - get pool pointer while holding lock
@@ -1429,6 +2051,41 @@ Result<OnnxModelPool::ModelHandle> OnnxModelPool::acquireModel(const std::string
     }
 
     return Error{ErrorCode::NotFound, "Failed to load model: " + modelName};
+}
+
+Result<void> OnnxModelPool::loadModel(const std::string& modelName, bool wait) {
+    if (!config_.asyncLoading || wait) {
+        return loadModelSync(modelName);
+    }
+    return scheduleLoad(modelName);
+}
+
+Result<void> OnnxModelPool::scheduleLoad(const std::string& modelName) {
+    if (!loadPool_) {
+        return loadModelSync(modelName);
+    }
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = models_.find(modelName);
+        if (it != models_.end() && it->second.pool) {
+            return Result<void>();
+        }
+        if (loadingFutures_.count(modelName) > 0) {
+            return Result<void>();
+        }
+
+        auto prom = std::make_shared<std::promise<Result<void>>>();
+        auto fut = prom->get_future().share();
+        loadingFutures_[modelName] = fut;
+
+        boost::asio::post(*loadPool_, [this, modelName, prom]() {
+            auto res = loadModelSync(modelName);
+            prom->set_value(res);
+        });
+    }
+
+    return Result<void>();
 }
 
 bool OnnxModelPool::isModelLoaded(const std::string& modelName) const {
@@ -1450,7 +2107,7 @@ std::vector<std::string> OnnxModelPool::getLoadedModels() const {
     return loaded;
 }
 
-Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
+Result<void> OnnxModelPool::loadModelSync(const std::string& modelName) {
     spdlog::info("[ONNX Plugin] loadModel() called for: {}", modelName);
 
     // In test environments, avoid heavy model loading entirely
@@ -1557,12 +2214,16 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     // Use TuneAdvisor for GPU-aware pool sizing:
     //   GPU mode: larger pool (GPU handles inference, more sessions for throughput)
     //   CPU mode: smaller pool (avoid CPU saturation from parallel inference)
-    const bool gpuEnabled = config_.enableGPU;
-    const size_t dynamic_max = TuneAdvisor::onnxSessionsPerModel(gpuEnabled);
+    const bool gpuEnabled = runtimeGpuEnabled_;
+    const size_t embedConcurrencyCap =
+        std::max<size_t>(1u, std::min<size_t>(TuneAdvisor::postEmbedConcurrent(),
+                                              TuneAdvisor::getEmbedMaxConcurrency()));
+    const size_t dynamic_max = std::max<size_t>(
+        1u, std::min<size_t>(TuneAdvisor::onnxSessionsPerModel(gpuEnabled), embedConcurrencyCap));
     const size_t dynamic_min = std::min(size_t{2}, dynamic_max);
 
-    spdlog::info("[ONNX Plugin] Configuring resource pool (gpu={}, pool_max={})",
-                 gpuEnabled ? "enabled" : "disabled", dynamic_max);
+    spdlog::info("[ONNX Plugin] Configuring resource pool (gpu={}, pool_max={}, embed_cap={})",
+                 gpuEnabled ? "enabled" : "disabled", dynamic_max, embedConcurrencyCap);
     PoolConfig<OnnxModelSession> poolConfig;
     poolConfig.minSize = dynamic_min;
     poolConfig.maxSize = dynamic_max;
@@ -1579,7 +2240,7 @@ Result<void> OnnxModelPool::loadModel(const std::string& modelName) {
     vector::EmbeddingConfig embConfig;
     embConfig.model_path = modelPath;
     embConfig.model_name = modelName;
-    embConfig.enable_gpu = config_.enableGPU;
+    embConfig.enable_gpu = gpuEnabled;
     embConfig.num_threads = config_.numThreads;
 
     // Create ResourcePool WITHOUT holding mutex_ - the factory lambda will be called
@@ -1675,6 +2336,11 @@ Result<void> OnnxModelPool::unloadModel(const std::string& modelName) {
     }
 
     if (it->second.pool) {
+        auto stats = it->second.pool->getStats();
+        if (stats.inUseResources > 0) {
+            return Error{ErrorCode::OperationInProgress,
+                         "Cannot unload model with in-use sessions: " + modelName};
+        }
         it->second.pool->shutdown();
         it->second.pool.reset();
 
@@ -1730,16 +2396,10 @@ Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
 
     auto handle = std::move(handleResult.value());
 
-    // Check if session is valid
-    if (!handle->isValid()) {
-        spdlog::error("[ONNX Plugin] Session invalid during warmup for model: {}", modelName);
-        return Error{ErrorCode::InvalidState, "Session invalid during warmup"};
-    }
-
-    // Do a dummy inference to trigger lazy loading
-    // Use a short text that will produce embeddings quickly
-    const std::string warmupText = "warmup";
-    auto embedResult = handle->generateEmbedding(warmupText);
+    // Do a batch inference to trigger lazy loading and warm the batch code path
+    std::vector<std::string> warmupTexts = {"warmup text one", "warmup text two",
+                                            "warmup text three", "warmup text four"};
+    auto embedResult = handle->generateBatchEmbeddings(warmupTexts);
     if (!embedResult) {
         spdlog::error("[ONNX Plugin] Warmup inference failed for {}: {}", modelName,
                       embedResult.error().message);
@@ -1748,13 +2408,144 @@ Result<void> OnnxModelPool::warmupModel(const std::string& modelName) {
 
     auto t1 = std::chrono::steady_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-    spdlog::info("[ONNX Plugin] Model '{}' warmed up in {}ms (embedding dim={})", modelName, ms,
-                 embedResult.value().size());
+    spdlog::info("[ONNX Plugin] Model '{}' warmed up in {}ms (batch={}, embedding dim={})",
+                 modelName, ms, warmupTexts.size(),
+                 embedResult.value().empty() ? 0 : embedResult.value()[0].size());
+
+    // Auto-tune batch size if not explicitly set and auto-tuning not disabled
+    auto autotuneDisabled = []() {
+        if (const char* s = std::getenv("YAMS_EMBED_AUTOTUNE")) {
+            std::string v(s);
+            std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+            return v == "0" || v == "false" || v == "no" || v == "off";
+        }
+        return false;
+    };
+    if (TuneAdvisor::getEmbedDocCap() == 0 && !autotuneDisabled()) {
+        spdlog::info("[ONNX Plugin] Auto-tuning batch size for '{}'...", modelName);
+
+        std::vector<std::string> probeTexts;
+        probeTexts.reserve(64);
+        for (uint32_t i = 0; i < 64; ++i)
+            probeTexts.push_back("probe text number " + std::to_string(i) + " for auto-tuning");
+
+        std::vector<uint32_t> candidates = {4, 8, 16, 32, 64};
+        double bestTps = 0.0;
+        uint32_t bestBatch = 16;
+
+        for (uint32_t bs : candidates) {
+            std::vector<std::string> batch(probeTexts.begin(),
+                                           probeTexts.begin() + static_cast<ptrdiff_t>(bs));
+            auto pt0 = std::chrono::steady_clock::now();
+            auto r = handle->generateBatchEmbeddings(batch);
+            auto elapsed = std::chrono::steady_clock::now() - pt0;
+            if (!r)
+                break;
+            double probeMs =
+                std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count() / 1000.0;
+            double tps = static_cast<double>(bs) / (probeMs / 1000.0);
+            spdlog::debug("[ONNX Plugin] Autotune probe: batch={} {:.1f}ms ({:.1f} texts/sec)", bs,
+                          probeMs, tps);
+            if (tps > bestTps) {
+                bestTps = tps;
+                bestBatch = bs;
+            }
+        }
+
+        TuneAdvisor::setEmbedDocCap(bestBatch);
+        spdlog::info("[ONNX Plugin] Auto-tuned batch size: {} ({:.1f} texts/sec)", bestBatch,
+                     bestTps);
+    }
+
+    // Pre-warm additional sessions to avoid cold-start penalty on concurrent requests.
+    // GPU mode: up to 3 sessions (GPU provider init is expensive).
+    // CPU mode: up to 2 sessions (eliminates ~1788ms cold start for second request).
+    // The initial handle is still held; additional sessions are acquired and immediately
+    // released back to the pool so they are pre-initialized for future use.
+    {
+        size_t targetWarm =
+            std::min(static_cast<size_t>(TuneAdvisor::onnxSessionsPerModel(runtimeGpuEnabled_)),
+                     runtimeGpuEnabled_ ? size_t{3} : size_t{2});
+
+        // Keep warm session count aligned with current embedding throughput budget
+        // to avoid retaining idle ONNX sessions under low-concurrency settings.
+        const size_t embedConcurrencyCap =
+            std::max<size_t>(1u, std::min<size_t>(TuneAdvisor::postEmbedConcurrent(),
+                                                  TuneAdvisor::getEmbedMaxConcurrency()));
+        targetWarm = std::min(targetWarm, embedConcurrencyCap);
+
+        // Optional explicit cap for test/benchmark scenarios.
+        if (const char* s = std::getenv("YAMS_ONNX_PREWARM_SESSIONS")) {
+            try {
+                size_t forced = static_cast<size_t>(std::stoull(s));
+                if (forced >= 1 && forced <= 8) {
+                    targetWarm = std::min(targetWarm, forced);
+                }
+            } catch (...) {
+            }
+        }
+
+        for (size_t i = 1; i < targetWarm; ++i) {
+            auto extra = acquireModel(modelName, std::chrono::seconds(60));
+            if (!extra) {
+                spdlog::debug("[ONNX Plugin] Pre-warm: could not acquire session {} for {}", i + 1,
+                              modelName);
+                break;
+            }
+            // Session returned to pool when extra goes out of scope
+        }
+        if (targetWarm > 1) {
+            spdlog::info("[ONNX Plugin] Pre-warmed {} sessions for '{}' (gpu={})", targetWarm,
+                         modelName, runtimeGpuEnabled_ ? "yes" : "no");
+        }
+    }
 
     return Result<void>();
 }
 
+Result<void> OnnxModelPool::setModelThreading(const std::string& modelName, int intraThreads,
+                                              int interThreads, bool applyNow) {
+    auto valid = [](int value) { return value == -1 || (value >= 1 && value <= 64); };
+    if (modelName.empty() || !valid(intraThreads) || !valid(interThreads)) {
+        return Error{ErrorCode::InvalidArgument,
+                     "setModelThreading requires model name and valid thread values"};
+    }
+
+    std::shared_ptr<ResourcePool<OnnxModelSession>> pool;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        threadingOverrides_[modelName] = {intraThreads, interThreads};
+        auto it = models_.find(modelName);
+        if (it != models_.end()) {
+            pool = it->second.pool;
+        }
+    }
+
+    if (!applyNow || !pool) {
+        return Result<void>();
+    }
+
+    if (pool->getStats().inUseResources > 0) {
+        return Error{ErrorCode::ResourceBusy,
+                     "Model is currently in use; threading override will apply on next reload"};
+    }
+
+    auto handle = pool->acquire(std::chrono::milliseconds(500));
+    if (!handle) {
+        return Error{ErrorCode::Timeout,
+                     "Timed out acquiring model session to apply threading override"};
+    }
+
+    return handle.value()->setThreading(intraThreads, interThreads);
+}
+
 void OnnxModelPool::evictLRU(size_t numToEvict) {
+    if (runtimeGpuEnabled_ && !allowGpuAutoUnload()) {
+        spdlog::debug(
+            "Skipping LRU model eviction on GPU path (set YAMS_ONNX_GPU_AUTO_UNLOAD=1 to enable)");
+        return;
+    }
+
     // Find least recently used models that are not hot
     std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>> candidates;
 
@@ -1773,9 +2564,19 @@ void OnnxModelPool::evictLRU(size_t numToEvict) {
         const auto& modelName = candidates[i].first;
         auto it = models_.find(modelName);
         if (it != models_.end() && it->second.pool) {
+            auto stats = it->second.pool->getStats();
+            if (stats.inUseResources > 0) {
+                spdlog::debug("Skipping LRU eviction for model '{}' (in_use={})", modelName,
+                              stats.inUseResources);
+                continue;
+            }
             spdlog::info("Evicting model due to LRU: {}", modelName);
             it->second.pool->shutdown();
             it->second.pool.reset();
+            const size_t count = loadedModelCount_.load(std::memory_order_relaxed);
+            if (count > 0) {
+                loadedModelCount_.fetch_sub(1, std::memory_order_relaxed);
+            }
         }
     }
 }
@@ -1832,18 +2633,30 @@ size_t OnnxModelPool::getMemoryUsage() const {
 }
 
 void OnnxModelPool::performMaintenance() {
+    if (runtimeGpuEnabled_ && !allowGpuAutoUnload()) {
+        return;
+    }
+
     std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     auto now = std::chrono::steady_clock::now();
 
     for (auto& [name, entry] : models_) {
         if (entry.pool && !entry.isHot) {
+            auto stats = entry.pool->getStats();
+            if (stats.inUseResources > 0) {
+                continue;
+            }
             // Check if model has been idle too long
             auto idleTime = now - entry.lastAccess;
             if (idleTime > config_.modelIdleTimeout) {
                 spdlog::info("Unloading idle model: {}", name);
                 entry.pool->shutdown();
                 entry.pool.reset();
+                const size_t count = loadedModelCount_.load(std::memory_order_relaxed);
+                if (count > 0) {
+                    loadedModelCount_.fetch_sub(1, std::memory_order_relaxed);
+                }
             } else if (entry.pool) {
                 // Clean up expired resources in the pool
                 entry.pool->evictExpired();
@@ -2100,6 +2913,15 @@ OnnxModelPool::createModelSession(const std::string& modelName) {
     config.model_name = modelName;
     config.enable_gpu = config_.enableGPU;
     config.num_threads = config_.numThreads;
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = threadingOverrides_.find(modelName);
+        if (it != threadingOverrides_.end()) {
+            config.num_threads = it->second.first;
+            config.inter_op_threads = it->second.second;
+        }
+    }
 
     try {
         auto session = std::make_shared<OnnxModelSession>(modelPath, modelName, config);

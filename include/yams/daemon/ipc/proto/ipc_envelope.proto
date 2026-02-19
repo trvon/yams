@@ -49,6 +49,7 @@ message SearchRequest {
   int32 keyword_stage_timeout_ms = 32;
   int32 snippet_hydration_timeout_ms = 33;
   string session_id = 99;
+  string instance_id = 100;
 }
 
 message GetRequest {
@@ -110,6 +111,7 @@ message DeleteRequest {
   bool recursive = 10;
   bool verbose = 11;
   string session_id = 99;
+  string instance_id = 100;
 }
 
 message ListRequest {
@@ -152,6 +154,7 @@ message ListRequest {
   repeated KvPair metadata_filters = 36;
   bool match_all_metadata = 37;
   string session_id = 99;
+  string instance_id = 100;
 }
 
 message ShutdownRequest { bool graceful = 1; int64 timeout_s = 2; }
@@ -211,6 +214,7 @@ message AddDocumentRequest {
   bool disable_auto_mime = 14;
   bool no_embeddings = 15;
   string session_id = 99;
+  string instance_id = 100;
 }
 
 message GrepRequest {
@@ -241,6 +245,7 @@ message GrepRequest {
   int32 after_context = 25;
   bool show_diff = 26;
   string session_id = 99;
+  string instance_id = 100;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +342,7 @@ message SearchResponse {
   repeated SearchResult results = 1;
   uint64 total_count = 2;
   int64 elapsed_ms = 3;
+  string trace_id = 4;
 }
 
 message AddResponse {
@@ -908,6 +914,63 @@ message GraphPathHistoryResponse {
   bool has_more = 3;
 }
 
+// Document repair (RepairService)
+message RepairRequest {
+  // Operation flags
+  bool repair_orphans = 1;
+  bool repair_mime = 2;
+  bool repair_downloads = 3;
+  bool repair_path_tree = 4;
+  bool repair_chunks = 5;
+  bool repair_block_refs = 6;
+  bool repair_fts5 = 7;
+  bool repair_embeddings = 8;
+  bool repair_stuck_docs = 9;
+  bool optimize_db = 10;
+  bool repair_all = 11;
+
+  // Options
+  bool dry_run = 12;
+  bool verbose = 13;
+  bool force = 14;
+  bool foreground = 15;
+  string embedding_model = 16;
+  repeated string include_mime = 17;
+  int32 max_retries = 18;
+}
+
+message RepairOperationResult {
+  string operation = 1;
+  uint64 processed = 2;
+  uint64 succeeded = 3;
+  uint64 failed = 4;
+  uint64 skipped = 5;
+  string message = 6;
+}
+
+// Streaming progress event emitted during repair
+message RepairEvent {
+  string phase = 1;     // scanning | repairing | completed | error
+  string operation = 2; // orphans | mime | fts5 | embeddings | stuck_docs | ...
+  uint64 processed = 3;
+  uint64 total = 4;
+  uint64 succeeded = 5;
+  uint64 failed = 6;
+  uint64 skipped = 7;
+  string message = 8;
+}
+
+// Final response after all requested repair operations complete
+message RepairResponse {
+  bool success = 1;
+  uint64 total_operations = 2;
+  uint64 total_succeeded = 3;
+  uint64 total_failed = 4;
+  uint64 total_skipped = 5;
+  repeated string errors = 6;
+  repeated RepairOperationResult operation_results = 7;
+}
+
 // ENVELOPE
 message Envelope {
   uint32 version = 1;
@@ -972,6 +1035,8 @@ message Envelope {
     GraphQueryRequest graph_query_request = 55;
     GraphPathHistoryRequest graph_path_history_request = 56;
     MetadataValueCountsRequest metadata_value_counts_request = 57;
+    // Document repair request (RepairService)
+    RepairRequest repair_request = 58;
 
     // Responses
     SuccessResponse success_response = 100;
@@ -1028,6 +1093,9 @@ message Envelope {
     // Batch request/response (Track B)
     BatchRequest batch_request = 143;
     BatchResponse batch_response = 144;
+    // Document repair responses + streaming event (RepairService)
+    RepairResponse repair_response = 145;
+    RepairEvent repair_event = 146;
 
   }
 }
@@ -1040,6 +1108,7 @@ message BatchRequest {
   repeated BatchItem items = 1;
   bool continue_on_error = 2;
   string session_id = 99;
+  string instance_id = 100;
 }
 
 message BatchItem {

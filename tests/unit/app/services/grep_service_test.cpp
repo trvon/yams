@@ -118,12 +118,14 @@ struct GrepFixture {
     }
 
     ~GrepFixture() {
+        grepService_.reset();
+        ctx_.metadataRepo.reset();
+        ctx_.store.reset();
+        ctx_.searchEngine.reset();
         repo_.reset();
         pool_.reset();
-        if (db_) {
-            db_->close();
-            db_.reset();
-        }
+        db_.reset();
+        store_.reset();
         std::filesystem::remove_all(tmpDir_);
     }
 

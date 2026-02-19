@@ -155,7 +155,7 @@ public:
 
     [[nodiscard]] std::string_view snippet() const noexcept { return item_.contentPreview; }
 
-    [[nodiscard]] std::string_view hash() const noexcept {
+    [[nodiscard]] static constexpr std::string_view hash() noexcept {
         // Search results don't typically have hashes, return empty
         return "";
     }
@@ -195,17 +195,17 @@ public:
                                         : std::string_view{path_};
     }
 
-    [[nodiscard]] std::string id() const { return path_; }
+    [[nodiscard]] const std::string& id() const noexcept { return path_; }
 
-    [[nodiscard]] constexpr std::string_view hash() const noexcept {
+    [[nodiscard]] static constexpr std::string_view hash() noexcept {
         return ""; // No hash for simple paths
     }
 
-    [[nodiscard]] constexpr int64_t size() const noexcept {
+    [[nodiscard]] static constexpr int64_t size() noexcept {
         return 0; // Size not available for simple paths
     }
 
-    [[nodiscard]] constexpr std::string_view mimeType() const noexcept {
+    [[nodiscard]] static constexpr std::string_view mimeType() noexcept {
         return ""; // MIME type not available for simple paths
     }
 };
@@ -267,7 +267,7 @@ private:
         // Try to find a good breaking point
         auto lastSpace = result.find_last_of(" \t\n");
         if (lastSpace != std::string::npos && lastSpace > maxLength * 0.8) {
-            result = result.substr(0, lastSpace);
+            result.resize(lastSpace);
         }
 
         return result + "...";
@@ -338,7 +338,7 @@ public:
 
 private:
     template <std::ranges::range FilteredRange>
-    void renderPathsOnly(FilteredRange& filtered_results) {
+    static void renderPathsOnly(FilteredRange& filtered_results) {
         for (const auto& adapter : filtered_results) {
             std::cout << adapter.path() << std::endl;
         }
@@ -455,7 +455,8 @@ private:
             // Truncate title if too long
             std::string title{adapter.title()};
             if (title.length() > 29) {
-                title = title.substr(0, 26) + "...";
+                title.resize(26);
+                title.append("...");
             }
             std::cout << std::setw(30) << title;
 
@@ -525,8 +526,9 @@ private:
             }
 
             // Show size and type
-            if (adapter.size() > 0) {
-                std::cout << "   Size: " << formatSize(adapter.size());
+            const int64_t itemSize = adapter.size();
+            if (itemSize > 0) {
+                std::cout << "   Size: " << formatSize(itemSize);
                 if (!adapter.mimeType().empty()) {
                     std::cout << " | Type: " << adapter.mimeType();
                 }

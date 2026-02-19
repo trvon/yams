@@ -18,27 +18,6 @@
 namespace {
 using yams::daemon::MessageType;
 
-[[maybe_unused]] inline yams::daemon::EmbeddingEvent
-make_embedding_start_event(const yams::daemon::Request& req) {
-    using namespace yams::daemon;
-    EmbeddingEvent ev{};
-    if (auto* r = std::get_if<BatchEmbeddingRequest>(&req)) {
-        ev.modelName = r->modelName;
-        ev.total = r->texts.size();
-    } else if (auto* r = std::get_if<EmbedDocumentsRequest>(&req)) {
-        ev.modelName = r->modelName;
-        ev.total = r->documentHashes.size();
-    } else if (auto* r = std::get_if<GenerateEmbeddingRequest>(&req)) {
-        ev.modelName = r->modelName;
-        ev.total = 1;
-    } else {
-        ev.total = 1;
-    }
-    ev.phase = "started";
-    ev.message = "embedding started";
-    return ev;
-}
-
 inline std::pair<std::size_t, std::size_t> page_bounds(std::size_t pos, std::size_t total,
                                                        std::size_t page) {
     const auto end = std::min(pos + page, total);
@@ -193,6 +172,16 @@ StreamingRequestProcessor::process_streaming_impl(Request request) {
             co_return std::nullopt;
         }
 
+        // RepairRequest: defer to stream_chunks() in request_handler for
+        // producer-thread streaming with keepalives.  Do NOT eagerly compute
+        // here — repair can take tens of minutes.
+        if (std::holds_alternative<RepairRequest>(req_copy)) {
+            spdlog::debug("[SRP] deferring RepairRequest to stream_chunks");
+            mode_ = Mode::Repair;
+            pending_request_.emplace(std::make_unique<Request>(std::move(request)));
+            co_return std::nullopt;
+        }
+
         // Not a streaming-recognized request: delegate immediately.
         // Note: request is still valid here because all branches that move it
         // also co_return immediately, so we only reach here if it wasn't moved.
@@ -227,7 +216,8 @@ bool StreamingRequestProcessor::supports_streaming(const Request& request) const
         std::holds_alternative<BatchEmbeddingRequest>(request) ||
         std::holds_alternative<EmbedDocumentsRequest>(request) ||
         std::holds_alternative<GenerateEmbeddingRequest>(request) ||
-        std::holds_alternative<LoadModelRequest>(request)) {
+        std::holds_alternative<LoadModelRequest>(request) ||
+        std::holds_alternative<RepairRequest>(request)) {
         return true;
     }
     return delegate_->supports_streaming(request);

@@ -15,6 +15,8 @@
 #include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/mcp/mcp_server.h>
+#include <cstdlib>
+#include <string>
 
 using namespace yams::mcp;
 using json = nlohmann::json;
@@ -34,6 +36,55 @@ public:
     }
 };
 
+class EnvGuard {
+public:
+    EnvGuard(const char* key, const char* value) : key_(key) {
+        const char* prev = std::getenv(key_);
+        if (prev) {
+            hadPrev_ = true;
+            prev_ = prev;
+        }
+        setValue(value);
+    }
+
+    ~EnvGuard() {
+        if (hadPrev_) {
+            setValue(prev_.c_str());
+        } else {
+            clearValue();
+        }
+    }
+
+private:
+    void setValue(const char* value) const {
+#if defined(_WIN32)
+        if (value) {
+            _putenv_s(key_, value);
+        } else {
+            _putenv_s(key_, "");
+        }
+#else
+        if (value) {
+            setenv(key_, value, 1);
+        } else {
+            unsetenv(key_);
+        }
+#endif
+    }
+
+    void clearValue() const {
+#if defined(_WIN32)
+        _putenv_s(key_, "");
+#else
+        unsetenv(key_);
+#endif
+    }
+
+    const char* key_;
+    bool hadPrev_ = false;
+    std::string prev_;
+};
+
 } // namespace
 
 // ============================================================================
@@ -43,7 +94,7 @@ public:
 TEST_CASE("MCP 2025-11-25 - supports tasks capability",
           "[mcp][protocol][2025-11-25][features][tasks][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -69,7 +120,7 @@ TEST_CASE("MCP 2025-11-25 - supports tasks capability",
 TEST_CASE("MCP 2025-11-25 - supports sampling context and tools",
           "[mcp][protocol][2025-11-25][features][sampling][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {
         {"jsonrpc", "2.0"},
@@ -91,7 +142,7 @@ TEST_CASE("MCP 2025-11-25 - supports sampling context and tools",
 TEST_CASE("MCP 2025-11-25 - serverInfo includes name and version",
           "[mcp][protocol][2025-11-25][features][serverinfo][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -119,7 +170,7 @@ TEST_CASE("MCP 2025-11-25 - serverInfo includes name and version",
 TEST_CASE("MCP 2025-06-18 - supports completions capability",
           "[mcp][protocol][2025-06-18][features][completions][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -145,7 +196,7 @@ TEST_CASE("MCP 2025-06-18 - supports completions capability",
 TEST_CASE("MCP 2025-06-18 - supports roots listChanged",
           "[mcp][protocol][2025-06-18][features][roots][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -169,7 +220,7 @@ TEST_CASE("MCP 2025-06-18 - supports roots listChanged",
 TEST_CASE("MCP 2025-03-26 - supports BaseMetadata with title",
           "[mcp][protocol][2025-03-26][features][metadata][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -210,7 +261,7 @@ TEST_CASE("MCP 2025-03-26 - supports BaseMetadata with title",
 TEST_CASE("MCP 2024-11-05 - supports tool annotations",
           "[mcp][protocol][2024-11-05][features][tool-annotations][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -260,7 +311,7 @@ TEST_CASE("MCP 2024-11-05 - supports tool annotations",
 TEST_CASE("MCP 2024-11-05 - supports structuredContent in tool results",
           "[mcp][protocol][2024-11-05][features][structured-content][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Initialize with 2024-11-05
     json initRequest = {{"jsonrpc", "2.0"},
@@ -299,13 +350,100 @@ TEST_CASE("MCP 2024-11-05 - supports structuredContent in tool results",
 }
 
 // ============================================================================
+// Version 2024-10-07 Specific Features
+// ============================================================================
+
+TEST_CASE("MCP 2024-10-07 - tools/list omits post-version metadata fields",
+          "[mcp][protocol][2024-10-07][features][tools-list-shaping][catch2]") {
+    auto transport = std::make_unique<NullTransport>();
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
+
+    json initRequest = {{"jsonrpc", "2.0"},
+                        {"id", 1},
+                        {"method", "initialize"},
+                        {"params",
+                         {{"protocolVersion", "2024-10-07"},
+                          {"clientInfo", {{"name", "test"}, {"version", "1.0"}}},
+                          {"capabilities", json::object()}}}};
+
+    auto initResponse = server->handleRequestPublic(initRequest);
+    REQUIRE(initResponse.has_value());
+
+    json toolsRequest = {
+        {"jsonrpc", "2.0"}, {"id", 2}, {"method", "tools/list"}, {"params", json::object()}};
+    auto toolsResponse = server->handleRequestPublic(toolsRequest);
+    REQUIRE(toolsResponse.has_value());
+
+    const auto& tools = toolsResponse.value()["result"]["tools"];
+    REQUIRE(tools.is_array());
+    REQUIRE_FALSE(tools.empty());
+
+    for (const auto& tool : tools) {
+        CHECK_FALSE(tool.contains("annotations"));
+        CHECK_FALSE(tool.contains("title"));
+    }
+}
+
+TEST_CASE("MCP strict-name compat - hides dotted tools and exposes underscore alias",
+          "[mcp][protocol][compat][tool-name][catch2]") {
+    EnvGuard renameGuard("YAMS_MCP_RENAME_DOTTED_TOOLS", "1");
+
+    auto transport = std::make_unique<NullTransport>();
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
+
+    json initRequest = {{"jsonrpc", "2.0"},
+                        {"id", 1},
+                        {"method", "initialize"},
+                        {"params",
+                         {{"protocolVersion", "2025-11-25"},
+                          {"clientInfo", {{"name", "test"}, {"version", "1.0"}}},
+                          {"capabilities", json::object()}}}};
+
+    auto initResponse = server->handleRequestPublic(initRequest);
+    REQUIRE(initResponse.has_value());
+
+    json toolsRequest = {
+        {"jsonrpc", "2.0"}, {"id", 2}, {"method", "tools/list"}, {"params", json::object()}};
+    auto toolsResponse = server->handleRequestPublic(toolsRequest);
+    REQUIRE(toolsResponse.has_value());
+
+    const auto& tools = toolsResponse.value()["result"]["tools"];
+    REQUIRE(tools.is_array());
+
+    bool foundDotted = false;
+    bool foundAlias = false;
+    for (const auto& tool : tools) {
+        const std::string name = tool.value("name", "");
+        if (name == "mcp.echo") {
+            foundDotted = true;
+        }
+        if (name == "mcp_echo") {
+            foundAlias = true;
+        }
+    }
+    CHECK_FALSE(foundDotted);
+    CHECK(foundAlias);
+
+    // Alias should be callable.
+    json aliasCall = {{"jsonrpc", "2.0"},
+                      {"id", 3},
+                      {"method", "tools/call"},
+                      {"params", {{"name", "mcp_echo"}, {"arguments", {{"text", "hello"}}}}}};
+
+    auto aliasResponse = server->handleRequestPublic(aliasCall);
+    REQUIRE(aliasResponse.has_value());
+    REQUIRE(aliasResponse.value().contains("result"));
+    REQUIRE(aliasResponse.value()["result"].contains("content"));
+}
+
+// ============================================================================
 // Version 2024-10-07 (Initial Release) Features
 // ============================================================================
 
 TEST_CASE("MCP 2024-10-07 - basic protocol features work",
           "[mcp][protocol][2024-10-07][features][basic][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -327,7 +465,7 @@ TEST_CASE("MCP 2024-10-07 - basic protocol features work",
 TEST_CASE("MCP 2024-10-07 - supports tools/list",
           "[mcp][protocol][2024-10-07][features][tools][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Initialize
     json initRequest = {{"jsonrpc", "2.0"},
@@ -357,7 +495,7 @@ TEST_CASE("MCP 2024-10-07 - supports tools/list",
 TEST_CASE("MCP 2024-10-07 - tool results omit structuredContent",
           "[mcp][protocol][2024-10-07][features][structured-content][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Initialize with pre-structuredContent protocol version
     json initRequest = {{"jsonrpc", "2.0"},
@@ -394,7 +532,7 @@ TEST_CASE("MCP 2024-10-07 - tool results omit structuredContent",
 TEST_CASE("MCP 2024-10-07 - supports resources/list",
           "[mcp][protocol][2024-10-07][features][resources][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Initialize
     json initRequest = {{"jsonrpc", "2.0"},
@@ -423,7 +561,7 @@ TEST_CASE("MCP 2024-10-07 - supports resources/list",
 TEST_CASE("MCP 2024-10-07 - supports prompts/list",
           "[mcp][protocol][2024-10-07][features][prompts][catch2]") {
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     // Initialize
     json initRequest = {{"jsonrpc", "2.0"},
@@ -460,7 +598,7 @@ TEST_CASE("MCP - all versions support ping",
 
     for (const auto& version : versions) {
         auto transport = std::make_unique<NullTransport>();
-        auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+        auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
         // Initialize
         json initRequest = {{"jsonrpc", "2.0"},
@@ -495,7 +633,7 @@ TEST_CASE("MCP - all versions support cancellation",
 
     for (const auto& version : versions) {
         auto transport = std::make_unique<NullTransport>();
-        auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+        auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
         // Initialize
         json initRequest = {{"jsonrpc", "2.0"},
@@ -527,7 +665,7 @@ TEST_CASE("MCP - all versions support progress notifications",
 
     for (const auto& version : versions) {
         auto transport = std::make_unique<NullTransport>();
-        auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+        auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
         // Initialize
         json initRequest = {{"jsonrpc", "2.0"},
@@ -556,7 +694,7 @@ TEST_CASE("MCP - all versions support logging",
 
     for (const auto& version : versions) {
         auto transport = std::make_unique<NullTransport>();
-        auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+        auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
         json initRequest = {{"jsonrpc", "2.0"},
                             {"id", 1},

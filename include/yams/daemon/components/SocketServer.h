@@ -24,6 +24,7 @@ namespace yams::daemon {
 
 // Forward declarations
 class RequestDispatcher;
+class IOCoordinator;
 class WorkCoordinator;
 struct StateComponent;
 
@@ -47,8 +48,8 @@ public:
         size_t proxyMaxConnections = 512;
     };
 
-    SocketServer(const Config& config, WorkCoordinator* coordinator, RequestDispatcher* dispatcher,
-                 StateComponent* state);
+    SocketServer(const Config& config, IOCoordinator* ioCoordinator, WorkCoordinator* coordinator,
+                 RequestDispatcher* dispatcher, StateComponent* state);
     ~SocketServer();
 
     // Lifecycle
@@ -71,7 +72,10 @@ public:
 
     // Proxy metrics
     size_t proxyActiveConnections() const { return proxyActiveConnections_.load(); }
-    std::filesystem::path proxySocketPath() const { return proxySocketPath_; }
+    std::filesystem::path proxySocketPath() const {
+        std::lock_guard<std::mutex> lk(socketPathsMutex_);
+        return proxySocketPath_;
+    }
 
     // Compute age of oldest active connection (in seconds); 0 if no connections
     uint64_t oldestConnectionAgeSeconds() const;
@@ -118,12 +122,13 @@ private:
 
     // Configuration
     Config config_;
+    IOCoordinator* ioCoordinator_{nullptr};
     WorkCoordinator* coordinator_;
     RequestDispatcher* dispatcher_;
     StateComponent* state_;
     mutable std::mutex dispatcherMutex_;
 
-    // Boost.ASIO components (use WorkCoordinator's io_context)
+    // Boost.ASIO components (use IOCoordinator's io_context)
     std::unique_ptr<boost::asio::local::stream_protocol::acceptor> acceptor_;
     std::future<void> acceptLoopFuture_;
 
@@ -136,8 +141,13 @@ private:
     // Socket tracking
     std::filesystem::path actualSocketPath_;
 
+    // actualSocketPath_ and proxySocketPath_ are read from other threads (e.g. DaemonMetrics)
+    // while being mutated during start/stop/rebuild.
+    mutable std::mutex socketPathsMutex_;
+
     // Connection metrics
     std::atomic<size_t> activeConnections_{0};
+    std::atomic<size_t> mainActiveConnections_{0};
     std::atomic<uint64_t> totalConnections_{0};
     std::atomic<uint64_t> connectionToken_{0};
     std::atomic<uint64_t> forcedCloseCount_{0}; // Connections closed due to lifetime exceeded
@@ -160,6 +170,7 @@ private:
     std::vector<std::future<void>> connectionFutures_;
 
     std::unique_ptr<std::counting_semaphore<>> connectionSlots_;
+    std::unique_ptr<std::counting_semaphore<>> proxyConnectionSlots_;
 
     // Dynamic sizing state (PBI-085)
     std::atomic<size_t> slotLimit_{0};   // Current slot limit (tracked for resize decisions)

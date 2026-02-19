@@ -16,7 +16,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
-## [v0.8.2] - Unreleased
+## [v0.8.3] - Unreleased
+
+### Fixed
+- **MCP download retrievability contract**: `download` no longer returns a non-retrievable hash when post-index ingest fails. On ingest failure, response now sets `indexed=false` and clears `hash` to prevent follow-up `get/cat` calls from hammering daemon CAS with repeated "File not found" lookups.
+- **Stuck-doc recovery enqueue**: Fixed repair stuck-document recovery enqueueing `PostIngestTask`s to an unused InternalEventBus channel. Recovery now enqueues to `post_ingest` (consumed by PostInestQueue), so re-extraction actually runs.
+- **Doctor FTS5 reindex SQLite TOOBIG**: Added best-effort truncation retry for oversized extracted text and report `truncated=<n>` in output.
+
+- **Embedding plugin output-shape compatibility**: ONNX provider output handling now accepts provider-padded batch dimensions (`output_B >= requested_B`) and uses the requested prefix rows, preventing false shape-mismatch failures under MIGraphX/accelerated providers.
+- **Embedding dim hint precedence**: ONNX plugin no longer lets stale config hints override graph-inferred embedding dimensions when model metadata is available, reducing startup/runtime mismatches.
+- **GPU escape hatch for stability triage**: Added ONNX env controls to force CPU execution (`YAMS_ONNX_FORCE_CPU=1` / `YAMS_ONNX_DISABLE_GPU=1`) for benchmark/repro stability when GPU EPs are unstable.
+- **Cross-process MIGraphX execution guard**: ONNX MIGraphX now uses a process-level device lock (default: enabled) so multiple daemon processes do not concurrently execute on the same GPU and trigger ROCm/HSA instability. Configure with `YAMS_MIGRAPHX_PROCESS_LOCK` (`0` to disable) and optional `YAMS_MIGRAPHX_LOCK_PATH`.
+- **Gradient limiter clamp safety**: Prevented invalid limiter bounds (`minLimit > maxLimit`) in post-ingest stage limiter setup when a stage cap resolves to unset/zero, fixing debug-build aborts from `std::clamp` assertions during title stage completion.
+- **Snapshot propagation consistency across add paths**: `yams add` now propagates one effective snapshot ID per invocation across file, stdin, and directory ingest paths (daemon + local fallback), and preserves snapshot label/id when daemon directory ingest is translated to indexing requests.
+- **Non-directory snapshot persistence parity**: File/stdin document stores now upsert first-class `tree_snapshots` records (with label/collection metadata) so snapshot timelines no longer depend only on per-document tags.
+
+- **ONNX dynamic tensor padding**: Pads input tensors to the aligned actual token length instead of the model's `max_seq_len` (512). Short texts now skip hundreds of zero-padded positions, yielding **~70-85x throughput improvement** for short inputs (93 texts/sec vs 1.6 texts/sec on CPU with `nomic-embed-text-v1.5`). Enabled by default; disable with `YAMS_ONNX_DYNAMIC_PADDING=0`. Sequence lengths are 8-byte aligned to balance SIMD efficiency with padding reduction.
+- **ROCm / MIGraphX compiled-model caching**: Enable save/load of compiled MIGraphX artifacts to avoid paying multi-minute `compile_program` costs when sessions are recreated (e.g., after scale-down/eviction). Defaults to caching hashed `*.mxr` artifacts under the model directory. Configure with `YAMS_MIGRAPHX_COMPILED_PATH` (directory; if a `.mxr` path is provided, its parent directory is used), `YAMS_MIGRAPHX_SAVE_COMPILED`, and `YAMS_MIGRAPHX_LOAD_COMPILED`.
+- **ONNX batch warmup and auto-tuning**: `warmupModel()` runs a 4-text batch embedding immediately after model load, pre-warming the ONNX Runtime session and measuring throughput. When `YAMS_EMBED_DOC_CAP` is unset, an auto-tuning sweep (batch sizes 4→8→16→32→64) selects the batch size with peak texts/sec as the default cap via `TuneAdvisor::setEmbedDocCap()`. Disable auto-tuning with `YAMS_EMBED_AUTOTUNE=0`.
+- **ONNX session reuse**: Pool-managed sessions now show **25x latency reduction** on warm cycles (259ms cold → 10ms warm), confirming session creation cost is amortized after the first inference.
+- **Hardware-adaptive pool sizing**: `TuneAdvisor::onnxSessionsPerModel()` dynamically sizes the session pool based on available CPU cores and GPU state, preventing over-subscription on constrained hardware.
+
+### Diagnostics
+- **ONNX ROCm diagnostic output**: GPU diagnostic now reports cold vs warm embedding timing to distinguish first-run compilation from steady-state inference.
+
+### Changed
+- **Balanced/base daemon scaling defaults**: Updated no-env defaults for multi-client stability and fairness: `YAMS_IO_THREADS` default `2 -> 6`, `YAMS_CONN_SLOTS_MIN` default `64 -> 256`, `YAMS_SERVER_MAX_INFLIGHT` default `2048 -> 256`, `YAMS_SERVER_QUEUE_BYTES_CAP` default `256MiB -> 128MiB`, `YAMS_IPC_TIMEOUT_MS` default `5000 -> 15000`, `YAMS_MAX_IDLE_TIMEOUTS` default `3 -> 12`, and server writer budget fallback now defaults to `8MiB` per turn.
+- **MCP graph tool consolidation**: Unified KG ingest under `graph` via `action="ingest"` and removed separate `kg_ingest` tool exposure to keep the MCP tool surface smaller and cleaner.
+- **Benchmark reporting terminology**: Normalized benchmark docs to use neutral **retrieval result** wording (instead of subjective "significant" labels), and explicitly tagged the current baseline as the SciFact benchmark result.
+
+- **Post-ingest embedding fan-out (phased rollout)**:
+  - **Phase 1**: Added centralized embedding selection policy (strategy + mode + caps/boosts) via `ConfigResolver` with config/env precedence.
+  - **Phase 2**: Moved embed preparation upstream so post-ingest can queue prepared embed payloads; embedding service consumes prepared-doc fast-path.
+  - **Phase 3**: Added extraction utility that returns both extracted text and optional content bytes, enabling downstream stage reuse and reducing duplicate content-store reads.
+  - **Phase 4**: Added selection strategy toggle (`ranked` vs `intro_headings`) and queue observability counters for prepared-doc/chunk vs hash-only embed dispatch.
+
+- **Embedding selection defaults codified**: default strategy `ranked`, mode `budgeted`, `max_chunks_per_doc=8`, `max_chars_per_doc=24000`, `heading_boost=1.25`, `intro_boost=0.75`.
+- **Embedding chunking defaults codified**: default chunk strategy `paragraph`; default config favors sentence boundary flexibility in embedding pipeline (`preserve_sentences=false`, `use_token_count=false` unless overridden).
+
+#### ONNX Embedding Benchmarks (CPU-only, macOS M3 Max, `nomic-embed-text-v1.5` 768-dim)
+
+| Benchmark | Metric | Result |
+|-----------|--------|--------|
+| Batch size sweep (64 texts) | Peak throughput | 55.9 texts/sec @ batch=16 |
+| Dynamic padding ON vs OFF (short texts) | Speedup | ~70-85x (111 vs 1.5 texts/sec) |
+| Session reuse (5 cycles) | Cold vs warm | 259ms → 10ms (25.9x) |
+| Concurrent inference (4 threads) | Throughput | 83.7 texts/sec |
+
+## [v0.8.2] - February 2, 2026
 
 ### Fixed
 - MCP stdio: Improved OpenCode compatibility during handshake/tool discovery (initialize capabilities schema, strict JSON-RPC batch responses, more robust NDJSON parsing).
@@ -24,6 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **FTS5 orphan detection**: Fixed bug where orphan scan used synthetic hashes (e.g., `orphan_id_12345`) that never matched actual documents. Orphans were detected but never removed because the removal query used non-existent hashes. Now passes document rowids directly via `Fts5Job.ids` and calls `removeFromIndex(docId)` which deletes by FTS5 rowid.
 
 ### Added
+- **MCP grep tag filtering**: `grep` tool now accepts `tags` and `match_all_tags` parameters, aligning MCP grep with CLI `yams grep --tags` capabilities.
+- **Blackboard search tools**: Three new OpenCode blackboard tools for discovering content:
+  - `bb_search_tasks` — semantic search for tasks (mirrors `bb_search_findings`).
+  - `bb_search` — unified cross-entity semantic search returning both findings and tasks.
+  - `bb_grep` — regex/pattern search across all blackboard content with optional entity filtering.
 - MCP stdio debug/compat toggles: `YAMS_MCP_HANDSHAKE_TRACE` (trace handshake events) and `YAMS_MCP_MINIMAL_TOOLS` (expose only `mcp.echo` for client compatibility debugging).
 
 ### Performance

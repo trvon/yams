@@ -27,8 +27,8 @@ class LifecycleComponent;
 class ServiceManager;
 class RequestDispatcher;
 class DaemonMetrics;
-class RepairCoordinator;
 class SocketServer;
+class IOCoordinator;
 class TuningManager; // centralized tuner (moved from ServiceManager)
 // Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
 
@@ -44,6 +44,7 @@ struct DaemonConfig {
     size_t maxLogFiles = 5;
     size_t maxLogSizeMb = 10;
     bool enableModelProvider = false;
+    bool modelProviderRequired = false;
     ModelPoolConfig modelPoolConfig;
     std::filesystem::path pluginDir;
     std::string pluginNamePolicy{"relaxed"};
@@ -122,7 +123,7 @@ public:
     // Socket server accessor (for testing)
     SocketServer* getSocketServer() const { return socketServer_.get(); }
 
-    // Document event notifications - forwarded to RepairCoordinator
+    // Document event notifications - forwarded to RepairService via ServiceManager
     void onDocumentAdded(const std::string& hash, const std::string& path);
     void onDocumentRemoved(const std::string& hash);
 
@@ -141,8 +142,8 @@ public:
     std::shared_ptr<DaemonMetrics> metrics_;
     // Integrated socket server (replaces external yams-socket-server)
     std::unique_ptr<SocketServer> socketServer_;
-    std::unique_ptr<RepairCoordinator> repairCoordinator_;
-    mutable std::mutex repairCoordinatorMutex_;
+    // Dedicated I/O thread pool for IPC sockets
+    std::unique_ptr<IOCoordinator> ioCoordinator_;
     std::unique_ptr<TuningManager> tuningManager_;
 
     // Lifecycle FSM (authoritative lifecycle state)
@@ -165,15 +166,6 @@ public:
 
     std::mutex shutdownThreadMutex_;
     std::thread shutdownThread_;
-
-    // Deferred repair startup control
-    std::atomic<bool> repairStarted_{false};
-    std::chrono::steady_clock::time_point repairIdleSince_{};
-    // Hysteresis + rate limit tracking for repair
-    std::chrono::steady_clock::time_point repairBusySince_{};
-    std::chrono::steady_clock::time_point repairReadySince_{};
-    std::chrono::steady_clock::time_point repairRateWindowStart_{};
-    uint64_t repairBatchesAtWindowStart_{0};
 
     // Signal check hook for integration with main loop (avoids separate thread)
     std::function<bool()> signalCheckHook_;

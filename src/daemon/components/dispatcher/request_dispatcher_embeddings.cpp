@@ -1,4 +1,5 @@
 // Split from RequestDispatcher.cpp: embedding-related handlers
+#include <semaphore>
 #include <sstream>
 #include <utility>
 #include <yams/daemon/components/dispatch_utils.hpp>
@@ -229,17 +230,27 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
         } else if (!metadataRepo) {
             result = Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         } else {
-            yams::repair::EmbeddingRepairConfig repairConfig;
-            repairConfig.batchSize = req.batchSize;
-            repairConfig.skipExisting = req.skipExisting;
-            try {
-                repairConfig.dataPath = serviceManager_->getResolvedDataDir();
-            } catch (...) {
+            // Limit concurrent repair embedding requests to avoid ONNX slot starvation.
+            // Max 2 concurrent repairs leaves slots for normal ingest/search embeddings.
+            static std::counting_semaphore<8> repairEmbedSemaphore{2};
+            if (!repairEmbedSemaphore.try_acquire_for(std::chrono::seconds(30))) {
+                result = Error{ErrorCode::ResourceExhausted,
+                               "Repair embedding concurrency limit reached; retry later"};
+            } else {
+                auto semaphoreGuard = std::unique_ptr<void, std::function<void(void*)>>(
+                    reinterpret_cast<void*>(1), [](void*) { repairEmbedSemaphore.release(); });
+                yams::repair::EmbeddingRepairConfig repairConfig;
+                repairConfig.batchSize = req.batchSize;
+                repairConfig.skipExisting = req.skipExisting;
+                try {
+                    repairConfig.dataPath = serviceManager_->getResolvedDataDir();
+                } catch (...) {
+                }
+                auto stats = yams::repair::repairMissingEmbeddings(
+                    contentStore, metadataRepo, modelProvider, modelName, repairConfig,
+                    req.documentHashes, nullptr, contentExtractors);
+                result = std::move(stats);
             }
-            auto stats = yams::repair::repairMissingEmbeddings(
-                contentStore, metadataRepo, modelProvider, modelName, repairConfig,
-                req.documentHashes, nullptr, contentExtractors);
-            result = std::move(stats);
         }
     }
 

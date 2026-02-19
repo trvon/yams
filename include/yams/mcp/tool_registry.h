@@ -251,6 +251,9 @@ struct MCPSearchRequest {
     // Symbol ranking
     bool symbolRank = true; // Enable automatic symbol ranking boost for code-like queries
 
+    // CWD scoping
+    std::string cwd; // optional: scope search to files under this directory
+
     static MCPSearchRequest fromJson(const json& j);
     json toJson() const;
 };
@@ -261,6 +264,7 @@ struct MCPSearchResponse {
     size_t total = 0;
     std::string type;
     uint64_t executionTimeMs = 0;
+    std::string traceId;
     std::vector<std::string> paths;
 
     struct Result {
@@ -308,6 +312,13 @@ struct MCPGrepRequest {
     // Session scoping
     bool useSession = true;
     std::string sessionName;
+
+    // Tag filtering
+    std::vector<std::string> tags;
+    bool matchAllTags = false;
+
+    // CWD scoping
+    std::string cwd; // optional: scope grep to files under this directory
 
     static MCPGrepRequest fromJson(const json& j);
     json toJson() const;
@@ -458,6 +469,7 @@ struct MCPListDocumentsRequest {
     std::string pattern;
     std::string name;
     std::vector<std::string> tags;
+    bool matchAllTags = false;
     std::string type;
     std::string mime;
     std::string extension;
@@ -916,9 +928,36 @@ struct MCPListSnapshotsResponse {
     json toJson() const;
 };
 
+// KG ingest sub-types (used by MCPGraphRequest when action == "ingest")
+struct MCPKgIngestNodeInput {
+    std::string nodeKey;
+    std::string label;
+    std::string type;
+    json properties; // arbitrary JSON (serialised to string for IPC)
+};
+
+struct MCPKgIngestEdgeInput {
+    std::string srcNodeKey;
+    std::string dstNodeKey;
+    std::string relation;
+    float weight{1.0f};
+    json properties;
+};
+
+struct MCPKgIngestAliasInput {
+    std::string nodeKey;
+    std::string alias;
+    std::string source;
+    float confidence{1.0f};
+};
+
 struct MCPGraphRequest {
     using RequestType = MCPGraphRequest;
 
+    // Action discriminator: "query" (default) | "ingest"
+    std::string action{"query"};
+
+    // ── Query fields ──────────────────────────────────────────
     // Target selection (match CLI graph)
     std::string hash;
     std::string name;
@@ -946,6 +985,14 @@ struct MCPGraphRequest {
     // Snapshot scoping
     std::string scopeSnapshot;
 
+    // ── Ingest fields (used when action == "ingest") ─────────
+    std::vector<MCPKgIngestNodeInput> nodes;
+    std::vector<MCPKgIngestEdgeInput> edges;
+    std::vector<MCPKgIngestAliasInput> aliases;
+    std::string documentHash; // associate ingested entities with a document
+    bool skipExistingNodes{true};
+    bool skipExistingEdges{true};
+
     static MCPGraphRequest fromJson(const json& j);
     json toJson() const;
 };
@@ -953,6 +1000,7 @@ struct MCPGraphRequest {
 struct MCPGraphResponse {
     using ResponseType = MCPGraphResponse;
 
+    // ── Query result fields ───────────────────────────────────
     json origin;
     json connectedNodes;
     json nodeTypeCounts;
@@ -964,6 +1012,17 @@ struct MCPGraphResponse {
     int64_t queryTimeMs{0};
     bool kgAvailable{true};
     std::string warning;
+
+    // ── Ingest result fields (populated when action == "ingest") ──
+    std::string action{"query"}; // echoes the action for clarity
+    uint64_t nodesInserted{0};
+    uint64_t nodesSkipped{0};
+    uint64_t edgesInserted{0};
+    uint64_t edgesSkipped{0};
+    uint64_t aliasesInserted{0};
+    uint64_t aliasesSkipped{0};
+    std::vector<std::string> errors;
+    bool success{true};
 
     static MCPGraphResponse fromJson(const json& j);
     json toJson() const;
@@ -1240,9 +1299,15 @@ public:
             return wrapper(args);
         };
 
-        auto [it, inserted] = handlers_.emplace(std::string(name), std::move(handlerFn));
-        if (inserted) {
-            descriptors_.push_back({it->first, std::move(schema), std::move(description),
+        // IMPORTANT: don't move handlerFn into emplace() before we know whether insertion will
+        // happen. unordered_map::emplace may still consume/move arguments even on duplicate keys,
+        // leaving handlerFn moved-from (and thus the stored handler empty).
+        const std::string key(name);
+        auto it = handlers_.find(key);
+        if (it == handlers_.end()) {
+            auto [nit, inserted] = handlers_.emplace(key, std::move(handlerFn));
+            (void)inserted;
+            descriptors_.push_back({nit->first, std::move(schema), std::move(description),
                                     std::move(title), std::move(annotations)});
             return;
         }

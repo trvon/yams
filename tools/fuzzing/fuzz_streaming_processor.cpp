@@ -3,8 +3,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -31,7 +33,9 @@ public:
             size_t num_results = std::min(resp.totalCount, size_t(20));
             for (size_t i = 0; i < num_results && (i * 10) < size_; ++i) {
                 SearchResult result;
-                result.hash = "fuzz_hash_" + std::to_string(i);
+                result.id = "fuzz_id_" + std::to_string(i);
+                result.path = "fuzz_path_" + std::to_string(i);
+                result.title = "fuzz_title_" + std::to_string(i);
                 result.score = (size_ > i) ? static_cast<double>(data_[i]) / 255.0 : 0.5;
                 result.snippet = std::string(reinterpret_cast<const char*>(data_ + (i * 10)),
                                              std::min(size_ - (i * 10), size_t(64)));
@@ -64,8 +68,8 @@ public:
             for (size_t i = 0; i < num_matches && (i * 12) < size_; ++i) {
                 GrepMatch match;
                 match.file = "file_" + std::to_string(i);
-                match.line = (size_ > i) ? data_[i] : 0;
-                match.text = std::string(reinterpret_cast<const char*>(data_ + (i * 12)),
+                match.lineNumber = (size_ > i) ? data_[i] : 0;
+                match.line = std::string(reinterpret_cast<const char*>(data_ + (i * 12)),
                                          std::min(size_ - (i * 12), size_t(80)));
                 resp.matches.push_back(match);
             }
@@ -95,7 +99,6 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         RequestHandler::Config config;
         config.enable_streaming = true;
         config.chunk_size = (size > 0) ? (data[0] * 1024) + 1024 : 128 * 1024;
-        config.streaming_threshold = (size > 1) ? (data[1] * 1024) : 512 * 1024;
         config.auto_detect_streaming = (size > 2) ? (data[2] & 1) : true;
         config.force_streaming = (size > 3) ? (data[3] & 1) : false;
 
@@ -126,7 +129,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
                     GrepRequest req;
                     req.pattern = std::string(reinterpret_cast<const char*>(data),
                                               std::min(size, size_t(64)));
-                    req.limit = (size > 5) ? data[5] : 100;
+                    req.maxMatches = (size > 5) ? static_cast<size_t>(data[5]) : 100;
                     test_request = req;
                     break;
                 }

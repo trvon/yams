@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
+#include "../../common/env_compat.h"
 
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/daemon/client/daemon_client.h>

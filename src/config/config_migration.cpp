@@ -130,6 +130,13 @@ Result<void> ConfigMigrator::createDefaultV2Config(const fs::path& configPath) {
 std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2AdditiveDefaults() {
     // Additive keys introduced post-initial v2 rollout. These will be merged non-destructively.
     return {{"embeddings", {{"auto_on_add", "false"}}},
+            {"embeddings.selection",
+             {{"mode", "budgeted"},
+              {"strategy", "ranked"},
+              {"max_chunks_per_doc", "8"},
+              {"max_chars_per_doc", "24000"},
+              {"heading_boost", "1.25"},
+              {"intro_boost", "0.75"}}},
             {"plugins.symbol_extraction", {{"enable", "true"}, {"auto_download_grammars", "true"}}},
             {"tuning",
              {{"profile", "balanced"},
@@ -351,6 +358,14 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"model_idle_timeout", "300"},
               {"preload_on_startup", "false"},
               {"max_model_memory_mb", "1024"}}},
+
+            {"embeddings.selection",
+             {{"mode", "budgeted"},
+              {"strategy", "ranked"},
+              {"max_chunks_per_doc", "8"},
+              {"max_chars_per_doc", "24000"},
+              {"heading_boost", "1.25"},
+              {"intro_boost", "0.75"}}},
 
             {"embeddings.cache",
              {{"enable_query_cache", "true"},
@@ -700,6 +715,7 @@ Result<void> ConfigMigrator::writeTomlConfig(
                                              "wal",
                                              "vector_database",
                                              "embeddings",
+                                             "embeddings.selection",
                                              "embeddings.cache",
                                              "vector_index",
                                              "search",

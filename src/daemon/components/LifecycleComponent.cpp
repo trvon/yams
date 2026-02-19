@@ -214,12 +214,8 @@ Result<void> LifecycleComponent::initialize() {
         return result;
     }
 
-    // Acquire data-dir lock to prevent multiple daemons from sharing the same data directory.
-    // This check is independent of the PID file check (which is socket-based).
-    dataDirLockFile_ = daemon_->config_.dataDir / ".yams-lock";
-    if (auto result = acquireDataDirLock(); !result) {
-        // createPidFile() already succeeded above. Ensure we don't leak a PID file
-        // (or open fd) on early initialization failure.
+    // Everything after this point needs PID file cleanup on failure
+    auto cleanupPidOnError = [this]() {
         if (pidFileFd_ != -1) {
 #ifdef _WIN32
             _close(pidFileFd_);
@@ -228,7 +224,14 @@ Result<void> LifecycleComponent::initialize() {
 #endif
             pidFileFd_ = -1;
         }
-        (void)removePidFile();
+        removePidFile();
+    };
+
+    // Acquire data-dir lock to prevent multiple daemons from sharing the same data directory.
+    // This check is independent of the PID file check (which is socket-based).
+    dataDirLockFile_ = daemon_->config_.dataDir / ".yams-lock";
+    if (auto result = acquireDataDirLock(); !result) {
+        cleanupPidOnError();
         return result;
     }
 
@@ -242,6 +245,27 @@ Result<void> LifecycleComponent::initialize() {
                 spdlog::warn("Failed to remove stale socket '{}': {}", sock.string(), ec.message());
             } else {
                 spdlog::debug("Removed stale socket file: {}", sock.string());
+            }
+        }
+
+        if (!sock.empty()) {
+            auto base = sock.stem().string();
+            if (base.empty()) {
+                base = sock.filename().string();
+            }
+            if (base.empty()) {
+                base = "yams-daemon";
+            }
+            auto proxySock = sock.parent_path() / (base + ".proxy.sock");
+            if (std::filesystem::exists(proxySock)) {
+                std::error_code proxyEc;
+                std::filesystem::remove(proxySock, proxyEc);
+                if (proxyEc) {
+                    spdlog::warn("Failed to remove stale proxy socket '{}': {}", proxySock.string(),
+                                 proxyEc.message());
+                } else {
+                    spdlog::debug("Removed stale proxy socket file: {}", proxySock.string());
+                }
             }
         }
     } catch (...) {

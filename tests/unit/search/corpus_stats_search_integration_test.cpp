@@ -421,8 +421,15 @@ private:
     void cleanupServices() { docService_.reset(); }
 
     void cleanupDatabase() {
+        appContext_.metadataRepo.reset();
+        appContext_.store.reset();
+        appContext_.searchEngine.reset();
+        contentStore_.reset();
         metadataRepo_.reset();
-        pool_.reset();
+        if (pool_) {
+            pool_->shutdown();
+            pool_.reset();
+        }
         if (database_) {
             database_->close();
         }

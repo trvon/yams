@@ -1,3 +1,4 @@
+#include <yams/daemon/components/IOCoordinator.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/SocketServer.h>
@@ -10,19 +11,7 @@
 #include <yams/daemon/ipc/request_handler.h>
 #include <yams/profiling.h>
 
-#ifdef __linux__
-#include <sys/prctl.h>
-#endif
-
 namespace {
-void set_current_thread_name(const std::string& name) {
-#ifdef __linux__
-    prctl(PR_SET_NAME, name.c_str(), 0, 0, 0);
-#elif __APPLE__
-    pthread_setname_np(name.c_str());
-#endif
-}
-
 bool stream_trace_enabled() {
     static int enabled = [] {
         if (const char* raw = std::getenv("YAMS_STREAM_TRACE")) {
@@ -41,6 +30,7 @@ bool stream_trace_enabled() {
 } // namespace
 
 #include <spdlog/spdlog.h>
+#include <atomic>
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
@@ -76,9 +66,11 @@ using boost::asio::detached;
 using boost::asio::use_awaitable;
 using local = boost::asio::local::stream_protocol;
 
-SocketServer::SocketServer(const Config& config, WorkCoordinator* coordinator,
-                           RequestDispatcher* dispatcher, StateComponent* state)
-    : config_(config), coordinator_(coordinator), dispatcher_(dispatcher), state_(state) {}
+SocketServer::SocketServer(const Config& config, IOCoordinator* ioCoordinator,
+                           WorkCoordinator* coordinator, RequestDispatcher* dispatcher,
+                           StateComponent* state)
+    : config_(config), ioCoordinator_(ioCoordinator), coordinator_(coordinator),
+      dispatcher_(dispatcher), state_(state) {}
 
 SocketServer::~SocketServer() {
     stop();
@@ -127,41 +119,24 @@ Result<void> SocketServer::start() {
             }
         }
 #endif
+        if (!ioCoordinator_) {
+            running_ = false;
+            return Error{ErrorCode::InvalidState,
+                         "IOCoordinator must be available before SocketServer"};
+        }
         if (!coordinator_ || !coordinator_->isRunning()) {
             running_ = false;
             return Error{ErrorCode::InvalidState,
                          "WorkCoordinator must be started before SocketServer"};
         }
 
-        auto io_context = coordinator_->getIOContext();
+        auto io_context = ioCoordinator_->getIOContext();
 
-        // Create acceptor on the io_context executor to avoid TSan race with
-        // worker threads already running io_context->run(). The kqueue_reactor
-        // descriptor allocation must be synchronized with event processing.
-        std::exception_ptr acceptorException;
-        std::string sockPathStr = sockPath.string();
-
-        std::promise<void> acceptorReady;
-        auto acceptorFuture = acceptorReady.get_future();
-
-        boost::asio::post(
-            *io_context, [this, io_context, &sockPathStr, &acceptorException, &acceptorReady]() {
-                try {
-                    acceptor_ = std::make_unique<local::acceptor>(*io_context);
-                    local::endpoint endpoint(sockPathStr);
-                    acceptor_->open(endpoint.protocol());
-                    acceptor_->bind(endpoint);
-                    acceptor_->listen(boost::asio::socket_base::max_listen_connections);
-                } catch (...) {
-                    acceptorException = std::current_exception();
-                }
-                acceptorReady.set_value();
-            });
-
-        acceptorFuture.get();
-        if (acceptorException) {
-            std::rethrow_exception(acceptorException);
-        }
+        acceptor_ = std::make_unique<local::acceptor>(*io_context);
+        local::endpoint endpoint(sockPath.string());
+        acceptor_->open(endpoint.protocol());
+        acceptor_->bind(endpoint);
+        acceptor_->listen(boost::asio::socket_base::max_listen_connections);
 
 #ifndef _WIN32
         // Set socket permissions on Unix (Windows Unix sockets don't support filesystem
@@ -171,7 +146,10 @@ Result<void> SocketServer::start() {
                                                    std::filesystem::perms::group_write);
 #endif
 
-        actualSocketPath_ = sockPath;
+        {
+            std::lock_guard<std::mutex> lk(socketPathsMutex_);
+            actualSocketPath_ = sockPath;
+        }
 
         // Determine initial connection slots: use config if specified, otherwise compute from
         // hardware/profile
@@ -185,6 +163,17 @@ Result<void> SocketServer::start() {
         connectionSlots_ = std::make_unique<std::counting_semaphore<>>(initialSlots);
         slotLimit_.store(initialSlots, std::memory_order_relaxed);
         spdlog::info("SocketServer: bounded concurrency enabled (max {} slots)", initialSlots);
+
+        // Proxy gets its own hard cap so it cannot starve main/control connections.
+        if (!config_.proxySocketPath.empty()) {
+            size_t proxySlots = config_.proxyMaxConnections;
+            if (proxySlots == 0) {
+                proxySlots = 1;
+            }
+            proxyConnectionSlots_ = std::make_unique<std::counting_semaphore<>>(proxySlots);
+            spdlog::info("SocketServer: proxy bounded concurrency enabled (max {} slots)",
+                         proxySlots);
+        }
 
         if (state_) {
             state_->stats.maxConnections.store(initialSlots, std::memory_order_relaxed);
@@ -202,13 +191,13 @@ Result<void> SocketServer::start() {
         setWriterBudget(initialBudget);
 
         acceptLoopFuture_ = co_spawn(
-            coordinator_->getExecutor(),
+            ioCoordinator_->getExecutor(),
             [this]() -> awaitable<void> {
                 co_await accept_loop(false);
                 co_return;
             },
             boost::asio::use_future);
-        spdlog::info("SocketServer: accept_loop scheduled on WorkCoordinator");
+        spdlog::info("SocketServer: accept_loop scheduled on IOCoordinator");
 
         // Start proxy acceptor if configured
         if (!config_.proxySocketPath.empty()) {
@@ -238,33 +227,15 @@ Result<void> SocketServer::start() {
 #endif
 
             {
-                std::promise<void> proxyReady;
-                auto proxyFut = proxyReady.get_future();
-                std::exception_ptr proxyExc;
-                std::string proxyPathStr = proxySockPath.string();
-
-                boost::asio::post(*io_context, [this, io_context, &proxyPathStr, &proxyExc,
-                                                &proxyReady]() {
-                    try {
-                        proxyAcceptor_ = std::make_unique<local::acceptor>(*io_context);
-                        local::endpoint ep(proxyPathStr);
-                        proxyAcceptor_->open(ep.protocol());
-                        proxyAcceptor_->bind(ep);
-                        proxyAcceptor_->listen(boost::asio::socket_base::max_listen_connections);
-                    } catch (...) {
-                        proxyExc = std::current_exception();
-                    }
-                    proxyReady.set_value();
-                });
-
-                proxyFut.get();
-                if (proxyExc) {
-                    try {
-                        std::rethrow_exception(proxyExc);
-                    } catch (const std::exception& e) {
-                        spdlog::warn("Failed to start proxy acceptor: {}", e.what());
-                        goto skip_proxy;
-                    }
+                try {
+                    proxyAcceptor_ = std::make_unique<local::acceptor>(*io_context);
+                    local::endpoint ep(proxySockPath.string());
+                    proxyAcceptor_->open(ep.protocol());
+                    proxyAcceptor_->bind(ep);
+                    proxyAcceptor_->listen(boost::asio::socket_base::max_listen_connections);
+                } catch (const std::exception& e) {
+                    spdlog::warn("Failed to start proxy acceptor: {}", e.what());
+                    goto skip_proxy;
                 }
 
 #ifndef _WIN32
@@ -274,10 +245,13 @@ Result<void> SocketServer::start() {
                                                  std::filesystem::perms::group_write);
 #endif
 
-                proxySocketPath_ = proxySockPath;
+                {
+                    std::lock_guard<std::mutex> lk(socketPathsMutex_);
+                    proxySocketPath_ = proxySockPath;
+                }
 
                 proxyAcceptLoopFuture_ = co_spawn(
-                    coordinator_->getExecutor(),
+                    ioCoordinator_->getExecutor(),
                     [this]() -> awaitable<void> {
                         co_await accept_loop(true);
                         co_return;
@@ -290,8 +264,9 @@ Result<void> SocketServer::start() {
         }
 
         // WorkCoordinator handles all threading - no need for separate worker pool
-        spdlog::info("SocketServer: using WorkCoordinator ({} threads) for async execution",
-                     coordinator_->getWorkerCount());
+        spdlog::info("SocketServer: using IOCoordinator ({} threads) for IPC I/O; WorkCoordinator "
+                     "({} threads) for CPU",
+                     ioCoordinator_->getThreadCount(), coordinator_->getWorkerCount());
 
         if (state_) {
             state_->readiness.ipcServerReady.store(true);
@@ -434,6 +409,7 @@ Result<void> SocketServer::stop() {
         // WorkCoordinator teardown).
         acceptor_.reset();
         connectionSlots_.reset();
+        proxyConnectionSlots_.reset();
 
         // WorkCoordinator manages thread lifecycle - just signal completion
         spdlog::info("SocketServer: accept loop stopped, WorkCoordinator continues running");
@@ -442,16 +418,23 @@ Result<void> SocketServer::stop() {
             state_->readiness.ipcServerReady.store(false);
         }
 
-        // Cleanup socket files
-        if (!actualSocketPath_.empty()) {
-            std::error_code ec;
-            std::filesystem::remove(actualSocketPath_, ec);
+        // Cleanup socket files (paths are read by other threads; copy+clear under lock)
+        std::filesystem::path actualPath;
+        std::filesystem::path proxyPath;
+        {
+            std::lock_guard<std::mutex> lk(socketPathsMutex_);
+            actualPath = actualSocketPath_;
+            proxyPath = proxySocketPath_;
             actualSocketPath_.clear();
-        }
-        if (!proxySocketPath_.empty()) {
-            std::error_code ec;
-            std::filesystem::remove(proxySocketPath_, ec);
             proxySocketPath_.clear();
+        }
+        if (!actualPath.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(actualPath, ec);
+        }
+        if (!proxyPath.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(proxyPath, ec);
         }
 
         spdlog::info("Socket server stopped (total_conn={} active_conn={})",
@@ -480,19 +463,17 @@ void SocketServer::setWriterBudget(std::size_t bytes) {
 
 awaitable<void> SocketServer::accept_loop(bool isProxy) {
     static const bool trace = stream_trace_enabled();
-    static bool trace_env_logged = false;
-    static bool logged_entry = false;
+    static std::atomic<bool> trace_env_logged{false};
+    static std::atomic<bool> logged_entry{false};
 
     const char* loopLabel = isProxy ? "proxy" : "main";
     auto* activeAcceptor = isProxy ? proxyAcceptor_.get() : acceptor_.get();
 
     spdlog::debug("{} accept loop started", loopLabel);
-    if (!logged_entry) {
-        logged_entry = true;
+    if (!logged_entry.exchange(true, std::memory_order_relaxed)) {
         spdlog::info("SocketServer: accept_loop coroutine entered");
     }
-    if (!trace && !trace_env_logged) {
-        trace_env_logged = true;
+    if (!trace && !trace_env_logged.exchange(true, std::memory_order_relaxed)) {
         if (const char* raw = std::getenv("YAMS_STREAM_TRACE")) {
             spdlog::info("stream-trace: accept_loop env present but disabled ('{}')", raw);
         } else {
@@ -500,11 +481,19 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
         }
     }
     if (trace) {
+        std::string sockStr;
+        if (isProxy) {
+            sockStr = proxySocketPath().string();
+        } else {
+            std::filesystem::path p;
+            {
+                std::lock_guard<std::mutex> lk(socketPathsMutex_);
+                p = actualSocketPath_;
+            }
+            sockStr = p.empty() ? config_.socketPath.string() : p.string();
+        }
         spdlog::info("stream-trace: accept_loop starting ({}, max_conn={} socket={})", loopLabel,
-                     isProxy ? config_.proxyMaxConnections : config_.maxConnections,
-                     isProxy ? proxySocketPath_.string()
-                             : (actualSocketPath_.empty() ? config_.socketPath.string()
-                                                          : actualSocketPath_.string()));
+                     isProxy ? config_.proxyMaxConnections : config_.maxConnections, sockStr);
     }
 
     if (!activeAcceptor) {
@@ -515,51 +504,17 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
     while (running_ && !stopping_) {
         YAMS_ZONE_SCOPED_N("SocketServer::accept_loop");
 
+        // IMPORTANT: Accept first, then try to acquire a slot.
+        // If we acquire slots before accept(), we can starve the acceptor/backlog under load.
+        std::counting_semaphore<>* slots =
+            isProxy ? proxyConnectionSlots_.get() : connectionSlots_.get();
         try {
-            // Use non-blocking try_acquire with async retry to avoid blocking the accept loop
-            if (connectionSlots_) {
-                while (!connectionSlots_->try_acquire()) {
-                    if (!running_ || stopping_) {
-                        break;
-                    }
-                    // Async wait before retrying - doesn't block other coroutines
-                    boost::asio::steady_timer slot_timer(*coordinator_->getIOContext());
-                    slot_timer.expires_after(std::chrono::milliseconds(1));
-                    co_await slot_timer.async_wait(use_awaitable);
-                }
-                if (trace) {
-                    spdlog::debug("stream-trace: acquired connection slot");
-                }
-            }
-
-            // Check if we're shutting down after acquiring slot
-            if (!running_ || stopping_) {
-                if (connectionSlots_) {
-                    connectionSlots_->release(); // Release slot before exit
-                }
-                break;
-            }
-
-            // Generate monotonic connection token for end-to-end tracing
-            const uint64_t conn_token = connectionToken_.fetch_add(1, std::memory_order_relaxed);
-
-            if (trace) {
-                spdlog::info("stream-trace: [conn={}] accept_start (active={} total={})",
-                             conn_token, activeConnections_.load(std::memory_order_relaxed),
-                             totalConnections_.load(std::memory_order_relaxed));
-            }
-
             // Use as_tuple to avoid exception overhead during shutdown
             auto [ec, socket] =
                 co_await activeAcceptor->async_accept(boost::asio::as_tuple(use_awaitable));
 
             // Handle errors without exception
             if (ec) {
-                // Release semaphore on error paths
-                if (connectionSlots_) {
-                    connectionSlots_->release();
-                }
-
                 if (!running_ || stopping_) {
                     break; // Clean shutdown
                 }
@@ -583,13 +538,21 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                             boost::system::error_code rebuild_ec;
                             if (activeAcceptor)
                                 activeAcceptor->close(rebuild_ec);
-                            auto rebuildPath =
-                                isProxy ? proxySocketPath_
-                                        : (actualSocketPath_.empty() ? config_.socketPath
-                                                                     : actualSocketPath_);
+                            std::filesystem::path rebuildPath;
+                            if (isProxy) {
+                                rebuildPath = proxySocketPath();
+                            } else {
+                                {
+                                    std::lock_guard<std::mutex> lk(socketPathsMutex_);
+                                    rebuildPath = actualSocketPath_;
+                                }
+                                if (rebuildPath.empty()) {
+                                    rebuildPath = config_.socketPath;
+                                }
+                            }
                             std::filesystem::remove(rebuildPath, rebuild_ec);
                             auto rebuilt =
-                                std::make_unique<local::acceptor>(*coordinator_->getIOContext());
+                                std::make_unique<local::acceptor>(*ioCoordinator_->getIOContext());
                             local::endpoint endpoint(rebuildPath.string());
                             rebuilt->open(endpoint.protocol());
                             rebuilt->bind(endpoint);
@@ -597,11 +560,17 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                             if (isProxy) {
                                 proxyAcceptor_ = std::move(rebuilt);
                                 activeAcceptor = proxyAcceptor_.get();
-                                proxySocketPath_ = rebuildPath;
+                                {
+                                    std::lock_guard<std::mutex> lk(socketPathsMutex_);
+                                    proxySocketPath_ = rebuildPath;
+                                }
                             } else {
                                 acceptor_ = std::move(rebuilt);
                                 activeAcceptor = acceptor_.get();
-                                actualSocketPath_ = rebuildPath;
+                                {
+                                    std::lock_guard<std::mutex> lk(socketPathsMutex_);
+                                    actualSocketPath_ = rebuildPath;
+                                }
                             }
                             static std::atomic<bool> s_warned_once{false};
                             static const bool s_quiet = []() {
@@ -638,7 +607,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 }
 
                 if (need_delay) {
-                    boost::asio::steady_timer timer(*coordinator_->getIOContext());
+                    boost::asio::steady_timer timer(*ioCoordinator_->getIOContext());
                     timer.expires_after(backoff_ms);
                     try {
                         co_await timer.async_wait(use_awaitable);
@@ -649,6 +618,57 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 }
                 continue; // Retry accept
             }
+
+            // If shutdown begins after accept completes, do not spawn a handler.
+            // Close the just-accepted socket.
+            if (!running_ || stopping_) {
+                boost::system::error_code close_ec;
+                socket.close(close_ec);
+                break;
+            }
+
+            bool slotAcquired = true;
+            if (slots) {
+                slotAcquired = slots->try_acquire();
+            }
+
+            if (!slotAcquired) {
+                // Hard cap reached. Close immediately to apply backpressure without
+                // stalling the acceptor/backlog.
+                boost::system::error_code close_ec;
+                socket.close(close_ec);
+
+                if (trace) {
+                    spdlog::debug("stream-trace: accept rejected (no slots)");
+                } else {
+                    static std::atomic<uint64_t> s_noSlotRejects{0};
+                    uint64_t n = s_noSlotRejects.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if ((n & 0x3FFu) == 0) { // log every 1024th reject
+                        spdlog::debug("SocketServer: {} accept rejected (no slots), rejects={}",
+                                      loopLabel, n);
+                    }
+                }
+
+                // Yield briefly to avoid a tight accept/close loop under sustained load.
+                boost::asio::steady_timer slot_timer(*ioCoordinator_->getIOContext());
+                slot_timer.expires_after(std::chrono::milliseconds(1));
+                co_await slot_timer.async_wait(use_awaitable);
+
+                continue;
+            }
+
+            // If shutdown begins after slot acquisition, do not spawn a handler.
+            if (!running_ || stopping_) {
+                boost::system::error_code close_ec;
+                socket.close(close_ec);
+                if (slots) {
+                    slots->release();
+                }
+                break;
+            }
+
+            // Generate monotonic connection token for end-to-end tracing
+            const uint64_t conn_token = connectionToken_.fetch_add(1, std::memory_order_relaxed);
 
             if (trace) {
                 spdlog::info("stream-trace: [conn={}] slot_acquired", conn_token);
@@ -661,6 +681,8 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
             totalConnections_.fetch_add(1);
             if (isProxy) {
                 proxyActiveConnections_.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                mainActiveConnections_.fetch_add(1, std::memory_order_relaxed);
             }
 
             spdlog::info("SocketServer: [conn={}] accepted {} connection, active={} total={}",
@@ -675,7 +697,7 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 state_->stats.connectionSlotsFree.store(slotsFree, std::memory_order_relaxed);
             }
 
-            auto connectionExecutor = boost::asio::make_strand(coordinator_->getExecutor());
+            auto connectionExecutor = boost::asio::make_strand(ioCoordinator_->getExecutor());
             auto sock = std::make_shared<local::socket>(std::move(socket));
             auto tracked = std::make_shared<TrackedSocket>();
             tracked->socket = sock;
@@ -697,30 +719,31 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 }
 
                 // Create a capturing lambda that releases the semaphore on completion
-                auto wrapped_handler = [this, conn_token, tracked,
-                                        isProxy]() mutable -> awaitable<void> {
+                auto wrapped_handler = [this, conn_token, tracked, isProxy,
+                                        slots]() mutable -> awaitable<void> {
                     // RAII guard for semaphore - handles shrink debt for graceful downsizing
                     struct SemaphoreGuard {
                         SocketServer* server;
                         std::counting_semaphore<>* sem;
+                        bool proxyConn;
                         ~SemaphoreGuard() {
                             if (!sem || !server)
                                 return;
-                            // Check shrink debt: if downsizing is in progress, consume debt
-                            // instead of releasing the semaphore back to the pool
+                            if (proxyConn) {
+                                sem->release();
+                                return;
+                            }
+                            // Main slot pool supports dynamic resizing via shrink debt.
                             int32_t debt = server->shrinkDebt_.load(std::memory_order_relaxed);
                             if (debt > 0) {
-                                // Try to decrement debt (may race with other connections,
-                                // which is fine - we just need eventual convergence)
                                 if (server->shrinkDebt_.compare_exchange_weak(
                                         debt, debt - 1, std::memory_order_relaxed)) {
-                                    // Debt consumed, don't release semaphore
                                     return;
                                 }
                             }
                             sem->release();
                         }
-                    } guard{this, connectionSlots_.get()};
+                    } guard{this, slots, isProxy};
 
                     // Handle the connection with tracing token
                     co_await handle_connection(tracked, conn_token, isProxy);
@@ -734,11 +757,6 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
         } catch (const std::exception& e) {
             if (!running_ || stopping_)
                 break;
-
-            // Release semaphore on unexpected exception
-            if (connectionSlots_) {
-                connectionSlots_->release();
-            }
 
             spdlog::error("Unexpected error in accept loop: {}", e.what());
             break;
@@ -797,6 +815,8 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
             auto current = server->activeConnections_.fetch_sub(1) - 1;
             if (proxyConn) {
                 server->proxyActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
+            } else {
+                server->mainActiveConnections_.fetch_sub(1, std::memory_order_relaxed);
             }
             if (server->state_) {
                 server->state_->stats.activeConnections.store(current);
@@ -872,18 +892,6 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         }
         handlerConfig.stream_chunk_timeout = std::chrono::milliseconds(streamChunkTimeoutMs);
         handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
-        if (handlerConfig.writer_budget_bytes_per_turn == 0) {
-            handlerConfig.writer_budget_bytes_per_turn =
-                TuneAdvisor::serverWriterBudgetBytesPerTurn();
-            if (handlerConfig.writer_budget_bytes_per_turn == 0)
-                handlerConfig.writer_budget_bytes_per_turn =
-                    TuneAdvisor::writerBudgetBytesPerTurn();
-            if (handlerConfig.writer_budget_bytes_per_turn == 0)
-                handlerConfig.writer_budget_bytes_per_turn = 256ULL * 1024;
-            if (writerBudget_)
-                writerBudget_->store(handlerConfig.writer_budget_bytes_per_turn,
-                                     std::memory_order_relaxed);
-        }
         MuxMetricsRegistry::instance().setWriterBudget(handlerConfig.writer_budget_bytes_per_turn);
         RequestDispatcher* disp = nullptr;
         {
@@ -914,17 +922,18 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
             // Use async_initiate to race connection handler against lifetime timer
             // (replaces experimental::awaitable_operators)
             auto executor = sock->get_executor();
+            auto connection_strand = boost::asio::make_strand(executor);
             auto lifetime = config_.maxConnectionLifetime;
             auto created_at = tracked_socket->created_at(); // Thread-safe read
 
             bool timedOut =
                 co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable),
                                                      void(std::exception_ptr, bool)>(
-                    [this, handler, sock, token, conn_token, executor, lifetime,
+                    [this, handler, sock, token, conn_token, executor, connection_strand, lifetime,
                      created_at](auto completion_handler) mutable {
                         // Shared state for race coordination
                         auto completed = std::make_shared<std::atomic<bool>>(false);
-                        auto timer = std::make_shared<boost::asio::steady_timer>(executor);
+                        auto timer = std::make_shared<boost::asio::steady_timer>(connection_strand);
                         timer->expires_after(lifetime);
 
                         using HandlerT = std::decay_t<decltype(completion_handler)>;
@@ -934,8 +943,8 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
 
                         // Set up lifetime timer
                         timer->async_wait([this, completed, handlerPtr, completion_exec, conn_token,
-                                           created_at,
-                                           lifetime](const boost::system::error_code& ec) mutable {
+                                           created_at, lifetime,
+                                           sock](const boost::system::error_code& ec) mutable {
                             if (ec == boost::asio::error::operation_aborted)
                                 return; // Cancelled by handler completion
                             if (!completed->exchange(true, std::memory_order_acq_rel)) {
@@ -952,6 +961,30 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                                 spdlog::warn("[conn={}] Connection lifetime exceeded (age={}s, "
                                              "limit={}s) - forcing close",
                                              conn_token, age_s, lifetime.count());
+                                // Cancel pending async ops so the detached coroutine's
+                                // async_read completes with operation_aborted.  Do NOT
+                                // close() here — closing from the timer callback while
+                                // the coroutine may be mid-resume on another IO thread
+                                // causes a double kqueue_reactor::deregister_descriptor
+                                // → SIGSEGV.
+                                //
+                                // cancel() is safe to call from any completion handler
+                                // on the same io_context (it uses internal locking on
+                                // the descriptor state).  The coroutine will observe
+                                // the read error (operation_aborted), exit its loop,
+                                // and close the socket itself.
+                                //
+                                // shutdown(both) ensures that even if the inner idle
+                                // timer wins the race (swallowing the cancel), the
+                                // *next* async_read returns EOF so the coroutine exits
+                                // promptly rather than lingering for idle-timeout cycles.
+                                if (sock && sock->is_open()) {
+                                    boost::system::error_code shutdown_ec;
+                                    sock->shutdown(boost::asio::socket_base::shutdown_both,
+                                                   shutdown_ec);
+                                    boost::system::error_code cancel_ec;
+                                    sock->cancel(cancel_ec);
+                                }
                                 boost::asio::post(
                                     completion_exec, [h = std::move(*handlerPtr)]() mutable {
                                         std::move(h)(std::exception_ptr{}, true); // timedOut = true
@@ -961,7 +994,7 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
 
                         // Spawn connection handler
                         boost::asio::co_spawn(
-                            executor,
+                            connection_strand,
                             [handler, sock, token, conn_token, timer, completed, handlerPtr,
                              completion_exec]() mutable -> boost::asio::awaitable<void> {
                                 co_await handler->handle_connection(sock, token, conn_token);
@@ -981,8 +1014,19 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
                     boost::asio::use_awaitable);
 
             if (timedOut) {
-                boost::system::error_code ec;
-                sock->close(ec);
+                // The timer callback cancelled pending I/O via cancel().
+                // The detached coroutine owns socket close: it will see the
+                // operation_aborted error and close the socket in its error
+                // path.  Do NOT close here — the coroutine may still be
+                // mid-resume on another IO thread, and concurrent close()
+                // on a Boost.Asio socket triggers a double
+                // kqueue_reactor::deregister_descriptor → SIGSEGV.
+                //
+                // If the coroutine exits without closing (e.g. exception),
+                // the shared_ptr<socket> destructor handles final cleanup.
+                spdlog::debug("[conn={}] Lifetime expired; socket cleanup "
+                              "delegated to coroutine",
+                              conn_token);
             }
         } else {
             co_await handler->handle_connection(sock, token, conn_token);
@@ -1021,8 +1065,8 @@ void SocketServer::execute_on_io_context(std::function<void()> fn) {
         return;
     }
 
-    auto io_context = coordinator_->getIOContext();
-    auto executor = coordinator_->getExecutor();
+    auto io_context = ioCoordinator_->getIOContext();
+    auto executor = ioCoordinator_->getExecutor();
     if (io_context->stopped() || executor.running_in_this_thread()) {
         fn();
         return;
@@ -1095,8 +1139,11 @@ std::size_t SocketServer::close_sockets_on_executor(
         try {
             boost::asio::dispatch(exec, [sock, promise]() mutable {
                 boost::system::error_code ec;
-                sock->cancel(ec);
-                sock->close(ec);
+                if (sock->is_open()) {
+                    boost::system::error_code shutdown_ec;
+                    sock->shutdown(boost::asio::socket_base::shutdown_both, shutdown_ec);
+                    sock->cancel(ec);
+                }
                 promise->set_value();
             });
         } catch (const std::exception& e) {

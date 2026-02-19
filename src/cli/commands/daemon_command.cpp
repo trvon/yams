@@ -439,6 +439,20 @@ private:
         return false;
     }
 
+    std::filesystem::path deriveProxySocketPath(const std::filesystem::path& daemonSocket) {
+        if (daemonSocket.empty()) {
+            return {};
+        }
+        auto base = daemonSocket.stem().string();
+        if (base.empty()) {
+            base = daemonSocket.filename().string();
+        }
+        if (base.empty()) {
+            base = "yams-daemon";
+        }
+        return daemonSocket.parent_path() / (base + ".proxy.sock");
+    }
+
     void cleanupDaemonFiles(const std::string& socketPath, const std::string& pidFilePath) {
         auto removeWithRetry = [](const std::filesystem::path& path, const std::string& label) {
             if (path.empty()) {
@@ -471,6 +485,8 @@ private:
         // Remove socket file if it exists
         if (!socketPath.empty()) {
             removeWithRetry(std::filesystem::path{socketPath}, "socket");
+            removeWithRetry(deriveProxySocketPath(std::filesystem::path{socketPath}),
+                            "proxy socket");
         }
 
         // Remove PID file if it exists
@@ -1635,7 +1651,68 @@ private:
                 spinner->stop();
             }
             if (!sres) {
-                std::cout << "YAMS daemon is running\n";
+                // IPC failed — the daemon is likely still initializing (VectorDB, model
+                // loading, etc.) and can't serve requests yet. Fall back to the bootstrap
+                // status file that the daemon writes throughout initialization so the
+                // user sees useful progress instead of an opaque error.
+                try {
+                    auto rt = daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
+                    std::ifstream bf(rt);
+                    if (bf) {
+                        json j;
+                        bf >> j;
+                        std::string overall = j.value("overall", std::string{"initializing"});
+                        // Capitalize first letter for display
+                        if (!overall.empty())
+                            overall[0] = static_cast<char>(
+                                std::toupper(static_cast<unsigned char>(overall[0])));
+
+                        std::cout << "YAMS daemon is " << overall << " (IPC not yet responsive)\n";
+
+                        if (j.contains("readiness")) {
+                            std::vector<std::string> waiting;
+                            for (auto it = j["readiness"].begin(); it != j["readiness"].end();
+                                 ++it) {
+                                if (!it.value().get<bool>()) {
+                                    std::ostringstream w;
+                                    w << it.key();
+                                    if (j.contains("progress") &&
+                                        j["progress"].contains(it.key())) {
+                                        try {
+                                            w << " (" << j["progress"][it.key()].get<int>() << "%)";
+                                        } catch (...) {
+                                        }
+                                    }
+                                    waiting.push_back(w.str());
+                                }
+                            }
+                            if (!waiting.empty()) {
+                                std::cout << "  Waiting on: ";
+                                for (size_t i = 0; i < waiting.size() && i < 4; ++i) {
+                                    if (i)
+                                        std::cout << ", ";
+                                    std::cout << waiting[i];
+                                }
+                                if (waiting.size() > 4)
+                                    std::cout << ", …";
+                                std::cout << "\n";
+                            }
+                        }
+                        if (j.contains("uptime_seconds")) {
+                            try {
+                                auto elapsed = j["uptime_seconds"].get<long>();
+                                std::cout << "  Uptime: ~" << elapsed << "s\n";
+                            } catch (...) {
+                            }
+                        }
+                        std::cout << "  Hint: Run 'yams daemon status -d' once ready, "
+                                     "or tail the daemon log.\n";
+                        return;
+                    }
+                } catch (...) {
+                }
+                // No bootstrap file available either — fall back to the original message
+                std::cout << "YAMS daemon status unavailable (IPC error)\n";
                 return;
             }
 
@@ -1723,6 +1800,33 @@ private:
             std::string embText = s.embeddingAvailable ? "Available" : "Unavailable";
             std::string embExtra = s.embeddingModel.empty() ? "" : s.embeddingModel;
             overview.push_back({"Embeddings", paintStatus(embSev, embText), embExtra});
+
+            // Repair summary
+            auto findCompactCount = [&](const char* key) -> uint64_t {
+                auto it = s.requestCounts.find(key);
+                return it != s.requestCounts.end() ? it->second : 0ULL;
+            };
+            const bool repairRunning = findCompactCount("repair_running") > 0;
+            const bool repairInProgress = findCompactCount("repair_in_progress") > 0;
+            const uint64_t repairQueue = findCompactCount("repair_queue_depth");
+            const uint64_t repairFailed = findCompactCount("repair_failed_operations");
+            Severity repairSev = !repairRunning       ? Severity::Warn
+                                 : (repairFailed > 0) ? Severity::Warn
+                                 : (repairInProgress) ? Severity::Warn
+                                 : (repairQueue > 0)  ? Severity::Warn
+                                                      : Severity::Good;
+            std::ostringstream repairText;
+            repairText << (repairRunning ? "Running" : "Stopped");
+            if (repairInProgress) {
+                repairText << " · RPC active";
+            }
+            std::ostringstream repairExtra;
+            repairExtra << repairQueue << " pending";
+            if (repairFailed > 0) {
+                repairExtra << " · " << repairFailed << " failed";
+            }
+            overview.push_back(
+                {"Repair", paintStatus(repairSev, repairText.str()), repairExtra.str()});
 
             render_rows(std::cout, overview);
 
@@ -2030,6 +2134,9 @@ private:
                     uint64_t queued = findPostIngestCount("post_ingest_queued");
                     uint64_t inflight = findPostIngestCount("post_ingest_inflight");
                     uint64_t cap = findPostIngestCount("post_ingest_capacity");
+                    uint64_t rpcQueued = findPostIngestCount("post_ingest_rpc_queued");
+                    uint64_t rpcCap = findPostIngestCount("post_ingest_rpc_capacity");
+                    uint64_t rpcMaxPerBatch = findPostIngestCount("post_ingest_rpc_max_per_batch");
                     uint64_t processed = findPostIngestCount("post_ingest_processed");
                     uint64_t failed = findPostIngestCount("post_ingest_failed");
                     uint64_t latency = findPostIngestCount("post_ingest_latency_ms_ema");
@@ -2054,6 +2161,14 @@ private:
                     std::ostringstream throughput;
                     throughput << rate << "/s · " << latency << "ms latency";
                     postIngestRows.push_back({"Throughput", throughput.str(), ""});
+
+                    if (rpcCap > 0) {
+                        std::ostringstream rpc;
+                        rpc << rpcQueued << "/" << rpcCap;
+                        if (rpcMaxPerBatch > 0)
+                            rpc << " · max/batch " << rpcMaxPerBatch;
+                        postIngestRows.push_back({"RPC Queue", rpc.str(), ""});
+                    }
 
                     std::ostringstream stats;
                     stats << processed << " processed";
@@ -2156,6 +2271,50 @@ private:
                 if (!internalRows.empty()) {
                     render_rows(std::cout, internalRows);
                 }
+
+                std::cout << "\n" << section_header("Repair Service") << "\n\n";
+                std::vector<Row> repairRows;
+                const bool repairRunning = findPostIngestCount("repair_running") > 0;
+                const bool repairInProgress = findPostIngestCount("repair_in_progress") > 0;
+                const uint64_t repairQueue = findPostIngestCount("repair_queue_depth");
+                const uint64_t repairBatches = findPostIngestCount("repair_batches_attempted");
+                const uint64_t repairEmbeddings =
+                    findPostIngestCount("repair_embeddings_generated");
+                const uint64_t repairFailed = findPostIngestCount("repair_failed_operations");
+                const uint64_t repairBacklog = findPostIngestCount("repair_total_backlog");
+                const uint64_t repairProcessed = findPostIngestCount("repair_processed");
+
+                std::string repairStatus = repairRunning ? "running" : "stopped";
+                Severity repairStatusSev = repairRunning ? Severity::Good : Severity::Warn;
+                if (repairInProgress) {
+                    repairStatus += " · RPC active";
+                    repairStatusSev = Severity::Warn;
+                }
+                repairRows.push_back({"Status", paintStatus(repairStatusSev, repairStatus), ""});
+
+                if (repairBacklog > 0) {
+                    const double fraction =
+                        std::min(1.0, static_cast<double>(repairProcessed) / repairBacklog);
+                    std::ostringstream progress;
+                    progress << progress_bar(fraction, 12, "#", "░", Ansi::GREEN, Ansi::YELLOW,
+                                             Ansi::RED, true)
+                             << " " << repairProcessed << "/" << repairBacklog;
+                    repairRows.push_back({"Progress", progress.str(), ""});
+                }
+
+                std::ostringstream queue;
+                queue << repairQueue << " pending";
+                repairRows.push_back({"Queue", queue.str(), ""});
+
+                std::ostringstream repairStats;
+                repairStats << repairBatches << " batches · " << repairEmbeddings << " embeddings";
+                Severity repairStatsSev = repairFailed > 0 ? Severity::Warn : Severity::Good;
+                if (repairFailed > 0) {
+                    repairStats << " · " << repairFailed << " failed";
+                }
+                repairRows.push_back({"Stats", paintStatus(repairStatsSev, repairStats.str()), ""});
+
+                render_rows(std::cout, repairRows);
 
                 std::cout << "\n" << section_header("Storage & Embeddings") << "\n\n";
                 std::vector<Row> storageRows;
@@ -2488,6 +2647,43 @@ private:
         }
         if (spinner) {
             spinner->stop();
+        }
+        // All retries exhausted — fall back to bootstrap status file before giving up
+        try {
+            auto rt = daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
+            std::ifstream bf(rt);
+            if (bf) {
+                json j;
+                bf >> j;
+                std::string overall = j.value("overall", std::string{"initializing"});
+                if (!overall.empty())
+                    overall[0] =
+                        static_cast<char>(std::toupper(static_cast<unsigned char>(overall[0])));
+                std::cout << "YAMS daemon is " << overall << " (IPC not yet responsive after " << 5
+                          << " attempts)\n";
+                if (j.contains("readiness")) {
+                    for (auto it = j["readiness"].begin(); it != j["readiness"].end(); ++it) {
+                        std::string state = it.value().get<bool>() ? "ready" : "waiting";
+                        std::string pct;
+                        if (j.contains("progress") && j["progress"].contains(it.key())) {
+                            try {
+                                pct = " (" + std::to_string(j["progress"][it.key()].get<int>()) +
+                                      "%)";
+                            } catch (...) {
+                            }
+                        }
+                        std::cout << "  " << it.key() << ": " << state << pct << "\n";
+                    }
+                }
+                if (j.contains("uptime_seconds")) {
+                    try {
+                        std::cout << "  Uptime: ~" << j["uptime_seconds"].get<long>() << "s\n";
+                    } catch (...) {
+                    }
+                }
+                return;
+            }
+        } catch (...) {
         }
         spdlog::error("Failed to get daemon status: {}", lastErr.message);
         std::exit(1);

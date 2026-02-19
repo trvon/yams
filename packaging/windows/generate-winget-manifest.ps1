@@ -82,6 +82,44 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Get-MsiProperty {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Path,
+
+        [Parameter(Mandatory=$true)]
+        [string]$PropertyName
+    )
+
+    $installer = $null
+    $database = $null
+    $view = $null
+    $record = $null
+
+    try {
+        $installer = New-Object -ComObject WindowsInstaller.Installer
+        $database = $installer.OpenDatabase($Path, 0)
+        $view = $database.OpenView("SELECT `Value` FROM `Property` WHERE `Property`='$PropertyName'")
+        $view.Execute()
+        $record = $view.Fetch()
+        if ($null -eq $record) {
+            return $null
+        }
+        return $record.StringData(1)
+    } catch {
+        Write-Warning "Unable to read MSI property '$PropertyName': $_"
+        return $null
+    } finally {
+        if ($view) {
+            try { $view.Close() } catch {}
+        }
+        if ($record) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
+        if ($view) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($view) }
+        if ($database) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($database) }
+        if ($installer) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($installer) }
+    }
+}
+
 # Check if this is a stable release (semantic version X.Y.Z)
 $isStable = $Version -match '^\d+\.\d+\.\d+$'
 
@@ -106,6 +144,17 @@ if (-not (Test-Path $MsiPath)) {
 Write-Host "Computing SHA256 hash for: $MsiPath" -ForegroundColor Cyan
 $hash = (Get-FileHash -Path $MsiPath -Algorithm SHA256).Hash
 Write-Host "SHA256: $hash" -ForegroundColor Green
+
+# Extract MSI identity for winget metadata
+$productCode = Get-MsiProperty -Path $MsiPath -PropertyName "ProductCode"
+if ([string]::IsNullOrWhiteSpace($productCode)) {
+    Write-Error "Could not extract ProductCode from MSI. Winget manifests for MSI installers require ProductCode metadata."
+    exit 1
+}
+if ($productCode -notmatch '^\{.+\}$') {
+    $productCode = "{$productCode}"
+}
+Write-Host "MSI ProductCode: $productCode" -ForegroundColor Cyan
 
 # Construct MSI download URL
 $msiFileName = "yams-$Version-windows-x86_64.msi"
@@ -151,7 +200,7 @@ Installers:
   - Architecture: x64
     InstallerUrl: $MsiUrl
     InstallerSha256: $hash
-    ProductCode: '{69FC51D5-B9FC-4DA9-9CA3-C889EDF8AFB8}'
+        ProductCode: '$productCode'
 ManifestType: installer
 ManifestVersion: $manifestVersion
 "@

@@ -423,12 +423,23 @@ Result<std::unique_ptr<Database>> ConnectionPool::createConnection() {
 }
 
 Result<void> ConnectionPool::configureConnection(Database& db) {
+    // Allow env-var override for busy_timeout (default from config, typically 15000ms)
+    auto effectiveBusyTimeout = config_.busyTimeout;
+    if (const char* envBusy = std::getenv("YAMS_DB_BUSY_TIMEOUT_MS"); envBusy && *envBusy) {
+        try {
+            auto v = std::stoul(envBusy);
+            if (v > 0)
+                effectiveBusyTimeout = std::chrono::milliseconds(v);
+        } catch (...) {
+        }
+    }
+
     // Set busy timeout
-    auto timeoutResult = db.setBusyTimeout(config_.busyTimeout);
+    auto timeoutResult = db.setBusyTimeout(effectiveBusyTimeout);
     if (!timeoutResult) {
         return timeoutResult.error();
     }
-    db.execute("PRAGMA busy_timeout = " + std::to_string(config_.busyTimeout.count()));
+    db.execute("PRAGMA busy_timeout = " + std::to_string(effectiveBusyTimeout.count()));
 
     // Enable WAL mode if requested.
     if (config_.enableWAL) {
@@ -454,6 +465,11 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     }
     db.execute("PRAGMA temp_store = MEMORY");
     db.execute("PRAGMA mmap_size = 268435456"); // 256MB
+
+    // Increase WAL autocheckpoint threshold to reduce checkpoint frequency under heavy write load.
+    // Default SQLite value is 1000 pages (~4MB). We raise to 2000 pages (~8MB) to batch more
+    // writes before checkpointing, which reduces I/O contention during concurrent ingestion.
+    db.execute("PRAGMA wal_autocheckpoint = 2000");
 
     return {};
 }

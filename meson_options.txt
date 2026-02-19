@@ -16,6 +16,7 @@ option('plugin-pdf', type: 'boolean', value: false, description: '[DEPRECATED] O
 option('plugin-onnx', type: 'boolean', value: true, description: 'Build ONNX plugin (requires onnxruntime and vector lib)')
 option('build-tests', type: 'boolean', value: false, description: 'Build unit/integration tests under tests/')
 option('build-fuzzers', type: 'boolean', value: false, description: 'Build fuzzing harnesses under tools/fuzzing/')
+option('build-benchmarks', type: 'boolean', value: true, description: 'Build benchmark utilities and executables under src/benchmarks')
 option('plugin-symbols', type: 'boolean', value: true, description: 'Build Tree-sitter symbol extractor plugin')
 option('plugin-zyp', type: 'boolean', value: false, description: 'Build zyp PDF extractor plugin (requires Zig 0.15.2+)')
 option('plugin-glint', type: 'boolean', value: false, description: 'Build Glint NL entity extractor plugin (GLiNER-based)')
@@ -41,6 +42,7 @@ option('enable-full-unit', type: 'boolean', value: true, description: 'Register 
 option('enable-vector-tests', type: 'boolean', value: false, description: 'Include vector/embedding tests (requires ONNX runtime and model downloads)')
 option('enable-bench-tests', type: 'boolean', value: false, description: 'Register bench/isolated performance-heavy unit tests')
 option('enable-profiling', type: 'boolean', value: false, description: 'Enable Tracy profiling instrumentation')
+option('enable-rocprofiler-tracy', type: 'feature', value: 'auto', description: 'Link Tracy client against ROCm rocprofiler (auto-detect ROCm; disabled otherwise)')
 option('enable-daemon-long-tests', type: 'boolean', value: false, description: 'Register long-running daemon lifecycle tests')
 option('enable-stress-tests', type: 'boolean', value: false, description: 'Register stress test binary')
 option('enable-reliability-tests', type: 'boolean', value: false, description: 'Register reliability gate (retries/latency sensitive)')
@@ -52,6 +54,9 @@ option('libcxx-hardening', type: 'combo', choices: ['none', 'fast', 'extensive',
 
 # Thread sanitizer (for detecting data races in debug builds)
 option('enable-tsan', type: 'boolean', value: false, description: 'Enable ThreadSanitizer for race detection (debug builds only, significant performance impact)')
+
+# Address sanitizer (for detecting memory errors in debug builds)
+option('enable-asan', type: 'boolean', value: false, description: 'Enable AddressSanitizer for memory error detection (debug builds only, significant performance impact)')
 
 # C++20 Modules (experimental)
 option('enable-modules', type: 'boolean', value: false, description: 'Enable C++20 module compilation (experimental, requires GCC 13+/Clang 16+/MSVC 17.4+)')

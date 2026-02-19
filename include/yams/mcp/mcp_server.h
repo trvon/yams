@@ -128,7 +128,7 @@ private:
 /**
  * MCP Server implementation
  */
-class MCPServer {
+class MCPServer : public std::enable_shared_from_this<MCPServer> {
 public:
     MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* externalShutdown = nullptr,
               std::filesystem::path overrideSocket = {},
@@ -140,6 +140,11 @@ public:
     boost::asio::awaitable<void> startAsync();
     void stop();
     bool isRunning() const { return running_.load(); }
+
+    // Shared ownership is required because MCPServer spawns detached coroutines
+    // that capture a shared_ptr to keep the server alive while work is in flight.
+    MCPServer(const MCPServer&) = delete;
+    MCPServer& operator=(const MCPServer&) = delete;
 
 #if defined(YAMS_TESTING) && !defined(YAMS_WASI)
     // Testing hooks: allow unit tests to intercept daemon client creation and
@@ -218,6 +223,24 @@ private:
     std::atomic<bool> mcpAppsSupported_{
         false};                   // Set when client supports io.modelcontextprotocol/ui
     std::string mcpAppsMimeType_; // The negotiated mime type (e.g., "text/html;profile=mcp-app")
+
+    // --- MCP Apps UI Resources ---
+    struct UIResource {
+        std::string uri;         // ui://...
+        std::string name;        // Human-readable
+        std::string description; // Optional
+        std::string mimeType;    // e.g., text/html;profile=mcp-app
+        std::string htmlContent; // HTML template content
+        json meta;               // Extension-specific metadata (CSP, permissions, etc.)
+    };
+
+    void ensureUiResourcesInitialized();
+    bool isUiResourceUri(const std::string& uri) const;
+    json uiResourcesAsMcpResources();
+    json readUiResource(const std::string& uri);
+
+    std::once_flag uiResourcesInitOnce_{};
+    std::unordered_map<std::string, UIResource> uiResources_;
 
     // --- Cancellation scaffolding ---
     // Each in-flight request id can be marked cancelable; a cancellation sets the token to true.
@@ -412,6 +435,7 @@ private:
     boost::asio::awaitable<Result<MCPListSnapshotsResponse>>
     handleListSnapshots(const MCPListSnapshotsRequest& req);
     boost::asio::awaitable<Result<MCPGraphResponse>> handleGraphQuery(const MCPGraphRequest& req);
+    boost::asio::awaitable<Result<MCPGraphResponse>> handleKgIngest(const MCPGraphRequest& req);
 
     // Session start/stop (simplified surface)
     boost::asio::awaitable<Result<MCPSessionStartResponse>>
@@ -513,6 +537,9 @@ private:
         std::string name = "yams-mcp";
         std::string version = YAMS_VERSION_STRING;
     } serverInfo_;
+
+    // Instance ID: unique per MCP connection / server lifetime
+    std::string instanceId_;
 
     // Client info (set during initialize)
     ClientInfo clientInfo_;

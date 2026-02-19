@@ -261,4 +261,45 @@ std::string classifyFileType(const std::string& mimeType, const std::string& ext
     return "unknown";
 }
 
+std::vector<std::string> buildCwdScopePatterns(const std::string& directory) {
+    std::vector<std::string> patterns;
+    if (directory.empty())
+        return patterns;
+
+    std::error_code ec;
+    std::filesystem::path base{directory};
+    if (!base.is_absolute()) {
+        base = std::filesystem::current_path(ec) / base;
+    }
+    auto resolved = std::filesystem::weakly_canonical(base, ec);
+    if (ec)
+        resolved = base;
+
+    std::string prefix = resolved.string();
+    std::replace(prefix.begin(), prefix.end(), '\\', '/');
+    if (!prefix.empty() && prefix.back() != '/') {
+        prefix += '/';
+    }
+
+    // Absolute path variant
+    patterns.push_back(prefix + "**/*");
+
+    // Without leading slash (repo-relative paths)
+    std::string noLeadingSlash = prefix;
+    if (!noLeadingSlash.empty() && noLeadingSlash.front() == '/') {
+        noLeadingSlash.erase(noLeadingSlash.begin());
+    }
+    if (!noLeadingSlash.empty()) {
+        patterns.push_back(noLeadingSlash + "**/*");
+    }
+
+    // Basename variant (e.g. "myproject/**/*")
+    auto baseName = std::filesystem::path(prefix).filename().string();
+    if (!baseName.empty()) {
+        patterns.push_back(baseName + "/**/*");
+    }
+
+    return patterns;
+}
+
 } // namespace yams::app::services::utils

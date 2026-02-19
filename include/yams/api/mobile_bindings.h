@@ -60,16 +60,23 @@ typedef enum yams_mobile_status {
  */
 typedef struct yams_mobile_context_t yams_mobile_context_t;
 
+typedef enum yams_mobile_backend_mode {
+    YAMS_MOBILE_BACKEND_EMBEDDED = 0,
+    YAMS_MOBILE_BACKEND_DAEMON = 1
+} yams_mobile_backend_mode;
+
 typedef struct yams_mobile_context_config {
     uint32_t struct_size; /**< Size of this struct for forward compatibility (set to sizeof). */
     uint32_t version;     /**< Packed API version from `YAMS_MOBILE_API_VERSION`. */
     uint32_t reserved;    /**< Reserved for future use; set to 0. */
-    const char* working_directory; /**< Root path for metadata/storage; UTF-8, nullable */
-    const char* cache_directory;   /**< Optional cache directory override */
-    const char* telemetry_sink;    /**< Optional sink identifier ("console", "stderr", "noop", or
-                                      "file:/path") */
-    uint32_t max_worker_threads;   /**< 0 => auto */
-    uint32_t flags;                /**< Reserved for future feature toggles */
+    const char* working_directory;  /**< Root path for metadata/storage; UTF-8, nullable */
+    const char* cache_directory;    /**< Optional cache directory override */
+    const char* telemetry_sink;     /**< Optional sink identifier ("console", "stderr", "noop", or
+                                       "file:/path") */
+    uint32_t max_worker_threads;    /**< 0 => auto */
+    uint32_t flags;                 /**< Reserved for future feature toggles */
+    uint32_t backend_mode;          /**< 0 => embedded (default), 1 => daemon */
+    const char* daemon_socket_path; /**< Optional daemon socket override when backend_mode=daemon */
 } yams_mobile_context_config;
 
 /**
@@ -131,6 +138,18 @@ typedef struct yams_mobile_document_store_request {
     uint8_t sync_now;
 } yams_mobile_document_store_request;
 
+typedef struct yams_mobile_download_request {
+    yams_mobile_request_header header;
+    const char* url;
+    const char** tags;
+    size_t tag_count;
+    const char** metadata_keys;
+    const char** metadata_values;
+    size_t metadata_count;
+    uint32_t timeout_ms;
+    uint8_t overwrite;
+} yams_mobile_download_request;
+
 typedef struct yams_mobile_metadata_request {
     yams_mobile_request_header header;
     const char* document_hash;
@@ -158,6 +177,50 @@ typedef struct yams_mobile_list_request {
 } yams_mobile_list_request;
 
 typedef struct yams_mobile_list_result_t yams_mobile_list_result_t;
+
+typedef struct yams_mobile_update_request {
+    yams_mobile_request_header header;
+    const char* hash;
+    const char* name;
+    const char** add_tags;
+    size_t add_tag_count;
+    const char** remove_tags;
+    size_t remove_tag_count;
+    const char** metadata_keys;
+    const char** metadata_values;
+    size_t metadata_count;
+} yams_mobile_update_request;
+
+typedef struct yams_mobile_update_result_t yams_mobile_update_result_t;
+
+typedef struct yams_mobile_delete_request {
+    yams_mobile_request_header header;
+    const char* hash;
+    const char* name;
+    const char* pattern;
+    uint8_t dry_run;
+} yams_mobile_delete_request;
+
+typedef struct yams_mobile_delete_result_t yams_mobile_delete_result_t;
+
+typedef struct yams_mobile_graph_query_request {
+    yams_mobile_request_header header;
+    const char* document_hash;
+    const char* document_name;
+    const char* snapshot_id;
+    int64_t node_id;
+    const char** relation_filters;
+    size_t relation_filter_count;
+    int32_t max_depth;
+    uint32_t max_results;
+    uint32_t offset;
+    uint32_t limit;
+    uint8_t reverse_traversal;
+    uint8_t include_edge_properties;
+    uint8_t include_node_properties;
+} yams_mobile_graph_query_request;
+
+typedef struct yams_mobile_graph_query_result_t yams_mobile_graph_query_result_t;
 
 typedef struct yams_mobile_document_get_request {
     yams_mobile_request_header header;
@@ -205,6 +268,38 @@ YAMS_MOBILE_API void yams_mobile_search_result_destroy(yams_mobile_search_result
 YAMS_MOBILE_API yams_mobile_status yams_mobile_store_document(
     yams_mobile_context_t* ctx, const yams_mobile_document_store_request* request,
     yams_mobile_string_view* out_hash);
+
+YAMS_MOBILE_API yams_mobile_status yams_mobile_download(yams_mobile_context_t* ctx,
+                                                        const yams_mobile_download_request* request,
+                                                        yams_mobile_string_view* out_hash);
+
+YAMS_MOBILE_API yams_mobile_status
+yams_mobile_update_document(yams_mobile_context_t* ctx, const yams_mobile_update_request* request,
+                            yams_mobile_update_result_t** out_result);
+
+YAMS_MOBILE_API void yams_mobile_update_result_destroy(yams_mobile_update_result_t* result);
+
+YAMS_MOBILE_API yams_mobile_string_view
+yams_mobile_update_result_json(const yams_mobile_update_result_t* result);
+
+YAMS_MOBILE_API yams_mobile_status
+yams_mobile_delete_by_name(yams_mobile_context_t* ctx, const yams_mobile_delete_request* request,
+                           yams_mobile_delete_result_t** out_result);
+
+YAMS_MOBILE_API void yams_mobile_delete_result_destroy(yams_mobile_delete_result_t* result);
+
+YAMS_MOBILE_API yams_mobile_string_view
+yams_mobile_delete_result_json(const yams_mobile_delete_result_t* result);
+
+YAMS_MOBILE_API yams_mobile_status
+yams_mobile_graph_query(yams_mobile_context_t* ctx, const yams_mobile_graph_query_request* request,
+                        yams_mobile_graph_query_result_t** out_result);
+
+YAMS_MOBILE_API void
+yams_mobile_graph_query_result_destroy(yams_mobile_graph_query_result_t* result);
+
+YAMS_MOBILE_API yams_mobile_string_view
+yams_mobile_graph_query_result_json(const yams_mobile_graph_query_result_t* result);
 
 YAMS_MOBILE_API yams_mobile_status yams_mobile_remove_document(yams_mobile_context_t* ctx,
                                                                const char* document_hash);
@@ -278,6 +373,8 @@ static inline yams_mobile_context_config yams_mobile_context_config_default() {
     config.struct_size = sizeof(yams_mobile_context_config);
     config.version = YAMS_MOBILE_API_VERSION;
     config.reserved = 0U;
+    config.backend_mode = YAMS_MOBILE_BACKEND_EMBEDDED;
+    config.daemon_socket_path = nullptr;
     return config;
 }
 
@@ -301,6 +398,8 @@ static inline yams_mobile_context_config yams_mobile_context_config_default(void
     config.telemetry_sink = NULL;
     config.max_worker_threads = 0U;
     config.flags = 0U;
+    config.backend_mode = YAMS_MOBILE_BACKEND_EMBEDDED;
+    config.daemon_socket_path = NULL;
     return config;
 }
 

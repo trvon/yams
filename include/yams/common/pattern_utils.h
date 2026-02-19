@@ -102,25 +102,36 @@ inline void brace_expand_impl(std::string_view pat, std::vector<std::string>& ou
                 break; // unmatched; treat literally
             --level;
             if (level == 0 && open != std::string_view::npos) {
-                // split inner by commas (not handling escapes)
+                // Split inner by commas at brace level 0 (not handling escapes).
                 std::string prefix{pat.substr(0, open)};
                 std::string_view inner = pat.substr(open + 1, i - open - 1);
                 std::string suffix{pat.substr(i + 1)};
+
                 size_t start = 0;
-                while (start <= inner.size()) {
-                    size_t pos = inner.find(',', start);
-                    std::string_view tok = (pos == std::string_view::npos)
-                                               ? inner.substr(start)
-                                               : inner.substr(start, pos - start);
-                    std::string merged;
-                    merged.reserve(prefix.size() + tok.size() + suffix.size());
-                    merged.append(prefix);
-                    merged.append(tok);
-                    merged.append(suffix);
-                    brace_expand_impl(merged, out);
-                    if (pos == std::string_view::npos)
-                        break;
-                    start = pos + 1;
+                size_t innerLevel = 0;
+                for (size_t pos = 0; pos <= inner.size(); ++pos) {
+                    const bool atEnd = (pos == inner.size());
+                    char ch = '\0';
+                    if (!atEnd) {
+                        ch = inner[pos];
+                        if (ch == '{') {
+                            ++innerLevel;
+                        } else if (ch == '}') {
+                            if (innerLevel > 0)
+                                --innerLevel;
+                        }
+                    }
+
+                    if (atEnd || (ch == ',' && innerLevel == 0)) {
+                        std::string_view tok = inner.substr(start, pos - start);
+                        std::string merged;
+                        merged.reserve(prefix.size() + tok.size() + suffix.size());
+                        merged.append(prefix);
+                        merged.append(tok);
+                        merged.append(suffix);
+                        brace_expand_impl(merged, out);
+                        start = pos + 1;
+                    }
                 }
                 return;
             }
@@ -249,20 +260,12 @@ inline void brace_expand_impl(std::string_view pat, std::vector<std::string>& ou
         // DP-style match with '**'
         size_t i = 0, j = 0; // i: tseg, j: pseg
         size_t starI = std::string_view::npos, starJ = std::string_view::npos;
-        // If anchored, pattern must match from beginning; else allow leading skip via implicit '**'
-        if (!anchored && !pseg.empty() && pseg[0] != "**") {
-            // emulate implicit leading '**' by advancing i until first segment can match
-            size_t ii = 0;
-            bool found = false;
-            for (; ii < tseg.size(); ++ii) {
-                if (match_segment(tseg[ii], pseg[0])) {
-                    i = ii;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found)
-                continue; // try next alt
+        // If anchored, pattern must match from beginning; else allow leading skip via implicit
+        // '**'. Insert an implicit leading '**' so the matcher can backtrack across multiple
+        // possible starting positions (e.g., matching "b/c" against "a/b/x/b/c").
+        static constexpr std::string_view kStarStar = "**";
+        if (!anchored && (pseg.empty() || pseg[0] != kStarStar)) {
+            pseg.insert(pseg.begin(), kStarStar);
         }
 
         while (i < tseg.size()) {

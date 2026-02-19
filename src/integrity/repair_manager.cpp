@@ -320,39 +320,35 @@ RepairManager::repairPathTree(std::function<void(uint64_t, uint64_t)> progress) 
 
     PathTreeRepairResult result;
 
-    // Query all documents
-    auto docsResult = repo_->queryDocuments(metadata::DocumentQueryOptions{});
-    if (!docsResult) {
-        spdlog::error("Failed to query documents for path tree repair: {}",
-                      docsResult.error().message);
-        return docsResult.error();
+    // Use SQL anti-join to find only docs missing from path_tree instead of
+    // loading all documents and checking each one individually (O(N) → O(missing)).
+    auto missingDocs = repo_->findDocsMissingPathTree();
+    if (!missingDocs) {
+        spdlog::error("Failed to query documents missing from path tree: {}",
+                      missingDocs.error().message);
+        return missingDocs.error();
     }
 
-    auto& allDocs = docsResult.value();
-    const uint64_t total = allDocs.size();
-    spdlog::info("Path tree repair: scanning {} documents", total);
+    auto& docs = missingDocs.value();
+    const uint64_t total = docs.size();
+    spdlog::info("Path tree repair: {} documents missing from path tree", total);
+
+    if (total == 0) {
+        // Quick path: nothing to do. Still log the scan count from a lightweight count.
+        auto countRes = repo_->countDocsMissingPathTree();
+        // countRes should be 0, but even if it fails we're done.
+        result.documentsScanned = 0;
+        spdlog::info("Path tree repair complete: all documents have path tree entries");
+        return result;
+    }
+
+    result.documentsScanned = total;
 
     uint64_t processed = 0;
-    for (const auto& doc : allDocs) {
-        result.documentsScanned++;
-
+    for (const auto& doc : docs) {
         // Report progress
         if (progress && processed % 100 == 0) {
             progress(processed, total);
-        }
-
-        // Skip documents without a valid path
-        if (doc.filePath.empty()) {
-            processed++;
-            continue;
-        }
-
-        // Check if this document already has a path tree entry
-        auto existingNode = repo_->findPathTreeNodeByFullPath(doc.filePath);
-        if (existingNode && existingNode.value().has_value()) {
-            // Node exists, skip (or could update doc_count if needed)
-            processed++;
-            continue;
         }
 
         // Create path tree entry for this document

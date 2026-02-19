@@ -663,6 +663,8 @@ private:
             std::cout << j.dump(2) << std::endl;
         } else {
             std::cout << "Session: " << *cur << std::endl;
+            if (j.contains("uuid") && j["uuid"].is_string())
+                std::cout << "UUID: " << j["uuid"].get<std::string>() << std::endl;
             size_t selCount = svc ? svc->listPathSelectors(*cur).size()
                                   : (j.contains("selectors") ? j["selectors"].size() : 0);
             auto mat =
@@ -1057,7 +1059,10 @@ private:
             return Error{ErrorCode::NotInitialized, "Session service not available"};
         try {
             svc->create(sessionName_, sessionDesc_);
+            auto info = svc->getSessionInfo(sessionName_);
             std::cout << "Created session: " << sessionName_ << " (closed)\n";
+            if (info && !info->uuid.empty())
+                std::cout << "  UUID: " << info->uuid << "\n";
         } catch (const std::exception& e) {
             return Error{ErrorCode::InvalidArgument, e.what()};
         }
@@ -1117,6 +1122,10 @@ private:
         if (jsonOutput_) {
             json j;
             j["name"] = info->name;
+            if (!info->uuid.empty())
+                j["uuid"] = info->uuid;
+            if (!info->instanceId.empty())
+                j["instanceId"] = info->instanceId;
             j["description"] = info->description;
             j["state"] = info->state == app::services::SessionState::Active ? "active" : "closed";
             j["documentCount"] = info->documentCount;
@@ -1128,10 +1137,14 @@ private:
             std::string stateStr =
                 info->state == app::services::SessionState::Active ? "active" : "closed";
             std::cout << "Session: " << info->name << "\n";
+            if (!info->uuid.empty())
+                std::cout << "  UUID: " << info->uuid << "\n";
             std::cout << "  State: " << stateStr << "\n";
             if (!info->description.empty())
                 std::cout << "  Description: " << info->description << "\n";
             std::cout << "  Documents: " << info->documentCount << "\n";
+            if (!info->instanceId.empty())
+                std::cout << "  Last Instance: " << info->instanceId << "\n";
         }
         return {};
     }

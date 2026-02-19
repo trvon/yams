@@ -287,8 +287,11 @@ ResourceSnapshot ResourceGovernor::tick(ServiceManager* sm) {
                      snap.memoryBudgetBytes / (1024ull * 1024ull), snap.memoryPressure * 100.0,
                      snap.cpuUsagePercent);
 
-        currentLevel_.store(newLevel, std::memory_order_relaxed);
+        // Fix Issue 1 (timing audit): update scaling caps BEFORE publishing
+        // the new level so concurrent readers never observe the new level with
+        // stale (old-level) caps.
         updateScalingCaps(newLevel);
+        currentLevel_.store(newLevel, std::memory_order_release);
 
         // Trigger level-specific responses
         switch (newLevel) {
@@ -307,7 +310,14 @@ ResourceSnapshot ResourceGovernor::tick(ServiceManager* sm) {
         }
     }
 
-    snap.level = newLevel;
+    // Keep snapshot level consistent with getPressureLevel() semantics.
+    // During startup grace, getPressureLevel() caps values above Warning.
+    // Export the same effective level in snapshots to avoid observable mismatch.
+    if (startupGraceActive() && newLevel > ResourcePressureLevel::Warning) {
+        snap.level = ResourcePressureLevel::Warning;
+    } else {
+        snap.level = newLevel;
+    }
 
     // Update stored snapshot
     {
@@ -367,12 +377,21 @@ void ResourceGovernor::updateCpuAdmissionControl(const ResourceSnapshot& snap) {
 void ResourceGovernor::collectMetrics(ServiceManager* sm, ResourceSnapshot& snap) {
     YAMS_ZONE_SCOPED_N("ResourceGovernor::collectMetrics");
 
-    // Memory metrics
-    snap.rssBytes = readRssBytes();
-    snap.memoryBudgetBytes = TuneAdvisor::memoryBudgetBytes();
+    // Cache /proc reads with a minimum interval to avoid excessive filesystem I/O.
+    // Even at 250ms default tick, env-var overrides could lower it; this guarantees
+    // at most ~10 /proc opens/sec regardless of tick cadence.
+    auto now = std::chrono::steady_clock::now();
+    constexpr auto kMinProcInterval = std::chrono::milliseconds(100);
 
-    // CPU metrics (delta-based, uses mutable state for jiffies tracking)
-    snap.cpuUsagePercent = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
+    if (now - lastProcReadTime_ >= kMinProcInterval) {
+        cachedRssBytes_ = readRssBytes();
+        cachedCpuPercent_ = readCpuUsagePercent(lastProcJiffies_, lastTotalJiffies_);
+        lastProcReadTime_ = now;
+    }
+
+    snap.rssBytes = cachedRssBytes_;
+    snap.memoryBudgetBytes = TuneAdvisor::memoryBudgetBytes();
+    snap.cpuUsagePercent = cachedCpuPercent_;
 
     if (snap.memoryBudgetBytes > 0) {
         snap.memoryPressure =
@@ -446,20 +465,26 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
     // CPU-based pressure escalation: if CPU is very high, escalate the pressure level
     // This prevents CPU saturation even when memory is fine
     const double cpuHighThresh = TuneAdvisor::cpuHighThresholdPercent();
-    const double cpuCriticalThresh = cpuHighThresh + 25.0; // 25% above high
+    const double cpuCriticalGap = TuneAdvisor::cpuCriticalGapPercent();
+    const double cpuCriticalThresh = cpuHighThresh + cpuCriticalGap;
 
     if (snap.cpuUsagePercent >= cpuCriticalThresh) {
-        // Escalate to at least Critical if CPU is very high
-        rawLevel = std::max(rawLevel, ResourcePressureLevel::Critical);
+        if (snap.embedQueued > 0 && snap.memoryPressure < criticalThresh) {
+            rawLevel = std::max(rawLevel, ResourcePressureLevel::Warning);
+        } else {
+            rawLevel = std::max(rawLevel, ResourcePressureLevel::Critical);
+        }
     } else if (snap.cpuUsagePercent >= cpuHighThresh) {
-        // Escalate to at least Warning if CPU is high
         rawLevel = std::max(rawLevel, ResourcePressureLevel::Warning);
     }
 
     // Apply hysteresis: require time at a level before transitioning
     // (decoupled from tick interval for consistent behavior at any tick rate)
     const auto hysteresisMs = std::chrono::milliseconds(TuneAdvisor::memoryHysteresisMs());
-    auto now = std::chrono::steady_clock::now();
+    const auto cpuHysteresisMs = std::chrono::milliseconds(TuneAdvisor::cpuLevelHysteresisMs());
+    // Fix Issue 5 (timing audit): use snap.timestamp instead of calling now() again
+    // to avoid drift between the snapshot time and the hysteresis comparison.
+    auto now = snap.timestamp;
 
     if (rawLevel != proposedLevel_) {
         // Level changed - reset timer
@@ -477,8 +502,13 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
         }
         return currentLvl; // Hold at current level
     } else if (rawLevel < currentLvl) {
-        // De-escalating - require 2× hysteresisMs for stability
-        if (elapsed >= hysteresisMs * 2) {
+        // De-escalating:
+        // - Memory-driven pressure keeps conservative 2x hysteresis for stability.
+        // - CPU-driven pressure uses a shorter CPU-specific hysteresis to avoid
+        //   excessive recovery lag and backlog oscillation.
+        const bool memoryPressurePresent = snap.memoryPressure >= warningThresh;
+        const auto deescalationHold = memoryPressurePresent ? (hysteresisMs * 2) : cpuHysteresisMs;
+        if (elapsed >= deescalationHold) {
             return rawLevel;
         }
         return currentLvl; // Hold at current level
@@ -494,12 +524,24 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
 void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
     std::unique_lock lock(mutex_);
 
+    auto slowDown = [](std::uint32_t current, std::uint32_t percent) -> std::uint32_t {
+        if (current == 0) {
+            return 0;
+        }
+        const std::uint32_t scaled = static_cast<std::uint32_t>(
+            (static_cast<std::uint64_t>(current) * percent + 99u) / 100u);
+        return std::min(current, std::max(1u, scaled));
+    };
+
     // Get TuneAdvisor defaults
     const auto defaultIngest = TuneAdvisor::maxIngestWorkers();
     const auto defaultSearch = TuneAdvisor::searchConcurrencyLimit();
-    const auto defaultExtract = TuneAdvisor::postExtractionConcurrent();
-    const auto defaultKg = TuneAdvisor::postKgConcurrent();
-    const auto defaultEmbed = TuneAdvisor::postEmbedConcurrent();
+    const auto defaultExtract = TuneAdvisor::postExtractionDefaultConcurrent();
+    const auto defaultKg = TuneAdvisor::postKgDefaultConcurrent();
+    const auto defaultSymbol = TuneAdvisor::postSymbolDefaultConcurrent();
+    const auto defaultEntity = TuneAdvisor::postEntityDefaultConcurrent();
+    const auto defaultTitle = TuneAdvisor::postTitleDefaultConcurrent();
+    const auto defaultEmbed = TuneAdvisor::postEmbedDefaultConcurrent();
 
     switch (level) {
         case ResourcePressureLevel::Normal:
@@ -509,33 +551,48 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
                 .searchConcurrency = defaultSearch,
                 .extractionConcurrency = defaultExtract,
                 .kgConcurrency = defaultKg,
+                .symbolConcurrency = defaultSymbol,
+                .entityConcurrency = defaultEntity,
+                .titleConcurrency = defaultTitle,
                 .embedConcurrency = defaultEmbed,
                 .allowModelLoads = true,
                 .allowNewIngest = true,
             };
             break;
 
-        case ResourcePressureLevel::Warning:
-            // Cap at 50% of normal, block model loads
+        case ResourcePressureLevel::Warning: {
+            // Gentle reduction under Warning to avoid abrupt throughput cliffs.
+            // Keep model-load blocking, but retain most pipeline concurrency so
+            // gradient limiters can adapt smoothly.
+            const std::uint32_t warningScale = TuneAdvisor::governorWarningScalePercent();
             scalingCaps_ = ScalingCaps{
-                .ingestWorkers = std::max(2u, defaultIngest / 2),
-                .searchConcurrency = std::max(2u, defaultSearch / 2),
-                .extractionConcurrency = std::max(2u, defaultExtract / 2),
-                .kgConcurrency = std::max(2u, defaultKg / 2),
-                .embedConcurrency = std::max(1u, defaultEmbed / 2),
+                .ingestWorkers = slowDown(defaultIngest, warningScale),
+                .searchConcurrency = slowDown(defaultSearch, warningScale),
+                .extractionConcurrency = slowDown(defaultExtract, warningScale),
+                .kgConcurrency = slowDown(defaultKg, warningScale),
+                .symbolConcurrency = slowDown(defaultSymbol, warningScale),
+                .entityConcurrency = slowDown(defaultEntity, warningScale),
+                .titleConcurrency = slowDown(defaultTitle, warningScale),
+                .embedConcurrency = slowDown(defaultEmbed, warningScale),
                 .allowModelLoads = false,
                 .allowNewIngest = true,
             };
             break;
+        }
 
         case ResourcePressureLevel::Critical:
-            // Minimum concurrency, aggressive reduction
+            // Minimum concurrency, aggressive reduction.
+            // Cap each field to never exceed the Normal allocation so that
+            // Critical <= Warning <= Normal holds on small systems.
             scalingCaps_ = ScalingCaps{
-                .ingestWorkers = 2,
-                .searchConcurrency = 2,
-                .extractionConcurrency = 2,
-                .kgConcurrency = 2,
-                .embedConcurrency = 1,
+                .ingestWorkers = std::min(defaultIngest, 2u),
+                .searchConcurrency = std::min(defaultSearch, 2u),
+                .extractionConcurrency = std::min(defaultExtract, 2u),
+                .kgConcurrency = std::min(defaultKg, 2u),
+                .symbolConcurrency = std::min(defaultSymbol, 2u),
+                .entityConcurrency = std::min(defaultEntity, 1u),
+                .titleConcurrency = std::min(defaultTitle, 2u),
+                .embedConcurrency = std::min(defaultEmbed, 1u),
                 .allowModelLoads = false,
                 .allowNewIngest = true,
             };
@@ -548,6 +605,9 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
                 .searchConcurrency = 1,
                 .extractionConcurrency = 0,
                 .kgConcurrency = 0,
+                .symbolConcurrency = 0,
+                .entityConcurrency = 0,
+                .titleConcurrency = 0,
                 .embedConcurrency = 0,
                 .allowModelLoads = false,
                 .allowNewIngest = false,
@@ -878,21 +938,24 @@ void ResourceGovernor::onCriticalLevel(ServiceManager* sm) {
         }
     }
 
-    // Trigger model eviction if enabled
     if (TuneAdvisor::enableProactiveEviction() && sm && canEvict()) {
-        if (auto provider = sm->getModelProvider()) {
-            std::shared_lock lock(mutex_);
-            const double pressure = lastSnapshot_.memoryPressure;
-            lock.unlock();
+        std::shared_lock lock(mutex_);
+        const double pressure = lastSnapshot_.memoryPressure;
+        lock.unlock();
 
-            // evictUnderPressure is defined in IModelProvider but may not be
-            // implemented by all providers. We'll add it to the interface.
-            // For now, use releaseUnusedResources as a fallback.
-            provider->releaseUnusedResources();
-            recordEviction();
-
-            spdlog::info("[ResourceGovernor] Released unused model resources (pressure={:.1f}%)",
-                         pressure * 100);
+        const bool memoryDriven = pressure >= TuneAdvisor::memoryCriticalThreshold();
+        if (memoryDriven) {
+            if (auto provider = sm->getModelProvider()) {
+                provider->releaseUnusedResources();
+                recordEviction();
+                spdlog::info(
+                    "[ResourceGovernor] Released unused model resources (pressure={:.1f}%)",
+                    pressure * 100);
+            }
+        } else {
+            spdlog::debug(
+                "[ResourceGovernor] Skipping model eviction (CPU-driven critical, mem={:.1f}%)",
+                pressure * 100);
         }
     }
 
@@ -974,6 +1037,30 @@ std::uint32_t ResourceGovernor::maxKgConcurrency() const {
     return scalingCaps_.kgConcurrency;
 }
 
+std::uint32_t ResourceGovernor::maxSymbolConcurrency() const {
+    if (!TuneAdvisor::enableResourceGovernor()) {
+        return TuneAdvisor::postSymbolConcurrent();
+    }
+    std::shared_lock lock(mutex_);
+    return scalingCaps_.symbolConcurrency;
+}
+
+std::uint32_t ResourceGovernor::maxEntityConcurrency() const {
+    if (!TuneAdvisor::enableResourceGovernor()) {
+        return TuneAdvisor::postEntityConcurrent();
+    }
+    std::shared_lock lock(mutex_);
+    return scalingCaps_.entityConcurrency;
+}
+
+std::uint32_t ResourceGovernor::maxTitleConcurrency() const {
+    if (!TuneAdvisor::enableResourceGovernor()) {
+        return TuneAdvisor::postTitleConcurrent();
+    }
+    std::shared_lock lock(mutex_);
+    return scalingCaps_.titleConcurrency;
+}
+
 // ============================================================================
 // Observability
 // ============================================================================
@@ -984,7 +1071,7 @@ ResourceSnapshot ResourceGovernor::getSnapshot() const {
 }
 
 ResourcePressureLevel ResourceGovernor::getPressureLevel() const noexcept {
-    auto level = currentLevel_.load(std::memory_order_relaxed);
+    auto level = currentLevel_.load(std::memory_order_acquire);
     // During startup grace period, cap at Warning to prevent false Emergency
     // from stalling pollers before metrics are populated.
     if (startupGraceActive() && level > ResourcePressureLevel::Warning) {

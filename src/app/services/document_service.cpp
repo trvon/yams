@@ -1,4 +1,5 @@
 #include <yams/app/services/services.hpp>
+#include <yams/core/uuid.h>
 // Hot/Cold mode helpers (env-driven)
 #include "../../cli/hot_cold_utils.h"
 
@@ -16,11 +17,11 @@
 #include <yams/extraction/text_extractor.h>
 
 #include <yams/core/cpp23_features.hpp>
+#include <yams/ingest/ingest_helpers.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
-#include <yams/ingest/ingest_helpers.h>
 
 #include <algorithm>
 #include <cctype>
@@ -45,26 +46,6 @@ namespace yams::app::services {
 namespace {
 
 constexpr std::size_t kCentroidPreviewLimit = 16;
-
-std::string generateSnapshotId() {
-    auto now = std::chrono::system_clock::now();
-    auto time_t_now = std::chrono::system_clock::to_time_t(now);
-    auto micros =
-        std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count() %
-        1000000;
-
-    std::tm tm_utc;
-#ifdef _WIN32
-    gmtime_s(&tm_utc, &time_t_now);
-#else
-    gmtime_r(&time_t_now, &tm_utc);
-#endif
-
-    std::ostringstream oss;
-    oss << std::put_time(&tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0') << std::setw(6)
-        << micros << 'Z';
-    return oss.str();
-}
 
 // Use project compatibility helpers from cpp23_features.hpp
 using yams::features::string_starts_with;
@@ -332,7 +313,12 @@ private:
     std::vector<metadata::DocumentInfo> tryPathPatterns(const std::string& name) {
         // Glob shortcut: if name contains glob chars, use glob-to-SQL conversion
         if (name.find('*') != std::string::npos || name.find('?') != std::string::npos) {
-            auto res = metadata::queryDocumentsByGlobPatterns(repo_, {name});
+            std::vector<std::string> patterns = {name};
+            // If the glob is relative, also try matching as a suffix of absolute paths
+            if (!name.empty() && name[0] != '/') {
+                patterns.push_back("**/" + name);
+            }
+            auto res = metadata::queryDocumentsByGlobPatterns(repo_, patterns);
             if (res)
                 return res.value();
             return {};
@@ -560,7 +546,8 @@ public:
         if (!req.collection.empty()) {
             md.tags["collection"] = req.collection;
         }
-        const auto snapshotId = req.snapshotId.empty() ? generateSnapshotId() : req.snapshotId;
+        const auto snapshotId =
+            req.snapshotId.empty() ? yams::core::generateSnapshotId() : req.snapshotId;
         const auto snapshotTime =
             std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(
                                std::chrono::system_clock::now().time_since_epoch())
@@ -573,6 +560,10 @@ public:
             md.tags["snapshot_label"] = req.snapshotLabel;
         }
         if (req.noEmbeddings) {
+            // Persist the opt-out as both:
+            // - a tag key (tag:no_embeddings) so tag queries and getDocumentTags() see it
+            // - a legacy metadata key (no_embeddings=true) for any existing consumers
+            md.tags["tag:no_embeddings"] = "no_embeddings";
             md.tags["no_embeddings"] = "true";
         }
         if (!req.sessionId.empty() && !req.bypassSession) {
@@ -712,14 +703,37 @@ public:
 
             populatePathDerivedFields(info);
 
-            auto ins = ctx_.metadataRepo->insertDocument(info);
+            // Build metadata tags as key-value pairs for the combined insert
+            std::vector<std::pair<std::string, metadata::MetadataValue>> tagPairs;
+            tagPairs.reserve(md.tags.size());
+            for (const auto& [k, v] : md.tags) {
+                tagPairs.emplace_back(k, metadata::MetadataValue(v));
+            }
+
+            // Build snapshot record for the combined insert
+            metadata::TreeSnapshotRecord snapshotRecord;
+            snapshotRecord.snapshotId = snapshotId;
+            // ingestDocumentId is set by insertDocumentWithMetadata
+            snapshotRecord.createdTime =
+                std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+            snapshotRecord.fileCount = 1;
+            snapshotRecord.totalBytes = info.fileSize;
+            snapshotRecord.metadata["directory_path"] = info.filePath;
+            if (!req.snapshotLabel.empty()) {
+                snapshotRecord.metadata["snapshot_label"] = req.snapshotLabel;
+            }
+            if (!req.collection.empty()) {
+                snapshotRecord.metadata["collection"] = req.collection;
+            }
+
+            // Single-transaction insert: document + metadata + snapshot in one
+            // BEGIN IMMEDIATE, reducing 15-20 lock acquisitions to 1.
+            auto ins =
+                ctx_.metadataRepo->insertDocumentWithMetadata(info, tagPairs, &snapshotRecord);
             if (ins) {
                 int64_t docId = ins.value();
-                for (const auto& [k, v] : md.tags) {
-                    (void)ctx_.metadataRepo->setMetadata(docId, k, metadata::MetadataValue(v));
-                }
 
-                // Update path tree for this document (best-effort)
+                // Update path tree for this document (best-effort, separate txn)
                 try {
                     auto treeRes = ctx_.metadataRepo->upsertPathTreeForDocument(
                         info, docId, true /* isNewDocument */, std::span<const float>());

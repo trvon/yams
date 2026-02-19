@@ -20,6 +20,10 @@ else
     'post_ingest_queue_validation_test.cpp',
   )
 
+  post_ingest_queue_benchmark_srcs = files(
+    'post_ingest_queue_benchmark_test.cpp',
+  )
+
   post_ingest_trace_srcs = files(
     'post_ingest_trace.cpp',
   )
@@ -53,6 +57,10 @@ else
 
   daemon_sigterm_srcs = files(
     'daemon_sigterm_test.cpp',
+  )
+
+  proxy_slot_starvation_srcs = files(
+    'proxy_slot_starvation_test.cpp',
   )
 
   lifecycle_single_instance_srcs = files(
@@ -192,6 +200,23 @@ else
       args: ['--allow-running-no-tests'],
     )
 
+    post_ingest_queue_benchmark_exe = executable('yams_post_ingest_queue_benchmark',
+      post_ingest_queue_benchmark_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('post_ingest_queue_benchmark',
+      post_ingest_queue_benchmark_exe,
+      suite: ['integration', 'daemon', 'catch2', 'post-ingest', 'benchmark'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 600, # Longer timeout for benchmark
+      args: ['--allow-running-no-tests'],
+    )
+
     client_timeout_recovery_exe = executable('yams_client_timeout_recovery_tests_catch2',
       client_timeout_recovery_srcs,
       include_directories: incs,
@@ -309,6 +334,23 @@ else
       dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
+    )
+
+    proxy_slot_starvation_exe = executable('yams_proxy_slot_starvation_tests_catch2',
+      proxy_slot_starvation_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('proxy_slot_starvation',
+      proxy_slot_starvation_exe,
+      suite: ['integration', 'daemon', 'catch2', 'proxy', 'slots'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['--allow-running-no-tests'],
     )
 
     test('daemon_sigterm_external_flag',

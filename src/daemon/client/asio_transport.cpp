@@ -4,6 +4,8 @@
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
+#include <yams/daemon/client/ipc_failure.h>
+
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
@@ -79,7 +81,7 @@ AsioTransportAdapter::AsioTransportAdapter(const Options& opts) : opts_(opts) {
     fsm_.enable_snapshots(snaps_on);
 }
 
-boost::asio::awaitable<std::shared_ptr<AsioConnection>>
+boost::asio::awaitable<Result<std::shared_ptr<AsioConnection>>>
 AsioTransportAdapter::get_or_create_connection(const Options& opts) {
     auto pool = AsioConnectionPool::get_or_create(opts);
     co_return co_await pool->acquire();
@@ -105,7 +107,8 @@ AsioTransportAdapter::async_connect_with_timeout(const std::filesystem::path& pa
         std::string msg = "Daemon not started (socket not found at '" + path.string() +
                           "'). Set YAMS_DAEMON_SOCKET or update config (daemon.socket_path).";
         spdlog::debug("AsioTransportAdapter preflight: {}", msg);
-        co_return Error{ErrorCode::NetworkError, std::move(msg)};
+        co_return Error{ErrorCode::NetworkError,
+                        formatIpcFailure(IpcFailureKind::SocketMissing, std::move(msg))};
     }
 #ifndef _WIN32
     {
@@ -114,7 +117,8 @@ AsioTransportAdapter::async_connect_with_timeout(const std::filesystem::path& pa
             if (!S_ISSOCK(st.st_mode)) {
                 std::string msg = "Path exists but is not a socket: '" + path.string() + "'";
                 spdlog::debug("AsioTransportAdapter preflight: {}", msg);
-                co_return Error{ErrorCode::NetworkError, std::move(msg)};
+                co_return Error{ErrorCode::NetworkError,
+                                formatIpcFailure(IpcFailureKind::PathNotSocket, std::move(msg))};
             }
         }
     }
@@ -161,21 +165,27 @@ AsioTransportAdapter::async_connect_with_timeout(const std::filesystem::path& pa
 
     if (connect_result.index() == 1) {
         socket->close();
-        co_return Error{ErrorCode::Timeout,
-                        yams::format("Connection timeout (socket='{}')", path.string())};
+        co_return Error{
+            ErrorCode::Timeout,
+            formatIpcFailure(IpcFailureKind::Timeout,
+                             yams::format("Connection timeout (socket='{}')", path.string()))};
     }
 
     auto& [ec] = std::get<0>(connect_result);
     if (ec) {
         if (ec == boost::asio::error::connection_refused ||
             ec == make_error_code(boost::system::errc::connection_refused)) {
-            co_return Error{ErrorCode::NetworkError,
-                            yams::format("Connection refused (socket='{}'). Is the daemon running? "
-                                         "Try 'yams daemon start' or verify daemon.socket_path.",
-                                         path.string())};
+            co_return Error{
+                ErrorCode::NetworkError,
+                formatIpcFailure(
+                    IpcFailureKind::Refused,
+                    yams::format("Connection refused (socket='{}'). Is the daemon running? "
+                                 "Try 'yams daemon start' or verify daemon.socket_path.",
+                                 path.string()))};
         }
         co_return Error{ErrorCode::NetworkError,
-                        yams::format("Connection failed: {}", ec.message())};
+                        formatIpcFailure(IpcFailureKind::Other,
+                                         yams::format("Connection failed: {}", ec.message()))};
     }
 
     co_return std::move(socket);
@@ -340,9 +350,17 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
         co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
     }
 
-    auto conn = co_await get_or_create_connection(opts_);
+    auto conn_res = co_await get_or_create_connection(opts_);
+    if (!conn_res) {
+        co_return conn_res.error();
+    }
+    auto conn = std::move(conn_res).value();
     if (!conn || !conn->alive) {
-        co_return Error{ErrorCode::NetworkError, "Failed to establish connection"};
+        co_return Error{
+            ErrorCode::NetworkError,
+            formatIpcFailure(IpcFailureKind::Other,
+                             yams::format("Connection not alive after acquire (socket='{}')",
+                                          opts_.socketPath.string()))};
     }
 
     const auto req_type = getMessageType(req);
@@ -448,6 +466,7 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
     }
 
     constexpr int kMaxRetries = 1;
+    std::optional<Error> lastErr;
     for (int attempt = 0; attempt <= kMaxRetries; ++attempt) {
         // Check cancellation at each retry attempt
         cs = co_await this_coro::cancellation_state;
@@ -455,14 +474,29 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
             co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
         }
 
-        auto conn = co_await get_or_create_connection(opts_);
-        if (!conn || !conn->alive) {
+        auto conn_res = co_await get_or_create_connection(opts_);
+        if (!conn_res) {
+            lastErr = conn_res.error();
             if (attempt < kMaxRetries) {
                 spdlog::debug("Failed to establish connection, retrying (attempt {}/{})",
                               attempt + 1, kMaxRetries + 1);
                 continue;
             }
-            co_return Error{ErrorCode::NetworkError, "Failed to establish connection"};
+            co_return conn_res.error();
+        }
+        auto conn = std::move(conn_res).value();
+        if (!conn || !conn->alive) {
+            lastErr = Error{
+                ErrorCode::NetworkError,
+                formatIpcFailure(IpcFailureKind::Other,
+                                 yams::format("Connection not alive after acquire (socket='{}')",
+                                              opts_.socketPath.string()))};
+            if (attempt < kMaxRetries) {
+                spdlog::debug("Failed to establish connection, retrying (attempt {}/{})",
+                              attempt + 1, kMaxRetries + 1);
+                continue;
+            }
+            co_return *lastErr;
         }
 
         Message msg;
@@ -534,6 +568,7 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
                 auto result = done_future.get();
 
                 if (!result && attempt < kMaxRetries) {
+                    lastErr = result.error();
                     const auto& err_msg = result.error().message;
                     bool is_eof_error = err_msg.find("End of file") != std::string::npos ||
                                         err_msg.find("Connection closed") != std::string::npos;
@@ -571,7 +606,12 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         }
     }
 
-    co_return Error{ErrorCode::NetworkError, "Failed after retry"};
+    if (lastErr)
+        co_return *lastErr;
+    co_return Error{
+        ErrorCode::NetworkError,
+        formatIpcFailure(IpcFailureKind::Other, yams::format("Failed after retry (socket='{}')",
+                                                             opts_.socketPath.string()))};
 }
 
 } // namespace yams::daemon

@@ -68,7 +68,7 @@ auto run_awaitable_with_timeout(Awaitable aw, std::chrono::milliseconds timeout)
 
 class MCPAsyncExecFixture {
 public:
-    std::unique_ptr<yams::mcp::MCPServer> server;
+    std::shared_ptr<yams::mcp::MCPServer> server;
     std::filesystem::path socketPath;
 
     MCPAsyncExecFixture() {
@@ -76,7 +76,7 @@ public:
         setenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1", 1);
 
         auto transport = std::make_unique<NullTransport>();
-        server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+        server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
         const auto uniqueName =
             std::string("yams-mcp-test-") +

@@ -3,15 +3,15 @@
 #
 # The AFL++ container ships with afl-clang-fast/afl-clang-fast++ wrappers
 # that instrument code for fuzzing. This profile ensures dependencies are
-# built with compatible settings (libc++, Debug mode for better crash info).
+# built with compatible settings (Debug mode for better crash info).
 #
 # Note: This is the HOST profile. Build tools use default_build profile.
 
 [settings]
 os=Linux
-arch=armv8
+arch=x86_64
 compiler=clang
-compiler.version=18
+compiler.version=19
 compiler.libcxx=libstdc++11
 compiler.cppstd=23
 build_type=Debug

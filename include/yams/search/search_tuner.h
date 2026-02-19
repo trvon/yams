@@ -165,13 +165,14 @@ struct TunedParams {
 
         case TuningState::SCIENTIFIC:
             // For scientific/benchmark corpora: balanced text + vector fusion
-            // Text-dominant because FTS5 keyword matching is reliable when it works
+            // Text-dominant because lexical precision is usually stronger than dense-only
+            // semantics on benchmark-style scientific corpora.
             // WEIGHTED_RECIPROCAL avoids COMB_MNZ's mnzBoost penalty which demotes
             // documents found by only one component (common when vector search doesn't
             // understand scientific terminology)
             params.rrfK = 12;            // Low k for better top-rank discrimination
-            params.textWeight = 0.60f;   // Text as primary signal
-            params.vectorWeight = 0.35f; // Vector for semantic understanding
+            params.textWeight = 0.70f;   // Text as primary signal
+            params.vectorWeight = 0.25f; // Vector as semantic assist
             params.entityVectorWeight = 0.00f;
             params.pathTreeWeight = 0.00f;
             params.kgWeight = 0.00f;

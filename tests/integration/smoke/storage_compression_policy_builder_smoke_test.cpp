@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <vector>
+#include "../../common/env_compat.h"
 #include <gtest/gtest.h>
 #include <yams/api/content_store_builder.h>
 #include <yams/compat/unistd.h>

@@ -53,6 +53,30 @@ public:
         head_.store(next, std::memory_order_release);
         return true;
     }
+    // Batch push with a single lock acquisition.
+    // Returns number of items successfully enqueued.
+    std::size_t try_push_many(std::vector<T>& values, std::size_t start = 0) noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (start >= values.size()) {
+            return 0;
+        }
+        std::size_t pushed = 0;
+        auto head = head_.load(std::memory_order_relaxed);
+        auto tail = tail_.load(std::memory_order_acquire);
+        for (std::size_t i = start; i < values.size(); ++i) {
+            auto next = inc(head);
+            if (next == tail) {
+                break; // full
+            }
+            buf_[head] = std::move(values[i]);
+            head = next;
+            ++pushed;
+        }
+        if (pushed > 0) {
+            head_.store(head, std::memory_order_release);
+        }
+        return pushed;
+    }
     bool try_pop(T& out) noexcept {
         std::lock_guard<std::mutex> lk(mu_);
         auto tail = tail_.load(std::memory_order_relaxed);
@@ -133,6 +157,19 @@ public:
         head_.store(next, std::memory_order_release);
         return true;
     }
+    std::size_t try_push_many(std::vector<T>& values, std::size_t start = 0) noexcept {
+        if (start >= values.size()) {
+            return 0;
+        }
+        std::size_t pushed = 0;
+        for (std::size_t i = start; i < values.size(); ++i) {
+            if (!try_push(std::move(values[i]))) {
+                break;
+            }
+            ++pushed;
+        }
+        return pushed;
+    }
     bool try_pop(T& out) noexcept {
         auto tail = tail_.load(std::memory_order_relaxed);
         if (tail == head_.load(std::memory_order_acquire))
@@ -190,12 +227,39 @@ public:
         return q;
     }
 
+    // Non-creating accessor: returns nullptr if channel doesn't exist.
+    // Use for observability paths (status/metrics) to avoid side effects.
+    template <typename T> std::shared_ptr<SpscQueue<T>> get_channel(const std::string& name) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = chans_.find(name);
+        if (it == chans_.end()) {
+            return nullptr;
+        }
+        return std::static_pointer_cast<SpscQueue<T>>(it->second);
+    }
+
     // Common event types
+    struct EmbedPreparedChunk {
+        std::string chunkId;
+        std::string content;
+        std::size_t startOffset{0};
+        std::size_t endOffset{0};
+    };
+
+    struct EmbedPreparedDoc {
+        std::string hash;
+        std::string fileName;
+        std::string filePath;
+        std::string mimeType;
+        std::vector<EmbedPreparedChunk> chunks;
+    };
+
     struct EmbedJob {
         std::vector<std::string> hashes;
         uint32_t batchSize{0};
         bool skipExisting{true};
         std::string modelName;
+        std::vector<EmbedPreparedDoc> preparedDocs;
     };
 
     enum class Fts5Operation {
@@ -268,6 +332,20 @@ public:
         bool runOnce{true};    // Run once at startup vs periodic
     };
 
+    // Storage garbage collection job (routed through bus for centralized dispatch)
+    struct StorageGcJob {
+        bool dryRun{false};
+    };
+
+    // Entity graph extraction job (routes through bus instead of direct WorkCoordinator dispatch)
+    struct EntityGraphJob {
+        std::string documentHash;
+        std::string filePath;
+        std::string contentUtf8;
+        std::string language;
+        std::string mimeType;
+    };
+
 private:
     InternalEventBus() = default;
     std::mutex mu_;
@@ -276,6 +354,9 @@ private:
     std::atomic<std::uint64_t> embedQueued_{0};
     std::atomic<std::uint64_t> embedDropped_{0};
     std::atomic<std::uint64_t> embedConsumed_{0};
+    std::atomic<std::uint64_t> embedPreparedDocsQueued_{0};
+    std::atomic<std::uint64_t> embedPreparedChunksQueued_{0};
+    std::atomic<std::uint64_t> embedHashOnlyDocsQueued_{0};
     std::atomic<std::uint64_t> fts5Queued_{0};
     std::atomic<std::uint64_t> fts5Dropped_{0};
     std::atomic<std::uint64_t> fts5Consumed_{0};
@@ -301,12 +382,33 @@ private:
     std::atomic<std::uint64_t> titleQueued_{0};
     std::atomic<std::uint64_t> titleDropped_{0};
     std::atomic<std::uint64_t> titleConsumed_{0};
+    std::atomic<std::uint64_t> gcQueued_{0};
+    std::atomic<std::uint64_t> gcDropped_{0};
+    std::atomic<std::uint64_t> gcConsumed_{0};
+    std::atomic<std::uint64_t> entityGraphQueued_{0};
+    std::atomic<std::uint64_t> entityGraphDropped_{0};
+    std::atomic<std::uint64_t> entityGraphConsumed_{0};
 
 public:
     // Counter helpers
-    void incEmbedQueued() { embedQueued_.fetch_add(1, std::memory_order_relaxed); }
-    void incEmbedDropped() { embedDropped_.fetch_add(1, std::memory_order_relaxed); }
-    void incEmbedConsumed() { embedConsumed_.fetch_add(1, std::memory_order_relaxed); }
+    void incEmbedQueued(std::uint64_t n = 1) {
+        embedQueued_.fetch_add(n, std::memory_order_relaxed);
+    }
+    void incEmbedDropped(std::uint64_t n = 1) {
+        embedDropped_.fetch_add(n, std::memory_order_relaxed);
+    }
+    void incEmbedConsumed(std::uint64_t n = 1) {
+        embedConsumed_.fetch_add(n, std::memory_order_relaxed);
+    }
+    void incEmbedPreparedDocsQueued(std::uint64_t n = 1) {
+        embedPreparedDocsQueued_.fetch_add(n, std::memory_order_relaxed);
+    }
+    void incEmbedPreparedChunksQueued(std::uint64_t n = 1) {
+        embedPreparedChunksQueued_.fetch_add(n, std::memory_order_relaxed);
+    }
+    void incEmbedHashOnlyDocsQueued(std::uint64_t n = 1) {
+        embedHashOnlyDocsQueued_.fetch_add(n, std::memory_order_relaxed);
+    }
     void incFts5Queued() { fts5Queued_.fetch_add(1, std::memory_order_relaxed); }
     void incFts5Dropped() { fts5Dropped_.fetch_add(1, std::memory_order_relaxed); }
     void incFts5Consumed() { fts5Consumed_.fetch_add(1, std::memory_order_relaxed); }
@@ -350,6 +452,15 @@ public:
     std::uint64_t embedQueued() const { return embedQueued_.load(std::memory_order_relaxed); }
     std::uint64_t embedDropped() const { return embedDropped_.load(std::memory_order_relaxed); }
     std::uint64_t embedConsumed() const { return embedConsumed_.load(std::memory_order_relaxed); }
+    std::uint64_t embedPreparedDocsQueued() const {
+        return embedPreparedDocsQueued_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t embedPreparedChunksQueued() const {
+        return embedPreparedChunksQueued_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t embedHashOnlyDocsQueued() const {
+        return embedHashOnlyDocsQueued_.load(std::memory_order_relaxed);
+    }
     std::uint64_t fts5Queued() const { return fts5Queued_.load(std::memory_order_relaxed); }
     std::uint64_t fts5Dropped() const { return fts5Dropped_.load(std::memory_order_relaxed); }
     std::uint64_t fts5Consumed() const { return fts5Consumed_.load(std::memory_order_relaxed); }
@@ -383,6 +494,26 @@ public:
     std::uint64_t titleQueued() const { return titleQueued_.load(std::memory_order_relaxed); }
     std::uint64_t titleDropped() const { return titleDropped_.load(std::memory_order_relaxed); }
     std::uint64_t titleConsumed() const { return titleConsumed_.load(std::memory_order_relaxed); }
+
+    void incGcQueued() { gcQueued_.fetch_add(1, std::memory_order_relaxed); }
+    void incGcDropped() { gcDropped_.fetch_add(1, std::memory_order_relaxed); }
+    void incGcConsumed() { gcConsumed_.fetch_add(1, std::memory_order_relaxed); }
+    void incEntityGraphQueued() { entityGraphQueued_.fetch_add(1, std::memory_order_relaxed); }
+    void incEntityGraphDropped() { entityGraphDropped_.fetch_add(1, std::memory_order_relaxed); }
+    void incEntityGraphConsumed() { entityGraphConsumed_.fetch_add(1, std::memory_order_relaxed); }
+
+    std::uint64_t gcQueued() const { return gcQueued_.load(std::memory_order_relaxed); }
+    std::uint64_t gcDropped() const { return gcDropped_.load(std::memory_order_relaxed); }
+    std::uint64_t gcConsumed() const { return gcConsumed_.load(std::memory_order_relaxed); }
+    std::uint64_t entityGraphQueued() const {
+        return entityGraphQueued_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t entityGraphDropped() const {
+        return entityGraphDropped_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t entityGraphConsumed() const {
+        return entityGraphConsumed_.load(std::memory_order_relaxed);
+    }
 };
 
 } // namespace yams::daemon

@@ -2,7 +2,6 @@
 #include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/fsm_helpers.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
-#include <yams/daemon/ipc/latency_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/proto_serializer.h>
 #include <yams/daemon/ipc/request_context_registry.h>
@@ -12,11 +11,13 @@
 // Server tuning knobs
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+// Repair streaming
+#include <yams/daemon/components/RepairService.h>
+#include <yams/daemon/components/ServiceManager.h>
 
 #include <spdlog/spdlog.h>
 #include <array>
 #include <chrono>
-#include <span>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -41,6 +42,11 @@
 namespace yams::daemon {
 
 namespace {
+bool is_client_disconnect(const std::string& msg) {
+    return msg.find("Connection reset by peer") != std::string::npos ||
+           msg.find("Broken pipe") != std::string::npos || msg.find("EPIPE") != std::string::npos ||
+           msg.find("ECONNRESET") != std::string::npos;
+}
 // CLI priority requests use a dedicated thread pool to ensure responsiveness
 // even when the worker pool is saturated with heavy operations (e.g., ingestion).
 // Includes: retrieval operations, status/ping/shutdown for daemon health checks.
@@ -104,6 +110,7 @@ public:
             std::holds_alternative<AddDocumentRequest>(request) ||
             std::holds_alternative<BatchEmbeddingRequest>(request) ||
             std::holds_alternative<EmbedDocumentsRequest>(request) ||
+            std::holds_alternative<RepairRequest>(request) ||
             std::holds_alternative<GenerateEmbeddingRequest>(request) ||
             std::holds_alternative<LoadModelRequest>(request)) {
             return true;
@@ -126,33 +133,6 @@ private:
     RequestDispatcher* dispatcher_;
 };
 
-// RAII guard to signal worker job start/end for metrics tracking.
-// Increments poolActive on construction, decrements on destruction.
-class WorkerJobGuard {
-public:
-    explicit WorkerJobGuard(const std::function<void(bool)>& signal)
-        : signal_(signal), engaged_(signal != nullptr) {
-        if (engaged_) {
-            signal_(true); // Job starting
-        }
-    }
-
-    ~WorkerJobGuard() {
-        if (engaged_) {
-            signal_(false); // Job ending
-        }
-    }
-
-    // Non-copyable, non-movable
-    WorkerJobGuard(const WorkerJobGuard&) = delete;
-    WorkerJobGuard& operator=(const WorkerJobGuard&) = delete;
-    WorkerJobGuard(WorkerJobGuard&&) = delete;
-    WorkerJobGuard& operator=(WorkerJobGuard&&) = delete;
-
-private:
-    const std::function<void(bool)>& signal_;
-    bool engaged_;
-};
 } // anonymous namespace
 
 // ============================================================================
@@ -183,13 +163,13 @@ RequestHandler::RequestHandler(RequestDispatcher* dispatcher, Config config)
 RequestHandler::~RequestHandler() {}
 
 boost::asio::awaitable<std::vector<uint8_t>>
-RequestHandler::handle_request(const std::vector<uint8_t>& request_data,
-                               yams::compat::stop_token token) {
+RequestHandler::handle_request(std::vector<uint8_t> request_data, yams::compat::stop_token token) {
     (void)token; // unused
+    auto data = std::move(request_data);
     using boost::asio::use_awaitable;
     try {
         // Parse the message from raw data
-        auto message_result = ProtoSerializer::decode_payload(request_data);
+        auto message_result = ProtoSerializer::decode_payload(data);
         if (!message_result) {
             // Create error response
             ErrorResponse error;
@@ -258,10 +238,6 @@ RequestHandler::handle_request(const std::vector<uint8_t>& request_data,
     }
 }
 
-// Note: Only the compat::stop_token variant is provided. On platforms where
-// std::stop_token exists, yams::compat::stop_token aliases it, avoiding the
-// need for an overload that would collide at the type level.
-
 boost::asio::awaitable<void> RequestHandler::handle_connection(
     std::shared_ptr<boost::asio::local::stream_protocol::socket> socket,
     yams::compat::stop_token token, uint64_t conn_token) {
@@ -292,9 +268,6 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
         fsm.on_connect(sock->native_handle());
         // Prepare write serialization for multiplexing
         if (config_.enable_multiplexing) {
-            // Serialize all writes through a per-connection strand
-            // CRITICAL: Use worker_executor for write strand, NOT socket executor,
-            // to avoid deadlock when connection loop blocks on reads
             if (config_.worker_executor) {
                 write_strand_exec_.emplace(boost::asio::make_strand(config_.worker_executor));
             } else {
@@ -305,20 +278,12 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
             write_strand_exec_.reset();
             inflight_.store(0, std::memory_order_relaxed);
         }
-        // Note: downstream clients may close early (e.g., pager exits). Treat write-side resets
-        // as non-fatal for the daemon; logs will be at debug level when detected.
-
-        // Native boost::asio sockets don't have set_timeout, timeouts are handled per-operation
-        // Use protocol maximum message size for inbound frame reader
         FrameReader reader(MAX_MESSAGE_SIZE);
         bool should_exit = false;
 
         uint64_t fsm_guard_fail_count = 0;
-        // Track consecutive idle read timeouts to prevent leaking idle connections forever
         std::uint32_t consecutive_idle_timeouts = 0;
-        // C++ IPC should be fast: 3 idle timeouts = 6s max idle with 2s read_timeout
-        // This ensures connections don't hang during shutdown or idle periods
-        // PBI-089: Made configurable via TuneAdvisor to allow backpressure-aware tolerance
+
         const std::uint32_t kMaxIdleTimeouts = TuneAdvisor::maxIdleTimeouts();
         while (!token.stop_requested() && sock->is_open()) {
             // Pause reads when backpressured to avoid amplifying write pressure
@@ -346,14 +311,14 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 guard_err = ex.what();
             }
             if (!can_read) {
-                // FSM not ready to read (e.g., mid-response). If FSM is already in Error/Closed
-                // state, close immediately to allow recovery instead of spinning.
                 const auto st = fsm.state();
                 if (st == ConnectionFsm::State::Error || st == ConnectionFsm::State::Closed) {
                     spdlog::warn("Closing connection immediately due to FSM={} (context={}): {}",
                                  ConnectionFsm::to_string(st), "before_async_read", guard_err);
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
+                    if (sock->is_open()) {
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
+                    }
                     break;
                 }
 
@@ -387,15 +352,15 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     spdlog::warn("Closing connection after prolonged unreadable FSM state "
                                  "(count={}, state={})",
                                  fsm_guard_fail_count, ConnectionFsm::to_string(st));
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
+                    if (sock->is_open()) {
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
+                    }
                     break;
                 }
                 continue;
             }
 
-            // Inactivity-based timeout for reads: reset timer every awaited read
-            // Race read against timeout using async_initiate (no experimental APIs)
             auto executor = co_await boost::asio::this_coro::executor;
             using ReadResult = std::tuple<boost::system::error_code, std::size_t>;
             using RaceResult = std::variant<ReadResult, bool>; // ReadResult or timedOut
@@ -445,12 +410,6 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
 
             size_t bytes_read = 0;
             if (read_or_timeout.index() == 1) {
-                // Idle persistent connection; keep connection open and continue.
-                // IMPORTANT: Do not signal FSM on idle timeouts. The FSM's on_timeout()
-                // is reserved for operation deadlines (header/payload/write). Calling it
-                // while in Connected (idle) can spuriously transition to Error.
-
-                // Get socket handle BEFORE any potential close operations to avoid use-after-free
                 const uint64_t sock_fd = sock && sock->is_open()
                                              ? static_cast<uint64_t>(sock->native_handle())
                                              : static_cast<uint64_t>(-1);
@@ -469,8 +428,6 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         has_active = !contexts_.empty();
                     }
 
-                    // Avoid closing a connection that still has active work (streaming or
-                    // inflight); reset the idle counter so long-running responses can complete.
                     if (has_active) {
                         spdlog::info("Idle timeout hit with active work (inflight={} ctxs={}) "
                                      "after {} timeouts (fd={}); keeping connection open",
@@ -483,8 +440,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     spdlog::info(
                         "Closing idle connection after {} consecutive read timeouts (fd={})",
                         consecutive_idle_timeouts, sock_fd);
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
+                    if (sock->is_open()) {
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
+                    }
                     break;
                 }
                 continue;
@@ -494,8 +453,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 if (read_ec) {
                     spdlog::debug("Closing connection: read error {} ({})", read_ec.message(),
                                   read_ec.value());
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
+                    if (sock->is_open()) {
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
+                    }
                     break;
                 }
                 bytes_read = read_bytes;
@@ -520,8 +481,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                 fsm.on_readable(static_cast<size_t>(bytes_read));
             } else {
                 spdlog::debug("Closing connection: FSM not alive during read");
-                boost::system::error_code ignore_ec;
-                sock->close(ignore_ec);
+                if (sock->is_open()) {
+                    boost::system::error_code ignore_ec;
+                    sock->close(ignore_ec);
+                }
                 break;
             }
 
@@ -534,6 +497,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
             while (feed_remaining > 0 && !feed_error && !should_exit) {
                 auto feed_result = reader.feed(buf.data() + feed_offset, feed_remaining);
                 stats_.bytes_received += feed_result.consumed;
+                FsmMetricsRegistry::instance().addBytesReceived(feed_result.consumed);
                 spdlog::debug("Frame reader consumed {} bytes, status={}", feed_result.consumed,
                               static_cast<int>(feed_result.status));
 
@@ -544,8 +508,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     spdlog::error("Invalid frame received");
                     (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                               "Invalid frame format");
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
+                    if (sock->is_open()) {
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
+                    }
                     feed_error = true;
                     break;
                 }
@@ -554,8 +520,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                     spdlog::error("Frame too large");
                     (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                               "Frame exceeds maximum size");
-                    boost::system::error_code ignore_ec;
-                    sock->close(ignore_ec);
+                    if (sock->is_open()) {
+                        boost::system::error_code ignore_ec;
+                        sock->close(ignore_ec);
+                    }
                     feed_error = true;
                     break;
                 }
@@ -573,8 +541,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                       frame_result.error().message);
                         (void)co_await send_error(*sock, ErrorCode::SerializationError,
                                                   "Failed to get frame");
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        if (sock->is_open()) {
+                            boost::system::error_code ignore_ec;
+                            sock->close(ignore_ec);
+                        }
                         should_exit = true;
                         break;
                     }
@@ -603,8 +573,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         }
                         (void)co_await send_error(*sock, message_result.error().code,
                                                   message_result.error().message, correlated_id);
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        if (sock->is_open()) {
+                            boost::system::error_code ignore_ec;
+                            sock->close(ignore_ec);
+                        }
                         should_exit = true;
                         break;
                     }
@@ -617,8 +589,10 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         // Correlate error with the observed message requestId and close
                         (void)co_await send_error(*sock, ErrorCode::InvalidArgument,
                                                   "Expected request message", message.requestId);
-                        boost::system::error_code ignore_ec;
-                        sock->close(ignore_ec);
+                        if (sock->is_open()) {
+                            boost::system::error_code ignore_ec;
+                            sock->close(ignore_ec);
+                        }
                         should_exit = true;
                         break;
                     }
@@ -730,10 +704,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                             // Downgrade common client-initiated close errors to debug to avoid
                             // noisy logs
                             const auto& msg = handle_result.error().message;
-                            if (msg.find("Connection reset by peer") != std::string::npos ||
-                                msg.find("Broken pipe") != std::string::npos ||
-                                msg.find("EPIPE") != std::string::npos ||
-                                msg.find("ECONNRESET") != std::string::npos) {
+                            if (is_client_disconnect(msg)) {
                                 spdlog::debug("Request handling ended by client: {}", msg);
                             } else {
                                 spdlog::error("Request handling failed: {}", msg);
@@ -806,82 +777,6 @@ RequestHandler::handle_request(boost::asio::local::stream_protocol::socket& sock
                                const Request& request, uint64_t request_id) {
     // Always use streaming mode
     co_return co_await handle_streaming_request(socket, request, request_id);
-}
-
-boost::asio::awaitable<Result<Message>>
-RequestHandler::read_message(boost::asio::local::stream_protocol::socket& socket,
-                             FrameReader& reader) {
-    using boost::asio::use_awaitable;
-    const bool stream_trace = stream_trace_enabled_local();
-    // Read until we have a complete frame
-    size_t read_loops = 0;
-    while (!reader.has_frame()) {
-        std::vector<uint8_t> buffer(4096);
-        boost::system::error_code ec;
-
-        size_t bytes_read = co_await boost::asio::async_read(
-            socket, boost::asio::buffer(buffer, buffer.size()), boost::asio::transfer_at_least(1),
-            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-
-        if (ec) {
-            if (ec == boost::asio::error::eof) {
-                co_return Error{ErrorCode::NetworkError, "Connection closed"};
-            }
-            co_return Error{ErrorCode::NetworkError, ec.message()};
-        }
-
-        buffer.resize(bytes_read);
-        if (buffer.empty()) {
-            co_return Error{ErrorCode::NetworkError, "Connection closed"};
-        }
-
-        auto feed_result = reader.feed(buffer.data(), buffer.size());
-        stats_.bytes_received += feed_result.consumed;
-        FsmMetricsRegistry::instance().addBytesReceived(bytes_read);
-
-        if (feed_result.status == FrameReader::FrameStatus::InvalidFrame) {
-            co_return Error{ErrorCode::InvalidArgument, "Invalid frame"};
-        }
-
-        if (feed_result.status == FrameReader::FrameStatus::FrameTooLarge) {
-            co_return Error{ErrorCode::InvalidArgument, "Frame too large"};
-        }
-
-        // Cooperative yield to allow other connections (e.g., status probes) to progress
-        if (++read_loops % 8 == 0) {
-            co_await boost::asio::post(boost::asio::use_awaitable);
-        }
-    }
-
-    auto frame_result = reader.get_frame();
-    if (!frame_result) {
-        co_return frame_result.error();
-    }
-
-    auto frame_data = frame_result.value();
-    auto parsed = framer_.parse_frame(frame_data);
-    if (parsed) {
-        if (stream_trace) {
-            const auto& msg = parsed.value();
-            spdlog::info("stream-trace: RequestHandler::read_message got frame req_id={} "
-                         "streaming={} size={}",
-                         msg.requestId, msg.expectsStreamingResponse, frame_data.size());
-        }
-        FsmMetricsRegistry::instance().incrementHeaderReads(1);
-        const auto& msg = parsed.value();
-        if (std::holds_alternative<Request>(msg.payload)) {
-            const auto& req = std::get<Request>(msg.payload);
-            spdlog::info(
-                "read_message: request req_id={} type={} expects_streaming={} payload_size={}",
-                msg.requestId, static_cast<int>(getMessageType(req)), msg.expectsStreamingResponse,
-                frame_data.size());
-        } else if (std::holds_alternative<Response>(msg.payload)) {
-            const auto& resp = std::get<Response>(msg.payload);
-            spdlog::info("read_message: response req_id={} type={} payload_size={}", msg.requestId,
-                         static_cast<int>(getMessageType(resp)), frame_data.size());
-        }
-    }
-    co_return parsed;
 }
 
 boost::asio::awaitable<Result<void>>
@@ -970,10 +865,7 @@ RequestHandler::write_message(boost::asio::local::stream_protocol::socket& socke
             boost::asio::redirect_error(boost::asio::use_awaitable, ec));
         if (ec) {
             const auto& msg = ec.message();
-            if (msg.find("Connection reset by peer") != std::string::npos ||
-                msg.find("Broken pipe") != std::string::npos ||
-                msg.find("EPIPE") != std::string::npos ||
-                msg.find("ECONNRESET") != std::string::npos) {
+            if (is_client_disconnect(msg)) {
                 spdlog::debug("Client closed during frame write: {}", msg);
             }
             co_return Error{ErrorCode::NetworkError, msg};
@@ -1031,59 +923,6 @@ bool RequestHandler::can_stream_request(const Request& request) const {
     return processor_->supports_streaming(request);
 }
 
-bool RequestHandler::should_stream_request(const Request& request) const {
-    // If force streaming is enabled, always stream
-    if (config_.force_streaming) {
-        return true;
-    }
-
-    // If streaming is disabled, never stream
-    if (!config_.enable_streaming) {
-        return false;
-    }
-
-    // Auto-detect if the request type benefits from streaming
-    if (config_.auto_detect_streaming) {
-        // These request types typically benefit from streaming
-        if (std::holds_alternative<SearchRequest>(request) ||
-            std::holds_alternative<ListRequest>(request) ||
-            std::holds_alternative<GrepRequest>(request) ||
-            // Auto-stream embeddings so clients without explicit streaming still get progress
-            std::holds_alternative<BatchEmbeddingRequest>(request) ||
-            std::holds_alternative<EmbedDocumentsRequest>(request)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-boost::asio::awaitable<std::vector<Response>>
-RequestHandler::collect_limited_chunks(const Request& request, size_t max_chunks) {
-    (void)request;
-    std::vector<Response> chunks;
-    if (!processor_) {
-        co_return chunks;
-    }
-
-    // Collect chunks until we reach the limit or get the last chunk
-    size_t chunk_count = 0;
-    bool last_chunk_received = false;
-
-    while (chunk_count < max_chunks && !last_chunk_received) {
-        auto chunk_result = co_await processor_->next_chunk();
-        chunks.push_back(chunk_result.data);
-        last_chunk_received = chunk_result.is_last_chunk;
-        chunk_count++;
-
-        if (last_chunk_received) {
-            break;
-        }
-    }
-
-    co_return chunks;
-}
-
 boost::asio::awaitable<Result<void>>
 RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::socket& socket,
                                          const Request& request, uint64_t request_id,
@@ -1100,10 +939,31 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         }
 
         // Signal worker job start/end for metrics tracking (poolActive, poolPosted, poolCompleted)
-        WorkerJobGuard job_guard(config_.worker_job_signal);
+        if (config_.worker_job_signal)
+            config_.worker_job_signal(true);
+        auto job_cleanup = [this]() {
+            if (config_.worker_job_signal)
+                config_.worker_job_signal(false);
+        };
+        // Ensure signal(false) fires on all exit paths (co_return, exception)
+        struct JobGuard {
+            std::function<void()> fn;
+            ~JobGuard() {
+                if (fn)
+                    fn();
+            }
+        } job_guard{std::move(job_cleanup)};
 
-        // Use the configured processor (server may decorate with streaming support)
+        // Use a request-scoped processor instance for streaming paths.
+        // The shared handler-level StreamingRequestProcessor stores mutable per-request state
+        // (pending_request_, mode_, chunk cursors). Under multiplexed concurrent requests,
+        // sharing that instance can corrupt state across requests. Build a fresh wrapper
+        // per request when dispatcher_ is available so streaming state is isolated.
         std::shared_ptr<RequestProcessor> proc = processor_;
+        if (dispatcher_) {
+            auto adapter = std::make_shared<DispatcherAdapter>(dispatcher_);
+            proc = std::make_shared<StreamingRequestProcessor>(adapter, config_);
+        }
         spdlog::debug("handle_streaming_request: processor type={} for request_id={}",
                       proc ? typeid(RequestProcessor).name() : "null", request_id);
 
@@ -1122,7 +982,9 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         // Preflight readiness gate REMOVED: was blocking all workers on status requests!
         // RequestDispatcher already checks readiness before processing requests.
         // This preflight check caused head-of-line blocking under concurrent load.
-        bool force_unary = true;
+        // NOTE: Streaming is enabled by default. We only force unary for control requests or
+        // specific response types (Get/Cat) that must remain single-frame.
+        bool force_unary = false;
         bool prefer_stub_stream = false;
         // Skip preflight - let RequestDispatcher handle readiness gating
         // This eliminates the blocking co_await proc->process(StatusRequest) that
@@ -1566,9 +1428,7 @@ RequestHandler::write_header_frame(boost::asio::local::stream_protocol::socket& 
     auto& [ec, bytes_written] = std::get<0>(write_or_timeout);
     if (ec) {
         const auto& msg = ec.message();
-        if (msg.find("Connection reset by peer") != std::string::npos ||
-            msg.find("Broken pipe") != std::string::npos ||
-            msg.find("EPIPE") != std::string::npos || msg.find("ECONNRESET") != std::string::npos) {
+        if (is_client_disconnect(msg)) {
             spdlog::debug("Client closed during header frame write: {}", msg);
         }
         co_return Error{ErrorCode::NetworkError, msg};
@@ -1602,9 +1462,7 @@ RequestHandler::write_chunk_frame(boost::asio::local::stream_protocol::socket& s
 
     if (ec) {
         const auto& msg = ec.message();
-        if (msg.find("Connection reset by peer") != std::string::npos ||
-            msg.find("Broken pipe") != std::string::npos ||
-            msg.find("EPIPE") != std::string::npos || msg.find("ECONNRESET") != std::string::npos) {
+        if (is_client_disconnect(msg)) {
             spdlog::debug("Client closed during chunk frame write: {}", msg);
         }
         co_return Error{ErrorCode::NetworkError, msg};
@@ -1831,6 +1689,15 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
     using boost::asio::use_awaitable;
     YAMS_ZONE_SCOPED_N("RequestHandler::writer_drain");
 
+    // Guard: if connection is already closing, don't attempt writes on a dead socket.
+    // This prevents the SIGSEGV when a concurrent request coroutine restarts drain
+    // after a previous drain cleared queues on write failure.
+    if (connection_closing_.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lock(rr_mutex_);
+        writer_running_ = false;
+        co_return;
+    }
+
     while (true) {
         uint64_t rid;
         std::vector<FrameItem> frames_to_write;
@@ -1948,7 +1815,29 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
 
             if (ec) {
                 spdlog::warn("[DRAIN] req_id={} write error: {}", rid, ec.message());
+                // Mark connection as broken to prevent new drain cycles on dead socket
+                connection_closing_.store(true, std::memory_order_release);
                 std::lock_guard<std::mutex> lock(rr_mutex_);
+                // Socket writes failed. This connection is effectively broken, so drop any
+                // remaining queued frames/bytes to avoid stranding rr_queues_ (which can
+                // permanently exhaust caps because future enqueues for non-empty queues do not
+                // re-activate rr_active_).
+                size_t dropped_bytes = 0;
+                for (auto& [qid, q] : rr_queues_) {
+                    for (auto& item : q) {
+                        dropped_bytes += item.data.size();
+                    }
+                }
+                if (dropped_bytes > 0) {
+                    // total_queued_bytes_ should already equal dropped_bytes here, but reset
+                    // defensively and keep metrics consistent.
+                    total_queued_bytes_ = 0;
+                    MuxMetricsRegistry::instance().addQueuedBytes(
+                        -static_cast<int64_t>(dropped_bytes));
+                } else {
+                    total_queued_bytes_ = 0;
+                }
+                rr_queues_.clear();
                 rr_active_.clear();
                 writer_running_ = false;
                 co_return;
@@ -1965,6 +1854,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                               const Request& request, uint64_t request_id,
                               std::shared_ptr<RequestProcessor> processor, ConnectionFsm* fsm) {
     using boost::asio::use_awaitable;
+
+    const bool stream_trace = stream_trace_enabled_local();
     // First, send a header-only response to tell client to expect chunks
     // Create an empty response or use the first chunk as header
     Response headerResponse;
@@ -2006,14 +1897,16 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         }
     }
     // Send header frame
-    spdlog::info("[STREAM] req_id={} about to write_header", request_id);
+    if (stream_trace)
+        spdlog::info("[STREAM] req_id={} about to write_header", request_id);
     auto header_result = co_await write_header(socket, headerResponse, request_id, true, fsm);
     if (!header_result) {
         spdlog::warn("[STREAM] req_id={} write_header failed: {}", request_id,
                      header_result.error().message);
         co_return header_result.error();
     }
-    spdlog::info("[STREAM] req_id={} header written successfully", request_id);
+    if (stream_trace)
+        spdlog::info("[STREAM] req_id={} header written successfully", request_id);
     if (fsm) {
         // Move FSM from WritingHeader -> StreamingChunks
         fsm->on_stream_next(false);
@@ -2026,8 +1919,200 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
     auto header_time = std::chrono::steady_clock::now();
     StreamMetricsRegistry::instance().incStreams(1);
 
+    // Special-case: RepairRequest streams RepairEvent progress and then a final RepairResponse.
+    // This is implemented here (rather than in StreamingRequestProcessor) because we need access
+    // to request_id for multiplexed chunk framing.
+    if (std::holds_alternative<RepairRequest>(request)) {
+        struct RepairStreamState {
+            std::mutex mu;
+            std::condition_variable cv;
+            std::deque<Response> queued;
+            std::optional<Response> final;
+            bool done{false};
+            bool aborted{false};
+        };
+
+        auto state = std::make_shared<RepairStreamState>();
+
+        // Resolve RepairService (daemon-first)
+        ServiceManager* sm = dispatcher_ ? dispatcher_->getServiceManager() : nullptr;
+        auto rs = sm ? sm->getRepairServiceShared() : std::shared_ptr<RepairService>{};
+        if (!rs) {
+            ErrorResponse err{ErrorCode::NotInitialized,
+                              "RepairService not available; is the daemon fully initialized?"};
+            (void)co_await write_chunk(socket, Response{std::move(err)}, request_id,
+                                       /*last_chunk=*/true, /*flush=*/true, fsm);
+            co_return Result<void>();
+        }
+
+        // Producer runs the synchronous repair logic and pushes events into a queue.
+        // We use a separate thread so the streaming loop can write chunks concurrently.
+        std::thread producer([state, rs, req = std::get<RepairRequest>(request), request_id]() {
+            try {
+                auto progress = [state](const RepairEvent& ev) {
+                    if (!state)
+                        return;
+                    {
+                        std::lock_guard<std::mutex> lk(state->mu);
+                        if (state->aborted)
+                            return;
+                        // Bound memory if the client stops consuming; drop oldest.
+                        if (state->queued.size() >= 4096) {
+                            state->queued.pop_front();
+                        }
+                        state->queued.emplace_back(Response{ev});
+                    }
+                    state->cv.notify_one();
+                };
+
+                RepairResponse resp = rs->executeRepair(req, progress);
+                {
+                    std::lock_guard<std::mutex> lk(state->mu);
+                    if (!state->aborted) {
+                        state->final = Response{std::move(resp)};
+                        state->done = true;
+                    }
+                }
+                state->cv.notify_one();
+            } catch (const std::exception& e) {
+                {
+                    std::lock_guard<std::mutex> lk(state->mu);
+                    if (!state->aborted) {
+                        ErrorResponse err{ErrorCode::InternalError,
+                                          std::string("Repair failed: ") + e.what()};
+                        state->final = Response{std::move(err)};
+                        state->done = true;
+                    }
+                }
+                state->cv.notify_one();
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lk(state->mu);
+                    if (!state->aborted) {
+                        ErrorResponse err{ErrorCode::InternalError, "Repair failed"};
+                        state->final = Response{std::move(err)};
+                        state->done = true;
+                    }
+                }
+                state->cv.notify_one();
+            }
+            (void)request_id;
+        });
+
+        // Consumer loop: write queued events, then the final response as last chunk.
+        const auto wait_timeout = config_.stream_chunk_timeout;
+        while (true) {
+            // Honor cancellation
+            {
+                std::lock_guard<std::mutex> lk(ctx_mtx_);
+                auto it = contexts_.find(request_id);
+                if (it != contexts_.end() && it->second->canceled.load(std::memory_order_relaxed)) {
+                    {
+                        std::lock_guard<std::mutex> lk2(state->mu);
+                        state->aborted = true;
+                        state->queued.clear();
+                    }
+                    ErrorResponse err{ErrorCode::OperationCancelled, "Request canceled"};
+                    (void)co_await write_chunk(socket, Response{std::move(err)}, request_id,
+                                               /*last_chunk=*/true, /*flush=*/true, fsm);
+                    if (producer.joinable())
+                        producer.detach();
+                    co_return Result<void>();
+                }
+            }
+
+            Response next;
+            bool have_next = false;
+            bool have_final = false;
+            Response final;
+
+            {
+                std::unique_lock<std::mutex> lk(state->mu);
+                auto pred = [&] { return state->aborted || !state->queued.empty() || state->done; };
+                if (!pred()) {
+                    if (wait_timeout.count() > 0) {
+                        (void)state->cv.wait_for(lk, wait_timeout, pred);
+                    } else {
+                        state->cv.wait(lk, pred);
+                    }
+                }
+
+                if (state->aborted) {
+                    // Already handled by cancellation path.
+                    have_next = false;
+                    have_final = false;
+                } else if (!state->queued.empty()) {
+                    next = std::move(state->queued.front());
+                    state->queued.pop_front();
+                    have_next = true;
+                } else if (state->done && state->final.has_value()) {
+                    final = std::move(*state->final);
+                    state->final.reset();
+                    have_final = true;
+                }
+            }
+
+            if (have_next) {
+                auto wr = co_await write_chunk(socket, std::move(next), request_id,
+                                               /*last_chunk=*/false, /*flush=*/true, fsm);
+                if (!wr) {
+                    {
+                        std::lock_guard<std::mutex> lk(state->mu);
+                        state->aborted = true;
+                        state->queued.clear();
+                    }
+                    if (producer.joinable())
+                        producer.detach();
+                    co_return wr.error();
+                }
+                chunk_count++;
+                continue;
+            }
+
+            if (have_final) {
+                // If the final payload is an ErrorResponse, force last.
+                bool last = true;
+                auto wr = co_await write_chunk(socket, std::move(final), request_id,
+                                               /*last_chunk=*/last, /*flush=*/true, fsm);
+                if (producer.joinable())
+                    producer.join();
+                if (!wr)
+                    co_return wr.error();
+                chunk_count++;
+                break;
+            }
+
+            // Timeout keepalive: send a tiny success chunk (client ignores; prevents read
+            // timeouts).
+            if (wait_timeout.count() > 0) {
+                SuccessResponse ok{"keepalive"};
+                auto wr = co_await write_chunk(socket, Response{std::move(ok)}, request_id,
+                                               /*last_chunk=*/false, /*flush=*/true, fsm);
+                if (!wr) {
+                    {
+                        std::lock_guard<std::mutex> lk(state->mu);
+                        state->aborted = true;
+                        state->queued.clear();
+                    }
+                    if (producer.joinable())
+                        producer.detach();
+                    co_return wr.error();
+                }
+                chunk_count++;
+            }
+        }
+
+        spdlog::debug("Sent {} repair chunks (request_id={})", chunk_count, request_id);
+        if (config_.close_after_response) {
+            // Let the generic close logic below run
+        }
+        // fallthrough to generic close/metrics tail
+        last_chunk_received = true;
+    }
+
     while (!last_chunk_received) {
-        spdlog::info("[STREAM] req_id={} preparing chunk #{}", request_id, chunk_count + 1);
+        if (stream_trace)
+            spdlog::info("[STREAM] req_id={} preparing chunk #{}", request_id, chunk_count + 1);
         {
             std::lock_guard<std::mutex> lk(ctx_mtx_);
             auto it = contexts_.find(request_id);
@@ -2036,12 +2121,14 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
             }
         }
         RequestProcessor::ResponseChunk chunk_result{};
-        spdlog::info("[STREAM] req_id={} chunk #{} stream_chunk_timeout={}ms", request_id,
-                     chunk_count + 1, config_.stream_chunk_timeout.count());
+        if (stream_trace)
+            spdlog::info("[STREAM] req_id={} chunk #{} stream_chunk_timeout={}ms", request_id,
+                         chunk_count + 1, config_.stream_chunk_timeout.count());
         if (config_.stream_chunk_timeout.count() > 0) {
             // Race next_chunk() against timeout using async_initiate (no experimental APIs)
-            spdlog::info("[STREAM] req_id={} using timeout path, about to co_await next_chunk",
-                         request_id);
+            if (stream_trace)
+                spdlog::info("[STREAM] req_id={} using timeout path, about to co_await next_chunk",
+                             request_id);
             auto executor = co_await boost::asio::this_coro::executor;
             using ChunkResult = RequestProcessor::ResponseChunk;
             using RaceResult = std::variant<ChunkResult, bool>; // ChunkResult or timedOut
@@ -2096,8 +2183,9 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                     },
                     boost::asio::use_awaitable);
 
-            spdlog::info("[STREAM] req_id={} co_await returned, index={}", request_id,
-                         chunk_or_timeout.index());
+            if (stream_trace)
+                spdlog::info("[STREAM] req_id={} co_await returned, index={}", request_id,
+                             chunk_or_timeout.index());
 
             if (chunk_or_timeout.index() == 1) {
                 // next_chunk() exceeded timeout; emit a terminal timeout chunk to unblock client
@@ -2113,10 +2201,12 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                 chunk_result = std::get<0>(std::move(chunk_or_timeout));
             }
         } else {
-            spdlog::info("[STREAM] req_id={} no timeout path, about to co_await next_chunk",
-                         request_id);
+            if (stream_trace)
+                spdlog::info("[STREAM] req_id={} no timeout path, about to co_await next_chunk",
+                             request_id);
             chunk_result = co_await processor->next_chunk();
-            spdlog::info("[STREAM] req_id={} no timeout path returned", request_id);
+            if (stream_trace)
+                spdlog::info("[STREAM] req_id={} no timeout path returned", request_id);
         }
         spdlog::debug("stream_chunks processor->next_chunk() returned req_id={} last={}",
                       request_id, chunk_result.is_last_chunk);
@@ -2165,8 +2255,13 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
         spdlog::debug("stream_chunks: chunk #{} type={} items={} last={} (request_id={})",
                       chunk_count + 1, msg_type, item_count, last_chunk_received, request_id);
         if (msg_type == static_cast<int>(MessageType::AddDocumentResponse)) {
-            spdlog::info("stream_chunks: AddDocument chunk #{} last={} (request_id={})",
-                         chunk_count + 1, last_chunk_received, request_id);
+            if (stream_trace) {
+                spdlog::info("stream_chunks: AddDocument chunk #{} last={} (request_id={})",
+                             chunk_count + 1, last_chunk_received, request_id);
+            } else {
+                spdlog::debug("stream_chunks: AddDocument chunk #{} last={} (request_id={})",
+                              chunk_count + 1, last_chunk_received, request_id);
+            }
         }
 
         // FSM guard before chunk write
@@ -2294,141 +2389,6 @@ RequestHandler::send_error(boost::asio::local::stream_protocol::socket& socket, 
     error_msg.payload = Response{error};
 
     co_return co_await write_message(socket, error_msg);
-}
-
-// ============================================================================
-// RequestRouter Implementation
-// ============================================================================
-
-boost::asio::awaitable<Response> RequestRouter::process(const Request& request) {
-    auto type_hash = get_request_type_hash(request);
-
-    auto it = handlers_.find(type_hash);
-    if (it == handlers_.end()) {
-        co_return ErrorResponse{ErrorCode::NotImplemented,
-                                "No handler registered for request type"};
-    }
-
-    co_return co_await it->second(request);
-}
-
-size_t RequestRouter::get_request_type_hash(const Request& request) const {
-    return std::visit([](const auto& req) { return typeid(req).hash_code(); }, request);
-}
-
-// ============================================================================
-// MiddlewarePipeline Implementation
-// ============================================================================
-
-boost::asio::awaitable<Response> MiddlewarePipeline::process(const Request& request) {
-    if (middleware_.empty()) {
-        if (final_handler_) {
-            co_return co_await final_handler_(request);
-        }
-        co_return ErrorResponse{ErrorCode::NotImplemented, "No handler configured"};
-    }
-
-    // Build the middleware chain
-    std::function<boost::asio::awaitable<Response>(const Request&)> chain = final_handler_;
-
-    for (auto it = middleware_.rbegin(); it != middleware_.rend(); ++it) {
-        const auto& middleware = *it;
-        auto next = chain;
-        chain = [middleware, next](const Request& req) -> boost::asio::awaitable<Response> {
-            co_return co_await middleware->process(req, next);
-        };
-    }
-
-    co_return co_await chain(request);
-}
-
-// ============================================================================
-// LoggingMiddleware Implementation
-// ============================================================================
-
-boost::asio::awaitable<Response> LoggingMiddleware::process(const Request& request, Next next) {
-    auto start_time = std::chrono::steady_clock::now();
-
-    // Log request
-    spdlog::debug("Processing request type: {}",
-                  std::visit([](const auto& req) { return typeid(req).name(); }, request));
-
-    // Call next handler
-    Response response = co_await next(request);
-
-    // Log response
-    auto duration = std::chrono::steady_clock::now() - start_time;
-    auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
-
-    bool is_error = std::holds_alternative<ErrorResponse>(response);
-    if (is_error) {
-        auto& error = std::get<ErrorResponse>(response);
-        spdlog::warn("Request failed: {} ({}ms)", error.message, duration_ms);
-    } else {
-        spdlog::debug("Request completed successfully ({}ms)", duration_ms);
-    }
-
-    co_return response;
-}
-
-// ============================================================================
-// RateLimitMiddleware Implementation
-// ============================================================================
-
-RateLimitMiddleware::RateLimitMiddleware(Config config)
-    : config_(config), tokens_(config.burst_size), last_refill_(std::chrono::steady_clock::now()) {}
-
-boost::asio::awaitable<Response> RateLimitMiddleware::process(const Request& request, Next next) {
-    // Refill tokens based on time elapsed
-    {
-        std::lock_guard lock(refill_mutex_);
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_refill_).count();
-
-        if (elapsed > 0) {
-            size_t new_tokens = elapsed * config_.requests_per_second;
-            size_t current = tokens_.load();
-            size_t max_tokens = config_.burst_size;
-
-            if (current + new_tokens > max_tokens) {
-                tokens_ = max_tokens;
-            } else {
-                tokens_ += new_tokens;
-            }
-
-            last_refill_ = now;
-        }
-    }
-
-    // Try to consume a token
-    size_t current = tokens_.load();
-    while (current > 0) {
-        if (tokens_.compare_exchange_weak(current, current - 1)) {
-            // Token acquired, process request
-            co_return co_await next(request);
-        }
-        // current was updated by compare_exchange, retry
-    }
-
-    // No tokens available
-    co_return ErrorResponse{ErrorCode::RateLimited, "Rate limit exceeded"};
-}
-
-// ============================================================================
-// AuthMiddleware Implementation
-// ============================================================================
-
-boost::asio::awaitable<Response> AuthMiddleware::process(const Request& request, Next next) {
-    // Extract auth token from request metadata (placeholder)
-    std::string token = ""; // TODO: Extract from request
-
-    bool is_valid = co_await validator_(token);
-
-    if (!is_valid) {
-        co_return ErrorResponse{ErrorCode::Unauthorized, "Authentication failed"};
-    }
-
-    co_return co_await next(request);
 }
 
 } // namespace yams::daemon

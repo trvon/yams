@@ -12,6 +12,7 @@ class Yams < Formula
   depends_on "protobuf"
   depends_on "sqlite"
   depends_on "boost"
+  depends_on "onnxruntime"
   depends_on macos: :monterey
 
   on_linux do

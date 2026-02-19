@@ -20,6 +20,7 @@ using nlohmann::json;
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/proto_serializer.h>
+#include <yams/compat/unistd.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_index_manager.h>
@@ -27,16 +28,10 @@ using nlohmann::json;
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
-#include <process.h>
 #include <share.h>
 using pid_t = int;
-#define getpid _getpid
-static int setenv(const char* name, const char* value, int overwrite) {
-    return _putenv_s(name, value);
-}
 #else
 #include <signal.h>
-#include <unistd.h>
 #include <sys/wait.h>
 #endif
 
@@ -72,7 +67,14 @@ struct DaemonFixture {
         config_.logFile = runtime_root_ / "daemon.log";
         config_.maxMemoryGb = 1.0;
 
-        config_.enableModelProvider = true;
+        // When ABI plugins are disabled, no model provider can be adopted,
+        // so disable the requirement to avoid init failure.
+        if (const char* v = std::getenv("YAMS_DISABLE_ABI_PLUGINS");
+            v && std::string_view(v) == "1") {
+            config_.enableModelProvider = false;
+        } else {
+            config_.enableModelProvider = true;
+        }
         config_.autoLoadPlugins = true;
         config_.modelPoolConfig.lazyLoading = true;
         config_.modelPoolConfig.preloadModels.clear();

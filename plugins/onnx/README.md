@@ -9,7 +9,7 @@ Interface
   - `get_embedding_dim`
   - `get_runtime_info_json` → returns `{ backend: "onnxruntime", pipeline: "raw_ort", model, dim, intra_threads, inter_threads }`
   - `free_string`
-  - `set_threading` → returns UNSUPPORTED (not wired yet)
+  - `set_threading` (applies per-model threading overrides; reloaded lazily on next inference)
 
 Status
 - The daemon uses the v1.2 helpers to populate embedding runtime details in status when this provider is adopted.

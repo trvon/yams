@@ -17,6 +17,7 @@
 #include <utility>
 #include <yams/api/content_metadata.h>
 #include <yams/cli/command.h>
+#include <yams/cli/error_hints.h>
 #include <yams/cli/progress_indicator.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
@@ -63,6 +64,20 @@ std::string trimCopy(std::string_view sv) {
         --end;
     }
     return std::string(sv.substr(start, end - start));
+}
+
+std::string scrubDaemonLoadMessage(std::string_view message) {
+    std::string cleaned(message);
+    const std::string needle(kDaemonLoadMessage);
+    auto pos = cleaned.find(needle);
+    if (pos != std::string::npos) {
+        cleaned.erase(pos, needle.size());
+    }
+    cleaned = trimCopy(cleaned);
+    if (cleaned.empty()) {
+        cleaned = "Daemon rejected request";
+    }
+    return cleaned;
 }
 
 bool hasUnsupportedControlChars(std::string_view sv) {
@@ -623,10 +638,11 @@ public:
                         } else {
                             pauseProgress();
                             const auto err = result.error();
+                            const auto msg = scrubDaemonLoadMessage(err.message);
                             spdlog::warn("Daemon add failed for file '{}': {}",
-                                         singleFiles[i].string(), err.message);
+                                         singleFiles[i].string(), msg);
                             resumeProgress();
-                            daemonFailures.emplace_back(singleFiles[i], err);
+                            daemonFailures.emplace_back(singleFiles[i], Error{err.code, msg});
                         }
                         if (daemonSpinner.enabled()) {
                             daemonSpinner.setCounts(completedRequests, totalDaemonRequests);
@@ -658,7 +674,10 @@ public:
                             render(result.value(), std::filesystem::path("-"));
                             successfulRequests++;
                         } else {
-                            daemonFailures.emplace_back(std::filesystem::path("-"), result.error());
+                            const auto err = result.error();
+                            const auto msg = scrubDaemonLoadMessage(err.message);
+                            daemonFailures.emplace_back(std::filesystem::path("-"),
+                                                        Error{err.code, msg});
                         }
                         continue;
                     }
@@ -686,10 +705,11 @@ public:
                         } else {
                             pauseProgress();
                             const auto err = result.error();
+                            const auto msg = scrubDaemonLoadMessage(err.message);
                             spdlog::warn("Daemon add failed for directory '{}': {}",
-                                         dirPaths[i].string(), err.message);
+                                         dirPaths[i].string(), msg);
                             resumeProgress();
-                            daemonFailures.emplace_back(dirPaths[i], err);
+                            daemonFailures.emplace_back(dirPaths[i], Error{err.code, msg});
                         }
                         if (daemonSpinner.enabled()) {
                             daemonSpinner.setCounts(completedRequests, totalDaemonRequests);

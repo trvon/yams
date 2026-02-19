@@ -411,4 +411,4 @@ config.corpusProfile = CorpusProfile::PROSE;
 - [GLiNER GitHub](https://github.com/urchade/GLiNER)
 - [REBEL Paper (EMNLP 2021)](https://aclanthology.org/2021.findings-emnlp.204)
 - [KeyBERT](https://github.com/MaartenGr/KeyBERT)
-- [YAMS symbol_extractor_v1](../spec/symbol_extractor_v1.md)
+- YAMS plugin interfaces: see `../spec/README.md`

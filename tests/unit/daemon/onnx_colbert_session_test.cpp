@@ -9,6 +9,8 @@
 #include <cmath>
 #include <cstdlib>
 
+#include "../../common/env_compat.h"
+
 namespace yams::daemon {
 namespace {
 

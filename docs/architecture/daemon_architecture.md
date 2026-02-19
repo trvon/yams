@@ -35,4 +35,4 @@ This document describes the YAMS daemon runtime strictly in terms of its impleme
 - `PluginHost::trust` and `PluginHost::enumerateTrusted` (`plugin_host.cpp`) maintain the on-disk trust manifest and gate which plugin paths `ServiceManager::autoloadPluginsNow` will admit.
 - `AbiPluginLoader` and `WasmRuntime` construct ABI shims (`abi_plugin_loader.cpp`) or WASM instances (`wasm_runtime.cpp`) to bind plugin callbacks into daemon services.
 
-Keep this document synchronized with `docs/delivery/038/artifacts/architecture-traceability.md` when responsibilities move or new subsystems are introduced.
+Keep this document synchronized with any associated traceability artifacts when responsibilities move or new subsystems are introduced.

@@ -106,6 +106,16 @@ private:
 
     boost::asio::awaitable<void> runAsync(std::shared_ptr<ShutdownState> shutdownState);
     bool maintenance_allowed() const;
+
+    // Extracted helpers for runAsync readability
+    boost::asio::awaitable<void> processPathTreeRepair();
+    void performVectorCleanup();
+    boost::asio::awaitable<void> spawnInitialScan();
+    struct MissingWorkResult {
+        std::vector<std::string> missingEmbeddings;
+        std::vector<std::string> missingFts5;
+    };
+    MissingWorkResult detectMissingWork(const std::vector<std::string>& batch);
     // Token gating helpers (inline to avoid ODR/decl mismatches)
     bool try_acquire_token() {
         if (cfg_.maintenanceTokens == 0)

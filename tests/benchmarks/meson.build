@@ -1,14 +1,47 @@
 # Build standalone benchmark executables. These are not registered as Meson
 # tests; CI invokes them directly to generate JSON/MD reports.
 
-# Tracy profiling support (optional)
-tracy_dep = dependency('tracy', required: false, static: true)
+fs = import('fs')
+# Tracy profiling support (optional, off unless enable-profiling is set)
+enable_profiling = get_option('enable-profiling')
+enable_rocprofiler_tracy = get_option('enable-rocprofiler-tracy')
+tracy_dep = dependency('tracy', required: enable_profiling, static: true)
 tracy_args = []
 tracy_deps = []
-if tracy_dep.found()
+if enable_profiling and tracy_dep.found()
   tracy_args += ['-DTRACY_ENABLE']
   tracy_deps += tracy_dep
-  message('Tracy profiling enabled for benchmarks')
+  rocm_hint = '/opt/rocm'
+  rocm_present = fs.exists(rocm_hint)
+  want_rocprofiler = (not enable_rocprofiler_tracy.disabled()) and (enable_rocprofiler_tracy.enabled() or (enable_rocprofiler_tracy.auto() and rocm_present))
+  if want_rocprofiler
+    rocprofiler_dep = dependency(
+      'rocprofiler-sdk',
+      method: 'cmake',
+      cmake_module_path: [join_paths(rocm_hint, 'lib', 'cmake'), join_paths(rocm_hint, 'lib64', 'cmake')],
+      required: enable_rocprofiler_tracy.enabled(),
+    )
+    if rocprofiler_dep.found()
+      tracy_deps += rocprofiler_dep
+    elif enable_rocprofiler_tracy.enabled()
+      error('enable-rocprofiler-tracy=enabled but rocprofiler-sdk was not found')
+    else
+      warning('Tracy present but rocprofiler-sdk missing; disabling Tracy ROCm hooks for benchmarks')
+      tracy_deps = []
+      tracy_args = []
+    endif
+  endif
+  if tracy_deps.length() > 0
+    cpp = meson.get_compiler('cpp')
+    tracy_link_ok = cpp.links('int main(){ return 0; }', dependencies: tracy_deps, name: 'tracy-bench-link-check', required: false)
+    if tracy_link_ok
+      message('Tracy profiling enabled for benchmarks')
+    else
+      warning('Tracy dependency failed to link; disabling Tracy for benchmarks')
+      tracy_deps = []
+      tracy_args = []
+    endif
+  endif
 endif
 
 # Google Benchmark dependency
@@ -31,6 +64,13 @@ search_bench = executable('yams_search_benchmarks', files('search_benchmarks.cpp
   install: false,
 )
 
+core_bench = executable('yams_core_benchmarks', files('core_benchmarks.cpp'),
+  include_directories: incs,
+  dependencies: [test_deps, dependency('yams_benchmarks')] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
 grep_bench = executable('yams_grep_benchmarks', files('grep_benchmarks.cpp'),
   include_directories: incs,
   dependencies: [test_deps, dependency('yams_benchmarks')] + tracy_deps,
@@ -38,20 +78,26 @@ grep_bench = executable('yams_grep_benchmarks', files('grep_benchmarks.cpp'),
   install: false,
 )
 
-search_tree_bench = executable('search_tree_bench', files('search_tree_bench.cpp'),
-  include_directories: incs,
-  dependencies: [
+# Large-scale ingestion benchmark (requires google-benchmark)
+if benchmark_dep.found()
+  large_scale_ingestion_bench_deps = [
+    test_deps,
     dependency('yams_benchmarks'),
-    dependency('yams_app_services'),
-    dependency('yams_metadata'),
-    dependency('yams_search'),
-    dependency('yams_daemon'),
-    dependency('spdlog'),
-    dependency('nlohmann_json'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-  install: false,
-)
+    benchmark_dep,
+  ] + tracy_deps
+
+  large_scale_ingestion_bench = executable('yams_large_scale_ingestion_bench',
+    files('large_scale_ingestion_bench.cpp'),
+    include_directories: incs,
+    dependencies: large_scale_ingestion_bench_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  alias_target('bench_large_scale_ingestion', large_scale_ingestion_bench)
+else
+  message('Google Benchmark not found; skipping large_scale_ingestion_bench')
+endif
 
 if benchmark_dep.found()
   retrieval_bench_deps = [test_deps, dependency('yams_benchmarks')] + tracy_deps + [benchmark_dep]
@@ -181,20 +227,24 @@ ipc_stream_bench = executable('ipc_stream_bench', files('ipc_streaming_bench.cpp
 alias_target('bench_ipc_stream', ipc_stream_bench)
 
 # Socket accept and metrics performance benchmark
-daemon_socket_accept_bench = executable('daemon_socket_accept_bench', files('daemon_socket_accept_bench.cpp'),
-  include_directories: incs,
-  dependencies: [
-    gtest_dep,
-    test_deps,
-    dependency('yams_benchmarks'),
-    dependency('yams_daemon'),
-    dependency('nlohmann_json'),
-  ] + tracy_deps,
-  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-  install: false,
-)
+if gtest_dep.found()
+  daemon_socket_accept_bench = executable('daemon_socket_accept_bench', files('daemon_socket_accept_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      gtest_dep,
+      test_deps,
+      dependency('yams_benchmarks'),
+      dependency('yams_daemon'),
+      dependency('nlohmann_json'),
+    ] + tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
 
-alias_target('bench_socket_accept', daemon_socket_accept_bench)
+  alias_target('bench_socket_accept', daemon_socket_accept_bench)
+else
+  message('GTest not found; skipping daemon_socket_accept_bench.')
+endif
 
 # PBI-073: Symbol extraction benchmark (Catch2-based)
 # Validates symbol extraction quality (Recall/Precision/F1) and performance
@@ -257,7 +307,38 @@ if catch2_with_main_dep.found()
        })
 
   alias_target('bench_hnsw', hnsw_entity_search_bench)
-else
-  message('Catch2 not found, skipping symbol_extraction_bench and hnsw_entity_search_bench')
-endif
 
+  # Multi-client ingestion & concurrent access benchmark (Catch2-based)
+  # Measures ingestion throughput, latency, and fairness under multi-client load.
+  # Tagged [!benchmark] so won't run by default - invoke manually or in nightly CI.
+  multi_client_ingestion_bench = executable('multi_client_ingestion_bench',
+    files('multi_client_ingestion_bench.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_with_main_dep,
+      test_deps,
+      dependency('nlohmann_json'),
+      dependency('spdlog'),
+    ] + tracy_deps,
+    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    install: false,
+  )
+
+  test('multi_client_ingestion_bench', multi_client_ingestion_bench,
+       args: ['--allow-running-no-tests'],
+       suite: ['bench', 'multi-client'],
+       is_parallel: false,
+       timeout: 600,
+       env: {
+         'YAMS_TESTING': '1',
+         'YAMS_DISABLE_VECTORS': '1',
+         'YAMS_DISABLE_SESSION_WATCHER': '1',
+         'YAMS_SKIP_MODEL_LOADING': '1',
+         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+         'LD_LIBRARY_PATH': _test_env_ld_library_path,
+       })
+
+  alias_target('bench_multi_client', multi_client_ingestion_bench)
+else
+  message('Catch2 not found, skipping symbol_extraction_bench, hnsw_entity_search_bench, and multi_client_ingestion_bench')
+endif

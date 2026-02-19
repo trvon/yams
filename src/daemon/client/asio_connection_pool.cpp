@@ -5,6 +5,8 @@
 #include <yams/daemon/ipc/message_framing.h>
 #include <yams/profiling.h>
 
+#include <yams/daemon/client/ipc_failure.h>
+
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
@@ -139,20 +141,27 @@ async_connect_with_timeout(const TransportOptions& opts) {
 
     if (connect_result.index() == 1) {
         socket->close();
-        co_return Error{ErrorCode::Timeout, "Connection timeout (pool connect)"};
+        co_return Error{ErrorCode::Timeout, formatIpcFailure(IpcFailureKind::Timeout,
+                                                             "Connection timeout (socket='" +
+                                                                 opts.socketPath.string() + "')")};
     }
 
     auto& [ec] = std::get<0>(connect_result);
     if (ec) {
         if (ec == boost::asio::error::connection_refused ||
             ec == make_error_code(boost::system::errc::connection_refused)) {
-            co_return Error{ErrorCode::NetworkError,
-                            std::string("Connection refused. Is the daemon running? Try 'yams "
-                                        "daemon start' or verify daemon.socket_path (pool). ") +
-                                ec.message()};
+            co_return Error{
+                ErrorCode::NetworkError,
+                formatIpcFailure(IpcFailureKind::Refused,
+                                 std::string("Connection refused (socket='") +
+                                     opts.socketPath.string() +
+                                     "'). Is the daemon running? Try 'yams daemon start' or verify "
+                                     "daemon.socket_path. " +
+                                     ec.message())};
         }
         co_return Error{ErrorCode::NetworkError,
-                        std::string("Connection failed (pool): ") + ec.message()};
+                        formatIpcFailure(IpcFailureKind::Other,
+                                         std::string("Connection failed: ") + ec.message())};
     }
 
     if (trace) {
@@ -216,12 +225,31 @@ async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::mil
         use_awaitable);
 
     if (read_result.index() == 1) {
-        co_return Error{ErrorCode::Timeout, "Read timeout"};
+        co_return Error{ErrorCode::Timeout,
+                        formatIpcFailure(IpcFailureKind::Timeout, "Read timeout")};
     }
 
     auto& [ec, bytes_read] = std::get<0>(read_result);
     if (ec) {
-        co_return Error{ErrorCode::NetworkError, ec.message()};
+        if (ec == boost::asio::error::eof) {
+            co_return Error{ErrorCode::NetworkError,
+                            formatIpcFailure(IpcFailureKind::Eof, ec.message())};
+        }
+        if (ec == boost::asio::error::operation_aborted) {
+            co_return Error{ErrorCode::OperationCancelled,
+                            formatIpcFailure(IpcFailureKind::Cancelled, ec.message())};
+        }
+
+        // Heuristic mapping for common AF_UNIX socket drops.
+        const auto msg = ec.message();
+        if (msg.find("Broken pipe") != std::string::npos ||
+            msg.find("EPIPE") != std::string::npos ||
+            msg.find("Connection reset") != std::string::npos ||
+            msg.find("ECONNRESET") != std::string::npos) {
+            co_return Error{ErrorCode::NetworkError,
+                            formatIpcFailure(IpcFailureKind::ResetOrBrokenPipe, msg)};
+        }
+        co_return Error{ErrorCode::NetworkError, formatIpcFailure(IpcFailureKind::Other, msg)};
     }
 
     co_return buffer;
@@ -368,11 +396,11 @@ void AsioConnectionPool::retire_connection(const std::shared_ptr<AsioConnection>
     });
 }
 
-awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::acquire() {
+awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::acquire() {
     YAMS_ZONE_SCOPED_N("ConnectionPool::acquire");
     // Check if pool is being shut down
     if (shutdown_.load(std::memory_order_acquire)) {
-        co_return nullptr;
+        co_return Error{ErrorCode::SystemShutdown, "Connection pool is shut down"};
     }
 
     // Fast path: try to reuse an existing idle connection
@@ -450,11 +478,11 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
     connection_pool_.clear();
 }
 
-awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection() {
+awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_connection() {
     YAMS_ZONE_SCOPED_N("ConnectionPool::create_connection");
     // Check shutdown before starting
     if (shutdown_.load(std::memory_order_acquire)) {
-        co_return nullptr;
+        co_return Error{ErrorCode::SystemShutdown, "Connection pool is shut down"};
     }
 
     auto conn = std::make_shared<AsioConnection>(opts_);
@@ -470,7 +498,10 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
     for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
         if (socketMissing()) {
             if (attempt + 1 < kMaxRetries) {
-                std::this_thread::sleep_for(backoff);
+                auto exec = co_await this_coro::executor;
+                boost::asio::steady_timer timer(exec);
+                timer.expires_after(backoff);
+                co_await timer.async_wait(use_awaitable);
                 backoff = std::min(backoff * 2, std::chrono::milliseconds(250));
                 continue;
             }
@@ -480,7 +511,10 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
             break;
         }
         if (socketMissing() && attempt + 1 < kMaxRetries) {
-            std::this_thread::sleep_for(backoff);
+            auto exec = co_await this_coro::executor;
+            boost::asio::steady_timer timer(exec);
+            timer.expires_after(backoff);
+            co_await timer.async_wait(use_awaitable);
             backoff = std::min(backoff * 2, std::chrono::milliseconds(250));
             continue;
         }
@@ -494,18 +528,28 @@ awaitable<std::shared_ptr<AsioConnection>> AsioConnectionPool::create_connection
             boost::system::error_code ec;
             socket_res.value()->close(ec);
         }
-        co_return nullptr;
+        co_return Error{ErrorCode::SystemShutdown, "Connection pool shut down while connecting"};
     }
 
     if (!socket_res) {
         if (socketMissing()) {
             spdlog::debug("[ConnectionPool::create_connection] socket not available: {}",
                           opts_.socketPath.string());
+            co_return Error{ErrorCode::NetworkError,
+                            formatIpcFailure(IpcFailureKind::SocketMissing,
+                                             "Daemon not started (socket not found at '" +
+                                                 opts_.socketPath.string() + "').")};
         } else {
             spdlog::warn("[ConnectionPool::create_connection] socket_res is error: {}",
                          socket_res.error().message);
+            // Preserve the underlying error (refused, timeout, etc.) instead of collapsing to
+            // nullptr.
+            const auto& msg = socket_res.error().message;
+            if (parseIpcFailureKind(msg)) {
+                co_return socket_res.error();
+            }
+            co_return Error{socket_res.error().code, formatIpcFailure(IpcFailureKind::Other, msg)};
         }
-        co_return nullptr;
     }
     conn->socket = std::move(socket_res.value());
     conn->alive.store(true, std::memory_order_release);
@@ -612,9 +656,13 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                     if (e.code == ErrorCode::OperationCancelled) {
                         co_return;
                     }
-                    if (e.message == "Read timeout" ||
-                        e.message.find("End of file") != std::string::npos) {
-                        e.message = "Connection closed by server (possibly stale connection)";
+                    // Preserve stable IPC classification when available.
+                    if (!parseIpcFailureKind(e.message)) {
+                        if (e.message == "Read timeout") {
+                            e.message = formatIpcFailure(IpcFailureKind::Timeout, e.message);
+                        } else if (e.message.find("End of file") != std::string::npos) {
+                            e.message = formatIpcFailure(IpcFailureKind::Eof, e.message);
+                        }
                     }
                     if (auto c = weak_conn.lock()) {
                         // Acquire strand before accessing handlers map
@@ -676,9 +724,13 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                         if (e.code == ErrorCode::OperationCancelled) {
                             co_return;
                         }
-                        if (e.message == "Read timeout" ||
-                            e.message.find("End of file") != std::string::npos) {
-                            e.message = "Connection closed by server (possibly stale connection)";
+                        // Preserve stable IPC classification when available.
+                        if (!parseIpcFailureKind(e.message)) {
+                            if (e.message == "Read timeout") {
+                                e.message = formatIpcFailure(IpcFailureKind::Timeout, e.message);
+                            } else if (e.message.find("End of file") != std::string::npos) {
+                                e.message = formatIpcFailure(IpcFailureKind::Eof, e.message);
+                            }
                         }
                         if (auto c = weak_conn.lock()) {
                             // Acquire strand before accessing handlers map

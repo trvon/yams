@@ -156,6 +156,13 @@ struct SearchEngineConfig {
         COMB_MNZ                                 // CombMNZ: score * num_components (recall-focused)
     } fusionStrategy = FusionStrategy::COMB_MNZ; // Default: recall-focused
 
+    // Hybrid behavior flags for experimentation and tuning
+    bool enableIntentAdaptiveWeighting = true; // Apply query-intent scaling at runtime
+    bool enableFieldAwareWeightedRrf = true;   // Use source-specific scaling in WEIGHTED_RECIPROCAL
+    bool enableLexicalExpansion = false;       // Enable fallback lexical expansion for sparse hits
+    size_t lexicalExpansionMinHits = 3;        // Trigger expansion when primary FTS hits below this
+    float lexicalExpansionScorePenalty = 0.65f; // Penalty applied to expanded-only FTS matches
+
     /// Convert FusionStrategy to string for logging/debugging
     [[nodiscard]] static constexpr const char*
     fusionStrategyToString(FusionStrategy strategy) noexcept {
@@ -476,6 +483,10 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
     // Single map to accumulate scores directly into SearchResult objects
     std::unordered_map<std::string, SearchResult> resultMap;
     resultMap.reserve(results.size());
+    std::unordered_map<std::string, double> maxVectorRawScore;
+    maxVectorRawScore.reserve(results.size());
+    std::unordered_set<std::string> anchoredDocs;
+    anchoredDocs.reserve(results.size());
 
     // Single pass: accumulate scores directly
     for (const auto& comp : results) {
@@ -496,6 +507,16 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
         // Track per-component breakdown
         accumulateComponentScore(r, comp.source, contribution);
 
+        if (isVectorComponent(comp.source)) {
+            const double clampedRaw = std::clamp(static_cast<double>(comp.score), 0.0, 1.0);
+            auto [it, inserted] = maxVectorRawScore.try_emplace(comp.documentHash, clampedRaw);
+            if (!inserted) {
+                it->second = std::max(it->second, clampedRaw);
+            }
+        } else if (isTextAnchoringComponent(comp.source)) {
+            anchoredDocs.insert(comp.documentHash);
+        }
+
         // Use first available snippet
         if (r.snippet.empty() && comp.snippet.has_value()) {
             r.snippet = comp.snippet.value();
@@ -505,7 +526,33 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
     // Extract results from map
     std::vector<SearchResult> fusedResults;
     fusedResults.reserve(resultMap.size());
-    for (auto& [_, r] : resultMap) {
+    for (auto& [hash, r] : resultMap) {
+        const bool hasAnchoring = anchoredDocs.contains(hash);
+        const auto vecIt = maxVectorRawScore.find(hash);
+        const bool hasVector = vecIt != maxVectorRawScore.end();
+
+        if (hasVector && !hasAnchoring) {
+            if (vecIt->second < static_cast<double>(config_.vectorOnlyThreshold)) {
+                continue;
+            }
+            r.score *= static_cast<double>(config_.vectorOnlyPenalty);
+        }
+
+        if (hasVector && hasAnchoring && config_.vectorBoostFactor > 0.0f) {
+            const double vectorContribution = r.vectorScore.value_or(0.0);
+            const double anchorContribution =
+                r.keywordScore.value_or(0.0) + r.pathScore.value_or(0.0) + r.kgScore.value_or(0.0) +
+                r.tagScore.value_or(0.0) + r.symbolScore.value_or(0.0);
+
+            if (vectorContribution > 0.0 && anchorContribution > 0.0) {
+                const double agreement = (2.0 * std::min(vectorContribution, anchorContribution)) /
+                                         (vectorContribution + anchorContribution);
+                const double boostFactor =
+                    std::clamp(static_cast<double>(config_.vectorBoostFactor), 0.0, 0.10);
+                r.score *= (1.0 + boostFactor * agreement);
+            }
+        }
+
         fusedResults.emplace_back(std::move(r));
     }
 

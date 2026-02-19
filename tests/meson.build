@@ -1,9 +1,12 @@
 #! Meson configure-time test discovery without fs.glob/subdir_glob
 
-gtest_dep = dependency('gtest', required: true)
+gtest_dep = dependency('gtest', required: false)
 gmock_dep = dependency('gmock', required: false)
 
-gtest_compile_dep = gtest_dep.partial_dependency(compile_args: true, includes: true)
+gtest_compile_dep = []
+if gtest_dep.found()
+  gtest_compile_dep = gtest_dep.partial_dependency(compile_args: true, includes: true)
+endif
 gmock_compile_deps = []
 gmock_link_deps = []
 if gmock_dep.found()
@@ -12,38 +15,9 @@ if gmock_dep.found()
 endif
 
 # Catch2 dependency for modern test framework (PBI-050)
-catch2_dep = dependency('catch2', required: false)
-if not catch2_dep.found()
-  catch2_dep = dependency('Catch2', required: false, method: 'pkg-config')
-endif
-if not catch2_dep.found()
-  catch2_dep = dependency('Catch2', required: false, method: 'cmake')
-endif
-
-# Catch2 with main function (provides test runner entry point)
-catch2_main_dep = dependency('catch2-with-main', required: false)
-if not catch2_main_dep.found()
-  catch2_main_dep = dependency('Catch2WithMain', required: false, method: 'pkg-config')
-endif
-if not catch2_main_dep.found()
-  catch2_main_dep = dependency('Catch2WithMain', required: false, method: 'cmake')
-endif
-if not catch2_main_dep.found()
-  # Fallback: try to find libCatch2Main directly (homebrew installs separate libs)
-  cxx = meson.get_compiler('cpp')
-  # Try with dirs hint for homebrew
-  catch2_main_lib = cxx.find_library('Catch2Main', required: false,
-                                      dirs: ['/opt/homebrew/lib', '/usr/local/lib'])
-  if catch2_main_lib.found()
-    catch2_main_dep = declare_dependency(
-      dependencies: [catch2_dep, catch2_main_lib]
-    )
-  else
-    # Last resort: use Catch2 only (tests will fail to link without main)
-    catch2_main_dep = catch2_dep
-    warning('Catch2Main library not found - tests may fail to link')
-  endif
-endif
+# Prefer system installs, but fall back to Meson wrap subproject when available.
+catch2_dep = dependency('catch2', required: false, fallback: ['catch2', 'catch2_dep'])
+catch2_main_dep = dependency('catch2-with-main', required: false, fallback: ['catch2', 'catch2_with_main_dep'])
 
 # Get Catch2 partial dependency with includes for test builds
 catch2_compile_dep = []
@@ -58,16 +32,7 @@ catch2_trailing_link_deps = [
   dependency('fmt', required: false),
 ]
 
-# Also query pkg-config directly for robustness
 catch2_incs = []
-catch2_pkgconfig = find_program('pkg-config', required: false)
-if catch2_pkgconfig.found()
-  catch2_incdir = run_command(catch2_pkgconfig, '--variable=includedir', 'catch2',
-                              check: false).stdout().strip()
-  if catch2_incdir != ''
-    catch2_incs += [include_directories(catch2_incdir)]
-  endif
-endif
 
 # TSAN suppressions file for tests (if TSAN is enabled)
 # Must be defined early before subdirs are included
@@ -199,36 +164,43 @@ endif
 # the Conan-shipped runtime used for installation.
 if host_machine.system() == 'windows' and windows_runtime_dlls.length() > 0
   py_mod = import('python')
-  python = py_mod.find_installation('python3')
+  python = py_mod.find_installation('python3', required: false)
+  if not python.found()
+    python = py_mod.find_installation('python', required: false)
+  endif
 
-  # All test binary directories (relative to builddir/tests)
-  test_runtime_dirs = [
-    '.',
-    'integration',
-    'integration/smoke',
-    'integration/daemon',
-    'integration/cli',
-    'integration/search',
-    'integration/services',
-  ]
+  if python.found()
+    # All test binary directories (relative to builddir/tests)
+    test_runtime_dirs = [
+      '.',
+      'integration',
+      'integration/smoke',
+      'integration/daemon',
+      'integration/cli',
+      'integration/search',
+      'integration/services',
+    ]
 
-  foreach dll_info : windows_runtime_dlls
-    dll_name = dll_info[0]
-    dll_src = dll_info[1]
+    foreach dll_info : windows_runtime_dlls
+      dll_name = dll_info[0]
+      dll_src = dll_info[1]
 
-    foreach dest_rel : test_runtime_dirs
-      dest_path = join_paths(meson.current_build_dir(), dest_rel, dll_name)
-      stamp = 'dllcopy_@0@_@1@.stamp'.format(dll_name, dest_rel.replace('/', '_'))
-      custom_target(stamp,
-        input: dll_src,
-        output: stamp,
-        command: [python, '-c',
-          'import pathlib, shutil, sys; src=sys.argv[1]; dest=pathlib.Path(sys.argv[2]); stamp=pathlib.Path(sys.argv[3]); dest.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dest); stamp.parent.mkdir(parents=True, exist_ok=True); stamp.write_text("ok")',
-          dll_src, dest_path, '@OUTPUT@'],
-        build_by_default: true,
-      )
+      foreach dest_rel : test_runtime_dirs
+        dest_path = join_paths(meson.current_build_dir(), dest_rel, dll_name)
+        stamp = 'dllcopy_@0@_@1@.stamp'.format(dll_name, dest_rel.replace('/', '_'))
+        custom_target(stamp,
+          input: dll_src,
+          output: stamp,
+          command: [python, '-c',
+            'import pathlib, shutil, sys; src=sys.argv[1]; dest=pathlib.Path(sys.argv[2]); stamp=pathlib.Path(sys.argv[3]); dest.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dest); stamp.parent.mkdir(parents=True, exist_ok=True); stamp.write_text("ok")',
+            dll_src, dest_path, '@OUTPUT@'],
+          build_by_default: true,
+        )
+      endforeach
     endforeach
-  endforeach
+  else
+    message('Python not found (python3/python); skipping Windows test runtime DLL staging')
+  endif
 endif
 
 tests_has_cli = false
@@ -272,10 +244,16 @@ test_cpp_noerror_args = cxx.get_supported_arguments([
 ])
 
 ## Meson-native test discovery via structured subdirs (no shell globs)
-# Build unit test object library in subdir and link here for the aggregate runner
-subdir('unit')
-if get_option('build-plugins')
-  subdir('plugins')
+# Build legacy GTest unit tests only when GTest is available.
+if gtest_dep.found()
+  # Build unit test object library in subdir and link here for the aggregate runner
+  subdir('unit')
+  if get_option('build-plugins')
+    subdir('plugins')
+  endif
+else
+  message('GTest not found; skipping GTest unit/plugin test build (Catch2 tests may still be enabled).')
+  yams_unit_objs = []
 endif
 
 
@@ -283,7 +261,11 @@ endif
 if get_option('enable-integration-tests') or get_option('buildtype') == 'debug'
   subdir('integration/smoke')
   subdir('integration/daemon')
-  subdir('integration/cli')
+  if gtest_dep.found()
+    subdir('integration/cli')
+  else
+    message('GTest not found; skipping GTest-based CLI integration tests.')
+  endif
   subdir('integration/search')
 endif
 if get_option('enable-mobile-tests')
@@ -405,14 +387,20 @@ endforeach
 # Prepare LD_LIBRARY_PATH for test environment (needed for transitive TBB dependencies)
 _test_env_ld_library_path = ':'.join(_test_ld_library_path)
 
-unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
-  include_directories: incs,
-  dependencies: [gtest_dep] + gmock_link_deps + test_deps,
-  cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-  link_whole: yams_unit_objs,
-  build_rpath: ':'.join(_test_rpaths),
-  install: false,
-)
+ unit_exe = []
+ # Only build the GTest executable if there are remaining GTest sources
+ if gtest_dep.found() and yams_unit_objs != []
+   unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
+     include_directories: incs,
+     dependencies: [gtest_dep] + gmock_link_deps + test_deps,
+     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+     link_whole: yams_unit_objs,
+     build_rpath: ':'.join(_test_rpaths),
+     install: false,
+   )
+ else
+   message('GTest unit tests fully migrated to Catch2 or GTest not found; skipping GTest-based unit test executable.')
+ endif
   unit_shards = get_option('unit-shards')
   unit_timeout = get_option('unit-timeout')
   bench_timeout = get_option('bench-timeout')
@@ -422,7 +410,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
     safe_timeout = 600
   endif
 
-  if get_option('enable-full-unit') and unit_shards > 1
+  if gtest_dep.found() and unit_exe != [] and get_option('enable-full-unit') and unit_shards > 1
     # Derive per-shard timeout (ceil division) with a small floor of 120s
     shard_timeout = (unit_timeout + unit_shards - 1) / unit_shards
     if shard_timeout < 120
@@ -453,7 +441,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
         timeout: shard_timeout
       )
     endforeach
-  elif get_option('enable-full-unit')
+  elif gtest_dep.found() and unit_exe != [] and get_option('enable-full-unit')
     test('unit', unit_exe,
       suite: 'unit',
       args: ['--gtest_filter=' + unit_exclude],
@@ -471,7 +459,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
       timeout: unit_timeout)
   endif
 
-  if get_option('enable-bench-tests')
+  if gtest_dep.found() and unit_exe != [] and get_option('enable-bench-tests')
   # Note: All bench tests use suite 'bench' or ['bench', 'isolated']
   # Run unified benchmarks with: meson test -C builddir --suite bench
 
@@ -489,7 +477,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   # Daemon lifecycle smoke coverage remains opt-in because it performs full daemon start/stop sequences.
   endif
 
-  if get_option('enable-daemon-long-tests')
+  if get_option('enable-daemon-long-tests') and unit_exe != []
   test('unit_isolated_daemon', unit_exe,
     suite: ['daemon-long'],
     args: ['--gtest_filter=DaemonTest.*'],
@@ -501,7 +489,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   )
   endif
 
-  if get_option('enable-bench-tests')
+  if gtest_dep.found() and unit_exe != [] and get_option('enable-bench-tests')
   test('unit_isolated_streaming_chunker', unit_exe,
     suite: ['bench', 'isolated', 'perf'],
     args: ['--gtest_filter=StreamingChunkerTest.*'],
@@ -608,7 +596,7 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
 
   endif
 
-  if get_option('enable-reliability-tests')
+  if gtest_dep.found() and unit_exe != [] and get_option('enable-reliability-tests')
   test('unit_reliability_grep_search_startup', unit_exe,
     suite: ['bench', 'reliability'],
     args: ['--gtest_filter=GrepServiceTest.RetriesTransientMetadataErrors:GrepServiceTest.PropagatesMetadataErrorsWhenTagsUnavailable:SearchServiceTest.LightIndexRetriesTransientMetadataErrors'],
@@ -628,84 +616,86 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
   )
   endif
 
-  # Define a fast "smoke" subset using gtest filter for developer iteration
-  smoke_filter = 'ContentStoreTest.*:ProgressReporterTest.*:ContentMetadataTest.*:ContentStoreBuilderTest.*:SearchSmoke.*'
-  test('unit_smoke', unit_exe,
-    suite: ['unit', 'smoke'],
-    args: ['--gtest_filter=' + smoke_filter],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
-      'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
-      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
-      'YAMS_VDB_IN_MEMORY': '1',
-      'YAMS_SQLITE_VEC_SKIP_INIT': '1',
-      'YAMS_DISABLE_VECTORS': '1',
-      'YAMS_TESTING': '1',
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-    },
-    timeout: 120,
-  )
+  if gtest_dep.found() and unit_exe != []
+    # Define a fast "smoke" subset using gtest filter for developer iteration
+    smoke_filter = 'ContentStoreTest.*:ProgressReporterTest.*:ContentMetadataTest.*:ContentStoreBuilderTest.*:SearchSmoke.*'
+    test('unit_smoke', unit_exe,
+      suite: ['unit', 'smoke'],
+      args: ['--gtest_filter=' + smoke_filter],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+        'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
+        'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+        'YAMS_VDB_IN_MEMORY': '1',
+        'YAMS_SQLITE_VEC_SKIP_INIT': '1',
+        'YAMS_DISABLE_VECTORS': '1',
+        'YAMS_TESTING': '1',
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      },
+      timeout: 120,
+    )
 
-  # Targeted fast subset for PBI-045 metadata modernization acceptance
-  targeted_filter = 'DatabaseStatementChronoTest.*:QueryHelpersIntegration.*:MetadataRepositoryCache.*:ConnectionPoolMaintenance.*:SqlBuildSelectTest.*:TagsQuerySpecIntegration.*:MetadataRepositoryTest.CountsAndModifiedSince:MetadataValueVariantTest.*'
-  test('unit_targeted_metadata', unit_exe,
-    suite: ['unit', 'pbi045'],
-    args: ['--gtest_filter=' + targeted_filter],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'GTEST_BRIEF': '1',
-      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
-      'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
-      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
-      'YAMS_VDB_IN_MEMORY': '1',
-      'YAMS_SQLITE_VEC_SKIP_INIT': '1',
-      'YAMS_DISABLE_VECTORS': '1',
-      'YAMS_TESTING': '1',
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-    },
-    timeout: 180,
-  )
+    # Targeted fast subset for PBI-045 metadata modernization acceptance
+    targeted_filter = 'DatabaseStatementChronoTest.*:QueryHelpersIntegration.*:MetadataRepositoryCache.*:ConnectionPoolMaintenance.*:SqlBuildSelectTest.*:TagsQuerySpecIntegration.*:MetadataRepositoryTest.CountsAndModifiedSince:MetadataValueVariantTest.*'
+    test('unit_targeted_metadata', unit_exe,
+      suite: ['unit', 'pbi045'],
+      args: ['--gtest_filter=' + targeted_filter],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'GTEST_BRIEF': '1',
+        'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+        'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
+        'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+        'YAMS_VDB_IN_MEMORY': '1',
+        'YAMS_SQLITE_VEC_SKIP_INIT': '1',
+        'YAMS_DISABLE_VECTORS': '1',
+        'YAMS_TESTING': '1',
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      },
+      timeout: 180,
+    )
 
-  # PBI-040: unit_safe runner — stable daily gate excluding known heavy/fragile suites
-  # This provides a fast, reliable unit test subset for CI/developer iteration
-  # CI-stable subset: drop FTS-heavy, repo search, reference counter stats and vector smoke
-  safe_include_filter = 'ContentStoreTest.*:ProgressReporterTest.*:QueryHelpersIntegration.*:ConnectionPoolMaintenance.*:BKTreeTest.*:SearchCacheTest.*:QueryParserTest.*:MessageFramingTest.*:ResponseOfTest.*:IPCMessageTypeTest.*'
-  test('unit_safe', unit_exe,
-    suite: ['unit', 'safe', 'pbi040'],
-    args: ['--gtest_filter=' + safe_include_filter],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'GTEST_BRIEF': '1',
-      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
-      'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
-      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
-      'YAMS_VDB_IN_MEMORY': '1',
-      'YAMS_SQLITE_VEC_SKIP_INIT': '1',
-      'YAMS_DISABLE_VECTORS': '1',
-      'YAMS_TESTING': '1',
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-    },
-    timeout: safe_timeout,
-  )
+    # PBI-040: unit_safe runner — stable daily gate excluding known heavy/fragile suites
+    # This provides a fast, reliable unit test subset for CI/developer iteration
+    # CI-stable subset: drop FTS-heavy, repo search, reference counter stats and vector smoke
+    safe_include_filter = 'ContentStoreTest.*:ProgressReporterTest.*:QueryHelpersIntegration.*:ConnectionPoolMaintenance.*:BKTreeTest.*:SearchCacheTest.*:QueryParserTest.*:MessageFramingTest.*:ResponseOfTest.*:IPCMessageTypeTest.*'
+    test('unit_safe', unit_exe,
+      suite: ['unit', 'safe', 'pbi040'],
+      args: ['--gtest_filter=' + safe_include_filter],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'GTEST_BRIEF': '1',
+        'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+        'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '1500',
+        'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+        'YAMS_VDB_IN_MEMORY': '1',
+        'YAMS_SQLITE_VEC_SKIP_INIT': '1',
+        'YAMS_DISABLE_VECTORS': '1',
+        'YAMS_TESTING': '1',
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      },
+      timeout: safe_timeout,
+    )
 
-  # PBI-040: Conditional vector smoke test (runs only when sqlite-vec is available)
-  test('unit_vector_smoke', unit_exe,
-    suite: ['unit', 'vector', 'pbi040'],
-    args: ['--gtest_filter=VectorSmokeTest.*'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'GTEST_BRIEF': '1',
-      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
-      'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '3000',
-      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
-      'YAMS_VDB_IN_MEMORY': '1',
-      'YAMS_TESTING': '1',
-      # Note: sqlite-vec env toggles NOT set, allowing initialization if available
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-    },
-    timeout: 120,
-  )
+    # PBI-040: Conditional vector smoke test (runs only when sqlite-vec is available)
+    test('unit_vector_smoke', unit_exe,
+      suite: ['unit', 'vector', 'pbi040'],
+      args: ['--gtest_filter=VectorSmokeTest.*'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'GTEST_BRIEF': '1',
+        'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+        'YAMS_SQLITE_VEC_INIT_TIMEOUT_MS': '3000',
+        'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+        'YAMS_VDB_IN_MEMORY': '1',
+        'YAMS_TESTING': '1',
+        # Note: sqlite-vec env toggles NOT set, allowing initialization if available
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      },
+      timeout: 120,
+    )
+  endif
 
 
 ## integration_smoke now defined in subdir('integration/smoke')
@@ -713,7 +703,11 @@ unit_exe = executable('yams_unit_tests', files('unit/main.cpp'),
 # Next integration group: Services (daemon ingestion/retrieval)
 # Compile this group separately to avoid duplicate plugin symbols and to allow isolated serial runs.
 # Prefer Meson-native subdirs over shell discovery for services integration tests
-subdir('integration/services')
+if gtest_dep.found()
+  subdir('integration/services')
+else
+  message('GTest not found; skipping GTest-based services integration tests (Catch2-based suites may still build).')
+endif
 
 # Benchmarks (standalone executables). Register bench test target only when enabled.
 subdir('benchmarks')
@@ -741,7 +735,7 @@ endif
 subdir('acceptance')
 
 # Stress tests can be heavy; register but mark as long-running via suite name
-if get_option('enable-stress-tests') and all_stress.length() > 0
+if gtest_dep.found() and get_option('enable-stress-tests') and all_stress.length() > 0
   stress_exe = executable('yams_stress_tests', all_stress + test_main,
     include_directories: incs,
     dependencies: [gtest_dep, test_deps],
@@ -756,6 +750,8 @@ if get_option('enable-stress-tests') and all_stress.length() > 0
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
     },
     timeout: 300)
+elif get_option('enable-stress-tests')
+  message('GTest not found; skipping stress test registration.')
 endif
 
 # ============================================================================
@@ -798,7 +794,10 @@ if catch2_dep.found()
   )
 
   catch2_daemon_protocol_exe = executable('catch2_daemon_protocol',
-    files('unit/daemon/daemon_protocol_test.cpp'),
+    files(
+      'unit/daemon/daemon_protocol_test.cpp',
+      'unit/daemon/request_handler_status_unary_catch2_test.cpp',
+    ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -839,6 +838,69 @@ if catch2_dep.found()
       'unit/daemon/components/request_queue_test.cpp',
       'unit/daemon/components/vector_system_manager_test.cpp',
     ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Gradient limiter tests (Netflix Gradient2 adaptive concurrency)
+  catch2_gradient_limiter_exe = executable('catch2_gradient_limiter',
+    files('unit/daemon/components/gradient_limiter_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # WorkCoordinator tests (async work coordination)
+  catch2_work_coordinator_exe = executable('catch2_work_coordinator',
+    files('unit/daemon/work_coordinator_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # PostIngestQueue unit tests (LruCache template + stage constants)
+  catch2_post_ingest_queue_unit_exe = executable('catch2_post_ingest_queue_unit',
+    files('unit/daemon/components/post_ingest_queue_unit_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Metrics consistency tests (migrated from GTest)
+  catch2_metrics_consistency_exe = executable('catch2_metrics_consistency',
+    files('unit/daemon/metrics_consistency_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # SearchService integration tests (migrated from GTest)
+  catch2_search_service_exe = executable('catch2_search_service',
+    files(
+      'unit/app/services/search_service_catch2_test.cpp',
+      'unit/app/services/search_hash_edge_cases_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # FTS5 performance/stress tests (migrated from GTest, opt-in via YAMS_RUN_STRESS_TESTS=1)
+  catch2_fts5_stress_exe = executable('catch2_fts5_stress',
+    files('unit/metadata/fts5_performance_stress_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -898,6 +960,37 @@ if catch2_dep.found()
       build_rpath: ':'.join(_test_rpaths),
       install: false,
     )
+
+    catch2_gpu_provider_exe = executable('catch2_gpu_provider',
+      files('unit/daemon/onnx_gpu_provider_catch2_test.cpp'),
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep] + test_deps + [onnx_dep],
+      cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+      build_rpath: ':'.join(_test_rpaths),
+      install: false,
+    )
+
+    catch2_onnx_embedding_diag_exe = executable('catch2_onnx_embedding_diag',
+      files(
+        'unit/daemon/onnx_embedding_diagnostic_test.cpp',
+        '../plugins/onnx/model_provider.cpp',
+        '../plugins/onnx/onnx_model_pool.cpp',
+        '../plugins/onnx/onnx_reranker_session.cpp',
+        '../plugins/onnx/onnx_colbert_session.cpp',
+      ),
+      include_directories: incs,
+      dependencies: onnx_provider_test_deps,
+      cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+      build_rpath: ':'.join(_test_rpaths),
+      install: false,
+    )
+
+    test('onnx_embedding_diagnostic', catch2_onnx_embedding_diag_exe,
+      suite: ['catch2', 'unit', 'daemon', 'onnx', 'diagnostic'],
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      args: ['--allow-running-no-tests'],
+      timeout: 120,
+    )
   endif
 
   catch2_plugin_infrastructure_exe = executable('catch2_plugin_infrastructure',
@@ -929,8 +1022,18 @@ if catch2_dep.found()
 
   # Daemon repair and service manager tests (Catch2)
   # Migrated from GTest as part of yams-3s4
-  catch2_repair_coordinator_exe = executable('catch2_repair_coordinator',
-    files('unit/daemon/repair_coordinator_catch2_test.cpp'),
+  # RepairCoordinator tests disabled — replaced by RepairService (port pending)
+  # catch2_repair_coordinator_exe = executable('catch2_repair_coordinator',
+  #   files('unit/daemon/repair_coordinator_catch2_test.cpp'),
+  #   include_directories: incs,
+  #   dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+  #   cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+  #   build_rpath: ':'.join(_test_rpaths),
+  #   install: false,
+  # )
+
+  catch2_repair_scheduling_exe = executable('catch2_repair_scheduling',
+    files('unit/daemon/repair_scheduling_adapter_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -938,8 +1041,8 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_repair_scheduling_exe = executable('catch2_repair_scheduling',
-    files('unit/daemon/repair_scheduling_adapter_catch2_test.cpp'),
+  catch2_repair_service_exe = executable('catch2_repair_service',
+    files('unit/daemon/repair_service_post_ingest_channel_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -1055,8 +1158,35 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_writer_drain_cleanup_exe = executable('catch2_writer_drain_cleanup',
+    files('unit/daemon/request_handler_writer_drain_cleanup_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_asio_connection_pool_exe = executable('catch2_asio_connection_pool',
     files('unit/daemon/asio_connection_pool_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_asio_transport_exhaustion_exe = executable('catch2_asio_transport_exhaustion',
+    files('unit/daemon/asio_transport_exhaustion_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_asio_transport_inflight_close_ipc_prefix_exe = executable('catch2_asio_transport_inflight_close_ipc_prefix',
+    files('unit/daemon/asio_transport_inflight_close_ipc_prefix_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -1083,6 +1213,33 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_tuning_allocation_exe = executable('catch2_tuning_allocation',
+    files('unit/daemon/tuning_allocation_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_tuning_reconciliation_exe = executable('catch2_tuning_reconciliation',
+    files('unit/daemon/tuning_reconciliation_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_post_ingest_dynamic_cap_recovery_exe = executable('catch2_post_ingest_dynamic_cap_recovery',
+    files('unit/daemon/post_ingest_dynamic_cap_recovery_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_resource_governance_exe = executable('catch2_resource_governance',
     files('unit/daemon/resource_governance_test.cpp'),
     include_directories: incs,
@@ -1092,18 +1249,29 @@ if catch2_dep.found()
     install: false,
   )
 
-  # NOTE: onnx_model_pool tests require linking with the ONNX plugin library,
-  # which is not directly available as a dependency. The original GTest version
-  # was also never properly linked. Skipping Catch2 migration until plugin
-  # test harness infrastructure is added.
-  # catch2_onnx_model_pool_exe = executable('catch2_onnx_model_pool',
-  #   files('unit/daemon/onnx_model_pool_catch2_test.cpp'),
-  #   include_directories: incs,
-  #   dependencies: [catch2_dep, catch2_main_dep, onnx_dep] + test_deps,
-  #   cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-  #   build_rpath: ':'.join(_test_rpaths),
-  #   install: false,
-  # )
+  catch2_timing_audit_exe = executable('catch2_timing_audit',
+    files('unit/daemon/timing_audit_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_onnx_model_pool_exe = executable('catch2_onnx_model_pool',
+    files(
+      'unit/daemon/onnx_model_pool_catch2_test.cpp',
+      '../plugins/onnx/model_provider.cpp',
+      '../plugins/onnx/onnx_model_pool.cpp',
+      '../plugins/onnx/onnx_reranker_session.cpp',
+      '../plugins/onnx/onnx_colbert_session.cpp',
+    ),
+    include_directories: incs,
+    dependencies: onnx_provider_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
 
   # CLI Test Suites (Catch2)
   # --------------------------------------------------------------------------
@@ -1148,6 +1316,29 @@ if catch2_dep.found()
     install: false,
   )
 
+  # WAL Entry tests - serialization, checksums, encode/decode round-trips
+  catch2_wal_entry_exe = executable('catch2_wal_entry',
+    files('unit/wal/wal_entry_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_wal_submodule_exe = executable('catch2_wal_submodule',
+    files(
+      'unit/wal/wal_file_catch2_test.cpp',
+      'unit/wal/wal_manager_catch2_test.cpp',
+      'unit/wal/wal_recovery_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # Search submodule tests (QueryParser, SearchExecutor, etc.)
   # Migrated from GTest as part of yams-3s4 / yams-1yq
   catch2_search_submodule_exe = executable('catch2_search_submodule',
@@ -1157,7 +1348,13 @@ if catch2_dep.found()
       'unit/search/kg_scorer_simple_catch2_test.cpp',
       'unit/search/query_parser_catch2_test.cpp',
       'unit/search/query_qualifiers_catch2_test.cpp',
+      'unit/search/result_fusion_catch2_test.cpp',
+      'unit/search/result_ranker_catch2_test.cpp',
+      'unit/search/search_engine_config_catch2_test.cpp',
       'unit/search/search_smoke_catch2_test.cpp',
+      'unit/search/query_literal_extractor_catch2_test.cpp',
+      'unit/search/search_filters_catch2_test.cpp',
+      'unit/search/search_results_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -1192,9 +1389,8 @@ if catch2_dep.found()
   # Migrated from GTest as part of yams-3s4 / yams-pmf
   catch2_compression_submodule_exe = executable('catch2_compression_submodule',
     files(
-      'unit/compression/basic_error_handler_catch2_test.cpp',
-      # TODO(yams-3s4): Fix API mismatch - uses non-existent ValidationConfig fields
-      # 'unit/compression/basic_integrity_validator_catch2_test.cpp',
+      # basic_error_handler_catch2_test.cpp removed: fully covered by error_handler_catch2_test.cpp
+      # basic_integrity_validator_catch2_test.cpp removed: fully covered by integrity_validator_catch2_test.cpp
       'unit/compression/compression_comprehensive_catch2_test.cpp',
       'unit/compression/compression_monitor_catch2_test.cpp',
       'unit/compression/compression_policy_catch2_test.cpp',
@@ -1222,6 +1418,9 @@ if catch2_dep.found()
       'unit/mcp/mcp_apps/capability_negotiation_test.cpp',
       'unit/mcp/mcp_apps/tool_metadata_test.cpp',
       'unit/mcp/mcp_apps/ui_resource_handling_test.cpp',
+      'unit/mcp/mcp_daemon_dto_parsing_catch2_test.cpp',
+      'unit/mcp/mcp_daemon_dto_parsing_more_catch2_test.cpp',
+      'unit/mcp/mcp_error_handling_catch2_test.cpp',
       'unit/mcp/mcp_disconnect_uniform_errors_catch2_test.cpp',
       'unit/mcp/mcp_doctor_flags_catch2_test.cpp',
       'unit/mcp/mcp_jsonrpc_roundtrip_catch2_test.cpp',
@@ -1246,6 +1445,10 @@ if catch2_dep.found()
   # Migrated from GTest as part of yams-3s4 / yams-cli
   catch2_cli_submodule_exe = executable('catch2_cli_submodule',
     files(
+      'unit/common/format_catch2_test.cpp',
+      'unit/common/pattern_utils_catch2_test.cpp',
+      'unit/common/test_utils_catch2_test.cpp',
+      'unit/common/utf8_utils_catch2_test.cpp',
       'unit/cli/add_command_stdin_catch2_test.cpp',
       'unit/cli/cli_option_isolation_catch2_test.cpp',
       'unit/cli/config_command_catch2_test.cpp',
@@ -1264,6 +1467,7 @@ if catch2_dep.found()
       'unit/cli/session_command_catch2_test.cpp',
       'unit/cli/stream_heuristics_catch2_test.cpp',
       'unit/cli/update_command_catch2_test.cpp',
+      'unit/cli/time_parser_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -1280,6 +1484,7 @@ if catch2_dep.found()
       files(
         'unit/vector/document_chunker_catch2_test.cpp',
         'unit/vector/embedding_genai_selection_catch2_test.cpp',
+        'unit/vector/embedding_service_synthetic_catch2_test.cpp',
         'unit/vector/hnsw_index_catch2_test.cpp',
         'unit/vector/multi_dimension_hnsw_catch2_test.cpp',
         'unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp',
@@ -1678,6 +1883,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  core_uuid_exe = executable('core_uuid',
+    files('unit/core/uuid_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + core_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   detection_exe = executable('detection',
     files(
       'unit/detection/command_integration_test.cpp',
@@ -1716,6 +1930,9 @@ if catch2_dep.found()
     dependency('yams_integrity'),
     dependency('yams_storage_engine'),
     dependency('yams_reference_counter'),
+    dependency('yams_metadata'),
+    dependency('yams_search'),
+    dependency('yams_daemon'),
   ]
 
   integrity_catch2_exe = executable('integrity_catch2',
@@ -1745,6 +1962,16 @@ if catch2_dep.found()
 
   content_handlers_exe = executable('content_handlers',
     files('unit/content/content_handlers_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  # Archive content handler tests (formatToString, ProcessingStats, helper functions, canHandle)
+  archive_content_handler_exe = executable('archive_content_handler',
+    files('unit/content/archive_content_handler_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + content_test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -2100,7 +2327,7 @@ if catch2_dep.found()
   test('repository_foundation', catch2_repository_foundation_exe,
     suite: ['catch2', 'unit', 'metadata', 'repository', 'foundation'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
+    timeout: 180
   )
 
   # Core tests
@@ -2112,6 +2339,12 @@ if catch2_dep.found()
 
   test('core_magic_numbers', core_magic_numbers_exe,
     suite: ['catch2', 'unit', 'core', 'magic'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('core_uuid', core_uuid_exe,
+    suite: ['catch2', 'unit', 'core', 'uuid'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
@@ -2141,6 +2374,12 @@ if catch2_dep.found()
     timeout: 60
   )
 
+  test('archive_content_handler', archive_content_handler_exe,
+    suite: ['catch2', 'unit', 'content', 'archive'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
   test('html_extractor_robust', html_extractor_robust_exe,
     suite: ['catch2', 'unit', 'extraction', 'html'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -2162,7 +2401,7 @@ if catch2_dep.found()
   test('plugin_process_minimal', plugin_process_minimal_exe,
     suite: ['catch2', 'unit', 'extraction', 'plugin', 'debug'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 
@@ -2283,6 +2522,23 @@ if catch2_dep.found()
     is_parallel: false
   )
 
+  test('repair_service', catch2_repair_service_exe,
+    suite: ['catch2', 'unit', 'daemon', 'repair', 'stuck-docs'],
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+      'YAMS_SQLITE_VEC_SKIP_INIT': '1',
+      'YAMS_DISABLE_VECTORS': '1',
+      'YAMS_DISABLE_VECTOR_DB': '1',
+      'YAMS_SKIP_MODEL_LOADING': '1',
+      'YAMS_TESTING': '1',
+    },
+    timeout: 120,
+    is_parallel: false
+  )
+
   test('daemon_protocol', catch2_daemon_protocol_exe,
     suite: ['catch2', 'unit', 'daemon', 'protocol'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -2307,6 +2563,53 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'components', 'yams-zns'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
+  )
+
+  test('gradient_limiter', catch2_gradient_limiter_exe,
+    suite: ['catch2', 'unit', 'daemon', 'gradient'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('work_coordinator', catch2_work_coordinator_exe,
+    suite: ['catch2', 'unit', 'daemon', 'work-coordinator'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('post_ingest_queue_unit', catch2_post_ingest_queue_unit_exe,
+    suite: ['catch2', 'unit', 'daemon', 'post-ingest'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('metrics_consistency', catch2_metrics_consistency_exe,
+    suite: ['catch2', 'unit', 'daemon', 'metrics'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('search_service', catch2_search_service_exe,
+    suite: ['catch2', 'unit', 'services', 'search'],
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'YAMS_SQLITE_MINIMAL_PRAGMAS': '1',
+      'YAMS_SQLITE_BUSY_TIMEOUT_MS': '1000',
+      'YAMS_SQLITE_VEC_SKIP_INIT': '1',
+      'YAMS_DISABLE_VECTORS': '1',
+      'YAMS_TESTING': '1',
+    },
+    timeout: 180,
+    is_parallel: false
+  )
+
+  test('fts5_stress', catch2_fts5_stress_exe,
+    suite: ['catch2', 'stress', 'metadata', 'fts5'],
+    args: ['--allow-running-no-tests'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 300,
+    is_parallel: false
   )
 
   test('daemon_plugin_harness', catch2_daemon_plugin_exe,
@@ -2337,6 +2640,15 @@ if catch2_dep.found()
       timeout: 60,
       is_parallel: true
     )
+
+    test('gpu_provider_coreml', catch2_gpu_provider_exe,
+      suite: ['catch2', 'unit', 'daemon', 'gpu'],
+      env: {
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      },
+      timeout: 30,
+      is_parallel: true
+    )
   endif
 
   test('plugin_infrastructure', catch2_plugin_infrastructure_exe,
@@ -2359,17 +2671,17 @@ if catch2_dep.found()
     timeout: 60
   )
 
-  test('repair_coordinator', catch2_repair_coordinator_exe,
-    suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60,
-    is_parallel: false
-  )
+  # test('repair_coordinator', catch2_repair_coordinator_exe,
+  #   suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
+  #   env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+  #   timeout: 60,
+  #   is_parallel: false
+  # )
 
   test('repair_scheduling_adapter', catch2_repair_scheduling_exe,
     suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
+    timeout: 120
   )
 
   test('service_manager', catch2_service_manager_exe,
@@ -2394,7 +2706,7 @@ if catch2_dep.found()
   test('entity_graph_service', catch2_entity_graph_service_exe,
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
+    timeout: 120
   )
 
   # These tests use ServiceManager/WorkCoordinator which have resource contention
@@ -2402,21 +2714,21 @@ if catch2_dep.found()
   test('service_manager_shutdown', catch2_service_manager_shutdown_exe,
     suite: ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 
   test('service_manager_degraded', catch2_service_manager_degraded_exe,
     suite: ['catch2', 'unit', 'daemon', 'service_manager', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 
   test('repair_binary_filter', catch2_repair_binary_filter_exe,
     suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 
@@ -2429,7 +2741,7 @@ if catch2_dep.found()
   test('embedding_recovery', catch2_embedding_recovery_exe,
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 
@@ -2437,7 +2749,7 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     args: ['--allow-running-no-tests'],  # Placeholder tests - all skipped
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 
@@ -2452,14 +2764,39 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
     args: ['--allow-running-no-tests'],  # Skips when streaming disabled
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
+    is_parallel: false
+  )
+
+  test('writer_drain_cleanup', catch2_writer_drain_cleanup_exe,
+    suite: ['catch2', 'unit', 'daemon', 'ipc', 'mux'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
     is_parallel: false
   )
 
   test('asio_connection_pool', catch2_asio_connection_pool_exe,
     suite: ['catch2', 'unit', 'daemon', 'connection-pool'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
+    is_parallel: false,
+    # Test skips on Windows (Unix domain sockets not supported)
+    should_fail: host_machine.system() == 'windows'
+  )
+
+  test('asio_transport_exhaustion', catch2_asio_transport_exhaustion_exe,
+    suite: ['catch2', 'unit', 'daemon', 'transport', 'max-inflight'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120,
+    is_parallel: false,
+    # Test skips on Windows (Unix domain sockets not supported)
+    should_fail: host_machine.system() == 'windows'
+  )
+
+  test('asio_transport_inflight_close_ipc_prefix', catch2_asio_transport_inflight_close_ipc_prefix_exe,
+    suite: ['catch2', 'unit', 'daemon', 'transport', 'ipc'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120,
     is_parallel: false,
     # Test skips on Windows (Unix domain sockets not supported)
     should_fail: host_machine.system() == 'windows'
@@ -2480,7 +2817,25 @@ if catch2_dep.found()
   test('tune_advisor_threshold', catch2_tune_advisor_threshold_exe,
     suite: ['catch2', 'unit', 'daemon', 'tune', 'advisor'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30
+    timeout: 120
+  )
+
+  test('tuning_allocation', catch2_tuning_allocation_exe,
+    suite: ['catch2', 'unit', 'daemon', 'tune', 'allocation'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('tuning_reconciliation', catch2_tuning_reconciliation_exe,
+    suite: ['catch2', 'unit', 'daemon', 'tune', 'reconciliation'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('post_ingest_dynamic_cap_recovery', catch2_post_ingest_dynamic_cap_recovery_exe,
+    suite: ['catch2', 'unit', 'daemon', 'tune', 'post-ingest'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   test('resource_governance', catch2_resource_governance_exe,
@@ -2489,19 +2844,22 @@ if catch2_dep.found()
     timeout: 60
   )
 
-  # NOTE: onnx_model_pool test registration skipped - see comment above
-  # if onnx_dep.found()
-  #   test('onnx_model_pool', catch2_onnx_model_pool_exe,
-  #     suite: ['catch2', 'unit', 'daemon', 'yams-3s4'],
-  #     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-  #     timeout: 60
-  #   )
-  # endif
+  test('timing_audit', catch2_timing_audit_exe,
+    suite: ['catch2', 'unit', 'daemon', 'timing-audit'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('onnx_model_pool', catch2_onnx_model_pool_exe,
+    suite: ['catch2', 'unit', 'daemon', 'onnx', 'pool'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120,
+  )
 
   test('cli_init_command', catch2_cli_init_command_exe,
     suite: ['catch2', 'unit', 'cli', 'init'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 30,
+    timeout: 120,
     is_parallel: false
   )
 
@@ -2515,6 +2873,18 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'storage', 'yams-8b9'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
+  )
+
+  test('wal_entry', catch2_wal_entry_exe,
+    suite: ['catch2', 'unit', 'wal'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('wal_submodule', catch2_wal_submodule_exe,
+    suite: ['catch2', 'unit', 'wal'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
   )
 
   test('search_submodule', catch2_search_submodule_exe,

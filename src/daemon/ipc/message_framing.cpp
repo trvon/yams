@@ -118,7 +118,7 @@ Result<std::vector<uint8_t>> MessageFramer::frame_message(const Message& message
     auto res = frame_message_into(message, frame);
     if (!res)
         return res.error();
-    return std::move(frame);
+    return frame;
 }
 
 Result<std::vector<uint8_t>> MessageFramer::frame_message_header(const Message& message,
@@ -127,7 +127,7 @@ Result<std::vector<uint8_t>> MessageFramer::frame_message_header(const Message& 
     auto res = frame_message_header_into(message, frame);
     if (!res)
         return res.error();
-    return std::move(frame);
+    return frame;
 }
 
 Result<std::vector<uint8_t>> MessageFramer::frame_message_chunk(const Message& message,
@@ -136,7 +136,7 @@ Result<std::vector<uint8_t>> MessageFramer::frame_message_chunk(const Message& m
     auto res = frame_message_chunk_into(message, frame, last_chunk);
     if (!res)
         return res.error();
-    return std::move(frame);
+    return frame;
 }
 
 Result<MessageFramer::ChunkedMessageInfo>

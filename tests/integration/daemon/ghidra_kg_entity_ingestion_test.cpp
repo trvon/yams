@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright 2025 YAMS Contributors
 //
-// Integration test: Ghidra plugin → KG enrich ingestion pipeline
-// Tests end-to-end flow: binary analysis → enrich extraction → KG node/edge creation
-// Part of yams-3jb: Add integration test for Ghidra KG enrich ingestion
+// Integration test: Ghidra plugin → KG entity ingestion pipeline
+// Tests end-to-end flow: binary analysis → entity extraction → KG node/edge creation
+// Part of yams-3jb: Add integration test for Ghidra KG entity ingestion
 
 #include <chrono>
 #include <filesystem>
@@ -16,6 +16,7 @@
 #include "test_daemon_harness.h"
 
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/metadata/knowledge_graph_store.h>
 
@@ -30,7 +31,7 @@ using namespace yams::metadata;
 #endif
 
 // ============================================================================
-// Test Fixture: Ghidra Enrich Extraction Integration
+// Test Fixture: Ghidra Entity Extraction Integration
 // ============================================================================
 
 class GhidraEntityIntegrationFixture {
@@ -59,15 +60,15 @@ public:
         spdlog::debug("GhidraEntityIntegrationFixture: Cleanup via DaemonHarness");
     }
 
-    // Check if any enrich providers are available
+    // Check if any entity providers are available
     bool hasEntityProviders() {
-        // Enrich providers are loaded via PluginManager
-        // For now, use configured enrich concurrency budget as a readiness proxy.
+        // Entity providers are loaded via PluginManager
+        // For now, check if the entity channel is active
         auto* pq = serviceManager_->getPostIngestQueue();
         if (!pq)
             return false;
 
-        // NOTE: maxEntityConcurrent currently maps to enrich-stage concurrency.
+        // Check via entity inflight counter existence (non-zero max concurrent)
         return pq->maxEntityConcurrent() > 0;
     }
 
@@ -122,7 +123,7 @@ public:
     // Get KG store for direct queries
     std::shared_ptr<KnowledgeGraphStore> getKgStore() { return serviceManager_->getKgStore(); }
 
-    // Wait for enrich extraction to complete
+    // Wait for entity extraction to complete
     bool waitForEntityProcessing(int timeoutMs = 10000) {
         auto* pq = serviceManager_->getPostIngestQueue();
         if (!pq)
@@ -130,7 +131,7 @@ public:
 
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
         while (std::chrono::steady_clock::now() < deadline) {
-            if (pq->enrichInFlight() == 0 && pq->size() == 0) {
+            if (pq->entityInFlight() == 0 && pq->size() == 0) {
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(200)); // Allow final processing
                 return true;
@@ -147,10 +148,10 @@ public:
 };
 
 // ============================================================================
-// Test Cases: Enrich Extraction Pipeline Validation
+// Test Cases: Entity Extraction Pipeline Validation
 // ============================================================================
 
-TEST_CASE("GhidraEntityIngestion: KG store is available for enrich storage",
+TEST_CASE("GhidraEntityIngestion: KG store is available for entity storage",
           "[integration][daemon][ghidra][pbi-3jb]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     GhidraEntityIntegrationFixture fixture;
@@ -161,34 +162,47 @@ TEST_CASE("GhidraEntityIngestion: KG store is available for enrich storage",
 
         auto healthResult = kg->healthCheck();
         REQUIRE(healthResult.has_value());
-        spdlog::info("KG store health check passed - ready for enrich storage");
+        spdlog::info("KG store health check passed - ready for entity storage");
     }
 }
 
-TEST_CASE("GhidraEntityIngestion: Enrich provider infrastructure is ready",
+TEST_CASE("GhidraEntityIngestion: Entity provider infrastructure is ready",
           "[integration][daemon][ghidra][pbi-3jb]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     GhidraEntityIntegrationFixture fixture;
 
-    SECTION("Enrich processing channel is configured") {
+    SECTION("Entity processing channel is configured") {
         auto* pq = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(pq != nullptr);
 
-        // Verify enrich channel configuration via current compatibility API.
+        // Verify entity channel configuration
         size_t maxConcurrent = pq->maxEntityConcurrent();
-        spdlog::info("Enrich channel configured with max concurrent: {}", maxConcurrent);
-        // Enrich lane can be 0 when profile scaling suppresses optional stages.
-        REQUIRE(maxConcurrent <= 16);
+        const uint32_t mask = yams::daemon::TuneAdvisor::postIngestStageActiveMask();
+        const uint32_t entityBit =
+            1u << static_cast<uint8_t>(yams::daemon::TuneAdvisor::PostIngestStage::Entity);
+        const bool entityStageActive = (mask & entityBit) != 0;
+
+        // Entity extraction concurrency is dynamically budgeted based on whether any
+        // ExternalEntityProviderAdapter instances are present. In the default integration-test
+        // harness, plugins are not autoloaded, so no entity providers are adopted and the entity
+        // stage is inactive (max concurrent == 0).
+        spdlog::info("Entity channel configured with max concurrent: {} (active={})", maxConcurrent,
+                     entityStageActive);
+        if (entityStageActive) {
+            REQUIRE(maxConcurrent > 0);
+        } else {
+            REQUIRE(maxConcurrent == 0);
+        }
     }
 
-    SECTION("Enrich inflight counter is accessible") {
+    SECTION("Entity inflight counter is accessible") {
         auto* pq = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(pq != nullptr);
 
-        size_t enrichInFlight = pq->enrichInFlight();
-        spdlog::info("Current enrich inflight count: {}", enrichInFlight);
+        size_t entityInFlight = pq->entityInFlight();
+        spdlog::info("Current entity inflight count: {}", entityInFlight);
         // Counter should be accessible (value doesn't matter)
-        REQUIRE(enrichInFlight >= 0);
+        REQUIRE(entityInFlight >= 0);
     }
 }
 
@@ -279,19 +293,19 @@ TEST_CASE("GhidraEntityIngestion: Binary node types are recognized in KG",
     }
 }
 
-TEST_CASE("GhidraEntityIngestion: Enrich metrics are exposed",
+TEST_CASE("GhidraEntityIngestion: Entity metrics are exposed",
           "[integration][daemon][ghidra][pbi-3jb]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     GhidraEntityIntegrationFixture fixture;
 
-    SECTION("Enrich queued/consumed/dropped counters are accessible") {
+    SECTION("Entity queued/consumed/dropped counters are accessible") {
         auto* pq = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(pq != nullptr);
 
         // These counters are read from InternalEventBus via DaemonMetrics
         // Just verify they're accessible - values depend on processing state
-        size_t enrichInFlight = pq->enrichInFlight();
-        spdlog::info("Enrich inflight: {}", enrichInFlight);
+        size_t entityInFlight = pq->entityInFlight();
+        spdlog::info("Entity inflight: {}", entityInFlight);
 
         // The counter access itself is the test - no specific value required
         REQUIRE(true);
@@ -302,7 +316,7 @@ TEST_CASE("GhidraEntityIngestion: Enrich metrics are exposed",
 // Optional: Full Ghidra Integration Test (requires Ghidra to be installed)
 // ============================================================================
 
-TEST_CASE("GhidraEntityIngestion: Full binary analysis creates KG enrich artifacts",
+TEST_CASE("GhidraEntityIngestion: Full binary analysis creates KG entities",
           "[integration][daemon][ghidra][pbi-3jb][.ghidra-full]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
 
@@ -311,12 +325,12 @@ TEST_CASE("GhidraEntityIngestion: Full binary analysis creates KG enrich artifac
 
     GhidraEntityIntegrationFixture fixture;
 
-    // Skip if no enrich providers are available
+    // Skip if no entity providers are available
     if (!fixture.hasEntityProviders()) {
-        SKIP("No enrich providers available - Ghidra plugin not loaded");
+        SKIP("No entity providers available - Ghidra plugin not loaded");
     }
 
-    SECTION("Analyze small binary and verify KG enrich artifacts") {
+    SECTION("Analyze small binary and verify KG entities") {
         // Create a minimal PE header (not a real executable, just enough structure)
         // This is a placeholder - real test would use an actual small binary
         std::vector<uint8_t> minimalPE = {
@@ -330,12 +344,12 @@ TEST_CASE("GhidraEntityIngestion: Full binary analysis creates KG enrich artifac
         auto hash = fixture.storeBinary("test_binary.exe", minimalPE);
         spdlog::info("Stored test binary with hash: {}", hash.substr(0, 12));
 
-        // Wait for enrich extraction
+        // Wait for entity extraction
         bool processed = fixture.waitForEntityProcessing(30000);
 
         if (!processed) {
-            spdlog::warn("Enrich processing timed out - Ghidra may not be configured");
-            SKIP("Enrich processing timed out - Ghidra may not be installed");
+            spdlog::warn("Entity processing timed out - Ghidra may not be configured");
+            SKIP("Entity processing timed out - Ghidra may not be installed");
         }
 
         auto kg = fixture.getKgStore();
@@ -359,7 +373,7 @@ TEST_CASE("GhidraEntityIngestion: Full binary analysis creates KG enrich artifac
         // - CALLS edges between functions
         // - IMPORTS edges to libraries
 
-        // This minimal PE may not produce enrich artifacts - real test needs real binary
+        // This minimal PE may not produce entities - real test needs real binary
         spdlog::info("Full Ghidra integration test completed");
     }
 }
@@ -368,16 +382,16 @@ TEST_CASE("GhidraEntityIngestion: Full binary analysis creates KG enrich artifac
 // Edge Cases and Error Recovery
 // ============================================================================
 
-TEST_CASE("GhidraEntityIngestion: Non-binary files don't trigger enrich extraction",
+TEST_CASE("GhidraEntityIngestion: Non-binary files don't trigger entity extraction",
           "[integration][daemon][ghidra][pbi-3jb]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
     GhidraEntityIntegrationFixture fixture;
 
-    SECTION("Text file is not sent to enrich provider") {
+    SECTION("Text file is not sent to entity provider") {
         auto* pq = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(pq != nullptr);
 
-        size_t enrichInflightBefore = pq->enrichInFlight();
+        size_t entityInflightBefore = pq->entityInFlight();
 
         // Store a text file (not binary)
         auto contentStore = fixture.serviceManager_->getContentStore();
@@ -398,13 +412,13 @@ TEST_CASE("GhidraEntityIngestion: Non-binary files don't trigger enrich extracti
 
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-        // Enrich inflight should not have increased significantly
-        size_t enrichInflightAfter = pq->enrichInFlight();
-        spdlog::info("Enrich inflight: before={}, after={}", enrichInflightBefore,
-                     enrichInflightAfter);
+        // Entity inflight should not have increased significantly
+        size_t entityInflightAfter = pq->entityInFlight();
+        spdlog::info("Entity inflight: before={}, after={}", entityInflightBefore,
+                     entityInflightAfter);
 
-        // Text files shouldn't trigger enrich extraction (may briefly increase during dispatch
+        // Text files shouldn't trigger entity extraction (may briefly increase during dispatch
         // check)
-        CHECK(enrichInflightAfter <= enrichInflightBefore + 1);
+        CHECK(entityInflightAfter <= entityInflightBefore + 1);
     }
 }

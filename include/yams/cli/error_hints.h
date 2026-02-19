@@ -1,7 +1,9 @@
 #pragma once
 #include <string>
 #include <string_view>
+
 #include <yams/core/types.h>
+#include <yams/daemon/client/ipc_failure.h>
 
 namespace yams::cli {
 
@@ -29,6 +31,39 @@ inline ErrorHint getErrorHint(ErrorCode code, std::string_view message,
                               std::string_view command = "") {
     ErrorHint hint;
 
+    // Daemon IPC failures (typed via stable message prefix)
+    if (auto kindOpt = yams::daemon::parseIpcFailureKind(message)) {
+        using yams::daemon::IpcFailureKind;
+        switch (*kindOpt) {
+            case IpcFailureKind::SocketMissing:
+                hint.hint = "Daemon IPC socket not found; start the daemon or check socket path";
+                hint.command = "yams daemon start";
+                return hint;
+            case IpcFailureKind::PathNotSocket:
+                hint.hint =
+                    "Daemon socket path exists but is not a socket; check configuration/env";
+                return hint;
+            case IpcFailureKind::Refused:
+                hint.hint = "Daemon refused the IPC connection; start or restart the daemon";
+                hint.command = "yams daemon start";
+                return hint;
+            case IpcFailureKind::Timeout:
+                hint.hint = std::string(kDaemonLoadMessage);
+                return hint;
+            case IpcFailureKind::ResetOrBrokenPipe:
+            case IpcFailureKind::Eof:
+                hint.hint = "Daemon connection dropped; retry the command";
+                return hint;
+            case IpcFailureKind::Cancelled:
+                hint.hint = "Request cancelled; retry the command";
+                return hint;
+            case IpcFailureKind::Other:
+                hint.hint = "Daemon IPC error; retry or start the daemon";
+                hint.command = "yams daemon start";
+                return hint;
+        }
+    }
+
     // Pattern-based hints (check message content first for specificity)
     if (message.find("FTS5") != std::string_view::npos ||
         message.find("tokenize") != std::string_view::npos ||
@@ -49,7 +84,8 @@ inline ErrorHint getErrorHint(ErrorCode code, std::string_view message,
     if (message.find("daemon") != std::string_view::npos ||
         message.find("socket") != std::string_view::npos ||
         message.find("connection refused") != std::string_view::npos) {
-        hint.hint = std::string(kDaemonLoadMessage);
+        hint.hint = "Daemon connection issue detected";
+        hint.command = "yams daemon start";
         return hint;
     }
 
@@ -156,9 +192,9 @@ inline ErrorHint getErrorHint(ErrorCode code, std::string_view message,
 }
 
 inline bool isDaemonConnectionError(ErrorCode code, std::string_view message) {
-    if (code == ErrorCode::NetworkError) {
+    (void)code;
+    if (yams::daemon::parseIpcFailureKind(message))
         return true;
-    }
     if (message.find("daemon") != std::string_view::npos ||
         message.find("socket") != std::string_view::npos ||
         message.find("connection refused") != std::string_view::npos ||
@@ -187,9 +223,6 @@ inline std::string formatErrorWithHint(ErrorCode code, std::string_view message,
     auto hint = getErrorHint(code, message, command);
 
     std::string result(message);
-    if (isDaemonConnectionError(code, message)) {
-        result = std::string(kDaemonLoadMessage);
-    }
 
     if (!hint.hint.empty()) {
         result += "\n  💡 Hint: " + hint.hint;

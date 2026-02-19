@@ -63,16 +63,17 @@ concept SqlExtractable = std::same_as<T, int64_t> || std::same_as<T, int> ||
  * @tparam T The column's C++ type
  * @tparam Entity The entity class this column belongs to
  */
-template <typename T, typename Entity> struct Column {
-    std::string_view name;      ///< Column name in database
-    T Entity::* member;         ///< Pointer to member for automatic bind/extract
-    bool nullable = false;      ///< Whether column allows NULL
-    bool isPrimaryKey = false;  ///< Whether this is the primary key
-    bool autoIncrement = false; ///< Whether this is auto-incremented
+template <typename T, typename Entity, bool Nullable = false, bool PrimaryKey = false,
+          bool AutoIncrement = false>
+struct Column {
+    std::string_view name; ///< Column name in database
+    T Entity::* member;    ///< Pointer to member for automatic bind/extract
 
-    constexpr Column(std::string_view n, T Entity::* m, bool null = false, bool pk = false,
-                     bool autoInc = false)
-        : name(n), member(m), nullable(null), isPrimaryKey(pk), autoIncrement(autoInc) {}
+    static constexpr bool kNullable = Nullable;
+    static constexpr bool kIsPrimaryKey = PrimaryKey;
+    static constexpr bool kAutoIncrement = AutoIncrement;
+
+    constexpr Column(std::string_view n, T Entity::* m) : name(n), member(m) {}
 };
 
 // ============================================================================
@@ -132,7 +133,7 @@ template <typename T> T extractColumn(const Statement& stmt, int column) {
  */
 template <HasEntityTraits Entity, std::size_t... Is>
 void extractColumnsImpl(const Statement& stmt, Entity& e, std::index_sequence<Is...>) {
-    constexpr auto& cols = EntityTraits<Entity>::columns;
+    const auto& cols = EntityTraits<Entity>::columns;
     // Fold expression: extract each column into corresponding member
     ((e.*(std::get<Is>(cols).member) =
           extractColumn<std::remove_reference_t<decltype(e.*(std::get<Is>(cols).member))>>(stmt,
@@ -167,7 +168,7 @@ namespace detail {
 template <HasEntityTraits Entity, std::size_t... Is>
 Result<void> bindColumnsImpl(Statement& stmt, const Entity& e, std::index_sequence<Is...>,
                              int startIndex = 1) {
-    constexpr auto& cols = EntityTraits<Entity>::columns;
+    const auto& cols = EntityTraits<Entity>::columns;
     int idx = startIndex;
     Result<void> result;
 
@@ -176,8 +177,9 @@ Result<void> bindColumnsImpl(Statement& stmt, const Entity& e, std::index_sequen
     (([&] {
          if (!result.has_value())
              return; // Short-circuit if error
-         constexpr auto& col = std::get<Is>(cols);
-         if constexpr (col.autoIncrement && col.isPrimaryKey) {
+         using Col = std::tuple_element_t<Is, typename EntityTraits<Entity>::columns_tuple>;
+         const auto& col = std::get<Is>(cols);
+         if constexpr (Col::kAutoIncrement && Col::kIsPrimaryKey) {
              // Skip auto-increment primary keys
              return;
          }
@@ -430,14 +432,15 @@ template <HasEntityTraits Entity> std::string buildSelectSql() {
 template <HasEntityTraits Entity> std::string buildInsertSql() {
     std::string columns;
     std::string placeholders;
-    constexpr auto& cols = EntityTraits<Entity>::columns;
+    const auto& cols = EntityTraits<Entity>::columns;
     constexpr auto N = std::tuple_size_v<typename EntityTraits<Entity>::columns_tuple>;
     bool first = true;
 
     [&]<std::size_t... Is>(std::index_sequence<Is...>) {
         (([&] {
-             constexpr auto& col = std::get<Is>(cols);
-             if constexpr (col.autoIncrement && col.isPrimaryKey) {
+             using Col = std::tuple_element_t<Is, typename EntityTraits<Entity>::columns_tuple>;
+             const auto& col = std::get<Is>(cols);
+             if constexpr (Col::kAutoIncrement && Col::kIsPrimaryKey) {
                  return; // Skip auto-increment primary keys
              }
              if (!first) {
@@ -462,14 +465,15 @@ template <HasEntityTraits Entity> std::string buildInsertSql() {
  */
 template <HasEntityTraits Entity> std::string buildUpdateSql() {
     std::string setClauses;
-    constexpr auto& cols = EntityTraits<Entity>::columns;
+    const auto& cols = EntityTraits<Entity>::columns;
     constexpr auto N = std::tuple_size_v<typename EntityTraits<Entity>::columns_tuple>;
     bool first = true;
 
     [&]<std::size_t... Is>(std::index_sequence<Is...>) {
         (([&] {
-             constexpr auto& col = std::get<Is>(cols);
-             if constexpr (col.isPrimaryKey) {
+             using Col = std::tuple_element_t<Is, typename EntityTraits<Entity>::columns_tuple>;
+             const auto& col = std::get<Is>(cols);
+             if constexpr (Col::kIsPrimaryKey) {
                  return; // Skip primary key in SET clause
              }
              if (!first)
@@ -498,9 +502,9 @@ template <> struct EntityTraits<DocumentInfo> {
     static constexpr std::string_view primary_key = "id";
 
     // Core columns for basic CRUD (not all columns - complex ones use custom extraction)
-    using columns_tuple = std::tuple<Column<int64_t, DocumentInfo>,     // id
-                                     Column<std::string, DocumentInfo>, // file_path
-                                     Column<std::string, DocumentInfo>, // file_name
+    using columns_tuple = std::tuple<Column<int64_t, DocumentInfo, false, true, true>, // id
+                                     Column<std::string, DocumentInfo>,                // file_path
+                                     Column<std::string, DocumentInfo>,                // file_name
                                      Column<std::string, DocumentInfo>, // file_extension
                                      Column<int64_t, DocumentInfo>,     // file_size
                                      Column<std::string, DocumentInfo>, // sha256_hash
@@ -510,7 +514,7 @@ template <> struct EntityTraits<DocumentInfo> {
                                      >;
 
     static constexpr columns_tuple columns{
-        Column<int64_t, DocumentInfo>{"id", &DocumentInfo::id, false, true, true},
+        Column<int64_t, DocumentInfo, false, true, true>{"id", &DocumentInfo::id},
         Column<std::string, DocumentInfo>{"file_path", &DocumentInfo::filePath},
         Column<std::string, DocumentInfo>{"file_name", &DocumentInfo::fileName},
         Column<std::string, DocumentInfo>{"file_extension", &DocumentInfo::fileExtension},
@@ -579,15 +583,15 @@ template <> struct EntityTraits<DocumentContent> {
     static constexpr std::string_view table = "document_content";
     static constexpr std::string_view primary_key = "document_id";
 
-    using columns_tuple = std::tuple<Column<int64_t, DocumentContent>,     // document_id
-                                     Column<std::string, DocumentContent>, // content_text
+    using columns_tuple = std::tuple<Column<int64_t, DocumentContent, false, true>, // document_id
+                                     Column<std::string, DocumentContent>,          // content_text
                                      Column<int64_t, DocumentContent>,     // content_length
                                      Column<std::string, DocumentContent>, // extraction_method
                                      Column<std::string, DocumentContent>  // language
                                      >;
 
     static constexpr columns_tuple columns{
-        Column<int64_t, DocumentContent>{"document_id", &DocumentContent::documentId, false, true},
+        Column<int64_t, DocumentContent, false, true>{"document_id", &DocumentContent::documentId},
         Column<std::string, DocumentContent>{"content_text", &DocumentContent::contentText},
         Column<int64_t, DocumentContent>{"content_length", &DocumentContent::contentLength},
         Column<std::string, DocumentContent>{"extraction_method",
@@ -613,24 +617,24 @@ template <> struct EntityTraits<SearchHistoryEntry> {
     static constexpr std::string_view primary_key = "id";
 
     using columns_tuple =
-        std::tuple<Column<int64_t, SearchHistoryEntry>,                  // id
-                   Column<std::string, SearchHistoryEntry>,              // query
-                   Column<std::chrono::sys_seconds, SearchHistoryEntry>, // query_time
-                   Column<int64_t, SearchHistoryEntry>,                  // results_count
-                   Column<int64_t, SearchHistoryEntry>,                  // execution_time_ms
-                   Column<std::string, SearchHistoryEntry>               // user_context
+        std::tuple<Column<int64_t, SearchHistoryEntry, false, true, true>, // id
+                   Column<std::string, SearchHistoryEntry>,                // query
+                   Column<std::chrono::sys_seconds, SearchHistoryEntry>,   // query_time
+                   Column<int64_t, SearchHistoryEntry>,                    // results_count
+                   Column<int64_t, SearchHistoryEntry>,                    // execution_time_ms
+                   Column<std::string, SearchHistoryEntry, true>           // user_context
                    >;
 
     static constexpr columns_tuple columns{
-        Column<int64_t, SearchHistoryEntry>{"id", &SearchHistoryEntry::id, false, true, true},
+        Column<int64_t, SearchHistoryEntry, false, true, true>{"id", &SearchHistoryEntry::id},
         Column<std::string, SearchHistoryEntry>{"query", &SearchHistoryEntry::query},
         Column<std::chrono::sys_seconds, SearchHistoryEntry>{"query_time",
                                                              &SearchHistoryEntry::queryTime},
         Column<int64_t, SearchHistoryEntry>{"results_count", &SearchHistoryEntry::resultsCount},
         Column<int64_t, SearchHistoryEntry>{"execution_time_ms",
                                             &SearchHistoryEntry::executionTimeMs},
-        Column<std::string, SearchHistoryEntry>{"user_context", &SearchHistoryEntry::userContext,
-                                                true}};
+        Column<std::string, SearchHistoryEntry, true>{"user_context",
+                                                      &SearchHistoryEntry::userContext}};
 
     static SearchHistoryEntry extract(const Statement& stmt, int startCol = 0) {
         SearchHistoryEntry entry;
@@ -647,26 +651,66 @@ template <> struct EntityTraits<SearchHistoryEntry> {
 };
 
 /**
+ * @brief EntityTraits specialization for FeedbackEvent
+ */
+template <> struct EntityTraits<FeedbackEvent> {
+    static constexpr std::string_view table = "feedback_events";
+    static constexpr std::string_view primary_key = "id";
+
+    using columns_tuple = std::tuple<Column<int64_t, FeedbackEvent, false, true, true>, // id
+                                     Column<std::string, FeedbackEvent>,                // event_id
+                                     Column<std::string, FeedbackEvent>,                // trace_id
+                                     Column<std::chrono::sys_seconds, FeedbackEvent>, // created_at
+                                     Column<std::string, FeedbackEvent>,              // source
+                                     Column<std::string, FeedbackEvent>,              // event_type
+                                     Column<std::string, FeedbackEvent, true> // payload_json
+                                     >;
+
+    static constexpr columns_tuple columns{
+        Column<int64_t, FeedbackEvent, false, true, true>{"id", &FeedbackEvent::id},
+        Column<std::string, FeedbackEvent>{"event_id", &FeedbackEvent::eventId},
+        Column<std::string, FeedbackEvent>{"trace_id", &FeedbackEvent::traceId},
+        Column<std::chrono::sys_seconds, FeedbackEvent>{"created_at", &FeedbackEvent::createdAt},
+        Column<std::string, FeedbackEvent>{"source", &FeedbackEvent::source},
+        Column<std::string, FeedbackEvent>{"event_type", &FeedbackEvent::eventType},
+        Column<std::string, FeedbackEvent, true>{"payload_json", &FeedbackEvent::payloadJson}};
+
+    static FeedbackEvent extract(const Statement& stmt, int startCol = 0) {
+        FeedbackEvent event;
+        event.id = stmt.getInt64(startCol + 0);
+        event.eventId = stmt.getString(startCol + 1);
+        event.traceId = stmt.getString(startCol + 2);
+        event.createdAt = stmt.getTime(startCol + 3);
+        event.source = stmt.getString(startCol + 4);
+        event.eventType = stmt.getString(startCol + 5);
+        if (!stmt.isNull(startCol + 6)) {
+            event.payloadJson = stmt.getString(startCol + 6);
+        }
+        return event;
+    }
+};
+
+/**
  * @brief EntityTraits specialization for SavedQuery
  */
 template <> struct EntityTraits<SavedQuery> {
     static constexpr std::string_view table = "saved_queries";
     static constexpr std::string_view primary_key = "id";
 
-    using columns_tuple = std::tuple<Column<int64_t, SavedQuery>,                  // id
-                                     Column<std::string, SavedQuery>,              // name
-                                     Column<std::string, SavedQuery>,              // query
-                                     Column<std::string, SavedQuery>,              // description
-                                     Column<std::chrono::sys_seconds, SavedQuery>, // created_time
-                                     Column<std::chrono::sys_seconds, SavedQuery>, // last_used
-                                     Column<int64_t, SavedQuery>                   // use_count
+    using columns_tuple = std::tuple<Column<int64_t, SavedQuery, false, true, true>, // id
+                                     Column<std::string, SavedQuery>,                // name
+                                     Column<std::string, SavedQuery>,                // query
+                                     Column<std::string, SavedQuery, true>,          // description
+                                     Column<std::chrono::sys_seconds, SavedQuery>,   // created_time
+                                     Column<std::chrono::sys_seconds, SavedQuery>,   // last_used
+                                     Column<int64_t, SavedQuery>                     // use_count
                                      >;
 
     static constexpr columns_tuple columns{
-        Column<int64_t, SavedQuery>{"id", &SavedQuery::id, false, true, true},
+        Column<int64_t, SavedQuery, false, true, true>{"id", &SavedQuery::id},
         Column<std::string, SavedQuery>{"name", &SavedQuery::name},
         Column<std::string, SavedQuery>{"query", &SavedQuery::query},
-        Column<std::string, SavedQuery>{"description", &SavedQuery::description, true},
+        Column<std::string, SavedQuery, true>{"description", &SavedQuery::description},
         Column<std::chrono::sys_seconds, SavedQuery>{"created_time", &SavedQuery::createdTime},
         Column<std::chrono::sys_seconds, SavedQuery>{"last_used", &SavedQuery::lastUsed},
         Column<int64_t, SavedQuery>{"use_count", &SavedQuery::useCount}};
@@ -711,16 +755,16 @@ template <> struct EntityTraits<DocumentRelationship> {
     // Note: relationship_type is stored as string but maps to enum+customType
     // We store a string representation for the column tuple, but extract handles the conversion
     using columns_tuple =
-        std::tuple<Column<int64_t, DocumentRelationship>,                 // id
-                   Column<int64_t, DocumentRelationship>,                 // parent_id
-                   Column<int64_t, DocumentRelationship>,                 // child_id
-                   Column<std::string, DocumentRelationship>,             // relationship_type
-                   Column<std::chrono::sys_seconds, DocumentRelationship> // created_time
+        std::tuple<Column<int64_t, DocumentRelationship, false, true, true>, // id
+                   Column<int64_t, DocumentRelationship, true>,              // parent_id
+                   Column<int64_t, DocumentRelationship>,                    // child_id
+                   Column<std::string, DocumentRelationship>,                // relationship_type
+                   Column<std::chrono::sys_seconds, DocumentRelationship>    // created_time
                    >;
 
     static constexpr columns_tuple columns{
-        Column<int64_t, DocumentRelationship>{"id", &DocumentRelationship::id, false, true, true},
-        Column<int64_t, DocumentRelationship>{"parent_id", &DocumentRelationship::parentId, true},
+        Column<int64_t, DocumentRelationship, false, true, true>{"id", &DocumentRelationship::id},
+        Column<int64_t, DocumentRelationship, true>{"parent_id", &DocumentRelationship::parentId},
         Column<int64_t, DocumentRelationship>{"child_id", &DocumentRelationship::childId},
         Column<std::string, DocumentRelationship>{"relationship_type",
                                                   nullptr}, // extract handles this
@@ -774,14 +818,14 @@ template <> struct EntityTraits<MetadataEntry> {
     static constexpr std::string_view table = "metadata";
     static constexpr std::string_view primary_key = "document_id"; // Part of composite PK
 
-    using columns_tuple = std::tuple<Column<int64_t, MetadataEntry>,     // document_id
-                                     Column<std::string, MetadataEntry>, // key
-                                     Column<std::string, MetadataEntry>, // value
-                                     Column<std::string, MetadataEntry>  // value_type
+    using columns_tuple = std::tuple<Column<int64_t, MetadataEntry, false, true>, // document_id
+                                     Column<std::string, MetadataEntry>,          // key
+                                     Column<std::string, MetadataEntry>,          // value
+                                     Column<std::string, MetadataEntry>           // value_type
                                      >;
 
     static constexpr columns_tuple columns{
-        Column<int64_t, MetadataEntry>{"document_id", &MetadataEntry::documentId, false, true},
+        Column<int64_t, MetadataEntry, false, true>{"document_id", &MetadataEntry::documentId},
         Column<std::string, MetadataEntry>{"key", &MetadataEntry::key},
         Column<std::string, MetadataEntry>{"value", &MetadataEntry::value},
         Column<std::string, MetadataEntry>{"value_type", &MetadataEntry::valueType}};

@@ -49,8 +49,9 @@ from_kv_pairs(const google::protobuf::RepeatedPtrField<pb::KvPair>& in) {
 static void set_string_list(const std::vector<std::string>& in,
                             google::protobuf::RepeatedPtrField<std::string>* out) {
     out->Clear();
+    out->Reserve(static_cast<int>(in.size()));
     for (const auto& s : in)
-        out->Add(std::string{s});
+        *out->Add() = s;
 }
 
 static std::vector<std::string>
@@ -231,6 +232,9 @@ template <> struct ProtoBinding<SearchRequest> {
         if (r.useSession && !r.sessionName.empty()) {
             o->set_session_id(r.sessionName);
         }
+        if (!r.instanceId.empty()) {
+            o->set_instance_id(r.instanceId);
+        }
     }
     static SearchRequest get(const Envelope& env) {
         const auto& i = env.search_request();
@@ -273,6 +277,7 @@ template <> struct ProtoBinding<SearchRequest> {
             r.useSession = true;
             r.sessionName = i.session_id();
         }
+        r.instanceId = i.instance_id();
         return r;
     }
 };
@@ -413,6 +418,9 @@ template <> struct ProtoBinding<DeleteRequest> {
         o->set_recursive(r.recursive);
         o->set_verbose(r.verbose);
         o->set_session_id(r.sessionId);
+        if (!r.instanceId.empty()) {
+            o->set_instance_id(r.instanceId);
+        }
     }
     static DeleteRequest get(const Envelope& env) {
         const auto& i = env.delete_request();
@@ -429,6 +437,7 @@ template <> struct ProtoBinding<DeleteRequest> {
         r.recursive = i.recursive();
         r.verbose = i.verbose();
         r.sessionId = i.session_id();
+        r.instanceId = i.instance_id();
         return r;
     }
 };
@@ -478,6 +487,9 @@ template <> struct ProtoBinding<ListRequest> {
         if (!r.sessionId.empty()) {
             o->set_session_id(r.sessionId);
         }
+        if (!r.instanceId.empty()) {
+            o->set_instance_id(r.instanceId);
+        }
     }
     static ListRequest get(const Envelope& env) {
         const auto& i = env.list_request();
@@ -521,6 +533,7 @@ template <> struct ProtoBinding<ListRequest> {
         r.metadataFilters = from_kv_pairs(i.metadata_filters());
         r.matchAllMetadata = i.match_all_metadata();
         r.sessionId = i.session_id();
+        r.instanceId = i.instance_id();
         return r;
     }
 };
@@ -686,6 +699,9 @@ template <> struct ProtoBinding<AddDocumentRequest> {
         if (!r.sessionId.empty()) {
             o->set_session_id(r.sessionId);
         }
+        if (!r.instanceId.empty()) {
+            o->set_instance_id(r.instanceId);
+        }
     }
     static AddDocumentRequest get(const Envelope& env) {
         const auto& i = env.add_document_request();
@@ -706,6 +722,7 @@ template <> struct ProtoBinding<AddDocumentRequest> {
         r.disableAutoMime = i.disable_auto_mime();
         r.noEmbeddings = i.no_embeddings();
         r.sessionId = i.session_id();
+        r.instanceId = i.instance_id();
         return r;
     }
 };
@@ -743,6 +760,9 @@ template <> struct ProtoBinding<GrepRequest> {
         if (r.useSession && !r.sessionName.empty()) {
             o->set_session_id(r.sessionName);
         }
+        if (!r.instanceId.empty()) {
+            o->set_instance_id(r.instanceId);
+        }
     }
     static GrepRequest get(const Envelope& env) {
         const auto& i = env.grep_request();
@@ -777,6 +797,7 @@ template <> struct ProtoBinding<GrepRequest> {
             r.useSession = true;
             r.sessionName = i.session_id();
         }
+        r.instanceId = i.instance_id();
         return r;
     }
 };
@@ -1007,6 +1028,7 @@ template <> struct ProtoBinding<SearchResponse> {
         auto* o = env.mutable_search_response();
         o->set_total_count(static_cast<uint64_t>(r.totalCount));
         o->set_elapsed_ms(static_cast<int64_t>(r.elapsed.count()));
+        o->set_trace_id(yams::common::sanitizeUtf8(r.traceId));
         for (const auto& s : r.results) {
             auto* pr = o->add_results();
             pr->set_id(yams::common::sanitizeUtf8(s.id));
@@ -1022,6 +1044,7 @@ template <> struct ProtoBinding<SearchResponse> {
         const auto& i = env.search_response();
         r.totalCount = i.total_count();
         r.elapsed = std::chrono::milliseconds{i.elapsed_ms()};
+        r.traceId = i.trace_id();
         r.results.reserve(i.results_size());
         for (const auto& pr : i.results()) {
             SearchResult sr{};
@@ -1235,6 +1258,34 @@ template <> struct ProtoBinding<StatusResponse> {
             kv->set_key("embedding_threads_inter");
             kv->set_value(std::to_string(r.embeddingThreadsInter));
         }
+        // Vector DB diagnostics (best-effort)
+        {
+            auto* kv = o->add_request_counts();
+            kv->set_key("vector_db_init_attempted");
+            kv->set_value(r.vectorDbInitAttempted ? "1" : "0");
+        }
+        {
+            auto* kv = o->add_request_counts();
+            kv->set_key("vector_db_ready");
+            kv->set_value(r.vectorDbReady ? "1" : "0");
+        }
+        if (r.vectorDbDim > 0) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("vector_db_dim");
+            kv->set_value(std::to_string(r.vectorDbDim));
+        }
+
+        // Proxy socket observability (serialized via request_counts until proto gains fields)
+        if (!r.proxySocketPath.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("proxy_socket_path");
+            kv->set_value(r.proxySocketPath);
+        }
+        {
+            auto* kv = o->add_request_counts();
+            kv->set_key("proxy_active_connections");
+            kv->set_value(std::to_string(static_cast<uint64_t>(r.proxyActiveConnections)));
+        }
         // readiness: bool->string
         for (const auto& [k, v] : r.readinessStates) {
             auto* kv = o->add_readiness();
@@ -1298,6 +1349,18 @@ template <> struct ProtoBinding<StatusResponse> {
                 r.lastError = kv.value();
                 continue;
             }
+            if (kv.key() == "proxy_socket_path") {
+                r.proxySocketPath = kv.value();
+                continue;
+            }
+            if (kv.key() == "proxy_active_connections") {
+                try {
+                    r.proxyActiveConnections = static_cast<size_t>(std::stoull(kv.value()));
+                } catch (...) {
+                    r.proxyActiveConnections = 0;
+                }
+                continue;
+            }
             if (kv.key() == "content_store_root") {
                 r.contentStoreRoot = kv.value();
                 continue;
@@ -1342,6 +1405,27 @@ template <> struct ProtoBinding<StatusResponse> {
             if (kv.key() == "embedding_threads_inter") {
                 try {
                     r.embeddingThreadsInter = static_cast<int32_t>(std::stol(kv.value()));
+                } catch (...) {
+                }
+                continue;
+            }
+            if (kv.key() == "vector_db_init_attempted") {
+                std::string v = kv.value();
+                for (auto& c : v)
+                    c = static_cast<char>(std::tolower(c));
+                r.vectorDbInitAttempted = (v == "1" || v == "true" || v == "yes");
+                continue;
+            }
+            if (kv.key() == "vector_db_ready") {
+                std::string v = kv.value();
+                for (auto& c : v)
+                    c = static_cast<char>(std::tolower(c));
+                r.vectorDbReady = (v == "1" || v == "true" || v == "yes");
+                continue;
+            }
+            if (kv.key() == "vector_db_dim") {
+                try {
+                    r.vectorDbDim = static_cast<uint32_t>(std::stoul(kv.value()));
                 } catch (...) {
                 }
                 continue;
@@ -1773,20 +1857,26 @@ template <> struct ProtoBinding<GetStatsResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kGetStatsResponse;
     static void set(Envelope& env, const GetStatsResponse& r) {
         auto* o = env.mutable_get_stats_response();
-        // Best-effort: provide JSON string and smuggle selected additionalStats keys inside it
+        // Best-effort: provide JSON string and preserve additionalStats keys inside it
         std::string jstr = "{}";
         if (auto it = r.additionalStats.find("json"); it != r.additionalStats.end())
             jstr = it->second;
         nlohmann::json j = nlohmann::json::parse(jstr, nullptr, false);
         if (j.is_discarded())
             j = nlohmann::json::object();
-        if (auto pit = r.additionalStats.find("plugins_json"); pit != r.additionalStats.end()) {
-            // Try to embed as JSON; fallback to string
-            nlohmann::json pj = nlohmann::json::parse(pit->second, nullptr, false);
-            if (!pj.is_discarded())
-                j["plugins_json"] = pj;
-            else
-                j["plugins_json"] = pit->second;
+        for (const auto& [key, value] : r.additionalStats) {
+            if (key == "json")
+                continue;
+            if (key == "plugins_json") {
+                // Preserve historical behavior: embed plugin list as JSON when possible.
+                nlohmann::json pj = nlohmann::json::parse(value, nullptr, false);
+                if (!pj.is_discarded())
+                    j[key] = pj;
+                else
+                    j[key] = value;
+                continue;
+            }
+            j[key] = value;
         }
         o->set_json(j.dump());
         // Populate numeric fields alongside JSON so non-JSON clients don't see zeros
@@ -1801,14 +1891,17 @@ template <> struct ProtoBinding<GetStatsResponse> {
         const auto& g = env.get_stats_response();
         if (!g.json().empty()) {
             r.additionalStats["json"] = g.json();
-            // Extract embedded plugins_json if present
+            // Extract all embedded additional stats
             nlohmann::json j = nlohmann::json::parse(g.json(), nullptr, false);
-            if (!j.is_discarded() && j.contains("plugins_json")) {
-                const auto& v = j["plugins_json"];
-                if (v.is_string())
-                    r.additionalStats["plugins_json"] = v.get<std::string>();
-                else
-                    r.additionalStats["plugins_json"] = v.dump();
+            if (!j.is_discarded() && j.is_object()) {
+                for (auto it = j.begin(); it != j.end(); ++it) {
+                    const auto& key = it.key();
+                    const auto& value = it.value();
+                    if (value.is_string())
+                        r.additionalStats[key] = value.get<std::string>();
+                    else
+                        r.additionalStats[key] = value.dump();
+                }
             }
         }
         // Also hydrate numeric fields for non-JSON consumers
@@ -2493,6 +2586,166 @@ template <> struct ProtoBinding<MetadataValueCountsResponse> {
     }
 };
 
+// --------------------------- Snapshot/Restore Bindings ---------------------------
+template <> struct ProtoBinding<ListSnapshotsRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kListSnapshotsRequest;
+    static void set(Envelope& env, const ListSnapshotsRequest&) {
+        (void)env.mutable_list_snapshots_request();
+    }
+    static ListSnapshotsRequest get(const Envelope&) { return ListSnapshotsRequest{}; }
+};
+
+template <> struct ProtoBinding<ListSnapshotsResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kListSnapshotsResponse;
+    static void set(Envelope& env, const ListSnapshotsResponse& r) {
+        auto* o = env.mutable_list_snapshots_response();
+        for (const auto& s : r.snapshots) {
+            auto* snap = o->add_snapshots();
+            snap->set_id(s.id);
+            snap->set_label(s.label);
+            snap->set_created_at(s.createdAt);
+            snap->set_document_count(s.documentCount);
+        }
+        o->set_total_count(r.totalCount);
+    }
+    static ListSnapshotsResponse get(const Envelope& env) {
+        ListSnapshotsResponse r{};
+        const auto& i = env.list_snapshots_response();
+        for (const auto& s : i.snapshots()) {
+            SnapshotInfo info;
+            info.id = s.id();
+            info.label = s.label();
+            info.createdAt = s.created_at();
+            info.documentCount = s.document_count();
+            r.snapshots.push_back(std::move(info));
+        }
+        r.totalCount = i.total_count();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<RestoreCollectionRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRestoreCollectionRequest;
+    static void set(Envelope& env, const RestoreCollectionRequest& r) {
+        auto* o = env.mutable_restore_collection_request();
+        o->set_collection(r.collection);
+        o->set_output_directory(r.outputDirectory);
+        o->set_layout_template(r.layoutTemplate);
+        set_string_list(r.includePatterns, o->mutable_include_patterns());
+        set_string_list(r.excludePatterns, o->mutable_exclude_patterns());
+        o->set_overwrite(r.overwrite);
+        o->set_create_dirs(r.createDirs);
+        o->set_dry_run(r.dryRun);
+    }
+    static RestoreCollectionRequest get(const Envelope& env) {
+        RestoreCollectionRequest r{};
+        const auto& i = env.restore_collection_request();
+        r.collection = i.collection();
+        r.outputDirectory = i.output_directory();
+        r.layoutTemplate = i.layout_template();
+        r.includePatterns = get_string_list(i.include_patterns());
+        r.excludePatterns = get_string_list(i.exclude_patterns());
+        r.overwrite = i.overwrite();
+        r.createDirs = i.create_dirs();
+        r.dryRun = i.dry_run();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<RestoreCollectionResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRestoreCollectionResponse;
+    static void set(Envelope& env, const RestoreCollectionResponse& r) {
+        auto* o = env.mutable_restore_collection_response();
+        o->set_files_restored(r.filesRestored);
+        o->set_dry_run(r.dryRun);
+        for (const auto& f : r.files) {
+            auto* rf = o->add_files();
+            rf->set_path(f.path);
+            rf->set_hash(f.hash);
+            rf->set_size(f.size);
+            rf->set_skipped(f.skipped);
+            rf->set_skip_reason(f.skipReason);
+        }
+    }
+    static RestoreCollectionResponse get(const Envelope& env) {
+        RestoreCollectionResponse r{};
+        const auto& i = env.restore_collection_response();
+        r.filesRestored = i.files_restored();
+        r.dryRun = i.dry_run();
+        for (const auto& f : i.files()) {
+            RestoredFile rf;
+            rf.path = f.path();
+            rf.hash = f.hash();
+            rf.size = f.size();
+            rf.skipped = f.skipped();
+            rf.skipReason = f.skip_reason();
+            r.files.push_back(std::move(rf));
+        }
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<RestoreSnapshotRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRestoreSnapshotRequest;
+    static void set(Envelope& env, const RestoreSnapshotRequest& r) {
+        auto* o = env.mutable_restore_snapshot_request();
+        o->set_snapshot_id(r.snapshotId);
+        o->set_output_directory(r.outputDirectory);
+        o->set_layout_template(r.layoutTemplate);
+        set_string_list(r.includePatterns, o->mutable_include_patterns());
+        set_string_list(r.excludePatterns, o->mutable_exclude_patterns());
+        o->set_overwrite(r.overwrite);
+        o->set_create_dirs(r.createDirs);
+        o->set_dry_run(r.dryRun);
+    }
+    static RestoreSnapshotRequest get(const Envelope& env) {
+        RestoreSnapshotRequest r{};
+        const auto& i = env.restore_snapshot_request();
+        r.snapshotId = i.snapshot_id();
+        r.outputDirectory = i.output_directory();
+        r.layoutTemplate = i.layout_template();
+        r.includePatterns = get_string_list(i.include_patterns());
+        r.excludePatterns = get_string_list(i.exclude_patterns());
+        r.overwrite = i.overwrite();
+        r.createDirs = i.create_dirs();
+        r.dryRun = i.dry_run();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<RestoreSnapshotResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRestoreSnapshotResponse;
+    static void set(Envelope& env, const RestoreSnapshotResponse& r) {
+        auto* o = env.mutable_restore_snapshot_response();
+        o->set_files_restored(r.filesRestored);
+        o->set_dry_run(r.dryRun);
+        for (const auto& f : r.files) {
+            auto* rf = o->add_files();
+            rf->set_path(f.path);
+            rf->set_hash(f.hash);
+            rf->set_size(f.size);
+            rf->set_skipped(f.skipped);
+            rf->set_skip_reason(f.skipReason);
+        }
+    }
+    static RestoreSnapshotResponse get(const Envelope& env) {
+        RestoreSnapshotResponse r{};
+        const auto& i = env.restore_snapshot_response();
+        r.filesRestored = i.files_restored();
+        r.dryRun = i.dry_run();
+        for (const auto& f : i.files()) {
+            RestoredFile rf;
+            rf.path = f.path();
+            rf.hash = f.hash();
+            rf.size = f.size();
+            rf.skipped = f.skipped();
+            rf.skipReason = f.skip_reason();
+            r.files.push_back(std::move(rf));
+        }
+        return r;
+    }
+};
+
 // --------------------------- Batch Request/Response (Track B) ---------------------------
 template <> struct ProtoBinding<BatchRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kBatchRequest;
@@ -2500,6 +2753,9 @@ template <> struct ProtoBinding<BatchRequest> {
         auto* o = env.mutable_batch_request();
         o->set_continue_on_error(r.continueOnError);
         o->set_session_id(r.sessionId);
+        if (!r.instanceId.empty()) {
+            o->set_instance_id(r.instanceId);
+        }
         for (const auto& item : r.items) {
             auto* item_pb = o->add_items();
             item_pb->set_sequence_id(item.sequenceId);
@@ -2542,6 +2798,7 @@ template <> struct ProtoBinding<BatchRequest> {
         BatchRequest r{};
         r.continueOnError = i.continue_on_error();
         r.sessionId = i.session_id();
+        r.instanceId = i.instance_id();
         for (const auto& item_pb : i.items()) {
             BatchItem item;
             item.sequenceId = item_pb.sequence_id();
@@ -2728,6 +2985,126 @@ template <> struct ProtoBinding<BatchResponse> {
     }
 };
 
+// --------------------------- Repair Service Bindings ---------------------------
+template <> struct ProtoBinding<RepairRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRepairRequest;
+    static void set(Envelope& env, const RepairRequest& r) {
+        auto* o = env.mutable_repair_request();
+        o->set_repair_orphans(r.repairOrphans);
+        o->set_repair_mime(r.repairMime);
+        o->set_repair_downloads(r.repairDownloads);
+        o->set_repair_path_tree(r.repairPathTree);
+        o->set_repair_chunks(r.repairChunks);
+        o->set_repair_block_refs(r.repairBlockRefs);
+        o->set_repair_fts5(r.repairFts5);
+        o->set_repair_embeddings(r.repairEmbeddings);
+        o->set_repair_stuck_docs(r.repairStuckDocs);
+        o->set_optimize_db(r.optimizeDb);
+        o->set_repair_all(r.repairAll);
+        o->set_dry_run(r.dryRun);
+        o->set_verbose(r.verbose);
+        o->set_force(r.force);
+        o->set_foreground(r.foreground);
+        o->set_embedding_model(r.embeddingModel);
+        set_string_list(r.includeMime, o->mutable_include_mime());
+        o->set_max_retries(r.maxRetries);
+    }
+    static RepairRequest get(const Envelope& env) {
+        const auto& i = env.repair_request();
+        RepairRequest r{};
+        r.repairOrphans = i.repair_orphans();
+        r.repairMime = i.repair_mime();
+        r.repairDownloads = i.repair_downloads();
+        r.repairPathTree = i.repair_path_tree();
+        r.repairChunks = i.repair_chunks();
+        r.repairBlockRefs = i.repair_block_refs();
+        r.repairFts5 = i.repair_fts5();
+        r.repairEmbeddings = i.repair_embeddings();
+        r.repairStuckDocs = i.repair_stuck_docs();
+        r.optimizeDb = i.optimize_db();
+        r.repairAll = i.repair_all();
+        r.dryRun = i.dry_run();
+        r.verbose = i.verbose();
+        r.force = i.force();
+        r.foreground = i.foreground();
+        r.embeddingModel = i.embedding_model();
+        r.includeMime = get_string_list(i.include_mime());
+        r.maxRetries = i.max_retries();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<RepairEvent> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRepairEvent;
+    static void set(Envelope& env, const RepairEvent& r) {
+        auto* o = env.mutable_repair_event();
+        o->set_phase(r.phase);
+        o->set_operation(r.operation);
+        o->set_processed(r.processed);
+        o->set_total(r.total);
+        o->set_succeeded(r.succeeded);
+        o->set_failed(r.failed);
+        o->set_skipped(r.skipped);
+        o->set_message(r.message);
+    }
+    static RepairEvent get(const Envelope& env) {
+        const auto& i = env.repair_event();
+        RepairEvent r{};
+        r.phase = i.phase();
+        r.operation = i.operation();
+        r.processed = i.processed();
+        r.total = i.total();
+        r.succeeded = i.succeeded();
+        r.failed = i.failed();
+        r.skipped = i.skipped();
+        r.message = i.message();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<RepairResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kRepairResponse;
+    static void set(Envelope& env, const RepairResponse& r) {
+        auto* o = env.mutable_repair_response();
+        o->set_success(r.success);
+        o->set_total_operations(r.totalOperations);
+        o->set_total_succeeded(r.totalSucceeded);
+        o->set_total_failed(r.totalFailed);
+        o->set_total_skipped(r.totalSkipped);
+        set_string_list(r.errors, o->mutable_errors());
+        for (const auto& op : r.operationResults) {
+            auto* op_pb = o->add_operation_results();
+            op_pb->set_operation(op.operation);
+            op_pb->set_processed(op.processed);
+            op_pb->set_succeeded(op.succeeded);
+            op_pb->set_failed(op.failed);
+            op_pb->set_skipped(op.skipped);
+            op_pb->set_message(op.message);
+        }
+    }
+    static RepairResponse get(const Envelope& env) {
+        const auto& i = env.repair_response();
+        RepairResponse r{};
+        r.success = i.success();
+        r.totalOperations = i.total_operations();
+        r.totalSucceeded = i.total_succeeded();
+        r.totalFailed = i.total_failed();
+        r.totalSkipped = i.total_skipped();
+        r.errors = get_string_list(i.errors());
+        for (const auto& op_pb : i.operation_results()) {
+            RepairOperationResult op{};
+            op.operation = op_pb.operation();
+            op.processed = op_pb.processed();
+            op.succeeded = op_pb.succeeded();
+            op.failed = op_pb.failed();
+            op.skipped = op_pb.skipped();
+            op.message = op_pb.message();
+            r.operationResults.push_back(std::move(op));
+        }
+        return r;
+    }
+};
+
 // Helper to encode Request/Response variants using bindings
 template <typename Variant>
 static Result<void> encode_variant_into(Envelope& env, const Variant& v) {
@@ -2813,7 +3190,7 @@ Result<std::vector<uint8_t>> ProtoSerializer::encode_payload(const Message& msg)
     auto res = encode_payload_into(msg, out);
     if (!res)
         return res.error();
-    return std::move(out);
+    return out;
 }
 
 Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) {
@@ -3057,6 +3434,26 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kListSnapshotsRequest: {
+            auto v = ProtoBinding<ListSnapshotsRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kRestoreCollectionRequest: {
+            auto v = ProtoBinding<RestoreCollectionRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kRestoreSnapshotRequest: {
+            auto v = ProtoBinding<RestoreSnapshotRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kRepairRequest: {
+            auto v = ProtoBinding<RepairRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
 
         // Additional responses
         case Envelope::kSuccessResponse: {
@@ -3224,6 +3621,21 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Response{std::in_place_type<BatchResponse>, std::move(v)};
             break;
         }
+        case Envelope::kListSnapshotsResponse: {
+            auto v = ProtoBinding<ListSnapshotsResponse>::get(env);
+            m.payload = Response{std::in_place_type<ListSnapshotsResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kRestoreCollectionResponse: {
+            auto v = ProtoBinding<RestoreCollectionResponse>::get(env);
+            m.payload = Response{std::in_place_type<RestoreCollectionResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kRestoreSnapshotResponse: {
+            auto v = ProtoBinding<RestoreSnapshotResponse>::get(env);
+            m.payload = Response{std::in_place_type<RestoreSnapshotResponse>, std::move(v)};
+            break;
+        }
         case Envelope::kEmbedEvent: {
             auto v = ProtoBinding<EmbeddingEvent>::get(env);
             m.payload = Response{std::in_place_type<EmbeddingEvent>, std::move(v)};
@@ -3234,12 +3646,22 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Response{std::in_place_type<ModelLoadEvent>, std::move(v)};
             break;
         }
+        case Envelope::kRepairResponse: {
+            auto v = ProtoBinding<RepairResponse>::get(env);
+            m.payload = Response{std::in_place_type<RepairResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kRepairEvent: {
+            auto v = ProtoBinding<RepairEvent>::get(env);
+            m.payload = Response{std::in_place_type<RepairEvent>, std::move(v)};
+            break;
+        }
         case Envelope::PAYLOAD_NOT_SET:
         default:
             return Error{ErrorCode::InvalidData, "Unsupported or empty Envelope payload"};
     }
 
-    return std::move(m);
+    return m;
 }
 
 } // namespace daemon

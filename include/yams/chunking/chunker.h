@@ -122,13 +122,13 @@ public:
             size_t chunkSize = chunkEnd - pos;
 
             // Create chunk reference
-            auto chunkData = data.subspan(pos, chunkSize);
-            auto hash = hasher->hash(chunkData);
+            auto chunkSpan = data.subspan(pos, chunkSize);
+            auto hash = hasher->hash(chunkSpan);
 
             ChunkRef ref{.hash = std::move(hash), .offset = pos, .size = chunkSize};
 
             // Process chunk
-            processor(ref, chunkData);
+            processor(ref, chunkSpan);
 
             pos = chunkEnd;
         }

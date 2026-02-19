@@ -1,12 +1,16 @@
 // Replace stub with actual ONNX-backed implementation
 #include "model_provider.h"
 #include <nlohmann/json.hpp>
+#include <onnxruntime_cxx_api.h>
 #include <spdlog/spdlog.h>
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <thread>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -58,11 +62,60 @@ static bool isColbertModelName(const std::string& name) {
     return lower.find("colbert") != std::string::npos;
 }
 
+struct ProviderCtx;
+
+static bool envTruthy(const char* value) {
+    if (!value || !*value) {
+        return false;
+    }
+    std::string v(value);
+    for (auto& c : v) {
+        c = static_cast<char>(std::tolower(c));
+    }
+    return v != "0" && v != "false" && v != "off" && v != "no";
+}
+
+static std::chrono::milliseconds modelAcquireTimeout(bool batchCall) {
+    // Batch calls can hold the model session for longer on large chunks/sub-batches.
+    // Keep a longer default to avoid turning transient contention into hard failures.
+    std::chrono::milliseconds timeout =
+        batchCall ? std::chrono::milliseconds(120000) : std::chrono::milliseconds(30000);
+
+    if (const char* global = std::getenv("YAMS_ONNX_MODEL_ACQUIRE_TIMEOUT_MS")) {
+        try {
+            const auto parsed = std::stoll(global);
+            if (parsed > 0) {
+                timeout = std::chrono::milliseconds(parsed);
+            }
+        } catch (...) {
+        }
+    }
+
+    if (batchCall) {
+        if (const char* batch = std::getenv("YAMS_ONNX_MODEL_ACQUIRE_TIMEOUT_BATCH_MS")) {
+            try {
+                const auto parsed = std::stoll(batch);
+                if (parsed > 0) {
+                    timeout = std::chrono::milliseconds(parsed);
+                }
+            } catch (...) {
+            }
+        }
+    }
+
+    if (envTruthy(std::getenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS"))) {
+        timeout = std::min(timeout, std::chrono::milliseconds(1000));
+    }
+
+    constexpr auto kMinTimeout = std::chrono::milliseconds(1000);
+    constexpr auto kMaxTimeout = std::chrono::milliseconds(600000);
+    timeout = std::clamp(timeout, kMinTimeout, kMaxTimeout);
+    return timeout;
+}
+
 // Provide a C-callable function for threading control (not supported yet)
 static yams_status_t onnx_set_threading(void* /*self*/, const char* /*model_id*/, int /*intra*/,
-                                        int /*inter*/) {
-    return YAMS_ERR_UNSUPPORTED;
-}
+                                        int /*inter*/);
 
 struct ProviderCtx {
     enum class State : uint8_t { Unloaded, Loading, Ready, Failed };
@@ -86,7 +139,9 @@ struct ProviderCtx {
     std::unordered_map<std::string, FailureInfo> model_failures; // failure tracking
     bool ready = false;
     bool disabled = false;
+    std::atomic<bool> shutdownRequested{false};
     bool gpuEnabled = false; // Tracks whether GPU acceleration is configured
+    std::string actualExecutionProvider{"cpu"};
     std::string last_error;
     std::string rerankerModelPath; // Path to reranker model
     std::string rerankerModelName; // Name of reranker model
@@ -138,8 +193,11 @@ struct ProviderCtx {
         // Defaults: prefer lazy loading to avoid blocking startup
         // Models will be loaded on first use, not during plugin initialization
         cfg.lazyLoading = true;
-        cfg.enableGPU = false;
-        cfg.numThreads = std::max(1u, std::thread::hardware_concurrency());
+        cfg.enableGPU = true; // runtime detection in appendGpuExecutionProvider()
+        const unsigned hwThreads = std::max(1u, std::thread::hardware_concurrency());
+        cfg.numThreads = static_cast<int>(std::clamp<unsigned>(hwThreads / 2, 1u, 4u));
+        cfg.loadWorkerThreads = std::max<size_t>(1u, static_cast<size_t>(cfg.numThreads / 2));
+        cfg.asyncLoading = false;
 
         // Variables for config (both file-based and JSON-based)
         std::string dataDir;
@@ -205,17 +263,15 @@ struct ProviderCtx {
                     } catch (...) {
                     }
                 };
-                auto apply_enable_gpu = [&](const std::string& value) {
+                auto apply_async_loading = [&](const std::string& value) {
                     std::string v = value;
                     for (auto& c : v)
                         c = static_cast<char>(std::tolower(c));
-                    if (v == "true" || v == "1" || v == "yes" || v == "on") {
-                        cfg.enableGPU = true;
-                    } else if (v == "false" || v == "0" || v == "no" || v == "off") {
-                        cfg.enableGPU = false;
-                    }
+                    if (v == "1" || v == "true" || v == "yes" || v == "on")
+                        cfg.asyncLoading = true;
+                    if (v == "0" || v == "false" || v == "no" || v == "off")
+                        cfg.asyncLoading = false;
                 };
-
                 while (std::getline(file, line)) {
                     if (line.empty() || line[0] == '#')
                         continue;
@@ -251,8 +307,6 @@ struct ProviderCtx {
                     if (section == "embeddings") {
                         if (key == "preferred_model" && preferredModel.empty())
                             preferredModel = value;
-                        else if (key == "enable_gpu")
-                            apply_enable_gpu(value);
                         else if (key == "num_threads")
                             apply_num_threads(value);
                         else if (key == "keep_model_hot") {
@@ -263,9 +317,7 @@ struct ProviderCtx {
                         }
                     }
                     if (section == "daemon.models") {
-                        if (key == "enable_gpu")
-                            apply_enable_gpu(value);
-                        else if (key == "num_threads")
+                        if (key == "num_threads")
                             apply_num_threads(value);
                         else if (key == "max_loaded_models")
                             apply_max_loaded_models(value);
@@ -304,6 +356,8 @@ struct ProviderCtx {
                         apply_max_loaded_models(value);
                     if (section == "plugins.onnx" && key == "hot_pool_size")
                         apply_hot_pool_size(value);
+                    if (section == "plugins.onnx" && key == "async_load")
+                        apply_async_loading(value);
                     if (section == "plugins.onnx" && key == "reranker_model")
                         rerankerModel = value;
                     if (section == "plugins.onnx" && key == "reranker_model_path")
@@ -330,12 +384,7 @@ struct ProviderCtx {
                 cfg.modelsRoot = dataDir + "/models";
                 spdlog::info("[ONNX-Plugin] Using models directory: {}", cfg.modelsRoot);
             }
-            // Map keep_model_hot to lazyLoading inverse - but always use lazy loading
-            // during plugin initialization to avoid blocking daemon startup.
-            // Background preloading (if configured) will happen after init completes.
-            // Disable lazy loading to force startup checks and surface deadlocks early
-            cfg.lazyLoading = false;
-            // Build preload list if any (will be deferred until after initialization)
+            // Build preload list if any; eager load behavior is controlled later.
             if (!preloadList.empty()) {
                 cfg.preloadModels = preloadList;
             } else if (keepModelHot && !preferredModel.empty()) {
@@ -349,6 +398,34 @@ struct ProviderCtx {
             }
         } catch (const std::exception&) {
             // ignore config parse errors
+        }
+
+        // Env overrides for async loading
+        auto parse_bool_env = [](const char* name) -> std::optional<bool> {
+            if (const char* s = std::getenv(name)) {
+                std::string v(s);
+                for (auto& c : v)
+                    c = static_cast<char>(std::tolower(c));
+                if (v == "1" || v == "true" || v == "yes" || v == "on")
+                    return true;
+                if (v == "0" || v == "false" || v == "no" || v == "off")
+                    return false;
+            }
+            return std::nullopt;
+        };
+        if (auto val = parse_bool_env("YAMS_ONNX_ASYNC_LOAD")) {
+            cfg.asyncLoading = *val;
+        }
+        const bool eagerPreload = parse_bool_env("YAMS_ONNX_EAGER_PRELOAD").value_or(false);
+        cfg.lazyLoading = !eagerPreload;
+        if (const char* w = std::getenv("YAMS_ONNX_LOAD_WORKERS")) {
+            try {
+                size_t threads = static_cast<size_t>(std::stoul(w));
+                if (threads > 0 && threads <= 32) {
+                    cfg.loadWorkerThreads = threads;
+                }
+            } catch (...) {
+            }
         }
 
         // Parse JSON config from plugin init (overrides file-based config)
@@ -398,11 +475,6 @@ struct ProviderCtx {
                         keepModelHot = j["keep_model_hot"].get<bool>();
                         spdlog::info("[ONNX-Plugin] JSON config: keep_model_hot={}", keepModelHot);
                     }
-                    // enable_gpu
-                    if (j.contains("enable_gpu") && j["enable_gpu"].is_boolean()) {
-                        cfg.enableGPU = j["enable_gpu"].get<bool>();
-                        spdlog::info("[ONNX-Plugin] JSON config: enable_gpu={}", cfg.enableGPU);
-                    }
                     // num_threads
                     if (j.contains("num_threads") && j["num_threads"].is_number_integer()) {
                         int v = j["num_threads"].get<int>();
@@ -427,6 +499,19 @@ struct ProviderCtx {
                             cfg.hotPoolSize = v;
                             spdlog::info("[ONNX-Plugin] JSON config: hot_pool_size={}",
                                          cfg.hotPoolSize);
+                        }
+                    }
+                    if (j.contains("async_load") && j["async_load"].is_boolean()) {
+                        cfg.asyncLoading = j["async_load"].get<bool>();
+                        spdlog::info("[ONNX-Plugin] JSON config: async_load={}", cfg.asyncLoading);
+                    }
+                    if (j.contains("load_worker_threads") &&
+                        j["load_worker_threads"].is_number_integer()) {
+                        auto v = static_cast<std::size_t>(j["load_worker_threads"].get<int>());
+                        if (v >= 1 && v <= 32) {
+                            cfg.loadWorkerThreads = v;
+                            spdlog::info("[ONNX-Plugin] JSON config: load_worker_threads={}",
+                                         cfg.loadWorkerThreads);
                         }
                     }
                     // models_root - override the models directory
@@ -456,6 +541,25 @@ struct ProviderCtx {
             }
         }
 
+        cfg.maxLoadedModels = std::max<std::size_t>(1, cfg.maxLoadedModels);
+        cfg.hotPoolSize = std::clamp(cfg.hotPoolSize, std::size_t{1}, cfg.maxLoadedModels);
+
+        if (!cfg.preloadModels.empty()) {
+            const std::size_t preloadCap = std::min(cfg.hotPoolSize, cfg.maxLoadedModels);
+            if (cfg.preloadModels.size() > preloadCap) {
+                spdlog::warn("[ONNX-Plugin] Trimming preload list from {} to {} (hot_pool_size={}, "
+                             "max_loaded_models={})",
+                             cfg.preloadModels.size(), preloadCap, cfg.hotPoolSize,
+                             cfg.maxLoadedModels);
+                cfg.preloadModels.resize(preloadCap);
+            }
+            if (cfg.lazyLoading) {
+                spdlog::info("[ONNX-Plugin] preload list configured ({} models), lazy loading "
+                             "enabled; models will load on first use",
+                             cfg.preloadModels.size());
+            }
+        }
+
         configuredMaxLoadedModels = cfg.maxLoadedModels;
         configuredHotPoolSize = cfg.hotPoolSize;
         gpuEnabled = cfg.enableGPU;
@@ -465,8 +569,9 @@ struct ProviderCtx {
         if (!rerankerModelPath.empty()) {
             this->rerankerModelPath = rerankerModelPath;
         }
-        spdlog::info("[ONNX-Plugin] Creating OnnxModelPool with modelsRoot={}, gpuEnabled={}",
-                     cfg.modelsRoot, gpuEnabled);
+        spdlog::info("[ONNX-Plugin] Creating OnnxModelPool with modelsRoot={}, gpuEnabled={}, "
+                     "async_load={}",
+                     cfg.modelsRoot, gpuEnabled, cfg.asyncLoading);
         pool = std::make_unique<yams::daemon::OnnxModelPool>(cfg);
         spdlog::info("[ONNX-Plugin] OnnxModelPool created, calling initialize()...");
         try {
@@ -475,6 +580,18 @@ struct ProviderCtx {
                 ready = true;
                 last_error.clear();
                 spdlog::info("[ONNX-Plugin] Pool initialized successfully, ready=true");
+
+                // Best-effort: derive actual EP from a preloaded model (if any)
+                try {
+                    if (!cfg.preloadModels.empty()) {
+                        auto h = pool->acquireModel(cfg.preloadModels.front(),
+                                                    std::chrono::milliseconds(500));
+                        if (h) {
+                            actualExecutionProvider = h.value()->getExecutionProvider();
+                        }
+                    }
+                } catch (...) {
+                }
             } else {
                 ready = false;
                 last_error = res.error().message;
@@ -510,6 +627,44 @@ struct ProviderCtx {
     }
 };
 
+static yams_status_t onnx_set_threading(void* self, const char* model_id, int intra, int inter) {
+    if (!self || !model_id || !*model_id) {
+        return YAMS_ERR_INVALID_ARG;
+    }
+    if (intra == 0 || inter == 0) {
+        return YAMS_ERR_INVALID_ARG;
+    }
+    if ((intra < -1 || intra > 64) || (inter < -1 || inter > 64)) {
+        return YAMS_ERR_INVALID_ARG;
+    }
+
+    auto* c = static_cast<ProviderCtx*>(self);
+    if (c->disabled) {
+        return YAMS_ERR_UNSUPPORTED;
+    }
+    if (!c->pool) {
+        return YAMS_ERR_INTERNAL;
+    }
+
+    auto r = c->pool->setModelThreading(model_id, intra, inter, true);
+    if (!r) {
+        spdlog::warn("[ONNX Plugin] set_threading failed model='{}' intra={} inter={}: {}",
+                     model_id, intra, inter, r.error().message);
+        return YAMS_ERR_INTERNAL;
+    }
+
+    spdlog::info("[ONNX Plugin] set_threading applied model='{}' intra={} inter={}", model_id,
+                 intra, inter);
+    return YAMS_OK;
+}
+
+static bool shutdownInProgress(const ProviderCtx* c) {
+    if (c && c->shutdownRequested.load(std::memory_order_acquire)) {
+        return true;
+    }
+    return envTruthy(std::getenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS"));
+}
+
 // Helpers for progress emission
 static void emit_progress(ProviderCtx* ctx, const char* model, int phase, const char* msg,
                           uint64_t cur = 0, uint64_t tot = 0) {
@@ -532,6 +687,9 @@ struct ProviderSingleton {
         if (shutdownCalled.exchange(true)) {
             return;
         }
+
+        ctx.shutdownRequested.store(true, std::memory_order_release);
+        ctx.ready = false;
 
         // If this is called from destructor during static destruction (not explicit),
         // skip cleanup to avoid crashes from corrupted global state.
@@ -603,6 +761,11 @@ struct ProviderSingleton {
                 auto* c = static_cast<ProviderCtx*>(self);
                 if (c->disabled)
                     return YAMS_ERR_UNSUPPORTED;
+                if (shutdownInProgress(c)) {
+                    spdlog::info("[ONNX Plugin] load_model skipped during shutdown for '{}'",
+                                 model_id);
+                    return YAMS_ERR_INTERNAL;
+                }
                 if (!c->ready || !c->pool)
                     return YAMS_ERR_INTERNAL;
                 // Parse per-load options (hf.revision, offline)
@@ -798,6 +961,12 @@ struct ProviderSingleton {
                     spdlog::warn("[ONNX Plugin] generate_embedding: plugin disabled");
                     return YAMS_ERR_UNSUPPORTED;
                 }
+                if (shutdownInProgress(c)) {
+                    spdlog::info("[ONNX Plugin] generate_embedding: shutdown in progress");
+                    *out_vec = nullptr;
+                    *out_dim = 0;
+                    return YAMS_ERR_INTERNAL;
+                }
                 if (!c->ready) {
                     spdlog::warn("[ONNX Plugin] generate_embedding: plugin not ready");
                     return YAMS_ERR_INTERNAL;
@@ -822,10 +991,20 @@ struct ProviderSingleton {
                 }
 
                 std::string text(reinterpret_cast<const char*>(input), input_len);
-                auto h = c->pool->acquireModel(model_id, std::chrono::seconds(30));
+                auto h = c->pool->acquireModel(model_id, modelAcquireTimeout(false));
                 if (!h) {
+                    const auto err = h.error();
+                    const bool acquireTimeout = (err.code == yams::ErrorCode::Timeout);
                     std::string errMsg = h.error().message;
                     spdlog::warn("[ONNX Plugin] acquireModel failed for {}: {}", model_id, errMsg);
+
+                    // Resource-pool acquisition timeout is usually transient contention, not a
+                    // model load failure. Do not poison cooldown state for this path.
+                    if (acquireTimeout) {
+                        *out_vec = nullptr;
+                        *out_dim = 0;
+                        return YAMS_ERR_INTERNAL;
+                    }
 
                     // Record failure and fire event if this is first failure
                     {
@@ -909,8 +1088,8 @@ struct ProviderSingleton {
                                              const uint8_t* const* inputs, const size_t* input_lens,
                                              size_t batch_size, float** out_vecs, size_t* out_batch,
                                              size_t* out_dim) -> yams_status_t {
-            spdlog::info("[ONNX Plugin] generate_embedding_batch called: model={} batch={}",
-                         model_id ? model_id : "(null)", batch_size);
+            spdlog::debug("[ONNX Plugin] generate_embedding_batch called: model={} batch={}",
+                          model_id ? model_id : "(null)", batch_size);
 
             if (!self || !model_id || !inputs || !input_lens || !out_vecs || !out_batch ||
                 !out_dim) {
@@ -918,14 +1097,30 @@ struct ProviderSingleton {
                 return YAMS_ERR_INVALID_ARG;
             }
 
-            int retries = 3;
+            auto* c = static_cast<ProviderCtx*>(self);
+            int retries = shutdownInProgress(c) ? 1 : 3;
             while (retries > 0) {
                 retries--;
                 try {
-                    auto* c = static_cast<ProviderCtx*>(self);
+                    const bool timingDebug = []() {
+                        if (const char* s = std::getenv("YAMS_ONNX_DEBUG_BATCH_TIMINGS")) {
+                            return std::string{s} == "1" || std::string{s} == "true" ||
+                                   std::string{s} == "yes";
+                        }
+                        return false;
+                    }();
+
                     if (c->disabled) {
                         spdlog::warn("[ONNX Plugin] generate_embedding_batch: plugin disabled");
                         return YAMS_ERR_UNSUPPORTED;
+                    }
+                    if (shutdownInProgress(c)) {
+                        spdlog::info(
+                            "[ONNX Plugin] generate_embedding_batch: shutdown in progress");
+                        *out_vecs = nullptr;
+                        *out_batch = 0;
+                        *out_dim = 0;
+                        return YAMS_ERR_INTERNAL;
                     }
                     std::string modelIdStr(model_id);
                     const bool isColbert = isColbertModelName(modelIdStr);
@@ -964,12 +1159,43 @@ struct ProviderSingleton {
                         texts.emplace_back(reinterpret_cast<const char*>(inputs[i]), input_lens[i]);
                     }
 
-                    spdlog::info("[ONNX Plugin] acquiring model '{}'...", model_id);
-                    auto h = c->pool->acquireModel(model_id, std::chrono::seconds(30));
+                    spdlog::debug("[ONNX Plugin] acquiring model '{}'...", model_id);
+                    const auto tAcquire = std::chrono::steady_clock::now();
+                    auto h = c->pool->acquireModel(model_id, modelAcquireTimeout(true));
+                    const auto acquireMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::steady_clock::now() - tAcquire)
+                                               .count();
+                    if (timingDebug) {
+                        spdlog::info("[ONNX Plugin] batch_timing acquire model='{}' batch={} ms={} "
+                                     "retries_left={}",
+                                     model_id, batch_size, acquireMs, retries);
+                    }
                     if (!h) {
+                        const auto err = h.error();
+                        const bool acquireTimeout = (err.code == yams::ErrorCode::Timeout);
                         std::string errMsg = h.error().message;
                         spdlog::error("[ONNX Plugin] acquireModel failed for '{}': {}", model_id,
                                       errMsg);
+
+                        // Timeout while waiting for a session is transient contention. Retry
+                        // without tripping model cooldown/failure bookkeeping.
+                        if (acquireTimeout) {
+                            if (retries > 0) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                                continue;
+                            }
+                            *out_vecs = nullptr;
+                            *out_batch = 0;
+                            *out_dim = 0;
+                            return YAMS_ERR_INTERNAL;
+                        }
+
+                        if (shutdownInProgress(c)) {
+                            *out_vecs = nullptr;
+                            *out_batch = 0;
+                            *out_dim = 0;
+                            return YAMS_ERR_INTERNAL;
+                        }
 
                         {
                             std::lock_guard<std::mutex> lk(c->mu);
@@ -1003,6 +1229,7 @@ struct ProviderSingleton {
                     }
 
                     auto& session = *h.value();
+                    const auto tInfer = std::chrono::steady_clock::now();
                     yams::Result<std::vector<std::vector<float>>> r;
                     if (isColbert) {
                         if (!c->colbert || !c->colbert->isValid()) {
@@ -1020,6 +1247,9 @@ struct ProviderSingleton {
                                       r.error().message);
                         return YAMS_ERR_INTERNAL;
                     }
+                    const auto inferMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::steady_clock::now() - tInfer)
+                                             .count();
                     auto& mat = r.value();
                     if (mat.empty()) {
                         *out_vecs = nullptr;
@@ -1038,6 +1268,12 @@ struct ProviderSingleton {
                     *out_vecs = buf;
                     *out_batch = b;
                     *out_dim = d;
+                    if (timingDebug) {
+                        spdlog::info(
+                            "[ONNX Plugin] batch_timing infer model='{}' batch={} out_batch={} "
+                            "dim={} acquire_ms={} infer_ms={}",
+                            model_id, batch_size, b, d, acquireMs, inferMs);
+                    }
                     return YAMS_OK;
 
                 } catch (const std::system_error& e) {
@@ -1203,23 +1439,43 @@ struct ProviderSingleton {
             j["model"] = model_id;
             // Best-effort dimension and runtime hints
             j["graph_optimization"] = "enabled";
-            // Report actual execution provider based on configuration
-            // GPU providers: CUDA (Linux), CoreML (macOS), DirectML (Windows)
-            if (c->gpuEnabled) {
-#if defined(__APPLE__)
-                j["execution_provider"] = "coreml";
-#elif defined(_WIN32)
-#if defined(YAMS_ONNX_CUDA_ENABLED)
-                j["execution_provider"] = "cuda";
-#else
-                j["execution_provider"] = "directml";
-#endif
-#else
-                j["execution_provider"] = "cuda";
-#endif
-            } else {
-                j["execution_provider"] = "cpu";
+
+            // Best-effort: report ONNX Runtime build's available providers
+            try {
+                auto providers = Ort::GetAvailableProviders();
+                auto arr = nlohmann::json::array();
+                for (const auto& p : providers)
+                    arr.push_back(p);
+                j["available_providers"] = std::move(arr);
+            } catch (...) {
+                // ignore
             }
+
+            // Report the actual execution provider used by a session (not a platform guess)
+            std::string ep = "cpu";
+            if (c->ready) {
+                try {
+                    auto h = c->pool->acquireModel(model_id, std::chrono::milliseconds(500));
+                    if (h) {
+                        ep = h.value()->getExecutionProvider();
+                        auto [intraThreads, interThreads] = h.value()->getThreading();
+                        j["intra_threads"] = intraThreads;
+                        j["inter_threads"] = interThreads;
+                        j["learned_batch_cap"] = h.value()->getLearnedBatchLimit();
+                        {
+                            std::lock_guard<std::mutex> lk(c->mu);
+                            c->actualExecutionProvider = ep;
+                        }
+                    }
+                } catch (...) {
+                }
+            }
+            if (ep == "cpu") {
+                std::lock_guard<std::mutex> lk(c->mu);
+                if (!c->actualExecutionProvider.empty())
+                    ep = c->actualExecutionProvider;
+            }
+            j["execution_provider"] = ep;
             size_t dim = 0;
             if (c->ready) {
                 auto h = c->pool->acquireModel(model_id, std::chrono::seconds(2));
@@ -1234,9 +1490,13 @@ struct ProviderSingleton {
                 }
             }
             j["dim"] = dim;
-            j["intra_threads"] =
-                static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
-            j["inter_threads"] = 1;
+            if (!j.contains("intra_threads")) {
+                j["intra_threads"] =
+                    static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+            }
+            if (!j.contains("inter_threads")) {
+                j["inter_threads"] = 1;
+            }
             // Source hint from path when present
             try {
                 if (j.contains("path") && j["path"].is_string()) {
@@ -1353,6 +1613,7 @@ struct ProviderSingleton {
                             cfg.model_path = onnxPath.string();
                             cfg.model_name = modelName;
                             cfg.num_threads = std::max(1u, std::thread::hardware_concurrency());
+                            // GPU usage is determined by runtime detection in the session
                             try {
                                 c->reranker = std::make_unique<yams::daemon::OnnxRerankerSession>(
                                     onnxPath.string(), modelName, cfg);
@@ -1559,6 +1820,51 @@ extern "C" const char* yams_onnx_get_health_json_cstr() {
         j["reason"] = c.last_error.empty() ? "init_failed" : c.last_error;
     } else {
         j["status"] = "ok";
+    }
+
+    // Execution provider + available providers (best-effort)
+    {
+        std::string ep = "cpu";
+        {
+            std::lock_guard<std::mutex> lk(c.mu);
+            ep = c.actualExecutionProvider;
+        }
+
+        if (c.pool) {
+            try {
+                // Try a quick acquire of any ready model to get the real EP.
+                std::string candidateModelId;
+                {
+                    std::lock_guard<std::mutex> lk(c.mu);
+                    for (const auto& [modelId, state] : c.model_states) {
+                        if (state == ProviderCtx::State::Ready) {
+                            candidateModelId = modelId;
+                            break;
+                        }
+                    }
+                }
+
+                if (!candidateModelId.empty()) {
+                    auto h = c.pool->acquireModel(candidateModelId, std::chrono::milliseconds(50));
+                    if (h) {
+                        ep = h.value()->getExecutionProvider();
+                        std::lock_guard<std::mutex> lk(c.mu);
+                        c.actualExecutionProvider = ep;
+                    }
+                }
+            } catch (...) {
+                // Keep cached EP on any failure.
+            }
+        }
+
+        j["execution_provider"] = ep;
+
+        try {
+            auto providers = Ort::GetAvailableProviders();
+            j["available_providers"] = providers;
+        } catch (...) {
+            // omit on failure
+        }
     }
 
     // Add model states for diagnostics

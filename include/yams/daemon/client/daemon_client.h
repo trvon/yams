@@ -249,6 +249,11 @@ public:
     // Collect progress events for embeddings (no stdout printing)
     boost::asio::awaitable<Result<std::vector<EmbeddingEvent>>>
     callEvents(const EmbedDocumentsRequest& req);
+
+    // Repair: streaming call that collects RepairEvent progress + final RepairResponse
+    boost::asio::awaitable<Result<RepairResponse>>
+    callRepair(const RepairRequest& req, std::function<void(const RepairEvent&)> onEvent = nullptr);
+
     boost::asio::awaitable<Result<ModelLoadResponse>> loadModel(const LoadModelRequest& req);
     boost::asio::awaitable<Result<SuccessResponse>> unloadModel(const UnloadModelRequest& req);
     boost::asio::awaitable<Result<ModelStatusResponse>>
@@ -421,10 +426,14 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, GraphRepairRequest>, std::is_same<Req, GraphValidateRequest>,
             // Graph query operations
             std::is_same<Req, GraphQueryRequest>,
+            // KG ingest operations
+            std::is_same<Req, KgIngestRequest>,
             // Cat operations
             std::is_same<Req, CatRequest>,
             // Generic metadata value counts query (MCP client mode)
-            std::is_same<Req, MetadataValueCountsRequest>>,
+            std::is_same<Req, MetadataValueCountsRequest>,
+            // Document repair
+            std::is_same<Req, RepairRequest>>,
         "Req must be a valid daemon Request alternative");
 
     // Force streaming for streaming-capable requests
@@ -434,6 +443,8 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
         co_return co_await streamingList(req);
     } else if constexpr (std::is_same_v<Req, GrepRequest>) {
         co_return co_await streamingGrep(req);
+    } else if constexpr (std::is_same_v<Req, RepairRequest>) {
+        co_return co_await callRepair(req);
     }
 
     Request request{req};

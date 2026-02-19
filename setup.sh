@@ -2,11 +2,14 @@
 
 # Unified build script for YAMS
 #
-# Usage: ./setup.sh [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan]
+# Usage: ./setup.sh [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan] [--asan] [--no-asan]
+#        ./setup.sh Release --with-tests
 #   build_type: Release (default), Debug, Profiling, or Fuzzing (TODO)
 #   --coverage: Enable code coverage instrumentation (Debug builds only)
 #   --tsan: Enable ThreadSanitizer for race detection (default for Debug builds)
 #   --no-tsan: Disable ThreadSanitizer (overrides default)
+#   --asan: Enable AddressSanitizer for memory error detection
+#   --no-asan: Disable AddressSanitizer (overrides default)
 #
 # Environment variables (for CI/advanced use):
 #   YAMS_CONAN_HOST_PROFILE  - Path to Conan host profile (bypasses auto-detection)
@@ -43,7 +46,11 @@ set -euo pipefail
 
 ENABLE_COVERAGE=false
 ENABLE_TSAN="${ENABLE_TSAN:-}"  # Preserve environment variable if set
+ENABLE_ASAN="${ENABLE_ASAN:-}"  # Preserve environment variable if set
 BUILD_TYPE_INPUT=""
+ENABLE_RELEASE_TESTS=false
+TSAN_EXPLICIT=false
+ASAN_EXPLICIT=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,10 +60,27 @@ while [[ $# -gt 0 ]]; do
       ;;
     --tsan)
       ENABLE_TSAN=true
+      TSAN_EXPLICIT=true
       shift
       ;;
     --no-tsan)
       ENABLE_TSAN=false
+      TSAN_EXPLICIT=true
+      shift
+      ;;
+    --asan)
+      ENABLE_ASAN=true
+      ASAN_EXPLICIT=true
+      shift
+      ;;
+    --no-asan)
+      ENABLE_ASAN=false
+      ASAN_EXPLICIT=true
+      shift
+      ;;
+    --with-tests)
+      # Force building tests/benchmarks even in Release builds.
+      ENABLE_RELEASE_TESTS=true
       shift
       ;;
     Debug|Release|Profiling|Fuzzing|debug|release|profiling|fuzzing)
@@ -68,7 +92,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      echo "Usage: $0 [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan]" >&2
+      echo "Usage: $0 [Debug|Release|Profiling|Fuzzing] [--coverage] [--tsan] [--no-tsan] [--asan] [--no-asan] [--with-tests]" >&2
       exit 1
       ;;
   esac
@@ -365,6 +389,9 @@ echo "C++ Std:           ${MESON_CPPSTD} (Conan: ${CPPSTD})"
 if [[ "${LIBCXX_HARDENING}" != "none" ]]; then
   echo "libc++ Hardening:  ${LIBCXX_HARDENING}"
 fi
+if [[ "${ENABLE_RELEASE_TESTS}" == "true" ]]; then
+  echo "Release Tests:     enabled (--with-tests)"
+fi
 
 echo "--- Exporting custom Conan recipes... ---"
 # qpdf export removed - PDF plugin will be updated in separate PBI
@@ -372,10 +399,10 @@ echo "--- Exporting custom Conan recipes... ---"
 # Export custom onnxruntime recipe if it exists
 if [[ -f "conan/onnxruntime/conanfile.py" ]]; then
   # Avoid sporadic Conan cache race/collision errors by retrying export once.
-  echo "Exporting onnxruntime/1.23.2 from conan/onnxruntime/"
-  if ! conan export conan/onnxruntime --name=onnxruntime --version=1.23.2; then
-    echo "Retrying conan export onnxruntime/1.23.2..."
-    conan export conan/onnxruntime --name=onnxruntime --version=1.23.2
+  echo "Exporting onnxruntime/1.23.0 from conan/onnxruntime/"
+  if ! conan export conan/onnxruntime --name=onnxruntime --version=1.23.0; then
+    echo "Retrying conan export onnxruntime/1.23.0..."
+    conan export conan/onnxruntime --name=onnxruntime --version=1.23.0
   fi
 fi
 
@@ -390,8 +417,15 @@ fi
 
 # Enable tests and benchmarks for Debug builds in Conan (needed for Catch2/gtest/benchmark dependencies)
 if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
-  CONAN_ARGS+=(-o build_tests=True)
-  CONAN_ARGS+=(-o build_benchmarks=True)
+  CONAN_ARGS+=(-o "&:build_tests=True")
+  CONAN_ARGS+=(-o "&:build_benchmarks=True")
+fi
+
+# Optionally enable tests/benchmarks dependencies in Conan for Release builds.
+# This is required to build standalone benchmark executables under tests/benchmarks.
+if [[ "${BUILD_TYPE}" == "Release" ]] && [[ "${ENABLE_RELEASE_TESTS}" == "true" ]]; then
+  CONAN_ARGS+=(-o "&:build_tests=True")
+  CONAN_ARGS+=(-o "&:build_benchmarks=True")
 fi
 
 # Enable Tracy profiling for profiling builds
@@ -440,18 +474,21 @@ else
       elif command -v rocm-smi >/dev/null 2>&1; then
         ROCM_PATH="$(dirname "$(dirname "$(command -v rocm-smi)")")"
       fi
-      # Check if MIGraphX is installed
-      if [[ -f "${ROCM_PATH}/lib/libmigraphx.so" ]]; then
+      # Check if MIGraphX is installed (ROCm 7.x uses lib/migraphx/lib/)
+      if [[ -f "${ROCM_PATH}/lib/libmigraphx.so" ]] || [[ -f "${ROCM_PATH}/lib/migraphx/lib/libmigraphx.so" ]] || [[ -f "${ROCM_PATH}/lib/libmigraphx_c.so" ]]; then
         ONNX_GPU="migraphx"
         echo "ROCm + MIGraphX detected at ${ROCM_PATH}: enabling AMD GPU acceleration"
         echo "  Note: ONNX Runtime will be built from source (takes ~20-30 minutes)"
 
-        # Auto-detect GPU architecture using rocminfo
+        # Auto-detect GPU architecture using rocminfo (with timeout in case of permission issues)
         if [[ -z "${YAMS_ROCM_GPU_TARGETS:-}" ]] && command -v rocminfo >/dev/null 2>&1; then
-          DETECTED_TARGETS=$(rocminfo 2>/dev/null | grep -oP 'gfx[0-9a-z]+' | sort -u | tr '\n' ';' | sed 's/;$//')
+          DETECTED_TARGETS=$(timeout 5 rocminfo 2>/dev/null | grep -oP 'gfx[0-9a-z]+' | sort -u | tr '\n' ';' | sed 's/;$//' || true)
           if [[ -n "${DETECTED_TARGETS}" ]]; then
             export YAMS_ROCM_GPU_TARGETS="${DETECTED_TARGETS}"
             echo "  Auto-detected GPU target(s): ${DETECTED_TARGETS}"
+          else
+            echo "  Could not auto-detect GPU targets (rocminfo failed or no permission)"
+            echo "  Set YAMS_ROCM_GPU_TARGETS manually if needed (e.g., gfx1100 for RX 7900)"
           fi
         fi
       else
@@ -505,7 +542,7 @@ fi
 CONAN_ARGS+=(--build=missing)
 
 # Use runtime_deploy to copy shared libraries next to executables (mainly for Windows, no-op on Unix with RPATH)
-conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}" --deployer=runtime_deploy --deployer-folder="${BUILD_DIR}"
+conan install . -of "${BUILD_DIR}" "${CONAN_ARGS[@]}" --deployer=runtime_deploy --deployer-folder="${BUILD_DIR}" -c tools.deployer:symlinks=False
 
 # Check for either native or cross file (Conan generates cross file for cross-compilation)
 # Conan 2.x sometimes nests generator output under build-<type>/conan even when -of points at
@@ -659,6 +696,24 @@ if [[ -z "${ENABLE_TSAN}" ]]; then
   fi
 fi
 
+# AddressSanitizer: default disabled; enable with --asan or ENABLE_ASAN=true
+if [[ -z "${ENABLE_ASAN}" ]]; then
+  ENABLE_ASAN=false
+fi
+
+# If ASAN was explicitly requested and TSAN wasn't explicitly chosen, prefer ASAN for this build.
+if [[ "${ENABLE_ASAN}" == "true" ]] && [[ "${ASAN_EXPLICIT}" == "true" ]] && [[ "${TSAN_EXPLICIT}" == "false" ]]; then
+  ENABLE_TSAN=false
+fi
+
+if [[ "${ENABLE_TSAN}" == "true" ]] && [[ "${ENABLE_ASAN}" == "true" ]]; then
+  echo "Error: TSAN and ASAN cannot be enabled in the same build directory." >&2
+  echo "Use separate invocations, e.g.:" >&2
+  echo "  ./setup.sh Debug --tsan --no-asan" >&2
+  echo "  ./setup.sh Debug --asan --no-tsan" >&2
+  exit 1
+fi
+
 if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
   MESON_OPTIONS+=(
     "-Dbuild-tests=true"
@@ -668,10 +723,23 @@ if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true"
   echo "Vector/embedding tests enabled for ${BUILD_TYPE} build"
 fi
 
+# Optionally enable tests in Release builds for benchmark executables.
+if [[ "${BUILD_TYPE}" == "Release" ]] && [[ "${ENABLE_RELEASE_TESTS}" == "true" ]]; then
+  MESON_OPTIONS+=(
+    "-Dbuild-tests=true"
+  )
+  echo "Tests enabled for Release build (benchmarks under tests/benchmarks will be built)"
+fi
+
 MESON_OPTIONS+=("-Denable-tsan=${ENABLE_TSAN}")
+MESON_OPTIONS+=("-Denable-asan=${ENABLE_ASAN}")
+
 if [[ "${ENABLE_TSAN}" == "true" ]]; then
   MESON_OPTIONS+=("-Db_sanitize=thread")
   echo "ThreadSanitizer enabled (race detection)"
+elif [[ "${ENABLE_ASAN}" == "true" ]]; then
+  MESON_OPTIONS+=("-Db_sanitize=address,undefined")
+  echo "AddressSanitizer enabled (memory safety checks)"
 else
   # Ensure any previous sanitizer setting doesn't persist across reconfigure.
   # Users can override via YAMS_EXTRA_MESON_FLAGS.

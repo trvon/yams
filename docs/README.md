@@ -1,4 +1,4 @@
-# YAMS Documentation
+# YAMS Documentation Index
 
 Content-addressed storage with deduplication and semantic search.
 

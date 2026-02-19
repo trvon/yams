@@ -61,6 +61,9 @@ struct MetricsSnapshot {
     uint64_t fsmPayloadWrites{0};
     uint64_t fsmBytesSent{0};
     uint64_t fsmBytesReceived{0};
+    uint64_t fsmTimeouts{0};
+    uint64_t fsmRetries{0};
+    uint64_t fsmErrors{0};
     uint64_t muxActiveHandlers{0};
     int64_t muxQueuedBytes{0};
     uint64_t muxWriterBudgetBytes{0};
@@ -85,10 +88,15 @@ struct MetricsSnapshot {
     std::size_t postIngestQueued{0};
     std::size_t postIngestInflight{0};
     std::size_t postIngestCapacity{0};
-    // Optional per-queue sizes (for diagnostics only)
-    std::size_t postIngestQMeta{0};
-    std::size_t postIngestQKg{0};
-    std::size_t postIngestQEmb{0};
+    // Post-ingest backpressure (KG saturation)
+    std::uint64_t postIngestBackpressureRejects{0};
+    std::size_t kgJobsDepth{0};
+    std::size_t kgJobsCapacity{0};
+    double kgJobsFillRatio{0.0};
+    // High-priority post-ingest queue (used for repair/stuck-doc recovery)
+    std::size_t postIngestRpcQueued{0};
+    std::size_t postIngestRpcCapacity{0};
+    std::size_t postIngestRpcMaxPerBatch{0};
     std::size_t postIngestProcessed{0};
     std::size_t postIngestFailed{0};
     // File/directory add tracking
@@ -98,23 +106,35 @@ struct MetricsSnapshot {
     std::uint64_t directoriesProcessed{0};
     double postIngestLatencyMsEma{0.0};
     double postIngestRateSecEma{0.0};
-    // Pipeline stage metrics (extraction → KG → enrich → embedding)
+    // Pipeline stage metrics (extraction → KG → symbol → entity → embedding)
     std::size_t extractionInFlight{0};
     std::size_t kgQueued{0};
     std::size_t kgDropped{0};
     std::size_t kgConsumed{0};
     std::size_t kgInFlight{0};
     std::size_t kgQueueDepth{0}; // Current channel queue depth
-    std::size_t enrichInFlight{0};
-    std::size_t enrichQueueDepth{0}; // Aggregated symbol+entity+title queue depth
+    std::size_t symbolInFlight{0};
+    std::size_t symbolQueueDepth{0}; // Current channel queue depth
     // Entity extraction metrics (external plugins like Ghidra)
     std::size_t entityQueued{0};
     std::size_t entityDropped{0};
     std::size_t entityConsumed{0};
-    std::size_t postEnrichLimit{0};
+    std::size_t entityInFlight{0};
+    std::size_t entityQueueDepth{0}; // Current channel queue depth
+    // Embedding Service metrics
+    std::size_t embedQueued{0};
+    std::size_t embedDropped{0};
+    std::size_t embedInFlight{0};
+    // Title extraction metrics
+    std::size_t titleQueueDepth{0}; // Current channel queue depth
+    std::size_t titleInFlight{0};
+    std::size_t titleConcurrencyLimit{0};
     // Dynamic concurrency limits (PBI-05a)
     std::size_t postExtractionLimit{4};
     std::size_t postKgLimit{8};
+    std::size_t postSymbolLimit{4};
+    std::size_t postEntityLimit{2};
+    std::size_t postEmbedLimit{0};
 
     // Session watch status
     bool watchEnabled{false};
@@ -141,8 +161,9 @@ struct MetricsSnapshot {
 
     // Document counts (cached from metadata repo, avoid live DB queries on hot path)
     std::uint64_t documentsTotal{0};
-    std::uint64_t documentsIndexed{0};
+    std::uint64_t documentsIndexed{0}; // Docs with FTS5 indexed + content extracted
     std::uint64_t documentsContentExtracted{0};
+    std::uint64_t documentsEmbedded{0}; // Docs with vector embeddings (from VectorDatabase)
 
     // FTS5 orphan scan metrics (from InternalEventBus)
     std::uint64_t fts5OrphansDetected{0}; // total orphans found since daemon start
@@ -226,6 +247,27 @@ struct MetricsSnapshot {
     uint64_t dbMigrationErrors{0};
     uint64_t dbRepositoryInitErrors{0};
 
+    // Route-separated DB pool telemetry (write/work vs read)
+    bool dbWritePoolAvailable{false};
+    std::size_t dbWritePoolTotalConnections{0};
+    std::size_t dbWritePoolAvailableConnections{0};
+    std::size_t dbWritePoolActiveConnections{0};
+    std::size_t dbWritePoolWaitingRequests{0};
+    std::size_t dbWritePoolMaxObservedWaiting{0};
+    std::uint64_t dbWritePoolTotalWaitMicros{0};
+    std::size_t dbWritePoolTimeoutCount{0};
+    std::size_t dbWritePoolFailedAcquisitions{0};
+
+    bool dbReadPoolAvailable{false};
+    std::size_t dbReadPoolTotalConnections{0};
+    std::size_t dbReadPoolAvailableConnections{0};
+    std::size_t dbReadPoolActiveConnections{0};
+    std::size_t dbReadPoolWaitingRequests{0};
+    std::size_t dbReadPoolMaxObservedWaiting{0};
+    std::uint64_t dbReadPoolTotalWaitMicros{0};
+    std::size_t dbReadPoolTimeoutCount{0};
+    std::size_t dbReadPoolFailedAcquisitions{0};
+
     // WorkCoordinator metrics
     std::size_t workCoordinatorActiveWorkers{0};
     bool workCoordinatorRunning{false};
@@ -251,8 +293,48 @@ struct MetricsSnapshot {
     uint64_t symbolDropped{0};
     uint64_t symbolConsumed{0};
 
+    // GC pipeline metrics (from InternalEventBus)
+    uint64_t gcQueued{0};
+    uint64_t gcDropped{0};
+    uint64_t gcConsumed{0};
+
+    // Entity graph pipeline metrics (from InternalEventBus)
+    uint64_t entityGraphQueued{0};
+    uint64_t entityGraphDropped{0};
+    uint64_t entityGraphConsumed{0};
+
+    // Gradient limiter per-stage metrics (from PostIngestQueue)
+    struct GradientLimiterMetrics {
+        double limit{0.0};
+        double smoothedRtt{0.0};
+        double gradient{0.0};
+        uint32_t inFlight{0};
+        uint64_t acquireCount{0};
+        uint64_t rejectCount{0};
+    };
+    GradientLimiterMetrics glExtraction;
+    GradientLimiterMetrics glKg;
+    GradientLimiterMetrics glSymbol;
+    GradientLimiterMetrics glEntity;
+    GradientLimiterMetrics glTitle;
+    GradientLimiterMetrics glEmbed;
+    bool gradientLimitersEnabled{false};
+
     // Deferred ingestion queue depth (store_document_tasks channel)
     std::size_t deferredQueueDepth{0};
+
+    // Repair service metrics
+    bool repairRunning{false};
+    bool repairInProgress{false};
+    std::uint64_t repairQueueDepth{0};
+    std::uint64_t repairBatchesAttempted{0};
+    std::uint64_t repairEmbeddingsGenerated{0};
+    std::uint64_t repairEmbeddingsSkipped{0};
+    std::uint64_t repairFailedOperations{0};
+    std::uint64_t repairIdleTicks{0};
+    std::uint64_t repairBusyTicks{0};
+    std::uint64_t repairTotalBacklog{0};
+    std::uint64_t repairProcessed{0};
 };
 
 class SocketServer; // Forward declaration
@@ -282,7 +364,7 @@ public:
     EmbeddingServiceInfo getEmbeddingServiceInfo() const;
 
     // Set SocketServer (called after SocketServer is created, which happens after DaemonMetrics)
-    void setSocketServer(const SocketServer* socketServer) { socketServer_ = socketServer; }
+    void setSocketServer(const SocketServer* socketServer);
 
 private:
     boost::asio::awaitable<void> pollingLoop(); // Background polling loop

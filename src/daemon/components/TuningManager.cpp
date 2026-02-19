@@ -3,12 +3,14 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
+
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
@@ -35,6 +37,21 @@ void TuningManager::start() {
     if (running_.exchange(true))
         return;
 
+    // Issue 3 fix: reset all hysteresis counters on start()
+    lastOnnxMax_ = lastOnnxGliner_ = lastOnnxEmbed_ = lastOnnxReranker_ = 0;
+    ipcHighTicks_ = ipcLowTicks_ = ioHighTicks_ = ioLowTicks_ = 0;
+    slotHighTicks_ = slotLowTicks_ = 0;
+    previousPressureLevel_ = 0;
+    previousEmbedDropped_ = 0;
+    previousPostProcessed_ = 0;
+    previousWriteWaitMicros_ = 0;
+    previousReadWaitMicros_ = 0;
+    previousWriteTimeoutCount_ = 0;
+    previousReadTimeoutCount_ = 0;
+    previousWriteFailedAcquisitions_ = 0;
+    previousReadFailedAcquisitions_ = 0;
+    contentionHealthyTicks_ = 0;
+
     // Seed FsmMetricsRegistry with initial ResourceGovernor data immediately
     // so status requests have valid data before the first async tick completes.
     // This prevents CLI tools from seeing 0 values for governorBudgetBytes.
@@ -48,10 +65,10 @@ void TuningManager::start() {
     // If tick_once early-returned (metadata not ready), seed safe minimums
     // so PostIngestQueue pollers don't start with zero concurrency.
     if (TuneAdvisor::postExtractionConcurrent() == 0) {
-        TuneAdvisor::setPostExtractionConcurrent(2);
+        TuneAdvisor::setPostExtractionConcurrentDynamicCap(2);
     }
     if (TuneAdvisor::postEmbedConcurrent() == 0) {
-        TuneAdvisor::setPostEmbedConcurrent(1);
+        TuneAdvisor::setPostEmbedConcurrentDynamicCap(1);
     }
 
     tuningFuture_ = boost::asio::co_spawn(strand_, tuningLoop(), boost::asio::use_future);
@@ -94,37 +111,170 @@ boost::asio::awaitable<void> TuningManager::tuningLoop() {
     spdlog::debug("TuningManager loop exiting");
 }
 
+void TuningManager::rebalanceTargetsByQueue(std::array<uint32_t, 6>& targets,
+                                            const std::array<uint32_t, 6>& floors,
+                                            const std::array<std::size_t, 6>& queueDepths,
+                                            const std::array<bool, 6>& active) {
+    auto pressure = [&](std::size_t i) -> double {
+        if (!active[i] || queueDepths[i] == 0) {
+            return 0.0;
+        }
+        const uint32_t denom = std::max<uint32_t>(1u, targets[i]);
+        return static_cast<double>(queueDepths[i]) / static_cast<double>(denom);
+    };
+
+    constexpr std::size_t kMaxIterations = 24;
+    for (std::size_t iter = 0; iter < kMaxIterations; ++iter) {
+        std::size_t receiver = 0;
+        std::size_t donor = 0;
+        double maxPressure = -1.0;
+        double minPressure = std::numeric_limits<double>::infinity();
+
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            if (!active[i]) {
+                continue;
+            }
+            const double p = pressure(i);
+            if (p > maxPressure) {
+                maxPressure = p;
+                receiver = i;
+            }
+        }
+
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            if (!active[i] || targets[i] <= floors[i]) {
+                continue;
+            }
+            const double p = pressure(i);
+            if (p < minPressure) {
+                minPressure = p;
+                donor = i;
+            }
+        }
+
+        if (maxPressure <= 0.0 || minPressure == std::numeric_limits<double>::infinity() ||
+            donor == receiver) {
+            break;
+        }
+        // Stop once the pressure skew is small enough.
+        if (maxPressure <= minPressure * 1.15) {
+            break;
+        }
+
+        targets[donor] -= 1;
+        targets[receiver] += 1;
+    }
+}
+
+void TuningManager::testing_rebalanceTargetsByQueue(std::array<uint32_t, 6>& targets,
+                                                    const std::array<uint32_t, 6>& floors,
+                                                    const std::array<std::size_t, 6>& queueDepths,
+                                                    const std::array<bool, 6>& active) {
+    rebalanceTargetsByQueue(targets, floors, queueDepths, active);
+}
+
+uint32_t TuningManager::computeEmbedScaleBias(std::size_t embedQueued, uint64_t embedDroppedDelta,
+                                              std::size_t postQueued, std::size_t embedInFlight) {
+    uint32_t bias = 0;
+
+    if (postQueued >= 500) {
+        bias = 1;
+    }
+
+    if (embedQueued >= 128) {
+        bias = std::max<uint32_t>(bias, 1);
+    }
+    if (embedQueued >= 384) {
+        bias = std::max<uint32_t>(bias, 2);
+    }
+    if (embedQueued >= 768) {
+        bias = std::max<uint32_t>(bias, 3);
+    }
+    if (embedQueued >= 1280) {
+        bias = std::max<uint32_t>(bias, 4);
+    }
+    if (embedQueued >= 2048) {
+        bias = std::max<uint32_t>(bias, 5);
+    }
+
+    if (embedDroppedDelta > 0) {
+        bias = std::max<uint32_t>(bias, 2);
+    }
+    if (embedDroppedDelta > 20) {
+        bias = std::max<uint32_t>(bias, 3);
+    }
+    if (embedDroppedDelta > 100) {
+        bias = std::max<uint32_t>(bias, 4);
+    }
+
+    // When embedding is active and backlog is present, add extra pressure.
+    if (embedInFlight > 0 && embedQueued > 0) {
+        bias += 1;
+    }
+    if (postQueued >= 750 && embedQueued >= 250) {
+        bias += 1;
+    }
+
+    return std::min<uint32_t>(bias, 8u);
+}
+
+uint32_t TuningManager::testing_computeEmbedScaleBias(std::size_t embedQueued,
+                                                      uint64_t embedDroppedDelta,
+                                                      std::size_t postQueued,
+                                                      std::size_t embedInFlight) {
+    return computeEmbedScaleBias(embedQueued, embedDroppedDelta, postQueued, embedInFlight);
+}
+
+int32_t TuningManager::computeContentionBudgetAdjustment(
+    std::size_t waitingRequests, std::uint64_t waitMicrosDelta, std::size_t timeoutDelta,
+    std::size_t failedDelta, std::size_t processedDelta, std::uint32_t healthyTicks) {
+    if (timeoutDelta > 0 || failedDelta > 0) {
+        return -2;
+    }
+    if (waitingRequests >= 2 || waitMicrosDelta >= 20000) {
+        return -1;
+    }
+    if (waitingRequests == 0 && waitMicrosDelta <= 1000 && processedDelta >= 4 &&
+        healthyTicks >= 2) {
+        return 1;
+    }
+    return 0;
+}
+
+int32_t TuningManager::testing_computeContentionBudgetAdjustment(
+    std::size_t waitingRequests, std::uint64_t waitMicrosDelta, std::size_t timeoutDelta,
+    std::size_t failedDelta, std::size_t processedDelta, std::uint32_t healthyTicks) {
+    return computeContentionBudgetAdjustment(waitingRequests, waitMicrosDelta, timeoutDelta,
+                                             failedDelta, processedDelta, healthyTicks);
+}
+
 void TuningManager::configureOnnxConcurrencyRegistry() {
     // Configure OnnxConcurrencyRegistry based on TuneAdvisor settings
     // This should only be called once during initialization
     auto& registry = OnnxConcurrencyRegistry::instance();
 
-    // Get profile-aware settings from TuneAdvisor
-    uint32_t maxConcurrent = TuneAdvisor::onnxMaxConcurrent();
-    uint32_t glinerReserved = TuneAdvisor::onnxGlinerReserved();
-    uint32_t embedReserved = TuneAdvisor::onnxEmbedReserved();
-    uint32_t rerankerReserved = TuneAdvisor::onnxRerankerReserved();
+    // Get profile-aware settings from TuneAdvisor (already scaled for profile)
+    const uint32_t maxConcurrent = TuneAdvisor::onnxMaxConcurrent();
+    const uint32_t glinerReserved = TuneAdvisor::onnxGlinerReserved();
+    const uint32_t embedReserved = TuneAdvisor::onnxEmbedReserved();
+    const uint32_t rerankerReserved = TuneAdvisor::onnxRerankerReserved();
 
-    // Apply profile scaling to slot limits
-    // Efficient = 0.0, Balanced = 0.5, Aggressive = 1.0
-    double scale = TuneAdvisor::profileScale();
-    uint32_t scaledMax = static_cast<uint32_t>(maxConcurrent * scale);
-    scaledMax = std::max(scaledMax, 2u); // Minimum 2 slots
-
-    // Ensure scaledMax is at least the sum of reserved slots
-    uint32_t totalReserved = glinerReserved + embedReserved + rerankerReserved;
-    scaledMax = std::max(scaledMax, totalReserved);
+    // Ensure at least 1 shared slot beyond reserved and a hard minimum of 2.
+    const uint32_t totalReserved = glinerReserved + embedReserved + rerankerReserved;
+    const uint32_t maxSlots =
+        std::max<uint32_t>(std::max<uint32_t>(maxConcurrent, 2u), totalReserved + 1);
 
     // Configure the registry
-    registry.setMaxSlots(scaledMax);
+    registry.setMaxSlots(maxSlots);
     registry.setReservedSlots(OnnxLane::Gliner, glinerReserved);
     registry.setReservedSlots(OnnxLane::Embedding, embedReserved);
     registry.setReservedSlots(OnnxLane::Reranker, rerankerReserved);
     registry.setReservedSlots(OnnxLane::Other, 0);
 
-    spdlog::info("[TuningManager] Configured OnnxConcurrencyRegistry: maxSlots={} (profile "
-                 "scale={:.1f}), reserved=[gliner={}, embed={}, reranker={}]",
-                 scaledMax, scale, glinerReserved, embedReserved, rerankerReserved);
+    spdlog::info(
+        "[TuningManager] Configured OnnxConcurrencyRegistry: maxSlots={}, reserved=[gliner={}, "
+        "embed={}, reranker={}]",
+        maxSlots, glinerReserved, embedReserved, rerankerReserved);
 }
 
 void TuningManager::tick_once() {
@@ -132,8 +282,13 @@ void TuningManager::tick_once() {
     if (!sm_ || !state_)
         return;
 
-    // Don't perform tuning until services are at least partially ready,
-    // to avoid acting on default PoolManager configs.
+    // Resource governor must keep running during startup so pressure/readiness
+    // state remains current even before all metadata services are ready.
+    auto& governor = ResourceGovernor::instance();
+    ResourceSnapshot govSnap = governor.tick(sm_);
+
+    // Don't perform adaptive tuning until services are at least partially ready,
+    // to avoid acting on default pool configs.
     if (!state_->readiness.metadataRepoReady.load()) {
         return;
     }
@@ -146,8 +301,66 @@ void TuningManager::tick_once() {
     // =========================================================================
     // Resource Governor: collect metrics and respond to memory pressure
     // =========================================================================
-    auto& governor = ResourceGovernor::instance();
-    ResourceSnapshot govSnap = governor.tick(sm_);
+    // Dynamically clamp ONNX concurrency to governor caps (keeps global pools aligned)
+    try {
+        auto& registry = OnnxConcurrencyRegistry::instance();
+        uint32_t desiredMax = std::max<uint32_t>(2u, TuneAdvisor::onnxMaxConcurrent());
+        uint32_t glinerReserved = TuneAdvisor::onnxGlinerReserved();
+        uint32_t embedReserved = TuneAdvisor::onnxEmbedReserved();
+        uint32_t rerankerReserved = TuneAdvisor::onnxRerankerReserved();
+
+        // Only clamp ONNX slots under memory pressure.
+        // OnnxConcurrencyRegistry is a global budget across multiple lanes; clamping it to
+        // embedding concurrency during Normal pressure can underutilize other lanes.
+        const bool underPressure = TuneAdvisor::enableResourceGovernor() &&
+                                   govSnap.level >= ResourcePressureLevel::Critical;
+        if (underPressure) {
+            desiredMax = std::min<uint32_t>(desiredMax, governor.maxEmbedConcurrency());
+        } else {
+            // Under normal conditions, preserve the invariant that there is at least 1 shared slot
+            // beyond the configured reserved total.
+            const uint32_t totalReservedWanted = glinerReserved + embedReserved + rerankerReserved;
+            desiredMax = std::max<uint32_t>(desiredMax, totalReservedWanted + 1u);
+        }
+
+        desiredMax = std::max<uint32_t>(desiredMax, 2u);
+        if (desiredMax > 64u) { // counting_semaphore<64> limit in registry
+            desiredMax = 64u;
+        }
+
+        // Always leave at least 1 shared slot beyond reserved budgets when possible.
+        uint32_t remainingForReserved = (desiredMax > 1u) ? (desiredMax - 1u) : 0u;
+        auto consume = [&remainingForReserved](uint32_t v) {
+            if (remainingForReserved == 0)
+                return 0u;
+            uint32_t take = std::min(v, remainingForReserved);
+            remainingForReserved -= take;
+            return take;
+        };
+        uint32_t effGliner = consume(glinerReserved);
+        uint32_t effEmbed = consume(embedReserved);
+        uint32_t effReranker = consume(rerankerReserved);
+
+        // Apply reserved first, then maxSlots to avoid transient states where reserved > max.
+        if (lastOnnxGliner_ != effGliner) {
+            registry.setReservedSlots(OnnxLane::Gliner, effGliner);
+            lastOnnxGliner_ = effGliner;
+        }
+        if (lastOnnxEmbed_ != effEmbed) {
+            registry.setReservedSlots(OnnxLane::Embedding, effEmbed);
+            lastOnnxEmbed_ = effEmbed;
+        }
+        if (lastOnnxReranker_ != effReranker) {
+            registry.setReservedSlots(OnnxLane::Reranker, effReranker);
+            lastOnnxReranker_ = effReranker;
+        }
+        if (lastOnnxMax_ != desiredMax) {
+            registry.setMaxSlots(desiredMax);
+            lastOnnxMax_ = desiredMax;
+            spdlog::info("[TuningManager] ONNX slots set to {}", desiredMax);
+        }
+    } catch (...) {
+    }
 
 #if defined(TRACY_ENABLE)
     TracyPlot("governor.rss_mb", static_cast<double>(govSnap.rssBytes) / (1024.0 * 1024.0));
@@ -257,44 +470,209 @@ void TuningManager::tick_once() {
         auto* pq = sm_->getPostIngestQueue();
         if (pq) {
             const std::size_t queuedItems = pq->size();
+            [[maybe_unused]] const std::size_t currentInFlight = pq->totalInFlight();
+            const std::size_t kgQueued = pq->kgQueueDepth();
+            const std::size_t symbolQueued = pq->symbolQueueDepth();
+            const std::size_t entityQueued = pq->entityQueueDepth();
+            const std::size_t titleQueued = pq->titleQueueDepth();
 
             auto& bus = InternalEventBus::instance();
-            const std::size_t embedQueued = bus.embedQueued();
-            const std::size_t embedDropped = bus.embedDropped();
+            const std::size_t embedQueuedJobs = sm_->getEmbeddingQueuedJobs();
+            [[maybe_unused]] const std::size_t embedInFlight = sm_->getEmbeddingInFlightJobs();
+            // Prefer document-level backlog pressure over job-count depth.
+            // Embed jobs can carry many hashes, so job-depth alone can under-report pressure.
+            const uint64_t embedQueuedTotal = bus.embedQueued();
+            const uint64_t embedConsumedTotal = bus.embedConsumed();
+            const std::size_t embedQueuedDocs = static_cast<std::size_t>(
+                (embedQueuedTotal >= embedConsumedTotal) ? (embedQueuedTotal - embedConsumedTotal)
+                                                         : embedQueuedTotal);
+            const std::size_t embedQueued = std::max(embedQueuedJobs, embedQueuedDocs);
+            const uint64_t embedDroppedTotal = bus.embedDropped();
+            uint64_t embedDroppedDelta = 0;
+            if (embedDroppedTotal >= previousEmbedDropped_) {
+                embedDroppedDelta = embedDroppedTotal - previousEmbedDropped_;
+            } else {
+                // Counter reset/restart: treat current value as delta for this tick.
+                embedDroppedDelta = embedDroppedTotal;
+            }
+            previousEmbedDropped_ = embedDroppedTotal;
 
             // Derive total post-ingest budget and weighted targets.
             // Note: We compute a temporary scaled budget but do NOT persist it back
             // to TuneAdvisor to avoid runaway scaling. The base budget from
             // recommendedThreads() should remain stable.
             uint32_t baseBudget = TuneAdvisor::postIngestTotalConcurrent();
-            uint32_t scaleBias = 0;
-            if (embedQueued > 1000 || embedDropped > 100) {
-                scaleBias = 2;
-            } else if (embedQueued > 250 || embedDropped > 20) {
-                scaleBias = 1;
-            } else if (queuedItems > 500) {
-                scaleBias = 1;
-            }
+            uint32_t scaleBias =
+                computeEmbedScaleBias(embedQueued, embedDroppedDelta, queuedItems, embedInFlight);
             // Cap scaled budget to hardware concurrency to avoid oversubscription
             uint32_t hwCap = TuneAdvisor::hardwareConcurrency();
             uint32_t totalBudget = std::min<uint32_t>(hwCap, baseBudget + scaleBias);
 
+            std::size_t processedDelta = 0;
+            {
+                const auto processedNow = pq->processed();
+                if (processedNow >= previousPostProcessed_) {
+                    processedDelta = processedNow - previousPostProcessed_;
+                } else {
+                    processedDelta = processedNow;
+                }
+                previousPostProcessed_ = processedNow;
+            }
+
+            std::size_t waitingRequests = 0;
+            std::uint64_t waitMicrosDelta = 0;
+            std::size_t timeoutDelta = 0;
+            std::size_t failedDelta = 0;
+
+            if (auto writePool = sm_->getWriteConnectionPool()) {
+                const auto stats = writePool->getStats();
+                waitingRequests += stats.waitingRequests;
+                waitMicrosDelta += (stats.totalWaitMicros >= previousWriteWaitMicros_)
+                                       ? (stats.totalWaitMicros - previousWriteWaitMicros_)
+                                       : stats.totalWaitMicros;
+                timeoutDelta += (stats.timeoutCount >= previousWriteTimeoutCount_)
+                                    ? (stats.timeoutCount - previousWriteTimeoutCount_)
+                                    : stats.timeoutCount;
+                failedDelta += (stats.failedAcquisitions >= previousWriteFailedAcquisitions_)
+                                   ? (stats.failedAcquisitions - previousWriteFailedAcquisitions_)
+                                   : stats.failedAcquisitions;
+                previousWriteWaitMicros_ = stats.totalWaitMicros;
+                previousWriteTimeoutCount_ = stats.timeoutCount;
+                previousWriteFailedAcquisitions_ = stats.failedAcquisitions;
+            }
+
+            if (auto readPool = sm_->getReadConnectionPool()) {
+                const auto stats = readPool->getStats();
+                waitingRequests += stats.waitingRequests;
+                waitMicrosDelta += (stats.totalWaitMicros >= previousReadWaitMicros_)
+                                       ? (stats.totalWaitMicros - previousReadWaitMicros_)
+                                       : stats.totalWaitMicros;
+                timeoutDelta += (stats.timeoutCount >= previousReadTimeoutCount_)
+                                    ? (stats.timeoutCount - previousReadTimeoutCount_)
+                                    : stats.timeoutCount;
+                failedDelta += (stats.failedAcquisitions >= previousReadFailedAcquisitions_)
+                                   ? (stats.failedAcquisitions - previousReadFailedAcquisitions_)
+                                   : stats.failedAcquisitions;
+                previousReadWaitMicros_ = stats.totalWaitMicros;
+                previousReadTimeoutCount_ = stats.timeoutCount;
+                previousReadFailedAcquisitions_ = stats.failedAcquisitions;
+            }
+
+            const bool healthyWindow =
+                (waitingRequests == 0 && waitMicrosDelta <= 1000 && timeoutDelta == 0 &&
+                 failedDelta == 0 && processedDelta >= 4);
+            if (healthyWindow) {
+                contentionHealthyTicks_ =
+                    std::min<std::uint32_t>(contentionHealthyTicks_ + 1, 1000u);
+            } else {
+                contentionHealthyTicks_ = 0;
+            }
+
+            const int32_t contentionAdjust = computeContentionBudgetAdjustment(
+                waitingRequests, waitMicrosDelta, timeoutDelta, failedDelta, processedDelta,
+                contentionHealthyTicks_);
+            if (contentionAdjust < 0) {
+                const uint32_t drop = static_cast<uint32_t>(-contentionAdjust);
+                totalBudget = (totalBudget > 2u) ? std::max<uint32_t>(2u, totalBudget - drop) : 2u;
+                contentionHealthyTicks_ = 0;
+            } else if (contentionAdjust > 0) {
+                totalBudget = std::min<uint32_t>(
+                    hwCap, totalBudget + static_cast<uint32_t>(contentionAdjust));
+                contentionHealthyTicks_ = 0;
+            }
+
             const uint64_t dbLockErrors = TuneAdvisor::getAndResetDbLockErrors();
             const uint32_t lockThreshold = TuneAdvisor::dbLockErrorThreshold();
-            governor.reportDbLockContention(dbLockErrors, lockThreshold);
 
-            uint32_t extractionTarget = TuneAdvisor::postExtractionConcurrent();
-            uint32_t kgTarget = TuneAdvisor::postKgConcurrent();
-            uint32_t enrichTarget = TuneAdvisor::postEnrichConcurrent();
-            uint32_t embedTarget = TuneAdvisor::postEmbedConcurrent();
+            // Fix Issue 7 (timing audit): compute the full post-ingest budget once
+            // instead of 6 individual getter calls (each of which independently calls
+            // postIngestBudgetedConcurrency). This ensures a consistent budget snapshot
+            // and avoids redundant computation.
+            auto budget = TuneAdvisor::postIngestBudgetAll(/*includeDynamicCaps=*/true);
+            uint32_t extractionTarget = budget.extraction;
+            uint32_t kgTarget = budget.kg;
+            uint32_t symbolTarget = budget.symbol;
+            uint32_t entityTarget = budget.entity;
+            uint32_t titleTarget = budget.title;
+            uint32_t embedTarget = budget.embed;
+            uint32_t embedFloor = 0;
 
-            kgTarget = governor.capKgConcurrencyForDbContention(kgTarget);
-            embedTarget = governor.capEmbedConcurrencyForDbContention(embedTarget);
+            // Keep embed fan-out responsive to backlog growth, especially during model warmup
+            // and bursty ingestion where job-depth can lag document-depth.
+            if (embedQueued >= 128) {
+                embedFloor = 2;
+            }
+            if (embedQueued >= 512) {
+                embedFloor = 4;
+            }
+            if (embedQueued >= 1024) {
+                embedFloor = 6;
+            }
+            if (embedDroppedDelta > 0) {
+                embedFloor = std::max<uint32_t>(embedFloor, 4u);
+            }
+            if (queuedItems >= 512 && embedQueued >= 128) {
+                embedFloor = std::max<uint32_t>(embedFloor, 4u);
+            }
 
-            if (TuneAdvisor::enableResourceGovernor()) {
+            // Override with gradient limiter values if enabled
+            if (TuneAdvisor::enableGradientLimiters()) {
+                // Propagate governor pressure to limiters before reading
+                const auto pressureLevel = static_cast<uint8_t>(govSnap.level);
+                auto applyPressureToLimiter = [pressureLevel](GradientLimiter* lim) {
+                    if (lim)
+                        lim->applyPressure(pressureLevel);
+                };
+                applyPressureToLimiter(pq->extractionLimiter());
+                applyPressureToLimiter(pq->kgLimiter());
+                applyPressureToLimiter(pq->symbolLimiter());
+                applyPressureToLimiter(pq->entityLimiter());
+                applyPressureToLimiter(pq->titleLimiter());
+
+                if (auto* extractionLimiter = pq->extractionLimiter()) {
+                    extractionTarget = extractionLimiter->effectiveLimit();
+                }
+                if (auto* kgLimiter = pq->kgLimiter()) {
+                    kgTarget = kgLimiter->effectiveLimit();
+                }
+                if (auto* symbolLimiter = pq->symbolLimiter()) {
+                    symbolTarget = symbolLimiter->effectiveLimit();
+                }
+                if (auto* entityLimiter = pq->entityLimiter()) {
+                    entityTarget = entityLimiter->effectiveLimit();
+                }
+                if (auto* titleLimiter = pq->titleLimiter()) {
+                    titleTarget = titleLimiter->effectiveLimit();
+                }
+                // Embed limiter is not currently driven by embed job RTT/completions, so
+                // keep embed target derived from budget/governor instead of stale limiter state.
+            }
+
+            if (dbLockErrors > lockThreshold * 2) {
+                kgTarget = std::min<uint32_t>(kgTarget, 2);
+                embedTarget = std::min<uint32_t>(embedTarget, 1);
+                spdlog::debug("TuningManager: DB lock errors ({}) severe; KG/embed reduced",
+                              dbLockErrors);
+            } else if (dbLockErrors > lockThreshold) {
+                kgTarget = std::min<uint32_t>(kgTarget, 4);
+                embedTarget = std::min<uint32_t>(embedTarget, 2);
+                spdlog::debug("TuningManager: DB lock errors ({}) > threshold; KG/embed reduced",
+                              dbLockErrors);
+            }
+
+            const bool applyGovernorConcurrencyCaps =
+                TuneAdvisor::enableResourceGovernor() &&
+                govSnap.level >= ResourcePressureLevel::Critical;
+            if (applyGovernorConcurrencyCaps) {
                 extractionTarget = std::min(extractionTarget, governor.maxExtractionConcurrency());
                 kgTarget = std::min(kgTarget, governor.maxKgConcurrency());
-                embedTarget = std::min(embedTarget, governor.maxEmbedConcurrency());
+                symbolTarget = std::min(symbolTarget, governor.maxSymbolConcurrency());
+                entityTarget = std::min(entityTarget, governor.maxEntityConcurrency());
+                titleTarget = std::min(titleTarget, governor.maxTitleConcurrency());
+                const uint32_t embedCap = governor.maxEmbedConcurrency();
+                embedTarget = std::min(embedCap, std::max(embedTarget, embedFloor));
+            } else {
+                embedTarget = std::max(embedTarget, embedFloor);
             }
 
             // Reconcile per-stage targets to the total budget to avoid oversubscription.
@@ -307,21 +685,20 @@ void TuningManager::tick_once() {
                 };
                 applyActiveMask(1u << 0u, extractionTarget);
                 applyActiveMask(1u << 1u, kgTarget);
-                if ((activeMask & ((1u << 2u) | (1u << 3u) | (1u << 4u))) == 0u) {
-                    enrichTarget = 0;
-                }
+                applyActiveMask(1u << 2u, symbolTarget);
+                applyActiveMask(1u << 3u, entityTarget);
+                applyActiveMask(1u << 4u, titleTarget);
                 applyActiveMask(1u << 5u, embedTarget);
+                const std::array<bool, 6> stageAllowed = {extractionTarget > 0, kgTarget > 0,
+                                                          symbolTarget > 0,     entityTarget > 0,
+                                                          titleTarget > 0,      embedTarget > 0};
 
                 const bool extractionActive = extractionTarget > 0;
-                const bool embedActive = embedTarget > 0;
                 const uint32_t minExtraction = (totalBudget >= 1 && extractionActive) ? 1u : 0u;
-                uint32_t minEmbed = (totalBudget >= 2 && embedActive) ? 1u : 0u;
-                if (totalBudget == 1 && !extractionActive && embedActive) {
-                    minEmbed = 1u;
-                }
 
                 auto sumTargets = [&]() {
-                    return extractionTarget + kgTarget + enrichTarget + embedTarget;
+                    return extractionTarget + kgTarget + symbolTarget + entityTarget + titleTarget +
+                           embedTarget;
                 };
 
                 uint32_t totalTarget = sumTargets();
@@ -330,10 +707,13 @@ void TuningManager::tick_once() {
                         uint32_t* value;
                         uint32_t minValue;
                     };
-                    std::array<StageRef, 4> reduceOrder = {
-                        StageRef{&enrichTarget, 0u}, StageRef{&kgTarget, 0u},
+                    std::array<StageRef, 6> reduceOrder = {
+                        StageRef{&entityTarget, 0u},
+                        StageRef{&titleTarget, 0u},
+                        StageRef{&symbolTarget, 0u},
+                        StageRef{&kgTarget, 0u},
                         StageRef{&extractionTarget, minExtraction},
-                        StageRef{&embedTarget, minEmbed}};
+                        StageRef{&embedTarget, embedFloor}};
 
                     while (totalTarget > totalBudget) {
                         bool progressed = false;
@@ -353,22 +733,122 @@ void TuningManager::tick_once() {
                         }
                     }
                 }
+
+                // Fill any slack directly to the most backlogged active stages.
+                {
+                    auto chooseMostBacklogged = [&]() -> int {
+                        std::array<std::size_t, 6> depths = {queuedItems,  kgQueued,
+                                                             symbolQueued, entityQueued,
+                                                             titleQueued,  embedQueued};
+                        int best = -1;
+                        std::size_t bestDepth = 0;
+                        for (std::size_t i = 0; i < depths.size(); ++i) {
+                            if (!stageAllowed[i]) {
+                                continue;
+                            }
+                            if (depths[i] > bestDepth) {
+                                bestDepth = depths[i];
+                                best = static_cast<int>(i);
+                            }
+                        }
+                        return best;
+                    };
+
+                    uint32_t totalTarget = sumTargets();
+                    while (totalTarget < totalBudget) {
+                        const int idx = chooseMostBacklogged();
+                        if (idx < 0) {
+                            break;
+                        }
+                        switch (idx) {
+                            case 0:
+                                ++extractionTarget;
+                                break;
+                            case 1:
+                                ++kgTarget;
+                                break;
+                            case 2:
+                                ++symbolTarget;
+                                break;
+                            case 3:
+                                ++entityTarget;
+                                break;
+                            case 4:
+                                ++titleTarget;
+                                break;
+                            case 5:
+                                ++embedTarget;
+                                break;
+                            default:
+                                break;
+                        }
+                        ++totalTarget;
+                    }
+                }
+
+                // Dynamic stage-agnostic rebalance by queue pressure.
+                std::array<uint32_t, 6> stageTargets = {extractionTarget, kgTarget,    symbolTarget,
+                                                        entityTarget,     titleTarget, embedTarget};
+                std::array<uint32_t, 6> stageFloors = {minExtraction, 0u, 0u, 0u, 0u, embedFloor};
+                std::array<std::size_t, 6> queueDepths = {queuedItems,  kgQueued,    symbolQueued,
+                                                          entityQueued, titleQueued, embedQueued};
+                rebalanceTargetsByQueue(stageTargets, stageFloors, queueDepths, stageAllowed);
+                extractionTarget = stageTargets[0];
+                kgTarget = stageTargets[1];
+                symbolTarget = stageTargets[2];
+                entityTarget = stageTargets[3];
+                titleTarget = stageTargets[4];
+                embedTarget = stageTargets[5];
             }
 
-            TuneAdvisor::setPostExtractionConcurrent(extractionTarget);
-            TuneAdvisor::setPostKgConcurrent(kgTarget);
-            TuneAdvisor::setPostEnrichConcurrent(enrichTarget);
-            TuneAdvisor::setPostEmbedConcurrent(embedTarget);
+            // Fix Issue 6 (timing audit): detect pressure de-escalation and clear
+            // DynamicCaps so the base budget is immediately restored. Without this,
+            // stale (reduced) caps from the previous higher-pressure tick persist for
+            // one extra tick, delaying recovery.
+            const auto currentPressure = static_cast<uint8_t>(govSnap.level);
+            if (currentPressure < previousPressureLevel_) {
+                // Pressure dropped — clear all DynamicCaps to let base budget through
+                TuneAdvisor::beginDynamicCapWrite();
+                TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
+                TuneAdvisor::setPostKgConcurrentDynamicCap(0);
+                TuneAdvisor::setPostSymbolConcurrentDynamicCap(0);
+                TuneAdvisor::setPostEntityConcurrentDynamicCap(0);
+                TuneAdvisor::setPostTitleConcurrentDynamicCap(0);
+                TuneAdvisor::setPostEmbedConcurrentDynamicCap(0);
+                TuneAdvisor::endDynamicCapWrite();
+            }
+            previousPressureLevel_ = currentPressure;
+
+            TuneAdvisor::beginDynamicCapWrite();
+            TuneAdvisor::setPostExtractionConcurrentDynamicCap(extractionTarget);
+            TuneAdvisor::setPostKgConcurrentDynamicCap(kgTarget);
+            TuneAdvisor::setPostSymbolConcurrentDynamicCap(symbolTarget);
+            TuneAdvisor::setPostEntityConcurrentDynamicCap(entityTarget);
+            TuneAdvisor::setPostTitleConcurrentDynamicCap(titleTarget);
+            TuneAdvisor::setPostEmbedConcurrentDynamicCap(embedTarget);
+            TuneAdvisor::endDynamicCapWrite();
+
+            // Align EmbeddingGenerator global gate with governor caps
+            uint32_t baseEmbedGuard = TuneAdvisor::embedMaxConcurrencyBase();
+            uint32_t desiredEmbedGuard = baseEmbedGuard;
+            if (applyGovernorConcurrencyCaps) {
+                desiredEmbedGuard = std::min(desiredEmbedGuard, governor.maxEmbedConcurrency());
+            }
+            if (desiredEmbedGuard < baseEmbedGuard) {
+                TuneAdvisor::setEmbedMaxConcurrencyDynamicCap(desiredEmbedGuard);
+            } else {
+                TuneAdvisor::setEmbedMaxConcurrencyDynamicCap(0);
+            }
 
 #if defined(TRACY_ENABLE)
             TracyPlot("post.queued", static_cast<double>(queuedItems));
             TracyPlot("post.inflight", static_cast<double>(currentInFlight));
             TracyPlot("post.extraction.limit", static_cast<double>(extractionTarget));
             TracyPlot("post.kg.limit", static_cast<double>(kgTarget));
-            TracyPlot("post.enrich.limit", static_cast<double>(enrichTarget));
             TracyPlot("post.embed.limit", static_cast<double>(embedTarget));
             TracyPlot("post.embed.queued", static_cast<double>(embedQueued));
-            TracyPlot("post.embed.dropped", static_cast<double>(embedDropped));
+            TracyPlot("post.embed.inflight", static_cast<double>(embedInFlight));
+            TracyPlot("post.embed.dropped_delta", static_cast<double>(embedDroppedDelta));
             TracyPlot("db.lock_errors_window", static_cast<double>(dbLockErrors));
 #endif
         }
@@ -405,10 +885,8 @@ void TuningManager::tick_once() {
                             : 0.0;
 
         // Hysteresis: only resize if utilization has been high/low for multiple ticks
-        static uint32_t ipcHighTicks = 0;
-        static uint32_t ipcLowTicks = 0;
-        static uint32_t ioHighTicks = 0;
-        static uint32_t ioLowTicks = 0;
+        // NOTE: These are member variables (not static locals) so they reset on stop/start.
+        // See ipcHighTicks_, ipcLowTicks_, ioHighTicks_, ioLowTicks_ in TuningManager.h
 
         const double highThreshold = 0.80;  // Grow when >80% utilized
         const double lowThreshold = 0.20;   // Shrink when <20% utilized
@@ -417,91 +895,91 @@ void TuningManager::tick_once() {
 
         // IPC pool sizing
         if (ipcUtil > highThreshold) {
-            ipcHighTicks++;
-            ipcLowTicks = 0;
-            if (ipcHighTicks >= hysteresisTicks) {
+            ipcHighTicks_++;
+            ipcLowTicks_ = 0;
+            if (ipcHighTicks_ >= hysteresisTicks) {
                 // Grow pool
                 int32_t target = static_cast<int32_t>(ipcStats.current_size) + scaleStep;
                 int32_t maxSize = static_cast<int32_t>(TuneAdvisor::poolMaxSizeIpc());
                 // Check with ResourceGovernor if scaling is allowed
                 if (TuneAdvisor::enableResourceGovernor() &&
                     !governor.canScaleUp("ipc", scaleStep)) {
-                    maxSize = static_cast<int32_t>(ipcStats.current_size); // Don't grow
+                    maxSize = ipcStats.current_size; // Don't grow
                 }
                 target = std::min(target, maxSize);
                 int32_t delta = target - static_cast<int32_t>(ipcStats.current_size);
                 if (delta > 0) {
-                    [[maybe_unused]] const auto updatedSize = governor.applyPoolDelta(
+                    governor.applyPoolDelta(
                         {"ipc", delta, "tuning_load_grow", TuneAdvisor::poolCooldownMs()});
                     spdlog::debug("TuningManager: IPC pool grown by {} (util={:.1f}%)", delta,
                                   ipcUtil * 100.0);
                 }
-                ipcHighTicks = 0;
+                ipcHighTicks_ = 0;
             }
         } else if (ipcUtil < lowThreshold) {
-            ipcLowTicks++;
-            ipcHighTicks = 0;
-            if (ipcLowTicks >= hysteresisTicks) {
+            ipcLowTicks_++;
+            ipcHighTicks_ = 0;
+            if (ipcLowTicks_ >= hysteresisTicks) {
                 // Shrink pool
                 int32_t target = static_cast<int32_t>(ipcStats.current_size) - scaleStep;
                 int32_t minSize = static_cast<int32_t>(TuneAdvisor::poolMinSizeIpc());
                 target = std::max(target, minSize);
                 int32_t delta = target - static_cast<int32_t>(ipcStats.current_size);
                 if (delta < 0) {
-                    [[maybe_unused]] const auto updatedSize = governor.applyPoolDelta(
+                    governor.applyPoolDelta(
                         {"ipc", delta, "tuning_load_shrink", TuneAdvisor::poolCooldownMs()});
                     spdlog::debug("TuningManager: IPC pool shrunk by {} (util={:.1f}%)", -delta,
                                   ipcUtil * 100.0);
                 }
-                ipcLowTicks = 0;
+                ipcLowTicks_ = 0;
             }
         } else {
             // Reset hysteresis counters when in middle range
-            ipcHighTicks = 0;
-            ipcLowTicks = 0;
+            ipcHighTicks_ = 0;
+            ipcLowTicks_ = 0;
         }
 
         // IO pool sizing (similar logic)
         if (ioUtil > highThreshold) {
-            ioHighTicks++;
-            ioLowTicks = 0;
-            if (ioHighTicks >= hysteresisTicks) {
+            ioHighTicks_++;
+            ioLowTicks_ = 0;
+            if (ioHighTicks_ >= hysteresisTicks) {
                 int32_t target = static_cast<int32_t>(ioStats.current_size) + scaleStep;
                 int32_t maxSize = static_cast<int32_t>(TuneAdvisor::poolMaxSizeIpcIo());
                 // Check with ResourceGovernor if scaling is allowed
                 if (TuneAdvisor::enableResourceGovernor() &&
                     !governor.canScaleUp("ipc_io", scaleStep)) {
-                    maxSize = static_cast<int32_t>(ioStats.current_size); // Don't grow
+                    maxSize = ioStats.current_size; // Don't grow
                 }
                 target = std::min(target, maxSize);
                 int32_t delta = target - static_cast<int32_t>(ioStats.current_size);
                 if (delta > 0) {
-                    [[maybe_unused]] const auto updatedSize = governor.applyPoolDelta(
+                    governor.applyPoolDelta(
                         {"ipc_io", delta, "tuning_load_grow", TuneAdvisor::poolCooldownMs()});
                     spdlog::debug("TuningManager: IO pool grown by {} (util={:.1f}%)", delta,
                                   ioUtil * 100.0);
                 }
-                ioHighTicks = 0;
+                ioHighTicks_ = 0;
             }
         } else if (ioUtil < lowThreshold) {
-            ioLowTicks++;
-            ioHighTicks = 0;
-            if (ioLowTicks >= hysteresisTicks) {
+            ioLowTicks_++;
+            ioHighTicks_ = 0;
+            if (ioLowTicks_ >= hysteresisTicks) {
                 int32_t target = static_cast<int32_t>(ioStats.current_size) - scaleStep;
                 int32_t minSize = static_cast<int32_t>(TuneAdvisor::poolMinSizeIpcIo());
                 target = std::max(target, minSize);
                 int32_t delta = target - static_cast<int32_t>(ioStats.current_size);
                 if (delta < 0) {
-                    [[maybe_unused]] const auto updatedSize = governor.applyPoolDelta(
+                    governor.applyPoolDelta(
                         {"ipc_io", delta, "tuning_load_shrink", TuneAdvisor::poolCooldownMs()});
                     spdlog::debug("TuningManager: IO pool shrunk by {} (util={:.1f}%)", -delta,
                                   ioUtil * 100.0);
                 }
-                ioLowTicks = 0;
+                ioLowTicks_ = 0;
             }
         } else {
-            ioHighTicks = 0;
-            ioLowTicks = 0;
+            ioHighTicks_ = 0;
+            ioLowTicks_ = 0;
         }
     } catch (...) {
     }
@@ -510,29 +988,61 @@ void TuningManager::tick_once() {
     // Uses same hysteresis pattern as IPC/IO pools for consistency
     try {
         if (setConnectionSlots_ && state_) {
+            // NOTE: slotHighTicks_/slotLowTicks_ are member variables (not static locals)
+            // so they reset on stop/start. See TuningManager.h
+
             const size_t activeConns = state_->stats.activeConnections.load();
             const size_t maxConns = state_->stats.maxConnections.load(std::memory_order_relaxed);
-
             if (maxConns > 0) {
                 double util = static_cast<double>(activeConns) / static_cast<double>(maxConns);
+
+                const double highThreshold = 0.80;  // Grow when >80% utilized
+                const double lowThreshold = 0.20;   // Shrink when <20% utilized
+                const uint32_t hysteresisTicks = 3; // Require 3 consecutive ticks
                 const uint32_t scaleStep = TuneAdvisor::connectionSlotsScaleStep();
                 const uint32_t minSlots = TuneAdvisor::connectionSlotsMin();
                 const uint32_t maxSlots = TuneAdvisor::connectionSlotsMax();
 
-                const uint32_t target = governor.recommendConnectionSlotTarget(
-                    static_cast<uint32_t>(maxConns), static_cast<uint32_t>(activeConns), minSlots,
-                    maxSlots, std::max<uint32_t>(1u, scaleStep));
-
-                if (target > maxConns) {
-                    setConnectionSlots_(target);
-                    spdlog::debug("TuningManager: connection slots grown from {} to {} "
-                                  "(util={:.1f}%, active={})",
-                                  maxConns, target, util * 100.0, activeConns);
-                } else if (target < maxConns) {
-                    setConnectionSlots_(target);
-                    spdlog::debug("TuningManager: connection slots shrunk from {} to {} "
-                                  "(util={:.1f}%, active={})",
-                                  maxConns, target, util * 100.0, activeConns);
+                if (util > highThreshold) {
+                    slotHighTicks_++;
+                    slotLowTicks_ = 0;
+                    if (slotHighTicks_ >= hysteresisTicks) {
+                        uint32_t target = static_cast<uint32_t>(maxConns) + scaleStep;
+                        // Gate through ResourceGovernor
+                        if (TuneAdvisor::enableResourceGovernor() &&
+                            !governor.canScaleUp("conn_slots", scaleStep)) {
+                            target = static_cast<uint32_t>(maxConns); // Don't grow
+                        }
+                        target = std::min(target, maxSlots);
+                        if (target > maxConns) {
+                            setConnectionSlots_(target);
+                            spdlog::debug("TuningManager: connection slots grown from {} to {} "
+                                          "(util={:.1f}%, active={})",
+                                          maxConns, target, util * 100.0, activeConns);
+                        }
+                        slotHighTicks_ = 0;
+                    }
+                } else if (util < lowThreshold && activeConns > 0) {
+                    // Only shrink if we have some connections (avoid shrinking at idle)
+                    slotLowTicks_++;
+                    slotHighTicks_ = 0;
+                    if (slotLowTicks_ >= hysteresisTicks) {
+                        uint32_t target = (maxConns > scaleStep)
+                                              ? static_cast<uint32_t>(maxConns - scaleStep)
+                                              : static_cast<uint32_t>(maxConns);
+                        target = std::max(target, minSlots);
+                        if (target < maxConns) {
+                            setConnectionSlots_(target);
+                            spdlog::debug("TuningManager: connection slots shrunk from {} to {} "
+                                          "(util={:.1f}%, active={})",
+                                          maxConns, target, util * 100.0, activeConns);
+                        }
+                        slotLowTicks_ = 0;
+                    }
+                } else {
+                    // Reset hysteresis when in middle range
+                    slotHighTicks_ = 0;
+                    slotLowTicks_ = 0;
                 }
             }
         }
@@ -548,23 +1058,6 @@ void TuningManager::tick_once() {
         FsmMetricsRegistry::instance().setIpcPoolSize(ipcStats.current_size);
         FsmMetricsRegistry::instance().setIoPoolSize(ioStats.current_size);
         FsmMetricsRegistry::instance().setWriterBudgetBytes(writerBudget);
-        // ResourceGovernor metrics
-        FsmMetricsRegistry::instance().setGovernorRssBytes(govSnap.rssBytes);
-        FsmMetricsRegistry::instance().setGovernorBudgetBytes(govSnap.memoryBudgetBytes);
-        FsmMetricsRegistry::instance().setGovernorPressureLevel(
-            static_cast<uint8_t>(govSnap.level));
-        FsmMetricsRegistry::instance().setGovernorHeadroomPct(
-            static_cast<uint8_t>(govSnap.scalingHeadroom * 100.0));
-        // ONNX concurrency metrics
-        auto onnxSnap = OnnxConcurrencyRegistry::instance().snapshot();
-        FsmMetricsRegistry::instance().setOnnxTotalSlots(onnxSnap.totalSlots);
-        FsmMetricsRegistry::instance().setOnnxUsedSlots(onnxSnap.usedSlots);
-        FsmMetricsRegistry::instance().setOnnxGlinerUsed(
-            onnxSnap.lanes[static_cast<size_t>(OnnxLane::Gliner)].used);
-        FsmMetricsRegistry::instance().setOnnxEmbedUsed(
-            onnxSnap.lanes[static_cast<size_t>(OnnxLane::Embedding)].used);
-        FsmMetricsRegistry::instance().setOnnxRerankerUsed(
-            onnxSnap.lanes[static_cast<size_t>(OnnxLane::Reranker)].used);
 #if defined(TRACY_ENABLE)
         TracyPlot("pool.ipc.size", static_cast<double>(ipcStats.current_size));
         TracyPlot("pool.io.size", static_cast<double>(ioStats.current_size));
@@ -579,8 +1072,7 @@ void TuningManager::tick_once() {
     try {
         auto s = std::make_shared<TuningSnapshot>();
         s->workerPollMs = TuneAdvisor::workerPollMs();
-        s->backpressureReadPauseMs = governor.recommendBackpressureReadPauseMs(
-            TuneAdvisor::backpressureReadPauseMs(), TuneAdvisor::requestQueueBackpressure());
+        s->backpressureReadPauseMs = TuneAdvisor::backpressureReadPauseMs();
         s->idleCpuPct = TuneAdvisor::idleCpuThresholdPercent();
         s->idleMuxLowBytes = TuneAdvisor::idleMuxLowBytes();
         s->idleShrinkHoldMs = TuneAdvisor::idleShrinkHoldMs();
@@ -595,7 +1087,18 @@ void TuningManager::tick_once() {
     } catch (...) {
     }
 
-    // RepairCoordinator tuning (tokens/batch) centralized here
+    // RepairCoordinator tuning (tokens/batch) centralized here.
+    //
+    // Cooperative repair: instead of a binary idle=1/busy=0 token scheme,
+    // allow repair to continue at reduced concurrency while the
+    // PostIngestQueue is actively processing.  This prevents the
+    // repair-then-flood pattern that causes governor oscillation.
+    //
+    // Token selection priority:
+    //   Emergency/Critical pressure → 0 (governor already blocked work)
+    //   busyHeld + PostIngestQueue active → repairTokensDuringIngest() (cooperative)
+    //   busyHeld (no PIQ) → repairTokensBusy() (legacy: 0)
+    //   idle → repairTokensIdle() (full repair throughput)
     try {
         if (setRepair_) {
             using clock = std::chrono::steady_clock;
@@ -622,9 +1125,33 @@ void TuningManager::tick_once() {
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - repairReadySince_)
                         .count() >= readyHold;
 
-            uint32_t tokens =
-                busyHeld ? TuneAdvisor::repairTokensBusy() : TuneAdvisor::repairTokensIdle();
+            uint32_t tokens = TuneAdvisor::repairTokensIdle();
+            if (busyHeld) {
+                // Check if PostIngestQueue is actively processing — if so, allow
+                // cooperative repair tokens instead of fully halting.
+                bool piqActive = false;
+                if (sm_) {
+                    if (auto* pq = sm_->getPostIngestQueue()) {
+                        piqActive = pq->started() && (pq->size() > 0 || pq->totalInFlight() > 0);
+                    }
+                }
+                // Under Critical/Emergency pressure the governor has already
+                // paused stages and blocked admission; halt repair entirely.
+                if (govSnap.level >= ResourcePressureLevel::Critical) {
+                    tokens = 0;
+                } else if (piqActive) {
+                    tokens = TuneAdvisor::repairTokensBusy();
+                } else {
+                    tokens = TuneAdvisor::repairTokensBusy();
+                }
+            }
             uint32_t batch = TuneAdvisor::repairMaxBatch();
+
+            // Under Warning pressure, reduce batch size to slow repair throughput
+            // proportionally, giving more bus capacity to the ingestion pipeline.
+            if (govSnap.level >= ResourcePressureLevel::Warning && batch > 1) {
+                batch = std::max<uint32_t>(1, batch / 2);
+            }
 
             // Rate limiting: cap batches per second; if exceeded, force tokens=0 this window
             uint32_t maxPerSec = TuneAdvisor::repairMaxBatchesPerSec();
@@ -667,10 +1194,14 @@ void TuningManager::tick_once() {
             auto searchMetrics = sm_->getSearchLoadMetrics();
             std::size_t postIngestQueued = 0;
             std::size_t currentInFlight = 0;
+            std::size_t embedQueued = 0;
+            std::size_t embedInFlight = 0;
             if (auto* pq = sm_->getPostIngestQueue()) {
                 postIngestQueued = pq->size();
                 currentInFlight = pq->totalInFlight();
             }
+            embedQueued = sm_->getEmbeddingQueuedJobs();
+            embedInFlight = sm_->getEmbeddingInFlightJobs();
 
             // Profile-aware thresholds: Efficient=permissive, Balanced=moderate, Aggressive=strict
             const uint32_t connThresh = TuneAdvisor::modelMaintenanceConnThreshold();
@@ -679,12 +1210,18 @@ void TuningManager::tick_once() {
 
             bool canDoMaintenance = (activeConns <= connThresh) &&
                                     (searchMetrics.active <= searchThresh) &&
-                                    (postIngestQueued <= queueThresh) && (currentInFlight == 0);
+                                    (postIngestQueued <= queueThresh) && (currentInFlight == 0) &&
+                                    (embedQueued == 0) && (embedInFlight == 0);
 
             if (canDoMaintenance) {
                 if (auto provider = sm_->getModelProvider()) {
                     provider->releaseUnusedResources();
                 }
+            } else {
+                spdlog::debug("[TuningManager] Skip model maintenance: conns={} search_active={} "
+                              "post_q={} post_inflight={} embed_q={} embed_inflight={}",
+                              activeConns, searchMetrics.active, postIngestQueued, currentInFlight,
+                              embedQueued, embedInFlight);
             }
         }
     } catch (...) {

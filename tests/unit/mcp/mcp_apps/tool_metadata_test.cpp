@@ -31,10 +31,8 @@ public:
 
 TEST_CASE("MCP Apps Tool - UI Linkage With Support",
           "[mcp][apps][tool][mcp-apps-tool-01][phase1]") {
-    SKIP("Pending MCP Apps implementation");
-
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -76,10 +74,8 @@ TEST_CASE("MCP Apps Tool - UI Linkage With Support",
 
 TEST_CASE("MCP Apps Tool - UI Linkage Without Support",
           "[mcp][apps][tool][mcp-apps-tool-02][phase1]") {
-    SKIP("Pending MCP Apps implementation");
-
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},
@@ -112,10 +108,8 @@ TEST_CASE("MCP Apps Tool - UI Linkage Without Support",
 
 TEST_CASE("MCP Apps Tool - Visibility Model and App",
           "[mcp][apps][tool][mcp-apps-tool-03][phase1]") {
-    SKIP("Pending MCP Apps implementation");
-
     auto transport = std::make_unique<NullTransport>();
-    auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport));
+    auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
     json initRequest = {{"jsonrpc", "2.0"},
                         {"id", 1},

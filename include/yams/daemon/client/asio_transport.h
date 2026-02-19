@@ -49,7 +49,7 @@ public:
 private:
     // Multiplexing: per-socket connection shared across requests
     // Awaitable to allow async creation/connection path
-    static boost::asio::awaitable<std::shared_ptr<Connection>>
+    static boost::asio::awaitable<Result<std::shared_ptr<Connection>>>
     get_or_create_connection(const Options& opts);
 
     // Helper to connect with timeout
