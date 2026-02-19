@@ -1369,6 +1369,16 @@ struct BenchFixture {
         // The embedding service processes documents asynchronously after FTS5 indexing
         // Vector count is exposed via requestCounts["vector_count"] in StatusResponse
         bool vectorsEnabled = !vectorsDisabled;
+        if (vectorsEnabled && !embeddingReady) {
+            vectorsEnabled = false;
+            spdlog::warn("Disabling vector wait for this benchmark run: embedding provider is "
+                         "unavailable; proceeding with keyword-dominant evaluation");
+            if (summaryLog) {
+                summaryLog << "Embedding provider unavailable after 30s; skipping vector wait"
+                           << std::endl;
+                summaryLog.flush();
+            }
+        }
 
         if (vectorsEnabled) {
             spdlog::info("Waiting for embeddings to be generated (target: {} docs)...", corpusSize);

@@ -507,7 +507,6 @@ public:
         auto providerLower = actualExecutionProvider_;
         std::transform(providerLower.begin(), providerLower.end(), providerLower.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        const bool usesMigraphxProvider = providerLower.find("migraphx") != std::string::npos;
 
         std::unique_lock<std::recursive_mutex> gpuLoadLock;
         std::unique_ptr<ScopedProcessFileLock> gpuProcessLoadLock;

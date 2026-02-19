@@ -283,6 +283,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             setVal(metrics::kPostKgLimit, snap->postKgLimit);
             setVal(metrics::kPostSymbolLimit, snap->postSymbolLimit);
             setVal(metrics::kPostEntityLimit, snap->postEntityLimit);
+            // Combined enrich (symbol+entity+title) metrics
+            setVal(metrics::kPostEnrichLimit, snap->postEnrichLimit);
+            setVal(metrics::kEnrichInflight, snap->enrichInflight);
+            setVal(metrics::kEnrichQueueDepth, snap->enrichQueueDepth);
 
             // Surface whether the InternalEventBus is being used for post-ingest
             try {

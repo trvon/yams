@@ -57,7 +57,10 @@ inline bool isGlinerTitleExtractionDisabled() {
 
 // Dynamic concurrency limits from TuneAdvisor
 std::size_t PostIngestQueue::maxExtractionConcurrent() {
-    return std::max<std::size_t>(4u,
+    // Use the budget allocator's decision — it already guarantees >=1 when
+    // totalBudget>=1.  A hard floor of 4 would consume most of the budget on
+    // small-core machines and starve downstream stages (KG, Enrich).
+    return std::max<std::size_t>(1u,
                                  static_cast<std::size_t>(TuneAdvisor::postExtractionConcurrent()));
 }
 
@@ -89,6 +92,7 @@ PostIngestQueue::PostIngestQueue(
       kg_(std::move(kg)), graphComponent_(std::move(graphComponent)), coordinator_(coordinator),
       entityCoordinator_(entityCoordinator), capacity_(capacity ? capacity : 1000) {
     refreshStageAvailability();
+    initializeChannels();
     spdlog::info("[PostIngestQueue] Created (parallel processing via WorkCoordinator)");
 }
 
@@ -108,7 +112,6 @@ void PostIngestQueue::start() {
         refreshStageAvailability();
         logStageAvailabilitySnapshot();
         initializeGradientLimiters();
-        initializeChannels();
         spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
         boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
         spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
@@ -433,7 +436,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     cfg.pauseFlag = &stagePaused_[0];
     cfg.wasActiveFlag = &wasActive_;
     cfg.inFlightCounter = &stageInFlight_[0];
-    cfg.getLimiterFn = [this]() { return limiters_[0].get(); };
+    cfg.getLimiterFn = [this]() { return extractionLimiter(); };
     cfg.maxConcurrentFn = &maxExtractionConcurrent;
     cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
         return tryAcquireLimiterSlot(l, id, s);
@@ -1030,7 +1033,7 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     cfg.pauseFlag = &stagePaused_[1];
     cfg.wasActiveFlag = &wasActive_;
     cfg.inFlightCounter = &stageInFlight_[1];
-    cfg.getLimiterFn = [this]() { return limiters_[1].get(); };
+    cfg.getLimiterFn = [this]() { return kgLimiter(); };
     cfg.maxConcurrentFn = &maxKgConcurrent;
     cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
         return tryAcquireLimiterSlot(l, id, s);
@@ -1062,7 +1065,7 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
     cfg.pauseFlag = &stagePaused_[2];
     cfg.wasActiveFlag = &wasActive_;
     cfg.inFlightCounter = &stageInFlight_[2];
-    cfg.getLimiterFn = [this]() { return limiters_[2].get(); };
+    cfg.getLimiterFn = [this]() { return symbolLimiter(); };
     cfg.maxConcurrentFn = &maxSymbolConcurrent;
     cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
         return tryAcquireLimiterSlot(l, id, s);
@@ -1270,7 +1273,7 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
     cfg.pauseFlag = &stagePaused_[3];
     cfg.wasActiveFlag = &wasActive_;
     cfg.inFlightCounter = &stageInFlight_[3];
-    cfg.getLimiterFn = [this]() { return limiters_[3].get(); };
+    cfg.getLimiterFn = [this]() { return entityLimiter(); };
     cfg.maxConcurrentFn = &maxEntityConcurrent;
     cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
         return tryAcquireLimiterSlot(l, id, s);
@@ -1629,7 +1632,7 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
     cfg.pauseFlag = &stagePaused_[4];
     cfg.wasActiveFlag = &wasActive_;
     cfg.inFlightCounter = &stageInFlight_[4];
-    cfg.getLimiterFn = [this]() { return limiters_[4].get(); };
+    cfg.getLimiterFn = [this]() { return titleLimiter(); };
     cfg.maxConcurrentFn = &maxTitleConcurrent;
     cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
         return tryAcquireLimiterSlot(l, id, s);
@@ -1955,6 +1958,8 @@ void PostIngestQueue::initializeGradientLimiters() {
         &TuneAdvisor::postEntityConcurrent, &TuneAdvisor::postTitleConcurrent,
         &TuneAdvisor::postEmbedConcurrent};
 
+    std::array<std::unique_ptr<GradientLimiter>, kLimiterCount> newLimiters;
+
     for (std::size_t i = 0; i < kLimiterCount; ++i) {
         double stageMax = 0.0;
         if (i == 0) {
@@ -1980,10 +1985,47 @@ void PostIngestQueue::initializeGradientLimiters() {
             cfg.initialLimit = cfg.maxLimit;
         }
 
-        limiters_[i] = std::make_unique<GradientLimiter>(kLimiterNames[i], cfg);
+        newLimiters[i] = std::make_unique<GradientLimiter>(kLimiterNames[i], cfg);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(limiterMutex_);
+        for (std::size_t i = 0; i < kLimiterCount; ++i) {
+            limiters_[i] = std::move(newLimiters[i]);
+        }
     }
 
     spdlog::info("[PostIngestQueue] Gradient limiters initialized");
+}
+
+GradientLimiter* PostIngestQueue::extractionLimiter() const {
+    std::lock_guard<std::mutex> lock(limiterMutex_);
+    return limiters_[0].get();
+}
+
+GradientLimiter* PostIngestQueue::kgLimiter() const {
+    std::lock_guard<std::mutex> lock(limiterMutex_);
+    return limiters_[1].get();
+}
+
+GradientLimiter* PostIngestQueue::symbolLimiter() const {
+    std::lock_guard<std::mutex> lock(limiterMutex_);
+    return limiters_[2].get();
+}
+
+GradientLimiter* PostIngestQueue::entityLimiter() const {
+    std::lock_guard<std::mutex> lock(limiterMutex_);
+    return limiters_[3].get();
+}
+
+GradientLimiter* PostIngestQueue::titleLimiter() const {
+    std::lock_guard<std::mutex> lock(limiterMutex_);
+    return limiters_[4].get();
+}
+
+GradientLimiter* PostIngestQueue::embedLimiter() const {
+    std::lock_guard<std::mutex> lock(limiterMutex_);
+    return limiters_[5].get();
 }
 
 bool PostIngestQueue::tryAcquireLimiterSlot(GradientLimiter* limiter, const std::string& jobId,

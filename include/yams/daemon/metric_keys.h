@@ -51,6 +51,11 @@ constexpr std::string_view kSymbolInflight = "symbol_inflight";
 constexpr std::string_view kSymbolQueueDepth = "symbol_queue_depth";
 constexpr std::string_view kPostSymbolLimit = "post_symbol_limit";
 
+// Enrich (combined symbol+entity+title) metrics
+constexpr std::string_view kPostEnrichLimit = "post_enrich_limit";
+constexpr std::string_view kEnrichInflight = "enrich_inflight";
+constexpr std::string_view kEnrichQueueDepth = "enrich_queue_depth";
+
 // Entity Stage metrics
 constexpr std::string_view kEntityQueued = "entity_queued";
 constexpr std::string_view kEntityDropped = "entity_dropped";

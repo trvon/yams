@@ -135,6 +135,10 @@ struct MetricsSnapshot {
     std::size_t postSymbolLimit{4};
     std::size_t postEntityLimit{2};
     std::size_t postEmbedLimit{0};
+    // Combined enrich limit (symbol+entity+title)
+    std::size_t postEnrichLimit{0};
+    std::size_t enrichInflight{0};
+    std::size_t enrichQueueDepth{0};
 
     // Session watch status
     bool watchEnabled{false};

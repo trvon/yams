@@ -48,6 +48,12 @@ struct DaemonHarnessOptions {
     std::optional<std::filesystem::path> pluginDir;
     // Per-plugin configuration: plugin name -> JSON config string
     std::map<std::string, std::string> pluginConfigs;
+    // Override the data directory instead of creating a temp one.
+    // When set, the harness uses this existing path (e.g. a real corpus)
+    // and skips cleanup of the data dir on destruction.
+    std::optional<std::filesystem::path> dataDir;
+    // Additional trusted plugin search paths (appended to DaemonConfig::trustedPluginPaths)
+    std::vector<std::filesystem::path> trustedPluginPaths;
 };
 
 class DaemonHarness {
@@ -61,8 +67,15 @@ public:
         auto id = random_id();
         root_ = fs::temp_directory_path() / (std::string("yams_it_") + id);
         fs::create_directories(root_);
-        data_ = root_ / "data";
-        fs::create_directories(data_);
+
+        // Use caller-provided dataDir if set (e.g. existing corpus), else create temp
+        if (options_.dataDir) {
+            data_ = *options_.dataDir;
+            externalDataDir_ = true; // skip cleanup of external data
+        } else {
+            data_ = root_ / "data";
+            fs::create_directories(data_);
+        }
         // Use platform-appropriate temp path for socket
         // On Windows, AF_UNIX sockets work but need a valid Windows path
         // On Unix, use /tmp for short paths to avoid AF_UNIX length limits
@@ -124,6 +137,8 @@ public:
         }
         // Pass plugin-specific configurations
         cfg.pluginConfigs = options_.pluginConfigs;
+        // Pass trusted plugin paths
+        cfg.trustedPluginPaths = options_.trustedPluginPaths;
         daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
         spdlog::info("[DaemonHarness] Daemon instance created");
 
@@ -380,8 +395,19 @@ private:
     void cleanup() {
         namespace fs = std::filesystem;
         std::error_code ec;
-        if (!root_.empty())
-            fs::remove_all(root_, ec);
+        if (externalDataDir_) {
+            // Only remove temp root (socket, pid, log) — preserve external data dir
+            if (!root_.empty()) {
+                // Remove everything in root_ except data_ (which is external)
+                for (auto& entry : fs::directory_iterator(root_, ec)) {
+                    fs::remove_all(entry.path(), ec);
+                }
+                fs::remove(root_, ec);
+            }
+        } else {
+            if (!root_.empty())
+                fs::remove_all(root_, ec);
+        }
     }
 
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
@@ -390,6 +416,7 @@ private:
     std::filesystem::path originalCwd_;
     std::string originalXdgState_;
     bool isolateStateActive_ = false;
+    bool externalDataDir_ = false;
     Options options_;
 };
 

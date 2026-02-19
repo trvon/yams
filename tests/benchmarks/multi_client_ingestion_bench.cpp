@@ -19,6 +19,11 @@
 //   YAMS_BENCH_DRAIN_TIMEOUT_S    - Seconds to wait for queue drain (default: 120)
 //   YAMS_BENCH_SCALING_MAX_CLIENTS - Max clients in scaling sweep (default: 32)
 //   YAMS_TUNING_PROFILE           - TuneAdvisor profile (Quiet/Balanced/Performance)
+//   YAMS_BENCH_DATA_DIR           - Existing YAMS data dir (for large-corpus bench)
+//   YAMS_BENCH_ENABLE_PLUGINS     - Enable plugin loading: 1/true/yes (default: off)
+//   YAMS_BENCH_PLUGIN_DIR         - Directory containing plugin .dylib/.so files
+//   YAMS_BENCH_TRUSTED_PLUGIN_PATHS - Colon-separated trusted plugin search paths
+//   YAMS_BENCH_REAL_MODEL_PROVIDER  - Use real ONNX model provider: 1/true/yes
 
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch_session.hpp>
@@ -75,6 +80,21 @@ struct BenchConfig {
     int scalingMaxClients{32};
     std::string tuningProfile;
 
+    // --- Storage / corpus overrides ---
+    // Point at an existing YAMS data directory (e.g. /Volumes/picaso/yams)
+    // When set, the daemon serves this corpus instead of creating an empty temp db.
+    std::optional<fs::path> dataDir;
+
+    // --- Plugin / embedding config ---
+    // Enable real plugin loading (ONNX embeddings, PDF extraction, etc.)
+    bool enablePlugins{false};
+    // Directory containing built plugin .dylib/.so files
+    std::optional<fs::path> pluginDir;
+    // Trusted plugin search paths (from plugins.trust)
+    std::vector<fs::path> trustedPluginPaths;
+    // Use real model provider instead of mock (requires ONNX runtime + models)
+    bool useRealModelProvider{false};
+
     static BenchConfig fromEnv() {
         BenchConfig cfg;
         if (auto* v = std::getenv("YAMS_BENCH_NUM_CLIENTS"))
@@ -96,6 +116,33 @@ struct BenchConfig {
         cfg.scalingMaxClients = std::max(cfg.scalingMaxClients, cfg.numClients * 2);
         if (auto* v = std::getenv("YAMS_TUNING_PROFILE"))
             cfg.tuningProfile = v;
+
+        // Storage path override: point at an existing corpus
+        if (auto* v = std::getenv("YAMS_BENCH_DATA_DIR"))
+            cfg.dataDir = fs::path(v);
+
+        // Plugin / embedding configuration
+        if (auto* v = std::getenv("YAMS_BENCH_ENABLE_PLUGINS")) {
+            std::string s(v);
+            cfg.enablePlugins = (s == "1" || s == "true" || s == "yes");
+        }
+        if (auto* v = std::getenv("YAMS_BENCH_PLUGIN_DIR"))
+            cfg.pluginDir = fs::path(v);
+        if (auto* v = std::getenv("YAMS_BENCH_TRUSTED_PLUGIN_PATHS")) {
+            // Colon-separated list of paths
+            std::string paths(v);
+            std::istringstream iss(paths);
+            std::string path;
+            while (std::getline(iss, path, ':')) {
+                if (!path.empty())
+                    cfg.trustedPluginPaths.push_back(fs::path(path));
+            }
+        }
+        if (auto* v = std::getenv("YAMS_BENCH_REAL_MODEL_PROVIDER")) {
+            std::string s(v);
+            cfg.useRealModelProvider = (s == "1" || s == "true" || s == "yes");
+        }
+
         return cfg;
     }
 };
@@ -424,6 +471,7 @@ void printPercentiles(const std::string& label, const PercentileStats& stats) {
 // - Disable model provider (we don't need embeddings for ingestion benchmarks)
 // - Use mock model provider as fallback
 // - No auto-loaded plugins (reduce startup variance)
+// Overloads accept a BenchConfig to enable plugins, real models, and custom data dirs.
 DaemonHarnessOptions benchHarnessOptions() {
     return DaemonHarnessOptions{
         .enableModelProvider = false,
@@ -431,6 +479,19 @@ DaemonHarnessOptions benchHarnessOptions() {
         .autoLoadPlugins = false,
         .enableAutoRepair = true,
     };
+}
+
+DaemonHarnessOptions benchHarnessOptions(const BenchConfig& cfg) {
+    DaemonHarnessOptions opts{
+        .enableModelProvider = cfg.enablePlugins || cfg.useRealModelProvider,
+        .useMockModelProvider = !cfg.useRealModelProvider,
+        .autoLoadPlugins = cfg.enablePlugins,
+        .enableAutoRepair = true,
+        .pluginDir = cfg.pluginDir,
+        .dataDir = cfg.dataDir,
+        .trustedPluginPaths = cfg.trustedPluginPaths,
+    };
+    return opts;
 }
 
 // Startup timeout: 30s to handle TSan/debug builds where init is ~5-10x slower
@@ -1143,6 +1204,869 @@ TEST_CASE("Multi-client ingestion: scaling curve", "[!benchmark][multi-client][s
         {"tuning_profile", baseCfg.tuningProfile},
     };
     emitJsonl(baseCfg.outputPath, record);
+}
+
+TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
+          "[!benchmark][multi-client][mixed-16]") {
+    // 16 clients performing list, search, status, and get simultaneously while
+    // background writers are ingesting. Measures per-operation-type latency and
+    // throughput under realistic concurrent access patterns.
+    auto cfg = BenchConfig::fromEnv();
+
+    constexpr int kTotalClients = 16;
+    constexpr int kWriterClients = 4;
+    constexpr int kSearchClients = 4;
+    constexpr int kListClients = 4;
+    constexpr int kStatusClients = 4;
+
+    // Each reader client runs for a fixed number of operations
+    constexpr int kOpsPerReader = 200;
+
+    DaemonHarness harness(benchHarnessOptions());
+    REQUIRE(harness.start(kStartTimeout));
+
+    // Pre-seed 100 docs so search/list have data from the start
+    std::vector<std::string> knownHashes;
+    {
+        ClientConfig warmCfg;
+        warmCfg.socketPath = harness.socketPath();
+        warmCfg.autoStart = false;
+        warmCfg.requestTimeout = 30s;
+        DaemonClient warmClient(warmCfg);
+
+        std::cout << "  Pre-seeding 100 warmup docs...\n";
+        for (int i = 0; i < 100; ++i) {
+            AddDocumentRequest req;
+            req.name = "mixed16_warmup_" + std::to_string(i) + ".md";
+            req.content = generateDocument(99, i, cfg.docSizeBytes);
+            req.tags = {"warmup", "bench"};
+            auto res = yams::cli::run_sync(warmClient.streamingAddDocument(req), 30s);
+            if (res && !res.value().hash.empty()) {
+                knownHashes.push_back(res.value().hash);
+            }
+        }
+        waitForDrain(warmClient, 60s);
+        std::this_thread::sleep_for(1s);
+        std::cout << "  Warmup complete (" << knownHashes.size() << " hashes)\n";
+    }
+
+    // Monitor client
+    ClientConfig monCfg;
+    monCfg.socketPath = harness.socketPath();
+    monCfg.autoStart = false;
+    monCfg.requestTimeout = 10s;
+    DaemonClient monitorClient(monCfg);
+
+    TimeSeriesSampler sampler;
+    sampler.start(monitorClient, 500ms);
+
+    // Per-thread latency collectors
+    std::mutex searchLatMutex, listLatMutex, statusLatMutex, getLatMutex, addLatMutex;
+    std::vector<int64_t> searchLatencies, listLatencies, statusLatencies, getLatencies,
+        addLatencies;
+
+    std::atomic<int> searchOps{0}, listOps{0}, statusOps{0}, getOps{0}, addOps{0};
+    std::atomic<int> searchFails{0}, listFails{0}, statusFails{0}, getFails{0}, addFails{0};
+
+    // Barrier: all threads start at the same instant
+    std::atomic<bool> go{false};
+
+    auto globalStart = std::chrono::steady_clock::now();
+    std::vector<std::thread> threads;
+    threads.reserve(kTotalClients);
+
+    // --- Writer threads (4): continuous ingestion ---
+    for (int w = 0; w < kWriterClients; ++w) {
+        threads.emplace_back([&, w]() {
+            ClientConfig ccfg;
+            ccfg.socketPath = harness.socketPath();
+            ccfg.autoStart = false;
+            ccfg.requestTimeout = 30s;
+            DaemonClient client(ccfg);
+            while (!go.load())
+                std::this_thread::yield();
+
+            for (int i = 0; i < cfg.docsPerClient; ++i) {
+                AddDocumentRequest req;
+                req.name = "mixed16_w" + std::to_string(w) + "_" + std::to_string(i) + ".md";
+                req.content = generateDocument(w, i, cfg.docSizeBytes);
+                req.tags = {"bench", "mixed16", "writer-" + std::to_string(w)};
+
+                auto t0 = std::chrono::steady_clock::now();
+                auto res = yams::cli::run_sync(client.streamingAddDocument(req), 30s);
+                auto t1 = std::chrono::steady_clock::now();
+                auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+                if (res) {
+                    addOps.fetch_add(1);
+                    std::lock_guard<std::mutex> lk(addLatMutex);
+                    addLatencies.push_back(latUs);
+                } else {
+                    addFails.fetch_add(1);
+                }
+            }
+        });
+    }
+
+    // --- Search threads (4): continuous search queries ---
+    for (int s = 0; s < kSearchClients; ++s) {
+        threads.emplace_back([&]() {
+            ClientConfig ccfg;
+            ccfg.socketPath = harness.socketPath();
+            ccfg.autoStart = false;
+            ccfg.requestTimeout = 10s;
+            DaemonClient client(ccfg);
+            while (!go.load())
+                std::this_thread::yield();
+
+            static const char* queries[] = {
+                "architecture performance tuning",
+                "ingestion pipeline extraction",
+                "resource governance memory pressure",
+                "thread pool concurrency limits",
+                "IPC transport protocol",
+            };
+
+            for (int i = 0; i < kOpsPerReader; ++i) {
+                SearchRequest req;
+                req.query = queries[i % 5];
+                req.limit = 10;
+
+                auto t0 = std::chrono::steady_clock::now();
+                auto res = yams::cli::run_sync(client.search(req), 10s);
+                auto t1 = std::chrono::steady_clock::now();
+                auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+                if (res) {
+                    searchOps.fetch_add(1);
+                    std::lock_guard<std::mutex> lk(searchLatMutex);
+                    searchLatencies.push_back(latUs);
+                } else {
+                    searchFails.fetch_add(1);
+                }
+            }
+        });
+    }
+
+    // --- List threads (4): continuous list queries with varying filters ---
+    for (int l = 0; l < kListClients; ++l) {
+        threads.emplace_back([&]() {
+            ClientConfig ccfg;
+            ccfg.socketPath = harness.socketPath();
+            ccfg.autoStart = false;
+            ccfg.requestTimeout = 10s;
+            DaemonClient client(ccfg);
+            while (!go.load())
+                std::this_thread::yield();
+
+            for (int i = 0; i < kOpsPerReader; ++i) {
+                ListRequest req;
+                req.limit = (i % 3 == 0) ? 5 : (i % 3 == 1) ? 20 : 50;
+                // Alternate between filtered and unfiltered
+                if (i % 4 == 0) {
+                    req.tags = {"warmup"};
+                }
+
+                auto t0 = std::chrono::steady_clock::now();
+                auto res = yams::cli::run_sync(client.list(req), 10s);
+                auto t1 = std::chrono::steady_clock::now();
+                auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+                if (res) {
+                    listOps.fetch_add(1);
+                    std::lock_guard<std::mutex> lk(listLatMutex);
+                    listLatencies.push_back(latUs);
+                } else {
+                    listFails.fetch_add(1);
+                }
+            }
+        });
+    }
+
+    // --- Status threads (4): continuous status + get queries ---
+    for (int t = 0; t < kStatusClients; ++t) {
+        threads.emplace_back([&, t]() {
+            ClientConfig ccfg;
+            ccfg.socketPath = harness.socketPath();
+            ccfg.autoStart = false;
+            ccfg.requestTimeout = 10s;
+            DaemonClient client(ccfg);
+            std::mt19937 rng(static_cast<unsigned>(t * 997 + 13));
+            while (!go.load())
+                std::this_thread::yield();
+
+            for (int i = 0; i < kOpsPerReader; ++i) {
+                if (i % 3 == 0) {
+                    // Status query
+                    auto t0 = std::chrono::steady_clock::now();
+                    auto res = yams::cli::run_sync(client.status(), 10s);
+                    auto t1 = std::chrono::steady_clock::now();
+                    auto latUs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+                    if (res) {
+                        statusOps.fetch_add(1);
+                        std::lock_guard<std::mutex> lk(statusLatMutex);
+                        statusLatencies.push_back(latUs);
+                    } else {
+                        statusFails.fetch_add(1);
+                    }
+                } else {
+                    // Get (metadata) by hash
+                    std::string hash;
+                    {
+                        if (!knownHashes.empty()) {
+                            std::uniform_int_distribution<std::size_t> dist(0,
+                                                                            knownHashes.size() - 1);
+                            hash = knownHashes[dist(rng)];
+                        }
+                    }
+                    if (hash.empty()) {
+                        statusOps.fetch_add(1); // count as no-op
+                        continue;
+                    }
+
+                    GetRequest req;
+                    req.hash = hash;
+                    req.metadataOnly = true;
+
+                    auto t0 = std::chrono::steady_clock::now();
+                    auto res = yams::cli::run_sync(client.get(req), 10s);
+                    auto t1 = std::chrono::steady_clock::now();
+                    auto latUs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+                    if (res) {
+                        getOps.fetch_add(1);
+                        std::lock_guard<std::mutex> lk(getLatMutex);
+                        getLatencies.push_back(latUs);
+                    } else {
+                        getFails.fetch_add(1);
+                    }
+                }
+            }
+        });
+    }
+
+    // Release all threads simultaneously
+    go.store(true);
+
+    for (auto& t : threads)
+        t.join();
+
+    sampler.stop();
+
+    auto globalEnd = std::chrono::steady_clock::now();
+    double globalElapsed = std::chrono::duration<double>(globalEnd - globalStart).count();
+
+    // Drain
+    bool drained = waitForDrain(monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs));
+    auto finalSnap = DaemonSnapshot::capture(monitorClient);
+
+    // Compute stats
+    auto searchStats = PercentileStats::compute(searchLatencies);
+    auto listStats = PercentileStats::compute(listLatencies);
+    auto statusStats = PercentileStats::compute(statusLatencies);
+    auto getStats = PercentileStats::compute(getLatencies);
+    auto addStats = PercentileStats::compute(addLatencies);
+
+    int totalOps =
+        searchOps.load() + listOps.load() + statusOps.load() + getOps.load() + addOps.load();
+    int totalFails = searchFails.load() + listFails.load() + statusFails.load() + getFails.load() +
+                     addFails.load();
+    double opsPerSec = static_cast<double>(totalOps) / globalElapsed;
+
+    // Print summary
+    std::cout << "\n=== 16-Client Concurrent Mixed Ops ===\n";
+    std::cout << "  Layout: " << kWriterClients << " writers + " << kSearchClients << " searchers"
+              << " + " << kListClients << " listers + " << kStatusClients << " status/get\n";
+    std::cout << "  Wall time: " << std::fixed << std::setprecision(2) << globalElapsed << "s\n";
+    std::cout << "  Total ops: " << totalOps << " (" << std::setprecision(0) << opsPerSec
+              << " ops/s)"
+              << "  Failures: " << totalFails << "\n\n";
+
+    std::cout << "  Op breakdown:\n";
+    std::cout << "    Add:    " << addOps.load() << " ok, " << addFails.load() << " fail\n";
+    std::cout << "    Search: " << searchOps.load() << " ok, " << searchFails.load() << " fail\n";
+    std::cout << "    List:   " << listOps.load() << " ok, " << listFails.load() << " fail\n";
+    std::cout << "    Status: " << statusOps.load() << " ok, " << statusFails.load() << " fail\n";
+    std::cout << "    Get:    " << getOps.load() << " ok, " << getFails.load() << " fail\n\n";
+
+    printPercentiles("Add latency   ", addStats);
+    printPercentiles("Search latency", searchStats);
+    printPercentiles("List latency  ", listStats);
+    printPercentiles("Status latency", statusStats);
+    printPercentiles("Get latency   ", getStats);
+
+    std::cout << "\n  Queue drained: " << (drained ? "yes" : "NO") << "\n";
+    std::cout << "  Final docs_total: " << finalSnap.documentsTotal << "\n";
+    std::cout << "  Final memory: " << finalSnap.memoryUsageMb << " MB\n\n";
+
+    // Key assertions: all op types must make progress
+    CHECK(addOps.load() > 0);
+    CHECK(searchOps.load() > 0);
+    CHECK(listOps.load() > 0);
+    CHECK(statusOps.load() > 0);
+    CHECK(getOps.load() > 0);
+    CHECK(drained);
+
+    // Emit JSONL
+    json timeSeries = json::array();
+    for (auto& s : sampler.getSamples()) {
+        timeSeries.push_back(json{{"elapsed_ms", s.elapsedMs}, {"snapshot", s.snap.toJson()}});
+    }
+
+    json record{
+        {"timestamp", isoTimestamp()},
+        {"test", "16_client_concurrent_mixed_ops"},
+        {"layout", json{{"writers", kWriterClients},
+                        {"searchers", kSearchClients},
+                        {"listers", kListClients},
+                        {"status_get", kStatusClients}}},
+        {"ops_per_reader", kOpsPerReader},
+        {"docs_per_writer", cfg.docsPerClient},
+        {"doc_size_bytes", cfg.docSizeBytes},
+        {"total_ops", totalOps},
+        {"total_failures", totalFails},
+        {"elapsed_seconds", globalElapsed},
+        {"ops_per_sec", opsPerSec},
+        {"add",
+         json{{"ops", addOps.load()}, {"fails", addFails.load()}, {"latency", addStats.toJson()}}},
+        {"search", json{{"ops", searchOps.load()},
+                        {"fails", searchFails.load()},
+                        {"latency", searchStats.toJson()}}},
+        {"list", json{{"ops", listOps.load()},
+                      {"fails", listFails.load()},
+                      {"latency", listStats.toJson()}}},
+        {"status", json{{"ops", statusOps.load()},
+                        {"fails", statusFails.load()},
+                        {"latency", statusStats.toJson()}}},
+        {"get",
+         json{{"ops", getOps.load()}, {"fails", getFails.load()}, {"latency", getStats.toJson()}}},
+        {"daemon_snapshot_final", finalSnap.toJson()},
+        {"time_series", timeSeries},
+        {"tuning_profile", cfg.tuningProfile},
+        {"drained", drained},
+    };
+    emitJsonl(cfg.outputPath, record);
+}
+
+// =============================================================================
+// EXISTING CORPUS BENCHMARK
+// =============================================================================
+
+TEST_CASE("Multi-client ingestion: large corpus reads",
+          "[!benchmark][multi-client][large-corpus]") {
+    // Benchmark against an existing YAMS corpus (e.g. /Volumes/picaso/yams with 48k+ docs).
+    // Requires YAMS_BENCH_DATA_DIR to point at a valid YAMS data directory.
+    // This test does NOT ingest — it hammers search/list/get/status against the real corpus
+    // to measure read-path performance with realistic data volumes and index sizes.
+    auto cfg = BenchConfig::fromEnv();
+    if (!cfg.dataDir) {
+        SKIP("Set YAMS_BENCH_DATA_DIR to an existing YAMS corpus to run this benchmark");
+    }
+
+    std::cout << "\n=== Large Corpus Read Benchmark ===\n";
+    std::cout << "  Data dir: " << cfg.dataDir->string() << "\n";
+
+    constexpr int kSearchClients = 4;
+    constexpr int kListClients = 4;
+    constexpr int kStatusGetClients = 4;
+    constexpr int kTotalClients = kSearchClients + kListClients + kStatusGetClients;
+    constexpr int kOpsPerClient = 500;
+
+    auto opts = benchHarnessOptions(cfg);
+    DaemonHarness harness(opts);
+    // Large corpus needs more startup time (loading indexes, etc.)
+    REQUIRE(harness.start(std::chrono::seconds(120)));
+
+    // Allow async init to complete (connection pools, indexes)
+    std::this_thread::sleep_for(3s);
+
+    // Discover some hashes from the corpus for get operations
+    ClientConfig discoverCfg;
+    discoverCfg.socketPath = harness.socketPath();
+    discoverCfg.autoStart = false;
+    discoverCfg.requestTimeout = 30s;
+    DaemonClient discoverClient(discoverCfg);
+
+    std::vector<std::string> knownHashes;
+    {
+        ListRequest listReq;
+        listReq.limit = 200;
+        auto listRes = yams::cli::run_sync(discoverClient.list(listReq), 30s);
+        if (listRes) {
+            for (auto& item : listRes.value().items) {
+                if (!item.hash.empty())
+                    knownHashes.push_back(item.hash);
+            }
+        }
+    }
+
+    // Get initial doc count
+    auto initSnap = DaemonSnapshot::capture(discoverClient);
+    std::cout << "  Corpus docs: " << initSnap.documentsTotal << "\n";
+    std::cout << "  Known hashes for get: " << knownHashes.size() << "\n";
+
+    if (knownHashes.empty()) {
+        WARN("Corpus appears empty — benchmark results may be unreliable");
+    }
+
+    // Monitor
+    ClientConfig monCfg;
+    monCfg.socketPath = harness.socketPath();
+    monCfg.autoStart = false;
+    monCfg.requestTimeout = 10s;
+    DaemonClient monitorClient(monCfg);
+
+    TimeSeriesSampler sampler;
+    sampler.start(monitorClient, 500ms);
+
+    // Latency collectors
+    std::mutex searchLatMutex, listLatMutex, statusLatMutex, getLatMutex;
+    std::vector<int64_t> searchLatencies, listLatencies, statusLatencies, getLatencies;
+    std::atomic<int> searchOps{0}, listOps{0}, statusOps{0}, getOps{0};
+    std::atomic<int> searchFails{0}, listFails{0}, statusFails{0}, getFails{0};
+
+    std::atomic<bool> go{false};
+    auto globalStart = std::chrono::steady_clock::now();
+    std::vector<std::thread> threads;
+    threads.reserve(kTotalClients);
+
+    // Search threads: varied queries against the real corpus
+    static const char* corpusQueries[] = {
+        "architecture design patterns", "security vulnerability analysis",
+        "memory management allocation", "network protocol implementation",
+        "database query optimization",  "concurrent thread synchronization",
+        "error handling recovery",      "configuration file parsing",
+        "build system compilation",     "testing framework assertions",
+    };
+
+    for (int s = 0; s < kSearchClients; ++s) {
+        threads.emplace_back([&]() {
+            ClientConfig ccfg;
+            ccfg.socketPath = harness.socketPath();
+            ccfg.autoStart = false;
+            ccfg.requestTimeout = 30s;
+            DaemonClient client(ccfg);
+            while (!go.load())
+                std::this_thread::yield();
+
+            for (int i = 0; i < kOpsPerClient; ++i) {
+                SearchRequest req;
+                req.query = corpusQueries[i % 10];
+                req.limit = (i % 3 == 0) ? 5 : (i % 3 == 1) ? 10 : 25;
+
+                auto t0 = std::chrono::steady_clock::now();
+                auto res = yams::cli::run_sync(client.search(req), 30s);
+                auto t1 = std::chrono::steady_clock::now();
+                auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+                if (res) {
+                    searchOps.fetch_add(1);
+                    std::lock_guard<std::mutex> lk(searchLatMutex);
+                    searchLatencies.push_back(latUs);
+                } else {
+                    searchFails.fetch_add(1);
+                }
+            }
+        });
+    }
+
+    // List threads: paginated listing with tag/extension filters
+    for (int l = 0; l < kListClients; ++l) {
+        threads.emplace_back([&]() {
+            ClientConfig ccfg;
+            ccfg.socketPath = harness.socketPath();
+            ccfg.autoStart = false;
+            ccfg.requestTimeout = 30s;
+            DaemonClient client(ccfg);
+            while (!go.load())
+                std::this_thread::yield();
+
+            for (int i = 0; i < kOpsPerClient; ++i) {
+                ListRequest req;
+                req.limit = (i % 4 == 0) ? 10 : (i % 4 == 1) ? 25 : (i % 4 == 2) ? 50 : 100;
+
+                auto t0 = std::chrono::steady_clock::now();
+                auto res = yams::cli::run_sync(client.list(req), 30s);
+                auto t1 = std::chrono::steady_clock::now();
+                auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+                if (res) {
+                    listOps.fetch_add(1);
+                    std::lock_guard<std::mutex> lk(listLatMutex);
+                    listLatencies.push_back(latUs);
+                } else {
+                    listFails.fetch_add(1);
+                }
+            }
+        });
+    }
+
+    // Status/Get threads: interleaved status checks and hash lookups
+    for (int t = 0; t < kStatusGetClients; ++t) {
+        threads.emplace_back([&, t]() {
+            ClientConfig ccfg;
+            ccfg.socketPath = harness.socketPath();
+            ccfg.autoStart = false;
+            ccfg.requestTimeout = 30s;
+            DaemonClient client(ccfg);
+            std::mt19937 rng(static_cast<unsigned>(t * 997 + 17));
+            while (!go.load())
+                std::this_thread::yield();
+
+            for (int i = 0; i < kOpsPerClient; ++i) {
+                if (i % 4 == 0) {
+                    // Status
+                    auto t0 = std::chrono::steady_clock::now();
+                    auto res = yams::cli::run_sync(client.status(), 10s);
+                    auto t1 = std::chrono::steady_clock::now();
+                    auto latUs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+                    if (res) {
+                        statusOps.fetch_add(1);
+                        std::lock_guard<std::mutex> lk(statusLatMutex);
+                        statusLatencies.push_back(latUs);
+                    } else {
+                        statusFails.fetch_add(1);
+                    }
+                } else {
+                    // Get by hash
+                    if (knownHashes.empty()) {
+                        statusOps.fetch_add(1);
+                        continue;
+                    }
+                    std::uniform_int_distribution<std::size_t> dist(0, knownHashes.size() - 1);
+                    GetRequest req;
+                    req.hash = knownHashes[dist(rng)];
+                    req.metadataOnly = true;
+
+                    auto t0 = std::chrono::steady_clock::now();
+                    auto res = yams::cli::run_sync(client.get(req), 30s);
+                    auto t1 = std::chrono::steady_clock::now();
+                    auto latUs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+                    if (res) {
+                        getOps.fetch_add(1);
+                        std::lock_guard<std::mutex> lk(getLatMutex);
+                        getLatencies.push_back(latUs);
+                    } else {
+                        getFails.fetch_add(1);
+                    }
+                }
+            }
+        });
+    }
+
+    go.store(true);
+    for (auto& t : threads)
+        t.join();
+    sampler.stop();
+
+    auto globalEnd = std::chrono::steady_clock::now();
+    double globalElapsed = std::chrono::duration<double>(globalEnd - globalStart).count();
+
+    auto finalSnap = DaemonSnapshot::capture(monitorClient);
+
+    auto searchStats = PercentileStats::compute(searchLatencies);
+    auto listStats = PercentileStats::compute(listLatencies);
+    auto statusStats = PercentileStats::compute(statusLatencies);
+    auto getStats = PercentileStats::compute(getLatencies);
+
+    int totalOps = searchOps.load() + listOps.load() + statusOps.load() + getOps.load();
+    int totalFails = searchFails.load() + listFails.load() + statusFails.load() + getFails.load();
+    double opsPerSec = totalOps > 0 ? totalOps / globalElapsed : 0.0;
+
+    std::cout << "\n=== Large Corpus Results ===\n";
+    std::cout << "  Corpus: " << finalSnap.documentsTotal << " docs\n";
+    std::cout << "  Layout: " << kSearchClients << " searchers + " << kListClients << " listers"
+              << " + " << kStatusGetClients << " status/get\n";
+    std::cout << "  Wall time: " << std::fixed << std::setprecision(2) << globalElapsed << "s\n";
+    std::cout << "  Total ops: " << totalOps << " (" << std::setprecision(0) << opsPerSec
+              << " ops/s)"
+              << "  Failures: " << totalFails << "\n\n";
+
+    std::cout << "  Op breakdown:\n";
+    std::cout << "    Search: " << searchOps.load() << " ok, " << searchFails.load() << " fail\n";
+    std::cout << "    List:   " << listOps.load() << " ok, " << listFails.load() << " fail\n";
+    std::cout << "    Status: " << statusOps.load() << " ok, " << statusFails.load() << " fail\n";
+    std::cout << "    Get:    " << getOps.load() << " ok, " << getFails.load() << " fail\n\n";
+
+    printPercentiles("Search latency", searchStats);
+    printPercentiles("List latency  ", listStats);
+    printPercentiles("Status latency", statusStats);
+    printPercentiles("Get latency   ", getStats);
+
+    std::cout << "\n  Final memory: " << finalSnap.memoryUsageMb << " MB\n\n";
+
+    CHECK(totalOps > 0);
+    CHECK(totalFails == 0);
+
+    // Emit JSONL
+    json timeSeries = json::array();
+    for (auto& s : sampler.getSamples()) {
+        timeSeries.push_back(json{{"elapsed_ms", s.elapsedMs}, {"snapshot", s.snap.toJson()}});
+    }
+
+    json record{
+        {"timestamp", isoTimestamp()},
+        {"test", "large_corpus_reads"},
+        {"data_dir", cfg.dataDir->string()},
+        {"corpus_docs", finalSnap.documentsTotal},
+        {"ops_per_client", kOpsPerClient},
+        {"total_ops", totalOps},
+        {"total_failures", totalFails},
+        {"elapsed_seconds", globalElapsed},
+        {"ops_per_sec", opsPerSec},
+        {"search", json{{"ops", searchOps.load()},
+                        {"fails", searchFails.load()},
+                        {"latency", searchStats.toJson()}}},
+        {"list", json{{"ops", listOps.load()},
+                      {"fails", listFails.load()},
+                      {"latency", listStats.toJson()}}},
+        {"status", json{{"ops", statusOps.load()},
+                        {"fails", statusFails.load()},
+                        {"latency", statusStats.toJson()}}},
+        {"get",
+         json{{"ops", getOps.load()}, {"fails", getFails.load()}, {"latency", getStats.toJson()}}},
+        {"daemon_snapshot_final", finalSnap.toJson()},
+        {"time_series", timeSeries},
+        {"tuning_profile", cfg.tuningProfile},
+    };
+    emitJsonl(cfg.outputPath, record);
+}
+
+// =============================================================================
+// EMBEDDINGS-ENABLED BENCHMARK
+// =============================================================================
+
+TEST_CASE("Multi-client ingestion: embeddings pipeline", "[!benchmark][multi-client][embeddings]") {
+    // Full ingestion benchmark with real plugins loaded: ONNX embeddings,
+    // symbol extraction, entity recognition. Measures the complete pipeline
+    // including embedding generation which is the most expensive stage.
+    //
+    // Requires either:
+    //   YAMS_BENCH_ENABLE_PLUGINS=1 with plugins and models available, or
+    //   YAMS_BENCH_DATA_DIR pointing to a corpus (can combine both for
+    //   ingest-into-existing-corpus testing).
+    auto cfg = BenchConfig::fromEnv();
+    if (!cfg.enablePlugins) {
+        SKIP("Set YAMS_BENCH_ENABLE_PLUGINS=1 to run the embeddings benchmark");
+    }
+
+    std::cout << "\n=== Embeddings Pipeline Benchmark ===\n";
+    std::cout << "  Plugins: enabled\n";
+    std::cout << "  Real model provider: " << (cfg.useRealModelProvider ? "yes" : "mock") << "\n";
+    if (cfg.pluginDir)
+        std::cout << "  Plugin dir: " << cfg.pluginDir->string() << "\n";
+    if (cfg.dataDir)
+        std::cout << "  Data dir: " << cfg.dataDir->string() << "\n";
+
+    constexpr int kWriterClients = 4;
+    constexpr int kSearchClients = 4;
+    constexpr int kTotalClients = kWriterClients + kSearchClients;
+
+    auto opts = benchHarnessOptions(cfg);
+    DaemonHarness harness(opts);
+    // Plugin loading + model warmup needs extra time
+    REQUIRE(harness.start(std::chrono::seconds(120)));
+
+    // Allow async init to complete (plugin loading, model warmup, connection pools)
+    std::this_thread::sleep_for(5s);
+
+    // Monitor
+    ClientConfig monCfg;
+    monCfg.socketPath = harness.socketPath();
+    monCfg.autoStart = false;
+    monCfg.requestTimeout = 30s;
+    DaemonClient monitorClient(monCfg);
+
+    auto initSnap = DaemonSnapshot::capture(monitorClient);
+    std::cout << "  Initial docs: " << initSnap.documentsTotal << "\n";
+    std::cout << "  Docs per writer: " << cfg.docsPerClient << "\n";
+
+    TimeSeriesSampler sampler;
+    sampler.start(monitorClient, 1s);
+
+    // Latency collectors
+    std::mutex addLatMutex, searchLatMutex;
+    std::vector<int64_t> addLatencies, searchLatencies;
+    std::atomic<int> addOps{0}, searchOps{0};
+    std::atomic<int> addFails{0}, searchFails{0};
+
+    // Collect hashes for search/get during ingest
+    std::mutex hashMutex;
+    std::vector<std::string> ingestedHashes;
+
+    std::atomic<bool> go{false};
+    std::atomic<bool> writersFinished{false};
+    auto globalStart = std::chrono::steady_clock::now();
+    std::vector<std::thread> threads;
+    threads.reserve(kTotalClients);
+
+    // Writer threads: ingest with embeddings pipeline active
+    for (int w = 0; w < kWriterClients; ++w) {
+        threads.emplace_back([&, w]() {
+            ClientConfig ccfg;
+            ccfg.socketPath = harness.socketPath();
+            ccfg.autoStart = false;
+            ccfg.requestTimeout = 60s; // embedding can be slow
+            DaemonClient client(ccfg);
+            while (!go.load())
+                std::this_thread::yield();
+
+            for (int i = 0; i < cfg.docsPerClient; ++i) {
+                AddDocumentRequest req;
+                req.name = "embed_w" + std::to_string(w) + "_" + std::to_string(i) + ".md";
+                req.content = generateDocument(w, i, cfg.docSizeBytes);
+                req.tags = {"bench", "embeddings", "writer-" + std::to_string(w)};
+
+                auto t0 = std::chrono::steady_clock::now();
+                auto res = yams::cli::run_sync(client.streamingAddDocument(req), 60s);
+                auto t1 = std::chrono::steady_clock::now();
+                auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+                if (res && !res.value().hash.empty()) {
+                    addOps.fetch_add(1);
+                    {
+                        std::lock_guard<std::mutex> lk(addLatMutex);
+                        addLatencies.push_back(latUs);
+                    }
+                    {
+                        std::lock_guard<std::mutex> lk(hashMutex);
+                        ingestedHashes.push_back(res.value().hash);
+                    }
+                } else {
+                    addFails.fetch_add(1);
+                }
+            }
+        });
+    }
+
+    // Search threads: query while ingest + embeddings are running
+    for (int s = 0; s < kSearchClients; ++s) {
+        threads.emplace_back([&]() {
+            ClientConfig ccfg;
+            ccfg.socketPath = harness.socketPath();
+            ccfg.autoStart = false;
+            ccfg.requestTimeout = 30s;
+            DaemonClient client(ccfg);
+            while (!go.load())
+                std::this_thread::yield();
+
+            static const char* queries[] = {
+                "architecture design",       "performance tuning parameters",
+                "ingestion pipeline stages", "resource governance pressure",
+                "IPC transport protocol",
+            };
+
+            // Keep searching until writers finish
+            int i = 0;
+            while (!writersFinished.load()) {
+                SearchRequest req;
+                req.query = queries[i % 5];
+                req.limit = 10;
+
+                auto t0 = std::chrono::steady_clock::now();
+                auto res = yams::cli::run_sync(client.search(req), 30s);
+                auto t1 = std::chrono::steady_clock::now();
+                auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+                if (res) {
+                    searchOps.fetch_add(1);
+                    std::lock_guard<std::mutex> lk(searchLatMutex);
+                    searchLatencies.push_back(latUs);
+                } else {
+                    searchFails.fetch_add(1);
+                }
+                ++i;
+            }
+        });
+    }
+
+    go.store(true);
+
+    // Wait for writers, then signal searchers to stop
+    for (int w = 0; w < kWriterClients; ++w)
+        threads[w].join();
+    writersFinished.store(true);
+
+    // Join searchers
+    for (int s = kWriterClients; s < kTotalClients; ++s)
+        threads[s].join();
+
+    sampler.stop();
+    auto globalEnd = std::chrono::steady_clock::now();
+    double globalElapsed = std::chrono::duration<double>(globalEnd - globalStart).count();
+
+    // Wait for embeddings pipeline to drain
+    bool drained =
+        waitForDrain(monitorClient, std::chrono::seconds(std::max(cfg.drainTimeoutSecs, 300)));
+    auto finalSnap = DaemonSnapshot::capture(monitorClient);
+
+    auto addStats = PercentileStats::compute(addLatencies);
+    auto searchStats = PercentileStats::compute(searchLatencies);
+
+    int totalOps = addOps.load() + searchOps.load();
+    int totalFails = addFails.load() + searchFails.load();
+    double addThroughput = addOps.load() > 0 ? addOps.load() / globalElapsed : 0.0;
+    double searchThroughput = searchOps.load() > 0 ? searchOps.load() / globalElapsed : 0.0;
+
+    std::cout << "\n=== Embeddings Pipeline Results ===\n";
+    std::cout << "  Wall time: " << std::fixed << std::setprecision(2) << globalElapsed << "s\n";
+    std::cout << "  Total ops: " << totalOps << "  Failures: " << totalFails << "\n\n";
+
+    std::cout << "  Ingest:\n";
+    std::cout << "    Added: " << addOps.load() << " (" << std::setprecision(1) << addThroughput
+              << " docs/s)  Fails: " << addFails.load() << "\n";
+    printPercentiles("    Add latency   ", addStats);
+
+    std::cout << "\n  Search (concurrent with ingest):\n";
+    std::cout << "    Queries: " << searchOps.load() << " (" << std::setprecision(1)
+              << searchThroughput << " q/s)  Fails: " << searchFails.load() << "\n";
+    printPercentiles("    Search latency", searchStats);
+
+    std::cout << "\n  Pipeline:\n";
+    std::cout << "    Queue drained: " << (drained ? "yes" : "NO") << "\n";
+    std::cout << "    Final docs_total: " << finalSnap.documentsTotal << "\n";
+    std::cout << "    Final memory: " << finalSnap.memoryUsageMb << " MB\n\n";
+
+    CHECK(addOps.load() > 0);
+    CHECK(drained);
+
+    // Emit JSONL
+    json timeSeries = json::array();
+    for (auto& s : sampler.getSamples()) {
+        timeSeries.push_back(json{{"elapsed_ms", s.elapsedMs}, {"snapshot", s.snap.toJson()}});
+    }
+
+    json record{
+        {"timestamp", isoTimestamp()},
+        {"test", "embeddings_pipeline"},
+        {"plugins_enabled", cfg.enablePlugins},
+        {"real_model_provider", cfg.useRealModelProvider},
+        {"data_dir", cfg.dataDir ? cfg.dataDir->string() : ""},
+        {"plugin_dir", cfg.pluginDir ? cfg.pluginDir->string() : ""},
+        {"writers", kWriterClients},
+        {"searchers", kSearchClients},
+        {"docs_per_writer", cfg.docsPerClient},
+        {"doc_size_bytes", cfg.docSizeBytes},
+        {"add", json{{"ops", addOps.load()},
+                     {"fails", addFails.load()},
+                     {"throughput_per_sec", addThroughput},
+                     {"latency", addStats.toJson()}}},
+        {"search", json{{"ops", searchOps.load()},
+                        {"fails", searchFails.load()},
+                        {"throughput_per_sec", searchThroughput},
+                        {"latency", searchStats.toJson()}}},
+        {"elapsed_seconds", globalElapsed},
+        {"drained", drained},
+        {"daemon_snapshot_final", finalSnap.toJson()},
+        {"time_series", timeSeries},
+        {"tuning_profile", cfg.tuningProfile},
+    };
+    emitJsonl(cfg.outputPath, record);
 }
 
 TEST_CASE("Multi-client ingestion: connection contention",

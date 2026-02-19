@@ -837,6 +837,14 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.postSymbolLimit = TuneAdvisor::postSymbolConcurrent();
                 out.postEntityLimit = TuneAdvisor::postEntityConcurrent();
                 out.postEmbedLimit = TuneAdvisor::postEmbedConcurrent();
+                // Combined enrich (symbol+entity+title)
+                out.postEnrichLimit = TuneAdvisor::postSymbolConcurrent() +
+                                      TuneAdvisor::postEntityConcurrent() +
+                                      TuneAdvisor::postTitleConcurrent();
+                out.enrichInflight =
+                    pq->symbolInFlight() + pq->entityInFlight() + pq->titleInFlight();
+                out.enrichQueueDepth =
+                    pq->symbolQueueDepth() + pq->entityQueueDepth() + pq->titleQueueDepth();
 
                 // Gradient limiter per-stage metrics
                 out.gradientLimitersEnabled = TuneAdvisor::enableGradientLimiters();

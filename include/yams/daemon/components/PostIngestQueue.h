@@ -261,12 +261,12 @@ public:
     static std::size_t maxTitleConcurrent();
 
     // Gradient-based adaptive limiter accessors (for TuningManager)
-    GradientLimiter* extractionLimiter() const { return limiters_[0].get(); }
-    GradientLimiter* kgLimiter() const { return limiters_[1].get(); }
-    GradientLimiter* symbolLimiter() const { return limiters_[2].get(); }
-    GradientLimiter* entityLimiter() const { return limiters_[3].get(); }
-    GradientLimiter* titleLimiter() const { return limiters_[4].get(); }
-    GradientLimiter* embedLimiter() const { return limiters_[5].get(); }
+    GradientLimiter* extractionLimiter() const;
+    GradientLimiter* kgLimiter() const;
+    GradientLimiter* symbolLimiter() const;
+    GradientLimiter* entityLimiter() const;
+    GradientLimiter* titleLimiter() const;
+    GradientLimiter* embedLimiter() const;
 
     void setCapacity(std::size_t cap) {
         if (cap > 0) {
@@ -468,6 +468,7 @@ private:
     // Gradient-based adaptive concurrency limiters (Netflix Gradient2 algorithm)
     // Index 0-4 = stages (Extraction..Title), index 5 = Embed
     std::array<std::unique_ptr<GradientLimiter>, kLimiterCount> limiters_;
+    mutable std::mutex limiterMutex_;
 
     // Job tracking for latency measurement
     struct ActiveJob {

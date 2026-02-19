@@ -103,9 +103,6 @@ public:
     // IComponent interface
     const char* getName() const override { return "ServiceManager"; }
 
-    /// Compute ETA remaining seconds from expected duration and progress percentage.
-    /// Uses round-up division to avoid integer truncation on small values.
-    /// Extracted as a static helper for testability.
     static int computeEtaRemaining(int expectedSeconds, int progressPercent) {
         if (expectedSeconds <= 0)
             return 0;
@@ -113,8 +110,6 @@ public:
         return std::max(0, expectedSeconds - completed);
     }
 
-    /// Synchronous initialization - validates config, creates directories, prepares resources.
-    /// Does NOT start async initialization - call startAsyncInit() after main loop is running.
     Result<void> initialize() override;
 
     void startAsyncInit(std::promise<void>* barrierPromise = nullptr,
@@ -122,7 +117,6 @@ public:
 
     void shutdown() override;
 
-    /// Reset FSM state for daemon restart (call before next start cycle)
     void prepareForRestart() {
         serviceFsm_.reset();
         asyncInitStopSource_ = yams::compat::stop_source{};
@@ -131,8 +125,6 @@ public:
     // Start background task coroutines (must be called after shared_ptr construction)
     void startBackgroundTasks();
 
-    // Service Accessors
-    // Use atomic_load for thread-safe read of shared_ptr (written by async init coroutine)
     std::shared_ptr<api::IContentStore> getContentStore() const {
         return std::atomic_load_explicit(&contentStore_, std::memory_order_acquire);
     }
@@ -149,7 +141,6 @@ public:
     std::shared_ptr<yams::search::SearchEngine> getSearchEngineSnapshot() const;
     std::string getEmbeddingModelName() const { return embeddingModelName_; }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
-        // PBI-088: Delegate to VectorSystemManager if available
         if (vectorSystemManager_) {
             auto db = vectorSystemManager_->getVectorDatabase();
             if (db)
@@ -173,9 +164,11 @@ public:
     };
     SearchLoadMetrics getSearchLoadMetrics() const;
     std::shared_ptr<metadata::ConnectionPool> getWriteConnectionPool() const {
+        std::lock_guard<std::mutex> lk(poolMutex_);
         return connectionPool_;
     }
     std::shared_ptr<metadata::ConnectionPool> getReadConnectionPool() const {
+        std::lock_guard<std::mutex> lk(poolMutex_);
         return readConnectionPool_;
     }
     void onSearchRequestQueued() { searchQueued_.fetch_add(1, std::memory_order_relaxed); }
@@ -268,7 +261,6 @@ public:
     }
     void enqueuePostIngest(const std::string& hash, const std::string& mime);
     void enqueuePostIngestBatch(const std::vector<std::string>& hashes, const std::string& mime);
-    // Phase 2.4: Delegate to SearchEngineManager
     SearchEngineSnapshot getSearchEngineFsmSnapshot() const {
         return searchEngineManager_.getSnapshot();
     }
@@ -276,7 +268,6 @@ public:
         return searchEngineManager_.getCachedEngine();
     }
 
-    // Plugin status snapshot API (PBI-046: non-blocking status)
     PluginStatusSnapshot getPluginStatusSnapshot() const;
     void setCachedModelProviderModelCount(std::uint32_t count) {
         cachedModelProviderModelCount_.store(count, std::memory_order_relaxed);
@@ -284,7 +275,6 @@ public:
     void refreshPluginStatusSnapshot();
     boost::asio::any_io_executor getWorkerExecutor() const;
     std::function<void(bool)> getWorkerJobSignal();
-    // Best-effort queue depth estimation for backpressure/telemetry
     std::size_t getWorkerQueueDepth() const;
 
     // Tuning configuration (no envs): getter/setter with live application where applicable.
@@ -317,7 +307,6 @@ public:
 
     // Knowledge Graph Store (PBI-059)
     std::shared_ptr<metadata::KnowledgeGraphStore> getKgStore() const {
-        // PBI-088: Delegate to DatabaseManager if available
         if (databaseManager_) {
             auto store = databaseManager_->getKgStore();
             if (store)
@@ -343,9 +332,6 @@ public:
         return repairManager_;
     }
 
-    // RepairService lifecycle (replaces RepairCoordinator)
-    // Note: accessed from multiple threads (daemon loop, tuning tick, request handlers).
-    // Use a shared_ptr snapshot to avoid data races and lifetime issues.
     std::shared_ptr<RepairService> getRepairServiceShared() const {
         return std::atomic_load_explicit(&repairService_, std::memory_order_acquire);
     }
@@ -374,11 +360,8 @@ public:
     // Stop source for cancelling async initialization coroutine during shutdown
     yams::compat::stop_source asyncInitStopSource_;
 
-    // ABI plugin loader access
     AbiPluginLoader* getAbiPluginLoader() const { return abiPluginLoader_.get(); }
-    // Plugin host (C‑ABI)
     AbiPluginHost* getAbiPluginHost() const { return abiHost_.get(); }
-    // Plugin host (external Python/JS plugins) - delegates to PluginManager
     ExternalPluginHost* getExternalPluginHost() const {
         return pluginManager_ ? pluginManager_->getExternalPluginHost() : nullptr;
     }
@@ -425,14 +408,12 @@ public:
     }
 
     void cancelServiceManagerWait() { serviceFsm_.cancelWait(); }
-    // PBI-088: Delegate to PluginManager FSM when available (it owns the provider lifecycle)
     ProviderSnapshot getEmbeddingProviderFsmSnapshot() const {
         if (pluginManager_) {
             return pluginManager_->getEmbeddingProviderFsmSnapshot();
         }
         return embeddingFsm_.snapshot();
     }
-    // PBI-088: Delegate to PluginManager FSM (it owns the plugin host lifecycle)
     PluginHostSnapshot getPluginHostFsmSnapshot() const {
         if (pluginManager_) {
             return pluginManager_->getPluginHostFsmSnapshot();
@@ -443,33 +424,20 @@ public:
 
     // Expose resolved daemon configuration for components that need paths
     const DaemonConfig& getConfig() const { return config_; }
-    // Resolved data directory used for storage (may derive from env/config)
     const std::filesystem::path& getResolvedDataDir() const { return resolvedDataDir_; }
-
-    // Persist trusted plugin path updates back to config.toml when available.
     void persistTrustedPluginPath(const std::filesystem::path& path, bool remove) const;
 
-    // Try to adopt a model provider from loaded plugin hosts at runtime.
-    // If preferredName is non-empty, attempts that plugin first.
-    // Returns true on success.
     Result<bool> adoptModelProviderFromHosts(const std::string& preferredName = "");
     Result<size_t> adoptContentExtractorsFromHosts();
     Result<size_t> adoptSymbolExtractorsFromHosts();
     Result<size_t> adoptEntityExtractorsFromHosts();
     bool isEmbeddingsAutoOnAdd() const { return embeddingsAutoOnAdd_; }
 
-    // Explicit, on-demand plugin autoload: scans trusted roots and default directories,
-    // loads plugins via ABI hosts, and attempts to adopt model providers and content extractors.
-    // Returns number of plugins loaded during this invocation.
     boost::asio::awaitable<Result<size_t>> autoloadPluginsNow();
-    // Attempt to preload preferred model if a model provider is available.
-    // Preferred model is resolved from env (YAMS_PREFERRED_MODEL) or by scanning ~/.yams/models.
     boost::asio::awaitable<void> preloadPreferredModelIfConfigured();
 
-    // Helper method to resolve the preferred model from env, config, or auto-detection
     std::string resolvePreferredModel() const;
 
-    // Helper method to align vector component dimensions after embedding generator is initialized
     void alignVectorComponentDimensions();
 
     // Model provider degraded state accessors (FSM-first)
@@ -488,36 +456,19 @@ public:
     // Clear embedding subsystem degradation
     void clearModelProviderError();
 
-    // Combined embedding initialization and search engine rebuild coroutine.
-    // This method provides idempotent, race-safe initialization of embedding capabilities
-    // followed by search engine rebuild to enable vector search. Uses atomic guards to
-    // prevent duplicate execution and ensures proper lifetime management.
-    // Should be called via co_spawn with shared_from_this() for safety.
     boost::asio::awaitable<void> co_enableEmbeddingsAndRebuild();
 
-    // Check if search engine needs rebuild due to corpus growth and trigger if needed.
-    // Safe to call frequently (e.g., from status handler) - uses atomic guards.
-    // Returns true if a rebuild was triggered (async, not awaited).
     bool triggerSearchEngineRebuildIfNeeded();
 
-    /// Request a search engine rebuild via the FSM. If waitForDrain is true (default),
-    /// the rebuild will be deferred until PostIngestQueue drains.
-    /// Returns true if the request was accepted (not already building/awaiting).
     bool requestSearchEngineRebuild(const std::string& reason, bool includeVector = true,
                                     bool waitForDrain = true) {
         return searchEngineManager_.requestRebuild(reason, includeVector, waitForDrain);
     }
 
-    /// Check if search engine is awaiting indexing drain before rebuild.
     bool isSearchEngineAwaitingDrain() const { return searchEngineManager_.isAwaitingDrain(); }
 
-    // Ensure embedding generator is initialized for a specific model name (already loaded in
-    // provider). Returns success if generator is ready or initialized; schedules no rebuild by
-    // itself.
     Result<void> ensureEmbeddingGeneratorFor(const std::string& modelName);
 
-    // Coroutine-based initialization wrapper (awaitable). Uses the same phase logic as
-    // initialization but integrates with Boost.Asio coroutine flow.
     boost::asio::awaitable<Result<void>> initializeAsyncAwaitable(yams::compat::stop_token token);
 
     // Test helpers: inject mock provider and tweak provider state/name
@@ -533,8 +484,6 @@ public:
     AbiPluginHost* __test_getAbiHost() const { return abiHost_.get(); }
     AbiPluginLoader* __test_getAbiPluginLoader() const { return abiPluginLoader_.get(); }
 #endif
-    // Test helpers for plugin host FSM transitions (status recovery tests)
-    // PBI-088: Delegate to PluginManager which owns the FSM
     void __test_pluginLoadFailed(const std::string& error) {
         if (pluginManager_) {
             pluginManager_->dispatchPluginLoadFailed(error);
@@ -545,8 +494,6 @@ public:
             pluginManager_->dispatchAllPluginsLoaded(count);
         }
     }
-    // Force a vector DB initialization attempt and return whether work was performed
-    // (skipped=false indicates already attempted or lock-busy/disabled).
     Result<bool> __test_forceVectorDbInitOnce(const std::filesystem::path& dataDir) {
         return initializeVectorDatabaseOnce(dataDir);
     }
@@ -588,23 +535,19 @@ private:
     const DaemonConfig& config_;
     StateComponent& state_;
     mutable std::mutex configPersistMutex_{};
+    mutable std::mutex poolMutex_{}; // Guards connectionPool_ / readConnectionPool_
 
     // All the services managed by this component
     std::shared_ptr<api::IContentStore> contentStore_;
     std::shared_ptr<metadata::Database> database_;
-    std::shared_ptr<metadata::ConnectionPool> connectionPool_;
-    std::shared_ptr<metadata::ConnectionPool> readConnectionPool_;
+    std::shared_ptr<metadata::ConnectionPool> connectionPool_;     // GUARDED_BY(poolMutex_)
+    std::shared_ptr<metadata::ConnectionPool> readConnectionPool_; // GUARDED_BY(poolMutex_)
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<GraphComponent> graphComponent_;
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
     std::shared_ptr<IModelProvider> modelProvider_;
 
-    // Thread pools: declared early so they destruct LAST (after threads that use them)
-    // (reverse order), ensuring coroutines are cancelled before executor dies
-    // Deprecated legacy pools removed – now using a single io_context with strands.
-
-    // Legacy members retained for compatibility during transition
     std::unique_ptr<IngestService> ingestService_;
     yams::compat::jthread initThread_; // Retained for legacy async init (will be removed later)
 
@@ -613,10 +556,6 @@ private:
     // NOTE: ExternalPluginHost moved to PluginManager (PBI-093)
     std::unique_ptr<RetrievalSessionManager> retrievalSessions_;
     std::unique_ptr<CheckpointManager> checkpointManager_;
-
-    // Phase 1 (PBI-002): Background task coordination
-    // CRITICAL: Must be declared BEFORE jthreads so it destructs AFTER threads
-    // (reverse order), ensuring coroutines are cancelled before executor dies
     std::unique_ptr<class BackgroundTaskManager> backgroundTaskManager_;
 
     // Worker pool metrics
@@ -639,26 +578,17 @@ private:
     // Cross-encoder reranker for improved search ranking
     std::shared_ptr<yams::search::IReranker> rerankerAdapter_;
 
-    // Modern async architecture (Phase 0c): WorkCoordinator delegates threading complexity
-    // Member declaration order is CRITICAL for correct destruction
-    // 1. Cancellation signal (destructs last among these) - signals all async ops to cancel
     boost::asio::cancellation_signal shutdownSignal_;
 
-    // 2. WorkCoordinator (destructs after cancellation) - owns io_context + worker threads
-    //    Replaces ioContext_, workGuard_, workers_ (extracted for reusability and testability)
     std::unique_ptr<WorkCoordinator> workCoordinator_;
     std::unique_ptr<WorkCoordinator> entityWorkCoordinator_;
     std::unique_ptr<boost::asio::thread_pool> cliRequestPool_;
 
-    // 3. Execution domains for logical separation (lightweight strands) - optional for lazy init
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> initStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> pluginStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> modelStrand_;
-
     std::atomic<bool> asyncInitStarted_{false};
-
     std::filesystem::path resolvedDataDir_;
-
     std::shared_ptr<WalMetricsProvider> walMetricsProvider_;
     std::shared_ptr<yams::wal::WALManager> walManager_;
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
@@ -673,16 +603,9 @@ private:
     // Centralized tuning config (persistable via config file; avoids envs).
     TuningConfig tuningConfig_{};
 
-    // Atomic guards retained:
-    //  - vectorDbInitAttempted_ (cross-process guard)
-    //  - shutdownInvoked_ (safety backstop)
-
     // Guard to ensure vector database initialization executes at most once per daemon lifetime
     std::atomic<bool> vectorDbInitAttempted_{false};
 
-    // Idempotent vector database initialization entry point
-    // Returns true when this call performed initialization work, false when skipped
-    // because it was already attempted elsewhere. On failure, returns Error.
     Result<bool> initializeVectorDatabaseOnce(const std::filesystem::path& dataDir);
 
     std::string adoptedProviderPluginName_;
@@ -699,17 +622,9 @@ private:
     // Reference to parent daemon's lifecycle FSM (for subsystem degradation tracking)
     DaemonLifecycleFsm& lifecycleFsm_;
 
-    // FSMs introduced by PBI-046 (initially advisory; will replace atomic flags incrementally)
-    // NOTE: pluginHostFsm_ removed - delegated to PluginManager (PBI-088)
     ServiceManagerFsm serviceFsm_{};
     EmbeddingProviderFsm embeddingFsm_{};
 
-    // jthreads: deprecated – replaced by std::thread workers using ioContext_
-    // They are kept for compatibility but not used in the new shutdown flow.
-    // yams::compat::jthread initThread_;      // Retained for legacy async init (will be removed
-    // later) yams::compat::jthread poolReconThread_; // Retained for legacy pool reconciliation
-
-    // Phase 2.4: Extracted managers (consolidate lifecycle management)
     SearchEngineManager searchEngineManager_;
     std::unique_ptr<SearchComponent> searchComponent_;
 

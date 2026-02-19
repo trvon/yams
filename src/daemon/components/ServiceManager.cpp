@@ -306,8 +306,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             spdlog::info("[ServiceManager] CLI request pool created with 2 threads");
         }
         refreshPluginStatusSnapshot();
-        // In test builds, prefer mock embedding provider unless explicitly disabled.
-        // This avoids heavy ONNX runtime usage and platform-specific crashes on CI/macOS.
+
 #ifdef YAMS_TESTING
         // Default to auto-embed on AddDocument in tests unless explicitly turned off
         try {
@@ -345,21 +344,13 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             spdlog::warn("ServiceManager: unknown error initializing AbiPluginHost");
         }
 
-        // NOTE: ExternalPluginHost should be initialized in PluginManager, not ServiceManager.
-        // See PBI-093 / RFC-EPH for future integration.
-
-        // Defer vector DB initialization to async phase to avoid blocking daemon startup (PBI-057).
         spdlog::debug("[Startup] deferring vector DB init to async phase");
 
-        // Auto-trust plugin directories (env, config, system) via AbiPluginHost
-        // Note: Use abiHost_ directly since PluginManager is created later
         if (abiHost_) {
             // Trust from env
             if (const char* env = std::getenv("YAMS_PLUGIN_DIR")) {
                 try {
                     std::string raw(env);
-                    // Support multiple roots separated by ':' (POSIX) or ';' (Windows/INI style).
-                    // This is useful for benchmarks that want to pin to builddir plugins.
                     std::vector<std::string> parts;
                     parts.reserve(4);
                     std::string cur;
@@ -1086,13 +1077,18 @@ void ServiceManager::shutdown() {
 
     spdlog::info("[ServiceManager] Phase 7: Shutting down database");
     try {
-        if (readConnectionPool_) {
-            readConnectionPool_->shutdown();
-            readConnectionPool_.reset();
+        std::shared_ptr<metadata::ConnectionPool> readPool;
+        std::shared_ptr<metadata::ConnectionPool> writePool;
+        {
+            std::lock_guard<std::mutex> lk(poolMutex_);
+            readPool = std::move(readConnectionPool_);
+            writePool = std::move(connectionPool_);
         }
-        if (connectionPool_) {
-            connectionPool_->shutdown();
-            connectionPool_.reset();
+        if (readPool) {
+            readPool->shutdown();
+        }
+        if (writePool) {
+            writePool->shutdown();
         }
         if (database_) {
             database_->close();
@@ -1556,7 +1552,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             } catch (...) {
             }
         }
-        connectionPool_ = std::make_shared<metadata::ConnectionPool>(dbPath.string(), dbPoolCfg);
+        {
+            std::lock_guard<std::mutex> lk(poolMutex_);
+            connectionPool_ =
+                std::make_shared<metadata::ConnectionPool>(dbPath.string(), dbPoolCfg);
+        }
         TuneAdvisor::setStoragePoolSize(static_cast<uint32_t>(dbPoolCfg.maxConnections));
         TuneAdvisor::setEnableParallelIngest(true);
         auto poolInit = init::record_duration(
@@ -1598,8 +1598,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     }
                 }
 
-                readConnectionPool_ =
-                    std::make_shared<metadata::ConnectionPool>(dbPath.string(), readCfg);
+                {
+                    std::lock_guard<std::mutex> lk(poolMutex_);
+                    readConnectionPool_ =
+                        std::make_shared<metadata::ConnectionPool>(dbPath.string(), readCfg);
+                }
                 auto readPoolInit = init::record_duration(
                     "db_read_pool", [&]() { return readConnectionPool_->initialize(); },
                     state_.initDurationsMs);
@@ -1607,7 +1610,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     spdlog::warn(
                         "Read connection pool init failed (falling back to single pool): {}",
                         readPoolInit.error().message);
-                    readConnectionPool_.reset();
+                    {
+                        std::lock_guard<std::mutex> lk(poolMutex_);
+                        readConnectionPool_.reset();
+                    }
                 } else {
                     spdlog::info("Dual DB pool mode enabled (write/work + read-only)");
                 }
@@ -2984,7 +2990,11 @@ ServiceManager::co_initDatabase(boost::asio::any_io_executor exec,
 
         // Create connection pool and metadata repository
         yams::metadata::ConnectionPoolConfig dbCfg{};
-        connectionPool_ = std::make_shared<yams::metadata::ConnectionPool>(dbPath.string(), dbCfg);
+        {
+            std::lock_guard<std::mutex> lk(poolMutex_);
+            connectionPool_ =
+                std::make_shared<yams::metadata::ConnectionPool>(dbPath.string(), dbCfg);
+        }
 
         // Dual pool enabled by default for better read/write separation.
         // Set YAMS_DB_DUAL_POOL=0 to disable.
@@ -2998,14 +3008,20 @@ ServiceManager::co_initDatabase(boost::asio::any_io_executor exec,
 
         if (dualPoolEnabled) {
             auto readCfg = dbCfg;
-            readConnectionPool_ =
-                std::make_shared<yams::metadata::ConnectionPool>(dbPath.string(), readCfg);
+            {
+                std::lock_guard<std::mutex> lk(poolMutex_);
+                readConnectionPool_ =
+                    std::make_shared<yams::metadata::ConnectionPool>(dbPath.string(), readCfg);
+            }
             auto readInit = readConnectionPool_->initialize();
             if (!readInit) {
                 spdlog::warn("[ServiceManager::co_initDatabase] Read pool init failed (single-pool "
                              "fallback): {}",
                              readInit.error().message);
-                readConnectionPool_.reset();
+                {
+                    std::lock_guard<std::mutex> lk(poolMutex_);
+                    readConnectionPool_.reset();
+                }
             }
         }
 
