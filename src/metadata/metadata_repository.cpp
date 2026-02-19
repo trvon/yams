@@ -77,6 +77,13 @@ constexpr const char* kDocumentColumnListCompatQualified =
     "reverse_path, '' as path_hash, '' as parent_hash, 0 as path_depth, 'pending' as "
     "repair_status, NULL as repair_attempted_at, 0 as repair_attempts";
 
+// Qualified with alias "d" for JOIN queries that alias documents as d
+constexpr const char* kDocumentColumnListAliasD =
+    "d.id, d.file_path, d.file_name, d.file_extension, d.file_size, d.sha256_hash, "
+    "d.mime_type, d.created_time, d.modified_time, d.indexed_time, d.content_extracted, "
+    "d.extraction_status, d.extraction_error, d.path_prefix, d.reverse_path, d.path_hash, "
+    "d.parent_hash, d.path_depth, d.repair_status, d.repair_attempted_at, d.repair_attempts";
+
 constexpr int64_t kPathTreeNullParent = PathTreeNode::kNullParent;
 
 // Transaction begin helper with backend-appropriate semantics.
@@ -3676,10 +3683,13 @@ MetadataRepository::findDocumentsByHashPrefix(const std::string& hashPrefix, std
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
             // Build query via helper
+            // Use sha256_hash LIKE ? instead of lower(sha256_hash) LIKE ?
+            // The lower() call defeats the idx_documents_hash index causing a full table scan.
+            // Hashes are stored lowercase, so a case-insensitive prefix match via LIKE is safe.
             sql::QuerySpec spec{};
             spec.table = "documents";
             spec.columns = {documentColumnList(false)};
-            spec.conditions = {"lower(sha256_hash) LIKE ?"};
+            spec.conditions = {"sha256_hash LIKE ?"};
             spec.orderBy = std::optional<std::string>("indexed_time DESC");
             spec.limit = static_cast<int>(limit);
             spec.offset = std::nullopt;
@@ -5906,23 +5916,25 @@ MetadataRepository::listTreeChanges(const TreeDiffQuery& query) {
 Result<void> MetadataRepository::finalizeTreeDiff(int64_t diffId, std::size_t changeCount,
                                                   std::string_view status) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
+        // Single-scan aggregation using SUM(CASE ...) instead of 4 correlated subqueries.
+        // Each subquery previously scanned tree_changes independently (4x I/O).
         auto stmtResult = db.prepare(R"(
-            UPDATE tree_diffs 
+            UPDATE tree_diffs
             SET files_added = (
-                    SELECT COUNT(*) FROM tree_changes 
-                    WHERE diff_id = ? AND change_type = 'added' AND is_directory = 0
+                    SELECT SUM(CASE WHEN change_type = 'added' THEN 1 ELSE 0 END)
+                    FROM tree_changes WHERE diff_id = ? AND is_directory = 0
                 ),
                 files_deleted = (
-                    SELECT COUNT(*) FROM tree_changes 
-                    WHERE diff_id = ? AND change_type = 'deleted' AND is_directory = 0
+                    SELECT SUM(CASE WHEN change_type = 'deleted' THEN 1 ELSE 0 END)
+                    FROM tree_changes WHERE diff_id = ? AND is_directory = 0
                 ),
                 files_modified = (
-                    SELECT COUNT(*) FROM tree_changes 
-                    WHERE diff_id = ? AND change_type = 'modified' AND is_directory = 0
+                    SELECT SUM(CASE WHEN change_type = 'modified' THEN 1 ELSE 0 END)
+                    FROM tree_changes WHERE diff_id = ? AND is_directory = 0
                 ),
                 files_renamed = (
-                    SELECT COUNT(*) FROM tree_changes 
-                    WHERE diff_id = ? AND change_type IN ('renamed', 'moved') AND is_directory = 0
+                    SELECT SUM(CASE WHEN change_type IN ('renamed', 'moved') THEN 1 ELSE 0 END)
+                    FROM tree_changes WHERE diff_id = ? AND is_directory = 0
                 ),
                 status = ?
             WHERE diff_id = ?
@@ -6366,16 +6378,14 @@ Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsBySnapshot(const std::string& snapshotId) {
     return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT DISTINCT d.id, d.file_path, d.file_name, d.file_extension, d.file_size,
-                   d.sha256_hash, d.mime_type, d.created_time, d.modified_time,
-                   d.indexed_time, d.content_extracted, d.extraction_status,
-                   d.extraction_error
-            FROM documents d
-            JOIN metadata m ON d.id = m.document_id
-            WHERE m.key = 'snapshot_id' AND m.value = ?
-            ORDER BY d.indexed_time DESC, d.id DESC
-        )");
+            // Use the full 21-column list so mapDocumentRow() can populate all fields
+            std::string sql = "SELECT DISTINCT ";
+            sql += kDocumentColumnListAliasD;
+            sql += " FROM documents d"
+                   " JOIN metadata m ON d.id = m.document_id"
+                   " WHERE m.key = 'snapshot_id' AND m.value = ?"
+                   " ORDER BY d.indexed_time DESC, d.id DESC";
+            auto stmtResult = db.prepare(sql);
 
             if (!stmtResult)
                 return stmtResult.error();
@@ -6404,16 +6414,14 @@ Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsBySnapshotLabel(const std::string& snapshotLabel) {
     return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT DISTINCT d.id, d.file_path, d.file_name, d.file_extension, d.file_size,
-                   d.sha256_hash, d.mime_type, d.created_time, d.modified_time,
-                   d.indexed_time, d.content_extracted, d.extraction_status,
-                   d.extraction_error
-            FROM documents d
-            JOIN metadata m ON d.id = m.document_id
-            WHERE m.key = 'snapshot_label' AND m.value = ?
-            ORDER BY d.indexed_time DESC, d.id DESC
-        )");
+            // Use the full 21-column list so mapDocumentRow() can populate all fields
+            std::string sql = "SELECT DISTINCT ";
+            sql += kDocumentColumnListAliasD;
+            sql += " FROM documents d"
+                   " JOIN metadata m ON d.id = m.document_id"
+                   " WHERE m.key = 'snapshot_label' AND m.value = ?"
+                   " ORDER BY d.indexed_time DESC, d.id DESC";
+            auto stmtResult = db.prepare(sql);
 
             if (!stmtResult)
                 return stmtResult.error();
@@ -6732,16 +6740,14 @@ Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsBySessionId(const std::string& sessionId) {
     return executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            auto stmtResult = db.prepare(R"(
-            SELECT DISTINCT d.id, d.file_path, d.file_name, d.file_extension, d.file_size,
-                   d.sha256_hash, d.mime_type, d.created_time, d.modified_time,
-                   d.indexed_time, d.content_extracted, d.extraction_status,
-                   d.extraction_error
-            FROM documents d
-            JOIN metadata m ON d.id = m.document_id
-            WHERE m.key = 'session_id' AND m.value = ?
-            ORDER BY d.indexed_time DESC
-        )");
+            // Use the full 21-column list so mapDocumentRow() can populate all fields
+            std::string sql = "SELECT DISTINCT ";
+            sql += kDocumentColumnListAliasD;
+            sql += " FROM documents d"
+                   " JOIN metadata m ON d.id = m.document_id"
+                   " WHERE m.key = 'session_id' AND m.value = ?"
+                   " ORDER BY d.indexed_time DESC";
+            auto stmtResult = db.prepare(sql);
 
             if (!stmtResult)
                 return stmtResult.error();
@@ -6885,11 +6891,14 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
             std::string inKeys = buildInList(tagKeys.size());
             std::string inTags = buildInList(uniqueTags.size());
 
+            // Use explicit column list instead of d.* to match mapDocumentRow() expectations
+            std::string colList = kDocumentColumnListAliasD;
             std::string sql;
             if (matchAll) {
                 // Match-all across both "tag:<name>" keys and legacy key="tag" values.
                 // Normalize to tag names via CASE so count reflects actual tags.
-                sql = "SELECT d.* FROM documents d WHERE d.id IN ("
+                sql = "SELECT " + colList +
+                      " FROM documents d WHERE d.id IN ("
                       "SELECT document_id FROM metadata WHERE "
                       "(key IN " +
                       inKeys + " OR (key = 'tag' AND value IN " + inTags +
@@ -6901,7 +6910,8 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
                       "END) = ?"
                       ") ORDER BY d.indexed_time DESC";
             } else {
-                sql = "SELECT DISTINCT d.* FROM documents d "
+                sql = "SELECT DISTINCT " + colList +
+                      " FROM documents d "
                       "JOIN metadata m ON d.id = m.document_id "
                       "WHERE (m.key IN " +
                       inKeys + " OR (m.key = 'tag' AND m.value IN " + inTags +

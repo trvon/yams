@@ -80,6 +80,13 @@ struct TunedParams {
     SearchEngineConfig::FusionStrategy fusionStrategy =
         SearchEngineConfig::FusionStrategy::COMB_MNZ;
 
+    // Graph reranking controls (dynamically adapted by SearchTuner)
+    bool enableGraphRerank = false;
+    size_t graphRerankTopN = 25;
+    float graphRerankWeight = 0.15f;
+    float graphRerankMaxBoost = 0.20f;
+    float graphRerankMinSignal = 0.01f;
+
     /**
      * @brief Apply tuned parameters to a SearchEngineConfig.
      */
@@ -95,6 +102,11 @@ struct TunedParams {
         config.vectorBoostFactor = vectorBoostFactor;
         config.rrfK = static_cast<float>(rrfK);
         config.fusionStrategy = fusionStrategy;
+        config.enableGraphRerank = enableGraphRerank;
+        config.graphRerankTopN = graphRerankTopN;
+        config.graphRerankWeight = graphRerankWeight;
+        config.graphRerankMaxBoost = graphRerankMaxBoost;
+        config.graphRerankMinSignal = graphRerankMinSignal;
     }
 
     /**
@@ -110,7 +122,12 @@ struct TunedParams {
                               {"tag_weight", tagWeight},
                               {"metadata_weight", metadataWeight},
                               {"similarity_threshold", similarityThreshold},
-                              {"vector_boost_factor", vectorBoostFactor}};
+                              {"vector_boost_factor", vectorBoostFactor},
+                              {"enable_graph_rerank", enableGraphRerank},
+                              {"graph_rerank_topn", graphRerankTopN},
+                              {"graph_rerank_weight", graphRerankWeight},
+                              {"graph_rerank_max_boost", graphRerankMaxBoost},
+                              {"graph_rerank_min_signal", graphRerankMinSignal}};
     }
 };
 

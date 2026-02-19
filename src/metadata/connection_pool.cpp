@@ -201,21 +201,17 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
             }
         }
 
-        // Wait for connection to become available
+        // Wait for connection to become available (always respect the deadline).
+        // Previous code treated timeouts >= 30s as indefinite waits, which caused
+        // zombie threads when clients dropped connections after their own RPC timeout.
         waitingGuard.activate();
-        if (timeout.count() >= 30000) { // >= 30 seconds, treat as indefinite wait
-            cv_.wait(lock, [this] { return !available_.empty() || shutdown_; });
+        if (!cv_.wait_until(lock, deadline, [this] { return !available_.empty() || shutdown_; })) {
+            waitingGuard.markTimeout();
             waitingGuard.finish();
-        } else {
-            if (!cv_.wait_until(lock, deadline,
-                                [this] { return !available_.empty() || shutdown_; })) {
-                waitingGuard.markTimeout();
-                waitingGuard.finish();
-                failedAcquisitions_++;
-                return Error{ErrorCode::Timeout, "Timeout acquiring connection"};
-            }
-            waitingGuard.finish();
+            failedAcquisitions_++;
+            return Error{ErrorCode::Timeout, "Timeout acquiring connection"};
         }
+        waitingGuard.finish();
 
         if (shutdown_) {
             failedAcquisitions_++;
@@ -466,6 +462,20 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     db.execute("PRAGMA temp_store = MEMORY");
     db.execute("PRAGMA mmap_size = 268435456"); // 256MB
 
+    // Page cache size: default SQLite is -2000 (~2MB), which causes severe thrashing on
+    // large databases (23GB+). We default to -65536 (~64MB per connection) to keep FTS5
+    // inverted-index nodes and hot B-tree pages resident. Configurable via env var.
+    int cacheSizeKB = -65536; // negative = KiB (64MB)
+    if (const char* envCache = std::getenv("YAMS_DB_CACHE_SIZE_KB")) {
+        try {
+            int v = std::stoi(envCache);
+            if (v != 0)
+                cacheSizeKB = v;
+        } catch (...) {
+        }
+    }
+    db.execute("PRAGMA cache_size = " + std::to_string(cacheSizeKB));
+
     // Increase WAL autocheckpoint threshold to reduce checkpoint frequency under heavy write load.
     // Default SQLite value is 1000 pages (~4MB). We raise to 2000 pages (~8MB) to batch more
     // writes before checkpointing, which reduces I/O contention during concurrent ingestion.
@@ -570,6 +580,10 @@ bool ConnectionPool::isConnectionValid(const Database& db) const {
     }
 
     try {
+        // SELECT 1 is sufficient to verify the connection is alive.
+        // Previous implementation also ran CREATE TEMP TABLE IF NOT EXISTS which
+        // requires a schema lock and disk I/O — far too expensive for a health
+        // check that runs on every acquire() and returnConnection().
         auto stmtResult = const_cast<Database&>(db).prepare("SELECT 1");
         if (!stmtResult)
             return false;
@@ -577,11 +591,6 @@ bool ConnectionPool::isConnectionValid(const Database& db) const {
         Statement stmt = std::move(stmtResult).value();
         auto result = stmt.step();
         if (!result.has_value())
-            return false;
-
-        auto writeTest = const_cast<Database&>(db).execute(
-            "CREATE TEMP TABLE IF NOT EXISTS __pool_health_check (id INTEGER)");
-        if (!writeTest)
             return false;
 
         return true;

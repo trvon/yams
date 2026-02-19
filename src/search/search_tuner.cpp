@@ -2,13 +2,81 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <sstream>
 
 namespace yams::search {
 
+namespace {
+
+void normalizeComponentWeights(TunedParams& params) {
+    params.textWeight = std::max(0.0f, params.textWeight);
+    params.vectorWeight = std::max(0.0f, params.vectorWeight);
+    params.entityVectorWeight = std::max(0.0f, params.entityVectorWeight);
+    params.pathTreeWeight = std::max(0.0f, params.pathTreeWeight);
+    params.kgWeight = std::max(0.0f, params.kgWeight);
+    params.tagWeight = std::max(0.0f, params.tagWeight);
+    params.metadataWeight = std::max(0.0f, params.metadataWeight);
+
+    const float sum = params.textWeight + params.vectorWeight + params.entityVectorWeight +
+                      params.pathTreeWeight + params.kgWeight + params.tagWeight +
+                      params.metadataWeight;
+    if (sum > 0.0f) {
+        const float inv = 1.0f / sum;
+        params.textWeight *= inv;
+        params.vectorWeight *= inv;
+        params.entityVectorWeight *= inv;
+        params.pathTreeWeight *= inv;
+        params.kgWeight *= inv;
+        params.tagWeight *= inv;
+        params.metadataWeight *= inv;
+    }
+}
+
+void applyGraphAwareAdjustments(const storage::CorpusStats& stats, TunedParams& params,
+                                std::string& stateReason) {
+    const bool hasKG = stats.hasKnowledgeGraph();
+    if (!hasKG) {
+        params.kgWeight = 0.0f;
+        params.enableGraphRerank = false;
+        normalizeComponentWeights(params);
+        stateReason += ", graph=off(no_kg)";
+        return;
+    }
+
+    const float graphRichness =
+        std::clamp(static_cast<float>((stats.symbolDensity - 0.1) / 1.5), 0.0f, 1.0f);
+    const float graphBoost = 0.04f + 0.10f * graphRichness;
+
+    // Move rank mass toward KG while preserving text/vector dominance for lexical quality.
+    params.kgWeight += graphBoost;
+    params.textWeight = std::max(0.0f, params.textWeight - graphBoost * 0.55f);
+    params.vectorWeight = std::max(0.0f, params.vectorWeight - graphBoost * 0.30f);
+    params.entityVectorWeight = std::max(0.0f, params.entityVectorWeight - graphBoost * 0.10f);
+    params.tagWeight = std::max(0.0f, params.tagWeight - graphBoost * 0.05f);
+
+    // Enable graph rerank and scale knobs by graph richness.
+    params.enableGraphRerank = true;
+    params.graphRerankTopN = stats.docCount >= 1000 ? 40 : 30;
+    params.graphRerankWeight = 0.18f + 0.14f * graphRichness;
+    params.graphRerankMaxBoost = 0.22f + 0.16f * graphRichness;
+    params.graphRerankMinSignal = std::max(0.005f, 0.02f - 0.012f * graphRichness);
+
+    normalizeComponentWeights(params);
+
+    std::ostringstream suffix;
+    suffix << ", graph=on(symbol_density=" << stats.symbolDensity
+           << ", kg_weight=" << params.kgWeight
+           << ", graph_rerank_weight=" << params.graphRerankWeight << ")";
+    stateReason += suffix.str();
+}
+
+} // namespace
+
 SearchTuner::SearchTuner(const storage::CorpusStats& stats) : stats_(stats) {
     state_ = computeState(stats, stateReason_);
     params_ = getTunedParams(state_);
+    applyGraphAwareAdjustments(stats_, params_, stateReason_);
 
     spdlog::debug("SearchTuner initialized: state={}, reason='{}'", tuningStateToString(state_),
                   stateReason_);

@@ -869,6 +869,8 @@ public:
     static inline std::atomic<uint32_t> ipcTimeoutMsOverride_{0};
 
     // IPC timeouts (ms) for read/write operations. Default 15000ms; env: YAMS_IPC_TIMEOUT_MS.
+    // Range clamp [500, 600000] — wide enough for large-corpus benchmarks under
+    // sanitizer builds where each op can take 30-60s.
     static uint32_t ipcTimeoutMs() {
         uint32_t ov = ipcTimeoutMsOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
@@ -877,7 +879,7 @@ public:
         if (const char* s = std::getenv("YAMS_IPC_TIMEOUT_MS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 500 && v <= 60000)
+                if (v >= 500 && v <= 600000)
                     return v;
             } catch (...) {
             }

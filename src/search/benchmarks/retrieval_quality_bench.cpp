@@ -887,13 +887,25 @@ struct BenchFixture {
             if (SUPPORTED_BEIR_DATASETS.count(datasetName) > 0) {
                 useBEIR = true;
                 beirDatasetName = datasetName;
-                // Set SCIENTIFIC tuning override for BEIR datasets
-                // This is needed because the auto-detection uses absolute path depth
-                // which fails for temp directories (pathDepthAvg >> 1.5)
-                setenv("YAMS_ENABLE_ENV_OVERRIDES", "1", 1);
-                setenv("YAMS_TUNING_OVERRIDE", "SCIENTIFIC", 1);
-                spdlog::info("Set YAMS_TUNING_OVERRIDE=SCIENTIFIC for BEIR benchmark ({})",
-                             datasetName);
+                // Default to SearchTuner auto mode so benchmark reflects dynamic tuning behavior.
+                // Keep explicit override support for controlled experiments:
+                //   YAMS_BENCH_FORCE_TUNING_OVERRIDE=SCIENTIFIC
+                const char* forcedOverride = std::getenv("YAMS_BENCH_FORCE_TUNING_OVERRIDE");
+                const char* existingOverride = std::getenv("YAMS_TUNING_OVERRIDE");
+                if (forcedOverride && std::strlen(forcedOverride) > 0) {
+                    setenv("YAMS_ENABLE_ENV_OVERRIDES", "1", 1);
+                    setenv("YAMS_TUNING_OVERRIDE", forcedOverride, 1);
+                    spdlog::info(
+                        "Set YAMS_TUNING_OVERRIDE={} via YAMS_BENCH_FORCE_TUNING_OVERRIDE for "
+                        "BEIR benchmark ({})",
+                        forcedOverride, datasetName);
+                } else if (existingOverride && std::strlen(existingOverride) > 0) {
+                    spdlog::info("Using pre-set YAMS_TUNING_OVERRIDE={} for BEIR benchmark ({})",
+                                 existingOverride, datasetName);
+                } else {
+                    spdlog::info("Using SearchTuner auto mode for BEIR benchmark ({})",
+                                 datasetName);
+                }
             } else {
                 spdlog::warn("Unknown dataset '{}', using synthetic. Supported: scifact, "
                              "cqadupstack, nfcorpus, etc.",
