@@ -4,6 +4,8 @@
 #include <yams/core/cpp23_features.hpp>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/search/kg_scorer.h>
+#include <yams/search/kg_scorer_simple.h>
 
 #include <algorithm>
 #include <chrono>
@@ -567,7 +569,11 @@ public:
          std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
          const SearchEngineConfig& config)
         : metadataRepo_(std::move(metadataRepo)), vectorDb_(std::move(vectorDb)),
-          embeddingGen_(std::move(embeddingGen)), kgStore_(std::move(kgStore)), config_(config) {}
+          embeddingGen_(std::move(embeddingGen)), kgStore_(std::move(kgStore)), config_(config) {
+        if (kgStore_) {
+            kgScorer_ = makeSimpleKGScorer(kgStore_);
+        }
+    }
 
     Result<std::vector<SearchResult>> search(const std::string& query, const SearchParams& params);
 
@@ -642,6 +648,7 @@ private:
     std::shared_ptr<vector::VectorDatabase> vectorDb_;
     std::shared_ptr<vector::EmbeddingGenerator> embeddingGen_;
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore_;
+    std::shared_ptr<KGScorer> kgScorer_;
     std::optional<boost::asio::any_io_executor> executor_;
     SearchEngineConfig config_;
     mutable SearchEngine::Statistics stats_;
@@ -1164,6 +1171,83 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     {
         YAMS_ZONE_SCOPED_N("fusion::results");
         response.results = fusion.fuse(allComponentResults);
+    }
+
+    if (config_.enableGraphRerank && kgScorer_ && !response.results.empty()) {
+        YAMS_ZONE_SCOPED_N("graph::rerank");
+        const auto graphRerankStart = std::chrono::steady_clock::now();
+
+        const size_t rerankWindow = std::min(config_.graphRerankTopN, response.results.size());
+        if (rerankWindow > 0) {
+            KGScoringConfig graphCfg = kgScorer_->getConfig();
+            graphCfg.max_neighbors = config_.graphMaxNeighbors;
+            graphCfg.max_hops = config_.graphMaxHops;
+            graphCfg.budget = std::chrono::milliseconds(std::max(0, config_.graphScoringBudgetMs));
+            graphCfg.enable_path_enumeration = config_.graphEnablePathEnumeration;
+            graphCfg.max_paths = config_.graphMaxPaths;
+            graphCfg.hop_decay = std::clamp(config_.graphHopDecay, 0.0f, 1.0f);
+            kgScorer_->setConfig(graphCfg);
+
+            std::vector<std::string> candidateIds;
+            candidateIds.reserve(rerankWindow);
+            for (size_t i = 0; i < rerankWindow; ++i) {
+                const auto& res = response.results[i];
+                candidateIds.push_back(!res.document.sha256Hash.empty() ? res.document.sha256Hash
+                                                                        : res.document.filePath);
+            }
+
+            auto graphScoresResult = kgScorer_->score(query, candidateIds);
+            if (graphScoresResult) {
+                const auto& graphScores = graphScoresResult.value();
+                bool boosted = false;
+                const float minSignal = std::max(0.0f, config_.graphRerankMinSignal);
+                const float maxBoost = std::max(0.0f, config_.graphRerankMaxBoost);
+                const float rerankWeight = std::max(0.0f, config_.graphRerankWeight);
+
+                for (size_t i = 0; i < rerankWindow; ++i) {
+                    const auto& candidateId = candidateIds[i];
+                    auto scoreIt = graphScores.find(candidateId);
+                    if (scoreIt == graphScores.end()) {
+                        continue;
+                    }
+
+                    const KGScore& kgScore = scoreIt->second;
+                    const float signal =
+                        std::clamp(kgScore.entity * 0.7f + kgScore.structural * 0.3f, 0.0f, 1.0f);
+                    if (signal < minSignal) {
+                        continue;
+                    }
+
+                    const float boost = std::min(maxBoost, rerankWeight * signal);
+                    if (boost <= 0.0f) {
+                        continue;
+                    }
+
+                    response.results[i].score *= (1.0 + static_cast<double>(boost));
+                    response.results[i].kgScore = response.results[i].kgScore.value_or(0.0) + boost;
+                    boosted = true;
+                }
+
+                if (boosted) {
+                    std::sort(response.results.begin(), response.results.end(),
+                              [](const SearchResult& a, const SearchResult& b) {
+                                  return a.score > b.score;
+                              });
+                    contributing.push_back("graph_rerank");
+                } else {
+                    skipped.push_back("graph_rerank");
+                }
+            } else {
+                failed.push_back("graph_rerank");
+                spdlog::debug("[graph_rerank] KG scoring failed: {}",
+                              graphScoresResult.error().message);
+            }
+        }
+
+        const auto graphRerankEnd = std::chrono::steady_clock::now();
+        componentTiming["graph_rerank"] =
+            std::chrono::duration_cast<std::chrono::microseconds>(graphRerankEnd - graphRerankStart)
+                .count();
     }
 
     std::vector<QueryConcept> concepts;

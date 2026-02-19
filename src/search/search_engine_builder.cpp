@@ -261,6 +261,70 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine rerankTopK overridden to {} via env", cfg.rerankTopK);
         }
 
+        if (auto graphRerankEnabled = getEnvBool("YAMS_SEARCH_ENABLE_GRAPH_RERANK")) {
+            cfg.enableGraphRerank = *graphRerankEnabled;
+            spdlog::info("SearchEngine enableGraphRerank overridden to {} via env",
+                         cfg.enableGraphRerank);
+        }
+
+        if (auto graphTopN = getEnvInt("YAMS_SEARCH_GRAPH_RERANK_TOPN")) {
+            cfg.graphRerankTopN = static_cast<size_t>(std::max(0, *graphTopN));
+            spdlog::info("SearchEngine graphRerankTopN overridden to {} via env",
+                         cfg.graphRerankTopN);
+        }
+
+        if (auto graphWeight = getEnvFloat("YAMS_SEARCH_GRAPH_RERANK_WEIGHT")) {
+            cfg.graphRerankWeight = std::max(0.0f, *graphWeight);
+            spdlog::info("SearchEngine graphRerankWeight overridden to {:.3f} via env",
+                         cfg.graphRerankWeight);
+        }
+
+        if (auto graphMaxBoost = getEnvFloat("YAMS_SEARCH_GRAPH_RERANK_MAX_BOOST")) {
+            cfg.graphRerankMaxBoost = std::max(0.0f, *graphMaxBoost);
+            spdlog::info("SearchEngine graphRerankMaxBoost overridden to {:.3f} via env",
+                         cfg.graphRerankMaxBoost);
+        }
+
+        if (auto graphMinSignal = getEnvFloat("YAMS_SEARCH_GRAPH_RERANK_MIN_SIGNAL")) {
+            cfg.graphRerankMinSignal = std::max(0.0f, *graphMinSignal);
+            spdlog::info("SearchEngine graphRerankMinSignal overridden to {:.3f} via env",
+                         cfg.graphRerankMinSignal);
+        }
+
+        if (auto graphNeighbors = getEnvInt("YAMS_SEARCH_GRAPH_MAX_NEIGHBORS")) {
+            cfg.graphMaxNeighbors = static_cast<size_t>(std::max(1, *graphNeighbors));
+            spdlog::info("SearchEngine graphMaxNeighbors overridden to {} via env",
+                         cfg.graphMaxNeighbors);
+        }
+
+        if (auto graphHops = getEnvInt("YAMS_SEARCH_GRAPH_MAX_HOPS")) {
+            cfg.graphMaxHops = static_cast<size_t>(std::clamp(*graphHops, 1, 5));
+            spdlog::info("SearchEngine graphMaxHops overridden to {} via env", cfg.graphMaxHops);
+        }
+
+        if (auto graphBudgetMs = getEnvInt("YAMS_SEARCH_GRAPH_BUDGET_MS")) {
+            cfg.graphScoringBudgetMs = std::max(0, *graphBudgetMs);
+            spdlog::info("SearchEngine graphScoringBudgetMs overridden to {} via env",
+                         cfg.graphScoringBudgetMs);
+        }
+
+        if (auto graphPaths = getEnvBool("YAMS_SEARCH_GRAPH_ENABLE_PATHS")) {
+            cfg.graphEnablePathEnumeration = *graphPaths;
+            spdlog::info("SearchEngine graphEnablePathEnumeration overridden to {} via env",
+                         cfg.graphEnablePathEnumeration);
+        }
+
+        if (auto graphMaxPaths = getEnvInt("YAMS_SEARCH_GRAPH_MAX_PATHS")) {
+            cfg.graphMaxPaths = static_cast<size_t>(std::max(1, *graphMaxPaths));
+            spdlog::info("SearchEngine graphMaxPaths overridden to {} via env", cfg.graphMaxPaths);
+        }
+
+        if (auto graphHopDecay = getEnvFloat("YAMS_SEARCH_GRAPH_HOP_DECAY")) {
+            cfg.graphHopDecay = std::clamp(*graphHopDecay, 0.0f, 1.0f);
+            spdlog::info("SearchEngine graphHopDecay overridden to {:.3f} via env",
+                         cfg.graphHopDecay);
+        }
+
         if (auto adaptiveFallback = getEnvBool("YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK")) {
             cfg.enableAdaptiveVectorFallback = *adaptiveFallback;
             spdlog::info("SearchEngine enableAdaptiveVectorFallback overridden to {} via env",

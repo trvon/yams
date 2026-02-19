@@ -211,6 +211,21 @@ struct SearchEngineConfig {
     float rerankWeight = 0.60f;            // Blend weight for model reranking
     bool rerankReplaceScores = true;       // If true, replace scores entirely; if false, blend
 
+    // Graph reranking (PR1: post-fusion rerank-only, default off)
+    bool enableGraphRerank = false;     // Enable KG-based reranking on fused top-N candidates
+    size_t graphRerankTopN = 25;        // Number of fused results to rescore with KG
+    float graphRerankWeight = 0.15f;    // Multiplicative weight applied to KG signal
+    float graphRerankMaxBoost = 0.20f;  // Per-document cap for graph-induced boost
+    float graphRerankMinSignal = 0.01f; // Ignore weak KG signals below this threshold
+
+    // KG scorer budget controls used by graph rerank
+    size_t graphMaxNeighbors = 16;           // Neighbor cap per node for structural scoring
+    size_t graphMaxHops = 1;                 // Hop depth for path-based graph scoring
+    int graphScoringBudgetMs = 10;           // Best-effort total budget for graph scoring call
+    bool graphEnablePathEnumeration = false; // Optional bounded path enumeration
+    size_t graphMaxPaths = 32;               // Soft cap on path enumeration
+    float graphHopDecay = 0.90f;             // Per-hop decay factor when path scoring is enabled
+
     // Model-based reranking (cross-encoder) - opt-in, requires ONNX model
     bool enableModelReranking = false; // Use cross-encoder model (slow, opt-in)
 

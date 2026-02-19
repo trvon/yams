@@ -1,6 +1,7 @@
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/search/kg_scorer.h>
+#include <yams/search/kg_scorer_simple.h>
 
 #include <algorithm>
 #include <cctype>
@@ -113,8 +114,8 @@ public:
             KGExplain expl;
             expl.id = cid;
 
-            // Parse candidate id as document id (best-effort)
-            auto docIdOpt = parseInt64(cid);
+            // Resolve candidate as document id (numeric id, hash, or path)
+            auto docIdOpt = resolveDocumentId(cid);
             if (!docIdOpt.has_value()) {
                 // If not numeric, emit zeros (missing id implies zero by contract)
                 out.emplace(cid, s);
@@ -284,6 +285,34 @@ private:
             val = val * 10 + d;
         }
         return neg ? -val : val;
+    }
+
+    std::optional<std::int64_t> resolveDocumentId(const std::string& candidateId) const {
+        if (auto parsed = parseInt64(candidateId); parsed.has_value()) {
+            return parsed;
+        }
+
+        if (!store_) {
+            return std::nullopt;
+        }
+
+        auto byHash = store_->getDocumentIdByHash(candidateId);
+        if (byHash) {
+            const auto hashDocId = byHash.value();
+            if (hashDocId.has_value()) {
+                return hashDocId;
+            }
+        }
+
+        auto byPath = store_->getDocumentIdByPath(candidateId);
+        if (byPath) {
+            const auto pathDocId = byPath.value();
+            if (pathDocId.has_value()) {
+                return pathDocId;
+            }
+        }
+
+        return std::nullopt;
     }
 
     static float jaccard(const std::unordered_set<std::int64_t>& a,
@@ -475,7 +504,6 @@ private:
         return elapsed > cfg_.budget;
     }
 
-private:
     KGScoringConfig cfg_{};
     std::shared_ptr<KnowledgeGraphStore> store_;
     std::shared_ptr<IGraphQueryService> graphService_; // Optional: enhanced traversal
