@@ -24,6 +24,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1263,9 +1264,47 @@ private:
                                         const yams::search::ExtractScope& scope,
                                         MetadataTelemetry* telemetry,
                                         [[maybe_unused]] const std::string& pathPattern) {
+        auto parseEpochFilter =
+            [](const std::string& value) -> Result<std::optional<std::int64_t>> {
+            if (value.empty()) {
+                return std::optional<std::int64_t>{};
+            }
+            auto parsed = utils::parseTimeExpression(value);
+            if (!parsed) {
+                return parsed.error();
+            }
+            return std::optional<std::int64_t>{parsed.value()};
+        };
+
+        auto createdAfter = parseEpochFilter(req.createdAfter);
+        if (!createdAfter) {
+            return createdAfter.error();
+        }
+        auto createdBefore = parseEpochFilter(req.createdBefore);
+        if (!createdBefore) {
+            return createdBefore.error();
+        }
+        auto modifiedAfter = parseEpochFilter(req.modifiedAfter);
+        if (!modifiedAfter) {
+            return modifiedAfter.error();
+        }
+        auto modifiedBefore = parseEpochFilter(req.modifiedBefore);
+        if (!modifiedBefore) {
+            return modifiedBefore.error();
+        }
+        auto indexedAfter = parseEpochFilter(req.indexedAfter);
+        if (!indexedAfter) {
+            return indexedAfter.error();
+        }
+        auto indexedBefore = parseEpochFilter(req.indexedBefore);
+        if (!indexedBefore) {
+            return indexedBefore.error();
+        }
+
         // Build SearchParams for the new SearchEngine API
         yams::search::SearchParams params;
-        params.limit = req.limit;
+        params.limit = static_cast<int>(std::min<std::size_t>(
+            req.limit, static_cast<std::size_t>(std::numeric_limits<int>::max())));
         params.offset = 0;
         // Propagate tag filters to the search engine (used for candidate gathering/ranking)
         params.tags = req.tags;
@@ -1282,6 +1321,24 @@ private:
         }
         if (!scope.mime.empty()) {
             params.mimeType = scope.mime;
+        }
+        if (params.extension.has_value() == false && !req.extension.empty()) {
+            std::string ext = req.extension;
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (!ext.empty() && ext.front() == '.') {
+                ext.erase(ext.begin());
+            }
+            params.extension = ext;
+        }
+        if (params.mimeType.has_value() == false && !req.mimeType.empty()) {
+            params.mimeType = req.mimeType;
+        }
+        if (modifiedAfter.value()) {
+            params.modifiedAfter = modifiedAfter.value();
+        }
+        if (modifiedBefore.value()) {
+            params.modifiedBefore = modifiedBefore.value();
         }
 
         // Defensive limit: cap engine query to prevent memory exhaustion
@@ -1322,10 +1379,116 @@ private:
         std::vector<const metadata::SearchResult*> candidates;
         candidates.reserve(vec.size());
 
+        auto normalizeLower = [](std::string value) {
+            std::transform(value.begin(), value.end(), value.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return value;
+        };
+        auto normalizeExtension = [&](std::string value) {
+            value = normalizeLower(std::move(value));
+            if (!value.empty() && value.front() == '.') {
+                value.erase(value.begin());
+            }
+            return value;
+        };
+
+        const std::string reqMimeLower = normalizeLower(req.mimeType);
+        const std::string reqExtLower = normalizeExtension(req.extension);
+        const std::string reqFileTypeLower = normalizeLower(req.fileType);
+        const auto createdAfterEpoch = createdAfter.value();
+        const auto createdBeforeEpoch = createdBefore.value();
+        const auto modifiedAfterEpoch = modifiedAfter.value();
+        const auto modifiedBeforeEpoch = modifiedBefore.value();
+        const auto indexedAfterEpoch = indexedAfter.value();
+        const auto indexedBeforeEpoch = indexedBefore.value();
+        std::vector<std::string> effectivePathPatterns = req.pathPatterns;
+        if (effectivePathPatterns.empty() && !pathPattern.empty()) {
+            effectivePathPatterns.push_back(pathPattern);
+        }
+
+        auto matchesPathFilters = [&](const std::string& filePath) {
+            if (effectivePathPatterns.empty()) {
+                return true;
+            }
+            for (const auto& patternRaw : effectivePathPatterns) {
+                if (patternRaw.empty()) {
+                    continue;
+                }
+                if (hasWildcard(patternRaw)) {
+                    std::string pattern = patternRaw;
+                    if (!pattern.empty() && pattern.front() != '*' && pattern.front() != '/' &&
+                        pattern.find(":/") == std::string::npos) {
+                        pattern.insert(pattern.begin(), '*');
+                    }
+                    if (wildcardMatch(filePath, pattern)) {
+                        return true;
+                    }
+                } else if (filePath.find(patternRaw) != std::string::npos) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
         for (const auto& r : vec) {
             if (tagDocHashes && tagDocHashes->count(r.document.sha256Hash) == 0) {
                 continue;
             }
+
+            const auto& doc = r.document;
+
+            if (!matchesPathFilters(doc.filePath)) {
+                continue;
+            }
+
+            if (!reqExtLower.empty()) {
+                if (normalizeExtension(doc.fileExtension) != reqExtLower) {
+                    continue;
+                }
+            }
+
+            if (!reqMimeLower.empty()) {
+                if (normalizeLower(doc.mimeType) != reqMimeLower) {
+                    continue;
+                }
+            }
+
+            const std::string classifiedType =
+                normalizeLower(utils::classifyFileType(doc.mimeType, doc.fileExtension));
+
+            if (!reqFileTypeLower.empty() && classifiedType != reqFileTypeLower) {
+                continue;
+            }
+            if (req.textOnly && classifiedType != "text") {
+                continue;
+            }
+            if (req.binaryOnly && classifiedType == "text") {
+                continue;
+            }
+
+            const auto createdEpoch = doc.createdTime.time_since_epoch().count();
+            const auto modifiedEpoch = doc.modifiedTime.time_since_epoch().count();
+            const auto indexedEpoch = doc.indexedTime.time_since_epoch().count();
+
+            if (createdAfterEpoch && createdEpoch < *createdAfterEpoch) {
+                continue;
+            }
+            if (createdBeforeEpoch && createdEpoch > *createdBeforeEpoch) {
+                continue;
+            }
+            if (modifiedAfterEpoch && modifiedEpoch < *modifiedAfterEpoch) {
+                continue;
+            }
+            if (modifiedBeforeEpoch && modifiedEpoch > *modifiedBeforeEpoch) {
+                continue;
+            }
+            if (indexedAfterEpoch && indexedEpoch < *indexedAfterEpoch) {
+                continue;
+            }
+            if (indexedBeforeEpoch && indexedEpoch > *indexedBeforeEpoch) {
+                continue;
+            }
+
             candidates.push_back(&r);
         }
 
@@ -1440,6 +1603,9 @@ private:
                 constexpr size_t kSymbolEnrichLimit = 25;
                 const size_t enrichCount = std::min(resp.results.size(), kSymbolEnrichLimit);
                 const std::string& queryText = req.query;
+                std::string queryLower = queryText;
+                std::transform(queryLower.begin(), queryLower.end(), queryLower.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                 bool boosted = false;
 
                 for (size_t i = 0; i < enrichCount; ++i) {
@@ -1452,9 +1618,42 @@ private:
 
                     if (symbolEnricher_->enrichResult(enrichItem, queryText)) {
                         if (enrichItem.symbolContext && enrichItem.symbolContext->isSymbolQuery) {
-                            float boost =
-                                1.0f + (symbolWeight_ * enrichItem.symbolContext->symbolScore);
-                            boost *= enrichItem.symbolContext->definitionScore;
+                            bool queryMatchesSymbol = false;
+                            if (!queryLower.empty()) {
+                                for (const auto& symbol : enrichItem.symbolContext->symbols) {
+                                    std::string nameLower = symbol.name;
+                                    std::transform(nameLower.begin(), nameLower.end(),
+                                                   nameLower.begin(), [](unsigned char c) {
+                                                       return static_cast<char>(std::tolower(c));
+                                                   });
+                                    std::string qualifiedLower = symbol.qualifiedName;
+                                    std::transform(qualifiedLower.begin(), qualifiedLower.end(),
+                                                   qualifiedLower.begin(), [](unsigned char c) {
+                                                       return static_cast<char>(std::tolower(c));
+                                                   });
+
+                                    if ((!nameLower.empty() &&
+                                         queryLower.find(nameLower) != std::string::npos) ||
+                                        (!qualifiedLower.empty() &&
+                                         queryLower.find(qualifiedLower) != std::string::npos)) {
+                                        queryMatchesSymbol = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (!queryMatchesSymbol) {
+                                continue;
+                            }
+
+                            const float symbolScore =
+                                std::clamp(enrichItem.symbolContext->symbolScore, 0.0f, 1.0f);
+                            const float definitionScore =
+                                std::clamp(enrichItem.symbolContext->definitionScore, 1.0f, 1.5f);
+
+                            float boost = 1.0f + (symbolWeight_ * symbolScore);
+                            boost *= (1.0f + (definitionScore - 1.0f) * 0.35f);
+                            boost = std::clamp(boost, 1.0f, 1.35f);
                             it.score *= boost;
                             boosted = boosted || (boost != 1.0f);
                         }

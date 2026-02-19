@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <mutex>
+#include <sstream>
 #include <string>
 
 #include <yams/detection/file_type_detector.h>
@@ -15,6 +18,70 @@ namespace yams::app::services::utils {
 // - '?' matches exactly one character
 // Pattern is matched against the entire text.
 namespace {
+
+std::string trimCopy(const std::string& value) {
+    const auto isSpace = [](unsigned char c) { return std::isspace(c) != 0; };
+    auto begin = std::find_if_not(value.begin(), value.end(), isSpace);
+    auto end = std::find_if_not(value.rbegin(), value.rend(), isSpace).base();
+    if (begin >= end) {
+        return {};
+    }
+    return std::string(begin, end);
+}
+
+std::string toLowerCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+std::int64_t nowEpochSeconds() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+bool allDigits(const std::string& value) {
+    return !value.empty() && std::all_of(value.begin(), value.end(),
+                                         [](unsigned char c) { return std::isdigit(c) != 0; });
+}
+
+Result<std::int64_t> parseIso8601ish(std::string value) {
+    // Accept basic forms:
+    // YYYY-MM-DD
+    // YYYY-MM-DD HH:MM:SS
+    // YYYY-MM-DDTHH:MM:SS[Z]
+    value = trimCopy(value);
+    if (!value.empty() && (value.back() == 'Z' || value.back() == 'z')) {
+        value.pop_back();
+    }
+
+    std::replace(value.begin(), value.end(), 'T', ' ');
+
+    std::tm tm{};
+    {
+        std::istringstream ss(value);
+        if (value.size() <= 10) {
+            ss >> std::get_time(&tm, "%Y-%m-%d");
+        } else {
+            ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
+        }
+        if (ss.fail()) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Invalid time expression: expected ISO 8601/date format"};
+        }
+    }
+
+#if defined(_WIN32)
+    std::time_t t = _mkgmtime(&tm);
+#else
+    std::time_t t = timegm(&tm);
+#endif
+    if (t == static_cast<std::time_t>(-1)) {
+        return Error{ErrorCode::InvalidArgument, "Invalid time expression: out of range"};
+    }
+    return static_cast<std::int64_t>(t);
+}
 
 bool hasPathWildcards(const std::string& path) {
     for (char c : path) {
@@ -80,6 +147,91 @@ std::string collapseDoubleStarDir(const std::string& pattern) {
 }
 
 } // namespace
+
+Result<std::int64_t> parseTimeExpression(const std::string& timeExpr) {
+    const std::string trimmed = trimCopy(timeExpr);
+    if (trimmed.empty()) {
+        return Error{ErrorCode::InvalidArgument, "Time expression is empty"};
+    }
+
+    const std::string lowered = toLowerCopy(trimmed);
+    const std::int64_t now = nowEpochSeconds();
+
+    if (lowered == "now") {
+        return now;
+    }
+    constexpr std::int64_t kSecPerMinute = 60;
+    constexpr std::int64_t kSecPerHour = 60 * kSecPerMinute;
+    constexpr std::int64_t kSecPerDay = 24 * kSecPerHour;
+    constexpr std::int64_t kSecPerWeek = 7 * kSecPerDay;
+    constexpr std::int64_t kSecPerMonth = 30 * kSecPerDay;
+    constexpr std::int64_t kSecPerYear = 365 * kSecPerDay;
+
+    if (lowered == "today") {
+        return now;
+    }
+    if (lowered == "yesterday") {
+        return now - kSecPerDay;
+    }
+    if (lowered == "last week") {
+        return now - kSecPerWeek;
+    }
+    if (lowered == "last month") {
+        return now - kSecPerMonth;
+    }
+    if (lowered == "last year") {
+        return now - kSecPerYear;
+    }
+
+    if (allDigits(trimmed)) {
+        try {
+            return std::stoll(trimmed);
+        } catch (...) {
+            return Error{ErrorCode::InvalidArgument, "Invalid numeric epoch time"};
+        }
+    }
+
+    // Relative format: <number><unit> where unit in [s,m,h,d,w]
+    // e.g. 30m, 2h, 7d
+    if (trimmed.size() >= 2) {
+        const char unit = static_cast<char>(std::tolower(trimmed.back()));
+        const std::string numberPart = trimmed.substr(0, trimmed.size() - 1);
+        if (allDigits(numberPart)) {
+            try {
+                const std::int64_t magnitude = std::stoll(numberPart);
+                std::int64_t seconds = 0;
+                switch (unit) {
+                    case 's':
+                        seconds = magnitude;
+                        break;
+                    case 'm':
+                        seconds = magnitude * kSecPerMinute;
+                        break;
+                    case 'h':
+                        seconds = magnitude * kSecPerHour;
+                        break;
+                    case 'd':
+                        seconds = magnitude * kSecPerDay;
+                        break;
+                    case 'w':
+                        seconds = magnitude * kSecPerWeek;
+                        break;
+                    default:
+                        seconds = 0;
+                        break;
+                }
+                if (seconds > 0) {
+                    return now - seconds;
+                }
+            } catch (...) {
+                return Error{ErrorCode::InvalidArgument,
+                             "Invalid relative time expression magnitude"};
+            }
+        }
+    }
+
+    return parseIso8601ish(trimmed);
+}
 
 bool matchGlob(const std::string& text, const std::string& pattern) {
     if (matchGlobRaw(text, pattern))

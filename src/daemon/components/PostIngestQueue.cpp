@@ -108,6 +108,7 @@ void PostIngestQueue::start() {
         refreshStageAvailability();
         logStageAvailabilitySnapshot();
         initializeGradientLimiters();
+        initializeChannels();
         spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
         boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
         spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
@@ -314,8 +315,7 @@ std::size_t PostIngestQueue::boundedStageChannelCapacity(std::size_t defaultCap)
 }
 
 double PostIngestQueue::kgChannelFillRatio(std::size_t* depthOut, std::size_t* capacityOut) const {
-    // Observability-only: do not create the channel as a side effect.
-    auto ch = InternalEventBus::instance().get_channel<InternalEventBus::KgJob>("kg_jobs");
+    auto ch = kgChannel_;
     if (!ch) {
         if (depthOut)
             *depthOut = 0;
@@ -418,19 +418,12 @@ void PostIngestQueue::checkDrainAndSignal() {
 
 boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     spdlog::info("[PostIngestQueue] channelPoller coroutine STARTED");
-    const std::size_t channelCapacity = resolveChannelCapacity();
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            "post_ingest", channelCapacity);
-    spdlog::info("[PostIngestQueue] channelPoller got channel (cap={})", channelCapacity);
+    auto channel = postIngestChannel_;
+    spdlog::info("[PostIngestQueue] channelPoller got channel (cached)");
 
-    std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>> rpcChannel;
-    const std::size_t rpcCapacity = static_cast<std::size_t>(TuneAdvisor::postIngestRpcQueueMax());
-    if (rpcCapacity > 0) {
-        rpcChannel =
-            InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-                "post_ingest_rpc", rpcCapacity);
-        spdlog::info("[PostIngestQueue] channelPoller got RPC channel (cap={})", rpcCapacity);
+    auto rpcChannel = postIngestRpcChannel_;
+    if (rpcChannel) {
+        spdlog::info("[PostIngestQueue] channelPoller got RPC channel (cached)");
     }
 
     PressureLimitedPollerConfig<InternalEventBus::PostIngestTask> cfg;
@@ -483,11 +476,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
 }
 
 void PostIngestQueue::enqueue(Task t) {
-    static constexpr const char* kChannelName = "post_ingest";
-    const std::size_t channelCapacity = resolveChannelCapacity();
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            kChannelName, channelCapacity);
+    auto channel = postIngestChannel_;
 
     InternalEventBus::PostIngestTask task;
     task.hash = std::move(t.hash);
@@ -512,11 +501,7 @@ void PostIngestQueue::enqueueBatch(std::vector<Task> tasks) {
         return;
     }
 
-    static constexpr const char* kChannelName = "post_ingest";
-    const std::size_t channelCapacity = resolveChannelCapacity();
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            kChannelName, channelCapacity);
+    auto channel = postIngestChannel_;
 
     std::vector<InternalEventBus::PostIngestTask> busTasks;
     busTasks.reserve(tasks.size());
@@ -564,11 +549,7 @@ bool PostIngestQueue::tryEnqueue(const Task& t) {
         return false;
     }
 
-    static constexpr const char* kChannelName = "post_ingest";
-    const std::size_t channelCapacity = resolveChannelCapacity();
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            kChannelName, channelCapacity);
+    auto channel = postIngestChannel_;
 
     InternalEventBus::PostIngestTask task;
     task.hash = t.hash;
@@ -590,11 +571,7 @@ bool PostIngestQueue::tryEnqueue(Task&& t) {
         return false;
     }
 
-    static constexpr const char* kChannelName = "post_ingest";
-    const std::size_t channelCapacity = resolveChannelCapacity();
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            kChannelName, channelCapacity);
+    auto channel = postIngestChannel_;
 
     InternalEventBus::PostIngestTask task;
     task.hash = std::move(t.hash);
@@ -604,53 +581,25 @@ bool PostIngestQueue::tryEnqueue(Task&& t) {
 }
 
 std::size_t PostIngestQueue::size() const {
-    static constexpr const char* kChannelName = "post_ingest";
-    const std::size_t channelCapacity = resolveChannelCapacity();
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            kChannelName, channelCapacity);
-
-    const std::size_t rpcCapacity = static_cast<std::size_t>(TuneAdvisor::postIngestRpcQueueMax());
-    auto rpcChannel =
-        (rpcCapacity > 0)
-            ? InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-                  "post_ingest_rpc", rpcCapacity)
-            : nullptr;
-
-    const std::size_t normalDepth = channel ? channel->size_approx() : 0;
-    const std::size_t rpcDepth = rpcChannel ? rpcChannel->size_approx() : 0;
+    const std::size_t normalDepth = postIngestChannel_ ? postIngestChannel_->size_approx() : 0;
+    const std::size_t rpcDepth = postIngestRpcChannel_ ? postIngestRpcChannel_->size_approx() : 0;
     return normalDepth + rpcDepth;
 }
 
 std::size_t PostIngestQueue::kgQueueDepth() const {
-    const std::size_t kgChannelCapacity = boundedStageChannelCapacity(16384);
-    auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::KgJob>(
-        "kg_jobs", kgChannelCapacity);
-    return channel ? channel->size_approx() : 0;
+    return kgChannel_ ? kgChannel_->size_approx() : 0;
 }
 
 std::size_t PostIngestQueue::symbolQueueDepth() const {
-    const std::size_t symbolChannelCapacity = boundedStageChannelCapacity(16384);
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
-            "symbol_extraction", symbolChannelCapacity);
-    return channel ? channel->size_approx() : 0;
+    return symbolChannel_ ? symbolChannel_->size_approx() : 0;
 }
 
 std::size_t PostIngestQueue::entityQueueDepth() const {
-    const std::size_t entityChannelCapacity = boundedStageChannelCapacity(4096);
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityExtractionJob>(
-            "entity_extraction", entityChannelCapacity);
-    return channel ? channel->size_approx() : 0;
+    return entityChannel_ ? entityChannel_->size_approx() : 0;
 }
 
 std::size_t PostIngestQueue::titleQueueDepth() const {
-    const std::size_t titleChannelCapacity = boundedStageChannelCapacity(4096);
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::TitleExtractionJob>(
-            "title_extraction", titleChannelCapacity);
-    return channel ? channel->size_approx() : 0;
+    return titleChannel_ ? titleChannel_->size_approx() : 0;
 }
 
 void PostIngestQueue::processTask(const std::string& hash, const std::string& mime) {
@@ -1041,9 +990,7 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
         return;
     }
 
-    const std::size_t kgChannelCapacity = boundedStageChannelCapacity(16384);
-    auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::KgJob>(
-        "kg_jobs", kgChannelCapacity);
+    auto channel = kgChannel_;
 
     InternalEventBus::KgJob job;
     job.hash = hash;
@@ -1074,9 +1021,7 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
 }
 
 boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
-    const std::size_t kgChannelCapacity = boundedStageChannelCapacity(16384);
-    auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::KgJob>(
-        "kg_jobs", kgChannelCapacity);
+    auto channel = kgChannel_;
 
     PressureLimitedPollerConfig<InternalEventBus::KgJob> cfg;
     cfg.stageName = "KG";
@@ -1108,10 +1053,7 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
 }
 
 boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
-    const std::size_t symbolChannelCapacity = boundedStageChannelCapacity(16384);
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
-            "symbol_extraction", symbolChannelCapacity);
+    auto channel = symbolChannel_;
 
     PressureLimitedPollerConfig<InternalEventBus::SymbolExtractionJob> cfg;
     cfg.stageName = "symbol";
@@ -1221,10 +1163,7 @@ void PostIngestQueue::processSymbolExtractionBatch(
 void PostIngestQueue::dispatchToSymbolChannel(
     const std::string& hash, int64_t docId, const std::string& filePath,
     const std::string& language, std::shared_ptr<std::vector<std::byte>> contentBytes) {
-    const std::size_t symbolChannelCapacity = boundedStageChannelCapacity(16384);
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
-            "symbol_extraction", symbolChannelCapacity);
+    auto channel = symbolChannel_;
 
     InternalEventBus::SymbolExtractionJob job;
     job.hash = hash;
@@ -1302,10 +1241,7 @@ void PostIngestQueue::processSymbolExtractionStage(
 void PostIngestQueue::dispatchToEntityChannel(
     const std::string& hash, int64_t docId, const std::string& filePath,
     const std::string& extension, std::shared_ptr<std::vector<std::byte>> contentBytes) {
-    const std::size_t entityChannelCapacity = boundedStageChannelCapacity(4096);
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityExtractionJob>(
-            "entity_extraction", entityChannelCapacity);
+    auto channel = entityChannel_;
 
     InternalEventBus::EntityExtractionJob job;
     job.hash = hash;
@@ -1325,10 +1261,7 @@ void PostIngestQueue::dispatchToEntityChannel(
 }
 
 boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
-    const std::size_t entityChannelCapacity = boundedStageChannelCapacity(4096);
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::EntityExtractionJob>(
-            "entity_extraction", entityChannelCapacity);
+    auto channel = entityChannel_;
 
     PressureLimitedPollerConfig<InternalEventBus::EntityExtractionJob> cfg;
     cfg.stageName = "entity";
@@ -1366,14 +1299,23 @@ void PostIngestQueue::processEntityExtractionBatch(
     if (jobs.empty()) {
         return;
     }
-    // Entity extraction is expensive; fan out within the batch to use available cores.
+    // Fan out entity extraction via coordinator pool (bounded threads)
+    auto executor =
+        entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor();
     std::vector<std::future<void>> futures;
     futures.reserve(jobs.size());
     for (auto& job : jobs) {
-        futures.push_back(std::async(std::launch::async, [this, job = std::move(job)]() mutable {
-            processEntityExtractionStage(job.hash, job.documentId, job.filePath, job.extension,
-                                         std::move(job.contentBytes));
-        }));
+        auto promise = std::make_shared<std::promise<void>>();
+        futures.push_back(promise->get_future());
+        boost::asio::post(executor, [this, p = std::move(promise), job = std::move(job)]() mutable {
+            try {
+                processEntityExtractionStage(job.hash, job.documentId, job.filePath, job.extension,
+                                             std::move(job.contentBytes));
+                p->set_value();
+            } catch (...) {
+                p->set_exception(std::current_exception());
+            }
+        });
     }
     for (auto& f : futures) {
         f.get();
@@ -1655,10 +1597,7 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
                                              const std::string& filePath,
                                              const std::string& language,
                                              const std::string& mimeType) {
-    const std::size_t titleChannelCapacity = boundedStageChannelCapacity(4096);
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::TitleExtractionJob>(
-            "title_extraction", titleChannelCapacity);
+    auto channel = titleChannel_;
 
     InternalEventBus::TitleExtractionJob job;
     job.hash = hash;
@@ -1681,10 +1620,7 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
 }
 
 boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
-    const std::size_t titleChannelCapacity = boundedStageChannelCapacity(4096);
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::TitleExtractionJob>(
-            "title_extraction", titleChannelCapacity);
+    auto channel = titleChannel_;
 
     PressureLimitedPollerConfig<InternalEventBus::TitleExtractionJob> cfg;
     cfg.stageName = "title";
@@ -1722,14 +1658,23 @@ void PostIngestQueue::processTitleExtractionBatch(
     if (jobs.empty()) {
         return;
     }
+    // Fan out title extraction via coordinator pool (bounded threads)
+    auto executor = coordinator_->getExecutor();
     std::vector<std::future<void>> futures;
     futures.reserve(jobs.size());
     for (auto& job : jobs) {
-        futures.push_back(std::async(std::launch::async, [this, job = std::move(job)]() mutable {
-            processTitleExtractionStage(job.hash, job.documentId, job.textSnippet,
-                                        job.fallbackTitle, job.filePath, job.language,
-                                        job.mimeType);
-        }));
+        auto promise = std::make_shared<std::promise<void>>();
+        futures.push_back(promise->get_future());
+        boost::asio::post(executor, [this, p = std::move(promise), job = std::move(job)]() mutable {
+            try {
+                processTitleExtractionStage(job.hash, job.documentId, job.textSnippet,
+                                            job.fallbackTitle, job.filePath, job.language,
+                                            job.mimeType);
+                p->set_value();
+            } catch (...) {
+                p->set_exception(std::current_exception());
+            }
+        });
     }
     for (auto& f : futures) {
         f.get();
@@ -1955,6 +1900,28 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
 // =========================================================================
 // Gradient-Based Adaptive Concurrency Limiter Integration
 // =========================================================================
+
+void PostIngestQueue::initializeChannels() {
+    auto& bus = InternalEventBus::instance();
+    postIngestChannel_ = bus.get_or_create_channel<InternalEventBus::PostIngestTask>(
+        "post_ingest", resolveChannelCapacity());
+    const std::size_t rpcCap = static_cast<std::size_t>(TuneAdvisor::postIngestRpcQueueMax());
+    if (rpcCap > 0) {
+        postIngestRpcChannel_ =
+            bus.get_or_create_channel<InternalEventBus::PostIngestTask>("post_ingest_rpc", rpcCap);
+    }
+    kgChannel_ = bus.get_or_create_channel<InternalEventBus::KgJob>(
+        "kg_jobs", boundedStageChannelCapacity(16384));
+    symbolChannel_ = bus.get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
+        "symbol_extraction", boundedStageChannelCapacity(16384));
+    entityChannel_ = bus.get_or_create_channel<InternalEventBus::EntityExtractionJob>(
+        "entity_extraction", boundedStageChannelCapacity(4096));
+    titleChannel_ = bus.get_or_create_channel<InternalEventBus::TitleExtractionJob>(
+        "title_extraction", boundedStageChannelCapacity(4096));
+    embedChannel_ = bus.get_or_create_channel<InternalEventBus::EmbedJob>(
+        "embed_jobs", std::max<std::size_t>(TuneAdvisor::embedChannelCapacity(), 256));
+    spdlog::info("[PostIngestQueue] Cached {} EventBus channel pointers", 7);
+}
 
 void PostIngestQueue::initializeGradientLimiters() {
     if (!TuneAdvisor::enableGradientLimiters()) {
@@ -2210,12 +2177,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
 
     // Opportunistically enqueue embedding jobs for successfully extracted/indexed documents.
     // This is the primary path for generating vector embeddings during normal ingestion.
-    std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedQ;
-    const uint32_t embedCap = TuneAdvisor::embedChannelCapacity();
-    if (embedCap > 0) {
-        embedQ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
-            "embed_jobs", embedCap);
-    }
+    auto embedQ = embedChannel_;
     std::vector<InternalEventBus::EmbedPreparedDoc> embedPreparedBatch;
     std::vector<std::string> embedHashBatch;
     const std::size_t maxEmbedBatch = TuneAdvisor::resolvedEmbedJobDocCap();
@@ -2382,19 +2344,26 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     const size_t numChunks = std::min(static_cast<size_t>(maxWorkers), tasks.size());
     const size_t chunkSize = (tasks.size() + numChunks - 1) / numChunks;
 
-    // Launch parallel chunks using std::async
+    // Launch parallel chunks via coordinator thread pool (bounded)
     std::vector<std::future<ChunkResult>> futures;
     futures.reserve(numChunks);
+    auto executor = coordinator_->getExecutor();
 
     for (size_t i = 0; i < tasks.size(); i += chunkSize) {
         size_t end = std::min(i + chunkSize, tasks.size());
         std::vector<InternalEventBus::PostIngestTask> chunk(tasks.begin() + i, tasks.begin() + end);
 
-        futures.push_back(
-            std::async(std::launch::async, [this, chunk = std::move(chunk), &stageCfg]() {
-                return processChunkParallel(chunk, stageCfg.symbolExtensionMap,
-                                            stageCfg.entityProviders);
-            }));
+        auto promise = std::make_shared<std::promise<ChunkResult>>();
+        futures.push_back(promise->get_future());
+        boost::asio::post(executor, [this, p = std::move(promise), chunk = std::move(chunk),
+                                     &stageCfg]() mutable {
+            try {
+                p->set_value(processChunkParallel(chunk, stageCfg.symbolExtensionMap,
+                                                  stageCfg.entityProviders));
+            } catch (...) {
+                p->set_exception(std::current_exception());
+            }
+        });
     }
 
     // Collect results
@@ -2428,7 +2397,12 @@ PostIngestQueue::ChunkResult PostIngestQueue::processChunkParallel(
     result.successes.reserve(tasks.size());
     result.failures.reserve(tasks.size() / 10);
 
-    // Parallel extraction within the chunk
+    // Parallel extraction within the chunk.
+    // NOTE: Uses std::async intentionally — this is leaf-level work already bounded by
+    // extractionSemaphore_. Using boost::asio::post here would risk deadlock because the
+    // calling pool thread (from processBatch's post) is blocked waiting for these futures,
+    // and posting more work to the same pool with semaphore blocking inside would exhaust
+    // available threads.
     std::vector<std::future<std::variant<PreparedMetadataEntry, ExtractionFailure>>> futures;
     futures.reserve(tasks.size());
 

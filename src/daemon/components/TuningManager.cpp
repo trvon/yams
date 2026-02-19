@@ -902,10 +902,10 @@ void TuningManager::tick_once() {
                 target = std::min(target, maxSize);
                 int32_t delta = target - static_cast<int32_t>(ipcStats.current_size);
                 if (delta > 0) {
-                    governor.applyPoolDelta(
+                    const auto newSize = governor.applyPoolDelta(
                         {"ipc", delta, "tuning_load_grow", TuneAdvisor::poolCooldownMs()});
-                    spdlog::debug("TuningManager: IPC pool grown by {} (util={:.1f}%)", delta,
-                                  ipcUtil * 100.0);
+                    spdlog::debug("TuningManager: IPC pool grown by {} to {} (util={:.1f}%)", delta,
+                                  newSize, ipcUtil * 100.0);
                 }
                 ipcHighTicks_ = 0;
             }
@@ -919,10 +919,10 @@ void TuningManager::tick_once() {
                 target = std::max(target, minSize);
                 int32_t delta = target - static_cast<int32_t>(ipcStats.current_size);
                 if (delta < 0) {
-                    governor.applyPoolDelta(
+                    const auto newSize = governor.applyPoolDelta(
                         {"ipc", delta, "tuning_load_shrink", TuneAdvisor::poolCooldownMs()});
-                    spdlog::debug("TuningManager: IPC pool shrunk by {} (util={:.1f}%)", -delta,
-                                  ipcUtil * 100.0);
+                    spdlog::debug("TuningManager: IPC pool shrunk by {} to {} (util={:.1f}%)",
+                                  -delta, newSize, ipcUtil * 100.0);
                 }
                 ipcLowTicks_ = 0;
             }
@@ -947,10 +947,10 @@ void TuningManager::tick_once() {
                 target = std::min(target, maxSize);
                 int32_t delta = target - static_cast<int32_t>(ioStats.current_size);
                 if (delta > 0) {
-                    governor.applyPoolDelta(
+                    const auto newSize = governor.applyPoolDelta(
                         {"ipc_io", delta, "tuning_load_grow", TuneAdvisor::poolCooldownMs()});
-                    spdlog::debug("TuningManager: IO pool grown by {} (util={:.1f}%)", delta,
-                                  ioUtil * 100.0);
+                    spdlog::debug("TuningManager: IO pool grown by {} to {} (util={:.1f}%)", delta,
+                                  newSize, ioUtil * 100.0);
                 }
                 ioHighTicks_ = 0;
             }
@@ -963,10 +963,10 @@ void TuningManager::tick_once() {
                 target = std::max(target, minSize);
                 int32_t delta = target - static_cast<int32_t>(ioStats.current_size);
                 if (delta < 0) {
-                    governor.applyPoolDelta(
+                    const auto newSize = governor.applyPoolDelta(
                         {"ipc_io", delta, "tuning_load_shrink", TuneAdvisor::poolCooldownMs()});
-                    spdlog::debug("TuningManager: IO pool shrunk by {} (util={:.1f}%)", -delta,
-                                  ioUtil * 100.0);
+                    spdlog::debug("TuningManager: IO pool shrunk by {} to {} (util={:.1f}%)",
+                                  -delta, newSize, ioUtil * 100.0);
                 }
                 ioLowTicks_ = 0;
             }

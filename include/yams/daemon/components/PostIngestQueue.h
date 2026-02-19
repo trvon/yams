@@ -163,8 +163,6 @@ public:
         std::string extension;
         std::vector<std::string> tags;
         std::string language;
-
-        // Optional: raw document bytes (reused for KG/symbol/entity stages to avoid re-reading).
         std::shared_ptr<std::vector<std::byte>> contentBytes;
 
         // Dispatch flags (determined during preparation)
@@ -233,8 +231,6 @@ public:
         return kgChannelFillRatio(depthOut, capacityOut);
     }
 
-    /// Returns true once the channel poller coroutine has started.
-    /// Tests should wait for this before enqueueing to avoid race conditions.
     bool started() const { return stageStarted_[0].load(); }
 
     // Per-stage inflight counts
@@ -455,6 +451,19 @@ private:
 
     search::EntityExtractionFunc titleExtractor_;
     KGWriteQueue* kgWriteQueue_{nullptr};
+
+    // Cached EventBus channel pointers — resolved once in start(), avoids
+    // per-call mutex + unordered_map<string> lookups on every enqueue/dispatch/depth query.
+    std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>> postIngestChannel_;
+    std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>> postIngestRpcChannel_;
+    std::shared_ptr<SpscQueue<InternalEventBus::KgJob>> kgChannel_;
+    std::shared_ptr<SpscQueue<InternalEventBus::SymbolExtractionJob>> symbolChannel_;
+    std::shared_ptr<SpscQueue<InternalEventBus::EntityExtractionJob>> entityChannel_;
+    std::shared_ptr<SpscQueue<InternalEventBus::TitleExtractionJob>> titleChannel_;
+    std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedChannel_;
+
+    /// Initialize cached channel pointers from InternalEventBus
+    void initializeChannels();
 
     // Gradient-based adaptive concurrency limiters (Netflix Gradient2 algorithm)
     // Index 0-4 = stages (Extraction..Title), index 5 = Embed

@@ -1798,9 +1798,9 @@ SearchEngine::Impl::queryKnowledgeGraph(const std::string& query, size_t limit) 
                 // Check if this term appears in snippet or path (heuristic for match attribution)
                 bool likelyMatch = false;
                 if (!searchResult.snippet.empty() &&
-                    searchResult.snippet.find(term) != std::string::npos) {
+                    ci_find(searchResult.snippet, term) != std::string::npos) {
                     likelyMatch = true;
-                } else if (searchResult.document.filePath.find(term) != std::string::npos) {
+                } else if (ci_find(searchResult.document.filePath, term) != std::string::npos) {
                     likelyMatch = true;
                 }
 
@@ -1885,6 +1885,37 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding, size_t
 
         auto vectorRecords = vectorDb_->search(embedding, params);
 
+        // Keep only the best semantic hit per document to avoid dense/chunked documents
+        // accumulating disproportionate score during fusion.
+        if (!vectorRecords.empty()) {
+            std::unordered_map<std::string, size_t> bestByHash;
+            bestByHash.reserve(vectorRecords.size());
+
+            std::vector<vector::VectorRecord> deduped;
+            deduped.reserve(vectorRecords.size());
+
+            for (const auto& vr : vectorRecords) {
+                if (vr.document_hash.empty()) {
+                    continue;
+                }
+                auto it = bestByHash.find(vr.document_hash);
+                if (it == bestByHash.end()) {
+                    bestByHash[vr.document_hash] = deduped.size();
+                    deduped.push_back(vr);
+                } else if (vr.relevance_score > deduped[it->second].relevance_score) {
+                    deduped[it->second] = vr;
+                }
+            }
+
+            std::sort(deduped.begin(), deduped.end(), [](const auto& a, const auto& b) {
+                return a.relevance_score > b.relevance_score;
+            });
+            if (deduped.size() > limit) {
+                deduped.resize(limit);
+            }
+            vectorRecords = std::move(deduped);
+        }
+
         if (vectorRecords.empty()) {
             return results;
         }
@@ -1954,6 +1985,37 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding, size_t
         params.candidate_hashes = candidates; // Narrow to Tier 1 candidates
 
         auto vectorRecords = vectorDb_->search(embedding, params);
+
+        // Keep only the best semantic hit per document to avoid dense/chunked documents
+        // accumulating disproportionate score during fusion.
+        if (!vectorRecords.empty()) {
+            std::unordered_map<std::string, size_t> bestByHash;
+            bestByHash.reserve(vectorRecords.size());
+
+            std::vector<vector::VectorRecord> deduped;
+            deduped.reserve(vectorRecords.size());
+
+            for (const auto& vr : vectorRecords) {
+                if (vr.document_hash.empty()) {
+                    continue;
+                }
+                auto it = bestByHash.find(vr.document_hash);
+                if (it == bestByHash.end()) {
+                    bestByHash[vr.document_hash] = deduped.size();
+                    deduped.push_back(vr);
+                } else if (vr.relevance_score > deduped[it->second].relevance_score) {
+                    deduped[it->second] = vr;
+                }
+            }
+
+            std::sort(deduped.begin(), deduped.end(), [](const auto& a, const auto& b) {
+                return a.relevance_score > b.relevance_score;
+            });
+            if (deduped.size() > limit) {
+                deduped.resize(limit);
+            }
+            vectorRecords = std::move(deduped);
+        }
 
         if (vectorRecords.empty()) {
             return results;
@@ -2026,6 +2088,37 @@ SearchEngine::Impl::queryEntityVectors(const std::vector<float>& embedding, size
         params.include_embeddings = false; // Don't need embeddings in results
 
         auto entityRecords = vectorDb_->searchEntities(embedding, params);
+
+        // Keep only the best entity hit per source document to reduce ranking noise from
+        // documents with many similar symbols.
+        if (!entityRecords.empty()) {
+            std::unordered_map<std::string, size_t> bestByHash;
+            bestByHash.reserve(entityRecords.size());
+
+            std::vector<vector::EntityVectorRecord> deduped;
+            deduped.reserve(entityRecords.size());
+
+            for (const auto& er : entityRecords) {
+                if (er.document_hash.empty()) {
+                    continue;
+                }
+                auto it = bestByHash.find(er.document_hash);
+                if (it == bestByHash.end()) {
+                    bestByHash[er.document_hash] = deduped.size();
+                    deduped.push_back(er);
+                } else if (er.relevance_score > deduped[it->second].relevance_score) {
+                    deduped[it->second] = er;
+                }
+            }
+
+            std::sort(deduped.begin(), deduped.end(), [](const auto& a, const auto& b) {
+                return a.relevance_score > b.relevance_score;
+            });
+            if (deduped.size() > limit) {
+                deduped.resize(limit);
+            }
+            entityRecords = std::move(deduped);
+        }
 
         if (entityRecords.empty()) {
             return results;

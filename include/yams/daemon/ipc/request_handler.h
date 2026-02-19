@@ -287,7 +287,8 @@ private:
                const std::string& message, uint64_t request_id = 0);
 
     std::shared_ptr<RequestProcessor> processor_;
-    RequestDispatcher* dispatcher_ = nullptr; // Alternative to processor_
+    std::shared_ptr<RequestProcessor> dispatcherAdapter_; // Cached adapter for dispatcher_
+    RequestDispatcher* dispatcher_ = nullptr;             // Alternative to processor_
     MessageFramer framer_;
     Config config_;
     mutable InternalStats stats_;

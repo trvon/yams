@@ -150,13 +150,13 @@ RequestHandler::RequestHandler(RequestDispatcher* dispatcher, Config config)
     config_.total_queued_bytes_cap = TuneAdvisor::serverQueueBytesCap();
     if (!config_.writer_budget_ref && config_.writer_budget_bytes_per_turn == 0)
         config_.writer_budget_bytes_per_turn = TuneAdvisor::serverWriterBudgetBytesPerTurn();
-    // Create a processor adapter that wraps the dispatcher
+    // Create a processor adapter that wraps the dispatcher (cached for reuse)
     if (dispatcher_) {
-        auto adapter = std::make_shared<DispatcherAdapter>(dispatcher_);
+        dispatcherAdapter_ = std::make_shared<DispatcherAdapter>(dispatcher_);
 
         // Always wrap with streaming support
         spdlog::debug("RequestHandler: Wrapping processor with StreamingRequestProcessor");
-        processor_ = std::make_shared<StreamingRequestProcessor>(adapter, config_);
+        processor_ = std::make_shared<StreamingRequestProcessor>(dispatcherAdapter_, config_);
     }
 }
 
@@ -960,9 +960,8 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
         // sharing that instance can corrupt state across requests. Build a fresh wrapper
         // per request when dispatcher_ is available so streaming state is isolated.
         std::shared_ptr<RequestProcessor> proc = processor_;
-        if (dispatcher_) {
-            auto adapter = std::make_shared<DispatcherAdapter>(dispatcher_);
-            proc = std::make_shared<StreamingRequestProcessor>(adapter, config_);
+        if (dispatcher_ && dispatcherAdapter_) {
+            proc = std::make_shared<StreamingRequestProcessor>(dispatcherAdapter_, config_);
         }
         spdlog::debug("handle_streaming_request: processor type={} for request_id={}",
                       proc ? typeid(RequestProcessor).name() : "null", request_id);
