@@ -9,6 +9,7 @@
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
+#include <yams/daemon/components/DocumentRequestMapper.h>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -16,8 +17,6 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/request_context_registry.h>
-#include <yams/extraction/extraction_util.h>
-#include <yams/ingest/ingest_helpers.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
 #include <yams/vector/embedding_service.h>
@@ -54,12 +53,35 @@ RequestDispatcher::handlePrepareSessionRequest(const PrepareSessionRequest& req)
         "prepare_session", [this, req]() -> boost::asio::awaitable<Response> {
             spdlog::debug("handlePrepareSessionRequest: unary response path (session='{}')",
                           req.sessionName);
-            // For now, respond optimistically to ensure round‑trip success in integration tests.
-            // Full implementation may consult SessionService if available.
-            (void)this;
-            (void)req;
+
+            PrepareSessionOptions opts;
+            opts.sessionName = req.sessionName;
+            opts.maxCores = req.cores;
+            opts.maxMemoryGb = req.memoryGb;
+            opts.maxTimeMs = req.timeMs;
+            opts.aggressive = req.aggressive;
+            opts.limit = req.limit;
+            opts.snippetLen = req.snippetLen;
+
+            const int warmed = co_await yams::daemon::dispatch::offload_to_worker(
+                serviceManager_, [this, opts]() { return prepareSession(opts); });
+
+            if (warmed < 0) {
+                switch (warmed) {
+                    case -2:
+                        co_return ErrorResponse{ErrorCode::NotFound,
+                                                "Session not found: " + req.sessionName};
+                    case -1:
+                        co_return ErrorResponse{ErrorCode::InvalidState,
+                                                "Session service unavailable"};
+                    default:
+                        co_return ErrorResponse{ErrorCode::InternalError,
+                                                "Failed to prepare session"};
+                }
+            }
+
             PrepareSessionResponse resp;
-            resp.warmedCount = 0;
+            resp.warmedCount = static_cast<uint64_t>(warmed);
             resp.message = "OK";
             co_return resp;
         });
@@ -443,39 +465,51 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
     YAMS_ZONE_SCOPED_N("handleAddDocumentRequest");
     co_return co_await yams::daemon::dispatch::guard_await(
         "add_document", [this, req]() -> boost::asio::awaitable<Response> {
-            // Check admission control before accepting new work
-            if (!ResourceGovernor::instance().canAdmitWork()) {
-                // Queue for deferred processing instead of rejecting outright
+            auto makeDeferredAddResponse = [&](const std::string& message,
+                                               bool skipHashComputation) -> Response {
+                AddDocumentResponse response;
+                response.path = req.path.empty() ? req.name : req.path;
+                response.documentsAdded = 0;
+
+                if (!skipHashComputation) {
+                    try {
+                        auto hasher = yams::crypto::createSHA256Hasher();
+                        if (!req.content.empty()) {
+                            response.hash = hasher->hash(req.content);
+                        } else if (!req.path.empty()) {
+                            response.hash = hasher->hashFile(req.path);
+                        }
+                    } catch (...) {
+                        response.hash = "";
+                    }
+                } else {
+                    response.hash = "";
+                }
+
+                response.message = message;
+                return response;
+            };
+
+            auto enqueueDeferredStoreTask = [&](const std::string& message,
+                                                bool skipHashComputation) -> Response {
                 auto channel = InternalEventBus::instance()
                                    .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
                                        "store_document_tasks", 4096);
                 InternalEventBus::StoreDocumentTask task{req};
                 if (channel->try_push(std::move(task))) {
-                    AddDocumentResponse response;
-                    response.path = req.path.empty() ? req.name : req.path;
-                    response.documentsAdded = 0;
-                    // Compute hash for immediate feedback
-                    bool reqIsDir = (!req.path.empty() && std::filesystem::is_directory(req.path));
-                    if (!reqIsDir && !req.recursive) {
-                        try {
-                            auto hasher = yams::crypto::createSHA256Hasher();
-                            if (!req.content.empty()) {
-                                response.hash = hasher->hash(req.content);
-                            } else if (!req.path.empty()) {
-                                response.hash = hasher->hashFile(req.path);
-                            }
-                        } catch (...) {
-                            response.hash = "";
-                        }
-                    } else {
-                        response.hash = "";
-                    }
-                    response.message = "Queued for deferred processing (system under pressure).";
-                    co_return response;
-                } else {
-                    co_return ErrorResponse{ErrorCode::ResourceExhausted,
-                                            "Ingestion queue is full. Please try again later."};
+                    return makeDeferredAddResponse(message, skipHashComputation);
                 }
+
+                return ErrorResponse{ErrorCode::ResourceExhausted,
+                                     "Ingestion queue is full. Please try again later."};
+            };
+
+            // Check admission control before accepting new work
+            if (!ResourceGovernor::instance().canAdmitWork()) {
+                bool reqIsDir = (!req.path.empty() && std::filesystem::is_directory(req.path));
+                co_return enqueueDeferredStoreTask(
+                    "Queued for deferred processing (system under pressure).",
+                    reqIsDir || req.recursive);
             }
 
             // Be forgiving: if the path is a directory but recursive was not set, treat it as
@@ -501,64 +535,18 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
 
             // For directories or if daemon not ready, use async queue
             if (isDir || req.recursive || !daemonReady) {
-                auto channel = InternalEventBus::instance()
-                                   .get_or_create_channel<InternalEventBus::StoreDocumentTask>(
-                                       "store_document_tasks", 4096);
-                InternalEventBus::StoreDocumentTask task{req};
-                if (channel->try_push(std::move(task))) {
-                    AddDocumentResponse response;
-                    response.path = req.path.empty() ? req.name : req.path;
-                    response.documentsAdded = 0;
-
-                    // Compute hash for single files/content even with async storage
-                    // This allows callers to get the hash immediately while processing continues
-                    if (!isDir && !req.recursive) {
-                        try {
-                            auto hasher = yams::crypto::createSHA256Hasher();
-                            if (!req.content.empty()) {
-                                response.hash = hasher->hash(req.content);
-                            } else if (!req.path.empty()) {
-                                response.hash = hasher->hashFile(req.path);
-                            }
-                        } catch (...) {
-                            response.hash = "";
-                        }
-                    } else {
-                        response.hash = "";
-                    }
-
-                    if (isDir || req.recursive) {
-                        response.message =
-                            "Directory ingestion accepted for asynchronous processing.";
-                    } else {
-                        response.message =
-                            "Ingestion accepted for asynchronous processing (daemon initializing).";
-                    }
-                    co_return response;
-                } else {
-                    co_return ErrorResponse{ErrorCode::ResourceExhausted,
-                                            "Ingestion queue is full. Please try again later."};
-                }
+                const bool skipHash = isDir || req.recursive;
+                const std::string message =
+                    (isDir || req.recursive)
+                        ? "Directory ingestion accepted for asynchronous processing."
+                        : "Ingestion accepted for asynchronous processing (daemon initializing).";
+                co_return enqueueDeferredStoreTask(message, skipHash);
             }
 
             // For single files when daemon is ready, store synchronously for immediate availability
             auto appContext = serviceManager_->getAppContext();
             auto docService = app::services::makeDocumentService(appContext);
-            app::services::StoreDocumentRequest serviceReq;
-            serviceReq.path = req.path;
-            serviceReq.content = req.content;
-            serviceReq.name = req.name;
-            serviceReq.mimeType = req.mimeType;
-            serviceReq.disableAutoMime = req.disableAutoMime;
-            serviceReq.tags = req.tags;
-            for (const auto& [key, value] : req.metadata) {
-                serviceReq.metadata[key] = value;
-            }
-            serviceReq.collection = req.collection;
-            serviceReq.snapshotId = req.snapshotId;
-            serviceReq.snapshotLabel = req.snapshotLabel;
-            serviceReq.sessionId = req.sessionId;
-            serviceReq.noEmbeddings = req.noEmbeddings;
+            auto serviceReq = yams::daemon::dispatch::mapStoreDocumentRequest(req);
 
             // Store document synchronously
             // Note: This may block the async context briefly, but ensures reliable completion
@@ -583,39 +571,16 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
 
             if (serviceResp.bytesStored > 0 && serviceResp.bytesStored < kFastTrackThreshold &&
                 serviceManager_ && !serviceResp.hash.empty()) {
-                // Try to extract synchronously for small documents
-                auto metaRepo = serviceManager_->getMetadataRepo();
-                auto contentStore = serviceManager_->getContentStore();
-                auto extractors = serviceManager_->getContentExtractors();
+                if (serviceManager_->getPostIngestQueue() &&
+                    serviceManager_->getPostIngestQueue()->tryFastTrackExtractAndPersist(
+                        serviceResp.hash, req.mimeType)) {
+                    fastTracked = true;
+                    response.message = "Document stored and extracted (fast-track).";
+                    response.extractionStatus = "success";
 
-                if (metaRepo && contentStore && !extractors.empty()) {
-                    auto docInfoRes = metaRepo->getDocumentByHash(serviceResp.hash);
-                    if (docInfoRes && docInfoRes.value().has_value()) {
-                        const auto& docInfo = docInfoRes.value().value();
-                        auto text = extraction::util::extractDocumentText(
-                            contentStore, serviceResp.hash,
-                            docInfo.mimeType.empty() ? req.mimeType : docInfo.mimeType,
-                            docInfo.fileExtension, extractors);
-
-                        if (text && !text->empty()) {
-                            // Persist extracted text synchronously
-                            auto persistRes = ingest::persist_content_and_index(
-                                *metaRepo, docInfo.id, docInfo.fileName, *text, docInfo.mimeType,
-                                "fast_track_sync");
-
-                            if (persistRes) {
-                                fastTracked = true;
-                                response.message = "Document stored and extracted (fast-track).";
-                                response.extractionStatus = "success";
-
-                                // Dispatch embed job so fast-tracked docs get embeddings
-                                if (serviceManager_ && serviceManager_->getPostIngestQueue()) {
-                                    serviceManager_->getPostIngestQueue()
-                                        ->dispatchEmbedJobWithRetry({serviceResp.hash}, true, true);
-                                }
-                            }
-                        }
-                    }
+                    // Dispatch embed job so fast-tracked docs get embeddings
+                    serviceManager_->getPostIngestQueue()->dispatchEmbedJobWithRetry(
+                        {serviceResp.hash}, true, true);
                 }
             }
 

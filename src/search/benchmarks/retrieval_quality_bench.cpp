@@ -1123,11 +1123,11 @@ struct BenchFixture {
             if (timeSinceProgress > progressTimeoutSec) {
                 spdlog::error(
                     "Ingestion stalled - no progress for {}s (docs: total={} indexed={} target={} "
-                    "queue={}, inflight: extract={} kg={} symbol={} entity={} extracted={} "
+                    "queue={}, inflight: extract={} kg={} enrich={} extracted={} "
                     "processed={})",
                     timeSinceProgress.count(), lastDocCount, lastIndexedDocCount, corpusSize,
-                    lastDepth, lastExtractionInFlight, lastKgInFlight, lastSymbolInFlight,
-                    lastEntityInFlight, lastContentExtracted, lastPostProcessed);
+                    lastDepth, lastExtractionInFlight, lastKgInFlight, lastEnrichInFlight,
+                    lastContentExtracted, lastPostProcessed);
                 throw std::runtime_error("Ingestion stalled - benchmark results would be invalid. "
                                          "Set YAMS_BENCH_PROGRESS_TIMEOUT=300 for slower systems. "
                                          "For faster ingestion: YAMS_POST_EMBED_CONCURRENT=12 "

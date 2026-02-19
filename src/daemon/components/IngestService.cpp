@@ -5,6 +5,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/IngestService.h>
+#include <yams/daemon/components/DocumentRequestMapper.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -163,22 +164,7 @@ static void processTask(ServiceManager* sm, const InternalEventBus::StoreDocumen
         }
     } else {
         auto docService = yams::app::services::makeDocumentService(appContext);
-        app::services::StoreDocumentRequest serviceReq;
-        serviceReq.path = req.path;
-        serviceReq.content = req.content;
-        serviceReq.name = req.name;
-        serviceReq.mimeType = req.mimeType;
-        serviceReq.disableAutoMime = req.disableAutoMime;
-        serviceReq.tags = req.tags;
-        serviceReq.metadata.clear();
-        for (const auto& [key, value] : req.metadata) {
-            serviceReq.metadata[key] = value;
-        }
-        serviceReq.collection = req.collection;
-        serviceReq.snapshotId = req.snapshotId;
-        serviceReq.snapshotLabel = req.snapshotLabel;
-        serviceReq.sessionId = req.sessionId; // Session-isolated memory (PBI-082)
-        serviceReq.noEmbeddings = req.noEmbeddings;
+        auto serviceReq = yams::daemon::dispatch::mapStoreDocumentRequest(req);
 
         auto result = docService->store(serviceReq);
         if (!result) {

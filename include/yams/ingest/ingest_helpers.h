@@ -27,15 +27,4 @@ Result<void> persist_content_and_index(metadata::IMetadataRepository& meta, int6
                                        const std::string& title, const std::string& text,
                                        const std::string& mime, const std::string& method);
 
-// Chunk, embed, insert vectors, and mark embedding status for a single document.
-// Returns number of inserted records.
-// Uses IModelProvider directly for embedding generation.
-Result<size_t> embed_and_insert_document(yams::daemon::IModelProvider& provider,
-                                         const std::string& modelName, vector::VectorDatabase& vdb,
-                                         metadata::IMetadataRepository& meta,
-                                         const std::string& hash, const std::string& text,
-                                         const std::string& name, const std::string& path,
-                                         const std::string& mime,
-                                         const yams::vector::ChunkingConfig& cfg = {});
-
 } // namespace yams::ingest

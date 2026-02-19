@@ -9,6 +9,7 @@
 
 #include <spdlog/spdlog.h>
 #include <atomic>
+#include <cmath>
 #include <ctime>
 #include <fcntl.h>
 #include <filesystem>
@@ -112,6 +113,109 @@ private:
     std::filesystem::path path_;
     int fd_;
 };
+
+Result<size_t> embedAndInsertRepairDocument(daemon::IModelProvider& modelProvider,
+                                            const std::string& modelName,
+                                            vector::VectorDatabase& vectorDb,
+                                            metadata::IMetadataRepository& metadataRepo,
+                                            const metadata::DocumentInfo& document,
+                                            const std::string& text) {
+    yams::vector::ChunkingConfig chunkingConfig{};
+    auto chunker = yams::vector::createChunker(yams::vector::ChunkingStrategy::SENTENCE_BASED,
+                                               chunkingConfig, nullptr);
+    auto chunks = chunker->chunkDocument(text, document.sha256Hash);
+    if (chunks.empty()) {
+        yams::vector::DocumentChunk fallbackChunk;
+        fallbackChunk.chunk_id = yams::vector::utils::generateChunkId(document.sha256Hash, 0);
+        fallbackChunk.document_hash = document.sha256Hash;
+        fallbackChunk.content = text;
+        fallbackChunk.chunk_index = 0;
+        chunks.push_back(std::move(fallbackChunk));
+    }
+
+    std::vector<std::string> chunkTexts;
+    chunkTexts.reserve(chunks.size());
+    for (const auto& chunk : chunks) {
+        chunkTexts.push_back(chunk.content);
+    }
+
+    auto embedResult = modelProvider.generateBatchEmbeddingsFor(modelName, chunkTexts);
+    if (!embedResult) {
+        return Result<size_t>(
+            Error{ErrorCode::InternalError,
+                  std::string("Failed to generate embeddings: ") + embedResult.error().message});
+    }
+
+    auto embeddings = std::move(embedResult.value());
+    const size_t count = std::min(embeddings.size(), chunks.size());
+    if (count == 0) {
+        return Result<size_t>(Error{ErrorCode::InternalError, "no embeddings generated"});
+    }
+
+    std::vector<float> documentEmbedding;
+    if (!embeddings[0].empty()) {
+        documentEmbedding.resize(embeddings[0].size(), 0.0f);
+        for (size_t index = 0; index < count; ++index) {
+            for (size_t dim = 0; dim < embeddings[index].size(); ++dim) {
+                documentEmbedding[dim] += embeddings[index][dim];
+            }
+        }
+        float norm = 0.0f;
+        for (float value : documentEmbedding) {
+            norm += value * value;
+        }
+        if (norm > 0.0f) {
+            norm = std::sqrt(norm);
+            for (float& value : documentEmbedding) {
+                value /= norm;
+            }
+        }
+    }
+
+    std::vector<yams::vector::VectorRecord> records;
+    records.reserve(count + (documentEmbedding.empty() ? 0 : 1));
+
+    for (size_t index = 0; index < count; ++index) {
+        yams::vector::VectorRecord record;
+        record.document_hash = document.sha256Hash;
+        record.chunk_id = chunks[index].chunk_id.empty()
+                              ? yams::vector::utils::generateChunkId(document.sha256Hash, index)
+                              : chunks[index].chunk_id;
+        record.embedding = std::move(embeddings[index]);
+        record.content = std::move(chunks[index].content);
+        record.start_offset = chunks[index].start_offset;
+        record.end_offset = chunks[index].end_offset;
+        record.level = yams::vector::EmbeddingLevel::CHUNK;
+        record.metadata["name"] = document.fileName;
+        record.metadata["mime_type"] = document.mimeType;
+        record.metadata["path"] = document.filePath;
+        records.push_back(std::move(record));
+    }
+
+    if (!documentEmbedding.empty()) {
+        yams::vector::VectorRecord documentRecord;
+        documentRecord.document_hash = document.sha256Hash;
+        documentRecord.chunk_id = yams::vector::utils::generateChunkId(document.sha256Hash, 999999);
+        documentRecord.embedding = std::move(documentEmbedding);
+        documentRecord.content = text.substr(0, 1000);
+        documentRecord.level = yams::vector::EmbeddingLevel::DOCUMENT;
+        documentRecord.source_chunk_ids.reserve(count);
+        for (size_t index = 0; index < count; ++index) {
+            documentRecord.source_chunk_ids.push_back(records[index].chunk_id);
+        }
+        documentRecord.metadata["name"] = document.fileName;
+        documentRecord.metadata["mime_type"] = document.mimeType;
+        documentRecord.metadata["path"] = document.filePath;
+        records.push_back(std::move(documentRecord));
+    }
+
+    if (!vectorDb.insertVectorsBatch(records)) {
+        return Result<size_t>(Error{ErrorCode::DatabaseError, vectorDb.getLastError()});
+    }
+
+    (void)metadataRepo.updateDocumentEmbeddingStatusByHash(document.sha256Hash, true, modelName);
+    return Result<size_t>(count);
+}
 } // namespace
 
 Result<EmbeddingRepairStats>
@@ -286,10 +390,8 @@ repairMissingEmbeddings(std::shared_ptr<api::IContentStore> contentStore,
                 while (!done) {
                     VectorDbLock vlock(lockPath);
                     if (vlock.isLocked()) {
-                        yams::vector::ChunkingConfig ccfg{};
-                        auto r = yams::ingest::embed_and_insert_document(
-                            *modelProvider, modelName, *vectorDb, *metadataRepo, doc.sha256Hash,
-                            text, doc.fileName, doc.filePath, doc.mimeType, ccfg);
+                        auto r = embedAndInsertRepairDocument(*modelProvider, modelName, *vectorDb,
+                                                              *metadataRepo, doc, text);
                         if (r) {
                             stats.embeddingsGenerated += r.value();
                             done = true;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -89,9 +90,11 @@ public:
     void start();
     void stop();
 
-    void enqueue(Task t);
-    bool tryEnqueue(const Task& t);
-    bool tryEnqueue(Task&& t);
+    bool tryEnqueue(Task t);
+
+    /// Attempt synchronous fast-track extraction + persist for a single stored document.
+    /// Returns true when extraction and persist succeed; false otherwise.
+    bool tryFastTrackExtractAndPersist(const std::string& hash, const std::string& mime);
 
     /// Dispatch an embedding job for already-extracted documents (e.g. fast-track).
     bool dispatchEmbedJobWithRetry(const std::vector<std::string>& hashes, bool recordOnFailure,
@@ -221,13 +224,6 @@ private:
     boost::asio::awaitable<void> kgPoller();
     boost::asio::awaitable<void> enrichPoller();
     void processBatch(std::vector<InternalEventBus::PostIngestTask>&& tasks);
-    void processTask(const std::string& hash, const std::string& mime);
-    void processMetadataStage(
-        const std::string& hash, const std::string& mime,
-        const std::optional<metadata::DocumentInfo>& info = std::nullopt,
-        const std::vector<std::string>* tagsOverride = nullptr,
-        const std::unordered_map<std::string, std::string>& symbolExtensionMap = {},
-        const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders = {});
 
     /// Prepare metadata for batch insertion (extraction only, no DB writes).
     /// Returns PreparedMetadataEntry on success, ExtractionFailure on failure.
@@ -274,6 +270,11 @@ private:
     void notifyEmbedFailure(const std::vector<std::string>& hashes);
     void refreshStageAvailability();
     void logStageAvailabilitySnapshot() const;
+    static constexpr std::size_t stageIndex(Stage stage) { return static_cast<std::size_t>(stage); }
+    std::atomic<bool>& pauseFlag(Stage stage) { return stagePaused_[stageIndex(stage)]; }
+    const std::atomic<bool>& pauseFlag(Stage stage) const {
+        return stagePaused_[stageIndex(stage)];
+    }
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
@@ -289,11 +290,7 @@ private:
     std::atomic<bool> symbolStarted_{false};
 
     // Pause flags for ResourceGovernor pressure response
-    std::atomic<bool> extractionPaused_{false};
-    std::atomic<bool> kgPaused_{false};
-    std::atomic<bool> symbolPaused_{false};
-    std::atomic<bool> entityPaused_{false};
-    std::atomic<bool> titlePaused_{false};
+    std::array<std::atomic<bool>, 5> stagePaused_{false, false, false, false, false};
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};
     // File/directory add tracking
