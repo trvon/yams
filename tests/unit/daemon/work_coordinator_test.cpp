@@ -346,8 +346,8 @@ TEST_CASE("WorkCoordinator priority executors", "[daemon][work_coordinator][prio
         boost::asio::post(coordinator.getPriorityExecutor(WorkCoordinator::Priority::High),
                           [&]() { ran.store(true, std::memory_order_release); });
 
-        bool completed = yams::test::wait_for_condition(
-            1000ms, 10ms, [&]() { return ran.load(std::memory_order_acquire); });
+        bool completed =
+            wait_for_condition(1000ms, 10ms, [&]() { return ran.load(std::memory_order_acquire); });
 
         REQUIRE(completed);
         coordinator.stop();
@@ -366,7 +366,7 @@ TEST_CASE("WorkCoordinator priority executors", "[daemon][work_coordinator][prio
         coordinator.post(WorkCoordinator::Priority::Background,
                          [&]() { ran.fetch_add(1, std::memory_order_relaxed); });
 
-        bool completed = yams::test::wait_for_condition(
+        bool completed = wait_for_condition(
             1000ms, 10ms, [&]() { return ran.load(std::memory_order_relaxed) == 3; });
 
         REQUIRE(completed);

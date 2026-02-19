@@ -100,6 +100,10 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         builder->withEmbeddingGenerator(embeddingGen);
 
     auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+    // Default daemon policy: lexical-first with adaptive semantic fallback.
+    // SearchEngine::Impl computes auto-threshold as max(maxResults*2, 50) when this is 0.
+    opts.config.enableAdaptiveVectorFallback = true;
+    opts.config.adaptiveVectorSkipMinTier1Hits = 0;
     if (!vectorEnabled) {
         opts.config.vectorWeight = 0.0f;
         opts.config.vectorMaxResults = 0;

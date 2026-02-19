@@ -118,6 +118,7 @@ struct ScalingCaps {
     std::uint32_t searchConcurrency{0};
     std::uint32_t extractionConcurrency{0};
     std::uint32_t kgConcurrency{0};
+    std::uint32_t enrichConcurrency{0}; // PBI-081 Phase 3: unified cap for symbol+entity+title
     std::uint32_t embedConcurrency{0};
     bool allowModelLoads{true};
     bool allowNewIngest{true};
@@ -227,6 +228,10 @@ public:
     /// Get maximum allowed search concurrency under current pressure
     [[nodiscard]] std::uint32_t maxSearchConcurrency() const;
 
+    /// Get maximum allowed enrichment concurrency under current pressure.
+    /// PBI-081 Phase 3: single governor cap for the collapsed symbol+entity+title stages.
+    [[nodiscard]] std::uint32_t maxEnrichConcurrency() const;
+
     /// Get maximum allowed embed concurrency under current pressure
     [[nodiscard]] std::uint32_t maxEmbedConcurrency() const;
 
@@ -248,6 +253,23 @@ public:
 
     /// Get current scaling caps (thread-safe copy)
     [[nodiscard]] ScalingCaps getScalingCaps() const;
+
+#ifdef YAMS_TESTING
+    /// Test-only: expose updateScalingCaps for unit tests.
+    void testing_updateScalingCaps(ResourcePressureLevel level) { updateScalingCaps(level); }
+    /// Test-only: expose computeLevel for unit tests.
+    ResourcePressureLevel testing_computeLevel(const ResourceSnapshot& snap) {
+        return computeLevel(snap);
+    }
+    /// Test-only: set pressure state for hysteresis tests.
+    void testing_setPressureState(ResourcePressureLevel level,
+                                  std::chrono::steady_clock::time_point when) {
+        std::unique_lock lock(mutex_);
+        currentLevel_.store(level, std::memory_order_relaxed);
+        proposedLevel_ = level;
+        proposedLevelSince_ = when;
+    }
+#endif
 
     // ========================================================================
     // Dynamic Pool Registry (formerly PoolManager)
@@ -330,6 +352,11 @@ private:
     // CPU utilization sampling state: deltas for calculating process CPU usage
     mutable std::uint64_t lastProcJiffies_{0};
     mutable std::uint64_t lastTotalJiffies_{0};
+
+    // Cached /proc read state to throttle filesystem I/O
+    std::chrono::steady_clock::time_point lastProcReadTime_{};
+    std::uint64_t cachedRssBytes_{0};
+    double cachedCpuPercent_{0.0};
 
     // CPU admission control state (time-based hysteresis)
     std::atomic<bool> cpuAdmissionBlocked_{false};

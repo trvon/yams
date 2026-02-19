@@ -260,6 +260,18 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.rerankTopK = static_cast<size_t>(std::max(0, *rerankTopK));
             spdlog::info("SearchEngine rerankTopK overridden to {} via env", cfg.rerankTopK);
         }
+
+        if (auto adaptiveFallback = getEnvBool("YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK")) {
+            cfg.enableAdaptiveVectorFallback = *adaptiveFallback;
+            spdlog::info("SearchEngine enableAdaptiveVectorFallback overridden to {} via env",
+                         cfg.enableAdaptiveVectorFallback);
+        }
+
+        if (auto adaptiveMinHits = getEnvInt("YAMS_SEARCH_ADAPTIVE_MIN_TIER1_HITS")) {
+            cfg.adaptiveVectorSkipMinTier1Hits = static_cast<size_t>(std::max(0, *adaptiveMinHits));
+            spdlog::info("SearchEngine adaptiveVectorSkipMinTier1Hits overridden to {} via env",
+                         cfg.adaptiveVectorSkipMinTier1Hits);
+        }
     }
 
     // Create the SearchEngine using the factory function

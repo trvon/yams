@@ -678,20 +678,29 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::vector<std::string> skipped;
     std::map<std::string, int64_t> componentTiming;
 
-    // Start embedding generation as async task (runs in parallel with Tier 1 components)
+    // Embedding generation may be launched eagerly or lazily depending on tiering strategy.
     std::optional<std::vector<float>> queryEmbedding;
     const bool needsEmbedding = (config_.vectorWeight > 0.0f || config_.entityVectorWeight > 0.0f);
     std::future<std::vector<float>> embeddingFuture;
     std::chrono::steady_clock::time_point embStart;
-    if (needsEmbedding && embeddingGen_) {
-        embStart = std::chrono::steady_clock::now();
-        // Launch embedding generation in parallel - will be awaited when Tier 2/vector needs it
-        embeddingFuture = postWork(
-            [this, &query]() {
-                YAMS_ZONE_SCOPED_N("embedding::generate_async");
-                return embeddingGen_->generateEmbedding(query);
-            },
-            executor_);
+    bool embeddingStarted = false;
+    auto launchEmbeddingIfNeeded = [&]() {
+        if (!embeddingStarted && needsEmbedding && embeddingGen_) {
+            embStart = std::chrono::steady_clock::now();
+            embeddingFuture = postWork(
+                [this, &query]() {
+                    YAMS_ZONE_SCOPED_N("embedding::generate_async");
+                    return embeddingGen_->generateEmbedding(query);
+                },
+                executor_);
+            embeddingStarted = true;
+        }
+    };
+
+    // Preserve overlap for default behavior. When adaptive fallback is enabled in tiered mode,
+    // delay embedding work until we know Tier 2 is truly needed.
+    if (!(config_.enableTieredExecution && config_.enableAdaptiveVectorFallback)) {
+        launchEmbeddingIfNeeded();
     }
 
     std::future<Result<QueryConceptResult>> conceptFuture;
@@ -708,6 +717,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     // Helper to await embedding result when needed (called before vector search)
     auto awaitEmbedding = [&]() {
+        launchEmbeddingIfNeeded();
         if (embeddingFuture.valid() && !queryEmbedding.has_value()) {
             try {
                 auto embResult = embeddingFuture.get();
@@ -893,29 +903,54 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             collectIf(tagFuture, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
             collectIf(metaFuture, "metadata", stats_.metadataQueries, stats_.avgMetadataTimeMicros);
 
-            // Extract Tier 1 candidate document hashes for narrowing vector search
+            // Extract Tier 1 candidate hashes only when needed (narrowing or adaptive fallback).
+            const bool needTier1Candidates =
+                config_.tieredNarrowVectorSearch || config_.enableAdaptiveVectorFallback;
             std::unordered_set<std::string> tier1Candidates;
-            for (const auto& r : allComponentResults) {
-                tier1Candidates.insert(r.documentHash);
+            if (needTier1Candidates) {
+                tier1Candidates.reserve(allComponentResults.size());
+                for (const auto& r : allComponentResults) {
+                    if (!r.documentHash.empty()) {
+                        tier1Candidates.insert(r.documentHash);
+                    }
+                }
             }
 
-            spdlog::debug("Tiered search: {} unique candidates from Tier 1",
-                          tier1Candidates.size());
+            const size_t tier1CandidateCount = tier1Candidates.size();
+            if (needTier1Candidates) {
+                spdlog::debug("Tiered search: {} unique candidates from Tier 1",
+                              tier1CandidateCount);
+            }
 
             // --- TIER 2: Vector search NARROWED to Tier 1 candidates ---
             // Always run vector search (never skip), but filter to Tier 1 candidates when
             // appropriate
             YAMS_ZONE_SCOPED_N("search_engine::tier2_semantic");
 
-            // Await embedding result (was started in parallel with Tier 1)
-            awaitEmbedding();
+            const size_t adaptiveSkipMinHits =
+                (config_.adaptiveVectorSkipMinTier1Hits > 0)
+                    ? config_.adaptiveVectorSkipMinTier1Hits
+                    : std::max<size_t>(workingConfig.maxResults * 2, static_cast<size_t>(50));
+            const bool shouldSkipSemantic = config_.enableAdaptiveVectorFallback &&
+                                            (tier1CandidateCount >= adaptiveSkipMinHits);
+
+            if (shouldSkipSemantic) {
+                skipped.push_back("vector");
+                skipped.push_back("entity_vector");
+                spdlog::debug("Tiered search: skipping embedding/vector tier (tier1 candidates={} "
+                              ">= threshold={})",
+                              tier1CandidateCount, adaptiveSkipMinHits);
+            } else {
+                // Await embedding result (eager or lazily started depending on config).
+                awaitEmbedding();
+            }
 
             // Decide whether to narrow vector search to Tier 1 candidates
             // Narrow if: config enabled AND Tier 1 has enough candidates
             const bool shouldNarrow = config_.tieredNarrowVectorSearch &&
-                                      tier1Candidates.size() >= config_.tieredMinCandidates;
+                                      tier1CandidateCount >= config_.tieredMinCandidates;
 
-            if (queryEmbedding.has_value() && vectorDb_) {
+            if (!shouldSkipSemantic && queryEmbedding.has_value() && vectorDb_) {
                 vectorFuture = schedule(
                     "vector", config_.vectorWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros,

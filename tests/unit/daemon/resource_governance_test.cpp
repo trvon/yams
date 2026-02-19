@@ -263,9 +263,7 @@ TEST_CASE("ResourceGovernor Warning caps honor configurable scale percent",
     CHECK(warning90.searchConcurrency == expectedScaled(normal.searchConcurrency, 90u));
     CHECK(warning90.extractionConcurrency == expectedScaled(normal.extractionConcurrency, 90u));
     CHECK(warning90.kgConcurrency == expectedScaled(normal.kgConcurrency, 90u));
-    CHECK(warning90.symbolConcurrency == expectedScaled(normal.symbolConcurrency, 90u));
-    CHECK(warning90.entityConcurrency == expectedScaled(normal.entityConcurrency, 90u));
-    CHECK(warning90.titleConcurrency == expectedScaled(normal.titleConcurrency, 90u));
+    CHECK(warning90.enrichConcurrency == expectedScaled(normal.enrichConcurrency, 90u));
     CHECK(warning90.embedConcurrency == expectedScaled(normal.embedConcurrency, 90u));
     CHECK_FALSE(warning90.allowModelLoads);
     CHECK(warning90.allowNewIngest);

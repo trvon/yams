@@ -136,6 +136,10 @@ struct SearchEngineConfig {
         false; // DISABLED: Narrowing prevents vector from finding docs FTS5 missed
     size_t tieredMinCandidates =
         10; // Min candidates from Tier 1 before narrowing (fallback to full)
+    bool enableAdaptiveVectorFallback =
+        false; // Skip embedding/vector tier when Tier 1 already has strong coverage
+    size_t adaptiveVectorSkipMinTier1Hits =
+        0; // 0=auto (max(maxResults*2,50)); explicit value overrides auto threshold
 
     // RRF (Reciprocal Rank Fusion) parameter
     // Lower k = more weight on top-ranked items (better precision/MRR)

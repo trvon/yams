@@ -62,8 +62,6 @@ void TuningManager::start() {
     } catch (...) {
     }
 
-    // If tick_once early-returned (metadata not ready), seed safe minimums
-    // so PostIngestQueue pollers don't start with zero concurrency.
     if (TuneAdvisor::postExtractionConcurrent() == 0) {
         TuneAdvisor::setPostExtractionConcurrentDynamicCap(2);
     }
@@ -309,9 +307,6 @@ void TuningManager::tick_once() {
         uint32_t embedReserved = TuneAdvisor::onnxEmbedReserved();
         uint32_t rerankerReserved = TuneAdvisor::onnxRerankerReserved();
 
-        // Only clamp ONNX slots under memory pressure.
-        // OnnxConcurrencyRegistry is a global budget across multiple lanes; clamping it to
-        // embedding concurrency during Normal pressure can underutilize other lanes.
         const bool underPressure = TuneAdvisor::enableResourceGovernor() &&
                                    govSnap.level >= ResourcePressureLevel::Critical;
         if (underPressure) {
@@ -497,10 +492,6 @@ void TuningManager::tick_once() {
             }
             previousEmbedDropped_ = embedDroppedTotal;
 
-            // Derive total post-ingest budget and weighted targets.
-            // Note: We compute a temporary scaled budget but do NOT persist it back
-            // to TuneAdvisor to avoid runaway scaling. The base budget from
-            // recommendedThreads() should remain stable.
             uint32_t baseBudget = TuneAdvisor::postIngestTotalConcurrent();
             uint32_t scaleBias =
                 computeEmbedScaleBias(embedQueued, embedDroppedDelta, queuedItems, embedInFlight);
@@ -584,10 +575,6 @@ void TuningManager::tick_once() {
             const uint64_t dbLockErrors = TuneAdvisor::getAndResetDbLockErrors();
             const uint32_t lockThreshold = TuneAdvisor::dbLockErrorThreshold();
 
-            // Fix Issue 7 (timing audit): compute the full post-ingest budget once
-            // instead of 6 individual getter calls (each of which independently calls
-            // postIngestBudgetedConcurrency). This ensures a consistent budget snapshot
-            // and avoids redundant computation.
             auto budget = TuneAdvisor::postIngestBudgetAll(/*includeDynamicCaps=*/true);
             uint32_t extractionTarget = budget.extraction;
             uint32_t kgTarget = budget.kg;
@@ -666,9 +653,19 @@ void TuningManager::tick_once() {
             if (applyGovernorConcurrencyCaps) {
                 extractionTarget = std::min(extractionTarget, governor.maxExtractionConcurrency());
                 kgTarget = std::min(kgTarget, governor.maxKgConcurrency());
-                symbolTarget = std::min(symbolTarget, governor.maxSymbolConcurrency());
-                entityTarget = std::min(entityTarget, governor.maxEntityConcurrency());
-                titleTarget = std::min(titleTarget, governor.maxTitleConcurrency());
+                // PBI-081 Phase 3: governor owns a single shared enrich budget.
+                // Symbol+entity+title collectively must not exceed enrichCap.
+                const uint32_t enrichCap = governor.maxEnrichConcurrency();
+                const uint32_t enrichSum = symbolTarget + entityTarget + titleTarget;
+                if (enrichSum > enrichCap && enrichSum > 0) {
+                    // Scale each sub-stage proportionally to fit within the shared cap.
+                    const double scale =
+                        static_cast<double>(enrichCap) / static_cast<double>(enrichSum);
+                    symbolTarget = static_cast<uint32_t>(symbolTarget * scale);
+                    entityTarget = static_cast<uint32_t>(entityTarget * scale);
+                    // Title gets the remainder to avoid rounding loss.
+                    titleTarget = enrichCap - symbolTarget - entityTarget;
+                }
                 const uint32_t embedCap = governor.maxEmbedConcurrency();
                 embedTarget = std::min(embedCap, std::max(embedTarget, embedFloor));
             } else {
@@ -801,10 +798,6 @@ void TuningManager::tick_once() {
                 embedTarget = stageTargets[5];
             }
 
-            // Fix Issue 6 (timing audit): detect pressure de-escalation and clear
-            // DynamicCaps so the base budget is immediately restored. Without this,
-            // stale (reduced) caps from the previous higher-pressure tick persist for
-            // one extra tick, delaying recovery.
             const auto currentPressure = static_cast<uint8_t>(govSnap.level);
             if (currentPressure < previousPressureLevel_) {
                 // Pressure dropped — clear all DynamicCaps to let base budget through
@@ -1087,18 +1080,6 @@ void TuningManager::tick_once() {
     } catch (...) {
     }
 
-    // RepairCoordinator tuning (tokens/batch) centralized here.
-    //
-    // Cooperative repair: instead of a binary idle=1/busy=0 token scheme,
-    // allow repair to continue at reduced concurrency while the
-    // PostIngestQueue is actively processing.  This prevents the
-    // repair-then-flood pattern that causes governor oscillation.
-    //
-    // Token selection priority:
-    //   Emergency/Critical pressure → 0 (governor already blocked work)
-    //   busyHeld + PostIngestQueue active → repairTokensDuringIngest() (cooperative)
-    //   busyHeld (no PIQ) → repairTokensBusy() (legacy: 0)
-    //   idle → repairTokensIdle() (full repair throughput)
     try {
         if (setRepair_) {
             using clock = std::chrono::steady_clock;

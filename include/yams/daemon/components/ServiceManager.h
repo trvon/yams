@@ -19,6 +19,7 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
@@ -159,7 +160,6 @@ public:
     std::shared_ptr<WorkerPool> getWorkerPool() const { return nullptr; }
     WorkCoordinator* getWorkCoordinator() const { return workCoordinator_.get(); }
     boost::asio::any_io_executor getCliExecutor() const;
-    boost::asio::any_io_executor getBackgroundExecutor() const;
     // Resize the worker pool to a target size; creates pool on demand.
     bool resizeWorkerPool(std::size_t target);
     PostIngestQueue* getPostIngestQueue() const { return postIngest_.get(); }
@@ -648,6 +648,7 @@ private:
     //    Replaces ioContext_, workGuard_, workers_ (extracted for reusability and testability)
     std::unique_ptr<WorkCoordinator> workCoordinator_;
     std::unique_ptr<WorkCoordinator> entityWorkCoordinator_;
+    std::unique_ptr<boost::asio::thread_pool> cliRequestPool_;
 
     // 3. Execution domains for logical separation (lightweight strands) - optional for lazy init
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> initStrand_;

@@ -538,10 +538,12 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
     const auto defaultSearch = TuneAdvisor::searchConcurrencyLimit();
     const auto defaultExtract = TuneAdvisor::postExtractionDefaultConcurrent();
     const auto defaultKg = TuneAdvisor::postKgDefaultConcurrent();
-    const auto defaultSymbol = TuneAdvisor::postSymbolDefaultConcurrent();
-    const auto defaultEntity = TuneAdvisor::postEntityDefaultConcurrent();
-    const auto defaultTitle = TuneAdvisor::postTitleDefaultConcurrent();
     const auto defaultEmbed = TuneAdvisor::postEmbedDefaultConcurrent();
+    // PBI-081 Phase 3: unified enrich budget covers symbol+entity+title sub-stages.
+    // Use the max of the three sub-stage defaults as the governor's enrich cap.
+    const auto defaultEnrich = std::max({TuneAdvisor::postSymbolDefaultConcurrent(),
+                                         TuneAdvisor::postEntityDefaultConcurrent(),
+                                         TuneAdvisor::postTitleDefaultConcurrent()});
 
     switch (level) {
         case ResourcePressureLevel::Normal:
@@ -551,9 +553,7 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
                 .searchConcurrency = defaultSearch,
                 .extractionConcurrency = defaultExtract,
                 .kgConcurrency = defaultKg,
-                .symbolConcurrency = defaultSymbol,
-                .entityConcurrency = defaultEntity,
-                .titleConcurrency = defaultTitle,
+                .enrichConcurrency = defaultEnrich,
                 .embedConcurrency = defaultEmbed,
                 .allowModelLoads = true,
                 .allowNewIngest = true,
@@ -570,9 +570,7 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
                 .searchConcurrency = slowDown(defaultSearch, warningScale),
                 .extractionConcurrency = slowDown(defaultExtract, warningScale),
                 .kgConcurrency = slowDown(defaultKg, warningScale),
-                .symbolConcurrency = slowDown(defaultSymbol, warningScale),
-                .entityConcurrency = slowDown(defaultEntity, warningScale),
-                .titleConcurrency = slowDown(defaultTitle, warningScale),
+                .enrichConcurrency = slowDown(defaultEnrich, warningScale),
                 .embedConcurrency = slowDown(defaultEmbed, warningScale),
                 .allowModelLoads = false,
                 .allowNewIngest = true,
@@ -589,9 +587,7 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
                 .searchConcurrency = std::min(defaultSearch, 2u),
                 .extractionConcurrency = std::min(defaultExtract, 2u),
                 .kgConcurrency = std::min(defaultKg, 2u),
-                .symbolConcurrency = std::min(defaultSymbol, 2u),
-                .entityConcurrency = std::min(defaultEntity, 1u),
-                .titleConcurrency = std::min(defaultTitle, 2u),
+                .enrichConcurrency = std::min(defaultEnrich, 2u),
                 .embedConcurrency = std::min(defaultEmbed, 1u),
                 .allowModelLoads = false,
                 .allowNewIngest = true,
@@ -605,9 +601,7 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
                 .searchConcurrency = 1,
                 .extractionConcurrency = 0,
                 .kgConcurrency = 0,
-                .symbolConcurrency = 0,
-                .entityConcurrency = 0,
-                .titleConcurrency = 0,
+                .enrichConcurrency = 0,
                 .embedConcurrency = 0,
                 .allowModelLoads = false,
                 .allowNewIngest = false,
@@ -1013,6 +1007,17 @@ std::uint32_t ResourceGovernor::maxSearchConcurrency() const {
     return scalingCaps_.searchConcurrency;
 }
 
+std::uint32_t ResourceGovernor::maxEnrichConcurrency() const {
+    if (!TuneAdvisor::enableResourceGovernor()) {
+        // Fallback: max of the three sub-stage defaults
+        return std::max({TuneAdvisor::postSymbolDefaultConcurrent(),
+                         TuneAdvisor::postEntityDefaultConcurrent(),
+                         TuneAdvisor::postTitleDefaultConcurrent()});
+    }
+    std::shared_lock lock(mutex_);
+    return scalingCaps_.enrichConcurrency;
+}
+
 std::uint32_t ResourceGovernor::maxEmbedConcurrency() const {
     if (!TuneAdvisor::enableResourceGovernor()) {
         return TuneAdvisor::postEmbedConcurrent();
@@ -1035,30 +1040,6 @@ std::uint32_t ResourceGovernor::maxKgConcurrency() const {
     }
     std::shared_lock lock(mutex_);
     return scalingCaps_.kgConcurrency;
-}
-
-std::uint32_t ResourceGovernor::maxSymbolConcurrency() const {
-    if (!TuneAdvisor::enableResourceGovernor()) {
-        return TuneAdvisor::postSymbolConcurrent();
-    }
-    std::shared_lock lock(mutex_);
-    return scalingCaps_.symbolConcurrency;
-}
-
-std::uint32_t ResourceGovernor::maxEntityConcurrency() const {
-    if (!TuneAdvisor::enableResourceGovernor()) {
-        return TuneAdvisor::postEntityConcurrent();
-    }
-    std::shared_lock lock(mutex_);
-    return scalingCaps_.entityConcurrency;
-}
-
-std::uint32_t ResourceGovernor::maxTitleConcurrency() const {
-    if (!TuneAdvisor::enableResourceGovernor()) {
-        return TuneAdvisor::postTitleConcurrent();
-    }
-    std::shared_lock lock(mutex_);
-    return scalingCaps_.titleConcurrency;
 }
 
 // ============================================================================
