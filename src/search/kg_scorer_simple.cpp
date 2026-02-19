@@ -466,8 +466,15 @@ private:
         return static_cast<float>(out);
     }
 
-    // Very simple tokenizer: lowercase alnum sequences as aliases + join bigrams
+    // Tokenize query into candidate aliases:
+    // - lowercase alnum sequences (minus stopwords/noise)
+    // - phrase n-grams (2..4) to capture multi-token entities in scientific claims
     static std::vector<std::string> tokenize(const std::string& text) {
+        static const std::unordered_set<std::string> kStopwords = {
+            "a",    "an",   "and",   "are",  "as", "at",  "be",   "by",  "for", "from",
+            "has",  "have", "in",    "into", "is", "it",  "its",  "of",  "on",  "or",
+            "that", "the",  "their", "this", "to", "was", "were", "with"};
+
         std::vector<std::string> tokens;
         tokens.reserve(text.size() / 5 + 1);
         std::string cur;
@@ -484,15 +491,47 @@ private:
         if (!cur.empty())
             tokens.push_back(cur);
 
-        // Merge in bigrams to capture simple phrases like "new york"
-        std::vector<std::string> out = tokens;
-        for (std::size_t i = 0; i + 1 < tokens.size(); ++i) {
-            std::string bi;
-            bi.reserve(tokens[i].size() + 1 + tokens[i + 1].size());
-            bi.append(tokens[i]).push_back(' ');
-            bi.append(tokens[i + 1]);
-            out.push_back(std::move(bi));
+        // Prune obvious noise tokens before generating phrase aliases.
+        std::vector<std::string> filtered;
+        filtered.reserve(tokens.size());
+        for (const auto& tok : tokens) {
+            if (tok.size() < 3) {
+                continue;
+            }
+            if (kStopwords.find(tok) != kStopwords.end()) {
+                continue;
+            }
+            filtered.push_back(tok);
         }
+
+        std::vector<std::string> out;
+        out.reserve(filtered.size() * 3);
+
+        // Unigrams
+        for (const auto& tok : filtered) {
+            out.push_back(tok);
+        }
+
+        // N-grams (2..4) with soft cap to contain combinatorics.
+        constexpr std::size_t kMaxN = 4;
+        constexpr std::size_t kMaxAliases = 96;
+        for (std::size_t n = 2; n <= kMaxN; ++n) {
+            if (filtered.size() < n) {
+                break;
+            }
+            for (std::size_t i = 0; i + n <= filtered.size(); ++i) {
+                std::string phrase = filtered[i];
+                for (std::size_t j = 1; j < n; ++j) {
+                    phrase.push_back(' ');
+                    phrase.append(filtered[i + j]);
+                }
+                out.push_back(std::move(phrase));
+                if (out.size() >= kMaxAliases) {
+                    return out;
+                }
+            }
+        }
+
         return out;
     }
 

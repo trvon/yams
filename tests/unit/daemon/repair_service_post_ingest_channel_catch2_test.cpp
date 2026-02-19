@@ -129,7 +129,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 
     // PostIngestQueue is started asynchronously and can consume tasks quickly.
     // Pause it to make channel assertions deterministic.
-    PostIngestQueue* piq = sm->getPostIngestQueue();
+    auto piq = sm->getPostIngestQueue();
     for (int i = 0; i < 200 && piq == nullptr; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
         piq = sm->getPostIngestQueue();
@@ -221,7 +221,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE(meta != nullptr);
     REQUIRE(store != nullptr);
 
-    PostIngestQueue* piq = sm->getPostIngestQueue();
+    auto piq = sm->getPostIngestQueue();
     for (int i = 0; i < 200 && piq == nullptr; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
         piq = sm->getPostIngestQueue();

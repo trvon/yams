@@ -260,6 +260,18 @@
 			"type": "shell",
 			"command": "python3 - <<'PY'\nimport json\nfrom pathlib import Path\n\ndef load(path):\n    p = Path(path)\n    if not p.exists():\n        raise SystemExit(f'missing file: {p}')\n    data = json.loads(p.read_text())\n    out = {}\n    for b in data.get('benchmarks', []):\n        name = b.get('name', '')\n        if name.startswith('BM_RetrievalService_Search_') and b.get('run_type') == 'aggregate':\n            agg = b.get('aggregate_name')\n            if agg in ('mean', 'median'):\n                out[(name, agg)] = b.get('real_time', 0.0)\n    return out\n\nb = load('bench_results/search_latency_baseline.json')\na = load('bench_results/search_latency_adaptive.json')\nprint('Search latency comparison (microseconds, lower is better):')\nfor key in sorted(set(b) | set(a)):\n    bv = b.get(key)\n    av = a.get(key)\n    if bv is None or av is None:\n        print(f'{key}: baseline={bv} adaptive={av}')\n        continue\n    delta = av - bv\n    pct = (delta / bv * 100.0) if bv else 0.0\n    print(f'{key[0]} [{key[1]}]: baseline={bv:.1f} adaptive={av:.1f} delta={delta:.1f} ({pct:+.2f}%)')\nPY",
 			"group": "test"
+		},
+		{
+			"label": "bench: search graph rerank",
+			"type": "shell",
+			"command": "mkdir -p bench_results && YAMS_ENABLE_ENV_OVERRIDES=1 YAMS_BENCH_ENABLE_EMBEDDINGS=1 YAMS_BENCH_DOC_COUNT=500 YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK=0 YAMS_SEARCH_ENABLE_GRAPH_RERANK=1 YAMS_SEARCH_GRAPH_RERANK_TOPN=25 YAMS_SEARCH_GRAPH_RERANK_WEIGHT=0.15 YAMS_SEARCH_GRAPH_RERANK_MAX_BOOST=0.20 YAMS_SEARCH_GRAPH_MAX_NEIGHBORS=16 YAMS_SEARCH_GRAPH_MAX_HOPS=1 YAMS_SEARCH_GRAPH_BUDGET_MS=10 ./builddir/tests/benchmarks/yams_retrieval_service_benchmarks --benchmark_filter='BM_RetrievalService_Search_(Keyword|Hybrid)' --benchmark_repetitions=5 --benchmark_report_aggregates_only=true --benchmark_out=bench_results/search_latency_graph_rerank.json --benchmark_out_format=json",
+			"group": "test"
+		},
+		{
+			"label": "bench: compare baseline vs graph rerank",
+			"type": "shell",
+			"command": "python3 - <<'PY'\nimport json\nfrom pathlib import Path\n\ndef load(path):\n    p = Path(path)\n    if not p.exists():\n        raise SystemExit(f'missing file: {p}')\n    data = json.loads(p.read_text())\n    out = {}\n    for b in data.get('benchmarks', []):\n        name = b.get('name', '')\n        if name.startswith('BM_RetrievalService_Search_') and b.get('run_type') == 'aggregate':\n            agg = b.get('aggregate_name')\n            if agg in ('mean', 'median'):\n                out[(name, agg)] = b.get('real_time', 0.0)\n    return out\n\nb = load('bench_results/search_latency_baseline.json')\ng = load('bench_results/search_latency_graph_rerank.json')\nprint('Search latency comparison (microseconds, lower is better):')\nfor key in sorted(set(b) | set(g)):\n    bv = b.get(key)\n    gv = g.get(key)\n    if bv is None or gv is None:\n        print(f'{key}: baseline={bv} graph_rerank={gv}')\n        continue\n    delta = gv - bv\n    pct = (delta / bv * 100.0) if bv else 0.0\n    print(f'{key[0]} [{key[1]}]: baseline={bv:.1f} graph_rerank={gv:.1f} delta={delta:.1f} ({pct:+.2f}%)')\nPY",
+			"group": "test"
 		}
 	]
 }

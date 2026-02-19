@@ -774,7 +774,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
             out.workerThreads = services_->getWorkerThreads();
             out.workerActive = services_->getWorkerActive();
             out.workerQueued = services_->getWorkerQueueDepth();
-            if (auto* pq = services_->getPostIngestQueue()) {
+            if (auto pq = services_->getPostIngestQueue()) {
                 out.postIngestThreads = 1; // Strand-based now, conceptually 1 "thread"
                 out.postIngestQueued = pq->size();
                 out.postIngestInflight = pq->totalInFlight();
@@ -1063,7 +1063,7 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     // Provide a best-effort retryAfter hint for clients when post-ingest queue is saturated.
     try {
         if (services_) {
-            if (auto* pq = services_->getPostIngestQueue()) {
+            if (auto pq = services_->getPostIngestQueue()) {
                 auto queued = pq->size();
                 auto cap = pq->capacity();
                 if (cap > 0 && queued >= cap) {

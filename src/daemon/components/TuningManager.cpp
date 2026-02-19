@@ -462,7 +462,7 @@ void TuningManager::tick_once() {
     // PBI-05a: PostIngestQueue dynamic concurrency scaling
     // Scale up when there's a large backlog, scale down when idle
     try {
-        auto* pq = sm_->getPostIngestQueue();
+        auto pq = sm_->getPostIngestQueue();
         if (pq) {
             const std::size_t queuedItems = pq->size();
             [[maybe_unused]] const std::size_t currentInFlight = pq->totalInFlight();
@@ -1112,7 +1112,7 @@ void TuningManager::tick_once() {
                 // cooperative repair tokens instead of fully halting.
                 bool piqActive = false;
                 if (sm_) {
-                    if (auto* pq = sm_->getPostIngestQueue()) {
+                    if (auto pq = sm_->getPostIngestQueue()) {
                         piqActive = pq->started() && (pq->size() > 0 || pq->totalInFlight() > 0);
                     }
                 }
@@ -1177,7 +1177,7 @@ void TuningManager::tick_once() {
             std::size_t currentInFlight = 0;
             std::size_t embedQueued = 0;
             std::size_t embedInFlight = 0;
-            if (auto* pq = sm_->getPostIngestQueue()) {
+            if (auto pq = sm_->getPostIngestQueue()) {
                 postIngestQueued = pq->size();
                 currentInFlight = pq->totalInFlight();
             }

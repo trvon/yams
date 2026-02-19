@@ -1204,6 +1204,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 const float maxBoost = std::max(0.0f, config_.graphRerankMaxBoost);
                 const float rerankWeight = std::max(0.0f, config_.graphRerankWeight);
 
+                std::vector<float> rawSignals(rerankWindow, 0.0f);
+                float maxRawSignal = 0.0f;
+
                 for (size_t i = 0; i < rerankWindow; ++i) {
                     const auto& candidateId = candidateIds[i];
                     auto scoreIt = graphScores.find(candidateId);
@@ -1212,13 +1215,43 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     }
 
                     const KGScore& kgScore = scoreIt->second;
-                    const float signal =
-                        std::clamp(kgScore.entity * 0.7f + kgScore.structural * 0.3f, 0.0f, 1.0f);
+                    const auto getFeature = [&kgScore](const char* key) {
+                        auto featureIt = kgScore.features.find(key);
+                        return featureIt != kgScore.features.end() ? featureIt->second : 0.0f;
+                    };
+
+                    const float queryCoverage =
+                        std::clamp(getFeature("feature_query_coverage_ratio"), 0.0f, 1.0f);
+                    const float pathSupport =
+                        std::clamp(getFeature("feature_path_support_score"), 0.0f, 1.0f);
+
+                    // Composite graph relevance signal.
+                    const float rawSignal =
+                        std::clamp(kgScore.entity * 0.45f + kgScore.structural * 0.25f +
+                                       queryCoverage * 0.20f + pathSupport * 0.10f,
+                                   0.0f, 1.0f);
+                    rawSignals[i] = rawSignal;
+                    maxRawSignal = std::max(maxRawSignal, rawSignal);
+                }
+
+                for (size_t i = 0; i < rerankWindow; ++i) {
+                    const auto& candidateId = candidateIds[i];
+                    auto scoreIt = graphScores.find(candidateId);
+                    if (scoreIt == graphScores.end()) {
+                        continue;
+                    }
+
+                    const float signal = rawSignals[i];
                     if (signal < minSignal) {
                         continue;
                     }
 
-                    const float boost = std::min(maxBoost, rerankWeight * signal);
+                    const float normalizedSignal =
+                        maxRawSignal > 0.0f ? signal / maxRawSignal : 0.0f;
+                    const float effectiveSignal =
+                        std::clamp(signal * 0.6f + normalizedSignal * 0.4f, 0.0f, 1.0f);
+
+                    const float boost = std::min(maxBoost, rerankWeight * effectiveSignal);
                     if (boost <= 0.0f) {
                         continue;
                     }

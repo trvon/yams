@@ -153,7 +153,9 @@ public:
     boost::asio::any_io_executor getCliExecutor() const;
     // Resize the worker pool to a target size; creates pool on demand.
     bool resizeWorkerPool(std::size_t target);
-    PostIngestQueue* getPostIngestQueue() const { return postIngest_.get(); }
+    std::shared_ptr<PostIngestQueue> getPostIngestQueue() const {
+        return std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+    }
     struct SearchLoadMetrics {
         std::uint32_t active{0};
         std::uint32_t queued{0};
@@ -281,8 +283,12 @@ public:
     const TuningConfig& getTuningConfig() const { return tuningConfig_; }
     void setTuningConfig(const TuningConfig& cfg) {
         tuningConfig_ = cfg;
-        if (postIngest_ && cfg.postIngestCapacity > 0)
-            postIngest_->setCapacity(cfg.postIngestCapacity);
+        if (cfg.postIngestCapacity > 0) {
+            auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+            if (piq) {
+                piq->setCapacity(cfg.postIngestCapacity);
+            }
+        }
     }
     const std::vector<std::shared_ptr<yams::extraction::IContentExtractor>>&
     getContentExtractors() const {
@@ -592,7 +598,7 @@ private:
     std::shared_ptr<WalMetricsProvider> walMetricsProvider_;
     std::shared_ptr<yams::wal::WALManager> walManager_;
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
-    std::unique_ptr<PostIngestQueue> postIngest_;
+    std::shared_ptr<PostIngestQueue> postIngest_;
     std::unique_ptr<EmbeddingService> embeddingService_;
     std::unique_ptr<KGWriteQueue> kgWriteQueue_;
     std::shared_ptr<RepairService> repairService_;

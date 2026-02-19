@@ -1573,28 +1573,46 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     constexpr int kListClients = 4;
     constexpr int kStatusGetClients = 4;
     constexpr int kTotalClients = kSearchClients + kListClients + kStatusGetClients;
-    constexpr int kOpsPerClient = 500;
+    // Under TSan, each op on a large corpus is slow; keep count modest.
+    constexpr int kOpsPerClient = 50;
+
+    // Large corpus with TSan can take >5s to build the search engine index;
+    // bump the default 5 s timeout so the FSM reaches Ready.
+    // Also raise server-side IPC/streaming timeouts — under TSan a single
+    // search or list chunk on 48k docs can exceed the 30 s defaults.
+    if (!std::getenv("YAMS_SEARCH_BUILD_TIMEOUT_MS")) {
+        ::setenv("YAMS_SEARCH_BUILD_TIMEOUT_MS", "120000", 0);
+    }
+    if (!std::getenv("YAMS_IPC_TIMEOUT_MS")) {
+        ::setenv("YAMS_IPC_TIMEOUT_MS", "120000", 0);
+    }
+    if (!std::getenv("YAMS_STREAM_CHUNK_TIMEOUT_MS")) {
+        ::setenv("YAMS_STREAM_CHUNK_TIMEOUT_MS", "120000", 0);
+    }
 
     auto opts = benchHarnessOptions(cfg);
     DaemonHarness harness(opts);
     // Large corpus needs more startup time (loading indexes, etc.)
-    REQUIRE(harness.start(std::chrono::seconds(120)));
+    REQUIRE(harness.start(std::chrono::seconds(180)));
 
     // Allow async init to complete (connection pools, indexes)
-    std::this_thread::sleep_for(3s);
+    std::this_thread::sleep_for(5s);
+
+    // Under TSan with 48k+ docs, individual operations can take >30s.
+    constexpr auto kOpTimeout = 120s;
 
     // Discover some hashes from the corpus for get operations
     ClientConfig discoverCfg;
     discoverCfg.socketPath = harness.socketPath();
     discoverCfg.autoStart = false;
-    discoverCfg.requestTimeout = 30s;
+    discoverCfg.requestTimeout = kOpTimeout;
     DaemonClient discoverClient(discoverCfg);
 
     std::vector<std::string> knownHashes;
     {
         ListRequest listReq;
         listReq.limit = 200;
-        auto listRes = yams::cli::run_sync(discoverClient.list(listReq), 30s);
+        auto listRes = yams::cli::run_sync(discoverClient.list(listReq), kOpTimeout);
         if (listRes) {
             for (auto& item : listRes.value().items) {
                 if (!item.hash.empty())
@@ -1647,7 +1665,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
             ClientConfig ccfg;
             ccfg.socketPath = harness.socketPath();
             ccfg.autoStart = false;
-            ccfg.requestTimeout = 30s;
+            ccfg.requestTimeout = kOpTimeout;
             DaemonClient client(ccfg);
             while (!go.load())
                 std::this_thread::yield();
@@ -1658,7 +1676,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 req.limit = (i % 3 == 0) ? 5 : (i % 3 == 1) ? 10 : 25;
 
                 auto t0 = std::chrono::steady_clock::now();
-                auto res = yams::cli::run_sync(client.search(req), 30s);
+                auto res = yams::cli::run_sync(client.search(req), kOpTimeout);
                 auto t1 = std::chrono::steady_clock::now();
                 auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
 
@@ -1679,7 +1697,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
             ClientConfig ccfg;
             ccfg.socketPath = harness.socketPath();
             ccfg.autoStart = false;
-            ccfg.requestTimeout = 30s;
+            ccfg.requestTimeout = kOpTimeout;
             DaemonClient client(ccfg);
             while (!go.load())
                 std::this_thread::yield();
@@ -1689,7 +1707,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 req.limit = (i % 4 == 0) ? 10 : (i % 4 == 1) ? 25 : (i % 4 == 2) ? 50 : 100;
 
                 auto t0 = std::chrono::steady_clock::now();
-                auto res = yams::cli::run_sync(client.list(req), 30s);
+                auto res = yams::cli::run_sync(client.list(req), kOpTimeout);
                 auto t1 = std::chrono::steady_clock::now();
                 auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
 
@@ -1710,7 +1728,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
             ClientConfig ccfg;
             ccfg.socketPath = harness.socketPath();
             ccfg.autoStart = false;
-            ccfg.requestTimeout = 30s;
+            ccfg.requestTimeout = kOpTimeout;
             DaemonClient client(ccfg);
             std::mt19937 rng(static_cast<unsigned>(t * 997 + 17));
             while (!go.load())
@@ -1720,7 +1738,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 if (i % 4 == 0) {
                     // Status
                     auto t0 = std::chrono::steady_clock::now();
-                    auto res = yams::cli::run_sync(client.status(), 10s);
+                    auto res = yams::cli::run_sync(client.status(), kOpTimeout);
                     auto t1 = std::chrono::steady_clock::now();
                     auto latUs =
                         std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
@@ -1743,7 +1761,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                     req.metadataOnly = true;
 
                     auto t0 = std::chrono::steady_clock::now();
-                    auto res = yams::cli::run_sync(client.get(req), 30s);
+                    auto res = yams::cli::run_sync(client.get(req), kOpTimeout);
                     auto t1 = std::chrono::steady_clock::now();
                     auto latUs =
                         std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();

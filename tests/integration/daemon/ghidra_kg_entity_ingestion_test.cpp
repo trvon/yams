@@ -64,7 +64,7 @@ public:
     bool hasEntityProviders() {
         // Entity providers are loaded via PluginManager
         // For now, check if the entity channel is active
-        auto* pq = serviceManager_->getPostIngestQueue();
+        auto pq = serviceManager_->getPostIngestQueue();
         if (!pq)
             return false;
 
@@ -125,7 +125,7 @@ public:
 
     // Wait for entity extraction to complete
     bool waitForEntityProcessing(int timeoutMs = 10000) {
-        auto* pq = serviceManager_->getPostIngestQueue();
+        auto pq = serviceManager_->getPostIngestQueue();
         if (!pq)
             return false;
 
@@ -172,7 +172,7 @@ TEST_CASE("GhidraEntityIngestion: Entity provider infrastructure is ready",
     GhidraEntityIntegrationFixture fixture;
 
     SECTION("Entity processing channel is configured") {
-        auto* pq = fixture.serviceManager_->getPostIngestQueue();
+        auto pq = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(pq != nullptr);
 
         // Verify entity channel configuration
@@ -196,7 +196,7 @@ TEST_CASE("GhidraEntityIngestion: Entity provider infrastructure is ready",
     }
 
     SECTION("Entity inflight counter is accessible") {
-        auto* pq = fixture.serviceManager_->getPostIngestQueue();
+        auto pq = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(pq != nullptr);
 
         size_t entityInFlight = pq->entityInFlight();
@@ -299,7 +299,7 @@ TEST_CASE("GhidraEntityIngestion: Entity metrics are exposed",
     GhidraEntityIntegrationFixture fixture;
 
     SECTION("Entity queued/consumed/dropped counters are accessible") {
-        auto* pq = fixture.serviceManager_->getPostIngestQueue();
+        auto pq = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(pq != nullptr);
 
         // These counters are read from InternalEventBus via DaemonMetrics
@@ -388,7 +388,7 @@ TEST_CASE("GhidraEntityIngestion: Non-binary files don't trigger entity extracti
     GhidraEntityIntegrationFixture fixture;
 
     SECTION("Text file is not sent to entity provider") {
-        auto* pq = fixture.serviceManager_->getPostIngestQueue();
+        auto pq = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(pq != nullptr);
 
         size_t entityInflightBefore = pq->entityInFlight();

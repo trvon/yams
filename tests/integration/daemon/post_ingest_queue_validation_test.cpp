@@ -118,7 +118,7 @@ public:
     bool waitForQueueDrain(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
         auto start = std::chrono::steady_clock::now();
         while (std::chrono::steady_clock::now() - start < timeout) {
-            if (auto* queue = serviceManager_->getPostIngestQueue()) {
+            if (auto queue = serviceManager_->getPostIngestQueue()) {
                 auto size = queue->size();
                 auto inFlight = queue->totalInFlight();
 
@@ -173,7 +173,7 @@ TEST_CASE("PostIngestQueue - Initialization", "[daemon][post-ingest][init]") {
     PostIngestQueueFixture fixture;
 
     SECTION("PostIngestQueue is created") {
-        auto* queue = fixture.serviceManager_->getPostIngestQueue();
+        auto queue = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(queue != nullptr);
 
         INFO("Queue should have capacity");
@@ -181,7 +181,7 @@ TEST_CASE("PostIngestQueue - Initialization", "[daemon][post-ingest][init]") {
     }
 
     SECTION("PostIngestQueue metrics are accessible") {
-        auto* queue = fixture.serviceManager_->getPostIngestQueue();
+        auto queue = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(queue != nullptr);
 
         auto size = queue->size();
@@ -204,7 +204,7 @@ TEST_CASE("PostIngestQueue - Document Enqueuing", "[daemon][post-ingest][enqueue
     PostIngestQueueFixture fixture;
 
     SECTION("Documents are enqueued after storage") {
-        auto* queue = fixture.serviceManager_->getPostIngestQueue();
+        auto queue = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(queue != nullptr);
 
         auto initialProcessed = queue->processed();
@@ -225,7 +225,7 @@ TEST_CASE("PostIngestQueue - Document Enqueuing", "[daemon][post-ingest][enqueue
     }
 
     SECTION("Multiple documents are processed") {
-        auto* queue = fixture.serviceManager_->getPostIngestQueue();
+        auto queue = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(queue != nullptr);
 
         auto initialProcessed = queue->processed();
@@ -314,7 +314,7 @@ TEST_CASE("PostIngestQueue - Synchronous Indexing", "[daemon][post-ingest][sync]
     PostIngestQueueFixture fixture;
 
     SECTION("Documents are indexed via async channel") {
-        auto* queue = fixture.serviceManager_->getPostIngestQueue();
+        auto queue = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(queue != nullptr);
 
         auto hash = fixture.storeDocument("sync_test.txt", "Sync content for async test");
@@ -353,7 +353,7 @@ TEST_CASE("PostIngestQueue - Capacity and Backpressure", "[daemon][post-ingest][
     PostIngestQueueFixture fixture;
 
     SECTION("Queue respects capacity limits") {
-        auto* queue = fixture.serviceManager_->getPostIngestQueue();
+        auto queue = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(queue != nullptr);
 
         auto capacity = queue->capacity();
@@ -398,7 +398,7 @@ TEST_CASE("PostIngestQueue - Error Handling", "[daemon][post-ingest][errors]") {
     PostIngestQueueFixture fixture;
 
     SECTION("Invalid hash doesn't crash") {
-        auto* queue = fixture.serviceManager_->getPostIngestQueue();
+        auto queue = fixture.serviceManager_->getPostIngestQueue();
         REQUIRE(queue != nullptr);
 
         // Enqueue a task with non-existent hash

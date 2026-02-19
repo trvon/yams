@@ -879,17 +879,22 @@ void ServiceManager::shutdown() {
     // This prevents new extraction/embedding dispatch during shutdown and reduces metadata lock
     // contention while in-flight embed jobs finish.
     spdlog::info("[ServiceManager] Phase 3.6.5: Quiescing post-ingest queue");
-    if (postIngest_) {
-        try {
-            postIngest_.reset();
-            spdlog::info("[ServiceManager] Phase 3.6.5: Post-ingest queue quiesced");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 3.6.5: Post-ingest quiesce failed: {}", e.what());
-        } catch (...) {
-            spdlog::warn("[ServiceManager] Phase 3.6.5: Post-ingest quiesce failed");
+    {
+        auto postIngestHold = std::atomic_exchange_explicit(
+            &postIngest_, std::shared_ptr<PostIngestQueue>{}, std::memory_order_acq_rel);
+        if (postIngestHold) {
+            try {
+                postIngestHold.reset();
+                spdlog::info("[ServiceManager] Phase 3.6.5: Post-ingest queue quiesced");
+            } catch (const std::exception& e) {
+                spdlog::warn("[ServiceManager] Phase 3.6.5: Post-ingest quiesce failed: {}",
+                             e.what());
+            } catch (...) {
+                spdlog::warn("[ServiceManager] Phase 3.6.5: Post-ingest quiesce failed");
+            }
+        } else {
+            spdlog::info("[ServiceManager] Phase 3.6.5: No post-ingest queue to quiesce");
         }
-    } else {
-        spdlog::info("[ServiceManager] Phase 3.6.5: No post-ingest queue to quiesce");
     }
 
     // Phase 3.7: Quiesce embedding service before stopping WorkCoordinator threads.
@@ -984,11 +989,15 @@ void ServiceManager::shutdown() {
     }
 
     spdlog::info("[ServiceManager] Phase 6.3: Resetting post-ingest queue");
-    if (postIngest_) {
-        postIngest_.reset();
-        spdlog::info("[ServiceManager] Phase 6.3: Post-ingest queue reset");
-    } else {
-        spdlog::info("[ServiceManager] Phase 6.3: No post-ingest queue to reset");
+    {
+        auto postIngestHold = std::atomic_exchange_explicit(
+            &postIngest_, std::shared_ptr<PostIngestQueue>{}, std::memory_order_acq_rel);
+        if (postIngestHold) {
+            postIngestHold.reset();
+            spdlog::info("[ServiceManager] Phase 6.3: Post-ingest queue reset");
+        } else {
+            spdlog::info("[ServiceManager] Phase 6.3: No post-ingest queue to reset");
+        }
     }
 
     spdlog::info("[ServiceManager] Phase 6.3.5: Resetting embedding service");
@@ -1759,24 +1768,31 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         } catch (...) {
         }
         auto qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
-        postIngest_ = std::make_unique<PostIngestQueue>(
+        auto newPostIngest = std::make_shared<PostIngestQueue>(
             contentStore_, metadataRepo_, contentExtractors_, kgStore_, graphComponent_,
             workCoordinator_.get(), nullptr, qcap);
-        postIngest_->start();
+        newPostIngest->start();
 
         try {
             if (config_.tuning.postIngestCapacity > 0)
-                postIngest_->setCapacity(config_.tuning.postIngestCapacity);
+                newPostIngest->setCapacity(config_.tuning.postIngestCapacity);
         } catch (...) {
         }
+
+        std::atomic_store_explicit(&postIngest_, newPostIngest, std::memory_order_release);
         spdlog::info("Post-ingest queue initialized (capacity={})", qcap);
 
         // Wire PostIngestQueue drain to SearchEngineManager FSM
-        postIngest_->setDrainCallback([this]() {
-            spdlog::debug(
-                "[ServiceManager] PostIngestQueue drained, signaling SearchEngineManager");
-            searchEngineManager_.signalIndexingDrained();
-        });
+        {
+            auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+            if (piq) {
+                piq->setDrainCallback([this]() {
+                    spdlog::debug(
+                        "[ServiceManager] PostIngestQueue drained, signaling SearchEngineManager");
+                    searchEngineManager_.signalIndexingDrained();
+                });
+            }
+        }
     } catch (const std::exception& e) {
         spdlog::warn("Post-ingest queue init failed: {}", e.what());
     } catch (...) {
@@ -1828,8 +1844,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             kgWriteQueue_ = std::make_unique<KGWriteQueue>(*workCoordinator_->getIOContext(),
                                                            kgStore, queueConfig);
             kgWriteQueue_->start();
-            if (postIngest_) {
-                postIngest_->setKgWriteQueue(kgWriteQueue_.get());
+            auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+            if (piq) {
+                piq->setKgWriteQueue(kgWriteQueue_.get());
             }
             spdlog::debug("[ServiceManager] KGWriteQueue started");
         }
@@ -2411,8 +2428,9 @@ Result<size_t> ServiceManager::adoptContentExtractorsFromHosts() {
                          contentExtractors_.size());
 
             // Update PostIngestQueue with the newly adopted extractors
-            if (postIngest_) {
-                postIngest_->setExtractors(contentExtractors_);
+            auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+            if (piq) {
+                piq->setExtractors(contentExtractors_);
                 spdlog::info("[ServiceManager] Updated PostIngestQueue with {} extractors",
                              contentExtractors_.size());
             }
@@ -2429,7 +2447,8 @@ Result<size_t> ServiceManager::adoptSymbolExtractorsFromHosts() {
         auto result = pluginManager_->adoptSymbolExtractors();
         if (result && result.value() > 0) {
             // Build extension-to-language map from symbol extractors and pass to PostIngestQueue
-            if (postIngest_) {
+            auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+            if (piq) {
                 std::unordered_map<std::string, std::string> extMap;
                 const auto& extractors = pluginManager_->getSymbolExtractors();
                 for (const auto& extractor : extractors) {
@@ -2441,7 +2460,7 @@ Result<size_t> ServiceManager::adoptSymbolExtractorsFromHosts() {
                     }
                 }
                 auto mapSize = extMap.size();
-                postIngest_->setSymbolExtensionMap(std::move(extMap));
+                piq->setSymbolExtensionMap(std::move(extMap));
                 spdlog::info(
                     "[ServiceManager] Updated PostIngestQueue with {} symbol extension mappings",
                     mapSize);
@@ -2458,13 +2477,14 @@ Result<size_t> ServiceManager::adoptEntityExtractorsFromHosts() {
     if (pluginManager_) {
         auto result = pluginManager_->adoptEntityExtractors();
         if (result) {
-            if (postIngest_) {
+            auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+            if (piq) {
                 auto extractor = createGlinerExtractionFunc(pluginManager_->getEntityExtractors());
                 if (!extractor) {
                     spdlog::warn("[ServiceManager] GLiNER extraction func is null — title "
                                  "extraction will be disabled (no entity extractors found)");
                 }
-                postIngest_->setTitleExtractor(std::move(extractor));
+                piq->setTitleExtractor(std::move(extractor));
                 spdlog::info("[ServiceManager] Updated PostIngestQueue title extractor using {} "
                              "entity extractors",
                              pluginManager_->getEntityExtractors().size());
@@ -3248,7 +3268,8 @@ void ServiceManager::__test_setModelProviderDegraded(bool degraded, const std::s
 }
 
 void ServiceManager::enqueuePostIngest(const std::string& hash, const std::string& mime) {
-    if (!postIngest_) {
+    auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+    if (!piq) {
         return;
     }
 
@@ -3256,12 +3277,13 @@ void ServiceManager::enqueuePostIngest(const std::string& hash, const std::strin
                                "", // session
                                std::chrono::steady_clock::now(),
                                PostIngestQueue::Task::Stage::Metadata};
-    postIngest_->enqueue(std::move(task));
+    piq->enqueue(std::move(task));
 }
 
 void ServiceManager::enqueuePostIngestBatch(const std::vector<std::string>& hashes,
                                             const std::string& mime) {
-    if (!postIngest_ || hashes.empty()) {
+    auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+    if (!piq || hashes.empty()) {
         return;
     }
 
@@ -3278,7 +3300,7 @@ void ServiceManager::enqueuePostIngestBatch(const std::vector<std::string>& hash
             PostIngestQueue::Task{hash, mime, "", now, PostIngestQueue::Task::Stage::Metadata});
     }
     if (!tasks.empty()) {
-        postIngest_->enqueueBatch(std::move(tasks));
+        piq->enqueueBatch(std::move(tasks));
     }
 }
 

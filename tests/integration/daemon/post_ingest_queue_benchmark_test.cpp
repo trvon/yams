@@ -153,7 +153,7 @@ TEST_CASE("PostIngestQueue: Real-world ingestion benchmark", "[daemon][benchmark
 
         if (auto* daemon = harness.daemon()) {
             if (auto* sm = daemon->getServiceManager()) {
-                if (auto* pq = sm->getPostIngestQueue()) {
+                if (auto pq = sm->getPostIngestQueue()) {
                     currentProcessed = pq->processed();
                     currentQueued = pq->size();
                     currentInflight = pq->totalInFlight();
@@ -202,7 +202,7 @@ TEST_CASE("PostIngestQueue: Real-world ingestion benchmark", "[daemon][benchmark
     size_t finalFailed = 0;
     if (auto* daemon = harness.daemon()) {
         if (auto* sm = daemon->getServiceManager()) {
-            if (auto* pq = sm->getPostIngestQueue()) {
+            if (auto pq = sm->getPostIngestQueue()) {
                 finalProcessed = pq->processed();
                 finalFailed = pq->failed();
             }
@@ -325,7 +325,7 @@ TEST_CASE("PostIngestQueue: Parallel processing stress test", "[daemon][benchmar
 
         if (auto* daemon = harness.daemon()) {
             if (auto* sm = daemon->getServiceManager()) {
-                if (auto* pq = sm->getPostIngestQueue()) {
+                if (auto pq = sm->getPostIngestQueue()) {
                     currentProcessed = pq->processed();
                     currentQueued = pq->size();
                     currentInflight = pq->totalInFlight();
@@ -364,7 +364,7 @@ TEST_CASE("PostIngestQueue: Parallel processing stress test", "[daemon][benchmar
     size_t finalProcessed = 0;
     if (auto* daemon = harness.daemon()) {
         if (auto* sm = daemon->getServiceManager()) {
-            if (auto* pq = sm->getPostIngestQueue()) {
+            if (auto pq = sm->getPostIngestQueue()) {
                 finalProcessed = pq->processed();
             }
         }

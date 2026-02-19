@@ -113,7 +113,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager PostIngestQueue accessor
     ServiceManager sm(config_, state_, lifecycleFsm_);
 
     // May be null before initialization
-    auto* piq = sm.getPostIngestQueue();
+    auto piq = sm.getPostIngestQueue();
     (void)piq;
     SUCCEED();
 }

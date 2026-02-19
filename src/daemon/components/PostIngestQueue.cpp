@@ -5,6 +5,7 @@
 #include <future>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <boost/asio.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -42,6 +43,52 @@ namespace yams::daemon {
 namespace {
 constexpr size_t kMaxGlinerChars = 2000;
 constexpr float kMinTitleConfidence = 0.55f;
+constexpr float kMinNlEntityConfidence = 0.45f;
+
+std::string normalizeEntityTextForKey(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+
+    bool inWs = false;
+    for (unsigned char c : text) {
+        if (std::isspace(c)) {
+            if (!inWs) {
+                out.push_back(' ');
+                inWs = true;
+            }
+            continue;
+        }
+        out.push_back(static_cast<char>(std::tolower(c)));
+        inWs = false;
+    }
+
+    while (!out.empty() && std::isspace(static_cast<unsigned char>(out.front()))) {
+        out.erase(out.begin());
+    }
+    while (!out.empty() && std::isspace(static_cast<unsigned char>(out.back()))) {
+        out.pop_back();
+    }
+    return out;
+}
+
+bool isUsefulNlEntity(const search::QueryConcept& qc) {
+    if (qc.text.empty() || qc.confidence < kMinNlEntityConfidence) {
+        return false;
+    }
+
+    if (qc.text.size() > 160) {
+        return false;
+    }
+
+    bool hasAlphaNum = false;
+    for (unsigned char c : qc.text) {
+        if (std::isalnum(c)) {
+            hasAlphaNum = true;
+            break;
+        }
+    }
+    return hasAlphaNum;
+}
 
 // Check if GLiNER title extraction is disabled via environment variable
 // Set YAMS_DISABLE_GLINER_TITLES=1 for faster ingestion at the cost of title quality
@@ -1726,23 +1773,46 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
 
         // Separate title entities from NL entities
         const search::QueryConcept* bestTitle = nullptr;
-        std::vector<const search::QueryConcept*> nlEntities;
+        std::unordered_map<std::string, const search::QueryConcept*> nlEntityByKey;
+        nlEntityByKey.reserve(result.value().concepts.size());
 
         for (const auto& qc : result.value().concepts) {
-            if (qc.confidence < kMinTitleConfidence || qc.text.empty()) {
+            if (qc.text.empty()) {
                 continue;
             }
 
             if (kTitleTypes.count(qc.type) > 0) {
                 // Title candidate
-                if (!bestTitle || qc.confidence > bestTitle->confidence) {
+                if (qc.confidence >= kMinTitleConfidence &&
+                    (!bestTitle || qc.confidence > bestTitle->confidence)) {
                     bestTitle = &qc;
                 }
             } else {
                 // NL entity for KG
-                nlEntities.push_back(&qc);
+                if (!isUsefulNlEntity(qc)) {
+                    continue;
+                }
+
+                std::string key = normalizeEntityTextForKey(qc.type);
+                key.push_back(':');
+                key.append(normalizeEntityTextForKey(qc.text));
+
+                auto it = nlEntityByKey.find(key);
+                if (it == nlEntityByKey.end() || qc.confidence > it->second->confidence) {
+                    nlEntityByKey[std::move(key)] = &qc;
+                }
             }
         }
+
+        std::vector<const search::QueryConcept*> nlEntities;
+        nlEntities.reserve(nlEntityByKey.size());
+        for (const auto& [_, entityPtr] : nlEntityByKey) {
+            nlEntities.push_back(entityPtr);
+        }
+        std::sort(nlEntities.begin(), nlEntities.end(),
+                  [](const search::QueryConcept* a, const search::QueryConcept* b) {
+                      return a->confidence > b->confidence;
+                  });
 
         // Update title if we found a good candidate
         if (bestTitle) {
@@ -1818,14 +1888,19 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
 
             // Build entity nodes and edges
             std::string targetNodeKey = !docNodeKey.empty() ? docNodeKey : fileNodeKey;
+            struct EntityRef {
+                std::string nodeKey;
+                float confidence{0.0f};
+            };
+            std::vector<EntityRef> entityRefs;
+            entityRefs.reserve(nlEntities.size());
+
             for (const auto* qc : nlEntities) {
                 std::string text = common::sanitizeUtf8(qc->text);
                 std::string type = common::sanitizeUtf8(qc->type);
 
                 // Normalize text for canonical matching
-                std::string normalizedText = text;
-                std::transform(normalizedText.begin(), normalizedText.end(), normalizedText.begin(),
-                               ::tolower);
+                std::string normalizedText = normalizeEntityTextForKey(text);
 
                 std::string nodeKey = "nl_entity:" + type + ":" + normalizedText;
 
@@ -1845,6 +1920,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                 }
                 node.properties = props.dump();
                 batch->nodes.push_back(std::move(node));
+                entityRefs.push_back(EntityRef{nodeKey, qc->confidence});
 
                 // Add edge from entity to document/file
                 if (!targetNodeKey.empty()) {
@@ -1869,11 +1945,44 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                     docEnt.documentId = documentDbId.value();
                     docEnt.entityText = text;
                     docEnt.nodeKey = nodeKey;
-                    docEnt.startOffset = 0; // Not available from QueryConcept
-                    docEnt.endOffset = 0;
+                    docEnt.startOffset = qc->startOffset;
+                    docEnt.endOffset = qc->endOffset;
                     docEnt.confidence = qc->confidence;
                     docEnt.extractor = "gliner_title_nl";
                     batch->deferredDocEntities.push_back(std::move(docEnt));
+                }
+            }
+
+            // Add bounded co-mention edges among strongest entities to enrich local graph
+            // structure without exploding edge count.
+            constexpr std::size_t kMaxCoMentionEntities = 12;
+            constexpr std::size_t kMaxCoMentionEdges = 36;
+            const std::size_t entityLimit = std::min(entityRefs.size(), kMaxCoMentionEntities);
+            std::size_t coMentionEdgeCount = 0;
+            for (std::size_t i = 0; i < entityLimit; ++i) {
+                for (std::size_t j = i + 1; j < entityLimit; ++j) {
+                    if (coMentionEdgeCount >= kMaxCoMentionEdges) {
+                        break;
+                    }
+
+                    DeferredEdge coEdge;
+                    coEdge.srcNodeKey = entityRefs[i].nodeKey;
+                    coEdge.dstNodeKey = entityRefs[j].nodeKey;
+                    coEdge.relation = "co_mentioned_with";
+                    coEdge.weight = std::max(
+                        0.05f, std::min(entityRefs[i].confidence, entityRefs[j].confidence) * 0.5f);
+
+                    nlohmann::json edgeProps;
+                    edgeProps["source"] = "gliner";
+                    if (!hash.empty()) {
+                        edgeProps["snapshot_id"] = hash;
+                    }
+                    coEdge.properties = edgeProps.dump();
+                    batch->deferredEdges.push_back(std::move(coEdge));
+                    ++coMentionEdgeCount;
+                }
+                if (coMentionEdgeCount >= kMaxCoMentionEdges) {
+                    break;
                 }
             }
 

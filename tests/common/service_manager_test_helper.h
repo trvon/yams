@@ -65,13 +65,13 @@ initializeServiceManagerFully(std::shared_ptr<yams::daemon::ServiceManager> serv
     return false;
 }
 
-inline yams::daemon::PostIngestQueue*
+inline std::shared_ptr<yams::daemon::PostIngestQueue>
 waitForPostIngestQueue(std::shared_ptr<yams::daemon::ServiceManager> serviceManager,
                        std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
     auto start = std::chrono::steady_clock::now();
 
     while (std::chrono::steady_clock::now() - start < timeout) {
-        auto* queue = serviceManager->getPostIngestQueue();
+        auto queue = serviceManager->getPostIngestQueue();
         if (queue) {
             return queue;
         }

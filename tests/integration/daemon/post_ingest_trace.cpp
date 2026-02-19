@@ -73,7 +73,7 @@ int main() {
     std::cout << "   ✓ ServiceManager fully initialized" << std::endl;
 
     std::cout << "\n3. Checking PostIngestQueue..." << std::endl;
-    auto* queue = serviceManager->getPostIngestQueue();
+    auto queue = serviceManager->getPostIngestQueue();
     if (!queue) {
         std::cerr << "ERROR: PostIngestQueue is NULL!" << std::endl;
         return 1;

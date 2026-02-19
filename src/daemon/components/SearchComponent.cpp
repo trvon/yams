@@ -115,7 +115,7 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
 
     // Rebuild only when ingest/post-ingest/embedding pipelines are drained.
     // Rebuilding during heavy ingest competes with extraction+embedding and reduces throughput.
-    if (const auto* postIngest = serviceManager_.getPostIngestQueue()) {
+    if (const auto postIngest = serviceManager_.getPostIngestQueue()) {
         if (postIngest->size() > 0 || postIngest->totalInFlight() > 0) {
             return false;
         }

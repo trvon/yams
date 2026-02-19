@@ -419,7 +419,7 @@ void ResourceGovernor::collectMetrics(ServiceManager* sm, ResourceSnapshot& snap
     snap.searchConcurrency = searchMetrics.active;
 
     // PostIngestQueue dimensions
-    if (auto* piq = sm->getPostIngestQueue()) {
+    if (auto piq = sm->getPostIngestQueue()) {
         snap.postIngestQueued = piq->size();
         snap.extractionConcurrency = static_cast<std::uint32_t>(piq->extractionInFlight());
         snap.kgConcurrency = static_cast<std::uint32_t>(piq->kgInFlight());
@@ -895,7 +895,7 @@ void ResourceGovernor::onNormalLevel(ServiceManager* sm) {
 
     // Resume all stages (in case coming down from Critical/Emergency)
     if (sm) {
-        if (auto* piq = sm->getPostIngestQueue()) {
+        if (auto piq = sm->getPostIngestQueue()) {
             piq->resumeAll();
         }
     }
@@ -909,7 +909,7 @@ void ResourceGovernor::onWarningLevel(ServiceManager* sm) {
 
     // Resume stages (in case coming down from Critical/Emergency)
     if (sm) {
-        if (auto* piq = sm->getPostIngestQueue()) {
+        if (auto piq = sm->getPostIngestQueue()) {
             piq->resumeAll();
         }
     }
@@ -923,7 +923,7 @@ void ResourceGovernor::onCriticalLevel(ServiceManager* sm) {
 
     // Pause non-essential stages to reduce memory pressure
     if (sm) {
-        if (auto* piq = sm->getPostIngestQueue()) {
+        if (auto piq = sm->getPostIngestQueue()) {
             piq->pauseStage(PostIngestQueue::Stage::KnowledgeGraph);
             piq->pauseStage(PostIngestQueue::Stage::Symbol);
             piq->pauseStage(PostIngestQueue::Stage::Entity);
@@ -968,7 +968,7 @@ void ResourceGovernor::onEmergencyLevel(ServiceManager* sm) {
 
     // Pause ALL stages to stop all processing
     if (sm) {
-        if (auto* piq = sm->getPostIngestQueue()) {
+        if (auto piq = sm->getPostIngestQueue()) {
             piq->pauseAll();
             spdlog::warn("[ResourceGovernor] Paused ALL post-ingest stages (emergency)");
         }
