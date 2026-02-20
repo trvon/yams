@@ -1,12 +1,14 @@
 // Split from RequestDispatcher.cpp: search handler
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <string_view>
 #include <fmt/ranges.h>
-#include <nlohmann/json.hpp>
-#include <yams/core/uuid.h>
 #include <yams/app/services/services.hpp>
+#include <yams/core/uuid.h>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -17,9 +19,23 @@
 
 namespace yams::daemon {
 
+namespace {
+bool query_trace_enabled() {
+    static std::atomic<int> cached{-1};
+    int v = cached.load(std::memory_order_relaxed);
+    if (v >= 0)
+        return v == 1;
+    const char* env = std::getenv("YAMS_QUERY_TRACE");
+    bool enabled = env && *env && std::string_view(env) != "0";
+    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
+    return enabled;
+}
+} // namespace
+
 boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const SearchRequest& req) {
     YAMS_ZONE_SCOPED_N("handleSearchRequest");
     try {
+        const auto requestStart = std::chrono::steady_clock::now();
         const std::string traceId = yams::core::generateUUID();
         if (serviceManager_) {
             serviceManager_->onSearchRequestQueued();
@@ -99,12 +115,17 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
             spdlog::debug("Hybrid search engine not ready, falling back to metadata search.");
         }
 
+        const auto serviceStart = std::chrono::steady_clock::now();
         auto result = co_await searchService->search(serviceReq);
+        const auto serviceMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - serviceStart)
+                                   .count();
         if (!result) {
             co_return ErrorResponse{result.error().code, result.error().message};
         }
         const auto& serviceResp = result.value();
 
+        const auto mapSortStart = std::chrono::steady_clock::now();
         const size_t limit = req.limit > 0 ? req.limit : serviceResp.results.size();
         auto results = yams::daemon::dispatch::SearchResultMapper::mapToSearchResults(
             serviceResp.results, limit);
@@ -112,43 +133,83 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         std::stable_sort(
             results.begin(), results.end(),
             [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+        const auto mapSortMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - mapSortStart)
+                                   .count();
+
+        int64_t feedbackMs = 0;
 
         if (appContext.metadataRepo) {
-            metadata::FeedbackEvent event;
-            event.eventId = yams::core::generateUUID();
-            event.traceId = traceId;
-            event.createdAt = std::chrono::time_point_cast<std::chrono::seconds>(
-                std::chrono::system_clock::now());
-            event.source = "daemon";
-            event.eventType = "retrieval_served";
-
-            nlohmann::json payload;
-            payload["query"] = req.query;
-            payload["search_type"] = serviceReq.type;
-            payload["limit"] = req.limit;
-            payload["total_count"] = serviceResp.total;
-            payload["elapsed_ms"] = serviceResp.executionTimeMs;
-            payload["session_name"] = req.sessionName;
-            payload["use_session"] = req.useSession;
-            payload["global_search"] = req.globalSearch;
-            nlohmann::json servedIds = nlohmann::json::array();
-            for (const auto& r : results) {
-                servedIds.push_back(r.id);
+            const auto feedbackStart = std::chrono::steady_clock::now();
+            // Feedback events are non-critical telemetry (used for RLHM tuning).
+            // Skip entirely when ResourceGovernor reports pressure to avoid blocking
+            // a worker thread in sqlite3_step() during the write. Even with best-effort
+            // writes, the busy_timeout can block for up to 2s per call.
+            bool skipFeedback = false;
+            try {
+                auto level = ResourceGovernor::instance().getPressureLevel();
+                skipFeedback = (level >= ResourcePressureLevel::Warning);
+            } catch (...) {
+                // ResourceGovernor not initialized — skip to be safe
+                skipFeedback = true;
             }
-            payload["served_result_ids"] = std::move(servedIds);
-            event.payloadJson = payload.dump();
 
-            auto ins = appContext.metadataRepo->insertFeedbackEvent(event);
-            if (!ins) {
-                spdlog::warn(
-                    "Failed to persist retrieval_served feedback event for trace_id={} : {}",
-                    traceId, ins.error().message);
+            if (!skipFeedback) {
+                metadata::FeedbackEvent event;
+                event.eventId = yams::core::generateUUID();
+                event.traceId = traceId;
+                event.createdAt = std::chrono::time_point_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now());
+                event.source = "daemon";
+                event.eventType = "retrieval_served";
+
+                nlohmann::json payload;
+                payload["query"] = req.query;
+                payload["search_type"] = serviceReq.type;
+                payload["limit"] = req.limit;
+                payload["total_count"] = serviceResp.total;
+                payload["elapsed_ms"] = serviceResp.executionTimeMs;
+                payload["session_name"] = req.sessionName;
+                payload["use_session"] = req.useSession;
+                payload["global_search"] = req.globalSearch;
+                nlohmann::json servedIds = nlohmann::json::array();
+                for (const auto& r : results) {
+                    servedIds.push_back(r.id);
+                }
+                payload["served_result_ids"] = std::move(servedIds);
+                event.payloadJson = payload.dump();
+
+                auto ins = appContext.metadataRepo->insertFeedbackEvent(event);
+                if (!ins) {
+                    spdlog::debug("Dropped retrieval_served feedback event for trace_id={} : {}",
+                                  traceId, ins.error().message);
+                }
             }
+            feedbackMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - feedbackStart)
+                             .count();
         }
 
-        co_return yams::daemon::dispatch::makeSearchResponse(
+        const auto responseStart = std::chrono::steady_clock::now();
+        auto response = yams::daemon::dispatch::makeSearchResponse(
             serviceResp.total, std::chrono::milliseconds(serviceResp.executionTimeMs),
             std::move(results), traceId);
+
+        const auto responseMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - responseStart)
+                                    .count();
+        const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - requestStart)
+                                 .count();
+        if (query_trace_enabled()) {
+            spdlog::info(
+                "[query-trace] op=search trace_id={} total_ms={} service_ms={} map_sort_ms={} "
+                "feedback_ms={} response_ms={} service_elapsed_ms={} results={} total_count={}",
+                traceId, totalMs, serviceMs, mapSortMs, feedbackMs, responseMs,
+                serviceResp.executionTimeMs, response.results.size(), response.totalCount);
+        }
+
+        co_return response;
     } catch (const std::exception& e) {
         co_return ErrorResponse{ErrorCode::InternalError,
                                 std::string("Search failed: ") + e.what()};

@@ -667,8 +667,11 @@ public:
     }
 
     // WorkCoordinator threads (override, env, or derived).
-    // Default: 100% of budgeted threads (I/O-bound SQL work benefits from
-    // more threads than the conservative 50% default).
+    // Default: max(12, hardware_concurrency). I/O-bound SQL work (sqlite3_step blocks
+    // on disk I/O) benefits from oversubscription: when some threads wait on I/O, others
+    // can still service requests. The floor of 12 prevents total starvation on ≤8-core
+    // machines where external storage (USB/NAS) can stall all worker threads during
+    // page cache warmup.
     // Environment: YAMS_WORK_COORDINATOR_THREADS
     static uint32_t workCoordinatorThreads() {
         uint32_t ov = workCoordinatorThreadsOverride_.load(std::memory_order_relaxed);
@@ -682,7 +685,7 @@ public:
             } catch (...) {
             }
         }
-        return recommendedThreads(1.0);
+        return std::max(12u, recommendedThreads(1.0));
     }
     static void setWorkCoordinatorThreads(uint32_t n) {
         workCoordinatorThreadsOverride_.store(std::clamp<uint32_t>(n, 1u, 512u),

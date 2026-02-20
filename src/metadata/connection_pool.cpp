@@ -1,13 +1,70 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <yams/metadata/connection_pool.h>
 #include <yams/profiling.h>
 
 namespace yams::metadata {
+
+namespace {
+
+bool sqlite_profile_trace_enabled() {
+    static std::atomic<int> cached{-1};
+    int cachedValue = cached.load(std::memory_order_relaxed);
+    if (cachedValue >= 0) {
+        return cachedValue == 1;
+    }
+
+    const char* env = std::getenv("YAMS_SQL_TRACE");
+    bool enabled = env && *env && std::string_view(env) != "0";
+    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
+    return enabled;
+}
+
+int sqlite_profile_min_ms() {
+    static std::atomic<int> cached{-1};
+    int cachedValue = cached.load(std::memory_order_relaxed);
+    if (cachedValue >= 0) {
+        return cachedValue;
+    }
+
+    int value = 200;
+    if (const char* env = std::getenv("YAMS_SQL_TRACE_MIN_MS")) {
+        try {
+            int parsed = std::stoi(env);
+            if (parsed > 0) {
+                value = parsed;
+            }
+        } catch (...) {
+        }
+    }
+    cached.store(value, std::memory_order_relaxed);
+    return value;
+}
+
+int sqlite_profile_trace_callback(unsigned traceCode, void*, void* ptr, void* data) {
+    if (traceCode != SQLITE_TRACE_PROFILE || ptr == nullptr || data == nullptr) {
+        return 0;
+    }
+
+    auto* statement = static_cast<sqlite3_stmt*>(ptr);
+    const auto elapsedNs = *static_cast<sqlite3_int64*>(data);
+    const auto elapsedMs = elapsedNs / 1000000;
+    if (elapsedMs < sqlite_profile_min_ms()) {
+        return 0;
+    }
+
+    const char* sql = sqlite3_sql(statement);
+    spdlog::warn("[sql-trace] elapsed_ms={} sql='{}'", elapsedMs, sql ? sql : "(null)");
+    return 0;
+}
+
+} // namespace
 
 // PooledConnection implementation
 PooledConnection::PooledConnection(std::unique_ptr<Database> db,
@@ -455,10 +512,18 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     }
     db.execute("PRAGMA temp_store = MEMORY");
 
-    // mmap_size: read-only connections skip mmap to avoid page-fault storms on external
-    // drives and reduce virtual memory pressure under concurrent load.
+    // mmap_size: both read and write connections use mmap to leverage the OS page cache.
+    // With mmap, all connections share the same mapped memory region, so pages read from
+    // disk once are visible to all connections without additional I/O. On external drives
+    // (USB/NAS), this is critical: without mmap, N connections each call read() for the
+    // same pages independently, causing N× the I/O traffic. 256MB covers the hot FTS5
+    // index and metadata B-tree pages for typical corpora.
+    //
+    // Note: page-fault storms were previously a concern for external drives, but the
+    // alternative (N × read() syscalls for the same pages) is worse. The OS page cache
+    // handles mmap'd page faults efficiently on macOS/Linux.
+    db.execute("PRAGMA mmap_size = 268435456"); // 256MB
     if (config_.readOnly) {
-        db.execute("PRAGMA mmap_size = 0");
         // read_uncommitted: reduces WAL index contention between concurrent readers.
         // Safe for search/list/get since they tolerate seeing latest committed data.
         db.execute("PRAGMA read_uncommitted = ON");
@@ -467,24 +532,52 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
         // The default 15s busy_timeout causes catastrophic thread starvation when
         // worker threads block in sqlite3_step() waiting for the write lock.
         db.execute("PRAGMA busy_timeout = 100");
-    } else {
-        db.execute("PRAGMA mmap_size = 268435456"); // 256MB
     }
 
     // Page cache size: default SQLite is -2000 (~2MB), which causes severe thrashing on
-    // large databases (23GB+). We default to -262144 (~256MB per connection) to keep FTS5
-    // inverted-index nodes and hot B-tree pages resident. Configurable via YAMS_DB_CACHE_SIZE_MB.
-    int cacheSizeKB = -262144; // negative = KiB (256MB)
-    if (const char* envCache = std::getenv("YAMS_DB_CACHE_SIZE_MB")) {
+    // large databases (23GB+).
+    //
+    // Read pool: 32MB per connection. Read connections serve short queries (search, list,
+    // get) whose hot-set fits easily in 32MB. Keeping this small avoids catastrophic I/O
+    // stalls during cache warmup when many connections fill simultaneously from slow media
+    // (e.g. 8 conns × 256MB = 2GB from USB → 90+ second stall vs 8 × 32MB = 256MB → <10s).
+    //
+    // Write pool: 256MB per connection. Ingestion and bulk operations benefit from keeping
+    // FTS5 inverted-index nodes and hot B-tree pages resident across long-running transactions.
+    //
+    // Both are overridable: YAMS_DB_CACHE_SIZE_MB (write pool), YAMS_DB_READ_CACHE_SIZE_MB.
+    int defaultCacheMB = config_.readOnly ? 32 : 256;
+    const char* envName = config_.readOnly ? "YAMS_DB_READ_CACHE_SIZE_MB" : "YAMS_DB_CACHE_SIZE_MB";
+    if (const char* envCache = std::getenv(envName)) {
         try {
             int mb = std::stoi(envCache);
             if (mb > 0)
-                cacheSizeKB = -(mb * 1024); // convert MB to negative KiB for SQLite
+                defaultCacheMB = mb;
         } catch (...) {
         }
     }
+    // Also check the generic env var as fallback for read pool
+    if (config_.readOnly) {
+        if (const char* envGeneric = std::getenv("YAMS_DB_CACHE_SIZE_MB")) {
+            // Only use generic if specific read var wasn't set
+            if (!std::getenv("YAMS_DB_READ_CACHE_SIZE_MB")) {
+                try {
+                    int mb = std::stoi(envGeneric);
+                    if (mb > 0)
+                        defaultCacheMB = mb;
+                } catch (...) {
+                }
+            }
+        }
+    }
+    int cacheSizeKB = -(defaultCacheMB * 1024); // negative = KiB for SQLite
     db.execute("PRAGMA cache_size = " + std::to_string(cacheSizeKB));
     db.execute("PRAGMA wal_autocheckpoint = 0");
+
+    if (sqlite_profile_trace_enabled()) {
+        sqlite3_trace_v2(db.rawHandle(), SQLITE_TRACE_PROFILE, sqlite_profile_trace_callback,
+                         nullptr);
+    }
 
     return {};
 }

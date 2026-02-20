@@ -15,6 +15,7 @@
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/metadata/connection_pool.h>
@@ -858,8 +859,20 @@ private:
     void recordPathHit(const std::string& normalizedPath) const;
     void updateQueryCache(const std::string& key, const SearchResults& results) const;
     void invalidateQueryCache() const;
+    std::optional<std::vector<int64_t>> getCachedFtsIndexedIds() const;
+    void setCachedFtsIndexedIds(const std::vector<int64_t>& docIds) const;
+    void noteFtsIndexedId(int64_t docId) const;
+    void eraseFtsIndexedId(int64_t docId) const;
 
-    // Helper method to handle nested Result from withConnection with retry for lock errors
+    mutable std::shared_mutex ftsIndexedIdsCacheMutex_;
+    mutable std::unordered_set<int64_t> ftsIndexedIdsCache_;
+    mutable std::atomic<bool> ftsIndexedIdsCacheReady_{false};
+
+    // Helper method to execute queries on a pool with retry for lock errors.
+    // Emits detailed timing when YAMS_METADATA_TRACE=1:
+    //   - acquire_ms: pool connection acquisition latency
+    //   - query_ms: function execution latency on the acquired connection
+    //   - total_ms: attempt total latency
     template <typename T>
     Result<T> executeQueryOnPool(ConnectionPool& pool, std::string_view route,
                                  std::function<Result<T>(Database&)> func) {
@@ -877,7 +890,67 @@ private:
         thread_local std::mt19937 rng(std::random_device{}());
 
         for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
-            auto result = pool.withConnection(func);
+            const auto attemptStart = std::chrono::steady_clock::now();
+            const auto acquireStart = attemptStart;
+            auto connResult =
+                pool.acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal);
+            const auto acquireEnd = std::chrono::steady_clock::now();
+            const auto acquireMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(acquireEnd - acquireStart)
+                    .count();
+
+            if (!connResult) {
+                auto op = current_metadata_op();
+                if (metadata_trace_enabled()) {
+                    const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::steady_clock::now() - attemptStart)
+                                             .count();
+                    spdlog::warn(
+                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
+                        "acquire_ms={} query_ms=0 total_ms={} ok=false error='{}'",
+                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, totalMs,
+                        connResult.error().message);
+                }
+                spdlog::error("MetadataRepository::executeQueryOnPool route='{}' acquire error: {}",
+                              route, connResult.error().message);
+                return Error{connResult.error()};
+            }
+
+            auto conn = std::move(connResult).value();
+            conn->touch();
+
+            const auto queryStart = std::chrono::steady_clock::now();
+            Result<T> result;
+            try {
+                result = func(**conn);
+            } catch (const std::exception& e) {
+                result = Error{ErrorCode::DatabaseError, e.what()};
+            }
+            const auto queryEnd = std::chrono::steady_clock::now();
+            const auto queryMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(queryEnd - queryStart)
+                    .count();
+            const auto totalMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(queryEnd - attemptStart)
+                    .count();
+
+            if (metadata_trace_enabled()) {
+                auto op = current_metadata_op();
+                if (result.has_value()) {
+                    spdlog::info(
+                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
+                        "acquire_ms={} query_ms={} total_ms={} ok=true",
+                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, queryMs,
+                        totalMs);
+                } else {
+                    spdlog::info(
+                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
+                        "acquire_ms={} query_ms={} total_ms={} ok=false error='{}'",
+                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, queryMs,
+                        totalMs, result.error().message);
+                }
+            }
+
             if (result.has_value()) {
                 if (attempt > 0) {
                     // Log successful retry at debug level
@@ -931,10 +1004,18 @@ private:
 
     template <typename T> Result<T> executeReadQuery(std::function<Result<T>(Database&)> func) {
         ConnectionPool& readPool = (readPool_ != nullptr) ? *readPool_ : pool_;
+        if (current_metadata_op().empty()) {
+            MetadataOpScope opScope("read_query");
+            return executeQueryOnPool<T>(readPool, "read", std::move(func));
+        }
         return executeQueryOnPool<T>(readPool, "read", std::move(func));
     }
 
     template <typename T> Result<T> executeWriteQuery(std::function<Result<T>(Database&)> func) {
+        if (current_metadata_op().empty()) {
+            MetadataOpScope opScope("write_query");
+            return executeQueryOnPool<T>(pool_, "write", std::move(func));
+        }
         return executeQueryOnPool<T>(pool_, "write", std::move(func));
     }
 
@@ -944,7 +1025,59 @@ private:
     /// otherwise starve worker threads under concurrent load.
     template <typename T>
     Result<T> executeBestEffortWrite(std::function<Result<T>(Database&)> func) {
-        auto result = pool_.withConnection(func);
+        const bool hasExistingOp = !current_metadata_op().empty();
+        std::string_view prevOp{};
+        if (!hasExistingOp) {
+            prevOp = detail::metadata_op_tag;
+            detail::metadata_op_tag = "best_effort_write";
+        }
+
+        const auto start = std::chrono::steady_clock::now();
+        auto connResult =
+            pool_.acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal);
+        if (!connResult) {
+            if (metadata_trace_enabled()) {
+                const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now() - start)
+                                         .count();
+                spdlog::warn("MetadataRepository::executeBestEffortWrite acquire_ms={} total_ms={} "
+                             "ok=false error='{}'",
+                             totalMs, totalMs, connResult.error().message);
+            }
+            if (!hasExistingOp) {
+                detail::metadata_op_tag = prevOp;
+            }
+            return Error{connResult.error()};
+        }
+
+        auto conn = std::move(connResult).value();
+        conn->touch();
+
+        Result<T> result;
+        try {
+            result = func(**conn);
+        } catch (const std::exception& e) {
+            result = Error{ErrorCode::DatabaseError, e.what()};
+        }
+
+        if (metadata_trace_enabled()) {
+            const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - start)
+                                     .count();
+            if (result.has_value()) {
+                spdlog::info("MetadataRepository::executeBestEffortWrite total_ms={} ok=true",
+                             totalMs);
+            } else {
+                spdlog::info(
+                    "MetadataRepository::executeBestEffortWrite total_ms={} ok=false error='{}'",
+                    totalMs, result.error().message);
+            }
+        }
+
+        if (!hasExistingOp) {
+            detail::metadata_op_tag = prevOp;
+        }
+
         if (result.has_value()) {
             if constexpr (std::is_void_v<T>) {
                 return Result<void>();

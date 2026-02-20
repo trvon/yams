@@ -176,12 +176,13 @@ Result<void> Statement::bind(int index, std::chrono::sys_seconds tp) {
 
 Result<void> Statement::execute() {
     // Retry logic for transient lock errors (SQLITE_BUSY, SQLITE_LOCKED)
-    // libsql MVCC reduces lock contention but FTS5/schema ops can still encounter locks
+    // Each retry calls sqlite3_step() which blocks for up to busy_timeout ms,
+    // so retries must be kept low to avoid starving worker threads.
 #if YAMS_LIBSQL_BACKEND
-    constexpr int kMaxRetries = 3;               // Fewer retries with MVCC
+    constexpr int kMaxRetries = 2;               // Fewer retries with MVCC
     auto backoff = std::chrono::milliseconds(5); // Shorter initial backoff
 #else
-    constexpr int kMaxRetries = 5;                // More retries for SQLite
+    constexpr int kMaxRetries = 3;                // Keep low: each blocks for busy_timeout
     auto backoff = std::chrono::milliseconds(10); // Standard backoff
 #endif
 
@@ -216,12 +217,13 @@ Result<void> Statement::execute() {
 
 Result<bool> Statement::step() {
     // Retry logic for transient lock errors (SQLITE_BUSY, SQLITE_LOCKED)
-    // libsql MVCC reduces lock contention but FTS5/schema ops can still encounter locks
+    // Each retry calls sqlite3_step() which blocks for up to busy_timeout ms,
+    // so retries must be kept low to avoid starving worker threads.
 #if YAMS_LIBSQL_BACKEND
-    constexpr int kMaxRetries = 3;               // Fewer retries with MVCC
+    constexpr int kMaxRetries = 2;               // Fewer retries with MVCC
     auto backoff = std::chrono::milliseconds(5); // Shorter initial backoff
 #else
-    constexpr int kMaxRetries = 5;                // More retries for SQLite
+    constexpr int kMaxRetries = 3;                // Keep low: each blocks for busy_timeout
     auto backoff = std::chrono::milliseconds(10); // Standard backoff
 #endif
 

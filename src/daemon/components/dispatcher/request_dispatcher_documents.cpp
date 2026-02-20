@@ -1,8 +1,10 @@
 // Split from RequestDispatcher.cpp: document/search/grep/download/cancel handlers
 #include <spdlog/spdlog.h>
+#include <atomic>
 #include <filesystem>
 #include <future>
 #include <sstream>
+#include <string_view>
 #include <thread>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
@@ -40,6 +42,17 @@ int envIntOrDefault(const char* name, int fallback, int minValue, int maxValue) 
     } catch (...) {
         return fallback;
     }
+}
+
+bool query_trace_enabled() {
+    static std::atomic<int> cached{-1};
+    int v = cached.load(std::memory_order_relaxed);
+    if (v >= 0)
+        return v == 1;
+    const char* env = std::getenv("YAMS_QUERY_TRACE");
+    bool enabled = env && *env && std::string_view(env) != "0";
+    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
+    return enabled;
 }
 
 int computeEnqueueDelayMs(const AddDocumentRequest& req, int attempt, int baseDelayMs,
@@ -138,6 +151,7 @@ RequestDispatcher::handlePrepareSessionRequest(const PrepareSessionRequest& req)
 boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRequest& req) {
     co_return co_await yams::daemon::dispatch::guard_await(
         "get", [this, req]() -> boost::asio::awaitable<Response> {
+            const auto requestStart = std::chrono::steady_clock::now();
             auto appContext = serviceManager_->getAppContext();
             auto documentService = app::services::makeDocumentService(appContext);
             app::services::RetrieveDocumentRequest serviceReq;
@@ -161,16 +175,22 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
             spdlog::debug("RequestDispatcher: Mapping GetRequest to DocumentService (hash='{}', "
                           "name='{}', metadataOnly={})",
                           req.hash, req.name, req.metadataOnly);
+            const auto serviceStart = std::chrono::steady_clock::now();
             auto result = co_await yams::daemon::dispatch::offload_to_worker(
                 serviceManager_, [documentService, serviceReq = std::move(serviceReq)]() mutable {
                     return documentService->retrieve(serviceReq);
                 });
+            const auto serviceMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now() - serviceStart)
+                                       .count();
             if (!result) {
                 spdlog::warn("RequestDispatcher: DocumentService::retrieve failed: {}",
                              result.error().message);
                 co_return ErrorResponse{result.error().code, result.error().message};
             }
             const auto& serviceResp = result.value();
+
+            const auto mapStart = std::chrono::steady_clock::now();
             GetResponse response;
             if (serviceResp.document.has_value()) {
                 response = yams::daemon::dispatch::GetResponseMapper::fromServiceDoc(
@@ -198,6 +218,21 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetRequest(const GetRe
             }
             response.totalBytes = serviceResp.totalBytes;
             response.outputWritten = serviceResp.outputPath.has_value();
+
+            const auto mapMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - mapStart)
+                                   .count();
+            const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - requestStart)
+                                     .count();
+            if (query_trace_enabled()) {
+                spdlog::info(
+                    "[query-trace] op=get total_ms={} service_ms={} map_ms={} graph_related={} "
+                    "total_bytes={} hash='{}' name='{}'",
+                    totalMs, serviceMs, mapMs, response.related.size(), response.totalBytes,
+                    req.hash, req.name);
+            }
+
             co_return response;
         });
 }
@@ -288,6 +323,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetEndRequest(const Ge
 boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const ListRequest& req) {
     spdlog::debug("[handleListRequest] START limit={}", req.limit);
     try {
+        const auto requestStart = std::chrono::steady_clock::now();
         auto appContext = serviceManager_->getAppContext();
         auto docService = app::services::makeDocumentService(appContext);
 
@@ -366,17 +402,36 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
         // Offload the list operation to a worker thread. On large corpora (48k+ docs),
         // a full list scan can block for 1s+. Running this on the ASIO reactor thread
         // paralyzes the IPC event loop, preventing other clients from being served.
+        const auto serviceStart = std::chrono::steady_clock::now();
         auto result = co_await yams::daemon::dispatch::offload_to_worker(
             serviceManager_, [docService, serviceReq]() { return docService->list(serviceReq); });
+        const auto serviceMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - serviceStart)
+                                   .count();
         if (!result) {
             co_return ErrorResponse{result.error().code, result.error().message};
         }
 
         const auto& serviceResp = result.value();
 
+        const auto mapStart = std::chrono::steady_clock::now();
         ListResponse response = yams::daemon::dispatch::makeListResponse(
             serviceResp.totalFound,
             yams::daemon::dispatch::ListEntryMapper::mapToListEntries(serviceResp.documents));
+
+        const auto mapMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - mapStart)
+                               .count();
+        const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - requestStart)
+                                 .count();
+        if (query_trace_enabled()) {
+            spdlog::info(
+                "[query-trace] op=list total_ms={} service_ms={} map_ms={} items={} total_count={} "
+                "limit={} offset={} recent={}",
+                totalMs, serviceMs, mapMs, response.items.size(), response.totalCount, req.limit,
+                req.offset, req.recentCount);
+        }
 
         co_return response;
     } catch (const std::exception& e) {

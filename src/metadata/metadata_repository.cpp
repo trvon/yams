@@ -325,6 +325,46 @@ void MetadataRepository::invalidateQueryCache() const {
                                std::memory_order_release);
 }
 
+std::optional<std::vector<int64_t>> MetadataRepository::getCachedFtsIndexedIds() const {
+    if (!ftsIndexedIdsCacheReady_.load(std::memory_order_acquire)) {
+        return std::nullopt;
+    }
+
+    std::shared_lock<std::shared_mutex> lock(ftsIndexedIdsCacheMutex_);
+    std::vector<int64_t> ids;
+    ids.reserve(ftsIndexedIdsCache_.size());
+    for (int64_t id : ftsIndexedIdsCache_) {
+        ids.push_back(id);
+    }
+    return ids;
+}
+
+void MetadataRepository::setCachedFtsIndexedIds(const std::vector<int64_t>& docIds) const {
+    std::unique_lock<std::shared_mutex> lock(ftsIndexedIdsCacheMutex_);
+    ftsIndexedIdsCache_.clear();
+    ftsIndexedIdsCache_.reserve(docIds.size());
+    for (int64_t id : docIds) {
+        ftsIndexedIdsCache_.insert(id);
+    }
+    ftsIndexedIdsCacheReady_.store(true, std::memory_order_release);
+}
+
+void MetadataRepository::noteFtsIndexedId(int64_t docId) const {
+    if (!ftsIndexedIdsCacheReady_.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::unique_lock<std::shared_mutex> lock(ftsIndexedIdsCacheMutex_);
+    ftsIndexedIdsCache_.insert(docId);
+}
+
+void MetadataRepository::eraseFtsIndexedId(int64_t docId) const {
+    if (!ftsIndexedIdsCacheReady_.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::unique_lock<std::shared_mutex> lock(ftsIndexedIdsCacheMutex_);
+    ftsIndexedIdsCache_.erase(docId);
+}
+
 void MetadataRepository::updateQueryCache(const std::string& key,
                                           const SearchResults& results) const {
     std::lock_guard<std::mutex> lock(queryCacheMutex_);
@@ -2195,8 +2235,10 @@ Result<void> MetadataRepository::indexDocumentContent(int64_t documentId, const 
                                         /*verifyDocumentExists=*/true);
     });
 
-    if (result)
+    if (result) {
+        noteFtsIndexedId(documentId);
         invalidateQueryCache();
+    }
     return result;
 }
 
@@ -2209,8 +2251,10 @@ Result<void> MetadataRepository::indexDocumentContentTrusted(int64_t documentId,
                                         /*verifyDocumentExists=*/false);
     });
 
-    if (result)
+    if (result) {
+        noteFtsIndexedId(documentId);
         invalidateQueryCache();
+    }
     return result;
 }
 
@@ -2237,12 +2281,15 @@ Result<void> MetadataRepository::removeFromIndex(int64_t documentId) {
         return stmt.execute();
     });
 
-    if (result)
+    if (result) {
+        eraseFtsIndexedId(documentId);
         invalidateQueryCache();
+    }
     return result;
 }
 
 Result<void> MetadataRepository::removeFromIndexByHash(const std::string& hash) {
+    int64_t removedDocId = 0;
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         // First check if FTS5 is available
         auto fts5Result = db.hasFTS5();
@@ -2284,11 +2331,19 @@ Result<void> MetadataRepository::removeFromIndexByHash(const std::string& hash) 
         if (!delBindResult)
             return delBindResult.error();
 
-        return delStmt.execute();
+        auto execResult = delStmt.execute();
+        if (execResult) {
+            removedDocId = docId;
+        }
+        return execResult;
     });
 
-    if (result)
+    if (result) {
+        if (removedDocId > 0) {
+            eraseFtsIndexedId(removedDocId);
+        }
         invalidateQueryCache();
+    }
     return result;
 }
 
@@ -2298,6 +2353,7 @@ MetadataRepository::removeFromIndexByHashBatch(const std::vector<std::string>& h
         return Result<size_t>(0);
     }
 
+    std::vector<int64_t> removedDocIds;
     auto result = executeQuery<size_t>([&](Database& db) -> Result<size_t> {
         // Begin transaction for batch operation
         auto beginResult = beginTransactionWithRetry(db);
@@ -2375,6 +2431,7 @@ MetadataRepository::removeFromIndexByHashBatch(const std::vector<std::string>& h
                 return execResult.error();
             }
 
+            removedDocIds.push_back(docId);
             ++removed;
         }
 
@@ -2387,12 +2444,33 @@ MetadataRepository::removeFromIndexByHashBatch(const std::vector<std::string>& h
         return Result<size_t>(removed);
     });
 
-    if (result)
+    if (result) {
+        for (int64_t docId : removedDocIds) {
+            eraseFtsIndexedId(docId);
+        }
         invalidateQueryCache();
+    }
     return result;
 }
 
 Result<std::vector<int64_t>> MetadataRepository::getAllFts5IndexedDocumentIds() {
+    if (auto cached = getCachedFtsIndexedIds(); cached.has_value()) {
+        return cached.value();
+    }
+
+    // Avoid cold-start full scans on hot paths (e.g. orphan scan) by default.
+    // This cache is maintained incrementally by index/remove operations after startup.
+    // Set YAMS_FTS5_BACKFILL_INDEX_CACHE=1 to force one-time full backfill scan.
+    bool allowBackfill = false;
+    if (const char* env = std::getenv("YAMS_FTS5_BACKFILL_INDEX_CACHE"); env && *env) {
+        std::string_view value(env);
+        allowBackfill = (value != "0" && value != "false" && value != "off" && value != "no");
+    }
+    if (!allowBackfill) {
+        setCachedFtsIndexedIds({});
+        return std::vector<int64_t>{};
+    }
+
     return executeReadQuery<std::vector<int64_t>>(
         [&](Database& db) -> Result<std::vector<int64_t>> {
             // First check if FTS5 is available
@@ -2404,8 +2482,9 @@ Result<std::vector<int64_t>> MetadataRepository::getAllFts5IndexedDocumentIds() 
                 return std::vector<int64_t>{}; // FTS5 not available, return empty
             }
 
-            // Query all rowids from FTS5 index (rowid corresponds to document.id)
-            auto stmtResult = db.prepare("SELECT DISTINCT rowid FROM documents_fts");
+            // Query all rowids from FTS5 index (rowid corresponds to document.id).
+            // DISTINCT is unnecessary for FTS5 rowid and can trigger expensive scan/sort work.
+            auto stmtResult = db.prepare("SELECT rowid FROM documents_fts");
             if (!stmtResult)
                 return stmtResult.error();
 
@@ -2424,6 +2503,7 @@ Result<std::vector<int64_t>> MetadataRepository::getAllFts5IndexedDocumentIds() 
                 docIds.push_back(docId);
             }
 
+            setCachedFtsIndexedIds(docIds);
             return docIds;
         });
 }
@@ -2904,6 +2984,23 @@ std::string sanitizeFTS5Query(const std::string& query) {
     return sanitizeFts5UserQuery(query);
 }
 
+// Snippet extraction forces additional FTS content-table reads and can dominate
+// latency on large corpora. Keep disabled by default for fast retrieval/ranking.
+static bool includeSearchSnippets() {
+    static std::atomic<int> cached{-1};
+    int cachedValue = cached.load(std::memory_order_relaxed);
+    if (cachedValue >= 0)
+        return cachedValue == 1;
+
+    bool enabled = false;
+    if (const char* env = std::getenv("YAMS_SEARCH_INCLUDE_SNIPPET"); env && *env) {
+        std::string_view value(env);
+        enabled = (value != "0" && value != "false" && value != "off" && value != "no");
+    }
+    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
+    return enabled;
+}
+
 Result<SearchResults>
 MetadataRepository::search(const std::string& query, int limit, int offset,
                            const std::optional<std::vector<int64_t>>& docIds) {
@@ -3034,9 +3131,8 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
             // BM25 column weights: content=1.0, title=10.0
             // Boosting title matches significantly improves precision for document retrieval
             // (Source: SQLite FTS5 docs, BEIR benchmark best practices)
+            const bool includeSnippet = includeSearchSnippets();
             spec.columns = {"d.id",
-                            "fts.title",
-                            "snippet(documents_fts, 0, '<b>', '</b>', '...', 16) as snippet",
                             "bm25(documents_fts, 1.0, 10.0) as score",
                             "d.file_path",
                             "d.file_name",
@@ -3050,6 +3146,11 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                             "d.content_extracted",
                             "d.extraction_status",
                             "d.extraction_error"};
+            if (includeSnippet) {
+                spec.columns.insert(spec.columns.begin() + 1,
+                                    "snippet(documents_fts, 0, '<b>', '</b>', '...', 16) as "
+                                    "snippet");
+            }
             spec.conditions.emplace_back("documents_fts MATCH ?");
             // Optional ID filter (dynamic IN placeholder list)
             std::string idIn;
@@ -3102,25 +3203,30 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
 
                 SearchResult result;
 
+                const bool includeSnippet = includeSearchSnippets();
+                const int scoreIndex = includeSnippet ? 2 : 1;
+                const int docStartIndex = includeSnippet ? 3 : 2;
+
                 // Map document info
                 result.document.id = stmt.getInt64(0);
-                result.document.filePath = stmt.getString(4);
-                result.document.fileName = stmt.getString(5);
-                result.document.fileExtension = stmt.getString(6);
-                result.document.fileSize = stmt.getInt64(7);
-                result.document.sha256Hash = stmt.getString(8);
-                result.document.mimeType = stmt.getString(9);
-                result.document.createdTime = stmt.getTime(10);
-                result.document.modifiedTime = stmt.getTime(11);
-                result.document.indexedTime = stmt.getTime(12);
-                result.document.contentExtracted = stmt.getInt(13) != 0;
+                result.document.filePath = stmt.getString(docStartIndex + 0);
+                result.document.fileName = stmt.getString(docStartIndex + 1);
+                result.document.fileExtension = stmt.getString(docStartIndex + 2);
+                result.document.fileSize = stmt.getInt64(docStartIndex + 3);
+                result.document.sha256Hash = stmt.getString(docStartIndex + 4);
+                result.document.mimeType = stmt.getString(docStartIndex + 5);
+                result.document.createdTime = stmt.getTime(docStartIndex + 6);
+                result.document.modifiedTime = stmt.getTime(docStartIndex + 7);
+                result.document.indexedTime = stmt.getTime(docStartIndex + 8);
+                result.document.contentExtracted = stmt.getInt(docStartIndex + 9) != 0;
                 result.document.extractionStatus =
-                    ExtractionStatusUtils::fromString(stmt.getString(14));
-                result.document.extractionError = stmt.getString(15);
+                    ExtractionStatusUtils::fromString(stmt.getString(docStartIndex + 10));
+                result.document.extractionError = stmt.getString(docStartIndex + 11);
 
                 // Search-specific fields
-                result.snippet = common::sanitizeUtf8(stmt.getString(2));
-                result.score = stmt.getDouble(3);
+                result.snippet =
+                    includeSnippet ? common::sanitizeUtf8(stmt.getString(1)) : std::string{};
+                result.score = stmt.getDouble(scoreIndex);
 
                 out.results.push_back(result);
             }
@@ -6275,10 +6381,10 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
         const int effectiveLimit = std::min(limit > 0 ? limit : 100, kMaxSearchLimit);
 
         // BM25 column weights: content=1.0, title=10.0 (match main search function)
+        const bool includeSnippet = includeSearchSnippets();
         std::string sql = R"(
-            SELECT d.id, fts.title,
-                   snippet(documents_fts, 0, '<b>', '</b>', '...', 16) as snippet,
-                   bm25(documents_fts, 1.0, 10.0) as score,
+                 SELECT d.id,
+                     bm25(documents_fts, 1.0, 10.0) as score,
                    d.file_path, d.file_name, d.file_extension, d.file_size,
                    d.sha256_hash, d.mime_type, d.created_time, d.modified_time,
                    d.indexed_time, d.content_extracted, d.extraction_status, d.extraction_error
@@ -6286,6 +6392,19 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
             JOIN documents d ON d.id = fts.rowid
             WHERE documents_fts MATCH ?
         )";
+        if (includeSnippet) {
+            sql = R"(
+                 SELECT d.id,
+                     snippet(documents_fts, 0, '<b>', '</b>', '...', 16) as snippet,
+                     bm25(documents_fts, 1.0, 10.0) as score,
+                   d.file_path, d.file_name, d.file_extension, d.file_size,
+                   d.sha256_hash, d.mime_type, d.created_time, d.modified_time,
+                   d.indexed_time, d.content_extracted, d.extraction_status, d.extraction_error
+            FROM documents_fts fts
+            JOIN documents d ON d.id = fts.rowid
+            WHERE documents_fts MATCH ?
+        )";
+        }
 
         // Add doc ID filter if provided
         if (docIds && !docIds->empty()) {
@@ -6348,22 +6467,25 @@ MetadataRepository::fuzzySearch(const std::string& query, float minSimilarity, i
                 break;
 
             SearchResult result;
+            const int scoreIndex = includeSnippet ? 2 : 1;
+            const int docStartIndex = includeSnippet ? 3 : 2;
             result.document.id = stmt.getInt64(0);
-            result.document.filePath = stmt.getString(4);
-            result.document.fileName = stmt.getString(5);
-            result.document.fileExtension = stmt.getString(6);
-            result.document.fileSize = stmt.getInt64(7);
-            result.document.sha256Hash = stmt.getString(8);
-            result.document.mimeType = stmt.getString(9);
-            result.document.createdTime = stmt.getTime(10);
-            result.document.modifiedTime = stmt.getTime(11);
-            result.document.indexedTime = stmt.getTime(12);
-            result.document.contentExtracted = stmt.getInt(13) != 0;
+            result.document.filePath = stmt.getString(docStartIndex + 0);
+            result.document.fileName = stmt.getString(docStartIndex + 1);
+            result.document.fileExtension = stmt.getString(docStartIndex + 2);
+            result.document.fileSize = stmt.getInt64(docStartIndex + 3);
+            result.document.sha256Hash = stmt.getString(docStartIndex + 4);
+            result.document.mimeType = stmt.getString(docStartIndex + 5);
+            result.document.createdTime = stmt.getTime(docStartIndex + 6);
+            result.document.modifiedTime = stmt.getTime(docStartIndex + 7);
+            result.document.indexedTime = stmt.getTime(docStartIndex + 8);
+            result.document.contentExtracted = stmt.getInt(docStartIndex + 9) != 0;
             result.document.extractionStatus =
-                ExtractionStatusUtils::fromString(stmt.getString(14));
-            result.document.extractionError = stmt.getString(15);
-            result.snippet = common::sanitizeUtf8(stmt.getString(2));
-            result.score = stmt.getDouble(3);
+                ExtractionStatusUtils::fromString(stmt.getString(docStartIndex + 10));
+            result.document.extractionError = stmt.getString(docStartIndex + 11);
+            result.snippet =
+                includeSnippet ? common::sanitizeUtf8(stmt.getString(1)) : std::string{};
+            result.score = stmt.getDouble(scoreIndex);
 
             results.results.push_back(result);
         }
