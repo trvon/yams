@@ -363,10 +363,11 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
             serviceReq.pattern = req.namePattern;
         }
 
-        // Execute list synchronously - faster and more reliable than offloading
-        // The list operation is typically fast (metadata query) and doesn't need
-        // to be offloaded to a worker thread
-        auto result = docService->list(serviceReq);
+        // Offload the list operation to a worker thread. On large corpora (48k+ docs),
+        // a full list scan can block for 1s+. Running this on the ASIO reactor thread
+        // paralyzes the IPC event loop, preventing other clients from being served.
+        auto result = co_await yams::daemon::dispatch::offload_to_worker(
+            serviceManager_, [docService, serviceReq]() { return docService->list(serviceReq); });
         if (!result) {
             co_return ErrorResponse{result.error().code, result.error().message};
         }

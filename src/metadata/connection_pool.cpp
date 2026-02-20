@@ -201,9 +201,6 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
             }
         }
 
-        // Wait for connection to become available (always respect the deadline).
-        // Previous code treated timeouts >= 30s as indefinite waits, which caused
-        // zombie threads when clients dropped connections after their own RPC timeout.
         waitingGuard.activate();
         if (!cv_.wait_until(lock, deadline, [this] { return !available_.empty() || shutdown_; })) {
             waitingGuard.markTimeout();
@@ -219,11 +216,8 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
         }
     }
 
-    // Get connection from pool and validate it
     std::unique_ptr<PooledConnection> conn;
     bool foundValid = false;
-
-    // PBI-079: Get current generation for staleness check
     const uint64_t currentGen = currentGeneration_.load();
 
     // Try up to 3 connections from the pool before creating a new one
@@ -292,16 +286,16 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
 ConnectionPool::Stats ConnectionPool::getStats() const {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    return {totalConnections_,
-            available_.size(),
-            activeConnections_,
-            waitingRequests_,
-            maxWaitingRequests_.load(std::memory_order_relaxed),
-            totalWaitMicros_.load(std::memory_order_relaxed),
-            timeoutCount_.load(std::memory_order_relaxed),
-            totalAcquired_,
-            totalReleased_,
-            failedAcquisitions_};
+    return {.totalConnections = totalConnections_,
+            .availableConnections = available_.size(),
+            .activeConnections = activeConnections_,
+            .waitingRequests = waitingRequests_,
+            .maxObservedWaiting = maxWaitingRequests_.load(std::memory_order_relaxed),
+            .totalWaitMicros = totalWaitMicros_.load(std::memory_order_relaxed),
+            .timeoutCount = timeoutCount_.load(std::memory_order_relaxed),
+            .totalAcquired = totalAcquired_,
+            .totalReleased = totalReleased_,
+            .failedAcquisitions = failedAcquisitions_};
 }
 
 Result<void> ConnectionPool::healthCheck() {
@@ -463,23 +457,19 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     db.execute("PRAGMA mmap_size = 268435456"); // 256MB
 
     // Page cache size: default SQLite is -2000 (~2MB), which causes severe thrashing on
-    // large databases (23GB+). We default to -65536 (~64MB per connection) to keep FTS5
-    // inverted-index nodes and hot B-tree pages resident. Configurable via env var.
-    int cacheSizeKB = -65536; // negative = KiB (64MB)
-    if (const char* envCache = std::getenv("YAMS_DB_CACHE_SIZE_KB")) {
+    // large databases (23GB+). We default to -262144 (~256MB per connection) to keep FTS5
+    // inverted-index nodes and hot B-tree pages resident. Configurable via YAMS_DB_CACHE_SIZE_MB.
+    int cacheSizeKB = -262144; // negative = KiB (256MB)
+    if (const char* envCache = std::getenv("YAMS_DB_CACHE_SIZE_MB")) {
         try {
-            int v = std::stoi(envCache);
-            if (v != 0)
-                cacheSizeKB = v;
+            int mb = std::stoi(envCache);
+            if (mb > 0)
+                cacheSizeKB = -(mb * 1024); // convert MB to negative KiB for SQLite
         } catch (...) {
         }
     }
     db.execute("PRAGMA cache_size = " + std::to_string(cacheSizeKB));
-
-    // Increase WAL autocheckpoint threshold to reduce checkpoint frequency under heavy write load.
-    // Default SQLite value is 1000 pages (~4MB). We raise to 2000 pages (~8MB) to batch more
-    // writes before checkpointing, which reduces I/O contention during concurrent ingestion.
-    db.execute("PRAGMA wal_autocheckpoint = 2000");
+    db.execute("PRAGMA wal_autocheckpoint = 0");
 
     return {};
 }
@@ -580,10 +570,6 @@ bool ConnectionPool::isConnectionValid(const Database& db) const {
     }
 
     try {
-        // SELECT 1 is sufficient to verify the connection is alive.
-        // Previous implementation also ran CREATE TEMP TABLE IF NOT EXISTS which
-        // requires a schema lock and disk I/O — far too expensive for a health
-        // check that runs on every acquire() and returnConnection().
         auto stmtResult = const_cast<Database&>(db).prepare("SELECT 1");
         if (!stmtResult)
             return false;

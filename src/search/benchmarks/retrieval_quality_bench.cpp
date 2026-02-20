@@ -54,6 +54,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -945,6 +946,33 @@ struct BenchFixture {
         const char* disableVectors = std::getenv("YAMS_DISABLE_VECTORS");
         bool vectorsDisabled = disableVectors && std::string(disableVectors) == "1";
 
+        auto envFlagEnabled = [](const char* value) -> bool {
+            if (!value) {
+                return false;
+            }
+            std::string normalized(value);
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
+                return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            });
+            return normalized == "1" || normalized == "true" || normalized == "yes" ||
+                   normalized == "on";
+        };
+
+        // Benchmark default: graph rerank is ON unless explicitly overridden.
+        // Canonical env key used by SearchEngineBuilder is YAMS_SEARCH_ENABLE_GRAPH_RERANK.
+        const char* graphRerankCanonical = std::getenv("YAMS_SEARCH_ENABLE_GRAPH_RERANK");
+        if (!(graphRerankCanonical && *graphRerankCanonical)) {
+            setenv("YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1", 0);
+            graphRerankCanonical = std::getenv("YAMS_SEARCH_ENABLE_GRAPH_RERANK");
+        }
+
+        const bool graphRerankRequested = envFlagEnabled(graphRerankCanonical);
+        const bool requireKgReady =
+            graphRerankRequested || envFlagEnabled(std::getenv("YAMS_BENCH_REQUIRE_KG_READY"));
+
+        spdlog::info("[Bench] Effective graph rerank env: YAMS_SEARCH_ENABLE_GRAPH_RERANK={}",
+                     graphRerankCanonical ? graphRerankCanonical : "<unset>");
+
         DaemonHarness::Options harnessOptions;
         harnessOptions.isolateState = true;
         harnessOptions.useMockModelProvider = vectorsDisabled;
@@ -1726,6 +1754,114 @@ struct BenchFixture {
             spdlog::error("This is likely due to search engine build not completing.");
         }
 
+        if (requireKgReady) {
+            int kgReadyTimeoutSec = 180;
+            if (const char* env = std::getenv("YAMS_BENCH_KG_READY_TIMEOUT")) {
+                kgReadyTimeoutSec = std::max(0, std::stoi(env));
+            }
+
+            spdlog::info("Waiting for KG readiness before query evaluation (timeout={}s)...",
+                         kgReadyTimeoutSec);
+
+            const auto kgDeadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(kgReadyTimeoutSec);
+            int stableReadyChecks = 0;
+            bool kgReady = false;
+            bool lastHasKg = false;
+            uint32_t lastQueueDepth = 0;
+            uint64_t lastPostQueued = 0;
+            uint64_t lastPostInflight = 0;
+            uint64_t lastKgInflight = 0;
+            uint64_t lastKgConsumed = 0;
+            uint64_t lastSymbolInflight = 0;
+            uint64_t lastEntityInflight = 0;
+            uint64_t lastExtractionInflight = 0;
+
+            while (std::chrono::steady_clock::now() < kgDeadline) {
+                auto statusCheck = yams::cli::run_sync(client->status(), 5s);
+                auto statsCheck =
+                    yams::cli::run_sync(client->getStats(yams::daemon::GetStatsRequest{}), 10s);
+
+                bool queuesDrained = false;
+                if (statusCheck) {
+                    const auto& st = statusCheck.value();
+                    const auto getCount = [&st](const std::string& key) -> uint64_t {
+                        auto it = st.requestCounts.find(key);
+                        return (it == st.requestCounts.end()) ? 0ULL : it->second;
+                    };
+
+                    lastQueueDepth = st.postIngestQueueDepth;
+                    lastPostQueued = getCount("post_ingest_queued");
+                    lastPostInflight = getCount("post_ingest_inflight");
+                    lastExtractionInflight = getCount("extraction_inflight");
+                    lastKgInflight = getCount("kg_inflight");
+                    lastKgConsumed = getCount("kg_consumed");
+                    lastSymbolInflight = getCount("symbol_inflight");
+                    lastEntityInflight = getCount("entity_inflight");
+
+                    queuesDrained =
+                        (lastQueueDepth == 0 && lastPostQueued == 0 && lastPostInflight == 0 &&
+                         lastExtractionInflight == 0 && lastKgInflight == 0 &&
+                         lastSymbolInflight == 0 && lastEntityInflight == 0);
+                }
+
+                bool hasKg = false;
+                if (statsCheck) {
+                    const auto& stats = statsCheck.value();
+                    if (auto it = stats.additionalStats.find("corpus_stats");
+                        it != stats.additionalStats.end() && !it->second.empty()) {
+                        try {
+                            auto corpusStats = json::parse(it->second);
+                            if (corpusStats.contains("classification") &&
+                                corpusStats["classification"].is_object()) {
+                                hasKg = corpusStats["classification"].value("has_kg", false);
+                            }
+                        } catch (const json::exception&) {
+                        }
+                    }
+                }
+
+                lastHasKg = hasKg;
+                const bool kgSignalReady = hasKg || (lastKgConsumed > 0);
+
+                if (queuesDrained && kgSignalReady) {
+                    stableReadyChecks++;
+                    if (stableReadyChecks >= 4) {
+                        kgReady = true;
+                        break;
+                    }
+                } else {
+                    stableReadyChecks = 0;
+                }
+
+                std::this_thread::sleep_for(500ms);
+            }
+
+            if (!kgReady) {
+                throw std::runtime_error(
+                    "KG not ready before benchmark queries (has_kg=" +
+                    std::string(lastHasKg ? "true" : "false") +
+                    ", kg_consumed=" + std::to_string(lastKgConsumed) +
+                    ", post_ingest_queue_depth=" + std::to_string(lastQueueDepth) +
+                    ", post_ingest_queued=" + std::to_string(lastPostQueued) +
+                    ", post_ingest_inflight=" + std::to_string(lastPostInflight) +
+                    ", extraction_inflight=" + std::to_string(lastExtractionInflight) +
+                    ", kg_inflight=" + std::to_string(lastKgInflight) +
+                    ", symbol_inflight=" + std::to_string(lastSymbolInflight) +
+                    ", entity_inflight=" + std::to_string(lastEntityInflight) +
+                    "). Increase YAMS_BENCH_KG_READY_TIMEOUT or reduce ingestion load.");
+            }
+
+            if (!lastHasKg) {
+                spdlog::warn(
+                    "KG readiness satisfied via kg_consumed={}, but corpus_stats.has_kg=false "
+                    "(low symbol_density). Graph signals may still be weak.",
+                    lastKgConsumed);
+            } else {
+                spdlog::info("KG readiness satisfied (queues drained + corpus_stats.has_kg=true)");
+            }
+        }
+
         // Verify document count using status metrics (avoids degraded search false negatives)
         uint64_t indexedDocCount = 0;
         auto statusResult = yams::cli::run_sync(client->status(), 5s);
@@ -1815,6 +1951,21 @@ struct BenchFixture {
                 statusEntry.returnedPaths.push_back("search_tuning_state=" + st.searchTuningState);
                 statusEntry.returnedPaths.push_back("search_tuning_reason=" +
                                                     st.searchTuningReason);
+
+                double tunedKgWeight = 0.0;
+                bool tunedGraphRerank = graphRerankRequested;
+                if (auto it = st.searchTuningParams.find("kg_weight");
+                    it != st.searchTuningParams.end()) {
+                    tunedKgWeight = static_cast<double>(it->second);
+                }
+                if (auto it = st.searchTuningParams.find("enable_graph_rerank");
+                    it != st.searchTuningParams.end()) {
+                    tunedGraphRerank = it->second > 0.5;
+                }
+                spdlog::info("[Bench] Effective graph rerank: env={} tuned={} kg_weight={:.4f}",
+                             graphRerankRequested ? "on" : "off", tunedGraphRerank ? "on" : "off",
+                             tunedKgWeight);
+
                 for (const auto& [k, v] : st.searchTuningParams) {
                     statusEntry.returnedPaths.push_back("tuning_" + k + "=" + std::to_string(v));
                 }

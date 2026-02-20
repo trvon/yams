@@ -502,6 +502,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             CheckpointManager::Dependencies checkpointDeps;
             checkpointDeps.vectorSystemManager = vectorSystemManager_.get();
             checkpointDeps.hotzoneManager = nullptr;
+            checkpointDeps.metadataRepository = getMetadataRepo().get();
             checkpointDeps.executor = workCoordinator_->getExecutor();
             checkpointDeps.stopRequested = std::make_shared<std::atomic<bool>>(false);
 

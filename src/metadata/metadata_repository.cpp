@@ -4923,7 +4923,11 @@ MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::str
 
 Result<void> MetadataRepository::checkpointWal() {
     return executeQuery<void>([](Database& db) -> Result<void> {
-        auto result = db.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+        // Use PASSIVE checkpoint instead of TRUNCATE. TRUNCATE requires exclusive access
+        // and blocks all readers/writers for the entire duration, causing pipeline stalls.
+        // PASSIVE checkpoints only pages that are not currently in use by any reader,
+        // allowing concurrent queries to continue uninterrupted.
+        auto result = db.execute("PRAGMA wal_checkpoint(PASSIVE)");
         if (!result) {
             return result;
         }

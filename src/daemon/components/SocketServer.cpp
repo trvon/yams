@@ -862,9 +862,9 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         handlerConfig.writer_budget_bytes_per_turn = writerBudget_->load(std::memory_order_relaxed);
         handlerConfig.enable_streaming = true;
         handlerConfig.enable_multiplexing = true;
-        // Keep worker_job_signal for cross-executor coordination, but don't override
-        // worker_executor This keeps IPC handlers on dedicated yams-ipc-N threads (prevents
-        // starvation by background work)
+        // Multiplexed request coroutines are co_spawned on worker_executor
+        // (WorkCoordinator). offload_to_worker posts heavy SQL to the same pool.
+        // Thread count is governed by YAMS_WORK_COORDINATOR_THREADS / TuneAdvisor.
         if (dispatcher_) {
             try {
                 handlerConfig.worker_executor = dispatcher_->getWorkerExecutor();
@@ -898,9 +898,8 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
             std::lock_guard<std::mutex> lk(dispatcherMutex_);
             disp = dispatcher_;
         }
-        // Keep worker_job_signal for cross-executor coordination, but don't override
-        // worker_executor This keeps IPC handlers on dedicated yams-ipc-N threads (prevents
-        // starvation by background work)
+        // Wire worker_job_signal for cross-executor coordination.
+        // worker_executor is already set above; this path only adds the signal.
         try {
             if (disp) {
                 handlerConfig.worker_job_signal = disp->getWorkerJobSignal();

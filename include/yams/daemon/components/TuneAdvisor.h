@@ -666,12 +666,23 @@ public:
         return 0;
     }
 
-    // WorkCoordinator threads (override or derived). Default to 50% of budgeted threads.
+    // WorkCoordinator threads (override, env, or derived).
+    // Default: 100% of budgeted threads (I/O-bound SQL work benefits from
+    // more threads than the conservative 50% default).
+    // Environment: YAMS_WORK_COORDINATOR_THREADS
     static uint32_t workCoordinatorThreads() {
         uint32_t ov = workCoordinatorThreadsOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
-        return recommendedThreads(0.5);
+        if (const char* s = std::getenv("YAMS_WORK_COORDINATOR_THREADS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v >= 1 && v <= 512)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return recommendedThreads(1.0);
     }
     static void setWorkCoordinatorThreads(uint32_t n) {
         workCoordinatorThreadsOverride_.store(std::clamp<uint32_t>(n, 1u, 512u),

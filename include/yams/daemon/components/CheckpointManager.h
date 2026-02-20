@@ -9,7 +9,12 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
+
+namespace yams::metadata {
+class MetadataRepository;
+}
 
 namespace yams::daemon {
 
@@ -37,6 +42,7 @@ public:
     struct Dependencies {
         VectorSystemManager* vectorSystemManager{nullptr};
         search::HotzoneManager* hotzoneManager{nullptr};
+        metadata::MetadataRepository* metadataRepository{nullptr};
         boost::asio::any_io_executor executor;
         std::shared_ptr<std::atomic<bool>> stopRequested;
     };
@@ -44,6 +50,7 @@ public:
     struct Stats {
         std::atomic<uint64_t> vector_checkpoints{0};
         std::atomic<uint64_t> hotzone_checkpoints{0};
+        std::atomic<uint64_t> wal_checkpoints{0};
         std::atomic<uint64_t> checkpoint_errors{0};
         std::atomic<uint64_t> last_vector_checkpoint_epoch{0};
         std::atomic<uint64_t> last_hotzone_checkpoint_epoch{0};
@@ -86,6 +93,7 @@ private:
 
     bool checkpointVectorIndex();
     bool checkpointHotzone();
+    bool checkpointWal();
 
     Config config_;
     Dependencies deps_;

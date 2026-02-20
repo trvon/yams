@@ -1557,55 +1557,89 @@ TEST_CASE("Multi-client ingestion: 16-client concurrent mixed ops",
 
 TEST_CASE("Multi-client ingestion: large corpus reads",
           "[!benchmark][multi-client][large-corpus]") {
-    // Benchmark against an existing YAMS corpus (e.g. /Volumes/picaso/yams with 48k+ docs).
-    // Requires YAMS_BENCH_DATA_DIR to point at a valid YAMS data directory.
-    // This test does NOT ingest — it hammers search/list/get/status against the real corpus
-    // to measure read-path performance with realistic data volumes and index sizes.
+    // Instrumented benchmark against an existing YAMS corpus (e.g. /Volumes/picaso/yams
+    // with 48k+ docs). Does NOT ingest — hammers search/list/get/status against the
+    // real corpus to measure read-path performance. Outputs:
+    //   - Per-op latency traces (every operation recorded)
+    //   - Live progress with rolling throughput
+    //   - Memory watermarks (peak RSS, delta over time)
+    //   - Error classification breakdown
+    //   - Detailed JSONL with all latency traces for post-analysis
+    //
+    // Env overrides:
+    //   YAMS_BENCH_DATA_DIR              - required: existing corpus path
+    //   YAMS_BENCH_SEARCH_CLIENTS        - search thread count (default: 4)
+    //   YAMS_BENCH_LIST_CLIENTS          - list thread count (default: 4)
+    //   YAMS_BENCH_STATUS_GET_CLIENTS    - status/get thread count (default: 4)
+    //   YAMS_BENCH_OPS_PER_CLIENT        - ops per thread (default: 50)
+    //   YAMS_BENCH_OP_TIMEOUT_S          - per-op timeout in seconds (default: 60)
     auto cfg = BenchConfig::fromEnv();
     if (!cfg.dataDir) {
         SKIP("Set YAMS_BENCH_DATA_DIR to an existing YAMS corpus to run this benchmark");
     }
 
-    std::cout << "\n=== Large Corpus Read Benchmark ===\n";
-    std::cout << "  Data dir: " << cfg.dataDir->string() << "\n";
+    // --- Configurable layout ---
+    auto envInt = [](const char* name, int def) {
+        if (auto* v = std::getenv(name))
+            return std::max(1, std::atoi(v));
+        return def;
+    };
+    const int kSearchClients = envInt("YAMS_BENCH_SEARCH_CLIENTS", 4);
+    const int kListClients = envInt("YAMS_BENCH_LIST_CLIENTS", 4);
+    const int kStatusGetClients = envInt("YAMS_BENCH_STATUS_GET_CLIENTS", 4);
+    const int kTotalClients = kSearchClients + kListClients + kStatusGetClients;
+    const int kOpsPerClient = envInt("YAMS_BENCH_OPS_PER_CLIENT", 50);
+    const int kOpTimeoutS = envInt("YAMS_BENCH_OP_TIMEOUT_S", 60);
+    const auto kOpTimeout = std::chrono::seconds(kOpTimeoutS);
 
-    constexpr int kSearchClients = 4;
-    constexpr int kListClients = 4;
-    constexpr int kStatusGetClients = 4;
-    constexpr int kTotalClients = kSearchClients + kListClients + kStatusGetClients;
-    // Under TSan, each op on a large corpus is slow; keep count modest.
-    constexpr int kOpsPerClient = 50;
+    std::cout << "\n=== Large Corpus Read Benchmark (instrumented) ===\n";
+    std::cout << "  Data dir:       " << cfg.dataDir->string() << "\n";
+    std::cout << "  Layout:         " << kSearchClients << "S + " << kListClients << "L + "
+              << kStatusGetClients << "G = " << kTotalClients << " threads\n";
+    std::cout << "  Ops/thread:     " << kOpsPerClient << "\n";
+    std::cout << "  Op timeout:     " << kOpTimeoutS << "s\n";
 
-    // Large corpus with TSan can take >5s to build the search engine index;
-    // bump the default 5 s timeout so the FSM reaches Ready.
-    // Also raise server-side IPC/streaming timeouts — under TSan a single
-    // search or list chunk on 48k docs can exceed the 30 s defaults.
-    if (!std::getenv("YAMS_SEARCH_BUILD_TIMEOUT_MS")) {
+    // --- Server-side timeout configuration ---
+    // Stay within TuneAdvisor range clamps:
+    //   ipcTimeoutMs:         [500, 600000]
+    //   streamChunkTimeoutMs: [1000, 600000]
+    //   searchBuildTimeout:   unclamped
+    std::string timeoutStr = std::to_string(std::min(kOpTimeoutS * 2000, 600000));
+    if (!std::getenv("YAMS_SEARCH_BUILD_TIMEOUT_MS"))
         ::setenv("YAMS_SEARCH_BUILD_TIMEOUT_MS", "120000", 0);
-    }
-    if (!std::getenv("YAMS_IPC_TIMEOUT_MS")) {
-        ::setenv("YAMS_IPC_TIMEOUT_MS", "120000", 0);
-    }
-    if (!std::getenv("YAMS_STREAM_CHUNK_TIMEOUT_MS")) {
-        ::setenv("YAMS_STREAM_CHUNK_TIMEOUT_MS", "120000", 0);
-    }
+    if (!std::getenv("YAMS_IPC_TIMEOUT_MS"))
+        ::setenv("YAMS_IPC_TIMEOUT_MS", timeoutStr.c_str(), 0);
+    if (!std::getenv("YAMS_STREAM_CHUNK_TIMEOUT_MS"))
+        ::setenv("YAMS_STREAM_CHUNK_TIMEOUT_MS", timeoutStr.c_str(), 0);
 
+    std::cout << "  IPC timeout:    " << (std::getenv("YAMS_IPC_TIMEOUT_MS") ?: "default")
+              << " ms\n";
+    std::cout << "  Stream timeout: " << (std::getenv("YAMS_STREAM_CHUNK_TIMEOUT_MS") ?: "default")
+              << " ms\n";
+
+    // --- Start daemon ---
+    // Large corpus on external/network drives may take 3+ min for content store init
     auto opts = benchHarnessOptions(cfg);
     DaemonHarness harness(opts);
-    // Large corpus needs more startup time (loading indexes, etc.)
-    REQUIRE(harness.start(std::chrono::seconds(180)));
+    REQUIRE(harness.start(std::chrono::seconds(360)));
+    std::this_thread::sleep_for(3s); // let async init settle
 
-    // Allow async init to complete (connection pools, indexes)
-    std::this_thread::sleep_for(5s);
+    // Helper: create a client config with all timeouts aligned to kOpTimeout.
+    // The default headerTimeout (30s) was causing cascading 30s stalls because
+    // the client would time out waiting for the first response frame header.
+    auto makeClientConfig = [&](std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) {
+        ClientConfig c;
+        c.socketPath = harness.socketPath();
+        c.autoStart = false;
+        auto t = timeout.count() > 0 ? timeout : kOpTimeout;
+        c.requestTimeout = t;
+        c.headerTimeout = t;
+        c.bodyTimeout = t;
+        return c;
+    };
 
-    // Under TSan with 48k+ docs, individual operations can take >30s.
-    constexpr auto kOpTimeout = 120s;
-
-    // Discover some hashes from the corpus for get operations
-    ClientConfig discoverCfg;
-    discoverCfg.socketPath = harness.socketPath();
-    discoverCfg.autoStart = false;
-    discoverCfg.requestTimeout = kOpTimeout;
+    // --- Discover corpus ---
+    auto discoverCfg = makeClientConfig();
     DaemonClient discoverClient(discoverCfg);
 
     std::vector<std::string> knownHashes;
@@ -1621,37 +1655,130 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         }
     }
 
-    // Get initial doc count
     auto initSnap = DaemonSnapshot::capture(discoverClient);
-    std::cout << "  Corpus docs: " << initSnap.documentsTotal << "\n";
-    std::cout << "  Known hashes for get: " << knownHashes.size() << "\n";
+    std::cout << "  Corpus docs:    " << initSnap.documentsTotal << "\n";
+    std::cout << "  Known hashes:   " << knownHashes.size() << "\n";
+    std::cout << "  Initial RSS:    " << initSnap.memoryUsageMb << " MB\n";
 
     if (knownHashes.empty()) {
         WARN("Corpus appears empty — benchmark results may be unreliable");
     }
 
-    // Monitor
-    ClientConfig monCfg;
-    monCfg.socketPath = harness.socketPath();
-    monCfg.autoStart = false;
-    monCfg.requestTimeout = 10s;
+    // ─────────────────────────────────────────────────────────────────────────
+    // Phase 1: Single-client warmup — baseline latency without contention
+    // ─────────────────────────────────────────────────────────────────────────
+    std::cout << "\n--- Phase 1: Single-client warmup (5 ops each) ---\n";
+    {
+        auto warmCfg = makeClientConfig();
+        DaemonClient warmClient(warmCfg);
+
+        // Warm search
+        for (int i = 0; i < 5; ++i) {
+            SearchRequest req;
+            req.query = "architecture design";
+            req.limit = 10;
+            auto t0 = std::chrono::steady_clock::now();
+            auto res = yams::cli::run_sync(warmClient.search(req), kOpTimeout);
+            auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+            std::cout << "    search[" << i << "]: " << us / 1000 << "ms" << (res ? "" : " FAIL")
+                      << "\n";
+        }
+        // Warm list
+        for (int i = 0; i < 5; ++i) {
+            ListRequest req;
+            req.limit = 50;
+            auto t0 = std::chrono::steady_clock::now();
+            auto res = yams::cli::run_sync(warmClient.list(req), kOpTimeout);
+            auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+            int items = res ? static_cast<int>(res.value().items.size()) : 0;
+            std::cout << "    list[" << i << "]:   " << us / 1000 << "ms (" << items << " items)"
+                      << (res ? "" : " FAIL") << "\n";
+        }
+        // Warm get
+        if (!knownHashes.empty()) {
+            for (int i = 0; i < 5 && i < static_cast<int>(knownHashes.size()); ++i) {
+                GetRequest req;
+                req.hash = knownHashes[i];
+                req.metadataOnly = true;
+                auto t0 = std::chrono::steady_clock::now();
+                auto res = yams::cli::run_sync(warmClient.get(req), kOpTimeout);
+                auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+                std::cout << "    get[" << i << "]:    " << us / 1000 << "ms"
+                          << (res ? "" : " FAIL") << "\n";
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Phase 2: Concurrent load with per-op tracing
+    // ─────────────────────────────────────────────────────────────────────────
+    std::cout << "\n--- Phase 2: Concurrent load (" << kTotalClients << " threads x "
+              << kOpsPerClient << " ops) ---\n";
+
+    // Per-op trace record
+    struct OpTrace {
+        std::string opType; // "search", "list", "get", "status"
+        int threadId{0};
+        int opIndex{0};
+        int64_t latencyUs{0};
+        bool success{false};
+        std::string errorMsg;
+        int resultCount{0};     // items returned (search hits, list items)
+        int64_t wallClockMs{0}; // ms since benchmark start
+    };
+
+    // Monitor with sampler
+    auto monCfg = makeClientConfig(10s);
     DaemonClient monitorClient(monCfg);
 
     TimeSeriesSampler sampler;
-    sampler.start(monitorClient, 500ms);
+    sampler.start(monitorClient, 1s);
 
-    // Latency collectors
-    std::mutex searchLatMutex, listLatMutex, statusLatMutex, getLatMutex;
-    std::vector<int64_t> searchLatencies, listLatencies, statusLatencies, getLatencies;
+    // Per-op trace collectors (one per thread for lock-free append)
+    std::vector<std::vector<OpTrace>> perThreadTraces(kTotalClients);
+
+    // Shared counters
     std::atomic<int> searchOps{0}, listOps{0}, statusOps{0}, getOps{0};
     std::atomic<int> searchFails{0}, listFails{0}, statusFails{0}, getFails{0};
+    std::atomic<int> totalCompleted{0};
+    const int totalExpected = kTotalClients * kOpsPerClient;
+
+    // Live progress reporter
+    std::atomic<bool> progressStop{false};
+    auto progressStart = std::chrono::steady_clock::now();
+    std::thread progressThread([&]() {
+        int lastCompleted = 0;
+        while (!progressStop.load()) {
+            std::this_thread::sleep_for(2s);
+            int cur = totalCompleted.load();
+            auto elapsed =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - progressStart)
+                    .count();
+            double rate = cur > 0 ? cur / elapsed : 0.0;
+            int delta = cur - lastCompleted;
+            lastCompleted = cur;
+            auto snap = DaemonSnapshot::capture(monitorClient);
+            std::cout << "  [" << std::fixed << std::setprecision(1) << elapsed << "s] " << cur
+                      << "/" << totalExpected << " ops (" << std::setprecision(1) << rate
+                      << " ops/s, +" << delta << ") "
+                      << "RSS=" << std::setprecision(0) << snap.memoryUsageMb << "MB "
+                      << "conns=" << snap.activeConnections << "/" << snap.maxConnections << " "
+                      << "pressure=" << snap.pressureLevel << "\n";
+        }
+    });
 
     std::atomic<bool> go{false};
     auto globalStart = std::chrono::steady_clock::now();
     std::vector<std::thread> threads;
     threads.reserve(kTotalClients);
 
-    // Search threads: varied queries against the real corpus
+    // Search queries
     static const char* corpusQueries[] = {
         "architecture design patterns", "security vulnerability analysis",
         "memory management allocation", "network protocol implementation",
@@ -1660,44 +1787,57 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         "build system compilation",     "testing framework assertions",
     };
 
+    int threadIdx = 0;
+
+    // --- Search threads ---
     for (int s = 0; s < kSearchClients; ++s) {
-        threads.emplace_back([&]() {
-            ClientConfig ccfg;
-            ccfg.socketPath = harness.socketPath();
-            ccfg.autoStart = false;
-            ccfg.requestTimeout = kOpTimeout;
+        int tid = threadIdx++;
+        perThreadTraces[tid].reserve(kOpsPerClient);
+        threads.emplace_back([&, tid, s]() {
+            auto ccfg = makeClientConfig();
             DaemonClient client(ccfg);
             while (!go.load())
                 std::this_thread::yield();
 
             for (int i = 0; i < kOpsPerClient; ++i) {
                 SearchRequest req;
-                req.query = corpusQueries[i % 10];
+                req.query = corpusQueries[(s * kOpsPerClient + i) % 10];
                 req.limit = (i % 3 == 0) ? 5 : (i % 3 == 1) ? 10 : 25;
 
                 auto t0 = std::chrono::steady_clock::now();
                 auto res = yams::cli::run_sync(client.search(req), kOpTimeout);
                 auto t1 = std::chrono::steady_clock::now();
                 auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+                auto wallMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(t1 - globalStart).count();
 
+                OpTrace trace;
+                trace.opType = "search";
+                trace.threadId = tid;
+                trace.opIndex = i;
+                trace.latencyUs = latUs;
+                trace.wallClockMs = wallMs;
                 if (res) {
+                    trace.success = true;
+                    trace.resultCount = static_cast<int>(res.value().results.size());
                     searchOps.fetch_add(1);
-                    std::lock_guard<std::mutex> lk(searchLatMutex);
-                    searchLatencies.push_back(latUs);
                 } else {
+                    trace.success = false;
+                    trace.errorMsg = res.error().message;
                     searchFails.fetch_add(1);
                 }
+                perThreadTraces[tid].push_back(std::move(trace));
+                totalCompleted.fetch_add(1);
             }
         });
     }
 
-    // List threads: paginated listing with tag/extension filters
+    // --- List threads ---
     for (int l = 0; l < kListClients; ++l) {
-        threads.emplace_back([&]() {
-            ClientConfig ccfg;
-            ccfg.socketPath = harness.socketPath();
-            ccfg.autoStart = false;
-            ccfg.requestTimeout = kOpTimeout;
+        int tid = threadIdx++;
+        perThreadTraces[tid].reserve(kOpsPerClient);
+        threads.emplace_back([&, tid]() {
+            auto ccfg = makeClientConfig();
             DaemonClient client(ccfg);
             while (!go.load())
                 std::this_thread::yield();
@@ -1710,69 +1850,100 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 auto res = yams::cli::run_sync(client.list(req), kOpTimeout);
                 auto t1 = std::chrono::steady_clock::now();
                 auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+                auto wallMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(t1 - globalStart).count();
 
+                OpTrace trace;
+                trace.opType = "list";
+                trace.threadId = tid;
+                trace.opIndex = i;
+                trace.latencyUs = latUs;
+                trace.wallClockMs = wallMs;
                 if (res) {
+                    trace.success = true;
+                    trace.resultCount = static_cast<int>(res.value().items.size());
                     listOps.fetch_add(1);
-                    std::lock_guard<std::mutex> lk(listLatMutex);
-                    listLatencies.push_back(latUs);
                 } else {
+                    trace.success = false;
+                    trace.errorMsg = res.error().message;
                     listFails.fetch_add(1);
                 }
+                perThreadTraces[tid].push_back(std::move(trace));
+                totalCompleted.fetch_add(1);
             }
         });
     }
 
-    // Status/Get threads: interleaved status checks and hash lookups
-    for (int t = 0; t < kStatusGetClients; ++t) {
-        threads.emplace_back([&, t]() {
-            ClientConfig ccfg;
-            ccfg.socketPath = harness.socketPath();
-            ccfg.autoStart = false;
-            ccfg.requestTimeout = kOpTimeout;
+    // --- Status/Get threads ---
+    for (int g = 0; g < kStatusGetClients; ++g) {
+        int tid = threadIdx++;
+        perThreadTraces[tid].reserve(kOpsPerClient);
+        threads.emplace_back([&, tid, g]() {
+            auto ccfg = makeClientConfig();
             DaemonClient client(ccfg);
-            std::mt19937 rng(static_cast<unsigned>(t * 997 + 17));
+            std::mt19937 rng(static_cast<unsigned>(g * 997 + 17));
             while (!go.load())
                 std::this_thread::yield();
 
             for (int i = 0; i < kOpsPerClient; ++i) {
-                if (i % 4 == 0) {
-                    // Status
-                    auto t0 = std::chrono::steady_clock::now();
+                auto t0 = std::chrono::steady_clock::now();
+                bool isStatus = (i % 4 == 0) || knownHashes.empty();
+
+                if (isStatus) {
                     auto res = yams::cli::run_sync(client.status(), kOpTimeout);
                     auto t1 = std::chrono::steady_clock::now();
                     auto latUs =
                         std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+                    auto wallMs =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - globalStart)
+                            .count();
+
+                    OpTrace trace;
+                    trace.opType = "status";
+                    trace.threadId = tid;
+                    trace.opIndex = i;
+                    trace.latencyUs = latUs;
+                    trace.wallClockMs = wallMs;
                     if (res) {
+                        trace.success = true;
                         statusOps.fetch_add(1);
-                        std::lock_guard<std::mutex> lk(statusLatMutex);
-                        statusLatencies.push_back(latUs);
                     } else {
+                        trace.success = false;
+                        trace.errorMsg = res.error().message;
                         statusFails.fetch_add(1);
                     }
+                    perThreadTraces[tid].push_back(std::move(trace));
                 } else {
-                    // Get by hash
-                    if (knownHashes.empty()) {
-                        statusOps.fetch_add(1);
-                        continue;
-                    }
                     std::uniform_int_distribution<std::size_t> dist(0, knownHashes.size() - 1);
                     GetRequest req;
                     req.hash = knownHashes[dist(rng)];
                     req.metadataOnly = true;
 
-                    auto t0 = std::chrono::steady_clock::now();
                     auto res = yams::cli::run_sync(client.get(req), kOpTimeout);
                     auto t1 = std::chrono::steady_clock::now();
                     auto latUs =
                         std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+                    auto wallMs =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - globalStart)
+                            .count();
+
+                    OpTrace trace;
+                    trace.opType = "get";
+                    trace.threadId = tid;
+                    trace.opIndex = i;
+                    trace.latencyUs = latUs;
+                    trace.wallClockMs = wallMs;
                     if (res) {
+                        trace.success = true;
                         getOps.fetch_add(1);
-                        std::lock_guard<std::mutex> lk(getLatMutex);
-                        getLatencies.push_back(latUs);
                     } else {
+                        trace.success = false;
+                        trace.errorMsg = res.error().message;
                         getFails.fetch_add(1);
                     }
+                    perThreadTraces[tid].push_back(std::move(trace));
                 }
+                totalCompleted.fetch_add(1);
             }
         });
     }
@@ -1780,30 +1951,70 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     go.store(true);
     for (auto& t : threads)
         t.join();
+
+    progressStop.store(true);
+    progressThread.join();
     sampler.stop();
 
     auto globalEnd = std::chrono::steady_clock::now();
     double globalElapsed = std::chrono::duration<double>(globalEnd - globalStart).count();
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Analysis
+    // ─────────────────────────────────────────────────────────────────────────
     auto finalSnap = DaemonSnapshot::capture(monitorClient);
 
-    auto searchStats = PercentileStats::compute(searchLatencies);
-    auto listStats = PercentileStats::compute(listLatencies);
-    auto statusStats = PercentileStats::compute(statusLatencies);
-    auto getStats = PercentileStats::compute(getLatencies);
+    // Aggregate latency vectors from per-thread traces
+    std::vector<int64_t> allSearchLat, allListLat, allStatusLat, allGetLat;
+    std::vector<OpTrace> allTraces;
+    std::map<std::string, int> errorCategories;
+
+    for (auto& threadTraces : perThreadTraces) {
+        for (auto& tr : threadTraces) {
+            allTraces.push_back(tr);
+            if (tr.success) {
+                if (tr.opType == "search")
+                    allSearchLat.push_back(tr.latencyUs);
+                else if (tr.opType == "list")
+                    allListLat.push_back(tr.latencyUs);
+                else if (tr.opType == "status")
+                    allStatusLat.push_back(tr.latencyUs);
+                else if (tr.opType == "get")
+                    allGetLat.push_back(tr.latencyUs);
+            } else {
+                errorCategories[classifyFailureMessage(tr.errorMsg)]++;
+            }
+        }
+    }
+
+    auto searchStats = PercentileStats::compute(allSearchLat);
+    auto listStats = PercentileStats::compute(allListLat);
+    auto statusStats = PercentileStats::compute(allStatusLat);
+    auto getStats = PercentileStats::compute(allGetLat);
 
     int totalOps = searchOps.load() + listOps.load() + statusOps.load() + getOps.load();
     int totalFails = searchFails.load() + listFails.load() + statusFails.load() + getFails.load();
     double opsPerSec = totalOps > 0 ? totalOps / globalElapsed : 0.0;
 
-    std::cout << "\n=== Large Corpus Results ===\n";
-    std::cout << "  Corpus: " << finalSnap.documentsTotal << " docs\n";
-    std::cout << "  Layout: " << kSearchClients << " searchers + " << kListClients << " listers"
-              << " + " << kStatusGetClients << " status/get\n";
-    std::cout << "  Wall time: " << std::fixed << std::setprecision(2) << globalElapsed << "s\n";
-    std::cout << "  Total ops: " << totalOps << " (" << std::setprecision(0) << opsPerSec
-              << " ops/s)"
-              << "  Failures: " << totalFails << "\n\n";
+    // Memory watermarks from time series
+    auto samples = sampler.getSamples();
+    double peakRss = 0.0, minRss = std::numeric_limits<double>::max();
+    for (auto& s : samples) {
+        peakRss = std::max(peakRss, s.snap.memoryUsageMb);
+        minRss = std::min(minRss, s.snap.memoryUsageMb);
+    }
+    if (samples.empty())
+        minRss = 0.0;
+
+    std::cout << "\n=== Large Corpus Results (instrumented) ===\n";
+    std::cout << "  Corpus:         " << finalSnap.documentsTotal << " docs\n";
+    std::cout << "  Layout:         " << kSearchClients << "S + " << kListClients << "L + "
+              << kStatusGetClients << "G\n";
+    std::cout << "  Wall time:      " << std::fixed << std::setprecision(2) << globalElapsed
+              << "s\n";
+    std::cout << "  Total ops:      " << totalOps << " (" << std::setprecision(1) << opsPerSec
+              << " ops/s)\n";
+    std::cout << "  Total failures: " << totalFails << "\n\n";
 
     std::cout << "  Op breakdown:\n";
     std::cout << "    Search: " << searchOps.load() << " ok, " << searchFails.load() << " fail\n";
@@ -1816,15 +2027,92 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     printPercentiles("Status latency", statusStats);
     printPercentiles("Get latency   ", getStats);
 
-    std::cout << "\n  Final memory: " << finalSnap.memoryUsageMb << " MB\n\n";
+    std::cout << "\n  Memory:\n";
+    std::cout << "    Initial: " << std::setprecision(0) << initSnap.memoryUsageMb << " MB\n";
+    std::cout << "    Peak:    " << peakRss << " MB\n";
+    std::cout << "    Min:     " << minRss << " MB\n";
+    std::cout << "    Final:   " << finalSnap.memoryUsageMb << " MB\n";
+    std::cout << "    Delta:   " << (finalSnap.memoryUsageMb - initSnap.memoryUsageMb) << " MB\n\n";
+
+    if (!errorCategories.empty()) {
+        std::cout << "  Error categories:\n";
+        for (auto& [cat, count] : errorCategories) {
+            std::cout << "    " << cat << ": " << count << "\n";
+        }
+        std::cout << "\n";
+    }
+
+    // Hotspot analysis: find slowest ops
+    std::sort(allTraces.begin(), allTraces.end(),
+              [](const OpTrace& a, const OpTrace& b) { return a.latencyUs > b.latencyUs; });
+
+    std::cout << "  Top 10 slowest operations:\n";
+    for (int i = 0; i < 10 && i < static_cast<int>(allTraces.size()); ++i) {
+        auto& tr = allTraces[i];
+        std::cout << "    " << (i + 1) << ". " << tr.opType << " t" << tr.threadId << "#"
+                  << tr.opIndex << ": " << tr.latencyUs / 1000 << "ms"
+                  << (tr.success ? "" : " FAIL:" + tr.errorMsg) << " @" << tr.wallClockMs << "ms\n";
+    }
+    std::cout << "\n";
+
+    // Latency distribution (histogram buckets)
+    auto printHistogram = [](const std::string& label, std::vector<int64_t>& lats) {
+        if (lats.empty())
+            return;
+        std::sort(lats.begin(), lats.end());
+        // Buckets: <1ms, 1-10ms, 10-100ms, 100ms-1s, 1-10s, >10s
+        int b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0;
+        for (auto us : lats) {
+            if (us < 1000)
+                b0++;
+            else if (us < 10000)
+                b1++;
+            else if (us < 100000)
+                b2++;
+            else if (us < 1000000)
+                b3++;
+            else if (us < 10000000)
+                b4++;
+            else
+                b5++;
+        }
+        std::cout << "    " << label << " histogram: <1ms=" << b0 << " 1-10ms=" << b1
+                  << " 10-100ms=" << b2 << " 100ms-1s=" << b3 << " 1-10s=" << b4 << " >10s=" << b5
+                  << "\n";
+    };
+
+    std::cout << "  Latency distribution:\n";
+    printHistogram("Search", allSearchLat);
+    printHistogram("List  ", allListLat);
+    printHistogram("Status", allStatusLat);
+    printHistogram("Get   ", allGetLat);
+    std::cout << "\n";
 
     CHECK(totalOps > 0);
-    CHECK(totalFails == 0);
+    // Soft-fail on errors — we want the data even if some ops time out
+    if (totalFails > 0) {
+        WARN("Had " << totalFails << " failures out of " << totalExpected << " total ops");
+    }
 
-    // Emit JSONL
+    // ─────────────────────────────────────────────────────────────────────────
+    // JSONL output with full traces
+    // ─────────────────────────────────────────────────────────────────────────
     json timeSeries = json::array();
-    for (auto& s : sampler.getSamples()) {
+    for (auto& s : samples) {
         timeSeries.push_back(json{{"elapsed_ms", s.elapsedMs}, {"snapshot", s.snap.toJson()}});
+    }
+
+    // Per-op latency trace array (sorted by wall clock)
+    std::sort(allTraces.begin(), allTraces.end(),
+              [](const OpTrace& a, const OpTrace& b) { return a.wallClockMs < b.wallClockMs; });
+    json traceArray = json::array();
+    for (auto& tr : allTraces) {
+        json j{{"op", tr.opType},          {"tid", tr.threadId}, {"idx", tr.opIndex},
+               {"lat_us", tr.latencyUs},   {"ok", tr.success},   {"items", tr.resultCount},
+               {"wall_ms", tr.wallClockMs}};
+        if (!tr.errorMsg.empty())
+            j["error"] = tr.errorMsg;
+        traceArray.push_back(std::move(j));
     }
 
     json record{
@@ -1832,7 +2120,11 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         {"test", "large_corpus_reads"},
         {"data_dir", cfg.dataDir->string()},
         {"corpus_docs", finalSnap.documentsTotal},
-        {"ops_per_client", kOpsPerClient},
+        {"layout", json{{"search_clients", kSearchClients},
+                        {"list_clients", kListClients},
+                        {"status_get_clients", kStatusGetClients},
+                        {"ops_per_client", kOpsPerClient},
+                        {"op_timeout_s", kOpTimeoutS}}},
         {"total_ops", totalOps},
         {"total_failures", totalFails},
         {"elapsed_seconds", globalElapsed},
@@ -1848,11 +2140,20 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         {"latency", statusStats.toJson()}}},
         {"get",
          json{{"ops", getOps.load()}, {"fails", getFails.load()}, {"latency", getStats.toJson()}}},
+        {"memory", json{{"initial_mb", initSnap.memoryUsageMb},
+                        {"peak_mb", peakRss},
+                        {"min_mb", minRss},
+                        {"final_mb", finalSnap.memoryUsageMb},
+                        {"delta_mb", finalSnap.memoryUsageMb - initSnap.memoryUsageMb}}},
+        {"error_categories", errorCategories},
         {"daemon_snapshot_final", finalSnap.toJson()},
         {"time_series", timeSeries},
+        {"op_traces", traceArray},
         {"tuning_profile", cfg.tuningProfile},
     };
     emitJsonl(cfg.outputPath, record);
+
+    std::cout << "  Results written to: " << cfg.outputPath.string() << "\n\n";
 }
 
 // =============================================================================

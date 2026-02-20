@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <future>
+#include <sstream>
 #include <string_view>
 #include <thread>
 #include <unordered_map>
@@ -88,6 +89,49 @@ bool isUsefulNlEntity(const search::QueryConcept& qc) {
         }
     }
     return hasAlphaNum;
+}
+
+std::vector<std::pair<std::string, float>> buildNlAliasVariants(const std::string& entityText,
+                                                                const std::string& entityType,
+                                                                float baseConfidence) {
+    std::vector<std::pair<std::string, float>> variants;
+    std::unordered_set<std::string> seen;
+
+    auto addVariant = [&](const std::string& value, float confScale) {
+        std::string normalized = normalizeEntityTextForKey(value);
+        if (normalized.size() < 2) {
+            return;
+        }
+        if (!seen.insert(normalized).second) {
+            return;
+        }
+        float conf = std::clamp(baseConfidence * confScale, 0.05f, 1.0f);
+        variants.emplace_back(std::move(normalized), conf);
+    };
+
+    // Primary alias: full normalized entity text.
+    addVariant(entityText, 1.0f);
+
+    // Type-qualified alias helps disambiguation for collisions.
+    if (!entityType.empty()) {
+        addVariant(entityType + " " + entityText, 0.95f);
+    }
+
+    // Token aliases allow query token matching in queryKnowledgeGraph().
+    std::istringstream iss(entityText);
+    std::string token;
+    while (iss >> token) {
+        std::string t = normalizeEntityTextForKey(token);
+        if (t.size() < 3) {
+            continue;
+        }
+        addVariant(t, 0.72f);
+        if (variants.size() >= 8) {
+            break;
+        }
+    }
+
+    return variants;
 }
 
 // Check if GLiNER title extraction is disabled via environment variable
@@ -1921,6 +1965,17 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                 node.properties = props.dump();
                 batch->nodes.push_back(std::move(node));
                 entityRefs.push_back(EntityRef{nodeKey, qc->confidence});
+
+                // Add aliases for query-time KG resolution. KGWriteQueue resolves nodeId from
+                // source when encoded as "source|nodeKey".
+                for (const auto& [aliasText, aliasConfidence] :
+                     buildNlAliasVariants(text, type, qc->confidence)) {
+                    metadata::KGAlias alias;
+                    alias.alias = aliasText;
+                    alias.source = std::string("gliner|") + nodeKey;
+                    alias.confidence = aliasConfidence;
+                    batch->aliases.push_back(std::move(alias));
+                }
 
                 // Add edge from entity to document/file
                 if (!targetNodeKey.empty()) {

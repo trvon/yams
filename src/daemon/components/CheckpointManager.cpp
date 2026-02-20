@@ -3,6 +3,7 @@
 
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/VectorSystemManager.h>
+#include <yams/metadata/metadata_repository.h>
 #include <yams/search/hotzone_manager.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_index_manager.h>
@@ -51,6 +52,10 @@ void CheckpointManager::stop() {
 
 bool CheckpointManager::checkpointNow() {
     bool success = true;
+
+    if (!checkpointWal()) {
+        success = false;
+    }
 
     if (!checkpointVectorIndex()) {
         success = false;
@@ -160,6 +165,27 @@ bool CheckpointManager::checkpointHotzone() {
         }
     } catch (const std::exception& e) {
         spdlog::warn("[CheckpointManager] Hotzone checkpoint failed: {}", e.what());
+        stats_.checkpoint_errors.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    return false;
+}
+
+bool CheckpointManager::checkpointWal() {
+    if (!deps_.metadataRepository) {
+        return true;
+    }
+
+    try {
+        auto result = deps_.metadataRepository->checkpointWal();
+        if (result) {
+            stats_.wal_checkpoints.fetch_add(1, std::memory_order_relaxed);
+            spdlog::debug("[CheckpointManager] WAL checkpoint (PASSIVE) completed");
+            return true;
+        }
+        spdlog::warn("[CheckpointManager] WAL checkpoint failed: {}", result.error().message);
+    } catch (const std::exception& e) {
+        spdlog::warn("[CheckpointManager] WAL checkpoint exception: {}", e.what());
         stats_.checkpoint_errors.fetch_add(1, std::memory_order_relaxed);
     }
 
