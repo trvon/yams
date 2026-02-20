@@ -1052,13 +1052,16 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
 
                 auto duration = std::chrono::steady_clock::now() - start_time;
                 stats_.requests_processed++;
-                stats_.total_processing_time += duration;
+                {
+                    std::lock_guard<std::mutex> lock(stats_mutex_);
+                    stats_.total_processing_time += duration;
 
-                if (duration < stats_.min_latency) {
-                    stats_.min_latency = duration;
-                }
-                if (duration > stats_.max_latency) {
-                    stats_.max_latency = duration;
+                    if (duration < stats_.min_latency) {
+                        stats_.min_latency = duration;
+                    }
+                    if (duration > stats_.max_latency) {
+                        stats_.max_latency = duration;
+                    }
                 }
 
                 co_return stream_result;
@@ -1067,13 +1070,16 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             // If we got here, streaming failed but we reported no error
             auto duration = std::chrono::steady_clock::now() - start_time;
             stats_.requests_processed++;
-            stats_.total_processing_time += duration;
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                stats_.total_processing_time += duration;
 
-            if (duration < stats_.min_latency) {
-                stats_.min_latency = duration;
-            }
-            if (duration > stats_.max_latency) {
-                stats_.max_latency = duration;
+                if (duration < stats_.min_latency) {
+                    stats_.min_latency = duration;
+                }
+                if (duration > stats_.max_latency) {
+                    stats_.max_latency = duration;
+                }
             }
 
             co_return Result<void>();
@@ -1263,13 +1269,16 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
 
         auto duration = std::chrono::steady_clock::now() - start_time;
         stats_.requests_processed++;
-        stats_.total_processing_time += duration;
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            stats_.total_processing_time += duration;
 
-        if (duration < stats_.min_latency) {
-            stats_.min_latency = duration;
-        }
-        if (duration > stats_.max_latency) {
-            stats_.max_latency = duration;
+            if (duration < stats_.min_latency) {
+                stats_.min_latency = duration;
+            }
+            if (duration > stats_.max_latency) {
+                stats_.max_latency = duration;
+            }
         }
 
         co_return Result<void>();

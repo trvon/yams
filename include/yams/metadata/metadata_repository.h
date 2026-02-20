@@ -889,11 +889,15 @@ private:
         // Thread-local RNG for jitter to avoid thundering herd
         thread_local std::mt19937 rng(std::random_device{}());
 
+        const std::string_view opTag = current_metadata_op();
+        const ConnectionPriority priority = (route == "read" && opTag.starts_with("client_"))
+                                                ? ConnectionPriority::High
+                                                : ConnectionPriority::Normal;
+
         for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
             const auto attemptStart = std::chrono::steady_clock::now();
             const auto acquireStart = attemptStart;
-            auto connResult =
-                pool.acquire(std::chrono::milliseconds(30000), ConnectionPriority::Normal);
+            auto connResult = pool.acquire(std::chrono::milliseconds(30000), priority);
             const auto acquireEnd = std::chrono::steady_clock::now();
             const auto acquireMs =
                 std::chrono::duration_cast<std::chrono::milliseconds>(acquireEnd - acquireStart)

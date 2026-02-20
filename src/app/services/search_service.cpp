@@ -8,6 +8,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/detection/file_type_detector.h>
+#include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 #ifdef YAMS_ENABLE_DAEMON_FEATURES
 #include <yams/daemon/components/ServiceManager.h>
@@ -34,6 +35,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <fmt/ranges.h>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -317,6 +319,8 @@ retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
     if (telemetry) {
         telemetry->operations.fetch_add(1, std::memory_order_relaxed);
     }
+
+    metadata::MetadataOpScope metadataScope("client_search");
 
     auto attempt = fn();
     if (attempt) {
@@ -1678,6 +1682,8 @@ private:
     Result<SearchResponse> metadataSearch(const SearchRequest& req,
                                           [[maybe_unused]] MetadataTelemetry* telemetry = nullptr) {
         YAMS_ZONE_SCOPED_N("search_service::keyword_pipeline");
+        metadata::MetadataOpScope metadataScope("client_search");
+
         // Prepare query - escape regex if literalText is requested
         std::string processedQuery = req.query;
 

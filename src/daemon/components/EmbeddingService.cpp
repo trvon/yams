@@ -56,10 +56,11 @@ Result<void> EmbeddingService::initialize() {
         capacity = std::min(capacity, postIngestCap);
     }
     capacity = std::max<std::size_t>(256u, capacity);
-    embedChannel_ = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
+    auto channel = InternalEventBus::instance().get_or_create_channel<InternalEventBus::EmbedJob>(
         "embed_jobs", capacity);
+    std::atomic_store_explicit(&embedChannel_, channel, std::memory_order_release);
 
-    if (!embedChannel_) {
+    if (!channel) {
         return Error{ErrorCode::InvalidOperation,
                      "Failed to create embedding channel on InternalBus"};
     }

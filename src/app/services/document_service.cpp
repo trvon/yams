@@ -790,6 +790,8 @@ public:
             return Error{ErrorCode::InvalidArgument, "Either hash or name is required"};
         }
 
+        metadata::MetadataOpScope metadataScope("client_get");
+
         RetrieveDocumentResponse resp;
         resp.graphEnabled = req.graph;
 
@@ -1091,6 +1093,9 @@ public:
         if (!ctx_.store) {
             return Error{ErrorCode::NotInitialized, "Content store not available"};
         }
+
+        metadata::MetadataOpScope metadataScope("client_cat");
+
         std::string hash;
         std::string name = req.name;
 
@@ -1271,6 +1276,8 @@ public:
         if (!ctx_.metadataRepo) {
             return Error{ErrorCode::NotInitialized, "Metadata repository not available"};
         }
+
+        metadata::MetadataOpScope metadataScope("client_list");
 
         std::vector<metadata::DocumentInfo> docs;
         bool usedQuery = false;

@@ -41,9 +41,11 @@ Result<void> VectorSystemManager::initialize() {
 }
 
 void VectorSystemManager::shutdown() {
-    if (vectorDatabase_) {
+    auto existing = std::atomic_load_explicit(&vectorDatabase_, std::memory_order_acquire);
+    if (existing) {
         spdlog::debug("[VectorSystemManager] Shutting down vector database");
-        vectorDatabase_.reset();
+        std::atomic_store_explicit(&vectorDatabase_, std::shared_ptr<vector::VectorDatabase>{},
+                                   std::memory_order_release);
     }
 }
 
@@ -60,7 +62,8 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         return Result<bool>(false);
     }
 
-    if (vectorDatabase_) {
+    auto existing = std::atomic_load_explicit(&vectorDatabase_, std::memory_order_acquire);
+    if (existing) {
         spdlog::debug("[VectorInit] vectorDatabase_ already present; nothing to do");
         return Result<bool>(false);
     }
@@ -288,11 +291,11 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         try {
             auto vdb = std::make_shared<vector::VectorDatabase>(cfg);
             if (vdb->initialize()) {
-                vectorDatabase_ = std::move(vdb);
+                std::atomic_store_explicit(&vectorDatabase_, vdb, std::memory_order_release);
 
                 // Initialize counter
                 try {
-                    vectorDatabase_->initializeCounter();
+                    vdb->initializeCounter();
                 } catch (...) {
                 }
 
@@ -367,8 +370,9 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
 }
 
 size_t VectorSystemManager::getEmbeddingDimension() const {
-    if (vectorDatabase_) {
-        return vectorDatabase_->getConfig().embedding_dim;
+    auto db = std::atomic_load_explicit(&vectorDatabase_, std::memory_order_acquire);
+    if (db) {
+        return db->getConfig().embedding_dim;
     }
     return 0;
 }

@@ -77,7 +77,9 @@ public:
     Result<bool> initializeOnce(const std::filesystem::path& dataDir);
 
     // Accessors
-    std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const { return vectorDatabase_; }
+    std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
+        return std::atomic_load_explicit(&vectorDatabase_, std::memory_order_acquire);
+    }
 
     /**
      * @brief Get embedding dimension from database config.

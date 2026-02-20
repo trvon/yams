@@ -233,9 +233,12 @@ private:
         copy.requests_failed = stats_.requests_failed.load();
         copy.bytes_received = stats_.bytes_received.load();
         copy.bytes_sent = stats_.bytes_sent.load();
-        copy.total_processing_time = stats_.total_processing_time;
-        copy.min_latency = stats_.min_latency;
-        copy.max_latency = stats_.max_latency;
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            copy.total_processing_time = stats_.total_processing_time;
+            copy.min_latency = stats_.min_latency;
+            copy.max_latency = stats_.max_latency;
+        }
         return copy;
     }
     void reset_stats() {
@@ -243,6 +246,7 @@ private:
         stats_.requests_failed = 0;
         stats_.bytes_received = 0;
         stats_.bytes_sent = 0;
+        std::lock_guard<std::mutex> lock(stats_mutex_);
         stats_.total_processing_time = std::chrono::nanoseconds{0};
         stats_.min_latency = std::chrono::nanoseconds::max();
         stats_.max_latency = std::chrono::nanoseconds{0};
@@ -292,6 +296,7 @@ private:
     MessageFramer framer_;
     Config config_;
     mutable InternalStats stats_;
+    mutable std::mutex stats_mutex_;
 
     // Per-connection write serialization when multiplexing is enabled is handled by
     // the write strand executor below. Do not add an extra write mutex here; the strand

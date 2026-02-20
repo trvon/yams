@@ -3034,7 +3034,6 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                 if (it != snapshot->end()) {
                     auto age = std::chrono::steady_clock::now() - it->second.timestamp;
                     if (age <= kQueryCacheTtl) {
-                        ++it->second.hits;
                         return it->second.results;
                     }
                 }
