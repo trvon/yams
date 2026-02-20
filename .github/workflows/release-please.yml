@@ -1,0 +1,37 @@
+# yamllint disable rule:line-length
+name: Release Please
+
+'on':
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      major: ${{ steps.rp.outputs.major }}
+      minor: ${{ steps.rp.outputs.minor }}
+      patch: ${{ steps.rp.outputs.patch }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # When a release is created, the v* tag triggers the existing
+      # release.yml workflow which handles the full build matrix,
+      # packaging, and artifact upload.  Nothing else to do here.
+      - name: Release info
+        if: steps.rp.outputs.release_created == 'true'
+        run: |
+          echo "Release ${{ steps.rp.outputs.tag_name }} created."
+          echo "The existing release.yml workflow will handle build & packaging."
