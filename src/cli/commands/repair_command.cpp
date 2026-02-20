@@ -172,13 +172,17 @@ public:
                 }
             } else if (ev.phase == "error") {
                 std::cout << "    " << ui::status_warning(ev.message) << "\n";
+            } else if (ev.phase == "repairing" && ev.total > 0 && ev.processed != lastProcessed) {
+                // Show progress for long-running operations (fts5, embeddings)
+                // even without --verbose, so the user knows it's not hung.
+                std::cout << "    [" << ev.processed << "/" << ev.total << "] " << ev.message
+                          << "\r" << std::flush;
+                lastProcessed = ev.processed;
+                lastTotal = ev.total;
             } else if (verbose_ && ev.phase == "repairing") {
-                // Progress ticks — only in verbose mode to avoid excessive output
-                if (ev.total > 0 && ev.processed != lastProcessed) {
-                    std::cout << "    [" << ev.processed << "/" << ev.total << "] " << ev.message
-                              << "\r" << std::flush;
-                    lastProcessed = ev.processed;
-                    lastTotal = ev.total;
+                // Extra detail in verbose mode for operations without a total count
+                if (!ev.message.empty()) {
+                    std::cout << "    " << ev.message << "\r" << std::flush;
                 }
             }
         };

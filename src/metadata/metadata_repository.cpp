@@ -2055,7 +2055,10 @@ Result<std::vector<SearchHistoryEntry>> MetadataRepository::getRecentSearches(in
 }
 
 Result<int64_t> MetadataRepository::insertFeedbackEvent(const FeedbackEvent& event) {
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+    // Best-effort: feedback events are telemetry. If the DB is locked by concurrent
+    // writes, drop the event rather than blocking the worker thread for 15+ seconds
+    // in busy_timeout + retry loops, which causes system-wide starvation.
+    return executeBestEffortWrite<int64_t>([&](Database& db) -> Result<int64_t> {
         repository::CrudOps<FeedbackEvent> ops;
         return ops.insert(db, event);
     });

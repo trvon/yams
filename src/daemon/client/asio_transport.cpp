@@ -519,6 +519,23 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         auto done_promise = std::make_shared<AsioConnection::void_promise_t>();
         auto done_future = done_promise->get_future();
 
+        // Track last activity so the deadline can extend when the server sends
+        // keepalives or progress events (prevents premature timeout on
+        // long-running streaming operations like repair).
+        auto last_activity_ns = std::make_shared<std::atomic<int64_t>>(
+            std::chrono::steady_clock::now().time_since_epoch().count());
+        auto onChunkWithActivity = [onChunk, last_activity_ns](const Response& r,
+                                                               bool last) -> bool {
+            last_activity_ns->store(std::chrono::steady_clock::now().time_since_epoch().count(),
+                                    std::memory_order_relaxed);
+            return onChunk(r, last);
+        };
+        auto onHeaderWithActivity = [onHeader, last_activity_ns](const Response& r) {
+            last_activity_ns->store(std::chrono::steady_clock::now().time_since_epoch().count(),
+                                    std::memory_order_relaxed);
+            onHeader(r);
+        };
+
         co_await boost::asio::dispatch(conn->strand, use_awaitable);
         if (conn->handlers.size() >= conn->opts.maxInflight) {
             conn->in_use.store(false, std::memory_order_release);
@@ -526,7 +543,7 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         }
         {
             AsioConnection::Handler h;
-            h.streaming.emplace(onHeader, onChunk, onError, onComplete);
+            h.streaming.emplace(onHeaderWithActivity, onChunkWithActivity, onError, onComplete);
             h.streaming->done_promise = done_promise;
             conn->handlers.emplace(msg.requestId, std::move(h));
         }
@@ -552,10 +569,19 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         conn->in_use.store(false, std::memory_order_release);
 
         using namespace std::chrono_literals;
-        auto deadline = std::chrono::steady_clock::now() + opts_.requestTimeout;
+        // Activity-based deadline: resets whenever the server sends any chunk
+        // (including keepalives).  This prevents long-running streaming
+        // operations from timing out while the server is still actively working.
+        const auto request_timeout = opts_.requestTimeout;
         boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
-        while (std::chrono::steady_clock::now() < deadline) {
+        auto is_timed_out = [&]() {
+            auto last = std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(
+                last_activity_ns->load(std::memory_order_relaxed)));
+            return (std::chrono::steady_clock::now() - last) >= request_timeout;
+        };
+
+        while (!is_timed_out()) {
             // Check cancellation at each iteration
             cs = co_await this_coro::cancellation_state;
             if (cs.cancelled() != boost::asio::cancellation_type::none) {
@@ -590,7 +616,7 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
             co_await timer.async_wait(use_awaitable);
         }
 
-        if (std::chrono::steady_clock::now() >= deadline) {
+        if (is_timed_out()) {
             co_await boost::asio::dispatch(conn->strand, use_awaitable);
             conn->handlers.erase(msg.requestId);
             conn->timed_out_requests.insert(msg.requestId);

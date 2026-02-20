@@ -1711,12 +1711,26 @@ RepairOperationResult RepairService::rebuildFts5Index(bool dryRun, bool verbose,
     const size_t totalDocs = docs.value().size();
     size_t docIdx = 0;
 
+    // Emit an initial progress event so the client knows how many documents
+    // to expect and doesn't appear to hang on large stores.
+    if (progress) {
+        RepairEvent ev;
+        ev.phase = "repairing";
+        ev.operation = "fts5";
+        ev.processed = 0;
+        ev.total = totalDocs;
+        ev.message = "Rebuilding FTS5 index (" + std::to_string(totalDocs) + " documents)";
+        progress(ev);
+    }
+
     for (const auto& d : docs.value()) {
         ++docIdx;
 
-        // Emit progress every 500 docs so the streaming layer has events to
+        // Emit progress frequently so the streaming layer has events to
         // send (prevents client read timeouts during large rebuilds).
-        if (progress && docIdx % 500 == 0) {
+        // Using a small interval (25) keeps the client alive and gives
+        // users visible feedback on long operations.
+        if (progress && docIdx % 25 == 0) {
             RepairEvent ev;
             ev.phase = "repairing";
             ev.operation = "fts5";

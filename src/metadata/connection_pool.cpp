@@ -454,7 +454,22 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
         db.execute("PRAGMA synchronous = NORMAL");
     }
     db.execute("PRAGMA temp_store = MEMORY");
-    db.execute("PRAGMA mmap_size = 268435456"); // 256MB
+
+    // mmap_size: read-only connections skip mmap to avoid page-fault storms on external
+    // drives and reduce virtual memory pressure under concurrent load.
+    if (config_.readOnly) {
+        db.execute("PRAGMA mmap_size = 0");
+        // read_uncommitted: reduces WAL index contention between concurrent readers.
+        // Safe for search/list/get since they tolerate seeing latest committed data.
+        db.execute("PRAGMA read_uncommitted = ON");
+        // Read-only connections use a much shorter busy_timeout because readers in WAL
+        // mode with read_uncommitted=ON should almost never encounter SQLITE_BUSY.
+        // The default 15s busy_timeout causes catastrophic thread starvation when
+        // worker threads block in sqlite3_step() waiting for the write lock.
+        db.execute("PRAGMA busy_timeout = 100");
+    } else {
+        db.execute("PRAGMA mmap_size = 268435456"); // 256MB
+    }
 
     // Page cache size: default SQLite is -2000 (~2MB), which causes severe thrashing on
     // large databases (23GB+). We default to -262144 (~256MB per connection) to keep FTS5

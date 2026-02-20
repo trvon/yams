@@ -1588,6 +1588,18 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
             if (dualPoolEnabled) {
                 auto readCfg = dbPoolCfg;
+                readCfg.readOnly = true;
+
+                // Cap read pool max to worker thread count — no point having more
+                // concurrent read connections than workers that can service them.
+                // Prevents memory explosion (N × 256MB cache per connection).
+                {
+                    auto workerCap = static_cast<size_t>(TuneAdvisor::workCoordinatorThreads());
+                    if (workerCap > 0 && workerCap < readCfg.maxConnections) {
+                        readCfg.maxConnections = workerCap;
+                        spdlog::info("Read pool max capped to {} (worker threads)", workerCap);
+                    }
+                }
                 if (const char* envReadMax = std::getenv("YAMS_DB_READ_POOL_MAX");
                     envReadMax && *envReadMax) {
                     try {

@@ -31,6 +31,8 @@ struct ConnectionPoolConfig {
     std::chrono::milliseconds busyTimeout{15000};
     bool enableWAL = true;
     bool enableForeignKeys = true;
+    bool readOnly =
+        false; ///< When true, applies read-optimized PRAGMAs (no mmap, read_uncommitted)
 };
 
 /**

@@ -1618,10 +1618,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
               << " ms\n";
 
     // --- Start daemon ---
-    // Large corpus on external/network drives may take 3+ min for content store init
     auto opts = benchHarnessOptions(cfg);
     DaemonHarness harness(opts);
-    REQUIRE(harness.start(std::chrono::seconds(360)));
+    REQUIRE(harness.start(std::chrono::seconds(300)));
     std::this_thread::sleep_for(3s); // let async init settle
 
     // Helper: create a client config with all timeouts aligned to kOpTimeout.

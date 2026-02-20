@@ -433,11 +433,28 @@ Result<void> LifecycleComponent::removePidFile() const {
 
 void LifecycleComponent::setupSignalHandlers() {
     instance_.store(this, std::memory_order_release);
+#ifndef _WIN32
+    std::signal(SIGTERM, signalHandler);
+    std::signal(SIGINT, signalHandler);
+    std::signal(SIGHUP, signalHandler);
+#else
+    std::signal(SIGTERM, signalHandler);
+    std::signal(SIGINT, signalHandler);
+#endif
 }
 
 void LifecycleComponent::cleanupSignalHandlers() {
     LifecycleComponent* expected = this;
-    instance_.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
+    if (instance_.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel)) {
+#ifndef _WIN32
+        std::signal(SIGTERM, SIG_DFL);
+        std::signal(SIGINT, SIG_DFL);
+        std::signal(SIGHUP, SIG_DFL);
+#else
+        std::signal(SIGTERM, SIG_DFL);
+        std::signal(SIGINT, SIG_DFL);
+#endif
+    }
 }
 
 void LifecycleComponent::signalHandler(int signal) {
@@ -448,19 +465,24 @@ void LifecycleComponent::signalHandler(int signal) {
 }
 
 void LifecycleComponent::handleSignal(int signal) {
+    // NOTE: This runs inside a signal handler. Only async-signal-safe operations
+    // are permitted here (no heap allocation, no locking, no spdlog).
     switch (signal) {
         case SIGTERM:
         case SIGINT:
-            spdlog::info("Received signal {}, initiating shutdown.", signal);
             if (daemon_) {
+                // requestStop() sets an atomic flag and notifies a CV — acceptable
+                // in practice on all supported platforms (POSIX & Windows).
                 daemon_->requestStop();
             }
             break;
 #ifndef _WIN32
         case SIGHUP:
-            spdlog::info("Received SIGHUP, reloading configuration.");
+            // TODO: set an atomic flag for reload, handle outside signal context
             break;
 #endif
+        default:
+            break;
     }
 }
 
@@ -536,7 +558,11 @@ bool LifecycleComponent::isPidFileLockedByOther() const {
     if (fd == -1) {
         return false;
     }
-    if (flock(fd, LOCK_SH | LOCK_NB) == -1 && errno == EWOULDBLOCK) {
+    // Use LOCK_EX (not LOCK_SH) to correctly detect an existing exclusive lock.
+    // On macOS/BSD, flock() coalesces locks per-process, so a LOCK_SH test from
+    // the same process that holds LOCK_EX would incorrectly succeed. LOCK_EX
+    // against LOCK_EX behaves correctly on both macOS and Linux.
+    if (flock(fd, LOCK_EX | LOCK_NB) == -1 && errno == EWOULDBLOCK) {
         close(fd);
         return true;
     }
@@ -803,8 +829,23 @@ bool LifecycleComponent::requestExistingDaemonShutdown(pid_t pid) const {
         return true;
     }
 
+    // Determine the existing daemon's socket path.
+    // First try the data-dir lock file (contains the actual socket the existing daemon is
+    // listening on). Fall back to our own configured socket path only if the lock file
+    // doesn't provide one.
+    std::filesystem::path existingSocket;
+    if (dataDirLockFd_ != -1) {
+        auto lockInfo = readDataDirLockInfo();
+        if (!lockInfo.socket.empty()) {
+            existingSocket = lockInfo.socket;
+        }
+    }
+    if (existingSocket.empty()) {
+        existingSocket = daemon_->config_.socketPath;
+    }
+
     ClientConfig cfg;
-    cfg.socketPath = daemon_->config_.socketPath;
+    cfg.socketPath = existingSocket;
     cfg.autoStart = false;
     cfg.connectTimeout = std::chrono::milliseconds(750);
     cfg.requestTimeout = std::chrono::milliseconds(5000);

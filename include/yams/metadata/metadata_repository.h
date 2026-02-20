@@ -863,9 +863,15 @@ private:
     template <typename T>
     Result<T> executeQueryOnPool(ConnectionPool& pool, std::string_view route,
                                  std::function<Result<T>(Database&)> func) {
-        constexpr int kMaxRetries = 10;   // Increased for heavy concurrent load
-        constexpr int kBaseDelayMs = 50;  // Higher base delay for better backoff
-        constexpr int kMaxDelayMs = 3000; // Cap delay to prevent very long waits
+        // Retry lock errors with exponential backoff.
+        // IMPORTANT: std::this_thread::sleep_for() blocks the calling worker thread,
+        // so aggressive retries cause system-wide starvation when all WorkCoordinator
+        // threads are sleeping in retry loops simultaneously.
+        // Read path: rarely encounters locks (WAL + read_uncommitted), so few retries.
+        // Write path: moderate retries for genuine contention.
+        const int kMaxRetries = (route == "read") ? 3 : 5;
+        constexpr int kBaseDelayMs = 25;
+        constexpr int kMaxDelayMs = 500;
 
         // Thread-local RNG for jitter to avoid thundering herd
         thread_local std::mt19937 rng(std::random_device{}());
@@ -930,6 +936,23 @@ private:
 
     template <typename T> Result<T> executeWriteQuery(std::function<Result<T>(Database&)> func) {
         return executeQueryOnPool<T>(pool_, "write", std::move(func));
+    }
+
+    /// Best-effort write: single attempt with no retries. If the database is locked,
+    /// the operation is dropped rather than blocking the calling thread. Used for
+    /// non-critical telemetry like feedback events where write contention would
+    /// otherwise starve worker threads under concurrent load.
+    template <typename T>
+    Result<T> executeBestEffortWrite(std::function<Result<T>(Database&)> func) {
+        auto result = pool_.withConnection(func);
+        if (result.has_value()) {
+            if constexpr (std::is_void_v<T>) {
+                return Result<void>();
+            } else {
+                return result.value();
+            }
+        }
+        return Error{result.error()};
     }
 
     template <typename T> Result<T> executeQuery(std::function<Result<T>(Database&)> func) {
