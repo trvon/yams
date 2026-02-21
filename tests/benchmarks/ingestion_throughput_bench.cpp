@@ -274,8 +274,10 @@ struct LocalIngestionSession {
         poolCfg.minConnections = 1;
         poolCfg.maxConnections = 8;
         yams::daemon::TuneAdvisor::setEnableParallelIngest(true);
-        yams::daemon::TuneAdvisor::setMaxIngestWorkers(poolCfg.maxConnections);
-        yams::daemon::TuneAdvisor::setStoragePoolSize(poolCfg.maxConnections);
+        yams::daemon::TuneAdvisor::setMaxIngestWorkers(
+            static_cast<uint32_t>(poolCfg.maxConnections));
+        yams::daemon::TuneAdvisor::setStoragePoolSize(
+            static_cast<uint32_t>(poolCfg.maxConnections));
         auto pool = std::make_unique<yams::metadata::ConnectionPool>(dbPath, poolCfg);
         auto repo = std::make_shared<yams::metadata::MetadataRepository>(*pool);
 

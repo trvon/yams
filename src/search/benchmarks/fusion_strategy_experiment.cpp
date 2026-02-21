@@ -321,7 +321,7 @@ QueryResult executeSearch(yams::daemon::DaemonClient& client, const std::string&
     for (const auto& r : searchResult.value().response.results) {
         std::string docId = fs::path(r.path).stem().string();
         result.returned_doc_ids.push_back(docId);
-        result.returned_scores.push_back(r.score);
+        result.returned_scores.push_back(static_cast<float>(r.score));
 
         if (result.reciprocal_rank == 0.0 && relevant_ids.count(docId)) {
             result.reciprocal_rank = 1.0 / static_cast<double>(result.returned_doc_ids.size());
@@ -377,7 +377,7 @@ QueryResult executeTwoStageTextFirst(yams::daemon::DaemonClient& client, const s
     if (stage2) {
         for (const auto& r : stage2.value().response.results) {
             std::string docId = fs::path(r.path).stem().string();
-            hybridScores[docId] = r.score;
+            hybridScores[docId] = static_cast<float>(r.score);
         }
     }
 

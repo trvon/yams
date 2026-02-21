@@ -40,7 +40,7 @@ TEST_CASE("DaemonBench: warm latency fast", "[daemon][.bench][.slow]") {
     cfg.socketPath = runtime_root / "sock";
     cfg.pidFile = runtime_root / "daemon.pid";
     cfg.logFile = runtime_root / "daemon.log";
-    cfg.maxMemoryGb = 0.5;
+    cfg.maxMemoryGb = 1;
     cfg.enableModelProvider = false; // keep startup minimal
     cfg.autoLoadPlugins = false;
 

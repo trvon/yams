@@ -412,8 +412,8 @@ struct CorpusGenerator {
     CorpusGenerator(const fs::path& dir) : corpusDir(dir) { fs::create_directories(corpusDir); }
 
     void generateDocuments(int count) {
-        std::uniform_int_distribution<int> topicDist(0, topics.size() - 1);
-        std::uniform_int_distribution<int> termDist(0, terms.size() - 1);
+        std::uniform_int_distribution<int> topicDist(0, static_cast<int>(topics.size()) - 1);
+        std::uniform_int_distribution<int> termDist(0, static_cast<int>(terms.size()) - 1);
         for (int i = 0; i < count; ++i) {
             std::string topicName = topics[topicDist(rng)];
             std::string content = "This document covers " + topicName + " functionality.\nThe " +
@@ -429,7 +429,7 @@ struct CorpusGenerator {
 
     std::vector<TestQuery> generateQueries(int numQueries) {
         std::vector<TestQuery> queries;
-        std::uniform_int_distribution<int> topicDist(0, topics.size() - 1);
+        std::uniform_int_distribution<int> topicDist(0, static_cast<int>(topics.size()) - 1);
         for (int q = 0; q < numQueries; ++q) {
             std::string topic = topics[topicDist(rng)];
             TestQuery tq;
@@ -573,7 +573,7 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
                                  const std::vector<TestQuery>& queries, int k,
                                  const std::string& searchType = "hybrid") {
     RetrievalMetrics metrics;
-    metrics.numQueries = queries.size();
+    metrics.numQueries = static_cast<int>(queries.size());
     double totalMRR = 0.0, totalRecall = 0.0, totalPrecision = 0.0, totalNDCG = 0.0, totalMAP = 0.0;
 
     std::uint64_t totalAttempts = 0;
@@ -675,7 +675,7 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
 
         for (size_t i = 0; i < std::min((size_t)k, results.size()); ++i) {
             debugEntry.returnedPaths.push_back(results[i].path);
-            debugEntry.returnedScores.push_back(results[i].score);
+            debugEntry.returnedScores.push_back(static_cast<float>(results[i].score));
 
             std::string filename = fs::path(results[i].path).filename().string();
             bool isRelevant = false;
@@ -1096,8 +1096,8 @@ struct BenchFixture {
             beirCorpus = std::make_unique<BEIRCorpusLoader>(dataset, corpusDir);
             beirCorpus->writeDocumentsAsFiles();
             benchCorpusDir = corpusDir;
-            corpusSize = dataset.documents.size();
-            numQueries = dataset.queries.size();
+            corpusSize = static_cast<int>(dataset.documents.size());
+            numQueries = static_cast<int>(dataset.queries.size());
         } else {
             benchCorpusDir = harness->rootDir() / "corpus";
             corpus = std::make_unique<CorpusGenerator>(benchCorpusDir);
@@ -1334,7 +1334,7 @@ struct BenchFixture {
                         contentExtracted, postProcessed, extractionInFlight, kgInFlight,
                         symbolInFlight, entityInFlight, totalInFlight, embedQueued, embedInFlight,
                         vectorCount, (vectorDbReady ? "true" : "false"));
-                    lastDepth = queuedTotal;
+                    lastDepth = static_cast<uint32_t>(queuedTotal);
                     lastDocCount = docCount;
                     lastIndexedDocCount = indexedCount;
                     lastContentExtracted = contentExtracted;

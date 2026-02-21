@@ -18,7 +18,9 @@ TEST_CASE("RequestHandler: writer_drain clears queued state on write error",
     SKIP("Unix domain socket tests skipped on Windows");
 #endif
 
+#ifndef _WIN32
     const auto previousSigpipeHandler = std::signal(SIGPIPE, SIG_IGN);
+#endif
 
     boost::asio::io_context io;
 
@@ -84,5 +86,7 @@ TEST_CASE("RequestHandler: writer_drain clears queued state on write error",
         REQUIRE(snap.queues == 1);
     }
 
+#ifndef _WIN32
     std::signal(SIGPIPE, previousSigpipeHandler);
+#endif
 }

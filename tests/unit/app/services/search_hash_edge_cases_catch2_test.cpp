@@ -6,6 +6,11 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#endif
+
 #include <chrono>
 #include <filesystem>
 #include <memory>

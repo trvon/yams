@@ -150,7 +150,7 @@ std::vector<GroundTruthSymbol> loadGroundTruth(const fs::path& jsonl_path) {
             if (!sym.name.empty() && !sym.kind.empty() && !sym.file.empty()) {
                 truth.push_back(sym);
             }
-        } catch (const std::exception& e) {
+        } catch (const std::exception& /*e*/) {
             // Skip malformed lines
             continue;
         }

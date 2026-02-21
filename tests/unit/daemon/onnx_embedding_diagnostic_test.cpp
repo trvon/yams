@@ -231,7 +231,7 @@ TEST_CASE("ONNX Diagnostic: GPU model load and embed",
 
     // Warm (steady-state) timing: run 3 more times and report avg.
     constexpr int kWarmIters = 3;
-    long warmTotalMs = 0;
+    int64_t warmTotalMs = 0;
     for (int i = 0; i < kWarmIters; ++i) {
         auto t0 = std::chrono::steady_clock::now();
         auto warm = const_cast<OnnxModelSession&>(session).generateBatchEmbeddings(texts);

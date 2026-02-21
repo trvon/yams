@@ -54,7 +54,7 @@ protected:
     void collectCustomMetrics(std::map<std::string, double>& metrics) override {
         metrics["dedup_ratio"] = lastDedupRatio_;
         metrics["avg_chunk_size"] = avgChunkSize_;
-        metrics["total_bytes"] = totalBytesProcessed_;
+        metrics["total_bytes"] = static_cast<double>(totalBytesProcessed_);
     }
 
     std::filesystem::path tempDir_;
@@ -176,9 +176,9 @@ protected:
     }
 
     void collectCustomMetrics(std::map<std::string, double>& metrics) override {
-        metrics["num_documents"] = documentIds_.size();
+        metrics["num_documents"] = static_cast<double>(documentIds_.size());
         metrics["avg_metadata_size"] = avgMetadataSize_;
-        metrics["operations_failed"] = failedOperations_;
+        metrics["operations_failed"] = static_cast<double>(failedOperations_);
     }
 
     std::filesystem::path tempDir_;
@@ -231,7 +231,7 @@ BENCHMARK_F(MetadataBenchmark, BulkUpdate) {
         return 0;
     }
 
-    avgMetadataSize_ = metadata.size();
+    avgMetadataSize_ = static_cast<double>(metadata.size());
     return entries.size();
 }
 

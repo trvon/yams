@@ -618,9 +618,9 @@ TEST_CASE_METHOD(HNSWSearchFixture, "Entity Vector Search with Symbol Extractor"
         }
 
         auto extract_end = std::chrono::high_resolution_clock::now();
-        double extraction_time_ms =
+        double extraction_time_ms = static_cast<double>(
             std::chrono::duration_cast<std::chrono::milliseconds>(extract_end - extract_start)
-                .count();
+                .count());
 
         INFO("Extracted " << all_symbols.size() << " symbols in " << extraction_time_ms << " ms");
         REQUIRE(!all_symbols.empty());
@@ -655,8 +655,8 @@ TEST_CASE_METHOD(HNSWSearchFixture, "Entity Vector Search with Symbol Extractor"
         }
 
         auto index_end = std::chrono::high_resolution_clock::now();
-        double indexing_time_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(index_end - index_start).count();
+        double indexing_time_ms = static_cast<double>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(index_end - index_start).count());
 
         INFO("Indexed " << all_symbols.size() << " entity vectors in " << indexing_time_ms
                         << " ms");
@@ -746,8 +746,8 @@ TEST_CASE_METHOD(HNSWSearchFixture, "HNSW Batch Insert Performance",
             }
 
             auto end = std::chrono::high_resolution_clock::now();
-            double duration_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+            double duration_ms = static_cast<double>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
             double throughput = total_vectors / (duration_ms / 1000.0);
 
             INFO("  Batch size " << batch_size << ": " << duration_ms << " ms, " << throughput

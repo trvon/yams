@@ -183,7 +183,7 @@ protected:
     }
 
     void collectCustomMetrics(std::map<std::string, double>& metrics) override {
-        metrics["file_count"] = fileCount_;
+        metrics["file_count"] = static_cast<double>(fileCount_);
         metrics["change_rate"] = 0.07; // 7% change rate
     }
 
@@ -240,8 +240,8 @@ protected:
                 expectedRenames > 0 ? static_cast<double>(detectedRenames) / expectedRenames : 1.0;
 
             metrics["rename_accuracy"] = accuracy * 100.0; // Percentage
-            metrics["expected_renames"] = expectedRenames;
-            metrics["detected_renames"] = detectedRenames;
+            metrics["expected_renames"] = static_cast<double>(expectedRenames);
+            metrics["detected_renames"] = static_cast<double>(detectedRenames);
             metrics["rename_rate"] = renameRate_ * 100.0;
         }
     }
@@ -296,7 +296,7 @@ protected:
             auto end = std::chrono::high_resolution_clock::now();
 
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-            latencies.push_back(duration.count());
+            latencies.push_back(static_cast<double>(duration.count()));
         }
 
         // Compute p95
@@ -350,8 +350,8 @@ protected:
         double overhead =
             flatSize_ > 0 ? (static_cast<double>(treeSize_) / flatSize_ - 1.0) * 100.0 : 0.0;
 
-        metrics["tree_size_bytes"] = treeSize_;
-        metrics["flat_size_bytes"] = flatSize_;
+        metrics["tree_size_bytes"] = static_cast<double>(treeSize_);
+        metrics["flat_size_bytes"] = static_cast<double>(flatSize_);
         metrics["storage_overhead_pct"] = overhead;
         metrics["ac_threshold_pct"] = 15.0;
         metrics["ac_passed"] = (overhead <= 15.0) ? 1.0 : 0.0;
@@ -419,16 +419,18 @@ protected:
             treeOverhead = (static_cast<double>(treeStorageSize_) / blockDeduplicatedSize_) * 100.0;
         }
 
-        metrics["snapshot_count"] = snapshotCount_;
-        metrics["block_only_total_mb"] = blockOnlyTotalSize_ / (1024.0 * 1024.0);
-        metrics["block_deduplicated_mb"] = blockDeduplicatedSize_ / (1024.0 * 1024.0);
-        metrics["tree_metadata_mb"] = treeStorageSize_ / (1024.0 * 1024.0);
+        metrics["snapshot_count"] = static_cast<double>(snapshotCount_);
+        metrics["block_only_total_mb"] =
+            static_cast<double>(blockOnlyTotalSize_) / (1024.0 * 1024.0);
+        metrics["block_deduplicated_mb"] =
+            static_cast<double>(blockDeduplicatedSize_) / (1024.0 * 1024.0);
+        metrics["tree_metadata_mb"] = static_cast<double>(treeStorageSize_) / (1024.0 * 1024.0);
         metrics["tree_plus_blocks_mb"] =
-            (treeStorageSize_ + blockDeduplicatedSize_) / (1024.0 * 1024.0);
+            static_cast<double>(treeStorageSize_ + blockDeduplicatedSize_) / (1024.0 * 1024.0);
         metrics["dedup_savings_pct"] = savings;
         metrics["tree_overhead_pct"] = treeOverhead;
-        metrics["unique_tree_nodes"] = uniqueTreeNodes_;
-        metrics["unique_blocks"] = uniqueBlocks_;
+        metrics["unique_tree_nodes"] = static_cast<double>(uniqueTreeNodes_);
+        metrics["unique_blocks"] = static_cast<double>(uniqueBlocks_);
         metrics["ac7_threshold_pct"] = 15.0;
         metrics["ac7_passed"] = (treeOverhead <= 15.0) ? 1.0 : 0.0;
 
@@ -539,8 +541,8 @@ protected:
                              ? static_cast<double>(durationOff.count()) / durationOn.count()
                              : 1.0;
 
-        metrics["with_opt_ms"] = durationOn.count();
-        metrics["without_opt_ms"] = durationOff.count();
+        metrics["with_opt_ms"] = static_cast<double>(durationOn.count());
+        metrics["without_opt_ms"] = static_cast<double>(durationOff.count());
         metrics["speedup_factor"] = speedup;
     }
 

@@ -38,7 +38,7 @@ protected:
     }
 
     void collectCustomMetrics(std::map<std::string, double>& metrics) override {
-        metrics["bytes_processed"] = dataSize_;
+        metrics["bytes_processed"] = static_cast<double>(dataSize_);
     }
 
     std::unique_ptr<crypto::IContentHasher> hasher_;

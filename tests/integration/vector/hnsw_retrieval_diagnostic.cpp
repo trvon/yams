@@ -400,8 +400,8 @@ public:
 
         // Check vector score distribution
         if (!vectorRes.results.empty()) {
-            float topScore = vectorRes.results[0].score;
-            float bottomScore = vectorRes.results.back().score;
+            float topScore = static_cast<float>(vectorRes.results[0].score);
+            float bottomScore = static_cast<float>(vectorRes.results.back().score);
             spdlog::info("Vector score range: [{:.4f}, {:.4f}]", bottomScore, topScore);
         }
 
