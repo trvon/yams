@@ -139,7 +139,7 @@ public:
 
     // Submit extraction job and wait for completion
     bool submitAndWaitForExtraction(const std::string& hash, const std::string& filePath,
-                                    const std::string& content, const std::string& language,
+                                    const std::string& /*content*/, const std::string& /*language*/,
                                     int timeoutMs = 5000) {
         auto graphComponent = serviceManager_->getGraphComponent();
         if (!graphComponent) {

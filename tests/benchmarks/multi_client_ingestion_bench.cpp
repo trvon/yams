@@ -610,6 +610,10 @@ std::string classifyFailureMessage(const std::string& errorMsg) {
     return "other";
 }
 
+bool isHotspotWindowEligible(int ops, int totalClients) {
+    return ops >= std::max(10, totalClients);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Wait for queue drain
 // ─────────────────────────────────────────────────────────────────────────────
@@ -799,7 +803,6 @@ TEST_CASE("Multi-client ingestion: concurrent pure ingest",
     // Shared counters
     std::atomic<int> totalDocsIngested{0};
     std::atomic<int> totalFailures{0};
-    std::mutex resultsMutex;
     std::vector<ClientResult> clientResults(cfg.numClients);
 
     auto globalStart = std::chrono::steady_clock::now();
@@ -1051,7 +1054,6 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
     std::atomic<int> totalSearches{0};
     std::atomic<int> totalLists{0};
     std::atomic<int> totalFailures{0};
-    std::mutex resultsMutex;
     std::vector<ClientResult> clientResults(cfg.numClients);
 
     auto globalStart = std::chrono::steady_clock::now();
@@ -1779,6 +1781,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     const int kOpsPerClient = envInt("YAMS_BENCH_OPS_PER_CLIENT", 50);
     const int kOpTimeoutS = envInt("YAMS_BENCH_OP_TIMEOUT_S", 60);
     const auto kOpTimeout = std::chrono::seconds(kOpTimeoutS);
+    const int kDiscoverPageSize = envInt("YAMS_BENCH_DISCOVER_PAGE_SIZE", 500);
+    const int kDiscoverHashLimit = envInt("YAMS_BENCH_DISCOVER_HASH_LIMIT", 5000);
+    const int kHotspotWindowMs = envInt("YAMS_BENCH_HOTSPOT_WINDOW_MS", 1000);
     const bool useMcpPath = cfg.useMcpPath;
     const size_t mcpPoolSize = static_cast<size_t>(
         std::max(1, envInt("YAMS_BENCH_MCP_POOL_SIZE", std::min(kTotalClients, 8))));
@@ -1789,6 +1794,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
               << kStatusGetClients << "G = " << kTotalClients << " threads\n";
     std::cout << "  Ops/thread:     " << kOpsPerClient << "\n";
     std::cout << "  Op timeout:     " << kOpTimeoutS << "s\n";
+    std::cout << "  Discover page:  " << kDiscoverPageSize << " (limit " << kDiscoverHashLimit
+              << ")\n";
+    std::cout << "  Hotspot window: " << kHotspotWindowMs << "ms\n";
     std::cout << "  Transport path: " << (useMcpPath ? "mcp(query-or-direct-tools)" : "daemon-ipc")
               << "\n";
     if (useMcpPath) {
@@ -1853,29 +1861,60 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
 
     std::vector<std::string> knownHashes;
     {
-        if (useMcpPath) {
-            auto listRes = sharedMcpPool->queryStepForSlot(0, "list", {{"limit", 200}});
-            if (listRes && listRes.value().contains("items") &&
-                listRes.value()["items"].is_array()) {
-                for (const auto& item : listRes.value()["items"]) {
-                    if (item.contains("hash") && item["hash"].is_string()) {
-                        auto hash = item["hash"].get<std::string>();
-                        if (!hash.empty())
-                            knownHashes.push_back(hash);
+        bool done = false;
+        for (int offset = 0; !done && static_cast<int>(knownHashes.size()) < kDiscoverHashLimit;
+             offset += kDiscoverPageSize) {
+            int itemsInPage = 0;
+            if (useMcpPath) {
+                auto listRes = sharedMcpPool->queryStepForSlot(
+                    0, "list", {{"limit", kDiscoverPageSize}, {"offset", offset}});
+                if (!listRes) {
+                    WARN("Discovery list failed at offset " << offset << ": "
+                                                            << listRes.error().message);
+                    break;
+                }
+                if (listRes.value().contains("items") && listRes.value()["items"].is_array()) {
+                    for (const auto& item : listRes.value()["items"]) {
+                        if (item.contains("hash") && item["hash"].is_string()) {
+                            auto hash = item["hash"].get<std::string>();
+                            if (!hash.empty()) {
+                                knownHashes.push_back(std::move(hash));
+                                ++itemsInPage;
+                                if (static_cast<int>(knownHashes.size()) >= kDiscoverHashLimit) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                ListRequest listReq;
+                listReq.limit = kDiscoverPageSize;
+                listReq.offset = offset;
+                auto listRes = yams::cli::run_sync(discoverClient.list(listReq), kOpTimeout);
+                if (!listRes) {
+                    WARN("Discovery list failed at offset " << offset << ": "
+                                                            << listRes.error().message);
+                    break;
+                }
+                for (auto& item : listRes.value().items) {
+                    if (!item.hash.empty()) {
+                        knownHashes.push_back(item.hash);
+                        ++itemsInPage;
+                        if (static_cast<int>(knownHashes.size()) >= kDiscoverHashLimit) {
+                            break;
+                        }
                     }
                 }
             }
-        } else {
-            ListRequest listReq;
-            listReq.limit = 200;
-            auto listRes = yams::cli::run_sync(discoverClient.list(listReq), kOpTimeout);
-            if (listRes) {
-                for (auto& item : listRes.value().items) {
-                    if (!item.hash.empty())
-                        knownHashes.push_back(item.hash);
-                }
+
+            if (itemsInPage < kDiscoverPageSize) {
+                done = true;
             }
         }
+
+        std::sort(knownHashes.begin(), knownHashes.end());
+        knownHashes.erase(std::unique(knownHashes.begin(), knownHashes.end()), knownHashes.end());
     }
 
     auto initSnap = DaemonSnapshot::capture(discoverClient);
@@ -2390,6 +2429,101 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     }
     std::cout << "\n";
 
+    // Thread-level hotspots
+    std::map<int, std::vector<int64_t>> perThreadSuccessLatUs;
+    std::map<int, int> perThreadFails;
+    for (const auto& tr : allTraces) {
+        if (tr.success) {
+            perThreadSuccessLatUs[tr.threadId].push_back(tr.latencyUs);
+        } else {
+            perThreadFails[tr.threadId]++;
+        }
+    }
+    struct ThreadHotspot {
+        int threadId{0};
+        int64_t p95Us{0};
+        double meanUs{0.0};
+        int failures{0};
+        size_t okCount{0};
+    };
+    std::vector<ThreadHotspot> threadHotspots;
+    threadHotspots.reserve(static_cast<size_t>(kTotalClients));
+    for (int tid = 0; tid < kTotalClients; ++tid) {
+        auto it = perThreadSuccessLatUs.find(tid);
+        std::vector<int64_t> lats =
+            (it != perThreadSuccessLatUs.end()) ? it->second : std::vector<int64_t>{};
+        auto stats = PercentileStats::compute(lats);
+        threadHotspots.push_back(
+            ThreadHotspot{tid, stats.p95, stats.mean, perThreadFails[tid], stats.count});
+    }
+    std::sort(threadHotspots.begin(), threadHotspots.end(),
+              [](const ThreadHotspot& a, const ThreadHotspot& b) {
+                  if (a.p95Us != b.p95Us) {
+                      return a.p95Us > b.p95Us;
+                  }
+                  return a.failures > b.failures;
+              });
+
+    std::cout << "  Slowest threads (p95):\n";
+    for (int i = 0; i < 5 && i < static_cast<int>(threadHotspots.size()); ++i) {
+        const auto& th = threadHotspots[i];
+        std::cout << "    t" << th.threadId << ": p95=" << th.p95Us / 1000
+                  << "ms mean=" << std::fixed << std::setprecision(1) << (th.meanUs / 1000.0)
+                  << "ms ok=" << th.okCount << " fail=" << th.failures << "\n";
+    }
+    std::cout << "\n";
+
+    // Time-window hotspots
+    struct WindowStats {
+        int ops{0};
+        int fails{0};
+        int64_t totalLatUs{0};
+    };
+    std::map<int, WindowStats> windows;
+    for (const auto& tr : allTraces) {
+        const int bucket = static_cast<int>(tr.wallClockMs / std::max(1, kHotspotWindowMs));
+        auto& ws = windows[bucket];
+        ws.ops++;
+        ws.totalLatUs += tr.latencyUs;
+        if (!tr.success) {
+            ws.fails++;
+        }
+    }
+    struct WindowHotspot {
+        int bucket{0};
+        double avgMs{0.0};
+        int ops{0};
+        int fails{0};
+    };
+    std::vector<WindowHotspot> windowHotspots;
+    windowHotspots.reserve(windows.size());
+    for (const auto& [bucket, ws] : windows) {
+        if (!isHotspotWindowEligible(ws.ops, kTotalClients)) {
+            continue;
+        }
+        const double avgMs =
+            (ws.ops > 0) ? (static_cast<double>(ws.totalLatUs) / ws.ops / 1000.0) : 0.0;
+        windowHotspots.push_back(WindowHotspot{bucket, avgMs, ws.ops, ws.fails});
+    }
+    std::sort(windowHotspots.begin(), windowHotspots.end(),
+              [](const WindowHotspot& a, const WindowHotspot& b) {
+                  if (a.avgMs != b.avgMs) {
+                      return a.avgMs > b.avgMs;
+                  }
+                  return a.fails > b.fails;
+              });
+
+    std::cout << "  Slowest time windows:\n";
+    for (int i = 0; i < 5 && i < static_cast<int>(windowHotspots.size()); ++i) {
+        const auto& hw = windowHotspots[i];
+        const int64_t startMs = static_cast<int64_t>(hw.bucket) * kHotspotWindowMs;
+        const int64_t endMs = startMs + kHotspotWindowMs;
+        std::cout << "    [" << startMs << ", " << endMs << ")ms"
+                  << " avg=" << std::fixed << std::setprecision(1) << hw.avgMs
+                  << "ms ops=" << hw.ops << " fail=" << hw.fails << "\n";
+    }
+    std::cout << "\n";
+
     // Latency distribution (histogram buckets)
     auto printHistogram = [](const std::string& label, std::vector<int64_t>& lats) {
         if (lats.empty())
@@ -2450,6 +2584,26 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         traceArray.push_back(std::move(j));
     }
 
+    json threadHotspotsJson = json::array();
+    for (const auto& th : threadHotspots) {
+        threadHotspotsJson.push_back(json{{"tid", th.threadId},
+                                          {"p95_us", th.p95Us},
+                                          {"mean_us", th.meanUs},
+                                          {"ok", th.okCount},
+                                          {"fail", th.failures}});
+    }
+
+    json windowHotspotsJson = json::array();
+    for (const auto& hw : windowHotspots) {
+        const int64_t startMs = static_cast<int64_t>(hw.bucket) * kHotspotWindowMs;
+        const int64_t endMs = startMs + kHotspotWindowMs;
+        windowHotspotsJson.push_back(json{{"start_ms", startMs},
+                                          {"end_ms", endMs},
+                                          {"avg_ms", hw.avgMs},
+                                          {"ops", hw.ops},
+                                          {"fail", hw.fails}});
+    }
+
     json record{
         {"timestamp", isoTimestamp()},
         {"test", "large_corpus_reads"},
@@ -2482,6 +2636,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         {"final_mb", finalSnap.memoryUsageMb},
                         {"delta_mb", finalSnap.memoryUsageMb - initSnap.memoryUsageMb}}},
         {"error_categories", errorCategories},
+        {"hotspots", json{{"window_ms", kHotspotWindowMs},
+                          {"threads", threadHotspotsJson},
+                          {"windows", windowHotspotsJson}}},
         {"daemon_snapshot_final", finalSnap.toJson()},
         {"time_series", timeSeries},
         {"op_traces", traceArray},

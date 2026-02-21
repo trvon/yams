@@ -55,25 +55,26 @@ struct SearchRequest {
     int afterContext = 0;               // Lines after match
     int beforeContext = 0;              // Lines before match
     int context = 0;                    // Lines before and after
-    std::string hashQuery;              // Search by file hash
+    std::string hashQuery = {};         // Search by file hash
 
     // Engine-level filtering (parity with app::services::SearchRequest)
-    std::string pathPattern; // Glob-like filename/path filter (legacy, single pattern)
-    std::vector<std::string> pathPatterns; // Multiple glob patterns (preferred over pathPattern)
-    std::vector<std::string> tags;         // Filter by tags (presence-based)
-    bool matchAllTags = false;             // Require all specified tags
-    std::string extension;                 // File extension filter
-    std::string mimeType;                  // MIME type filter
-    std::string fileType;                  // High-level file type
-    bool textOnly{false};                  // Text-only filter
-    bool binaryOnly{false};                // Binary-only filter
+    std::string pathPattern = {}; // Glob-like filename/path filter (legacy, single pattern)
+    std::vector<std::string> pathPatterns =
+        {};                             // Multiple glob patterns (preferred over pathPattern)
+    std::vector<std::string> tags = {}; // Filter by tags (presence-based)
+    bool matchAllTags = false;          // Require all specified tags
+    std::string extension = {};         // File extension filter
+    std::string mimeType = {};          // MIME type filter
+    std::string fileType = {};          // High-level file type
+    bool textOnly{false};               // Text-only filter
+    bool binaryOnly{false};             // Binary-only filter
     // Time filters
-    std::string createdAfter;
-    std::string createdBefore;
-    std::string modifiedAfter;
-    std::string modifiedBefore;
-    std::string indexedAfter;
-    std::string indexedBefore;
+    std::string createdAfter = {};
+    std::string createdBefore = {};
+    std::string modifiedAfter = {};
+    std::string modifiedBefore = {};
+    std::string indexedAfter = {};
+    std::string indexedBefore = {};
 
     int vectorStageTimeoutMs{0};
     int keywordStageTimeoutMs{0};
@@ -81,10 +82,10 @@ struct SearchRequest {
 
     // Session scoping (controls hot/cold path behavior)
     bool useSession = false;
-    std::string sessionName;
-    bool globalSearch = false; // Session-isolated memory (PBI-082): bypass session isolation
-    bool symbolRank = true;    // Enable automatic symbol ranking boost for code-like queries
-    std::string instanceId;    // Instance-level isolation (UUID of MCP connection)
+    std::string sessionName = {};
+    bool globalSearch = false;   // Session-isolated memory (PBI-082): bypass session isolation
+    bool symbolRank = true;      // Enable automatic symbol ranking boost for code-like queries
+    std::string instanceId = {}; // Instance-level isolation (UUID of MCP connection)
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -1516,8 +1517,8 @@ struct EmbedDocumentsRequest {
 
 struct LoadModelRequest {
     std::string modelName;
-    bool preload = true;     // Keep in hot pool
-    std::string optionsJson; // Optional plugin options (e.g., hf.revision/offline)
+    bool preload = true;          // Keep in hot pool
+    std::string optionsJson = {}; // Optional plugin options (e.g., hf.revision/offline)
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -6921,8 +6922,8 @@ struct UseSessionRequest {
 struct AddPathSelectorRequest {
     std::string session_name;
     std::string path;
-    std::vector<std::string> tags;
-    std::map<std::string, std::string> metadata;
+    std::vector<std::string> tags = {};
+    std::map<std::string, std::string> metadata = {};
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -7488,9 +7489,9 @@ struct Message {
     std::variant<Request, Response> payload;
 
     // Optional fields
-    std::optional<std::string> sessionId;
-    std::optional<std::string> instanceId;
-    std::optional<std::string> clientVersion;
+    std::optional<std::string> sessionId = std::nullopt;
+    std::optional<std::string> instanceId = std::nullopt;
+    std::optional<std::string> clientVersion = std::nullopt;
 
     // Streaming preference - client indicates if it expects chunked/streaming response
     bool expectsStreamingResponse = false;

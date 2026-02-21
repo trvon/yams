@@ -749,6 +749,22 @@ public:
         }
     }
 
+    Result<void> checkpointWal() {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        // Downcast to SqliteVecBackend — safe because we always create it as such
+        auto* sqliteBackend = dynamic_cast<SqliteVecBackend*>(backend_.get());
+        if (!sqliteBackend) {
+            return Result<void>{}; // Non-SQLite backend, nothing to do
+        }
+
+        return sqliteBackend->checkpointWal();
+    }
+
     VectorDatabase::DatabaseStats getStats() const {
         VectorDatabase::DatabaseStats stats;
 
@@ -964,6 +980,10 @@ void VectorDatabase::compactDatabase() {
 
 bool VectorDatabase::rebuildIndex() {
     return pImpl->buildIndex();
+}
+
+Result<void> VectorDatabase::checkpointWal() {
+    return pImpl->checkpointWal();
 }
 
 VectorDatabase::DatabaseStats VectorDatabase::getStats() const {

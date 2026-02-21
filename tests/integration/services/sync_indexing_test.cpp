@@ -143,7 +143,7 @@ TEST_F(SyncIndexingIT, SingleFileAddImmediateGrep) {
     // Queue should be minimal (only KG/embeddings stages, not FTS5 metadata)
     std::this_thread::sleep_for(200ms); // brief wait for queue update
     auto queueDepth = getQueueDepth();
-    EXPECT_LE(queueDepth, 2) << "Queue depth too high after sync add: " << queueDepth;
+    EXPECT_LE(queueDepth, 2u) << "Queue depth too high after sync add: " << queueDepth;
 }
 
 /**

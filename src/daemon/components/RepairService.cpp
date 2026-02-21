@@ -1928,40 +1928,75 @@ RepairOperationResult RepairService::optimizeDatabase(bool dryRun, bool verbose,
 
     namespace fs = std::filesystem;
     fs::path dbPath = cfg_.dataDir / "yams.db";
+    fs::path vecDbPath = cfg_.dataDir / "vectors.db";
 
-    if (!fs::exists(dbPath)) {
-        result.message = "Database not found";
+    int dbCount = 0;
+    if (fs::exists(dbPath))
+        dbCount++;
+    if (fs::exists(vecDbPath))
+        dbCount++;
+
+    if (dbCount == 0) {
+        result.message = "No databases found";
         return result;
     }
 
-    result.processed = 1;
+    result.processed = dbCount;
 
     if (dryRun) {
-        result.skipped = 1;
-        result.message = "Would optimize database";
+        result.skipped = dbCount;
+        result.message = "Would optimize " + std::to_string(dbCount) + " database(s)";
         return result;
     }
 
-    sqlite3* db;
-    if (sqlite3_open(dbPath.string().c_str(), &db) != SQLITE_OK) {
-        result.message = "Failed to open database";
-        result.failed = 1;
-        return result;
+    int succeeded = 0;
+    std::string failMsg;
+
+    // Helper: checkpoint WAL + VACUUM + ANALYZE for a single database
+    auto optimizeOne = [&](const fs::path& path, const char* label) {
+        sqlite3* db = nullptr;
+        if (sqlite3_open(path.string().c_str(), &db) != SQLITE_OK) {
+            failMsg += std::string(label) + ": failed to open; ";
+            return false;
+        }
+
+        // Checkpoint WAL first to reduce its size before VACUUM
+        int walLog = 0, walCkpt = 0;
+        sqlite3_wal_checkpoint_v2(db, nullptr, SQLITE_CHECKPOINT_TRUNCATE, &walLog, &walCkpt);
+        spdlog::info("[Optimize] {} WAL checkpoint: log={} checkpointed={}", label, walLog,
+                     walCkpt);
+
+        char* errMsg = nullptr;
+        if (sqlite3_exec(db, "VACUUM", nullptr, nullptr, &errMsg) == SQLITE_OK) {
+            sqlite3_exec(db, "ANALYZE", nullptr, nullptr, nullptr);
+            spdlog::info("[Optimize] {} VACUUM + ANALYZE completed", label);
+            sqlite3_close(db);
+            return true;
+        } else {
+            std::string error = errMsg ? errMsg : "Unknown error";
+            sqlite3_free(errMsg);
+            failMsg += std::string(label) + ": " + error + "; ";
+            sqlite3_close(db);
+            return false;
+        }
+    };
+
+    if (fs::exists(dbPath) && optimizeOne(dbPath, "yams.db")) {
+        succeeded++;
+    }
+    if (fs::exists(vecDbPath) && optimizeOne(vecDbPath, "vectors.db")) {
+        succeeded++;
     }
 
-    char* errMsg = nullptr;
-    if (sqlite3_exec(db, "VACUUM", nullptr, nullptr, &errMsg) == SQLITE_OK) {
-        sqlite3_exec(db, "ANALYZE", nullptr, nullptr, nullptr);
-        result.succeeded = 1;
-        result.message = "Database optimized";
+    result.succeeded = succeeded;
+    result.failed = dbCount - succeeded;
+
+    if (result.failed == 0) {
+        result.message = "All databases optimized";
     } else {
-        std::string error = errMsg ? errMsg : "Unknown error";
-        sqlite3_free(errMsg);
-        result.failed = 1;
-        result.message = "Optimize failed: " + error;
+        result.message = "Optimize partially failed: " + failMsg;
     }
 
-    sqlite3_close(db);
     return result;
 }
 

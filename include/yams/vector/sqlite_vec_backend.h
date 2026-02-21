@@ -127,6 +127,9 @@ public:
     /// Drop vector tables (safe when reinitializing)
     Result<void> dropTables();
 
+    /// Checkpoint vectors.db WAL to reclaim disk space
+    Result<void> checkpointWal();
+
     /// No-op for V2 schema (unified table has no rowid sync issues)
     Result<void> ensureEmbeddingRowIdColumn();
 

@@ -227,7 +227,8 @@ TEST_F(ZypPluginTest, InterfaceRetrieval) {
         GTEST_SKIP() << "zyp plugin not available";
     }
     EXPECT_NE(extractor_, nullptr);
-    EXPECT_EQ(extractor_->abi_version, YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION);
+    EXPECT_EQ(extractor_->abi_version,
+              static_cast<uint32_t>(YAMS_IFACE_CONTENT_EXTRACTOR_V1_VERSION));
 }
 
 // ============================================================================

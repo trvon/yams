@@ -1413,12 +1413,62 @@ public:
         // Save any dirty indices
         saveAllHnswUnlocked();
 
+        // Checkpoint WAL before vacuum to reclaim WAL space
+        checkpointWalUnlocked();
+
         // Vacuum SQLite
         sqlite3_exec(db_, "VACUUM", nullptr, nullptr, nullptr);
 
         return Result<void>{};
     }
 
+    /// Checkpoint vectors.db WAL using PASSIVE mode (non-blocking).
+    /// If the WAL exceeds a size threshold, escalate to TRUNCATE to reclaim disk.
+    Result<void> checkpointWal() {
+        std::unique_lock lock(mutex_);
+
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        return checkpointWalUnlocked();
+    }
+
+private:
+    Result<void> checkpointWalUnlocked() {
+        int walLog = 0, walCkpt = 0;
+
+        // First try PASSIVE (non-blocking, won't interfere with readers)
+        int rc =
+            sqlite3_wal_checkpoint_v2(db_, nullptr, SQLITE_CHECKPOINT_PASSIVE, &walLog, &walCkpt);
+        if (rc != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string("WAL checkpoint failed: ") + sqlite3_errmsg(db_)};
+        }
+
+        spdlog::debug("[VectorDB] WAL checkpoint PASSIVE: log={} checkpointed={}", walLog, walCkpt);
+
+        // If significant un-checkpointed pages remain, try TRUNCATE to reclaim disk.
+        // Threshold: 50K pages (~200MB at 4KB page size).
+        constexpr int kTruncateThreshold = 50000;
+        if (walLog > kTruncateThreshold && walLog > walCkpt) {
+            spdlog::info("[VectorDB] WAL has {} uncheckpointed pages, attempting TRUNCATE",
+                         walLog - walCkpt);
+            rc = sqlite3_wal_checkpoint_v2(db_, nullptr, SQLITE_CHECKPOINT_TRUNCATE, &walLog,
+                                           &walCkpt);
+            if (rc == SQLITE_OK) {
+                spdlog::info("[VectorDB] WAL TRUNCATE succeeded");
+            } else {
+                // TRUNCATE requires exclusive access; PASSIVE fallback is fine
+                spdlog::debug("[VectorDB] WAL TRUNCATE not possible (busy): {}",
+                              sqlite3_errmsg(db_));
+            }
+        }
+
+        return Result<void>{};
+    }
+
+public:
     Result<void> beginTransaction() {
         std::unique_lock lock(mutex_);
 
@@ -2694,6 +2744,10 @@ Result<void> SqliteVecBackend::buildIndex() {
 
 Result<void> SqliteVecBackend::optimize() {
     return impl_->optimize();
+}
+
+Result<void> SqliteVecBackend::checkpointWal() {
+    return impl_->checkpointWal();
 }
 
 Result<void> SqliteVecBackend::beginTransaction() {

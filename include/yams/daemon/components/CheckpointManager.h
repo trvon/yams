@@ -94,6 +94,7 @@ private:
     bool checkpointVectorIndex();
     bool checkpointHotzone();
     bool checkpointWal();
+    bool checkpointVectorWal();
 
     Config config_;
     Dependencies deps_;

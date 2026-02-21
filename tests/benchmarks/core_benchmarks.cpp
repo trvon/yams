@@ -68,6 +68,7 @@ protected:
         return chunks.size();
     }
 
+    size_t dataSize_;
     chunking::ChunkingConfig chunkConfig_;
     std::unique_ptr<chunking::RabinChunker> chunker_;
     std::vector<std::byte> data_;

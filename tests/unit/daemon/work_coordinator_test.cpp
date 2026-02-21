@@ -228,8 +228,8 @@ TEST_CASE("WorkCoordinator async operations", "[daemon][work_coordinator][async]
         }
 
         // Wait for all coroutines to complete with timeout
-        bool completed = wait_for_condition(
-            2000ms, 10ms, [&counter, num_coros]() { return counter.load() == num_coros; });
+        bool completed =
+            wait_for_condition(2000ms, 10ms, [&counter]() { return counter.load() == num_coros; });
 
         REQUIRE(completed);
         REQUIRE(counter.load() == num_coros);

@@ -280,7 +280,7 @@ TEST_CASE("PostIngestQueue: Parallel processing stress test", "[daemon][benchmar
 
     // Create test files in batches
     auto startTime = std::chrono::steady_clock::now();
-    int ingested = 0;
+    size_t ingested = 0;
 
     for (int batch = 0; batch < numBatches; ++batch) {
         spdlog::info("Ingesting batch {}/{}...", batch + 1, numBatches);

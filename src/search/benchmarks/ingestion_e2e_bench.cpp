@@ -714,7 +714,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
 // main - Entry point
 // ============================================================================
 
-int main(int argc, char* argv[]) {
+int main(int /*argc*/, char* /*argv*/[]) {
     // Set log level
     const char* logLevel = std::getenv("YAMS_LOG_LEVEL");
     if (logLevel && std::string(logLevel) == "debug") {

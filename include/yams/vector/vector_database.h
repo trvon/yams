@@ -209,6 +209,10 @@ public:
     void compactDatabase();
     bool rebuildIndex();
 
+    /// Checkpoint vectors.db WAL to reclaim disk space.
+    /// Called periodically by CheckpointManager.
+    Result<void> checkpointWal();
+
     // Statistics and monitoring
     struct DatabaseStats {
         size_t total_vectors = 0;

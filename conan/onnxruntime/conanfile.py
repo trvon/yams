@@ -34,6 +34,10 @@ class OnnxRuntimeConan(ConanFile):
         "parallel_jobs": ["ANY"],
         # Use prebuilt Python package instead of building from source
         "use_prebuilt_python": [True, False],
+        # Use system-installed onnxruntime (e.g. Homebrew, apt, manual install)
+        "use_system": [True, False],
+        # Prefix path for system-installed onnxruntime (auto-detected if empty)
+        "system_prefix": ["ANY"],
     }
     default_options = {
         "shared": False,
@@ -42,6 +46,8 @@ class OnnxRuntimeConan(ConanFile):
         "rocm_path": "/opt/rocm",
         "parallel_jobs": "4",
         "use_prebuilt_python": False,
+        "use_system": False,
+        "system_prefix": "",
     }
 
     # Source builds need these
@@ -61,9 +67,169 @@ class OnnxRuntimeConan(ConanFile):
         if self.settings.os == "Windows":
             del self.options.fPIC
 
+    def _detect_system_prefix(self):
+        """Auto-detect system onnxruntime installation prefix.
+
+        Search order:
+        1. Explicit system_prefix option
+        2. pkg-config --variable=prefix onnxruntime
+        3. Homebrew prefix (macOS)
+        4. Common system paths (/usr/local, /usr, /opt/homebrew)
+        """
+        explicit = str(self.options.system_prefix)
+        if explicit:
+            return explicit
+
+        # Try pkg-config
+        try:
+            result = subprocess.run(
+                ["pkg-config", "--variable=prefix", "onnxruntime"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                prefix = result.stdout.strip()
+                if os.path.isdir(prefix):
+                    return prefix
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # Try brew --prefix onnxruntime (macOS)
+        if str(self.settings.os) == "Macos":
+            try:
+                result = subprocess.run(
+                    ["brew", "--prefix", "onnxruntime"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    prefix = result.stdout.strip()
+                    if os.path.isdir(prefix):
+                        return prefix
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
+        # Probe common system prefixes
+        candidates = []
+        if str(self.settings.os) == "Macos":
+            candidates = ["/opt/homebrew", "/usr/local"]
+        else:
+            candidates = ["/usr/local", "/usr"]
+
+        for prefix in candidates:
+            if self._has_onnxruntime_lib(prefix) and self._has_onnxruntime_header(prefix):
+                return prefix
+
+        return None
+
+    @staticmethod
+    def _has_onnxruntime_lib(prefix):
+        """Check if libonnxruntime exists under prefix/lib."""
+        lib_dir = os.path.join(prefix, "lib")
+        if not os.path.isdir(lib_dir):
+            return False
+        for name in os.listdir(lib_dir):
+            if name.startswith("libonnxruntime") and (
+                name.endswith(".dylib") or name.endswith(".so") or ".so." in name
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _has_onnxruntime_header(prefix):
+        """Check if onnxruntime_c_api.h exists in any known layout.
+
+        Layouts:
+        - Flat:     include/onnxruntime_c_api.h  (prebuilt archives)
+        - Homebrew: include/onnxruntime/onnxruntime_c_api.h  (brew install)
+        - Source:   include/onnxruntime/core/session/onnxruntime_c_api.h
+        - Linux:    include/onnxruntime/core/session/onnxruntime_c_api.h (apt/manual)
+        """
+        include_dir = os.path.join(prefix, "include")
+        return any(os.path.exists(os.path.join(include_dir, p)) for p in [
+            "onnxruntime_c_api.h",
+            os.path.join("onnxruntime", "onnxruntime_c_api.h"),
+            os.path.join("onnxruntime", "core", "session", "onnxruntime_c_api.h"),
+        ])
+
+    @staticmethod
+    def _find_onnxruntime_header(prefix):
+        """Return the path to onnxruntime_c_api.h under prefix, or None."""
+        include_dir = os.path.join(prefix, "include")
+        for rel in [
+            "onnxruntime_c_api.h",
+            os.path.join("onnxruntime", "onnxruntime_c_api.h"),
+            os.path.join("onnxruntime", "core", "session", "onnxruntime_c_api.h"),
+        ]:
+            candidate = os.path.join(include_dir, rel)
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
+    def _validate_system_install(self, prefix):
+        """Validate that system onnxruntime has required headers and library."""
+        lib_dir = os.path.join(prefix, "lib")
+        include_dir = os.path.join(prefix, "include")
+
+        if not self._has_onnxruntime_lib(prefix):
+            raise ConanInvalidConfiguration(
+                f"System onnxruntime library not found in {lib_dir}. "
+                f"Install onnxruntime or set -o onnxruntime/*:use_system=False"
+            )
+
+        if not self._has_onnxruntime_header(prefix):
+            raise ConanInvalidConfiguration(
+                f"System onnxruntime headers not found under {include_dir}. "
+                f"Checked flat (include/), Homebrew (include/onnxruntime/), "
+                f"and source (include/onnxruntime/core/session/) layouts. "
+                f"Install onnxruntime development headers or set -o onnxruntime/*:use_system=False"
+            )
+
+        # Detect version from header
+        version_header = self._find_onnxruntime_header(prefix)
+        if version_header:
+            self._detect_system_version(version_header)
+
+        self.output.info(f"System onnxruntime validated at {prefix}")
+        return True
+
+    def _detect_system_version(self, header_path):
+        """Read ORT API version from onnxruntime_c_api.h."""
+        try:
+            with open(header_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            import re
+            major = re.search(r"ORT_API_VERSION\s+([0-9]+)", content)
+            minor_match = re.search(r"ORT_API_MINOR_VERSION\s+([0-9]+)", content)
+            # Fallback patterns used in different ORT versions
+            if not major:
+                major = re.search(r"ORT_API_VERSION_MAJOR\s+([0-9]+)", content)
+            if not minor_match:
+                minor_match = re.search(r"ORT_API_VERSION_MINOR\s+([0-9]+)", content)
+            if major:
+                ver = major.group(1)
+                if minor_match:
+                    ver += f".{minor_match.group(1)}"
+                self.output.info(f"System onnxruntime API version: {ver}")
+        except Exception:
+            pass
+
     def configure(self):
         if self.options.shared:
             self.options.rm_safe("fPIC")
+
+        # When using system onnxruntime, validate the installation
+        if self.options.use_system:
+            prefix = self._detect_system_prefix()
+            if prefix is None:
+                raise ConanInvalidConfiguration(
+                    "use_system=True but no system onnxruntime installation found. "
+                    "Install onnxruntime (e.g., 'brew install onnxruntime') or set "
+                    "-o onnxruntime/*:system_prefix=/path/to/prefix"
+                )
+            self._validate_system_install(prefix)
+            # Store resolved prefix for later stages
+            self._system_prefix_resolved = prefix
+            self.output.info(f"Using system onnxruntime from: {prefix}")
+            return  # Skip GPU validation for system builds
 
         # Validate GPU options per platform
         gpu = self.options.with_gpu
@@ -301,6 +467,9 @@ class OnnxRuntimeConan(ConanFile):
             )
 
     def build(self):
+        if self.options.use_system:
+            self.output.info("Using system onnxruntime - skipping build")
+            return
         if self.options.use_prebuilt_python:
             # Skip build - we'll package from Python installation
             self.output.info("Using prebuilt Python package - skipping build")
@@ -700,8 +869,110 @@ class OnnxRuntimeConan(ConanFile):
             f.write("ONNX Runtime - MIT License\n")
             f.write("See: https://github.com/microsoft/onnxruntime/blob/main/LICENSE\n")
 
+    def _package_system(self):
+        """Package from system-installed onnxruntime (Homebrew, apt, etc.).
+
+        Copies headers and libraries from the system prefix into the Conan
+        package so downstream consumers get a self-contained package reference
+        without needing system paths at link time.
+        """
+        prefix = getattr(self, "_system_prefix_resolved", None) or self._detect_system_prefix()
+        if prefix is None:
+            raise ConanInvalidConfiguration(
+                "System onnxruntime prefix could not be resolved during packaging"
+            )
+
+        include_src = os.path.join(prefix, "include")
+        lib_src = os.path.join(prefix, "lib")
+
+        # Copy headers — handle all known layouts:
+        #   Flat:     include/onnxruntime_c_api.h
+        #   Homebrew: include/onnxruntime/onnxruntime_c_api.h
+        #   Source:   include/onnxruntime/core/session/onnxruntime_c_api.h
+        #
+        # Target layout in Conan package:
+        #   include/onnxruntime_c_api.h  (flat, for #include "onnxruntime_c_api.h")
+        #   include/onnxruntime/...      (tree, for #include <onnxruntime/...>)
+        if os.path.isdir(include_src):
+            # Copy any flat headers (prebuilt archive layout)
+            copy(self, "onnxruntime*.h", src=include_src,
+                 dst=os.path.join(self.package_folder, "include"), keep_path=False)
+            copy(self, "onnxruntime*.hpp", src=include_src,
+                 dst=os.path.join(self.package_folder, "include"), keep_path=False)
+
+            # Copy nested header tree (onnxruntime/...)
+            onnx_inc = os.path.join(include_src, "onnxruntime")
+            if os.path.isdir(onnx_inc):
+                copy(self, "*.h", src=onnx_inc,
+                     dst=os.path.join(self.package_folder, "include", "onnxruntime"),
+                     keep_path=True)
+                copy(self, "*.hpp", src=onnx_inc,
+                     dst=os.path.join(self.package_folder, "include", "onnxruntime"),
+                     keep_path=True)
+
+                # Homebrew layout: headers are directly in include/onnxruntime/
+                # (e.g. include/onnxruntime/onnxruntime_c_api.h)
+                # Also copy them flat into include/ so #include "onnxruntime_c_api.h" works
+                copy(self, "onnxruntime*.h", src=onnx_inc,
+                     dst=os.path.join(self.package_folder, "include"), keep_path=False)
+
+            # Source layout: headers in include/onnxruntime/core/session/
+            session_inc = os.path.join(include_src, "onnxruntime", "core", "session")
+            if os.path.isdir(session_inc):
+                copy(self, "onnxruntime*.h", src=session_inc,
+                     dst=os.path.join(self.package_folder, "include"), keep_path=False)
+
+        # Copy libraries (shared + static)
+        lib_dst = os.path.join(self.package_folder, "lib")
+        mkdir(self, lib_dst)
+        if os.path.isdir(lib_src):
+            for item in os.listdir(lib_src):
+                if not item.startswith("libonnxruntime"):
+                    continue
+                src_path = os.path.join(lib_src, item)
+                dst_path = os.path.join(lib_dst, item)
+                if item.endswith((".so", ".a", ".dylib")) or ".so." in item or ".dylib." in item:
+                    if os.path.islink(src_path):
+                        link_target = os.readlink(src_path)
+                        if os.path.exists(dst_path) or os.path.islink(dst_path):
+                            os.remove(dst_path)
+                        os.symlink(link_target, dst_path)
+                        self.output.info(f"Preserved symlink: {item} -> {link_target}")
+                    elif os.path.isfile(src_path):
+                        shutil.copy2(src_path, dst_path)
+                        self.output.info(f"Copied library: {item}")
+
+        # Copy existing pkg-config if available (we'll overwrite with ours later)
+        system_pc = os.path.join(lib_src, "pkgconfig", "onnxruntime.pc")
+        if os.path.exists(system_pc):
+            self.output.info("Found system pkg-config file")
+
+        # License
+        license_candidates = [
+            os.path.join(prefix, "share", "doc", "onnxruntime", "LICENSE"),
+            os.path.join(prefix, "share", "onnxruntime", "LICENSE"),
+            os.path.join(prefix, "LICENSE"),
+        ]
+        for lic in license_candidates:
+            if os.path.exists(lic):
+                copy(self, os.path.basename(lic), src=os.path.dirname(lic),
+                     dst=os.path.join(self.package_folder, "licenses"), keep_path=False)
+                break
+        else:
+            # Create a stub license
+            licenses_dir = os.path.join(self.package_folder, "licenses")
+            mkdir(self, licenses_dir)
+            save(self, os.path.join(licenses_dir, "LICENSE"),
+                 "ONNX Runtime - MIT License\n"
+                 "System installation from: {}\n"
+                 "See: https://github.com/microsoft/onnxruntime/blob/main/LICENSE\n".format(prefix))
+
+        self.output.info(f"Packaged system onnxruntime from {prefix}")
+
     def package(self):
-        if self.options.use_prebuilt_python:
+        if self.options.use_system:
+            self._package_system()
+        elif self.options.use_prebuilt_python:
             self._package_python_prebuilt()
         elif self._is_source_build():
             self._package_source_build()

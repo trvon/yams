@@ -376,8 +376,8 @@ public:
     }
 
     void analyzeResults(const TestQuery& tq, const daemon::SearchResponse& vectorRes,
-                        const daemon::SearchResponse& keywordRes,
-                        const daemon::SearchResponse& hybridRes) {
+                        const daemon::SearchResponse& /*keywordRes*/,
+                        const daemon::SearchResponse& /*hybridRes*/) {
         spdlog::info("\n--- Analysis ---");
 
         // Check if expected files are in vector results

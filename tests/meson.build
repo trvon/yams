@@ -1258,20 +1258,22 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_onnx_model_pool_exe = executable('catch2_onnx_model_pool',
-    files(
-      'unit/daemon/onnx_model_pool_catch2_test.cpp',
-      '../plugins/onnx/model_provider.cpp',
-      '../plugins/onnx/onnx_model_pool.cpp',
-      '../plugins/onnx/onnx_reranker_session.cpp',
-      '../plugins/onnx/onnx_colbert_session.cpp',
-    ),
-    include_directories: incs,
-    dependencies: onnx_provider_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  if onnx_dep.found()
+    catch2_onnx_model_pool_exe = executable('catch2_onnx_model_pool',
+      files(
+        'unit/daemon/onnx_model_pool_catch2_test.cpp',
+        '../plugins/onnx/model_provider.cpp',
+        '../plugins/onnx/onnx_model_pool.cpp',
+        '../plugins/onnx/onnx_reranker_session.cpp',
+        '../plugins/onnx/onnx_colbert_session.cpp',
+      ),
+      include_directories: incs,
+      dependencies: onnx_provider_test_deps,
+      cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+      build_rpath: ':'.join(_test_rpaths),
+      install: false,
+    )
+  endif
 
   # CLI Test Suites (Catch2)
   # --------------------------------------------------------------------------
@@ -2851,11 +2853,13 @@ if catch2_dep.found()
     timeout: 120
   )
 
-  test('onnx_model_pool', catch2_onnx_model_pool_exe,
-    suite: ['catch2', 'unit', 'daemon', 'onnx', 'pool'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120,
-  )
+  if onnx_dep.found()
+    test('onnx_model_pool', catch2_onnx_model_pool_exe,
+      suite: ['catch2', 'unit', 'daemon', 'onnx', 'pool'],
+      env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+      timeout: 120,
+    )
+  endif
 
   test('cli_init_command', catch2_cli_init_command_exe,
     suite: ['catch2', 'unit', 'cli', 'init'],

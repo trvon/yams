@@ -221,7 +221,7 @@ TEST(SymbolExtractorPlugins, ExtractMultipleSymbols) {
     ASSERT_NE(out, nullptr);
 
     // Should have at least the class and some methods/functions
-    ASSERT_GE(out->symbol_count, 1) << "Expected at least 1 symbol";
+    ASSERT_GE(out->symbol_count, 1u) << "Expected at least 1 symbol";
 
     // Verify we have at least one class or function
     bool found_symbol = false;
@@ -261,7 +261,7 @@ class DataProcessor:
     PLUGIN_MISSING_SKIP(rc, out, "Python grammar not available");
     ASSERT_EQ(rc, 0);
     ASSERT_NE(out, nullptr);
-    ASSERT_GT(out->symbol_count, 0) << "No symbols extracted";
+    ASSERT_GT(out->symbol_count, 0u) << "No symbols extracted";
 
     // Should have class and methods
     bool has_class = false;

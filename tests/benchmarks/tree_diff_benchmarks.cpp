@@ -467,7 +467,7 @@ private:
 
         // Calculate deduplicated block storage
         blockDeduplicatedSize_ = 0;
-        for (const auto& hash : uniqueBlockSet) {
+        for (const auto& /*hash*/ : uniqueBlockSet) {
             // Average file size (simulated)
             blockDeduplicatedSize_ += 5000; // Conservative estimate
         }
@@ -556,7 +556,7 @@ private:
 } // anonymous namespace
 
 // Main benchmark runner
-int main(int argc, char** argv) {
+int main(int /*argc*/, char** /*argv*/) {
     using namespace yams::benchmark;
 
     std::cout << "=== PBI-043 Tree-Diff Benchmarks ===" << std::endl;

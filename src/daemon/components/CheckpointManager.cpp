@@ -57,6 +57,10 @@ bool CheckpointManager::checkpointNow() {
         success = false;
     }
 
+    if (!checkpointVectorWal()) {
+        success = false;
+    }
+
     if (!checkpointVectorIndex()) {
         success = false;
     }
@@ -186,6 +190,32 @@ bool CheckpointManager::checkpointWal() {
         spdlog::warn("[CheckpointManager] WAL checkpoint failed: {}", result.error().message);
     } catch (const std::exception& e) {
         spdlog::warn("[CheckpointManager] WAL checkpoint exception: {}", e.what());
+        stats_.checkpoint_errors.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    return false;
+}
+
+bool CheckpointManager::checkpointVectorWal() {
+    if (!deps_.vectorSystemManager) {
+        return true;
+    }
+
+    auto vectorDb = deps_.vectorSystemManager->getVectorDatabase();
+    if (!vectorDb || !vectorDb->isInitialized()) {
+        return true;
+    }
+
+    try {
+        auto result = vectorDb->checkpointWal();
+        if (result) {
+            spdlog::debug("[CheckpointManager] vectors.db WAL checkpoint completed");
+            return true;
+        }
+        spdlog::warn("[CheckpointManager] vectors.db WAL checkpoint failed: {}",
+                     result.error().message);
+    } catch (const std::exception& e) {
+        spdlog::warn("[CheckpointManager] vectors.db WAL checkpoint exception: {}", e.what());
         stats_.checkpoint_errors.fetch_add(1, std::memory_order_relaxed);
     }
 

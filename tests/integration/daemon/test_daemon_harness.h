@@ -44,16 +44,16 @@ struct DaemonHarnessOptions {
     bool skipSocketVerificationOnReady = false;
     bool configureModelPool = false;
     bool modelPoolLazyLoading = true;
-    std::vector<std::string> preloadModels;
-    std::optional<std::filesystem::path> pluginDir;
+    std::vector<std::string> preloadModels = {};
+    std::optional<std::filesystem::path> pluginDir = std::nullopt;
     // Per-plugin configuration: plugin name -> JSON config string
-    std::map<std::string, std::string> pluginConfigs;
+    std::map<std::string, std::string> pluginConfigs = {};
     // Override the data directory instead of creating a temp one.
     // When set, the harness uses this existing path (e.g. a real corpus)
     // and skips cleanup of the data dir on destruction.
-    std::optional<std::filesystem::path> dataDir;
+    std::optional<std::filesystem::path> dataDir = std::nullopt;
     // Additional trusted plugin search paths (appended to DaemonConfig::trustedPluginPaths)
-    std::vector<std::filesystem::path> trustedPluginPaths;
+    std::vector<std::filesystem::path> trustedPluginPaths = {};
 };
 
 class DaemonHarness {

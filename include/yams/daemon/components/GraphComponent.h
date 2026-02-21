@@ -48,11 +48,11 @@ public:
     struct DocumentGraphContext {
         std::string documentHash;
         std::string filePath;
-        std::optional<std::string> snapshotId;
-        std::optional<std::string> rootTreeHash;
-        std::vector<std::string> tags;
-        int64_t documentDbId;
-        std::shared_ptr<std::vector<std::byte>> contentBytes;
+        std::optional<std::string> snapshotId = std::nullopt;
+        std::optional<std::string> rootTreeHash = std::nullopt;
+        std::vector<std::string> tags = {};
+        int64_t documentDbId = 0;
+        std::shared_ptr<std::vector<std::byte>> contentBytes = nullptr;
         bool skipEntityExtraction{false};
     };
     Result<void> onDocumentIngested(const DocumentGraphContext& ctx);

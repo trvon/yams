@@ -24,6 +24,12 @@
 #   YAMS_ONNX_GPU            - GPU provider for ONNX (auto|cuda|coreml|migraphx|none, default: auto)
 #                              auto: macOS=coreml, Linux+NVIDIA=cuda, Linux+ROCm=migraphx, otherwise=none
 #                              migraphx: AMD ROCm GPU acceleration (builds ONNX Runtime from source)
+#   YAMS_USE_SYSTEM_ONNX     - Use system-installed onnxruntime (auto|true|false, default: auto)
+#                              auto: detect system onnxruntime and use it if found
+#                              true: require system onnxruntime (fail if not found)
+#                              false: always download/build via Conan recipe
+#   YAMS_ONNX_PREFIX         - Override prefix path for system onnxruntime
+#                              (e.g., /opt/homebrew/opt/onnxruntime)
 #   YAMS_ROCM_PATH           - ROCm installation path for MIGraphX builds (default: /opt/rocm)
 #   YAMS_ROCM_GPU_TARGETS    - Semicolon-separated AMD GPU architectures for MIGraphX builds
 #                              (default: gfx900;gfx906;gfx908;gfx90a;gfx1030;gfx1100)
@@ -439,8 +445,89 @@ if [[ "${YAMS_DISABLE_ONNX:-}" == "true" ]]; then
   echo "ONNX support disabled (YAMS_DISABLE_ONNX=true)"
   CONAN_ARGS+=(-o "yams/*:enable_onnx=False")
 else
-  # Auto-detect GPU for ONNX acceleration
+  # --- Detect system-installed onnxruntime ---
+  # Override with YAMS_USE_SYSTEM_ONNX=true|false|auto (default: auto)
+  # When auto, we detect system onnxruntime and use it if found.
+  # Set YAMS_ONNX_PREFIX to override the detected prefix path.
+  USE_SYSTEM_ONNX="${YAMS_USE_SYSTEM_ONNX:-auto}"
+  SYSTEM_ONNX_PREFIX="${YAMS_ONNX_PREFIX:-}"
+
+  if [[ "${USE_SYSTEM_ONNX}" == "auto" ]]; then
+    # Auto-detect: check pkg-config, Homebrew, common paths
+    DETECTED_ONNX_PREFIX=""
+
+    # 1) pkg-config
+    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists onnxruntime 2>/dev/null; then
+      DETECTED_ONNX_PREFIX=$(pkg-config --variable=prefix onnxruntime 2>/dev/null || true)
+      if [[ -n "${DETECTED_ONNX_PREFIX}" && -d "${DETECTED_ONNX_PREFIX}" ]]; then
+        echo "System onnxruntime detected via pkg-config: ${DETECTED_ONNX_PREFIX}"
+      else
+        DETECTED_ONNX_PREFIX=""
+      fi
+    fi
+
+    # 2) Homebrew (macOS)
+    if [[ -z "${DETECTED_ONNX_PREFIX}" && "$(uname -s)" == "Darwin" ]]; then
+      if command -v brew >/dev/null 2>&1; then
+        BREW_ONNX_PREFIX=$(brew --prefix onnxruntime 2>/dev/null || true)
+        if [[ -n "${BREW_ONNX_PREFIX}" && -d "${BREW_ONNX_PREFIX}/lib" && -d "${BREW_ONNX_PREFIX}/include" ]]; then
+          # Verify it's actually installed (brew --prefix returns cellar path even if not installed)
+          if ls "${BREW_ONNX_PREFIX}"/lib/libonnxruntime* >/dev/null 2>&1; then
+            DETECTED_ONNX_PREFIX="${BREW_ONNX_PREFIX}"
+            echo "System onnxruntime detected via Homebrew: ${DETECTED_ONNX_PREFIX}"
+          fi
+        fi
+      fi
+    fi
+
+    # 3) Common system paths
+    if [[ -z "${DETECTED_ONNX_PREFIX}" ]]; then
+      for candidate_prefix in /opt/homebrew /usr/local /usr; do
+        if ls "${candidate_prefix}"/lib/libonnxruntime* >/dev/null 2>&1; then
+          # Check all known header layouts:
+          #   Flat:     include/onnxruntime_c_api.h  (prebuilt archives)
+          #   Homebrew: include/onnxruntime/onnxruntime_c_api.h  (brew)
+          #   Source:   include/onnxruntime/core/session/onnxruntime_c_api.h (apt/manual)
+          if [[ -f "${candidate_prefix}/include/onnxruntime_c_api.h" ]] || \
+             [[ -f "${candidate_prefix}/include/onnxruntime/onnxruntime_c_api.h" ]] || \
+             [[ -f "${candidate_prefix}/include/onnxruntime/core/session/onnxruntime_c_api.h" ]]; then
+            DETECTED_ONNX_PREFIX="${candidate_prefix}"
+            echo "System onnxruntime detected at: ${DETECTED_ONNX_PREFIX}"
+            break
+          fi
+        fi
+      done
+    fi
+
+    if [[ -n "${DETECTED_ONNX_PREFIX}" ]]; then
+      USE_SYSTEM_ONNX="true"
+      SYSTEM_ONNX_PREFIX="${SYSTEM_ONNX_PREFIX:-${DETECTED_ONNX_PREFIX}}"
+    else
+      USE_SYSTEM_ONNX="false"
+    fi
+  fi
+
+  if [[ "${USE_SYSTEM_ONNX}" == "true" ]]; then
+    echo "Using system onnxruntime from: ${SYSTEM_ONNX_PREFIX}"
+    CONAN_ARGS+=(-o "onnxruntime/*:use_system=True")
+    if [[ -n "${SYSTEM_ONNX_PREFIX}" ]]; then
+      CONAN_ARGS+=(-o "onnxruntime/*:system_prefix=${SYSTEM_ONNX_PREFIX}")
+    fi
+    # Detect system onnxruntime version for informational purposes
+    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists onnxruntime 2>/dev/null; then
+      SYS_ONNX_VERSION=$(pkg-config --modversion onnxruntime 2>/dev/null || true)
+      if [[ -n "${SYS_ONNX_VERSION}" ]]; then
+        echo "System onnxruntime version: ${SYS_ONNX_VERSION}"
+      fi
+    fi
+  fi
+
+  # Auto-detect GPU for ONNX acceleration (skip when using system onnxruntime)
   # Override with YAMS_ONNX_GPU=cuda|coreml|migraphx|none
+  if [[ "${USE_SYSTEM_ONNX}" == "true" ]]; then
+    echo "Skipping GPU auto-detection (using system onnxruntime)"
+    ONNX_GPU="none"  # System build has its own GPU support baked in
+  else
   ONNX_GPU="${YAMS_ONNX_GPU:-auto}"
   if [[ "${ONNX_GPU}" == "auto" ]]; then
     if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -502,9 +589,10 @@ else
       echo "No GPU detected: using CPU-only ONNX Runtime"
     fi
   fi
+  fi  # end: skip GPU detection for system onnxruntime
 
-  # Handle MIGraphX-specific options
-  if [[ "${ONNX_GPU}" == "migraphx" ]]; then
+  # Handle MIGraphX-specific options (only for non-system builds)
+  if [[ "${USE_SYSTEM_ONNX}" != "true" ]] && [[ "${ONNX_GPU}" == "migraphx" ]]; then
     # Set ROCm path for conan (use detected path or environment override)
     ROCM_PATH="${YAMS_ROCM_PATH:-${ROCM_PATH:-/opt/rocm}}"
     if [[ ! -d "${ROCM_PATH}" ]]; then
@@ -521,7 +609,7 @@ else
     fi
   fi
 
-  if [[ "${ONNX_GPU}" != "none" ]]; then
+  if [[ "${USE_SYSTEM_ONNX}" != "true" ]] && [[ "${ONNX_GPU}" != "none" ]]; then
     CONAN_ARGS+=(-o "onnxruntime/*:with_gpu=${ONNX_GPU}")
     echo "ONNX GPU provider: ${ONNX_GPU}"
   fi
