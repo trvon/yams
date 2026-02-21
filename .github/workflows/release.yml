@@ -1501,15 +1501,25 @@ jobs:
           pushd "$REPO_ROOT" >/dev/null
           dpkg-scanpackages --multiversion pool > dists/$DIST/$COMPONENT/binary-$ARCH/Packages
           gzip -c dists/$DIST/$COMPONENT/binary-$ARCH/Packages > dists/$DIST/$COMPONENT/binary-$ARCH/Packages.gz
-          cat > dists/$DIST/Release <<REL
-          Origin: YAMS
-          Label: YAMS
-          Suite: $DIST
-          Codename: $DIST
-          Architectures: $ARCH
-          Components: $COMPONENT
-          Description: YAMS APT repository
-          REL
+          # Generate Release file with proper Date and SHA256 hash entries
+          {
+            echo "Origin: YAMS"
+            echo "Label: YAMS"
+            echo "Suite: $DIST"
+            echo "Codename: $DIST"
+            echo "Architectures: $ARCH"
+            echo "Components: $COMPONENT"
+            echo "Date: $(date -Ru)"
+            echo "Description: YAMS APT repository"
+            echo "SHA256:"
+            for f in $COMPONENT/binary-$ARCH/Packages $COMPONENT/binary-$ARCH/Packages.gz; do
+              if [ -f "dists/$DIST/$f" ]; then
+                hash=$(sha256sum "dists/$DIST/$f" | awk '{print $1}')
+                size=$(stat --format='%s' "dists/$DIST/$f" 2>/dev/null || stat -f '%z' "dists/$DIST/$f")
+                printf " %s %16d %s\n" "$hash" "$size" "$f"
+              fi
+            done
+          } > dists/$DIST/Release
           # Optional GPG signing if secret present
           if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
             echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --yes --import
@@ -1518,16 +1528,16 @@ jobs:
           fi
           popd >/dev/null
           tree "$REPO_ROOT" || find "$REPO_ROOT" -maxdepth 4 -type f -print
-          cat > "$REPO_ROOT/USAGE.txt" <<EOF
-          Add this APT repo (unsigned example):
-            curl -fsSL https://${{ github.repository_owner }}.pages.dev/aptrepo/gpg.key -o /usr/share/keyrings/yams.gpg   # (If you later publish a key)
-            echo "deb [signed-by=/usr/share/keyrings/yams.gpg] https://${{ github.repository_owner }}.pages.dev/aptrepo stable main" | sudo tee /etc/apt/sources.list.d/yams.list
-            sudo apt-get update && sudo apt-get install yams
-
-          If unsigned (temporary/testing):
-            echo "deb [trusted=yes] https://${{ github.repository_owner }}.pages.dev/aptrepo stable main" | sudo tee /etc/apt/sources.list.d/yams.list
-            sudo apt-get update && sudo apt-get install yams
-          EOF
+          printf '%s\n' \
+            'Add this APT repo (unsigned example):' \
+            '  curl -fsSL https://repo.yamsmemory.ai/gpg.key -o /usr/share/keyrings/yams.gpg' \
+            '  echo "deb [signed-by=/usr/share/keyrings/yams.gpg] https://repo.yamsmemory.ai/aptrepo stable main" | sudo tee /etc/apt/sources.list.d/yams.list' \
+            '  sudo apt-get update && sudo apt-get install yams' \
+            '' \
+            'If unsigned (temporary/testing):' \
+            '  echo "deb [trusted=yes] https://repo.yamsmemory.ai/aptrepo stable main" | sudo tee /etc/apt/sources.list.d/yams.list' \
+            '  sudo apt-get update && sudo apt-get install yams' \
+            > "$REPO_ROOT/USAGE.txt"
 
       - name: Upload APT repo artifact
         if: steps.meta.outputs.channel == 'stable' && always()
@@ -1560,23 +1570,23 @@ jobs:
             echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --yes --import
             gpg --batch --yes --detach-sign --armor -o "$YUM_ROOT/repodata/repomd.xml.asc" "$YUM_ROOT/repodata/repomd.xml"
           fi
-          cat > "$YUM_ROOT/USAGE.txt" <<EOF
-          Add YUM/DNF repo (unsigned example):
-            sudo tee /etc/yum.repos.d/yams.repo <<'REPO'
-            [yams]
-            name=YAMS Repository
-            baseurl=https://${{ github.repository_owner }}.pages.dev/yumrepo/
-            enabled=1
-            gpgcheck=0
-            repo_gpgcheck=0
-            REPO
-
-          Then install:
-            sudo dnf makecache || sudo yum makecache
-            sudo dnf install yams || sudo yum install yams
-
-          (Enable gpgcheck once you publish a key and sign RPMs/repodata.)
-          EOF
+          printf '%s\n' \
+            'Add YUM/DNF repo (unsigned example):' \
+            '  sudo tee /etc/yum.repos.d/yams.repo <<REPO' \
+            '  [yams]' \
+            '  name=YAMS Repository' \
+            '  baseurl=https://repo.yamsmemory.ai/yumrepo/' \
+            '  enabled=1' \
+            '  gpgcheck=0' \
+            '  repo_gpgcheck=0' \
+            '  REPO' \
+            '' \
+            'Then install:' \
+            '  sudo dnf makecache || sudo yum makecache' \
+            '  sudo dnf install yams || sudo yum install yams' \
+            '' \
+            '(Enable gpgcheck once you publish a key and sign RPMs/repodata.)' \
+            > "$YUM_ROOT/USAGE.txt"
 
       - name: Upload YUM repo artifact
         if: steps.meta.outputs.channel == 'stable' && always()
