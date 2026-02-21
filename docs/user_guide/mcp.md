@@ -115,120 +115,82 @@ docker run -i --rm \
 
 ## Available Tools
 
-The MCP server provides the following tools to AI assistants:
+The MCP server exposes **3 composite tools** to AI assistants. All operations are accessed through these tools, dramatically reducing context window usage (~800 tokens vs ~4,000 for individual tools).
 
-### search
+| Tool | Purpose | Operations |
+|------|---------|------------|
+| `query` | Read-only pipeline | `search`, `grep`, `list`, `list_collections`, `list_snapshots`, `graph`, `get`, `status`, `describe` |
+| `execute` | Write batch | `add`, `update`, `delete`, `restore`, `download` |
+| `session` | Session lifecycle | `start`, `stop`, `pin`, `unpin`, `watch` |
 
-Search for documents using various strategies.
+Use `describe` to discover the full parameter schema for any operation at runtime:
 
-**Parameters:**
-- `query` (required): Search query string
-- `limit`: Maximum results (default: 10)
-- `fuzzy`: Enable fuzzy matching (default: true)
-- `similarity`: Fuzzy match threshold 0.0-1.0 (default: 0.7)
-- `type`: Search type - keyword|semantic|hybrid (default: hybrid)
-- `paths_only`: Return only file paths (default: false)
+```json
+{"name": "query", "arguments": {"steps": [{"op": "describe", "params": {"target": "search"}}]}}
+```
 
-Defaults: When the client omits search options, the server runs hybrid search with fuzzy enabled (similarity 0.7).
+### query — Read Pipeline
 
-**Example:**
+Supports multi-step pipelines where each step can reference the previous result via `$prev`.
+
+**Search example:**
 ```json
 {
-  "tool": "search",
+  "name": "query",
   "arguments": {
-    "query": "configuration management",
-    "limit": 5,
-    "type": "hybrid"
+    "steps": [{"op": "search", "params": {"query": "configuration management", "limit": 5}}]
   }
 }
 ```
 
-### grep
-
-Search using regular expressions across indexed content.
-
-**Parameters:**
-- `pattern` (required): Regex pattern
-- `paths`: Files/directories to search (optional)
-- `ignore_case`: Case-insensitive search
-- `line_numbers`: Include line numbers
-- `context`: Lines of context around matches
-
-**Example:**
+**Grep example:**
 ```json
 {
-  "tool": "grep",
+  "name": "query",
   "arguments": {
-    "pattern": "class\\s+\\w+Handler",
-    "ignore_case": false,
-    "line_numbers": true,
-    "context": 2
+    "steps": [{"op": "grep", "params": {"pattern": "class\\s+\\w+Handler", "line_numbers": true, "context": 2}}]
   }
 }
 ```
 
-### add
+**Pipeline example (search → get top result):**
+```json
+{
+  "name": "query",
+  "arguments": {
+    "steps": [
+      {"op": "search", "params": {"query": "auth middleware", "limit": 1}},
+      {"op": "get", "params": {"hash": "$prev.results[0].hash", "include_content": true}}
+    ]
+  }
+}
+```
 
-Store a document with metadata.
+### execute — Write Batch
 
-**Parameters:**
-- `path` (required): File path to store
-- `tags`: Array of tags
-- `metadata`: Key-value metadata object
+Executes write operations sequentially. Stops on first error unless `continueOnError: true`.
 
-### get
+**Add example:**
+```json
+{
+  "name": "execute",
+  "arguments": {
+    "operations": [
+      {"op": "add", "params": {"path": "/tmp/notes.md", "tags": ["meeting"]}}
+    ]
+  }
+}
+```
 
-Retrieve document by hash.
+### session — Session Lifecycle
 
-**Parameters:**
-- `hash` (required): Document hash
-- `name`: Document name/path (optional)
-- `outputPath`: Where to save (optional)
-- `graph`: Include related documents
-- `depth`: Graph traversal depth (1-5)
+Manage sessions for scoped work.
 
-### graph
+```json
+{"name": "session", "arguments": {"action": "start", "params": {"label": "review"}}}
+```
 
-Query the knowledge graph (matches `yams graph`).
-
-**Parameters:**
-- `hash`: Document hash (optional)
-- `name`: Document name/path (optional)
-- `node_key`: Direct KG node key (optional)
-- `node_id`: Direct KG node id (optional)
-- `list_types`: List available node types with counts
-- `list_type`: List nodes of a specific type
-- `isolated`: List isolated nodes (no incoming edges for relation)
-- `relation`: Single relation filter
-- `relation_filters`: Array of relation filters
-- `depth`: Traversal depth (1-5)
-- `limit`: Maximum results (default: 100)
-- `offset`: Pagination offset
-- `reverse`: Traverse incoming edges instead of outgoing
-
-### status
-
-Get storage statistics and analytics.
-
-**Parameters:**
-- `detailed`: Include detailed breakdown
-
-### list
-
-List stored documents with filtering.
-
-**Parameters:**
-- `limit`: Maximum documents to return
-- `offset`: Pagination offset
-- `sort_by`: Sort field (name|size|created|modified)
-- `sort_order`: asc|desc
-- `recent`: Show N most recent documents
-
-### restore
-
-Restore documents from a collection or snapshot.
-
-For the full parameter list and examples, see the API reference: `../api/mcp_tools.md#restore`.
+For full parameter schemas and pipeline examples, see the [API Reference](../api/mcp_tools.md).
 
 ## Hot/Cold Modes
 
@@ -244,11 +206,7 @@ Note: paths_only typically engages hot paths where supported, and reduces respon
 
 ## Additional Tools
 
-The MCP server also exposes additional tools for batch and collection workflows. See the API reference for schemas and examples: ../api/mcp_tools.md
-
-- download: Fetch artifacts by URL into CAS with checksum support.
-- list_collections, list_snapshots: Enumerate collections and snapshots.
-- session_start/session_stop/session_pin/session_unpin: Session management.
+All operations are accessed through the 3 composite tools above. Use `describe` to discover available operations and their schemas. See the [API Reference](../api/mcp_tools.md) for full documentation.
 
 ## Testing the MCP Server
 
@@ -260,11 +218,11 @@ Test the MCP server directly with JSON-RPC messages:
 # Initialize the connection
 echo '{"jsonrpc":"2.0","method":"initialize","params":{"clientInfo":{"name":"test","version":"1.0"}},"id":1}' | yams serve
 
-# List available tools
+# List available tools (should return query, execute, session)
 echo '{"jsonrpc":"2.0","method":"tools/list","id":2}' | yams serve
 
-# Search for documents
-echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"search","arguments":{"query":"test"}},"id":3}' | yams serve
+# Search using the query tool
+echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"query","arguments":{"steps":[{"op":"search","params":{"query":"test"}}]}},"id":3}' | yams serve
 ```
 
 ## Integration Examples
@@ -335,10 +293,10 @@ if __name__ == "__main__":
     tools = mcp.call("tools/list", {})
     print("<-- Tools available:", json.dumps(tools, indent=2))
 
-    print("\n--> Calling 'search' tool...")
+    print("\n--> Calling 'query' tool (search op)...")
     search_result = mcp.call("tools/call", {
-        "name": "search",
-        "arguments": {"query": "test", "limit": 5}
+        "name": "query",
+        "arguments": {"steps": [{"op": "search", "params": {"query": "test", "limit": 5}}]}
     })
     print("<-- Search result:", json.dumps(search_result, indent=2))
     
@@ -434,10 +392,10 @@ async function main() {
     const tools = await mcp.call("tools/list", {});
     console.log("<-- Tools available:", JSON.stringify(tools, null, 2));
 
-    console.log("\n--> Calling 'search' tool...");
+    console.log("\n--> Calling 'query' tool (search op)...");
     const searchResult = await mcp.call("tools/call", {
-        "name": "search",
-        "arguments": {"query": "test", "limit": 5}
+        "name": "query",
+        "arguments": {"steps": [{"op": "search", "params": {"query": "test", "limit": 5}}]}
     });
     console.log("<-- Search result:", JSON.stringify(searchResult, null, 2));
 
