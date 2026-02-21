@@ -1796,7 +1796,7 @@ public:
                                 yams::daemon::SearchResponse out;
                                 for (const auto& it : local.value().results) {
                                     yams::daemon::SearchResult sr;
-                                    sr.id = it.id;
+                                    sr.id = std::to_string(it.id);
                                     sr.title = it.title;
                                     sr.path = it.path;
                                     sr.score = it.score;

@@ -14,6 +14,10 @@ extern "C" {
 #include <nlohmann/json.hpp>
 #include <curl/curl.h>
 
+#ifdef _WIN32
+#define strdup _strdup
+#endif
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>

@@ -98,6 +98,56 @@ inline int read_timeout_ms(const char* envName, int defaultMs, int minMs) {
     return yams::daemon::ConfigResolver::readTimeoutMs(envName, defaultMs, minMs);
 }
 
+size_t readPoolPrewarmTarget(size_t defaultTarget) {
+    if (const char* env = std::getenv("YAMS_DB_READ_POOL_PREWARM"); env && *env) {
+        try {
+            return static_cast<size_t>(std::stoul(env));
+        } catch (...) {
+        }
+    }
+    return defaultTarget;
+}
+
+void prewarmReadPool(const std::shared_ptr<yams::metadata::ConnectionPool>& readPool,
+                     size_t targetConnections) {
+    if (!readPool || targetConnections == 0) {
+        return;
+    }
+
+    std::vector<std::unique_ptr<yams::metadata::PooledConnection>> held;
+    held.reserve(targetConnections);
+
+    for (size_t i = 0; i < targetConnections; ++i) {
+        auto connResult = readPool->acquire(std::chrono::milliseconds(150),
+                                            yams::metadata::ConnectionPriority::High);
+        if (!connResult) {
+            break;
+        }
+        held.push_back(std::move(connResult).value());
+    }
+
+    size_t warmed = 0;
+    for (auto& conn : held) {
+        try {
+            auto& db = **conn;
+            for (const char* sql :
+                 {"SELECT COUNT(*) FROM documents", "SELECT COUNT(*) FROM documents_fts",
+                  "SELECT COUNT(*) FROM metadata"}) {
+                auto stmtResult = db.prepareCached(sql);
+                if (!stmtResult) {
+                    continue;
+                }
+                auto stmt = std::move(stmtResult).value();
+                (void)stmt->step();
+            }
+            ++warmed;
+        } catch (...) {
+        }
+    }
+
+    spdlog::info("Read pool prewarm complete: warmed {} connection(s)", warmed);
+}
+
 inline void setOnnxShutdownMarker(bool enabled) {
 #ifdef _WIN32
     _putenv_s("YAMS_ONNX_SHUTDOWN_IN_PROGRESS", enabled ? "1" : "");
@@ -1634,6 +1684,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                         readConnectionPool_.reset();
                     }
                 } else {
+                    const size_t defaultPrewarm = std::min<size_t>(readCfg.maxConnections, 4);
+                    prewarmReadPool(readConnectionPool_, readPoolPrewarmTarget(defaultPrewarm));
                     spdlog::info("Dual DB pool mode enabled (write/work + read-only)");
                 }
             }
@@ -2820,9 +2872,9 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
 
 size_t ServiceManager::getWorkerQueueDepth() const {
     // A simple estimate of the queue depth based on job tracking counters.
-    long posted = poolPosted_.load(std::memory_order_relaxed);
-    long completed = poolCompleted_.load(std::memory_order_relaxed);
-    long active = poolActive_.load(std::memory_order_relaxed);
+    auto posted = static_cast<int64_t>(poolPosted_.load(std::memory_order_relaxed));
+    auto completed = static_cast<int64_t>(poolCompleted_.load(std::memory_order_relaxed));
+    auto active = static_cast<int64_t>(poolActive_.load(std::memory_order_relaxed));
 
     if (posted > completed + active) {
         return static_cast<size_t>(posted - completed - active);

@@ -19,6 +19,12 @@
 
 #include <yams/daemon/resource/onnx_resource_export.h>
 
+// MSVC C4251: private members of dllexport class don't need dll-interface
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4251)
+#endif
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -186,3 +192,7 @@ private:
 };
 
 } // namespace yams::daemon
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif

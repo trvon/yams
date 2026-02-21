@@ -36,10 +36,10 @@ public:
 };
 
 struct ServerUnderTest {
-    // Construct MCPServer with null dependencies that aren't needed for listTools schema checks
     static std::shared_ptr<yams::mcp::MCPServer> make() {
         auto transport = std::make_unique<NullTransport>();
-        return std::make_shared<yams::mcp::MCPServer>(std::move(transport));
+        auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
+        return server;
     }
 };
 
@@ -118,7 +118,7 @@ private:
 // ListTools schema validation
 // ============================================================================
 
-TEST_CASE("MCP Schema - ListTools contains all expected tools", "[mcp][schema][tools][catch2]") {
+TEST_CASE("MCP Schema - ListTools contains composite tools", "[mcp][schema][tools][catch2]") {
     auto server = ServerUnderTest::make();
     json result = server->testListTools();
 
@@ -126,13 +126,42 @@ TEST_CASE("MCP Schema - ListTools contains all expected tools", "[mcp][schema][t
     REQUIRE(result.contains("tools"));
     REQUIRE(result["tools"].is_array());
 
-    // Expected set of core tools per CHANGELOG and implementation
+    // Composite tools exposed to clients
+    std::vector<std::string> expected = {"query", "execute", "mcp.echo"};
+
+    // Gather actual names
+    std::vector<std::string> actual;
+    for (const auto& t : result["tools"]) {
+        if (t.is_object() && t.contains("name")) {
+            actual.push_back(t.value("name", ""));
+        }
+    }
+
+    for (const auto& name : expected) {
+        bool found = std::find(actual.begin(), actual.end(), name) != actual.end();
+        CHECK(found);
+    }
+
+    // Individual tools should NOT be exposed
+    CHECK(std::find(actual.begin(), actual.end(), "search") == actual.end());
+    CHECK(std::find(actual.begin(), actual.end(), "grep") == actual.end());
+}
+
+TEST_CASE("MCP Schema - Internal tools contain all individual ops",
+          "[mcp][schema][tools][catch2]") {
+    auto server = ServerUnderTest::make();
+    json result = server->testListInternalTools();
+
+    REQUIRE(result.is_object());
+    REQUIRE(result.contains("tools"));
+    REQUIRE(result["tools"].is_array());
+
+    // All individual tools are in the internal registry for dispatch
     std::vector<std::string> expected = {
         "search",        "grep",  "download", "session_start",    "session_stop",  "session_pin",
         "session_unpin", "graph", "get",      "status",           "update",        "delete_by_name",
         "list",          "add",   "restore",  "list_collections", "list_snapshots"};
 
-    // Gather actual names
     std::vector<std::string> actual;
     for (const auto& t : result["tools"]) {
         if (t.is_object() && t.contains("name")) {
@@ -149,7 +178,7 @@ TEST_CASE("MCP Schema - ListTools contains all expected tools", "[mcp][schema][t
 TEST_CASE("MCP Schema - SearchDocuments has ergonomic and context params",
           "[mcp][schema][search][catch2]") {
     auto server = ServerUnderTest::make();
-    json tools = server->testListTools();
+    json tools = server->testListInternalTools();
     auto t = findTool(tools, "search");
     REQUIRE(t.has_value());
 
@@ -177,7 +206,7 @@ TEST_CASE("MCP Schema - SearchDocuments has ergonomic and context params",
 
 TEST_CASE("MCP Schema - GrepDocuments has expected grep options", "[mcp][schema][grep][catch2]") {
     auto server = ServerUnderTest::make();
-    json tools = server->testListTools();
+    json tools = server->testListInternalTools();
     auto t = findTool(tools, "grep");
     REQUIRE(t.has_value());
 
@@ -203,7 +232,7 @@ TEST_CASE("MCP Schema - GrepDocuments has expected grep options", "[mcp][schema]
 
 TEST_CASE("MCP Schema - RetrieveDocument has expected params", "[mcp][schema][retrieve][catch2]") {
     auto server = ServerUnderTest::make();
-    json tools = server->testListTools();
+    json tools = server->testListInternalTools();
     auto t = findTool(tools, "get");
     REQUIRE(t.has_value());
 
@@ -225,7 +254,7 @@ TEST_CASE("MCP Schema - RetrieveDocument has expected params", "[mcp][schema][re
 
 TEST_CASE("MCP Schema - Graph tool has CLI parity params", "[mcp][schema][graph][catch2]") {
     auto server = ServerUnderTest::make();
-    json tools = server->testListTools();
+    json tools = server->testListInternalTools();
     auto t = findTool(tools, "graph");
     REQUIRE(t.has_value());
 
@@ -269,7 +298,7 @@ TEST_CASE("MCP Schema - Graph tool has CLI parity params", "[mcp][schema][graph]
 TEST_CASE("MCP Schema - UpdateMetadata supports name or hash and multiple pairs",
           "[mcp][schema][update][catch2]") {
     auto server = ServerUnderTest::make();
-    json tools = server->testListTools();
+    json tools = server->testListInternalTools();
     auto t = findTool(tools, "update");
     REQUIRE(t.has_value());
 
@@ -295,7 +324,7 @@ TEST_CASE("MCP Schema - UpdateMetadata supports name or hash and multiple pairs"
 TEST_CASE("MCP Schema - ListDocuments supports filters and sorting",
           "[mcp][schema][list][catch2]") {
     auto server = ServerUnderTest::make();
-    json tools = server->testListTools();
+    json tools = server->testListInternalTools();
     auto t = findTool(tools, "list");
     REQUIRE(t.has_value());
 
@@ -322,7 +351,7 @@ TEST_CASE("MCP Schema - ListDocuments supports filters and sorting",
 
 TEST_CASE("MCP Schema - GetStats supports file types breakdown", "[mcp][schema][stats][catch2]") {
     auto server = ServerUnderTest::make();
-    json tools = server->testListTools();
+    json tools = server->testListInternalTools();
     auto t = findTool(tools, "status");
     REQUIRE(t.has_value());
 
@@ -334,7 +363,7 @@ TEST_CASE("MCP Schema - GetStats supports file types breakdown", "[mcp][schema][
 
 TEST_CASE("MCP Schema - Restore has expected properties", "[mcp][schema][restore][catch2]") {
     auto server = ServerUnderTest::make();
-    json tools = server->testListTools();
+    json tools = server->testListInternalTools();
     auto t = findTool(tools, "restore");
     REQUIRE(t.has_value());
 
@@ -355,7 +384,7 @@ TEST_CASE("MCP Schema - Restore has expected properties", "[mcp][schema][restore
 
 TEST_CASE("MCP Schema - ListSnapshots has withLabels", "[mcp][schema][snapshots][catch2]") {
     auto server = ServerUnderTest::make();
-    json tools = server->testListTools();
+    json tools = server->testListInternalTools();
     auto t = findTool(tools, "list_snapshots");
     REQUIRE(t.has_value());
 

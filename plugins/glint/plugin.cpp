@@ -160,8 +160,8 @@ int extract_abi(void*, const char* content, size_t content_len,
             const auto& span = spans[i];
             r->entities[i].text = dup_cstr(span.text);
             r->entities[i].type = dup_cstr(span.label);
-            r->entities[i].start_offset = span.start_char;
-            r->entities[i].end_offset = span.end_char;
+            r->entities[i].start_offset = static_cast<uint32_t>(span.start_char);
+            r->entities[i].end_offset = static_cast<uint32_t>(span.end_char);
             r->entities[i].confidence = span.score;
             r->entities[i].qualified_name = nullptr;
             r->entities[i].scope = nullptr;

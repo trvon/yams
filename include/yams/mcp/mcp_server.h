@@ -189,6 +189,9 @@ private:
     std::unique_ptr<ITransport> transport_;
     StdioTransport* cachedStdioTransport_{nullptr}; // Cache to avoid repeated dynamic_cast
     std::unique_ptr<ToolRegistry> toolRegistry_;
+    // Internal registry holds all individual tools for dispatch by composite handlers;
+    // toolRegistry_ holds the composite tools (query/execute/session) exposed to clients.
+    std::unique_ptr<ToolRegistry> internalRegistry_;
     std::atomic<bool>* externalShutdown_;
     std::atomic<bool> exitRequested_{false};     // Set when handling explicit 'exit' request
     std::atomic<bool> shutdownRequested_{false}; // Set when 'shutdown' request received
@@ -347,6 +350,9 @@ public:
 public:
     // Public testing interface - only available when building tests
     json testListTools() { return listTools(); }
+    json testListInternalTools() {
+        return internalRegistry_ ? internalRegistry_->listTools() : listTools();
+    }
 
     boost::asio::awaitable<json> testCallToolAsync(const std::string& name, const json& arguments) {
         return callToolAsync(name, arguments);
@@ -389,6 +395,13 @@ public:
         std::function<Result<void>(const yams::daemon::ClientConfig&)> hook) {
         testEnsureDaemonClientHook_ = std::move(hook);
     }
+
+    // Code-mode test helpers
+    static json testResolvePrevRefs(const json& params, const json& prev) {
+        return resolvePrevRefs(params, prev);
+    }
+    json testDescribeOp(const std::string& target) const { return describeOp(target); }
+    json testDescribeAllOps() const { return describeAllOps(); }
 #endif
 
 private:
@@ -448,6 +461,19 @@ private:
     handleSessionUnpin(const MCPSessionUnpinRequest& req);
     boost::asio::awaitable<Result<MCPSessionWatchResponse>>
     handleSessionWatch(const MCPSessionWatchRequest& req);
+
+    // ── Code Mode composite handlers ──
+    // Pipeline query: sequential read-only ops with $prev reference resolution
+    boost::asio::awaitable<json> handlePipelineQuery(const json& args);
+    // Batch execute: sequential write ops with optional continueOnError
+    boost::asio::awaitable<json> handleBatchExecute(const json& args);
+    // Session action: dispatch to session_start/stop/pin/unpin/watch
+    boost::asio::awaitable<json> handleSessionAction(const json& args);
+
+    // Code-mode helpers
+    static json resolvePrevRefs(const json& params, const json& prev);
+    json describeOp(const std::string& target) const;
+    json describeAllOps() const;
 
     // (Removed legacy JSON helper declarations – use typed async tool handlers via ToolRegistry)
 

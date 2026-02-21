@@ -149,13 +149,15 @@ TEST_CASE("MCP Server - Core tools are registered", "[mcp][server][tools][core][
         }
     }
 
-    // Verify core tools are present
-    std::vector<std::string> coreTools = {"search", "grep",  "get",    "list",          "add",
-                                          "status", "graph", "update", "delete_by_name"};
+    // Verify composite tools are present (code mode: query, execute, mcp.echo)
+    CHECK(toolNames.count("query") > 0);
+    CHECK(toolNames.count("execute") > 0);
+    CHECK(toolNames.count("mcp.echo") > 0);
 
-    for (const auto& toolName : coreTools) {
-        CHECK(toolNames.count(toolName) > 0);
-    }
+    // Individual tools should NOT be directly exposed
+    CHECK(toolNames.count("search") == 0);
+    CHECK(toolNames.count("grep") == 0);
+    CHECK(toolNames.count("add") == 0);
 }
 
 // ============================================================================

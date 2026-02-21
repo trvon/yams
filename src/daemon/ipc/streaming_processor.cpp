@@ -18,6 +18,26 @@
 namespace {
 using yams::daemon::MessageType;
 
+bool response_fits_single_chunk(const yams::daemon::Response& response,
+                                std::size_t chunk_size_bytes) {
+    if (chunk_size_bytes == 0) {
+        return false;
+    }
+
+    yams::daemon::Message probe{};
+    probe.version = yams::daemon::PROTOCOL_VERSION;
+    probe.requestId = 0;
+    probe.timestamp = std::chrono::steady_clock::now();
+    probe.payload = response;
+
+    auto encoded = yams::daemon::ProtoSerializer::encode_payload(probe);
+    if (!encoded) {
+        return false;
+    }
+
+    return encoded.value().size() <= chunk_size_bytes;
+}
+
 inline std::pair<std::size_t, std::size_t> page_bounds(std::size_t pos, std::size_t total,
                                                        std::size_t page) {
     const auto end = std::min(pos + page, total);
@@ -141,14 +161,47 @@ StreamingRequestProcessor::process_streaming_impl(Request request) {
         }
 
         if (std::holds_alternative<SearchRequest>(req_copy)) {
-            spdlog::debug("StreamingRequestProcessor: defer Search for deterministic paging");
+            spdlog::debug("StreamingRequestProcessor: evaluate Search fast path");
+            auto final = co_await delegate_->process(req_copy);
+            if (!std::holds_alternative<SearchResponse>(final)) {
+                co_return final;
+            }
+            if (response_fits_single_chunk(final, cfg_.chunk_size)) {
+                spdlog::debug("StreamingRequestProcessor: Search one-shot fast path");
+                co_return final;
+            }
+
             mode_ = Mode::Search;
+            auto* s = std::get_if<SearchResponse>(&final);
+            if (s != nullptr) {
+                search_ = SearchState{};
+                search_->results = std::move(s->results);
+                search_->totalCount = s->totalCount;
+                search_->elapsed = s->elapsed;
+                search_->pos = 0;
+            }
             pending_request_.emplace(std::make_unique<Request>(std::move(request)));
             co_return std::nullopt;
         }
         if (std::holds_alternative<ListRequest>(req_copy)) {
-            spdlog::info("[SRP] process_streaming: deferring ListRequest to streaming mode");
+            spdlog::debug("StreamingRequestProcessor: evaluate List fast path");
+            auto final = co_await delegate_->process(req_copy);
+            if (!std::holds_alternative<ListResponse>(final)) {
+                co_return final;
+            }
+            if (response_fits_single_chunk(final, cfg_.chunk_size)) {
+                spdlog::debug("StreamingRequestProcessor: List one-shot fast path");
+                co_return final;
+            }
+
             mode_ = Mode::List;
+            auto* l = std::get_if<ListResponse>(&final);
+            if (l != nullptr) {
+                list_ = ListState{};
+                list_->items = std::move(l->items);
+                list_->totalCount = l->totalCount;
+                list_->pos = 0;
+            }
             pending_request_.emplace(std::make_unique<Request>(std::move(request)));
             co_return std::nullopt;
         }
@@ -268,7 +321,7 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                 co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
             }
             if (mode_ == Mode::List) {
-                spdlog::info("[SRP] next_chunk: sending List heartbeat");
+                spdlog::debug("[SRP] next_chunk: sending List heartbeat");
                 ListResponse r;
                 r.totalCount = 0;
                 co_return ResponseChunk{.data = Response{std::move(r)}, .is_last_chunk = false};
@@ -375,17 +428,17 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     co_return ResponseChunk{.data = std::move(r), .is_last_chunk = true};
                 }
             } else if (mode_ == Mode::List && !list_.has_value()) {
-                spdlog::info("[SRP] next_chunk: calling delegate_->process() for ListRequest");
+                spdlog::debug("[SRP] next_chunk: calling delegate_->process() for ListRequest");
                 auto r = co_await delegate_->process(**pending_request_);
-                spdlog::info("[SRP] next_chunk: delegate_->process() returned for List");
+                spdlog::debug("[SRP] next_chunk: delegate_->process() returned for List");
                 if (auto* l = std::get_if<ListResponse>(&r)) {
-                    spdlog::info("[SRP] next_chunk: List got {} items", l->items.size());
+                    spdlog::debug("[SRP] next_chunk: List got {} items", l->items.size());
                     list_ = ListState{};
                     list_->items = std::move(l->items);
                     list_->totalCount = l->totalCount;
                     list_->pos = 0;
                 } else {
-                    spdlog::info("[SRP] next_chunk: List got non-ListResponse, resetting");
+                    spdlog::debug("[SRP] next_chunk: List got non-ListResponse, resetting");
                     reset_state();
                     co_return ResponseChunk{.data = std::move(r), .is_last_chunk = true};
                 }

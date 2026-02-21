@@ -213,8 +213,8 @@ public:
             averageSizeBytes = 256;
         }
 
-        std::poisson_distribution<std::size_t> size_dist(
-            std::max<std::size_t>(64, averageSizeBytes));
+        std::poisson_distribution<int> size_dist(
+            static_cast<double>(std::max<std::size_t>(64, averageSizeBytes)));
         std::bernoulli_distribution duplicate_dist(std::clamp(duplicationRate, 0.0, 1.0));
 
         for (std::size_t i = 0; i < count; ++i) {

@@ -861,8 +861,8 @@ bool SymbolExtractor::executeQuery(const ExtractionContext& ctx, std::string_vie
     uint32_t error_offset = 0;
 
     TSLanguage* lang = language_;
-    TSQuery* query =
-        ts_query_new(lang, query_text.data(), query_text.size(), &error_offset, &error_type);
+    TSQuery* query = ts_query_new(lang, query_text.data(), static_cast<uint32_t>(query_text.size()),
+                                  &error_offset, &error_type);
     if (!query)
         return false;
 
@@ -1004,7 +1004,8 @@ SymbolExtractor::extractCallRelations(const ExtractionContext& ctx,
         uint32_t error_offset = 0;
         TSQueryError error_type = TSQueryErrorNone;
         TSQuery* query =
-            ts_query_new(language_, pattern.data(), pattern.size(), &error_offset, &error_type);
+            ts_query_new(language_, pattern.data(), static_cast<uint32_t>(pattern.size()),
+                         &error_offset, &error_type);
         if (!query)
             continue;
 
@@ -1128,7 +1129,8 @@ SymbolExtractor::Result SymbolExtractor::extractIncludes(const ExtractionContext
         uint32_t error_offset = 0;
         TSQueryError error_type = TSQueryErrorNone;
         TSQuery* query =
-            ts_query_new(language_, pattern.data(), pattern.size(), &error_offset, &error_type);
+            ts_query_new(language_, pattern.data(), static_cast<uint32_t>(pattern.size()),
+                         &error_offset, &error_type);
         if (!query)
             continue;
 

@@ -49,6 +49,11 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#endif
+
 #include "../common/test_helpers_catch2.h"
 #include "../integration/daemon/test_async_helpers.h"
 #include "../integration/daemon/test_daemon_harness.h"
@@ -56,6 +61,7 @@
 #include <spdlog/spdlog.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/metric_keys.h>
+#include <yams/mcp/mcp_server.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -94,6 +100,7 @@ struct BenchConfig {
     std::vector<fs::path> trustedPluginPaths;
     // Use real model provider instead of mock (requires ONNX runtime + models)
     bool useRealModelProvider{false};
+    bool useMcpPath{false};
 
     static BenchConfig fromEnv() {
         BenchConfig cfg;
@@ -143,8 +150,185 @@ struct BenchConfig {
             cfg.useRealModelProvider = (s == "1" || s == "true" || s == "yes");
         }
 
+        if (auto* v = std::getenv("YAMS_BENCH_USE_MCP")) {
+            std::string s(v);
+            cfg.useMcpPath = (s == "1" || s == "true" || s == "yes");
+        }
+
         return cfg;
     }
+};
+
+class NullTransport : public yams::mcp::ITransport {
+public:
+    void send(const nlohmann::json&) override {}
+    yams::mcp::MessageResult receive() override {
+        return yams::Error{yams::ErrorCode::NotImplemented, "Null transport"};
+    }
+    bool isConnected() const override { return false; }
+    void close() override {}
+    yams::mcp::TransportState getState() const override {
+        return yams::mcp::TransportState::Disconnected;
+    }
+};
+
+class MCPPipelineClient {
+public:
+    explicit MCPPipelineClient(const fs::path& socketPath) {
+        ::setenv("YAMS_DAEMON_SOCKET_PATH", socketPath.string().c_str(), 1);
+        ::setenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1", 1);
+        server_ = std::make_shared<yams::mcp::MCPServer>(std::make_unique<NullTransport>());
+        initialize();
+    }
+
+    yams::Result<nlohmann::json> queryStep(const std::string& op, const nlohmann::json& params) {
+        std::lock_guard<std::mutex> lock(mu_);
+        return queryStepUnlocked(op, params);
+    }
+
+private:
+    yams::Result<nlohmann::json> queryStepUnlocked(const std::string& op,
+                                                   const nlohmann::json& params) {
+        nlohmann::json request = nlohmann::json::object();
+        request["jsonrpc"] = "2.0";
+        request["id"] = requestId_++;
+        request["method"] = "tools/call";
+        request["params"] = nlohmann::json::object();
+        request["params"]["name"] = hasQueryTool_ ? "query" : op;
+        if (hasQueryTool_) {
+            request["params"]["arguments"] = nlohmann::json::object();
+            request["params"]["arguments"]["steps"] =
+                nlohmann::json::array({{{"op", op}, {"params", params}}});
+        } else {
+            request["params"]["arguments"] = params.is_object() ? params : nlohmann::json::object();
+        }
+
+        auto responseResult = server_->processMessage(request);
+        if (!responseResult) {
+            return yams::Error{responseResult.error()};
+        }
+
+        const auto& response = responseResult.value();
+        if (response.contains("error")) {
+            const std::string msg = response["error"].value("message", "MCP tools/call error");
+            if (hasQueryTool_ && msg.rfind("Unknown tool: query", 0) == 0) {
+                hasQueryTool_ = false;
+                return queryStepUnlocked(op, params);
+            }
+            return yams::Error{yams::ErrorCode::InvalidState, msg};
+        }
+        if (!response.contains("result") || !response["result"].is_object()) {
+            return yams::Error{yams::ErrorCode::InvalidState,
+                               "MCP tools/call missing result object"};
+        }
+
+        const auto& result = response["result"];
+        if (result.value("isError", false)) {
+            std::string msg{"MCP tool returned error"};
+            if (result.contains("content") && result["content"].is_array() &&
+                !result["content"].empty() && result["content"][0].contains("text")) {
+                msg = result["content"][0]["text"].get<std::string>();
+            }
+            return yams::Error{yams::ErrorCode::InvalidState, msg};
+        }
+
+        if (result.contains("structuredContent") && result["structuredContent"].is_object()) {
+            const auto& sc = result["structuredContent"];
+            if (sc.contains("data")) {
+                return sc["data"];
+            }
+        }
+
+        if (result.contains("content") && result["content"].is_array() &&
+            !result["content"].empty() && result["content"][0].contains("text")) {
+            try {
+                return nlohmann::json::parse(result["content"][0]["text"].get<std::string>());
+            } catch (...) {
+                return nlohmann::json{{"text", result["content"][0]["text"]}};
+            }
+        }
+
+        return yams::Error{yams::ErrorCode::InvalidState, "MCP tool result had no data"};
+    }
+
+    void initialize() {
+        nlohmann::json initReq = nlohmann::json::object();
+        initReq["jsonrpc"] = "2.0";
+        initReq["id"] = requestId_++;
+        initReq["method"] = "initialize";
+        initReq["params"] = nlohmann::json::object();
+        initReq["params"]["protocolVersion"] = "2025-06-18";
+        initReq["params"]["capabilities"] = nlohmann::json::object();
+        initReq["params"]["clientInfo"] =
+            nlohmann::json{{"name", "multi_client_ingestion_bench"}, {"version", "1.0"}};
+        auto initRes = server_->processMessage(initReq);
+        if (!initRes) {
+            throw std::runtime_error("MCP initialize failed: " + initRes.error().message);
+        }
+
+        nlohmann::json initializedNotif = {{"jsonrpc", "2.0"},
+                                           {"method", "notifications/initialized"},
+                                           {"params", nlohmann::json::object()}};
+        (void)server_->processMessage(initializedNotif);
+
+        nlohmann::json toolsReq = nlohmann::json::object();
+        toolsReq["jsonrpc"] = "2.0";
+        toolsReq["id"] = requestId_++;
+        toolsReq["method"] = "tools/list";
+        toolsReq["params"] = nlohmann::json::object();
+        auto toolsRes = server_->processMessage(toolsReq);
+        if (!toolsRes) {
+            throw std::runtime_error("MCP tools/list failed: " + toolsRes.error().message);
+        }
+        const auto& toolsResp = toolsRes.value();
+        if (!toolsResp.contains("result") || !toolsResp["result"].is_object() ||
+            !toolsResp["result"].contains("tools") || !toolsResp["result"]["tools"].is_array()) {
+            throw std::runtime_error("MCP tools/list returned invalid shape");
+        }
+        hasQueryTool_ = false;
+        for (const auto& tool : toolsResp["result"]["tools"]) {
+            if (!tool.is_object() || !tool.contains("name") || !tool["name"].is_string()) {
+                continue;
+            }
+            if (tool["name"].get<std::string>() == "query") {
+                hasQueryTool_ = true;
+                break;
+            }
+        }
+    }
+
+    std::shared_ptr<yams::mcp::MCPServer> server_;
+    std::mutex mu_;
+    bool hasQueryTool_{false};
+    std::uint64_t requestId_{1};
+};
+
+class MCPPipelineClientPool {
+public:
+    MCPPipelineClientPool(const fs::path& socketPath, size_t poolSize) {
+        const size_t size = std::max<size_t>(1, poolSize);
+        clients_.reserve(size);
+        for (size_t i = 0; i < size; ++i) {
+            clients_.push_back(std::make_unique<MCPPipelineClient>(socketPath));
+        }
+    }
+
+    yams::Result<nlohmann::json> queryStep(const std::string& op, const nlohmann::json& params) {
+        const size_t idx = next_.fetch_add(1, std::memory_order_relaxed) % clients_.size();
+        return clients_[idx]->queryStep(op, params);
+    }
+
+    yams::Result<nlohmann::json> queryStepForSlot(size_t slot, const std::string& op,
+                                                  const nlohmann::json& params) {
+        const size_t idx = slot % clients_.size();
+        return clients_[idx]->queryStep(op, params);
+    }
+
+    size_t size() const { return clients_.size(); }
+
+private:
+    std::vector<std::unique_ptr<MCPPipelineClient>> clients_;
+    std::atomic<size_t> next_{0};
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -366,7 +550,11 @@ std::string isoTimestamp() {
     auto now = std::chrono::system_clock::now();
     auto tt = std::chrono::system_clock::to_time_t(now);
     std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &tt);
+#else
     gmtime_r(&tt, &tm);
+#endif
     std::ostringstream oss;
     oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
     return oss.str();
@@ -1591,6 +1779,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     const int kOpsPerClient = envInt("YAMS_BENCH_OPS_PER_CLIENT", 50);
     const int kOpTimeoutS = envInt("YAMS_BENCH_OP_TIMEOUT_S", 60);
     const auto kOpTimeout = std::chrono::seconds(kOpTimeoutS);
+    const bool useMcpPath = cfg.useMcpPath;
+    const size_t mcpPoolSize = static_cast<size_t>(
+        std::max(1, envInt("YAMS_BENCH_MCP_POOL_SIZE", std::min(kTotalClients, 8))));
 
     std::cout << "\n=== Large Corpus Read Benchmark (instrumented) ===\n";
     std::cout << "  Data dir:       " << cfg.dataDir->string() << "\n";
@@ -1598,6 +1789,11 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
               << kStatusGetClients << "G = " << kTotalClients << " threads\n";
     std::cout << "  Ops/thread:     " << kOpsPerClient << "\n";
     std::cout << "  Op timeout:     " << kOpTimeoutS << "s\n";
+    std::cout << "  Transport path: " << (useMcpPath ? "mcp(query-or-direct-tools)" : "daemon-ipc")
+              << "\n";
+    if (useMcpPath) {
+        std::cout << "  MCP pool size:  " << mcpPoolSize << "\n";
+    }
 
     // --- Server-side timeout configuration ---
     // Stay within TuneAdvisor range clamps:
@@ -1605,16 +1801,26 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     //   streamChunkTimeoutMs: [1000, 600000]
     //   searchBuildTimeout:   unclamped
     std::string timeoutStr = std::to_string(std::min(kOpTimeoutS * 2000, 600000));
+#ifdef _WIN32
+    if (!std::getenv("YAMS_SEARCH_BUILD_TIMEOUT_MS"))
+        _putenv_s("YAMS_SEARCH_BUILD_TIMEOUT_MS", "120000");
+    if (!std::getenv("YAMS_IPC_TIMEOUT_MS"))
+        _putenv_s("YAMS_IPC_TIMEOUT_MS", timeoutStr.c_str());
+    if (!std::getenv("YAMS_STREAM_CHUNK_TIMEOUT_MS"))
+        _putenv_s("YAMS_STREAM_CHUNK_TIMEOUT_MS", timeoutStr.c_str());
+#else
     if (!std::getenv("YAMS_SEARCH_BUILD_TIMEOUT_MS"))
         ::setenv("YAMS_SEARCH_BUILD_TIMEOUT_MS", "120000", 0);
     if (!std::getenv("YAMS_IPC_TIMEOUT_MS"))
         ::setenv("YAMS_IPC_TIMEOUT_MS", timeoutStr.c_str(), 0);
     if (!std::getenv("YAMS_STREAM_CHUNK_TIMEOUT_MS"))
         ::setenv("YAMS_STREAM_CHUNK_TIMEOUT_MS", timeoutStr.c_str(), 0);
+#endif
 
-    std::cout << "  IPC timeout:    " << (std::getenv("YAMS_IPC_TIMEOUT_MS") ?: "default")
-              << " ms\n";
-    std::cout << "  Stream timeout: " << (std::getenv("YAMS_STREAM_CHUNK_TIMEOUT_MS") ?: "default")
+    const char* ipcTimeoutEnv = std::getenv("YAMS_IPC_TIMEOUT_MS");
+    const char* streamTimeoutEnv = std::getenv("YAMS_STREAM_CHUNK_TIMEOUT_MS");
+    std::cout << "  IPC timeout:    " << (ipcTimeoutEnv ? ipcTimeoutEnv : "default") << " ms\n";
+    std::cout << "  Stream timeout: " << (streamTimeoutEnv ? streamTimeoutEnv : "default")
               << " ms\n";
 
     // --- Start daemon ---
@@ -1640,16 +1846,34 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     // --- Discover corpus ---
     auto discoverCfg = makeClientConfig();
     DaemonClient discoverClient(discoverCfg);
+    std::shared_ptr<MCPPipelineClientPool> sharedMcpPool;
+    if (useMcpPath) {
+        sharedMcpPool = std::make_shared<MCPPipelineClientPool>(harness.socketPath(), mcpPoolSize);
+    }
 
     std::vector<std::string> knownHashes;
     {
-        ListRequest listReq;
-        listReq.limit = 200;
-        auto listRes = yams::cli::run_sync(discoverClient.list(listReq), kOpTimeout);
-        if (listRes) {
-            for (auto& item : listRes.value().items) {
-                if (!item.hash.empty())
-                    knownHashes.push_back(item.hash);
+        if (useMcpPath) {
+            auto listRes = sharedMcpPool->queryStepForSlot(0, "list", {{"limit", 200}});
+            if (listRes && listRes.value().contains("items") &&
+                listRes.value()["items"].is_array()) {
+                for (const auto& item : listRes.value()["items"]) {
+                    if (item.contains("hash") && item["hash"].is_string()) {
+                        auto hash = item["hash"].get<std::string>();
+                        if (!hash.empty())
+                            knownHashes.push_back(hash);
+                    }
+                }
+            }
+        } else {
+            ListRequest listReq;
+            listReq.limit = 200;
+            auto listRes = yams::cli::run_sync(discoverClient.list(listReq), kOpTimeout);
+            if (listRes) {
+                for (auto& item : listRes.value().items) {
+                    if (!item.hash.empty())
+                        knownHashes.push_back(item.hash);
+                }
             }
         }
     }
@@ -1673,11 +1897,27 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
 
         // Warm search
         for (int i = 0; i < 5; ++i) {
-            SearchRequest req;
-            req.query = "architecture design";
-            req.limit = 10;
             auto t0 = std::chrono::steady_clock::now();
-            auto res = yams::cli::run_sync(warmClient.search(req), kOpTimeout);
+            yams::Result<nlohmann::json> res;
+            if (useMcpPath) {
+                res = sharedMcpPool->queryStepForSlot(
+                    0, "search", {{"query", "architecture design"}, {"limit", 10}});
+            } else {
+                SearchRequest req;
+                req.query = "architecture design";
+                req.limit = 10;
+                auto direct = yams::cli::run_sync(warmClient.search(req), kOpTimeout);
+                if (direct) {
+                    nlohmann::json j;
+                    j["results"] = nlohmann::json::array();
+                    for (const auto& r : direct.value().results) {
+                        j["results"].push_back({{"id", r.id}, {"path", r.path}});
+                    }
+                    res = j;
+                } else {
+                    res = yams::Error{direct.error()};
+                }
+            }
             auto us = std::chrono::duration_cast<std::chrono::microseconds>(
                           std::chrono::steady_clock::now() - t0)
                           .count();
@@ -1686,14 +1926,30 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         }
         // Warm list
         for (int i = 0; i < 5; ++i) {
-            ListRequest req;
-            req.limit = 50;
             auto t0 = std::chrono::steady_clock::now();
-            auto res = yams::cli::run_sync(warmClient.list(req), kOpTimeout);
+            yams::Result<nlohmann::json> res;
+            int items = 0;
+            if (useMcpPath) {
+                res = sharedMcpPool->queryStepForSlot(0, "list", {{"limit", 50}});
+                if (res && res.value().contains("items") && res.value()["items"].is_array()) {
+                    items = static_cast<int>(res.value()["items"].size());
+                }
+            } else {
+                ListRequest req;
+                req.limit = 50;
+                auto direct = yams::cli::run_sync(warmClient.list(req), kOpTimeout);
+                if (direct) {
+                    items = static_cast<int>(direct.value().items.size());
+                    nlohmann::json j;
+                    j["items"] = nlohmann::json::array();
+                    res = j;
+                } else {
+                    res = yams::Error{direct.error()};
+                }
+            }
             auto us = std::chrono::duration_cast<std::chrono::microseconds>(
                           std::chrono::steady_clock::now() - t0)
                           .count();
-            int items = res ? static_cast<int>(res.value().items.size()) : 0;
             std::cout << "    list[" << i << "]:   " << us / 1000 << "ms (" << items << " items)"
                       << (res ? "" : " FAIL") << "\n";
         }
@@ -1704,7 +1960,18 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 req.hash = knownHashes[i];
                 req.metadataOnly = true;
                 auto t0 = std::chrono::steady_clock::now();
-                auto res = yams::cli::run_sync(warmClient.get(req), kOpTimeout);
+                yams::Result<nlohmann::json> res;
+                if (useMcpPath) {
+                    res = sharedMcpPool->queryStepForSlot(
+                        0, "get", {{"hash", knownHashes[i]}, {"include_content", false}});
+                } else {
+                    auto direct = yams::cli::run_sync(warmClient.get(req), kOpTimeout);
+                    if (direct) {
+                        res = nlohmann::json::object();
+                    } else {
+                        res = yams::Error{direct.error()};
+                    }
+                }
                 auto us = std::chrono::duration_cast<std::chrono::microseconds>(
                               std::chrono::steady_clock::now() - t0)
                               .count();
@@ -1793,8 +2060,11 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         int tid = threadIdx++;
         perThreadTraces[tid].reserve(kOpsPerClient);
         threads.emplace_back([&, tid, s]() {
-            auto ccfg = makeClientConfig();
-            DaemonClient client(ccfg);
+            std::optional<DaemonClient> client;
+            if (!useMcpPath) {
+                auto ccfg = makeClientConfig();
+                client.emplace(ccfg);
+            }
             while (!go.load())
                 std::this_thread::yield();
 
@@ -1804,7 +2074,24 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 req.limit = (i % 3 == 0) ? 5 : (i % 3 == 1) ? 10 : 25;
 
                 auto t0 = std::chrono::steady_clock::now();
-                auto res = yams::cli::run_sync(client.search(req), kOpTimeout);
+                yams::Result<nlohmann::json> res;
+                if (useMcpPath) {
+                    res = sharedMcpPool->queryStepForSlot(
+                        static_cast<size_t>(tid), "search",
+                        {{"query", req.query}, {"limit", req.limit}});
+                } else {
+                    auto direct = yams::cli::run_sync(client->search(req), kOpTimeout);
+                    if (direct) {
+                        nlohmann::json j;
+                        j["results"] = nlohmann::json::array();
+                        for (const auto& r : direct.value().results) {
+                            j["results"].push_back({{"id", r.id}});
+                        }
+                        res = j;
+                    } else {
+                        res = yams::Error{direct.error()};
+                    }
+                }
                 auto t1 = std::chrono::steady_clock::now();
                 auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
                 auto wallMs =
@@ -1818,7 +2105,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 trace.wallClockMs = wallMs;
                 if (res) {
                     trace.success = true;
-                    trace.resultCount = static_cast<int>(res.value().results.size());
+                    if (res.value().contains("results") && res.value()["results"].is_array()) {
+                        trace.resultCount = static_cast<int>(res.value()["results"].size());
+                    }
                     searchOps.fetch_add(1);
                 } else {
                     trace.success = false;
@@ -1836,8 +2125,11 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         int tid = threadIdx++;
         perThreadTraces[tid].reserve(kOpsPerClient);
         threads.emplace_back([&, tid]() {
-            auto ccfg = makeClientConfig();
-            DaemonClient client(ccfg);
+            std::optional<DaemonClient> client;
+            if (!useMcpPath) {
+                auto ccfg = makeClientConfig();
+                client.emplace(ccfg);
+            }
             while (!go.load())
                 std::this_thread::yield();
 
@@ -1846,7 +2138,23 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 req.limit = (i % 4 == 0) ? 10 : (i % 4 == 1) ? 25 : (i % 4 == 2) ? 50 : 100;
 
                 auto t0 = std::chrono::steady_clock::now();
-                auto res = yams::cli::run_sync(client.list(req), kOpTimeout);
+                yams::Result<nlohmann::json> res;
+                if (useMcpPath) {
+                    res = sharedMcpPool->queryStepForSlot(static_cast<size_t>(tid), "list",
+                                                          {{"limit", req.limit}});
+                } else {
+                    auto direct = yams::cli::run_sync(client->list(req), kOpTimeout);
+                    if (direct) {
+                        nlohmann::json j;
+                        j["items"] = nlohmann::json::array();
+                        for (const auto& it : direct.value().items) {
+                            j["items"].push_back({{"hash", it.hash}});
+                        }
+                        res = j;
+                    } else {
+                        res = yams::Error{direct.error()};
+                    }
+                }
                 auto t1 = std::chrono::steady_clock::now();
                 auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
                 auto wallMs =
@@ -1860,7 +2168,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 trace.wallClockMs = wallMs;
                 if (res) {
                     trace.success = true;
-                    trace.resultCount = static_cast<int>(res.value().items.size());
+                    if (res.value().contains("items") && res.value()["items"].is_array()) {
+                        trace.resultCount = static_cast<int>(res.value()["items"].size());
+                    }
                     listOps.fetch_add(1);
                 } else {
                     trace.success = false;
@@ -1878,8 +2188,11 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         int tid = threadIdx++;
         perThreadTraces[tid].reserve(kOpsPerClient);
         threads.emplace_back([&, tid, g]() {
-            auto ccfg = makeClientConfig();
-            DaemonClient client(ccfg);
+            std::optional<DaemonClient> client;
+            if (!useMcpPath) {
+                auto ccfg = makeClientConfig();
+                client.emplace(ccfg);
+            }
             std::mt19937 rng(static_cast<unsigned>(g * 997 + 17));
             while (!go.load())
                 std::this_thread::yield();
@@ -1889,7 +2202,18 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 bool isStatus = (i % 4 == 0) || knownHashes.empty();
 
                 if (isStatus) {
-                    auto res = yams::cli::run_sync(client.status(), kOpTimeout);
+                    yams::Result<nlohmann::json> res;
+                    if (useMcpPath) {
+                        res = sharedMcpPool->queryStepForSlot(static_cast<size_t>(tid), "status",
+                                                              nlohmann::json::object());
+                    } else {
+                        auto direct = yams::cli::run_sync(client->status(), kOpTimeout);
+                        if (direct) {
+                            res = nlohmann::json::object();
+                        } else {
+                            res = yams::Error{direct.error()};
+                        }
+                    }
                     auto t1 = std::chrono::steady_clock::now();
                     auto latUs =
                         std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
@@ -1914,11 +2238,23 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                     perThreadTraces[tid].push_back(std::move(trace));
                 } else {
                     std::uniform_int_distribution<std::size_t> dist(0, knownHashes.size() - 1);
-                    GetRequest req;
-                    req.hash = knownHashes[dist(rng)];
-                    req.metadataOnly = true;
-
-                    auto res = yams::cli::run_sync(client.get(req), kOpTimeout);
+                    std::string hash = knownHashes[dist(rng)];
+                    yams::Result<nlohmann::json> res;
+                    if (useMcpPath) {
+                        res = sharedMcpPool->queryStepForSlot(
+                            static_cast<size_t>(tid), "get",
+                            {{"hash", hash}, {"include_content", false}});
+                    } else {
+                        GetRequest req;
+                        req.hash = hash;
+                        req.metadataOnly = true;
+                        auto direct = yams::cli::run_sync(client->get(req), kOpTimeout);
+                        if (direct) {
+                            res = nlohmann::json::object();
+                        } else {
+                            res = yams::Error{direct.error()};
+                        }
+                    }
                     auto t1 = std::chrono::steady_clock::now();
                     auto latUs =
                         std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
@@ -2117,6 +2453,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     json record{
         {"timestamp", isoTimestamp()},
         {"test", "large_corpus_reads"},
+        {"request_path", useMcpPath ? "mcp_query" : "daemon_ipc"},
         {"data_dir", cfg.dataDir->string()},
         {"corpus_docs", finalSnap.documentsTotal},
         {"layout", json{{"search_clients", kSearchClients},

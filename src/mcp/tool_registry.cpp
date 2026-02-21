@@ -93,7 +93,7 @@ MCPSearchRequest MCPSearchRequest::fromJson(const json& j) {
     req.query = normalize_query(j.value("query", std::string{}));
     req.limit = parse_size_tolerant(j, "limit", 10);
     req.fuzzy = detail::jsonValueOr(j, "fuzzy", false);
-    req.similarity = parse_double_tolerant(j, "similarity", 0.7);
+    req.similarity = static_cast<float>(parse_double_tolerant(j, "similarity", 0.7));
     req.hash = j.value("hash", std::string{});
     req.type = j.value("type", std::string{"hybrid"});
     req.verbose = detail::jsonValueOr(j, "verbose", false);

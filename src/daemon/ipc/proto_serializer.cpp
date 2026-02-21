@@ -898,9 +898,9 @@ template <> struct ProtoBinding<PrepareSessionRequest> {
         const auto& i = env.prepare_session_request();
         PrepareSessionRequest r{};
         r.sessionName = i.session_name();
-        r.cores = i.cores();
-        r.memoryGb = i.memory_gb();
-        r.timeMs = i.time_ms();
+        r.cores = static_cast<int>(i.cores());
+        r.memoryGb = static_cast<int>(i.memory_gb());
+        r.timeMs = static_cast<long>(i.time_ms());
         r.aggressive = i.aggressive();
         r.limit = static_cast<size_t>(i.limit());
         r.snippetLen = static_cast<size_t>(i.snippet_len());

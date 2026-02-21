@@ -1,5 +1,10 @@
 #include <gtest/gtest.h>
 
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
