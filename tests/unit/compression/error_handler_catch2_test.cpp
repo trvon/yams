@@ -129,7 +129,7 @@ TEST_CASE_METHOD(ErrorHandlerFixture, "CompressionErrorHandler - ErrorStatistics
             return result;
         };
 
-        handler_->handleError(error, retryFunc);
+        (void)handler_->handleError(error, retryFunc);
     }
 
     // getErrorStats returns std::unordered_map<ErrorCode, size_t>
@@ -157,7 +157,7 @@ TEST_CASE_METHOD(ErrorHandlerFixture, "CompressionErrorHandler - ErrorCallbacks"
         return Error{ErrorCode::CompressionError, "Test error"};
     };
 
-    handler_->handleError(error, retryFunc);
+    (void)handler_->handleError(error, retryFunc);
 
     CHECK(callbackInvoked);
     CHECK(capturedCode == ErrorCode::CompressionError);
@@ -176,7 +176,7 @@ TEST_CASE_METHOD(ErrorHandlerFixture, "CompressionErrorHandler - ResetStatistics
         return Error{ErrorCode::CompressionError, "Test"};
     };
 
-    handler_->handleError(error, retryFunc);
+    (void)handler_->handleError(error, retryFunc);
 
     auto stats = handler_->getErrorStats();
     CHECK(stats.size() > 0);

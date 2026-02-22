@@ -117,7 +117,8 @@ TEST_CASE_METHOD(TransactionManagerFixture, "TransactionManager - CompressInTran
 
     auto data = generateTestData(1024);
 
-    auto result = manager_->compressInTransaction(data, CompressionAlgorithm::Zstandard, 5);
+    auto result =
+        manager_->compressInTransaction(data, CompressionAlgorithm::Zstandard, std::nullopt, 5);
 
     // Should succeed or fail based on algorithm availability
     if (result.has_value()) {
@@ -155,7 +156,7 @@ TEST_CASE_METHOD(TransactionManagerFixture, "TransactionManager - TransactionWit
     // Use the transaction ID for compression
     auto data = generateTestData(2048);
     auto compressResult =
-        manager_->compressInTransaction(data, CompressionAlgorithm::Zstandard, 3, txId);
+        manager_->compressInTransaction(data, CompressionAlgorithm::Zstandard, txId, 3);
 
     // Commit the transaction
     auto commitResult = manager_->commitTransaction(txId);
@@ -293,11 +294,11 @@ TEST_CASE_METHOD(TransactionManagerFixture, "TransactionManager - TransactionSta
         auto txId = txResult.value();
 
         if (i < 6) {
-            manager_->commitTransaction(txId);
+            (void)manager_->commitTransaction(txId);
         } else if (i < 8) {
-            manager_->abortTransaction(txId, "Test");
+            (void)manager_->abortTransaction(txId, "Test");
         } else {
-            manager_->rollbackTransaction(txId);
+            (void)manager_->rollbackTransaction(txId);
         }
     }
 
@@ -330,7 +331,7 @@ TEST_CASE_METHOD(TransactionManagerFixture, "TransactionManager - MaxConcurrentT
     CHECK(extraTxResult.error().code == ErrorCode::ResourceExhausted);
 
     // Commit one transaction
-    manager_->commitTransaction(txIds[0]);
+    (void)manager_->commitTransaction(txIds[0]);
 
     // Now we should be able to create another
     extraTxResult =
@@ -349,7 +350,7 @@ TEST_CASE_METHOD(TransactionManagerFixture, "TransactionManager - TransactionLog
                                                    IsolationLevel::ReadCommitted);
 
         if (txResult.has_value()) {
-            manager_->commitTransaction(txResult.value());
+            (void)manager_->commitTransaction(txResult.value());
         }
     }
 

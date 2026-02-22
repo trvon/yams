@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <string>
 
+#include <yams/compat/unistd.h>
 #include <yams/mcp/mcp_server.h>
 
 using nlohmann::json;

@@ -145,7 +145,7 @@ TEST_CASE_METHOD(RecoveryManagerFixture, "RecoveryManager - RecoveryCallback",
     request.originalAlgorithm = CompressionAlgorithm::None;
     request.data = data;
 
-    manager_->performRecovery(request);
+    (void)manager_->performRecovery(request);
 
     CHECK(callbackInvoked);
     CHECK(capturedStatus == RecoveryStatus::Success);
@@ -185,7 +185,7 @@ TEST_CASE_METHOD(RecoveryManagerFixture, "RecoveryManager - RecoveryStatistics",
         request.originalAlgorithm = CompressionAlgorithm::None;
         request.data = data;
 
-        manager_->performRecovery(request);
+        (void)manager_->performRecovery(request);
     }
 
     auto stats = manager_->getRecoveryStats();
@@ -283,7 +283,7 @@ TEST_CASE_METHOD(RecoveryManagerFixture, "RecoveryManager - DiagnosticsOutput",
     request.originalAlgorithm = CompressionAlgorithm::None;
     request.data = data;
 
-    manager_->performRecovery(request);
+    (void)manager_->performRecovery(request);
 
     auto diagnostics = manager_->getDiagnostics();
     CHECK_FALSE(diagnostics.empty());

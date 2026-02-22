@@ -979,6 +979,8 @@ public:
                 fileResult.matchCount = 0;
                 size_t ln_counter = 0;
                 auto onLine = [&](const std::string& line) {
+                    if (stop.load(std::memory_order_relaxed))
+                        return;
                     ++ln_counter;
                     size_t n = countMatches(line);
                     bool matched = (n > 0);
@@ -986,6 +988,30 @@ public:
                         matched = !matched;
                     if (!matched)
                         return;
+
+                    if (max_total_results > 0) {
+                        const size_t limit = static_cast<size_t>(max_total_results);
+                        size_t prev = totalMatches.fetch_add(n, std::memory_order_relaxed);
+                        if (prev >= limit) {
+                            totalMatches.fetch_sub(n, std::memory_order_relaxed);
+                            stop.store(true, std::memory_order_relaxed);
+                            return;
+                        }
+                        const size_t remaining = limit - prev;
+                        if (n > remaining) {
+                            const size_t overflow = n - remaining;
+                            totalMatches.fetch_sub(overflow, std::memory_order_relaxed);
+                            n = remaining;
+                        }
+                        if (n == 0) {
+                            stop.store(true, std::memory_order_relaxed);
+                            return;
+                        }
+                        if ((prev + n) >= limit) {
+                            stop.store(true, std::memory_order_relaxed);
+                        }
+                    }
+
                     fileResult.matchCount += n;
                     if (req.count)
                         return;
@@ -1148,7 +1174,9 @@ public:
                 if (fileResult.matchCount > 0) {
                     spdlog::debug("[GrepService] matched '{}' count={}", fileResult.file,
                                   fileResult.matchCount);
-                    totalMatches += static_cast<size_t>(fileResult.matchCount);
+                    if (max_total_results <= 0) {
+                        totalMatches += static_cast<size_t>(fileResult.matchCount);
+                    }
                     regexMatches += static_cast<size_t>(fileResult.matchCount);
                     filesWith.insert(fileResult.file);
                     if (!req.filesWithMatches && !req.pathsOnly)

@@ -13,6 +13,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+
+#include <yams/compat/unistd.h>
 #include <future>
 #include <memory>
 #include <optional>
