@@ -72,7 +72,6 @@ protected:
     chunking::ChunkingConfig chunkConfig_;
     std::unique_ptr<chunking::RabinChunker> chunker_;
     std::vector<std::byte> data_;
-    size_t dataSize_;
 };
 
 // --- Compression Benchmarks ---

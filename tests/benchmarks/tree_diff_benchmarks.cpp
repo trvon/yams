@@ -467,7 +467,7 @@ private:
 
         // Calculate deduplicated block storage
         blockDeduplicatedSize_ = 0;
-        for (const auto& /*hash*/ : uniqueBlockSet) {
+        for ([[maybe_unused]] const auto& hash : uniqueBlockSet) {
             // Average file size (simulated)
             blockDeduplicatedSize_ += 5000; // Conservative estimate
         }

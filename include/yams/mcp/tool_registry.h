@@ -1403,6 +1403,10 @@ public:
         }
     }
 
+    bool hasTool(std::string_view name) const {
+        return handlers_.find(std::string(name)) != handlers_.end();
+    }
+
     boost::asio::awaitable<json> callTool(std::string_view name, const json& arguments) {
         if (auto it = handlers_.find(std::string(name)); it != handlers_.end()) {
             co_return co_await it->second(arguments);

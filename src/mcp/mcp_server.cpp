@@ -2011,7 +2011,16 @@ json yams::mcp::MCPServer::listPrompts() {
 json MCPServer::callTool(const std::string& name, const json& arguments) {
     spdlog::info("MCP callTool invoked: name='{}', arguments={}", name, arguments.dump());
 
-    auto* reg = internalRegistry_ ? internalRegistry_.get() : toolRegistry_.get();
+    // Resolve registry: try public toolRegistry_ first (composite tools: query/execute/session),
+    // then fall back to internalRegistry_ (individual tools used for internal dispatch).
+    ToolRegistry* reg = nullptr;
+    if (toolRegistry_ && toolRegistry_->hasTool(name)) {
+        reg = toolRegistry_.get();
+    } else if (internalRegistry_ && internalRegistry_->hasTool(name)) {
+        reg = internalRegistry_.get();
+    } else if (toolRegistry_) {
+        reg = toolRegistry_.get(); // let it produce "Unknown tool" error
+    }
     if (!reg) {
         return {{"error", {{"code", -32603}, {"message", "Tool registry not initialized"}}}};
     }
@@ -2082,7 +2091,16 @@ boost::asio::awaitable<json> MCPServer::callToolAsync(const std::string& name,
                                                       const json& arguments) {
     spdlog::debug("MCP callToolAsync invoked: '{}'", name);
 
-    auto* reg = internalRegistry_ ? internalRegistry_.get() : toolRegistry_.get();
+    // Resolve registry: try public toolRegistry_ first (composite tools: query/execute/session),
+    // then fall back to internalRegistry_ (individual tools).
+    ToolRegistry* reg = nullptr;
+    if (toolRegistry_ && toolRegistry_->hasTool(name)) {
+        reg = toolRegistry_.get();
+    } else if (internalRegistry_ && internalRegistry_->hasTool(name)) {
+        reg = internalRegistry_.get();
+    } else if (toolRegistry_) {
+        reg = toolRegistry_.get();
+    }
     if (!reg) {
         co_return json{{"error", {{"code", -32603}, {"message", "Tool registry not initialized"}}}};
     }

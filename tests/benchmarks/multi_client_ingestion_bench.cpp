@@ -1760,9 +1760,14 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     //   YAMS_BENCH_DATA_DIR              - required: existing corpus path
     //   YAMS_BENCH_SEARCH_CLIENTS        - search thread count (default: 4)
     //   YAMS_BENCH_LIST_CLIENTS          - list thread count (default: 4)
+    //   YAMS_BENCH_GREP_CLIENTS          - grep thread count (default: 2)
     //   YAMS_BENCH_STATUS_GET_CLIENTS    - status/get thread count (default: 4)
     //   YAMS_BENCH_OPS_PER_CLIENT        - ops per thread (default: 50)
     //   YAMS_BENCH_OP_TIMEOUT_S          - per-op timeout in seconds (default: 60)
+    //   YAMS_BENCH_STATUS_EVERY_N        - status cadence in status/get threads (default: 4)
+    //   YAMS_BENCH_CAT_EVERY_N           - cat cadence among non-status status/get ops
+    //                                      (default: 3)
+    //   YAMS_BENCH_LIST_INFLIGHT_CAP     - max concurrent list ops (0 = unlimited, default: 0)
     auto cfg = BenchConfig::fromEnv();
     if (!cfg.dataDir) {
         SKIP("Set YAMS_BENCH_DATA_DIR to an existing YAMS corpus to run this benchmark");
@@ -1776,11 +1781,15 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     };
     const int kSearchClients = envInt("YAMS_BENCH_SEARCH_CLIENTS", 4);
     const int kListClients = envInt("YAMS_BENCH_LIST_CLIENTS", 4);
+    const int kGrepClients = envInt("YAMS_BENCH_GREP_CLIENTS", 2);
     const int kStatusGetClients = envInt("YAMS_BENCH_STATUS_GET_CLIENTS", 4);
-    const int kTotalClients = kSearchClients + kListClients + kStatusGetClients;
+    const int kTotalClients = kSearchClients + kListClients + kGrepClients + kStatusGetClients;
     const int kOpsPerClient = envInt("YAMS_BENCH_OPS_PER_CLIENT", 50);
     const int kOpTimeoutS = envInt("YAMS_BENCH_OP_TIMEOUT_S", 60);
     const auto kOpTimeout = std::chrono::seconds(kOpTimeoutS);
+    const int kStatusEveryN = std::max(1, envInt("YAMS_BENCH_STATUS_EVERY_N", 4));
+    const int kCatEveryN = std::max(1, envInt("YAMS_BENCH_CAT_EVERY_N", 3));
+    const int kListInflightCap = std::max(0, envInt("YAMS_BENCH_LIST_INFLIGHT_CAP", 0));
     const int kDiscoverPageSize = envInt("YAMS_BENCH_DISCOVER_PAGE_SIZE", 500);
     const int kDiscoverHashLimit = envInt("YAMS_BENCH_DISCOVER_HASH_LIMIT", 5000);
     const int kHotspotWindowMs = envInt("YAMS_BENCH_HOTSPOT_WINDOW_MS", 1000);
@@ -1790,10 +1799,17 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
 
     std::cout << "\n=== Large Corpus Read Benchmark (instrumented) ===\n";
     std::cout << "  Data dir:       " << cfg.dataDir->string() << "\n";
-    std::cout << "  Layout:         " << kSearchClients << "S + " << kListClients << "L + "
-              << kStatusGetClients << "G = " << kTotalClients << " threads\n";
+    std::cout << "  Layout:         " << kSearchClients << " search + " << kListClients
+              << " list + " << kGrepClients << " grep + " << kStatusGetClients
+              << " status/get/cat = " << kTotalClients << " threads\n";
     std::cout << "  Ops/thread:     " << kOpsPerClient << "\n";
     std::cout << "  Op timeout:     " << kOpTimeoutS << "s\n";
+    std::cout << "  Status every:   " << kStatusEveryN << " op(s) on status/get/cat threads\n";
+    std::cout << "  Cat every:      " << kCatEveryN
+              << " non-status op(s) on status/get/cat threads\n";
+    std::cout << "  List cap:       "
+              << (kListInflightCap > 0 ? std::to_string(kListInflightCap) : "unlimited")
+              << " in-flight\n";
     std::cout << "  Discover page:  " << kDiscoverPageSize << " (limit " << kDiscoverHashLimit
               << ")\n";
     std::cout << "  Hotspot window: " << kHotspotWindowMs << "ms\n";
@@ -1861,11 +1877,34 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
 
     std::vector<std::string> knownHashes;
     {
+        auto discoverDirectPage = [&](int offset, int& itemsInPage) -> bool {
+            ListRequest listReq;
+            listReq.limit = kDiscoverPageSize;
+            listReq.offset = offset;
+            auto listRes = yams::cli::run_sync(discoverClient.list(listReq), kOpTimeout);
+            if (!listRes) {
+                WARN("Discovery list failed at offset " << offset << ": "
+                                                        << listRes.error().message);
+                return false;
+            }
+            for (auto& item : listRes.value().items) {
+                if (!item.hash.empty()) {
+                    knownHashes.push_back(item.hash);
+                    ++itemsInPage;
+                    if (static_cast<int>(knownHashes.size()) >= kDiscoverHashLimit) {
+                        break;
+                    }
+                }
+            }
+            return true;
+        };
+
+        bool useDirectDiscoveryFallback = false;
         bool done = false;
         for (int offset = 0; !done && static_cast<int>(knownHashes.size()) < kDiscoverHashLimit;
              offset += kDiscoverPageSize) {
             int itemsInPage = 0;
-            if (useMcpPath) {
+            if (useMcpPath && !useDirectDiscoveryFallback) {
                 auto listRes = sharedMcpPool->queryStepForSlot(
                     0, "list", {{"limit", kDiscoverPageSize}, {"offset", offset}});
                 if (!listRes) {
@@ -1873,38 +1912,54 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                                                             << listRes.error().message);
                     break;
                 }
-                if (listRes.value().contains("items") && listRes.value()["items"].is_array()) {
-                    for (const auto& item : listRes.value()["items"]) {
+                auto collectHashes = [&](const nlohmann::json& arr) {
+                    if (!arr.is_array()) {
+                        return;
+                    }
+                    for (const auto& item : arr) {
+                        if (!item.is_object()) {
+                            continue;
+                        }
+                        std::string hash;
                         if (item.contains("hash") && item["hash"].is_string()) {
-                            auto hash = item["hash"].get<std::string>();
-                            if (!hash.empty()) {
-                                knownHashes.push_back(std::move(hash));
-                                ++itemsInPage;
-                                if (static_cast<int>(knownHashes.size()) >= kDiscoverHashLimit) {
-                                    break;
-                                }
+                            hash = item["hash"].get<std::string>();
+                        } else if (item.contains("id") && item["id"].is_string()) {
+                            hash = item["id"].get<std::string>();
+                        } else if (item.contains("document_hash") &&
+                                   item["document_hash"].is_string()) {
+                            hash = item["document_hash"].get<std::string>();
+                        }
+
+                        if (!hash.empty()) {
+                            knownHashes.push_back(std::move(hash));
+                            ++itemsInPage;
+                            if (static_cast<int>(knownHashes.size()) >= kDiscoverHashLimit) {
+                                break;
                             }
                         }
                     }
+                };
+
+                const auto& payload = listRes.value();
+                if (payload.contains("items")) {
+                    collectHashes(payload["items"]);
+                }
+                if (itemsInPage == 0 && payload.contains("results")) {
+                    collectHashes(payload["results"]);
+                }
+
+                if (offset == 0 && itemsInPage == 0) {
+                    int directItemsInPage = 0;
+                    if (discoverDirectPage(offset, directItemsInPage) && directItemsInPage > 0) {
+                        useDirectDiscoveryFallback = true;
+                        itemsInPage = directItemsInPage;
+                        INFO("Discovery fallback: using direct list() pagination because MCP list "
+                             "did not return discoverable hashes.");
+                    }
                 }
             } else {
-                ListRequest listReq;
-                listReq.limit = kDiscoverPageSize;
-                listReq.offset = offset;
-                auto listRes = yams::cli::run_sync(discoverClient.list(listReq), kOpTimeout);
-                if (!listRes) {
-                    WARN("Discovery list failed at offset " << offset << ": "
-                                                            << listRes.error().message);
+                if (!discoverDirectPage(offset, itemsInPage)) {
                     break;
-                }
-                for (auto& item : listRes.value().items) {
-                    if (!item.hash.empty()) {
-                        knownHashes.push_back(item.hash);
-                        ++itemsInPage;
-                        if (static_cast<int>(knownHashes.size()) >= kDiscoverHashLimit) {
-                            break;
-                        }
-                    }
                 }
             }
 
@@ -1922,8 +1977,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     std::cout << "  Known hashes:   " << knownHashes.size() << "\n";
     std::cout << "  Initial RSS:    " << initSnap.memoryUsageMb << " MB\n";
 
-    if (knownHashes.empty()) {
-        WARN("Corpus appears empty — benchmark results may be unreliable");
+    if (knownHashes.empty() && initSnap.documentsTotal == 0) {
+        SKIP("Large-corpus benchmark requires a non-empty corpus: discovery returned 0 hashes or "
+             "daemon reports 0 documents. Verify YAMS_BENCH_DATA_DIR points to populated data.");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2028,7 +2084,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
 
     // Per-op trace record
     struct OpTrace {
-        std::string opType; // "search", "list", "get", "status"
+        std::string opType; // "search", "list", "grep", "status", "get", "cat"
         int threadId{0};
         int opIndex{0};
         int64_t latencyUs{0};
@@ -2049,9 +2105,11 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     std::vector<std::vector<OpTrace>> perThreadTraces(kTotalClients);
 
     // Shared counters
-    std::atomic<int> searchOps{0}, listOps{0}, statusOps{0}, getOps{0};
-    std::atomic<int> searchFails{0}, listFails{0}, statusFails{0}, getFails{0};
+    std::atomic<int> searchOps{0}, listOps{0}, grepOps{0}, statusOps{0}, getOps{0}, catOps{0};
+    std::atomic<int> searchFails{0}, listFails{0}, grepFails{0}, statusFails{0}, getFails{0},
+        catFails{0};
     std::atomic<int> totalCompleted{0};
+    std::atomic<int> listInFlight{0};
     const int totalExpected = kTotalClients * kOpsPerClient;
 
     // Live progress reporter
@@ -2090,6 +2148,13 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         "database query optimization",  "concurrent thread synchronization",
         "error handling recovery",      "configuration file parsing",
         "build system compilation",     "testing framework assertions",
+    };
+
+    static const char* corpusGrepPatterns[] = {
+        "TODO|FIXME",      "error|exception",       "thread|mutex|lock",
+        "config|settings", "benchmark|performance", "daemon|socket",
+        "search|index",    "vector|embedding",      "plugin|model",
+        "timeout|retry",
     };
 
     int threadIdx = 0;
@@ -2176,6 +2241,20 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 ListRequest req;
                 req.limit = (i % 4 == 0) ? 10 : (i % 4 == 1) ? 25 : (i % 4 == 2) ? 50 : 100;
 
+                bool listPermitAcquired = false;
+                if (kListInflightCap > 0) {
+                    while (!listPermitAcquired) {
+                        int cur = listInFlight.load(std::memory_order_relaxed);
+                        if (cur < kListInflightCap) {
+                            listPermitAcquired = listInFlight.compare_exchange_weak(
+                                cur, cur + 1, std::memory_order_relaxed);
+                        }
+                        if (!listPermitAcquired) {
+                            std::this_thread::yield();
+                        }
+                    }
+                }
+
                 auto t0 = std::chrono::steady_clock::now();
                 yams::Result<nlohmann::json> res;
                 if (useMcpPath) {
@@ -2194,6 +2273,11 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         res = yams::Error{direct.error()};
                     }
                 }
+
+                if (kListInflightCap > 0 && listPermitAcquired) {
+                    listInFlight.fetch_sub(1, std::memory_order_relaxed);
+                }
+
                 auto t1 = std::chrono::steady_clock::now();
                 auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
                 auto wallMs =
@@ -2223,6 +2307,74 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     }
 
     // --- Status/Get threads ---
+    for (int g = 0; g < kGrepClients; ++g) {
+        int tid = threadIdx++;
+        perThreadTraces[tid].reserve(kOpsPerClient);
+        threads.emplace_back([&, tid, g]() {
+            std::optional<DaemonClient> client;
+            if (!useMcpPath) {
+                auto ccfg = makeClientConfig();
+                client.emplace(ccfg);
+            }
+            while (!go.load())
+                std::this_thread::yield();
+
+            for (int i = 0; i < kOpsPerClient; ++i) {
+                const char* pattern = corpusGrepPatterns[(g * kOpsPerClient + i) % 10];
+                auto t0 = std::chrono::steady_clock::now();
+                yams::Result<nlohmann::json> res;
+                if (useMcpPath) {
+                    res = sharedMcpPool->queryStepForSlot(static_cast<size_t>(tid), "grep",
+                                                          {{"pattern", pattern},
+                                                           {"max_count", (i % 2 == 0) ? 25 : 50},
+                                                           {"ignore_case", (i % 3 == 0)},
+                                                           {"context", i % 2}});
+                } else {
+                    GrepRequest req;
+                    req.pattern = pattern;
+                    req.maxMatches = static_cast<size_t>((i % 2 == 0) ? 25 : 50);
+                    req.caseInsensitive = (i % 3 == 0);
+                    req.contextLines = i % 2;
+                    auto direct = yams::cli::run_sync(client->grep(req), kOpTimeout);
+                    if (direct) {
+                        nlohmann::json j;
+                        j["match_count"] = direct.value().totalMatches;
+                        j["file_count"] = direct.value().filesSearched;
+                        res = j;
+                    } else {
+                        res = yams::Error{direct.error()};
+                    }
+                }
+                auto t1 = std::chrono::steady_clock::now();
+                auto latUs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+                auto wallMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(t1 - globalStart).count();
+
+                OpTrace trace;
+                trace.opType = "grep";
+                trace.threadId = tid;
+                trace.opIndex = i;
+                trace.latencyUs = latUs;
+                trace.wallClockMs = wallMs;
+                if (res) {
+                    trace.success = true;
+                    if (res.value().contains("match_count") &&
+                        res.value()["match_count"].is_number_integer()) {
+                        trace.resultCount = res.value()["match_count"].get<int>();
+                    }
+                    grepOps.fetch_add(1);
+                } else {
+                    trace.success = false;
+                    trace.errorMsg = res.error().message;
+                    grepFails.fetch_add(1);
+                }
+                perThreadTraces[tid].push_back(std::move(trace));
+                totalCompleted.fetch_add(1);
+            }
+        });
+    }
+
+    // --- Status/Get/Cat threads ---
     for (int g = 0; g < kStatusGetClients; ++g) {
         int tid = threadIdx++;
         perThreadTraces[tid].reserve(kOpsPerClient);
@@ -2238,7 +2390,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
 
             for (int i = 0; i < kOpsPerClient; ++i) {
                 auto t0 = std::chrono::steady_clock::now();
-                bool isStatus = (i % 4 == 0) || knownHashes.empty();
+                bool isStatus = (i % kStatusEveryN == 0) || knownHashes.empty();
 
                 if (isStatus) {
                     yams::Result<nlohmann::json> res;
@@ -2278,20 +2430,41 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 } else {
                     std::uniform_int_distribution<std::size_t> dist(0, knownHashes.size() - 1);
                     std::string hash = knownHashes[dist(rng)];
+                    bool doCat = (i % kCatEveryN == 0);
                     yams::Result<nlohmann::json> res;
-                    if (useMcpPath) {
-                        res = sharedMcpPool->queryStepForSlot(
-                            static_cast<size_t>(tid), "get",
-                            {{"hash", hash}, {"include_content", false}});
-                    } else {
-                        GetRequest req;
-                        req.hash = hash;
-                        req.metadataOnly = true;
-                        auto direct = yams::cli::run_sync(client->get(req), kOpTimeout);
-                        if (direct) {
-                            res = nlohmann::json::object();
+                    if (doCat) {
+                        if (useMcpPath) {
+                            res = sharedMcpPool->queryStepForSlot(
+                                static_cast<size_t>(tid), "get",
+                                {{"hash", hash}, {"include_content", true}});
                         } else {
-                            res = yams::Error{direct.error()};
+                            CatRequest req;
+                            req.hash = hash;
+                            auto direct = yams::cli::run_sync(client->cat(req), kOpTimeout);
+                            if (direct) {
+                                nlohmann::json j;
+                                j["has_content"] = direct.value().hasContent;
+                                j["size"] = direct.value().size;
+                                res = j;
+                            } else {
+                                res = yams::Error{direct.error()};
+                            }
+                        }
+                    } else {
+                        if (useMcpPath) {
+                            res = sharedMcpPool->queryStepForSlot(
+                                static_cast<size_t>(tid), "get",
+                                {{"hash", hash}, {"include_content", false}});
+                        } else {
+                            GetRequest req;
+                            req.hash = hash;
+                            req.metadataOnly = true;
+                            auto direct = yams::cli::run_sync(client->get(req), kOpTimeout);
+                            if (direct) {
+                                res = nlohmann::json::object();
+                            } else {
+                                res = yams::Error{direct.error()};
+                            }
                         }
                     }
                     auto t1 = std::chrono::steady_clock::now();
@@ -2302,18 +2475,30 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                             .count();
 
                     OpTrace trace;
-                    trace.opType = "get";
+                    trace.opType = doCat ? "cat" : "get";
                     trace.threadId = tid;
                     trace.opIndex = i;
                     trace.latencyUs = latUs;
                     trace.wallClockMs = wallMs;
                     if (res) {
                         trace.success = true;
-                        getOps.fetch_add(1);
+                        if (doCat) {
+                            if (res.value().contains("size") && res.value()["size"].is_number()) {
+                                trace.resultCount =
+                                    static_cast<int>(res.value()["size"].get<uint64_t>());
+                            }
+                            catOps.fetch_add(1);
+                        } else {
+                            getOps.fetch_add(1);
+                        }
                     } else {
                         trace.success = false;
                         trace.errorMsg = res.error().message;
-                        getFails.fetch_add(1);
+                        if (doCat) {
+                            catFails.fetch_add(1);
+                        } else {
+                            getFails.fetch_add(1);
+                        }
                     }
                     perThreadTraces[tid].push_back(std::move(trace));
                 }
@@ -2339,7 +2524,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     auto finalSnap = DaemonSnapshot::capture(monitorClient);
 
     // Aggregate latency vectors from per-thread traces
-    std::vector<int64_t> allSearchLat, allListLat, allStatusLat, allGetLat;
+    std::vector<int64_t> allSearchLat, allListLat, allGrepLat, allStatusLat, allGetLat, allCatLat;
     std::vector<OpTrace> allTraces;
     std::map<std::string, int> errorCategories;
 
@@ -2351,10 +2536,14 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                     allSearchLat.push_back(tr.latencyUs);
                 else if (tr.opType == "list")
                     allListLat.push_back(tr.latencyUs);
+                else if (tr.opType == "grep")
+                    allGrepLat.push_back(tr.latencyUs);
                 else if (tr.opType == "status")
                     allStatusLat.push_back(tr.latencyUs);
                 else if (tr.opType == "get")
                     allGetLat.push_back(tr.latencyUs);
+                else if (tr.opType == "cat")
+                    allCatLat.push_back(tr.latencyUs);
             } else {
                 errorCategories[classifyFailureMessage(tr.errorMsg)]++;
             }
@@ -2363,11 +2552,15 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
 
     auto searchStats = PercentileStats::compute(allSearchLat);
     auto listStats = PercentileStats::compute(allListLat);
+    auto grepStats = PercentileStats::compute(allGrepLat);
     auto statusStats = PercentileStats::compute(allStatusLat);
     auto getStats = PercentileStats::compute(allGetLat);
+    auto catStats = PercentileStats::compute(allCatLat);
 
-    int totalOps = searchOps.load() + listOps.load() + statusOps.load() + getOps.load();
-    int totalFails = searchFails.load() + listFails.load() + statusFails.load() + getFails.load();
+    int totalOps = searchOps.load() + listOps.load() + grepOps.load() + statusOps.load() +
+                   getOps.load() + catOps.load();
+    int totalFails = searchFails.load() + listFails.load() + grepFails.load() + statusFails.load() +
+                     getFails.load() + catFails.load();
     double opsPerSec = totalOps > 0 ? totalOps / globalElapsed : 0.0;
 
     // Memory watermarks from time series
@@ -2382,8 +2575,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
 
     std::cout << "\n=== Large Corpus Results (instrumented) ===\n";
     std::cout << "  Corpus:         " << finalSnap.documentsTotal << " docs\n";
-    std::cout << "  Layout:         " << kSearchClients << "S + " << kListClients << "L + "
-              << kStatusGetClients << "G\n";
+    std::cout << "  Layout:         " << kSearchClients << " search + " << kListClients
+              << " list + " << kGrepClients << " grep + " << kStatusGetClients
+              << " status/get/cat\n";
     std::cout << "  Wall time:      " << std::fixed << std::setprecision(2) << globalElapsed
               << "s\n";
     std::cout << "  Total ops:      " << totalOps << " (" << std::setprecision(1) << opsPerSec
@@ -2393,13 +2587,17 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     std::cout << "  Op breakdown:\n";
     std::cout << "    Search: " << searchOps.load() << " ok, " << searchFails.load() << " fail\n";
     std::cout << "    List:   " << listOps.load() << " ok, " << listFails.load() << " fail\n";
+    std::cout << "    Grep:   " << grepOps.load() << " ok, " << grepFails.load() << " fail\n";
     std::cout << "    Status: " << statusOps.load() << " ok, " << statusFails.load() << " fail\n";
     std::cout << "    Get:    " << getOps.load() << " ok, " << getFails.load() << " fail\n\n";
+    std::cout << "    Cat:    " << catOps.load() << " ok, " << catFails.load() << " fail\n\n";
 
     printPercentiles("Search latency", searchStats);
     printPercentiles("List latency  ", listStats);
+    printPercentiles("Grep latency  ", grepStats);
     printPercentiles("Status latency", statusStats);
     printPercentiles("Get latency   ", getStats);
+    printPercentiles("Cat latency   ", catStats);
 
     std::cout << "\n  Memory:\n";
     std::cout << "    Initial: " << std::setprecision(0) << initSnap.memoryUsageMb << " MB\n";
@@ -2553,8 +2751,10 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     std::cout << "  Latency distribution:\n";
     printHistogram("Search", allSearchLat);
     printHistogram("List  ", allListLat);
+    printHistogram("Grep  ", allGrepLat);
     printHistogram("Status", allStatusLat);
     printHistogram("Get   ", allGetLat);
+    printHistogram("Cat   ", allCatLat);
     std::cout << "\n";
 
     CHECK(totalOps > 0);
@@ -2612,9 +2812,13 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         {"corpus_docs", finalSnap.documentsTotal},
         {"layout", json{{"search_clients", kSearchClients},
                         {"list_clients", kListClients},
+                        {"grep_clients", kGrepClients},
                         {"status_get_clients", kStatusGetClients},
                         {"ops_per_client", kOpsPerClient},
-                        {"op_timeout_s", kOpTimeoutS}}},
+                        {"op_timeout_s", kOpTimeoutS},
+                        {"status_every_n", kStatusEveryN},
+                        {"cat_every_n", kCatEveryN},
+                        {"list_inflight_cap", kListInflightCap}}},
         {"total_ops", totalOps},
         {"total_failures", totalFails},
         {"elapsed_seconds", globalElapsed},
@@ -2625,11 +2829,16 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         {"list", json{{"ops", listOps.load()},
                       {"fails", listFails.load()},
                       {"latency", listStats.toJson()}}},
+        {"grep", json{{"ops", grepOps.load()},
+                      {"fails", grepFails.load()},
+                      {"latency", grepStats.toJson()}}},
         {"status", json{{"ops", statusOps.load()},
                         {"fails", statusFails.load()},
                         {"latency", statusStats.toJson()}}},
         {"get",
          json{{"ops", getOps.load()}, {"fails", getFails.load()}, {"latency", getStats.toJson()}}},
+        {"cat",
+         json{{"ops", catOps.load()}, {"fails", catFails.load()}, {"latency", catStats.toJson()}}},
         {"memory", json{{"initial_mb", initSnap.memoryUsageMb},
                         {"peak_mb", peakRss},
                         {"min_mb", minRss},

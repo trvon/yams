@@ -925,26 +925,22 @@ if catch2_dep.found()
     install: false,
   )
 
-  # Reranker session test (uses mock mode by default, real model optional)
-  # Compile the reranker session source directly into the test to avoid plugin linking issues
-  reranker_test_deps = [catch2_dep, catch2_main_dep] + test_deps
   if onnx_dep.found()
-    reranker_test_deps += onnx_dep
-  endif
+    # Reranker session test (uses mock mode by default, real model optional)
+    # Compile the reranker session source directly into the test to avoid plugin linking issues
+    reranker_test_deps = [catch2_dep, catch2_main_dep] + test_deps + onnx_dep
 
-  catch2_daemon_reranker_exe = executable('catch2_daemon_reranker',
-    files(
-      'unit/daemon/onnx_reranker_session_test.cpp',
-      '../plugins/onnx/onnx_reranker_session.cpp',
-    ),
-    include_directories: incs,
-    dependencies: reranker_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
-  if onnx_dep.found()
+    catch2_daemon_reranker_exe = executable('catch2_daemon_reranker',
+      files(
+        'unit/daemon/onnx_reranker_session_test.cpp',
+        '../plugins/onnx/onnx_reranker_session.cpp',
+      ),
+      include_directories: incs,
+      dependencies: reranker_test_deps,
+      cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+      build_rpath: ':'.join(_test_rpaths),
+      install: false,
+    )
     onnx_provider_test_deps = [catch2_dep, catch2_main_dep] + test_deps + onnx_dep
     catch2_daemon_onnx_provider_exe = executable('catch2_daemon_onnx_provider',
       files(
@@ -1432,6 +1428,7 @@ if catch2_dep.found()
       'unit/mcp/mcp_server_exec_catch2_test.cpp',
       'unit/mcp/mcp_socket_resolution_catch2_test.cpp',
       'unit/mcp/mcp_code_mode_catch2_test.cpp',
+      'unit/mcp/mcp_composite_dispatch_catch2_test.cpp',
       'unit/mcp/mcp_tool_registry_wrappers_catch2_test.cpp',
       'unit/mcp/mcp_tools_schema_and_smoke_catch2_test.cpp',
       'unit/mcp/stdio_transport_catch2_test.cpp',
@@ -2622,16 +2619,18 @@ if catch2_dep.found()
     is_parallel: false
   )
 
-  # Reranker session test - uses mock mode by default, enabling quick CI runs
-  test('daemon_reranker_session', catch2_daemon_reranker_exe,
-    suite: ['catch2', 'unit', 'daemon', 'reranker'],
-    env: {
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-      'YAMS_TEST_MODE': '1',  # Enable mock mode for CI
-    },
-    timeout: 60,
-    is_parallel: true
-  )
+  if onnx_dep.found()
+    # Reranker session test - uses mock mode by default, enabling quick CI runs
+    test('daemon_reranker_session', catch2_daemon_reranker_exe,
+      suite: ['catch2', 'unit', 'daemon', 'reranker'],
+      env: {
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+        'YAMS_TEST_MODE': '1',  # Enable mock mode for CI
+      },
+      timeout: 60,
+      is_parallel: true
+    )
+  endif
 
   if onnx_dep.found()
     test('daemon_onnx_provider_config', catch2_daemon_onnx_provider_exe,
