@@ -961,7 +961,7 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
 
     // Phase 3: Search index repair
     if (doFts5)
-        runOp("fts5", [&] { return rebuildFts5Index(request.dryRun, request.verbose, progress); });
+        runOp("fts5", [&] { return rebuildFts5Index(request, progress); });
     if (doEmbeddings)
         runOp("embeddings", [&] { return generateMissingEmbeddings(request, progress); });
 
@@ -1673,10 +1673,13 @@ RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool ver
     return result;
 }
 
-RepairOperationResult RepairService::rebuildFts5Index(bool dryRun, bool verbose,
-                                                      ProgressFn progress) {
+RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
+                                                       ProgressFn progress) {
     RepairOperationResult result;
     result.operation = "fts5";
+
+    const bool dryRun = req.dryRun;
+    const bool force = req.force;
 
     auto store = services_ ? services_->getContentStore() : nullptr;
     auto meta = services_ ? services_->getMetadataRepo() : nullptr;
@@ -1768,6 +1771,18 @@ RepairOperationResult RepairService::rebuildFts5Index(bool dryRun, bool verbose,
             continue;
         }
 
+        // Incremental mode: skip documents that already have successful extraction
+        // with a valid content row. The ghost-success loop above already reset any
+        // documents that claim Success but lack content, so remaining Success docs
+        // are genuinely indexed. Use --force to unconditionally rebuild everything.
+        if (!force && d.extractionStatus == metadata::ExtractionStatus::Success) {
+            auto contentRes = meta->getContent(d.id);
+            if (contentRes && contentRes.value().has_value()) {
+                result.skipped++;
+                continue;
+            }
+        }
+
         try {
             auto extractedOpt = yams::extraction::util::extractDocumentText(
                 store, d.sha256Hash, effectiveMime, ext, customExtractors);
@@ -1857,16 +1872,49 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
             hashes.push_back(d.sha256Hash);
     }
 
-    result.processed = hashes.size();
+    // Incremental mode: skip documents that already have embeddings.
+    // Batch-fetch all embedded hashes in a single query for efficiency.
+    // Use --force to regenerate embeddings for all documents unconditionally.
+    size_t skippedExisting = 0;
+    if (!req.force) {
+        auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
+        if (vectorDb) {
+            auto embeddedHashes = vectorDb->getEmbeddedDocumentHashes();
+            if (!embeddedHashes.empty()) {
+                std::vector<std::string> missing;
+                missing.reserve(hashes.size());
+                for (auto& h : hashes) {
+                    if (embeddedHashes.count(h) == 0) {
+                        missing.push_back(std::move(h));
+                    } else {
+                        ++skippedExisting;
+                    }
+                }
+                hashes = std::move(missing);
+            }
+        }
+    }
+
+    result.processed = hashes.size() + skippedExisting;
+    result.skipped = skippedExisting;
 
     if (hashes.empty()) {
-        result.message = "No eligible documents";
+        if (skippedExisting > 0) {
+            result.message = "All " + std::to_string(skippedExisting) +
+                             " eligible documents already have embeddings";
+        } else {
+            result.message = "No eligible documents";
+        }
         return result;
     }
 
     if (req.dryRun) {
-        result.skipped = hashes.size();
+        result.skipped += hashes.size();
         result.message = "Would generate embeddings for " + std::to_string(hashes.size()) + " docs";
+        if (skippedExisting > 0) {
+            result.message +=
+                " (" + std::to_string(skippedExisting) + " already embedded, skipped)";
+        }
         return result;
     }
 
@@ -1918,6 +1966,9 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
     }
 
     result.message = "Queued " + std::to_string(result.succeeded) + " docs for embedding";
+    if (result.skipped > 0) {
+        result.message += " (" + std::to_string(result.skipped) + " already embedded, skipped)";
+    }
     return result;
 }
 

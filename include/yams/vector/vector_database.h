@@ -202,6 +202,7 @@ public:
     getVectorsBatch(const std::vector<std::string>& chunk_ids) const;
     std::vector<VectorRecord> getVectorsByDocument(const std::string& document_hash) const;
     bool hasEmbedding(const std::string& document_hash) const;
+    std::unordered_set<std::string> getEmbeddedDocumentHashes() const;
 
     // Index management
     bool buildIndex();

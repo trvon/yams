@@ -432,26 +432,11 @@ std::size_t PostIngestQueue::adaptiveExtractionBatchSize(std::size_t baseBatchSi
     // Keep extraction commits meaningfully batched even when stage concurrency is clamped.
     // Concurrency governs how many batches run at once; this floor governs docs per batch.
     constexpr std::size_t kExtractionBatchFloor = 4u;
-    const std::size_t floorBatch = kExtractionBatchFloor;
-
-    // When KG is saturated, reduce extraction batching to avoid overwhelming the KG stage.
-    // We intentionally keep this simple and monotonic.
-    std::size_t depth = 0;
-    std::size_t cap = 0;
-    const double fill = kgChannelFillRatio(&depth, &cap);
-    (void)depth;
-
-    if (cap == 0) {
-        return std::max(baseBatchSize, floorBatch);
-    }
-
-    if (fill > 0.85) {
-        return std::max<std::size_t>(floorBatch, baseBatchSize / 4u);
-    }
-    if (fill > 0.70) {
-        return std::max<std::size_t>(floorBatch, baseBatchSize / 2u);
-    }
-    return std::max(baseBatchSize, floorBatch);
+    // Extraction batch size is decoupled from KG channel backpressure. KG processing
+    // is downstream and independent — a full KG channel should not throttle text
+    // extraction + FTS indexing. The KG channel already handles drops gracefully
+    // when full, and the KG poller runs on its own independent schedule.
+    return std::max(baseBatchSize, kExtractionBatchFloor);
 }
 
 std::size_t PostIngestQueue::adaptiveStageBatchSize(std::size_t queueDepth,
@@ -565,6 +550,11 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     cfg.batchProcessFn = [this](std::vector<InternalEventBus::PostIngestTask>&& tasks) {
         processBatch(std::move(tasks));
     };
+    // Disable CPU throttling for the extraction poller. Extraction concurrency is
+    // already bounded by extractionSemaphore_ and maxExtractionConcurrent(). The
+    // CPU throttle adds 2-25ms delays after every productive batch, compounding
+    // across hundreds of documents and significantly reducing throughput.
+    cfg.enableCpuThrottling = false;
 
     co_await pressureLimitedPoll(channel, std::move(cfg));
 }

@@ -445,7 +445,6 @@ Result<void> StorageEngine::verify() const {
 }
 
 Result<void> StorageEngine::compact() {
-    // TODO: Implement storage compaction
     spdlog::debug("Storage compaction not yet implemented");
     return {};
 }
@@ -598,7 +597,7 @@ auto validateStorageIntegrity(const std::filesystem::path& basePath) -> Result<b
             return false;
         }
 
-        // TODO: Additional integrity checks
+
 
         return true;
 

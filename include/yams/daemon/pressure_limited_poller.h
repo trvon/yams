@@ -120,7 +120,7 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
     spdlog::info("[PostIngestQueue] {} poller started", cfg.stageName);
 
     constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);
-    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(10);
+    constexpr auto kMaxIdleDelay = std::chrono::milliseconds(5);
     auto idleDelay = kMinIdleDelay;
 
     while (!cfg.stopFlag->load()) {

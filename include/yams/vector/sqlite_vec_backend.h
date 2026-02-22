@@ -94,6 +94,7 @@ public:
     getVectorsByDocument(const std::string& document_hash) override;
 
     Result<bool> hasEmbedding(const std::string& document_hash) override;
+    Result<std::unordered_set<std::string>> getEmbeddedDocumentHashes() override;
     Result<size_t> getVectorCount() override;
     Result<VectorDatabase::DatabaseStats> getStats() override;
 

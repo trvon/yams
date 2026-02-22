@@ -552,6 +552,15 @@ public:
         return result && result.value();
     }
 
+    std::unordered_set<std::string> getEmbeddedDocumentHashes() const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        auto result = backend_->getEmbeddedDocumentHashes();
+        if (result) {
+            return std::move(result.value());
+        }
+        return {};
+    }
+
     Result<VectorDatabase::OrphanCleanupStats> cleanupOrphanRows() {
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
@@ -959,6 +968,10 @@ VectorDatabase::getVectorsByDocument(const std::string& document_hash) const {
 
 bool VectorDatabase::hasEmbedding(const std::string& document_hash) const {
     return pImpl->hasEmbedding(document_hash);
+}
+
+std::unordered_set<std::string> VectorDatabase::getEmbeddedDocumentHashes() const {
+    return pImpl->getEmbeddedDocumentHashes();
 }
 
 Result<VectorDatabase::OrphanCleanupStats> VectorDatabase::cleanupOrphanRows() {

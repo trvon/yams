@@ -128,6 +128,12 @@ public:
     virtual Result<bool> hasEmbedding(const std::string& document_hash) = 0;
 
     /**
+     * @brief Get all document hashes that have at least one embedding vector.
+     * Used for batch incremental checks (e.g., repair skip-if-embedded).
+     */
+    virtual Result<std::unordered_set<std::string>> getEmbeddedDocumentHashes() = 0;
+
+    /**
      * @brief Get total number of vectors in storage
      */
     virtual Result<size_t> getVectorCount() = 0;

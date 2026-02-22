@@ -1332,6 +1332,41 @@ public:
         return false;
     }
 
+    Result<std::unordered_set<std::string>> getEmbeddedDocumentHashes() {
+        std::shared_lock lock(mutex_);
+
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        std::unordered_set<std::string> hashes;
+        const char* sql = "SELECT DISTINCT document_hash FROM vectors";
+        sqlite3_stmt* stmt = nullptr;
+        int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string("Failed to prepare getEmbeddedDocumentHashes: ") +
+                             sqlite3_errmsg(db_)};
+        }
+
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            const char* hash =
+                reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            if (hash) {
+                hashes.emplace(hash);
+            }
+        }
+        sqlite3_finalize(stmt);
+
+        if (rc != SQLITE_DONE) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string("getEmbeddedDocumentHashes iteration failed: ") +
+                             sqlite3_errmsg(db_)};
+        }
+
+        return hashes;
+    }
+
     Result<size_t> getVectorCount() {
         std::shared_lock lock(mutex_);
 
@@ -2728,6 +2763,10 @@ SqliteVecBackend::getVectorsByDocument(const std::string& document_hash) {
 
 Result<bool> SqliteVecBackend::hasEmbedding(const std::string& document_hash) {
     return impl_->hasEmbedding(document_hash);
+}
+
+Result<std::unordered_set<std::string>> SqliteVecBackend::getEmbeddedDocumentHashes() {
+    return impl_->getEmbeddedDocumentHashes();
 }
 
 Result<size_t> SqliteVecBackend::getVectorCount() {

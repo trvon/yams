@@ -138,7 +138,7 @@ private:
     RepairOperationResult rebuildPathTree(bool dryRun, bool verbose, ProgressFn progress);
     RepairOperationResult cleanOrphanedChunks(bool dryRun, bool verbose, ProgressFn progress);
     RepairOperationResult repairBlockReferences(bool dryRun, bool verbose, ProgressFn progress);
-    RepairOperationResult rebuildFts5Index(bool dryRun, bool verbose, ProgressFn progress);
+    RepairOperationResult rebuildFts5Index(const RepairRequest& req, ProgressFn progress);
     RepairOperationResult generateMissingEmbeddings(const RepairRequest& req, ProgressFn progress);
     RepairOperationResult optimizeDatabase(bool dryRun, bool verbose, ProgressFn progress);
 
