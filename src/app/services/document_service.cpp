@@ -1560,10 +1560,47 @@ public:
             page.assign(itStart, itEnd);
         }
 
+        ListDocumentsResponse out;
+        out.totalFound = usedQuery ? totalFoundApprox : docs.size();
+        out.count = page.size();
+        out.sortBy = req.sortBy;
+        out.sortOrder = req.sortOrder;
+        if (!req.pattern.empty())
+            out.pattern = req.pattern;
+        if (!req.tags.empty())
+            out.filteredByTags = req.tags;
+
+        // Hot path: minimal listing avoids metadata/snippet hydration entirely.
+        // When environment forces hot mode, still hydrate when the request explicitly asks.
+        yams::cli::HotColdMode listMode = yams::cli::getListMode();
+        bool forceHot = yams::cli::isForceHot(listMode);
+        const bool wantsSnippets = req.showSnippets && req.snippetLength > 0;
+        const bool wantsMetadata = req.showMetadata || req.showTags;
+        const bool wantsHydration = wantsSnippets || wantsMetadata;
+        if (req.pathsOnly || (forceHot && !wantsHydration)) {
+            out.documents.reserve(page.size());
+            for (const auto& d : page) {
+                DocumentEntry e;
+                e.name = d.fileName;
+                e.fileName = d.fileName;
+                e.hash = d.sha256Hash;
+                e.path = d.filePath;
+                e.extension = d.fileExtension;
+                e.size = static_cast<uint64_t>(d.fileSize);
+                e.mimeType = d.mimeType;
+                e.fileType = toFileType(d.mimeType);
+                e.created = toEpochSeconds(d.createdTime);
+                e.modified = toEpochSeconds(d.modifiedTime);
+                e.indexed = toEpochSeconds(d.indexedTime);
+                e.extractionStatus = metadata::ExtractionStatusUtils::toString(d.extractionStatus);
+                out.documents.push_back(std::move(e));
+            }
+            return out;
+        }
+
         std::unordered_map<int64_t, std::unordered_map<std::string, metadata::MetadataValue>>
             metadataCache;
-        if (!page.empty() &&
-            (req.showMetadata || req.showTags || (!req.tags.empty() && !usedQuery))) {
+        if (!page.empty() && (req.showMetadata || req.showTags)) {
             std::vector<int64_t> docIds;
             docIds.reserve(page.size());
             for (const auto& doc : page)
@@ -1576,7 +1613,7 @@ public:
 
         std::unordered_map<int64_t, std::string> snippetPreviewCache;
         bool snippetFetchFailed = false;
-        if (!page.empty() && req.showSnippets && req.snippetLength > 0) {
+        if (!page.empty() && wantsSnippets) {
             auto parseSnippetEnvInt = [](const char* name, int fallback, int minValue,
                                          int maxValue) {
                 const char* raw = std::getenv(name);
@@ -1619,41 +1656,6 @@ public:
             } else {
                 snippetFetchFailed = true;
             }
-        }
-
-        ListDocumentsResponse out;
-        out.totalFound = usedQuery ? totalFoundApprox : docs.size();
-        out.count = page.size();
-        out.sortBy = req.sortBy;
-        out.sortOrder = req.sortOrder;
-        if (!req.pattern.empty())
-            out.pattern = req.pattern;
-        if (!req.tags.empty())
-            out.filteredByTags = req.tags;
-
-        // Hot path: paths-only/minimal listing avoids metadata/snippet hydration entirely.
-        // Also engage when environment forces hot mode.
-        yams::cli::HotColdMode listMode = yams::cli::getListMode();
-        bool forceHot = yams::cli::isForceHot(listMode);
-        if (req.pathsOnly || forceHot) {
-            out.documents.reserve(page.size());
-            for (const auto& d : page) {
-                DocumentEntry e;
-                e.name = d.fileName;
-                e.fileName = d.fileName;
-                e.hash = d.sha256Hash;
-                e.path = d.filePath;
-                e.extension = d.fileExtension;
-                e.size = static_cast<uint64_t>(d.fileSize);
-                e.mimeType = d.mimeType;
-                e.fileType = toFileType(d.mimeType);
-                e.created = toEpochSeconds(d.createdTime);
-                e.modified = toEpochSeconds(d.modifiedTime);
-                e.indexed = toEpochSeconds(d.indexedTime);
-                e.extractionStatus = metadata::ExtractionStatusUtils::toString(d.extractionStatus);
-                out.documents.push_back(std::move(e));
-            }
-            return out;
         }
 
         // Build entries in parallel when large pages, else sequential

@@ -454,8 +454,7 @@ public:
                     sanitizeStringList(includePatterns_, "Include pattern", kMaxPatternLength);
                 if (!sanitizedIncludeRes)
                     return sanitizedIncludeRes.error();
-                // Include patterns validated but not directly used here; daemon applies them
-                (void)sanitizedIncludeRes.value();
+                const auto& sanitizedInclude = sanitizedIncludeRes.value();
 
                 auto sanitizedExcludeRes =
                     sanitizeStringList(excludePatterns_, "Exclude pattern", kMaxPatternLength);
@@ -527,8 +526,31 @@ public:
                     }
                 };
 
+                json jsonResults = json::array();
+                auto recordJsonSuccess = [&](const yams::daemon::AddDocumentResponse& resp,
+                                             const std::filesystem::path& path) {
+                    jsonResults.push_back(json{{"path", path.string()},
+                                               {"success", true},
+                                               {"documentsAdded", resp.documentsAdded},
+                                               {"documentsUpdated", resp.documentsUpdated},
+                                               {"documentsSkipped", resp.documentsSkipped},
+                                               {"hash", resp.hash},
+                                               {"message", resp.message}});
+                };
+                auto recordJsonFailure = [&](const std::filesystem::path& path,
+                                             const yams::Error& err) {
+                    jsonResults.push_back(json{{"path", path.string()},
+                                               {"success", false},
+                                               {"error", err.message},
+                                               {"code", static_cast<int>(err.code)}});
+                };
+
                 auto render = [&](const yams::daemon::AddDocumentResponse& resp,
                                   const std::filesystem::path& path) -> void {
+                    if (cli_->getJsonOutput()) {
+                        recordJsonSuccess(resp, path);
+                        return;
+                    }
                     pauseProgress();
                     if (resp.documentsAdded > 0 || resp.documentsUpdated > 0) {
                         std::cout << "From " << path.string() << ": added=" << resp.documentsAdded
@@ -642,7 +664,11 @@ public:
                             spdlog::warn("Daemon add failed for file '{}': {}",
                                          singleFiles[i].string(), msg);
                             resumeProgress();
-                            daemonFailures.emplace_back(singleFiles[i], Error{err.code, msg});
+                            const auto renderedErr = Error{err.code, msg};
+                            daemonFailures.emplace_back(singleFiles[i], renderedErr);
+                            if (cli_->getJsonOutput()) {
+                                recordJsonFailure(singleFiles[i], renderedErr);
+                            }
                         }
                         if (daemonSpinner.enabled()) {
                             daemonSpinner.setCounts(completedRequests, totalDaemonRequests);
@@ -676,15 +702,18 @@ public:
                         } else {
                             const auto err = result.error();
                             const auto msg = scrubDaemonLoadMessage(err.message);
-                            daemonFailures.emplace_back(std::filesystem::path("-"),
-                                                        Error{err.code, msg});
+                            const auto renderedErr = Error{err.code, msg};
+                            daemonFailures.emplace_back(std::filesystem::path("-"), renderedErr);
+                            if (cli_->getJsonOutput()) {
+                                recordJsonFailure(std::filesystem::path("-"), renderedErr);
+                            }
                         }
                         continue;
                     }
                     auto aopts = makeBaseOpts();
                     aopts.path = dir.string();
                     aopts.recursive = true;
-                    aopts.includePatterns = files;
+                    aopts.includePatterns = sanitizedInclude;
                     aopts.name = sanitizedName;
                     dirBatch.push_back(std::move(aopts));
                     dirPaths.push_back(dir);
@@ -709,23 +738,37 @@ public:
                             spdlog::warn("Daemon add failed for directory '{}': {}",
                                          dirPaths[i].string(), msg);
                             resumeProgress();
-                            daemonFailures.emplace_back(dirPaths[i], Error{err.code, msg});
+                            const auto renderedErr = Error{err.code, msg};
+                            daemonFailures.emplace_back(dirPaths[i], renderedErr);
+                            if (cli_->getJsonOutput()) {
+                                recordJsonFailure(dirPaths[i], renderedErr);
+                            }
                         }
                         if (daemonSpinner.enabled()) {
                             daemonSpinner.setCounts(completedRequests, totalDaemonRequests);
                         }
-                    }
-                }
+                     }
+                 }
                 daemonSpinner.pause();
 
                 const size_t daemonRequestsAttempted = successfulRequests + daemonFailures.size();
                 if (daemonRequestsAttempted > 0) {
-                    std::cout << "Summary: added=" << totalAdded << ", updated=" << totalUpdated
-                              << ", skipped=" << totalSkipped;
-                    if (!daemonFailures.empty()) {
-                        std::cout << ", failed=" << daemonFailures.size();
+                    if (cli_->getJsonOutput()) {
+                        json output;
+                        output["results"] = std::move(jsonResults);
+                        output["summary"] = json{{"added", totalAdded},
+                                                 {"updated", totalUpdated},
+                                                 {"skipped", totalSkipped},
+                                                 {"failed", daemonFailures.size()}};
+                        std::cout << output.dump(2) << std::endl;
+                    } else {
+                        std::cout << "Summary: added=" << totalAdded << ", updated=" << totalUpdated
+                                  << ", skipped=" << totalSkipped;
+                        if (!daemonFailures.empty()) {
+                            std::cout << ", failed=" << daemonFailures.size();
+                        }
+                        std::cout << std::endl;
                     }
-                    std::cout << std::endl;
                 }
                 if (!daemonFailures.empty()) {
                     const auto& [failedPath, failure] = daemonFailures.front();

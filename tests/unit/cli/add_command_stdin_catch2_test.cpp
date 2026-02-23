@@ -9,6 +9,8 @@
 #include <fstream>
 #include <string>
 
+#include <nlohmann/json.hpp>
+
 #include "../../common/test_helpers_catch2.h"
 #include <yams/compat/unistd.h>
 
@@ -40,17 +42,59 @@ TEST_CASE("AddCommand - reads from piped stdin and stores content",
         o << payload;
     }
 
-    std::string cmd = "cat '" + in.string() + "' | yams add - --name piped.txt --json";
+    // Prefer the freshly built yams-cli when available; fall back to PATH.
+    fs::path out = tmp / "out.json";
+    const fs::path builtYams = fs::current_path() / "build" / "release" / "tools" / "yams-cli" /
+                               "yams-cli";
+    const std::string yamsBin = fs::exists(builtYams) ? builtYams.string() : std::string("yams");
+    std::string cmd = "cat '" + in.string() + "' | '" + yamsBin +
+                      "' --json add - --name piped.txt > '" + out.string() + "'";
     int rc = std::system(cmd.c_str());
 
-    // Cleanup temp directory
-    std::error_code ec;
-    fs::remove_all(tmp, ec);
-
     if (rc == -1 || (WIFEXITED(rc) && WEXITSTATUS(rc) == 127)) {
+        // Cleanup temp directory
+        std::error_code ec;
+        fs::remove_all(tmp, ec);
         SKIP("yams binary not available in PATH for CLI test");
     }
     REQUIRE(WIFEXITED(rc));
     CHECK(WEXITSTATUS(rc) == 0);
+
+    // Validate JSON output
+    {
+        std::ifstream i(out);
+        REQUIRE(i.good());
+        std::string content((std::istreambuf_iterator<char>(i)), std::istreambuf_iterator<char>());
+        REQUIRE(!content.empty());
+
+        // Some invocations might print non-JSON lines; ensure we parse from the first '{'.
+        auto pos = content.find('{');
+        REQUIRE(pos != std::string::npos);
+        content = content.substr(pos);
+
+        nlohmann::json j;
+        REQUIRE_NOTHROW(j = nlohmann::json::parse(content));
+        REQUIRE(j.is_object());
+
+        REQUIRE(j.contains("results"));
+        REQUIRE(j["results"].is_array());
+        REQUIRE(!j["results"].empty());
+
+        REQUIRE(j.contains("summary"));
+        REQUIRE(j["summary"].is_object());
+        REQUIRE(j["summary"].contains("added"));
+        REQUIRE(j["summary"].contains("updated"));
+        REQUIRE(j["summary"].contains("skipped"));
+        REQUIRE(j["summary"].contains("failed"));
+
+        const auto& r0 = j["results"][0];
+        REQUIRE(r0.is_object());
+        REQUIRE(r0.contains("path"));
+        REQUIRE(r0.contains("success"));
+    }
+
+    // Cleanup temp directory
+    std::error_code ec;
+    fs::remove_all(tmp, ec);
 #endif
 }

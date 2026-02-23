@@ -2,6 +2,13 @@
 
 yams_mcp_sources = [
   'mcp_server.cpp',
+  'mcp_handshake.cpp',
+  'mcp_code_mode.cpp',
+  'mcp_ui_resources.cpp',
+  'mcp_cancellation.cpp',
+  'mcp_resources.cpp',
+  'mcp_tool_calls.cpp',
+  'stdio_transport.cpp',
   'tool_registry.cpp',
 ]
 

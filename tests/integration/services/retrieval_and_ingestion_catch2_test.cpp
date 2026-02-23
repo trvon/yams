@@ -41,6 +41,32 @@ namespace {
 constexpr int kRequestTimeoutMs = 5000;
 constexpr int kBodyTimeoutMs = 15000;
 
+class EnvGuard {
+    std::string name_;
+    std::string prev_;
+    bool hadPrev_{false};
+
+public:
+    EnvGuard(const char* name, const char* value) : name_(name) {
+        if (const char* existing = std::getenv(name)) {
+            prev_ = existing;
+            hadPrev_ = true;
+        }
+        setenv(name, value, 1);
+    }
+
+    ~EnvGuard() {
+        if (hadPrev_) {
+            setenv(name_.c_str(), prev_.c_str(), 1);
+        } else {
+            unsetenv(name_.c_str());
+        }
+    }
+
+    EnvGuard(const EnvGuard&) = delete;
+    EnvGuard& operator=(const EnvGuard&) = delete;
+};
+
 struct BarrierStats {
     std::uint64_t lastPostIngestQueued{0};
     std::uint64_t lastPostIngestInflight{0};
@@ -835,6 +861,56 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "RetrievalListEchoesTotalCou
         CHECK_FALSE(e.name.empty());
         CHECK_FALSE(e.path.empty());
     }
+}
+
+TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
+                 "AppDocumentList_HotOnlyStillHydratesMetadataWhenRequested",
+                 "[integration][services][document][list][hot_only]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
+    EnvGuard listMode("YAMS_LIST_MODE", "hot_only");
+    REQUIRE(startDaemon());
+
+    using yams::app::services::ListDocumentsRequest;
+    using yams::app::services::makeDocumentService;
+
+    fs::create_directories(fixtures_->root() / "hot_list");
+    fixtures_->createTextFixture("hot_list/one.txt", "one", {"it-list-hot"});
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath_;
+    opts.explicitDataDir = storageDir_;
+    opts.path = (fixtures_->root() / "hot_list").string();
+    opts.recursive = true;
+    opts.noEmbeddings = true;
+    opts.timeoutMs = kRequestTimeoutMs;
+    REQUIRE(ing.addViaDaemon(opts));
+
+    auto* sm = daemon()->getServiceManager();
+    REQUIRE(sm != nullptr);
+    auto ctx = sm->getAppContext();
+    auto docSvc = makeDocumentService(ctx);
+
+    ListDocumentsRequest rq;
+    rq.limit = 10;
+    rq.pattern = (fixtures_->root() / "hot_list" / "**").string();
+    rq.showSnippets = false;
+    rq.showTags = true;
+    rq.showMetadata = true;
+
+    auto r1 = docSvc->list(rq);
+    REQUIRE(r1);
+    const auto& resp = r1.value();
+    REQUIRE_FALSE(resp.documents.empty());
+
+    bool foundTagMetadata = false;
+    for (const auto& e : resp.documents) {
+        if (e.metadata.find("tag:it-list-hot") != e.metadata.end()) {
+            foundTagMetadata = true;
+            break;
+        }
+    }
+    CHECK(foundTagMetadata);
 }
 
 TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AppDocumentListEchoDetailsAndBurst",

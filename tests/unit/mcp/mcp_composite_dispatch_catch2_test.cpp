@@ -283,6 +283,24 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "async callTool routes query correctl
     CHECK_FALSE(hasUnknown);
 }
 
+TEST_CASE_METHOD(CompositeDispatchFixture,
+                 "async callTool normalizes composite tool isError into JSON-RPC error",
+                 "[mcp][composite][routing]") {
+    // Using a write op in query should produce an isError tool result.
+    // callToolAsync() must normalize it into a JSON-RPC error with the original
+    // tool payload preserved in error.data.toolResult.
+    json args = {{"steps", json::array({{{"op", "add"}, {"params", json::object()}}})}};
+
+    auto result = callToolAsync("query", args);
+    REQUIRE(result.has_value());
+    INFO("result: " << result->dump(2));
+
+    REQUIRE(result->contains("error"));
+    REQUIRE((*result)["error"].contains("data"));
+    REQUIRE((*result)["error"]["data"].contains("toolResult"));
+    CHECK((*result)["error"]["data"]["toolResult"].value("isError", false));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 2. QUERY PIPELINE: validation and error handling
 // ═══════════════════════════════════════════════════════════════════════════
@@ -457,6 +475,24 @@ TEST_CASE_METHOD(CompositeDispatchFixture,
     CHECK(reachedHandler(result));
 }
 
+TEST_CASE_METHOD(CompositeDispatchFixture, "query - write op in query returns clear error",
+                 "[mcp][composite][query][error-message]") {
+    auto result = callTool(
+        "query",
+        json{{"steps", json::array({{{"op", "add"}, {"params", {{"path", "/tmp/x.txt"}}}}})}});
+
+    INFO("result: " << result.dump(2));
+    CHECK_FALSE(isRoutingError(result));
+    CHECK(reachedHandler(result));
+    CHECK(isCompositeError(result, "not a read operation"));
+    CHECK(isCompositeError(result, "Use the 'execute' tool"));
+    REQUIRE(result.contains("error"));
+    REQUIRE(result["error"].contains("data"));
+    REQUIRE(result["error"]["data"].contains("toolResult"));
+    // Validation happens before any pipeline execution; expect a direct error message.
+    CHECK(result["error"].value("message", std::string{}).find("Pipeline:") == std::string::npos);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 3. EXECUTE BATCH: validation and dispatch
 // ═══════════════════════════════════════════════════════════════════════════
@@ -475,6 +511,45 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "execute - empty operations returns e
 
     INFO("result: " << result.dump(2));
     CHECK(isCompositeError(result, "'operations' array must not be empty"));
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture,
+                 "execute - JSON-RPC error includes error.data.toolResult for debugging",
+                 "[mcp][composite][execute][error-data]") {
+    // Force a composite-layer validation error that becomes JSON-RPC error.
+    auto result = callTool("execute", json::object());
+
+    INFO("result: " << result.dump(2));
+    REQUIRE(result.is_object());
+    REQUIRE(result.contains("error"));
+    REQUIRE(result["error"].is_object());
+    REQUIRE(result["error"].contains("data"));
+
+    const auto& data = result["error"]["data"];
+    REQUIRE(data.is_object());
+    CHECK(data.value("tool", std::string{}) == "execute");
+    REQUIRE(data.contains("toolResult"));
+    REQUIRE(data["toolResult"].is_object());
+    CHECK(data["toolResult"].value("isError", false));
+    // Should preserve the original human-readable error content
+    REQUIRE(data["toolResult"].contains("content"));
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture, "execute - non-write op returns clear error",
+                 "[mcp][composite][execute][error-message]") {
+    auto result = callTool(
+        "execute",
+        json{{"operations", json::array({{{"op", "describe"}, {"params", json::object()}}})}});
+
+    INFO("result: " << result.dump(2));
+    CHECK_FALSE(isRoutingError(result));
+    CHECK(reachedHandler(result));
+    CHECK(isCompositeError(result, "not a write operation"));
+    CHECK(isCompositeError(result, "Use the 'query' tool"));
+    REQUIRE(result.contains("error"));
+    REQUIRE(result["error"].contains("data"));
+    REQUIRE(result["error"]["data"].contains("toolResult"));
+    CHECK(result["error"].value("message", std::string{}).find("Execute:") != std::string::npos);
 }
 
 TEST_CASE_METHOD(CompositeDispatchFixture, "execute - operation missing op field",
