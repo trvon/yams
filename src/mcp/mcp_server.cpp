@@ -923,12 +923,16 @@ MessageResult MCPServer::handleRequest(const json& request) {
                 const std::string pattern = args.value("pattern", "");
                 const std::string fileType = args.value("file_type", "");
                 std::string u =
-                    "Goal: find occurrences in the codebase and propose next steps.\n"
-                    "- Prefer tools/grep for regex/precise matches with contexts.\n"
-                    "- Prefer tools/search for fuzzy/hybrid discovery across names+content.\n"
-                    "- Respect session scoping by default (server may scope by session).\n"
-                    "- When using grep, include line numbers and filenames.\n"
-                    "- When using search, return names/paths and snippets.\n";
+                    "Goal: find relevant code/docs using a Codex-style grep-first workflow.\n"
+                    "Execution order:\n"
+                    "1) tools/grep for exact symbols, literals, paths, and signatures.\n"
+                    "2) tools/search for semantic context and related files.\n"
+                    "3) Return compact candidates for follow-up tools/get reads.\n"
+                    "Output requirements:\n"
+                    "- Include line numbers and filenames for grep hits.\n"
+                    "- Include names/paths and snippets for search hits.\n"
+                    "- De-dup near-identical candidates.\n"
+                    "- Respect session scoping when present.\n";
                 if (!pattern.empty()) {
                     u += "\nRequested pattern: " + pattern + "\n";
                 }
@@ -945,32 +949,32 @@ MessageResult MCPServer::handleRequest(const json& request) {
                 const std::string docName = args.value("document_name", "");
                 const int maxLen = args.value("max_length", 200);
                 std::string u =
-                    "Task: summarize a single document retrieved from the knowledge store.\n"
+                    "Summarize one YAMS document with grounded citations.\n"
                     "Steps:\n"
-                    "1) Retrieve by name via tools/get (name=... latest=true) or by hash via "
-                    "tools/get.\n"
-                    "2) Produce a concise, faithful summary within " +
+                    "1) Retrieve via tools/get (prefer name + latest=true, or hash).\n"
+                    "2) Summarize only retrieved content within " +
                     std::to_string(maxLen) +
                     " words.\n"
-                    "3) Include citation using the document name and/or hash.\n";
+                    "3) Include citation using name/path/hash.\n";
                 if (!docName.empty()) {
                     u += "\nDocument name: " + docName + "\n";
                 }
                 return makeResponse(
-                    {assistantMsg("You are a precise summarizer. Cite sources by name/hash."),
+                    {assistantMsg("You are a precise, grounded summarizer for YAMS artifacts."),
                      userMsg(u)});
             }
 
             if (name == "rag/rewrite_query") {
                 const std::string query = args.value("query", "");
                 const std::string intent = args.value("intent", "");
-                std::string u = "Rewrite the user query to optimize retrieval (hybrid search: text "
-                                "+ metadata).\n"
+                std::string u = "Rewrite the user query for YAMS hybrid retrieval (text + "
+                                "metadata).\n"
                                 "Guidelines:\n"
-                                "- Expand meaningful synonyms; preserve critical terms.\n"
-                                "- Add lightweight qualifiers (e.g., name:*.md, tag:pinned) only "
-                                "if clearly helpful.\n"
-                                "- Keep it concise and robust to typos.\n";
+                                "- Preserve exact symbols, paths, identifiers, hashes, and quoted "
+                                "literals.\n"
+                                "- Add only high-value synonyms or qualifiers.\n"
+                                "- Keep it compact and retrieval-oriented.\n"
+                                "- If already strong, keep it nearly unchanged.\n";
                 if (!query.empty()) {
                     u += "\nOriginal query: " + query + "\n";
                 }
@@ -988,12 +992,12 @@ MessageResult MCPServer::handleRequest(const json& request) {
                 const std::string session = args.value("session", "");
                 std::string u =
                     "Retrieve top-" + std::to_string(k) +
-                    " relevant items using tools/search.\n"
+                    " YAMS candidates for follow-up reading.\n"
                     "Requirements:\n"
-                    "- Use fuzzy=true and type=hybrid (server defaults may already do this).\n"
-                    "- Prefer session scoping if available; include name/path/hash/score/snippet.\n"
-                    "- Return a compact list suitable for follow-up fetches via tools/get "
-                    "(include_content=true).\n";
+                    "- Use tools/search (hybrid/fuzzy unless exact-match behavior is needed).\n"
+                    "- Apply session scoping if provided.\n"
+                    "- Return compact, citeable candidates: name/path/hash/score/snippet.\n"
+                    "- De-dup near-identical results and prefer diverse sources.\n";
                 if (!query.empty()) {
                     u += "\nQuery: " + query + "\n";
                 }
@@ -1010,18 +1014,18 @@ MessageResult MCPServer::handleRequest(const json& request) {
                 const std::string query = args.value("query", "");
                 const int k = std::max(1, args.value("k", 5));
                 const int maxWords = std::max(50, args.value("max_words", 250));
-                std::string u = "RAG pipeline: retrieve then summarize.\n"
+                std::string u = "YAMS RAG pipeline: retrieve, read, then summarize.\n"
                                 "Steps:\n"
                                 "1) tools/search with query (hybrid/fuzzy), top-" +
                                 std::to_string(k) +
                                 ".\n"
-                                "2) For each candidate, fetch content via tools/get "
-                                "(by hash/name, include_content=true).\n"
-                                "3) Synthesize a grounded summary in <= " +
+                                "2) Fetch candidate content via tools/get (by hash/name, "
+                                "include_content=true).\n"
+                                "3) Synthesize a grounded summary from retrieved content only in <= " +
                                 std::to_string(maxWords) +
                                 " words.\n"
                                 "4) Include inline citations like (name | hash:abcd...).\n"
-                                "5) Prefer diverse sources and de-dup near-identical results.\n";
+                                "5) Note uncertainty or conflicting evidence explicitly.\n";
                 if (!query.empty()) {
                     u += "\nQuery: " + query + "\n";
                 }
@@ -1038,7 +1042,8 @@ MessageResult MCPServer::handleRequest(const json& request) {
                     "From prior retrieval results, produce " + std::to_string(k) +
                     " citations in style '" + style +
                     "'.\n"
-                    "Include: name, hash (short), path (if available), and date/labels if known.\n";
+                    "Include: name, short hash, path (if available), and date/labels if known.\n"
+                    "Keep formatting consistent and deterministic.\n";
                 return makeResponse(
                     {assistantMsg("You format high-quality citations for retrieved artifacts."),
                      userMsg(u)});
@@ -1048,10 +1053,11 @@ MessageResult MCPServer::handleRequest(const json& request) {
                 const std::string symbol = args.value("symbol", "");
                 const std::string lang = args.value("language", "");
                 std::string u =
-                    "Plan code navigation using grep+search:\n"
-                    "- Suggest regexes for tools/grep (e.g., function/class definitions; case "
-                    "sensitivity).\n"
-                    "- Suggest hybrid queries for tools/search (semantic context, filenames).\n"
+                    "Plan code navigation using a Codex-style grep-first flow.\n"
+                    "Output:\n"
+                    "- Exact tools/grep patterns or regexes to try first.\n"
+                    "- Follow-up tools/search queries for semantic context and related files.\n"
+                    "- Expected file/symbol variants to check.\n"
                     "- Respect session include patterns when unspecified.\n";
                 if (!symbol.empty()) {
                     u += "\nTarget symbol: " + symbol + "\n";
@@ -1061,6 +1067,21 @@ MessageResult MCPServer::handleRequest(const json& request) {
                 }
                 return makeResponse(
                     {assistantMsg("You guide symbol discovery and code navigation."), userMsg(u)});
+            }
+
+            if (name == "session/codex_repo") {
+                std::string u =
+                    "Create a Codex session setup for this repo using the generic prompt plus "
+                    "repo supplement.\n"
+                    "Steps:\n"
+                    "1) prompts/get name=eng_codex (file-backed generic YAMS/Codex prompt)\n"
+                    "2) Read AGENTS.md from repo root (repo-specific supplement)\n"
+                    "3) Apply YAMS-first retrieval/indexing workflow from both\n"
+                    "4) Prefer concise, actionable outputs and cite retrieved artifacts when used\n";
+                return makeResponse(
+                    {assistantMsg("You assemble a repo-ready Codex prompt from generic + repo "
+                                  "instructions."),
+                     userMsg(u)});
             }
 
             // File-backed prompt fallback: if name matches a file-based template, return its
@@ -1217,7 +1238,7 @@ json yams::mcp::MCPServer::listPrompts() {
 #else
     auto builtins = json::array(
         {{{"name", "search_codebase"},
-          {"description", "Search for code patterns in the codebase"},
+          {"description", "Grep-first codebase search plan (Codex/YAMS workflow)"},
           {"arguments", json::array({{{"name", "pattern"},
                                       {"description", "Code pattern to search for"},
                                       {"required", true}},
@@ -1225,7 +1246,7 @@ json yams::mcp::MCPServer::listPrompts() {
                                       {"description", "Filter by file type (e.g., cpp, py, js)"},
                                       {"required", false}}})}},
          {{"name", "summarize_document"},
-          {"description", "Generate a summary of a document"},
+          {"description", "Grounded summary of one YAMS document with citation"},
           {"arguments", json::array({{{"name", "document_name"},
                                       {"description", "Name of the document to summarize"},
                                       {"required", true}},
@@ -1233,7 +1254,7 @@ json yams::mcp::MCPServer::listPrompts() {
                                       {"description", "Maximum summary length in words"},
                                       {"required", false}}})}},
          {{"name", "rag/rewrite_query"},
-          {"description", "Rewrite a query to optimize hybrid retrieval"},
+          {"description", "Rewrite a query for YAMS hybrid retrieval"},
           {"arguments", json::array({{{"name", "query"},
                                       {"description", "Original user query text"},
                                       {"required", true}},
@@ -1241,7 +1262,7 @@ json yams::mcp::MCPServer::listPrompts() {
                                       {"description", "Optional intent hint to guide rewriting"},
                                       {"required", false}}})}},
          {{"name", "rag/retrieve"},
-          {"description", "Retrieve top-k candidates via hybrid search"},
+          {"description", "Retrieve top-k citeable candidates via YAMS search"},
           {"arguments",
            json::array({{{"name", "query"},
                          {"description", "Search query for retrieval"},
@@ -1256,7 +1277,7 @@ json yams::mcp::MCPServer::listPrompts() {
                          {"description", "Optional tag filters (comma-separated or array)"},
                          {"required", false}}})}},
          {{"name", "rag/retrieve_summarize"},
-          {"description", "RAG pipeline: retrieve then summarize with citations"},
+          {"description", "YAMS RAG pipeline: retrieve, read, summarize with citations"},
           {"arguments",
            json::array({{{"name", "query"},
                          {"description", "Search query for retrieval"},
@@ -1280,13 +1301,16 @@ json yams::mcp::MCPServer::listPrompts() {
                          {"description", "Whether to include content hashes in citations"},
                          {"required", false}}})}},
          {{"name", "rag/code_navigation"},
-          {"description", "Suggest grep and hybrid search strategies for symbol discovery"},
+          {"description", "Codex-style grep-first symbol discovery plan"},
           {"arguments", json::array({{{"name", "symbol"},
                                       {"description", "Target symbol or identifier to locate"},
                                       {"required", true}},
                                      {{"name", "language"},
                                       {"description", "Language hint (e.g., cpp, py, js)"},
-                                      {"required", false}}})}}});
+                                      {"required", false}}})}},
+         {{"name", "session/codex_repo"},
+          {"description", "Compose generic eng_codex prompt plus repo AGENTS.md guidance"},
+          {"arguments", json::array()}}});
 
     // Merge file-backed prompts
     std::unordered_set<std::string> seen;

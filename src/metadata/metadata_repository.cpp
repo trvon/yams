@@ -86,6 +86,315 @@ constexpr const char* kDocumentColumnListAliasD =
 
 constexpr int64_t kPathTreeNullParent = PathTreeNode::kNullParent;
 
+std::string buildInList(size_t count) {
+    std::string list;
+    list.reserve(count * 2 + 2);
+    list += '(';
+    for (size_t i = 0; i < count; ++i) {
+        if (i)
+            list += ',';
+        list += '?';
+    }
+    list += ')';
+    return list;
+}
+
+Result<void> bindIdList(Statement& stmt, int startIndex, const std::vector<int64_t>& ids) {
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (auto bindResult = stmt.bind(static_cast<int>(i + startIndex), ids[i]); !bindResult) {
+            return bindResult.error();
+        }
+    }
+    return {};
+}
+
+struct BindParam {
+    enum class Type { Text, Int } type;
+    std::string text;
+    int64_t integer{0};
+};
+
+void addTextParam(std::vector<BindParam>& params, std::string value) {
+    params.push_back(BindParam{BindParam::Type::Text, std::move(value), 0});
+}
+
+void addIntParam(std::vector<BindParam>& params, int64_t value) {
+    params.push_back(BindParam{BindParam::Type::Int, {}, value});
+}
+
+void appendDocumentQueryFilters(const DocumentQueryOptions& options, bool joinFtsForContains,
+                                bool hasPathIndexing, std::vector<std::string>& conditions,
+                                std::vector<BindParam>& params, bool logExactPath) {
+    if (options.exactPath) {
+        auto derived = computePathDerivedValues(*options.exactPath);
+        const bool pathsDiffer = derived.normalizedPath != *options.exactPath;
+        if (hasPathIndexing) {
+            std::string clause = "(path_hash = ? OR file_path = ?";
+            addTextParam(params, derived.pathHash);
+            addTextParam(params, derived.normalizedPath);
+            if (pathsDiffer) {
+                clause += " OR file_path = ?";
+                addTextParam(params, *options.exactPath);
+            }
+            clause += ')';
+            conditions.emplace_back(std::move(clause));
+        } else {
+            if (pathsDiffer) {
+                conditions.emplace_back("(file_path = ? OR file_path = ?)");
+                addTextParam(params, derived.normalizedPath);
+                addTextParam(params, *options.exactPath);
+            } else {
+                conditions.emplace_back("file_path = ?");
+                addTextParam(params, derived.normalizedPath);
+            }
+        }
+        if (logExactPath) {
+            spdlog::info("[MetadataRepository] exactPath query path='{}' normalized='{}' hash={}",
+                         *options.exactPath, derived.normalizedPath, derived.pathHash);
+        }
+    }
+
+    if (options.pathPrefix && !options.pathPrefix->empty()) {
+        const std::string& originalPrefix = *options.pathPrefix;
+        bool treatAsDirectory = options.prefixIsDirectory;
+        if (!treatAsDirectory) {
+            char tail = originalPrefix.back();
+            treatAsDirectory = (tail == '/' || tail == '\\');
+        }
+
+        auto derived = computePathDerivedValues(originalPrefix);
+        std::string normalized = derived.normalizedPath;
+
+        if (treatAsDirectory) {
+            if (!normalized.empty() && normalized.back() == '/')
+                normalized.pop_back();
+
+            if (!normalized.empty()) {
+                if (hasPathIndexing) {
+                    std::string clause = "(path_prefix = ?";
+                    addTextParam(params, normalized);
+                    if (options.includeSubdirectories) {
+                        clause += " OR path_prefix LIKE ?";
+                        std::string likeValue = normalized;
+                        likeValue.append("/%");
+                        addTextParam(params, likeValue);
+                    }
+                    clause += ')';
+                    conditions.emplace_back(std::move(clause));
+                } else {
+                    std::string likeValue = normalized;
+                    likeValue.append("/%");
+                    conditions.emplace_back("file_path LIKE ?");
+                    addTextParam(params, likeValue);
+                }
+            } else {
+                if (!options.includeSubdirectories) {
+                    if (hasPathIndexing) {
+                        conditions.emplace_back("path_prefix = ''");
+                    } else {
+                        conditions.emplace_back("file_path NOT LIKE '%/%'");
+                    }
+                }
+            }
+        } else {
+            std::string lower = normalized;
+            std::string upper = normalized;
+            upper.push_back(static_cast<char>(0xFF));
+            conditions.emplace_back("(file_path >= ? AND file_path < ?)");
+            addTextParam(params, lower);
+            addTextParam(params, upper);
+        }
+    }
+
+    if (options.containsFragment && !options.containsFragment->empty()) {
+        std::string fragment = *options.containsFragment;
+        std::replace(fragment.begin(), fragment.end(), '\\', '/');
+
+        if (joinFtsForContains) {
+            if (hasAdvancedFts5Operators(fragment)) {
+                std::string sanitized = sanitizeFts5UserQuery(fragment, true);
+                if (!sanitized.empty()) {
+                    conditions.emplace_back("documents_path_fts MATCH ?");
+                    addTextParam(params, sanitized);
+                }
+            } else {
+                std::string ftsToken = fragment;
+                auto slashPos = ftsToken.find_last_of('/');
+                if (slashPos != std::string::npos)
+                    ftsToken = ftsToken.substr(slashPos + 1);
+                bool prefix = true;
+                if (!ftsToken.empty() && ftsToken.back() == '*') {
+                    ftsToken.pop_back();
+                }
+                ftsToken = stripPunctuation(std::move(ftsToken));
+                if (!ftsToken.empty()) {
+                    conditions.emplace_back("documents_path_fts MATCH ?");
+                    addTextParam(params, renderFts5Token(ftsToken, prefix));
+                }
+            }
+        }
+
+        if (hasPathIndexing) {
+            std::string reversed(fragment.rbegin(), fragment.rend());
+            conditions.emplace_back("reverse_path LIKE ?");
+            addTextParam(params, reversed + "%");
+        } else {
+            conditions.emplace_back("file_path LIKE ?");
+            addTextParam(params, "%" + fragment + "%");
+        }
+    }
+
+    if (options.likePattern && !options.likePattern->empty()) {
+        conditions.emplace_back("file_path LIKE ?");
+        addTextParam(params, *options.likePattern);
+    }
+
+    if (options.fileName && !options.fileName->empty()) {
+        conditions.emplace_back("file_name = ?");
+        addTextParam(params, *options.fileName);
+    }
+
+    if (options.extension && !options.extension->empty()) {
+        conditions.emplace_back("file_extension = ?");
+        addTextParam(params, *options.extension);
+    }
+
+    if (!options.extensions.empty()) {
+        std::vector<std::string> extConditions;
+        extConditions.reserve(options.extensions.size());
+        for (const auto& ext : options.extensions) {
+            extConditions.emplace_back("file_extension = ?");
+            addTextParam(params, ext);
+        }
+        if (!extConditions.empty()) {
+            std::string clause = "(";
+            for (size_t i = 0; i < extConditions.size(); ++i) {
+                if (i > 0)
+                    clause += " OR ";
+                clause += extConditions[i];
+            }
+            clause += ')';
+            conditions.emplace_back(std::move(clause));
+        }
+    }
+
+    if (options.mimeType && !options.mimeType->empty()) {
+        conditions.emplace_back("mime_type = ?");
+        addTextParam(params, *options.mimeType);
+    }
+
+    if (options.textOnly) {
+        conditions.emplace_back("mime_type LIKE 'text/%'");
+    } else if (options.binaryOnly) {
+        conditions.emplace_back("mime_type NOT LIKE 'text/%'");
+    }
+
+    if (options.modifiedAfter) {
+        conditions.emplace_back("modified_time >= ?");
+        addIntParam(params, *options.modifiedAfter);
+    }
+
+    if (options.createdAfter) {
+        conditions.emplace_back("created_time >= ?");
+        addIntParam(params, *options.createdAfter);
+    }
+
+    if (options.createdBefore) {
+        conditions.emplace_back("created_time <= ?");
+        addIntParam(params, *options.createdBefore);
+    }
+
+    if (options.modifiedBefore) {
+        conditions.emplace_back("modified_time <= ?");
+        addIntParam(params, *options.modifiedBefore);
+    }
+
+    if (options.indexedAfter) {
+        conditions.emplace_back("indexed_time >= ?");
+        addIntParam(params, *options.indexedAfter);
+    }
+
+    if (options.indexedBefore) {
+        conditions.emplace_back("indexed_time <= ?");
+        addIntParam(params, *options.indexedBefore);
+    }
+
+    if (options.changedSince) {
+        conditions.emplace_back("(modified_time >= ? OR created_time >= ? OR indexed_time >= ?)");
+        addIntParam(params, *options.changedSince);
+        addIntParam(params, *options.changedSince);
+        addIntParam(params, *options.changedSince);
+    }
+
+    for (const auto& tag : options.tags) {
+        conditions.emplace_back("EXISTS (SELECT 1 FROM metadata m WHERE m.document_id = documents.id "
+                                "AND m.key = ? AND m.value = ?)");
+        addTextParam(params, std::string("tag:") + tag);
+        addTextParam(params, tag);
+    }
+
+    for (const auto& [key, value] : options.metadataFilters) {
+        conditions.emplace_back("EXISTS (SELECT 1 FROM metadata m WHERE m.document_id = documents.id "
+                                "AND m.key = ? AND m.value = ?)");
+        addTextParam(params, key);
+        addTextParam(params, value);
+    }
+
+    if (!options.extractionStatuses.empty()) {
+        if (options.extractionStatuses.size() == 1) {
+            conditions.emplace_back("extraction_status = ?");
+            addTextParam(params, ExtractionStatusUtils::toString(options.extractionStatuses[0]));
+        } else {
+            std::string clause = "(";
+            for (size_t i = 0; i < options.extractionStatuses.size(); ++i) {
+                if (i > 0)
+                    clause += " OR ";
+                clause += "extraction_status = ?";
+                addTextParam(params, ExtractionStatusUtils::toString(options.extractionStatuses[i]));
+            }
+            clause += ')';
+            conditions.emplace_back(std::move(clause));
+        }
+    }
+
+    if (!options.repairStatuses.empty()) {
+        if (options.repairStatuses.size() == 1) {
+            conditions.emplace_back("repair_status = ?");
+            addTextParam(params, RepairStatusUtils::toString(options.repairStatuses[0]));
+        } else {
+            std::string clause = "(";
+            for (size_t i = 0; i < options.repairStatuses.size(); ++i) {
+                if (i > 0)
+                    clause += " OR ";
+                clause += "repair_status = ?";
+                addTextParam(params, RepairStatusUtils::toString(options.repairStatuses[i]));
+            }
+            clause += ')';
+            conditions.emplace_back(std::move(clause));
+        }
+    }
+
+    if (options.maxRepairAttempts > 0) {
+        conditions.emplace_back("repair_attempts < ?");
+        addIntParam(params, options.maxRepairAttempts);
+    }
+
+    if (options.onlyMissingContent) {
+        conditions.emplace_back("NOT EXISTS (SELECT 1 FROM document_content c "
+                                "WHERE c.document_id = documents.id)");
+    }
+
+    if (options.stalledBefore) {
+        conditions.emplace_back("COALESCE(NULLIF(indexed_time, 0), modified_time) < ?");
+        addIntParam(params, *options.stalledBefore);
+    }
+
+    if (options.repairAttemptedBefore) {
+        conditions.emplace_back("repair_attempted_at < ?");
+        addIntParam(params, *options.repairAttemptedBefore);
+    }
+}
+
 // Transaction begin helper with backend-appropriate semantics.
 // - libsql (MVCC): Uses regular BEGIN since concurrent writers are supported.
 // - SQLite: Uses BEGIN IMMEDIATE with retry/backoff for lock contention.
@@ -3452,299 +3761,9 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
                 sql += " JOIN documents_path_fts ON documents.id = documents_path_fts.rowid";
 
             std::vector<std::string> conditions;
-            struct BindParam {
-                enum class Type { Text, Int } type;
-                std::string text;
-                int64_t integer{0};
-            };
             std::vector<BindParam> params;
-
-            auto addText = [&](std::string value) {
-                params.push_back(BindParam{BindParam::Type::Text, std::move(value), 0});
-            };
-            auto addInt = [&](int64_t value) {
-                params.push_back(BindParam{BindParam::Type::Int, {}, value});
-            };
-
-            if (options.exactPath) {
-                auto derived = computePathDerivedValues(*options.exactPath);
-                const bool pathsDiffer = derived.normalizedPath != *options.exactPath;
-                if (hasPathIndexing_) {
-                    std::string clause = "(path_hash = ? OR file_path = ?";
-                    addText(derived.pathHash);
-                    addText(derived.normalizedPath);
-                    if (pathsDiffer) {
-                        clause += " OR file_path = ?";
-                        addText(*options.exactPath);
-                    }
-                    clause += ')';
-                    conditions.emplace_back(std::move(clause));
-                } else {
-                    if (pathsDiffer) {
-                        conditions.emplace_back("(file_path = ? OR file_path = ?)");
-                        addText(derived.normalizedPath);
-                        addText(*options.exactPath);
-                    } else {
-                        conditions.emplace_back("file_path = ?");
-                        addText(derived.normalizedPath);
-                    }
-                }
-                spdlog::info(
-                    "[MetadataRepository] exactPath query path='{}' normalized='{}' hash={}",
-                    *options.exactPath, derived.normalizedPath, derived.pathHash);
-            }
-
-            if (options.pathPrefix && !options.pathPrefix->empty()) {
-                const std::string& originalPrefix = *options.pathPrefix;
-                bool treatAsDirectory = options.prefixIsDirectory;
-                if (!treatAsDirectory) {
-                    char tail = originalPrefix.back();
-                    treatAsDirectory = (tail == '/' || tail == '\\');
-                }
-
-                auto derived = computePathDerivedValues(originalPrefix);
-                std::string normalized = derived.normalizedPath;
-
-                if (treatAsDirectory) {
-                    // Ensure we operate on directory component without trailing slash
-                    if (!normalized.empty() && normalized.back() == '/')
-                        normalized.pop_back();
-
-                    if (!normalized.empty()) {
-                        if (hasPathIndexing_) {
-                            std::string clause = "(path_prefix = ?";
-                            addText(normalized);
-                            if (options.includeSubdirectories) {
-                                clause += " OR path_prefix LIKE ?";
-                                std::string likeValue = normalized;
-                                likeValue.append("/%");
-                                addText(likeValue);
-                            }
-                            clause += ')';
-                            conditions.emplace_back(std::move(clause));
-                        } else {
-                            std::string likeValue = normalized;
-                            likeValue.append("/%");
-                            conditions.emplace_back("file_path LIKE ?");
-                            addText(likeValue);
-                        }
-                    } else {
-                        if (!options.includeSubdirectories) {
-                            if (hasPathIndexing_) {
-                                conditions.emplace_back("path_prefix = ''");
-                            } else {
-                                // Root-only without subdirectories doesn't have a strict
-                                // equivalent; approximate with file_path NOT LIKE '%/%'
-                                // which filters to top-level entries.
-                                conditions.emplace_back("file_path NOT LIKE '%/%'");
-                            }
-                        }
-                        // When querying from repository root with includeSubdirectories,
-                        // the prefix condition would match everything; omit predicate.
-                    }
-                } else {
-                    std::string lower = normalized;
-                    std::string upper = normalized;
-                    upper.push_back(static_cast<char>(0xFF));
-                    conditions.emplace_back("(file_path >= ? AND file_path < ?)");
-                    addText(lower);
-                    addText(upper);
-                }
-            }
-
-            if (options.containsFragment && !options.containsFragment->empty()) {
-                std::string fragment = *options.containsFragment;
-                std::replace(fragment.begin(), fragment.end(), '\\', '/');
-
-                if (joinFtsForContains) {
-                    if (hasAdvancedFts5Operators(fragment)) {
-                        std::string sanitized = sanitizeFts5UserQuery(fragment);
-                        if (!sanitized.empty()) {
-                            conditions.emplace_back("documents_path_fts MATCH ?");
-                            addText(sanitized);
-                        }
-                    } else {
-                        std::string ftsToken = fragment;
-                        auto slashPos = ftsToken.find_last_of('/');
-                        if (slashPos != std::string::npos)
-                            ftsToken = ftsToken.substr(slashPos + 1);
-                        bool prefix = true;
-                        if (!ftsToken.empty() && ftsToken.back() == '*') {
-                            ftsToken.pop_back();
-                        }
-                        ftsToken = stripPunctuation(std::move(ftsToken));
-                        if (!ftsToken.empty()) {
-                            conditions.emplace_back("documents_path_fts MATCH ?");
-                            addText(renderFts5Token(ftsToken, prefix));
-                        }
-                    }
-                }
-
-                if (hasPathIndexing_) {
-                    std::string reversed(fragment.rbegin(), fragment.rend());
-                    conditions.emplace_back("reverse_path LIKE ?");
-                    addText(reversed + "%");
-                } else {
-                    conditions.emplace_back("file_path LIKE ?");
-                    addText("%" + fragment + "%");
-                }
-            }
-
-            if (options.likePattern && !options.likePattern->empty()) {
-                conditions.emplace_back("file_path LIKE ?");
-                addText(*options.likePattern);
-            }
-
-            if (options.fileName && !options.fileName->empty()) {
-                conditions.emplace_back("file_name = ?");
-                addText(*options.fileName);
-            }
-
-            if (options.extension && !options.extension->empty()) {
-                conditions.emplace_back("file_extension = ?");
-                addText(*options.extension);
-            }
-
-            if (!options.extensions.empty()) {
-                std::vector<std::string> extConditions;
-                extConditions.reserve(options.extensions.size());
-                for (const auto& ext : options.extensions) {
-                    extConditions.emplace_back("file_extension = ?");
-                    addText(ext);
-                }
-                if (!extConditions.empty()) {
-                    std::string clause = "(";
-                    for (size_t i = 0; i < extConditions.size(); ++i) {
-                        if (i > 0)
-                            clause += " OR ";
-                        clause += extConditions[i];
-                    }
-                    clause += ')';
-                    conditions.emplace_back(std::move(clause));
-                }
-            }
-
-            if (options.mimeType && !options.mimeType->empty()) {
-                conditions.emplace_back("mime_type = ?");
-                addText(*options.mimeType);
-            }
-
-            if (options.textOnly) {
-                conditions.emplace_back("mime_type LIKE 'text/%'");
-            } else if (options.binaryOnly) {
-                conditions.emplace_back("mime_type NOT LIKE 'text/%'");
-            }
-
-            if (options.modifiedAfter) {
-                conditions.emplace_back("modified_time >= ?");
-                addInt(*options.modifiedAfter);
-            }
-
-            if (options.createdAfter) {
-                conditions.emplace_back("created_time >= ?");
-                addInt(*options.createdAfter);
-            }
-
-            if (options.createdBefore) {
-                conditions.emplace_back("created_time <= ?");
-                addInt(*options.createdBefore);
-            }
-
-            if (options.modifiedBefore) {
-                conditions.emplace_back("modified_time <= ?");
-                addInt(*options.modifiedBefore);
-            }
-
-            if (options.indexedAfter) {
-                conditions.emplace_back("indexed_time >= ?");
-                addInt(*options.indexedAfter);
-            }
-
-            if (options.indexedBefore) {
-                conditions.emplace_back("indexed_time <= ?");
-                addInt(*options.indexedBefore);
-            }
-
-            if (options.changedSince) {
-                conditions.emplace_back(
-                    "(modified_time >= ? OR created_time >= ? OR indexed_time >= ?)");
-                addInt(*options.changedSince);
-                addInt(*options.changedSince);
-                addInt(*options.changedSince);
-            }
-
-            for (const auto& tag : options.tags) {
-                conditions.emplace_back(
-                    "EXISTS (SELECT 1 FROM metadata m WHERE m.document_id = documents.id "
-                    "AND m.key = ? AND m.value = ?)");
-                addText(std::string("tag:") + tag);
-                addText(tag);
-            }
-
-            // Generic metadata key/value filtering (replaces findDocumentsByCollection)
-            for (const auto& [key, value] : options.metadataFilters) {
-                conditions.emplace_back(
-                    "EXISTS (SELECT 1 FROM metadata m WHERE m.document_id = documents.id "
-                    "AND m.key = ? AND m.value = ?)");
-                addText(key);
-                addText(value);
-            }
-
-            // --- Repair / health-check filters ---
-
-            if (!options.extractionStatuses.empty()) {
-                if (options.extractionStatuses.size() == 1) {
-                    conditions.emplace_back("extraction_status = ?");
-                    addText(ExtractionStatusUtils::toString(options.extractionStatuses[0]));
-                } else {
-                    std::string clause = "(";
-                    for (size_t i = 0; i < options.extractionStatuses.size(); ++i) {
-                        if (i > 0)
-                            clause += " OR ";
-                        clause += "extraction_status = ?";
-                        addText(ExtractionStatusUtils::toString(options.extractionStatuses[i]));
-                    }
-                    clause += ')';
-                    conditions.emplace_back(std::move(clause));
-                }
-            }
-
-            if (!options.repairStatuses.empty()) {
-                if (options.repairStatuses.size() == 1) {
-                    conditions.emplace_back("repair_status = ?");
-                    addText(RepairStatusUtils::toString(options.repairStatuses[0]));
-                } else {
-                    std::string clause = "(";
-                    for (size_t i = 0; i < options.repairStatuses.size(); ++i) {
-                        if (i > 0)
-                            clause += " OR ";
-                        clause += "repair_status = ?";
-                        addText(RepairStatusUtils::toString(options.repairStatuses[i]));
-                    }
-                    clause += ')';
-                    conditions.emplace_back(std::move(clause));
-                }
-            }
-
-            if (options.maxRepairAttempts > 0) {
-                conditions.emplace_back("repair_attempts < ?");
-                addInt(options.maxRepairAttempts);
-            }
-
-            if (options.onlyMissingContent) {
-                conditions.emplace_back("NOT EXISTS (SELECT 1 FROM document_content c "
-                                        "WHERE c.document_id = documents.id)");
-            }
-
-            if (options.stalledBefore) {
-                conditions.emplace_back("COALESCE(NULLIF(indexed_time, 0), modified_time) < ?");
-                addInt(*options.stalledBefore);
-            }
-
-            if (options.repairAttemptedBefore) {
-                conditions.emplace_back("repair_attempted_at < ?");
-                addInt(*options.repairAttemptedBefore);
-            }
+            appendDocumentQueryFilters(options, joinFtsForContains, hasPathIndexing_, conditions,
+                                       params, true);
 
             if (!conditions.empty()) {
                 sql += " WHERE ";
@@ -3763,11 +3782,11 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
 
             if (options.limit > 0) {
                 sql += " LIMIT ?";
-                addInt(options.limit);
+                addIntParam(params, options.limit);
             }
             if (options.offset > 0) {
                 sql += " OFFSET ?";
-                addInt(options.offset);
+                addIntParam(params, options.offset);
             }
 
             auto stmtResult = db.prepare(sql);
@@ -4055,13 +4074,8 @@ MetadataRepository::batchGetContent(const std::vector<int64_t>& documentIds) {
         [&](Database& db) -> Result<std::unordered_map<int64_t, DocumentContent>> {
             std::string sql =
                 "SELECT document_id, content_text, content_length, extraction_method, language "
-                "FROM document_content WHERE document_id IN (";
-            for (size_t i = 0; i < documentIds.size(); ++i) {
-                if (i > 0)
-                    sql += ",";
-                sql += "?";
-            }
-            sql += ")";
+                "FROM document_content WHERE document_id IN ";
+            sql += buildInList(documentIds.size());
 
             auto stmtResult = db.prepare(sql);
             if (!stmtResult) {
@@ -4071,11 +4085,8 @@ MetadataRepository::batchGetContent(const std::vector<int64_t>& documentIds) {
             Statement stmt = std::move(stmtResult).value();
 
             // Bind document IDs
-            for (size_t i = 0; i < documentIds.size(); ++i) {
-                if (auto bindResult = stmt.bind(static_cast<int>(i + 1), documentIds[i]);
-                    !bindResult) {
-                    return bindResult.error();
-                }
+            if (auto bindResult = bindIdList(stmt, 1, documentIds); !bindResult) {
+                return bindResult.error();
             }
 
             std::unordered_map<int64_t, DocumentContent> result;
@@ -4118,13 +4129,8 @@ MetadataRepository::batchGetContentPreview(const std::vector<int64_t>& documentI
     return executeReadQuery<std::unordered_map<int64_t, std::string>>(
         [&](Database& db) -> Result<std::unordered_map<int64_t, std::string>> {
             std::string sql = "SELECT document_id, substr(content_text, 1, ?) "
-                              "FROM document_content WHERE document_id IN (";
-            for (size_t i = 0; i < effectiveIds.size(); ++i) {
-                if (i > 0)
-                    sql += ",";
-                sql += "?";
-            }
-            sql += ")";
+                              "FROM document_content WHERE document_id IN ";
+            sql += buildInList(effectiveIds.size());
 
             auto stmtResult = db.prepare(sql);
             if (!stmtResult) {
@@ -4137,11 +4143,8 @@ MetadataRepository::batchGetContentPreview(const std::vector<int64_t>& documentI
                 return bindResult.error();
             }
 
-            for (size_t i = 0; i < effectiveIds.size(); ++i) {
-                if (auto bindResult = stmt.bind(static_cast<int>(i + 2), effectiveIds[i]);
-                    !bindResult) {
-                    return bindResult.error();
-                }
+            if (auto bindResult = bindIdList(stmt, 2, effectiveIds); !bindResult) {
+                return bindResult.error();
             }
 
             std::unordered_map<int64_t, std::string> result;
@@ -4181,287 +4184,9 @@ MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& 
                 sql += " JOIN documents_path_fts ON documents.id = documents_path_fts.rowid";
 
             std::vector<std::string> conditions;
-            struct BindParam {
-                enum class Type { Text, Int } type;
-                std::string text;
-                int64_t integer{0};
-            };
             std::vector<BindParam> params;
-
-            auto addText = [&](std::string value) {
-                params.push_back(BindParam{BindParam::Type::Text, std::move(value), 0});
-            };
-            auto addInt = [&](int64_t value) {
-                params.push_back(BindParam{BindParam::Type::Int, {}, value});
-            };
-
-            if (options.exactPath) {
-                auto derived = computePathDerivedValues(*options.exactPath);
-                const bool pathsDiffer = derived.normalizedPath != *options.exactPath;
-                if (hasPathIndexing_) {
-                    std::string clause = "(path_hash = ? OR file_path = ?";
-                    addText(derived.pathHash);
-                    addText(derived.normalizedPath);
-                    if (pathsDiffer) {
-                        clause += " OR file_path = ?";
-                        addText(*options.exactPath);
-                    }
-                    clause += ')';
-                    conditions.emplace_back(std::move(clause));
-                } else {
-                    if (pathsDiffer) {
-                        conditions.emplace_back("(file_path = ? OR file_path = ?)");
-                        addText(derived.normalizedPath);
-                        addText(*options.exactPath);
-                    } else {
-                        conditions.emplace_back("file_path = ?");
-                        addText(derived.normalizedPath);
-                    }
-                }
-            }
-
-            if (options.pathPrefix && !options.pathPrefix->empty()) {
-                const std::string& originalPrefix = *options.pathPrefix;
-                bool treatAsDirectory = options.prefixIsDirectory;
-                if (!treatAsDirectory) {
-                    char tail = originalPrefix.back();
-                    treatAsDirectory = (tail == '/' || tail == '\\');
-                }
-
-                auto derived = computePathDerivedValues(originalPrefix);
-                std::string normalized = derived.normalizedPath;
-
-                if (treatAsDirectory) {
-                    if (!normalized.empty() && normalized.back() == '/')
-                        normalized.pop_back();
-
-                    if (!normalized.empty()) {
-                        if (hasPathIndexing_) {
-                            std::string clause = "(path_prefix = ?";
-                            addText(normalized);
-                            if (options.includeSubdirectories) {
-                                clause += " OR path_prefix LIKE ?";
-                                std::string likeValue = normalized;
-                                likeValue.append("/%");
-                                addText(likeValue);
-                            }
-                            clause += ')';
-                            conditions.emplace_back(std::move(clause));
-                        } else {
-                            std::string likeValue = normalized;
-                            likeValue.append("/%");
-                            conditions.emplace_back("file_path LIKE ?");
-                            addText(likeValue);
-                        }
-                    } else {
-                        if (!options.includeSubdirectories) {
-                            if (hasPathIndexing_) {
-                                conditions.emplace_back("path_prefix = ''");
-                            } else {
-                                conditions.emplace_back("file_path NOT LIKE '%/%'");
-                            }
-                        }
-                    }
-                } else {
-                    std::string lower = normalized;
-                    std::string upper = normalized;
-                    upper.push_back(static_cast<char>(0xFF));
-                    conditions.emplace_back("(file_path >= ? AND file_path < ?)");
-                    addText(lower);
-                    addText(upper);
-                }
-            }
-
-            if (options.containsFragment && !options.containsFragment->empty()) {
-                std::string fragment = *options.containsFragment;
-                std::replace(fragment.begin(), fragment.end(), '\\', '/');
-
-                if (joinFtsForContains) {
-                    if (hasAdvancedFts5Operators(fragment)) {
-                        std::string sanitized = sanitizeFts5UserQuery(fragment);
-                        if (!sanitized.empty()) {
-                            conditions.emplace_back("documents_path_fts MATCH ?");
-                            addText(sanitized);
-                        }
-                    } else {
-                        std::string ftsToken = fragment;
-                        auto slashPos = ftsToken.find_last_of('/');
-                        if (slashPos != std::string::npos)
-                            ftsToken = ftsToken.substr(slashPos + 1);
-                        bool prefix = true;
-                        if (!ftsToken.empty() && ftsToken.back() == '*') {
-                            ftsToken.pop_back();
-                        }
-                        ftsToken = stripPunctuation(std::move(ftsToken));
-                        if (!ftsToken.empty()) {
-                            conditions.emplace_back("documents_path_fts MATCH ?");
-                            addText(renderFts5Token(ftsToken, prefix));
-                        }
-                    }
-                }
-
-                if (hasPathIndexing_) {
-                    std::string reversed(fragment.rbegin(), fragment.rend());
-                    conditions.emplace_back("reverse_path LIKE ?");
-                    addText(reversed + "%");
-                } else {
-                    conditions.emplace_back("file_path LIKE ?");
-                    addText("%" + fragment + "%");
-                }
-            }
-
-            if (options.likePattern && !options.likePattern->empty()) {
-                conditions.emplace_back("file_path LIKE ?");
-                addText(*options.likePattern);
-            }
-
-            if (options.fileName && !options.fileName->empty()) {
-                conditions.emplace_back("file_name = ?");
-                addText(*options.fileName);
-            }
-
-            if (options.extension && !options.extension->empty()) {
-                conditions.emplace_back("file_extension = ?");
-                addText(*options.extension);
-            }
-
-            if (!options.extensions.empty()) {
-                std::vector<std::string> extConditions;
-                extConditions.reserve(options.extensions.size());
-                for (const auto& ext : options.extensions) {
-                    extConditions.emplace_back("file_extension = ?");
-                    addText(ext);
-                }
-                if (!extConditions.empty()) {
-                    std::string clause = "(";
-                    for (size_t i = 0; i < extConditions.size(); ++i) {
-                        if (i > 0)
-                            clause += " OR ";
-                        clause += extConditions[i];
-                    }
-                    clause += ')';
-                    conditions.emplace_back(std::move(clause));
-                }
-            }
-
-            if (options.mimeType && !options.mimeType->empty()) {
-                conditions.emplace_back("mime_type = ?");
-                addText(*options.mimeType);
-            }
-
-            if (options.textOnly) {
-                conditions.emplace_back("mime_type LIKE 'text/%'");
-            } else if (options.binaryOnly) {
-                conditions.emplace_back("mime_type NOT LIKE 'text/%'");
-            }
-
-            if (options.modifiedAfter) {
-                conditions.emplace_back("modified_time >= ?");
-                addInt(*options.modifiedAfter);
-            }
-
-            if (options.createdAfter) {
-                conditions.emplace_back("created_time >= ?");
-                addInt(*options.createdAfter);
-            }
-
-            if (options.createdBefore) {
-                conditions.emplace_back("created_time <= ?");
-                addInt(*options.createdBefore);
-            }
-
-            if (options.modifiedBefore) {
-                conditions.emplace_back("modified_time <= ?");
-                addInt(*options.modifiedBefore);
-            }
-
-            if (options.indexedAfter) {
-                conditions.emplace_back("indexed_time >= ?");
-                addInt(*options.indexedAfter);
-            }
-
-            if (options.indexedBefore) {
-                conditions.emplace_back("indexed_time <= ?");
-                addInt(*options.indexedBefore);
-            }
-
-            if (options.changedSince) {
-                conditions.emplace_back(
-                    "(modified_time >= ? OR created_time >= ? OR indexed_time >= ?)");
-                addInt(*options.changedSince);
-                addInt(*options.changedSince);
-                addInt(*options.changedSince);
-            }
-
-            for (const auto& tag : options.tags) {
-                conditions.emplace_back(
-                    "EXISTS (SELECT 1 FROM metadata m WHERE m.document_id = documents.id "
-                    "AND m.key = ? AND m.value = ?)");
-                addText(std::string("tag:") + tag);
-                addText(tag);
-            }
-
-            for (const auto& [key, value] : options.metadataFilters) {
-                conditions.emplace_back(
-                    "EXISTS (SELECT 1 FROM metadata m WHERE m.document_id = documents.id "
-                    "AND m.key = ? AND m.value = ?)");
-                addText(key);
-                addText(value);
-            }
-
-            if (!options.extractionStatuses.empty()) {
-                if (options.extractionStatuses.size() == 1) {
-                    conditions.emplace_back("extraction_status = ?");
-                    addText(ExtractionStatusUtils::toString(options.extractionStatuses[0]));
-                } else {
-                    std::string clause = "(";
-                    for (size_t i = 0; i < options.extractionStatuses.size(); ++i) {
-                        if (i > 0)
-                            clause += " OR ";
-                        clause += "extraction_status = ?";
-                        addText(ExtractionStatusUtils::toString(options.extractionStatuses[i]));
-                    }
-                    clause += ')';
-                    conditions.emplace_back(std::move(clause));
-                }
-            }
-
-            if (!options.repairStatuses.empty()) {
-                if (options.repairStatuses.size() == 1) {
-                    conditions.emplace_back("repair_status = ?");
-                    addText(RepairStatusUtils::toString(options.repairStatuses[0]));
-                } else {
-                    std::string clause = "(";
-                    for (size_t i = 0; i < options.repairStatuses.size(); ++i) {
-                        if (i > 0)
-                            clause += " OR ";
-                        clause += "repair_status = ?";
-                        addText(RepairStatusUtils::toString(options.repairStatuses[i]));
-                    }
-                    clause += ')';
-                    conditions.emplace_back(std::move(clause));
-                }
-            }
-
-            if (options.maxRepairAttempts > 0) {
-                conditions.emplace_back("repair_attempts < ?");
-                addInt(options.maxRepairAttempts);
-            }
-
-            if (options.onlyMissingContent) {
-                conditions.emplace_back("NOT EXISTS (SELECT 1 FROM document_content c "
-                                        "WHERE c.document_id = documents.id)");
-            }
-
-            if (options.stalledBefore) {
-                conditions.emplace_back("COALESCE(NULLIF(indexed_time, 0), modified_time) < ?");
-                addInt(*options.stalledBefore);
-            }
-
-            if (options.repairAttemptedBefore) {
-                conditions.emplace_back("repair_attempted_at < ?");
-                addInt(*options.repairAttemptedBefore);
-            }
+            appendDocumentQueryFilters(options, joinFtsForContains, hasPathIndexing_, conditions,
+                                       params, false);
 
             if (!conditions.empty()) {
                 sql += " WHERE ";
@@ -4480,11 +4205,11 @@ MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& 
 
             if (options.limit > 0) {
                 sql += " LIMIT ?";
-                addInt(options.limit);
+                addIntParam(params, options.limit);
             }
             if (options.offset > 0) {
                 sql += " OFFSET ?";
-                addInt(options.offset);
+                addIntParam(params, options.offset);
             }
 
             auto stmtResult = db.prepare(sql);
@@ -7501,19 +7226,6 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
             for (const auto& t : uniqueTags) {
                 tagKeys.push_back(std::string("tag:") + t);
             }
-            // Build IN list
-            auto buildInList = [](size_t count) {
-                std::string list;
-                list.reserve(count * 2 + 2);
-                list += '(';
-                for (size_t i = 0; i < count; ++i) {
-                    if (i)
-                        list += ',';
-                    list += '?';
-                }
-                list += ')';
-                return list;
-            };
             std::string inKeys = buildInList(tagKeys.size());
             std::string inTags = buildInList(uniqueTags.size());
 
