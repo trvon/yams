@@ -2258,6 +2258,59 @@ Result<void> MetadataRepository::indexDocumentContentTrusted(int64_t documentId,
     return result;
 }
 
+Result<bool> MetadataRepository::hasFtsEntry(int64_t documentId) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::hasFtsEntry");
+    return executeReadQuery<bool>([&](Database& db) -> Result<bool> {
+        auto fts5Result = db.hasFTS5();
+        if (!fts5Result)
+            return fts5Result.error();
+        if (!fts5Result.value())
+            return false; // FTS5 not available, no entry possible
+
+        auto stmtResult = db.prepare("SELECT rowid FROM documents_fts WHERE rowid = ?");
+        if (!stmtResult)
+            return stmtResult.error();
+        Statement stmt = std::move(stmtResult).value();
+        auto bindResult = stmt.bind(1, documentId);
+        if (!bindResult)
+            return bindResult.error();
+        auto stepResult = stmt.step();
+        if (!stepResult)
+            return stepResult.error();
+        return stepResult.value(); // true if row was found
+    });
+}
+
+Result<std::unordered_set<int64_t>> MetadataRepository::getFts5IndexedRowIdSet() {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::getFts5IndexedRowIdSet");
+    return executeReadQuery<std::unordered_set<int64_t>>(
+        [&](Database& db) -> Result<std::unordered_set<int64_t>> {
+            auto fts5Result = db.hasFTS5();
+            if (!fts5Result)
+                return fts5Result.error();
+            if (!fts5Result.value())
+                return std::unordered_set<int64_t>{}; // FTS5 not available
+
+            auto stmtResult = db.prepare("SELECT rowid FROM documents_fts");
+            if (!stmtResult)
+                return stmtResult.error();
+
+            Statement stmt = std::move(stmtResult).value();
+            std::unordered_set<int64_t> ids;
+
+            for (;;) {
+                auto stepResult = stmt.step();
+                if (!stepResult)
+                    return stepResult.error();
+                if (!stepResult.value())
+                    break;
+                ids.insert(stmt.getInt64(0));
+            }
+
+            return ids;
+        });
+}
+
 Result<void> MetadataRepository::removeFromIndex(int64_t documentId) {
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         // First check if FTS5 is available
@@ -4059,21 +4112,19 @@ MetadataRepository::batchGetContentPreview(const std::vector<int64_t>& documentI
     }
 
     const int effectiveMaxChars = std::max(1, maxChars);
-    const int effectiveMaxDocs = std::clamp(maxDocs, 0, static_cast<int>(documentIds.size()));
+    (void)maxDocs;
+    const std::vector<int64_t>& effectiveIds = documentIds;
 
     return executeReadQuery<std::unordered_map<int64_t, std::string>>(
         [&](Database& db) -> Result<std::unordered_map<int64_t, std::string>> {
             std::string sql = "SELECT document_id, substr(content_text, 1, ?) "
                               "FROM document_content WHERE document_id IN (";
-            for (size_t i = 0; i < documentIds.size(); ++i) {
+            for (size_t i = 0; i < effectiveIds.size(); ++i) {
                 if (i > 0)
                     sql += ",";
                 sql += "?";
             }
             sql += ")";
-            if (effectiveMaxDocs > 0) {
-                sql += " LIMIT ?";
-            }
 
             auto stmtResult = db.prepare(sql);
             if (!stmtResult) {
@@ -4086,16 +4137,8 @@ MetadataRepository::batchGetContentPreview(const std::vector<int64_t>& documentI
                 return bindResult.error();
             }
 
-            for (size_t i = 0; i < documentIds.size(); ++i) {
-                if (auto bindResult = stmt.bind(static_cast<int>(i + 2), documentIds[i]);
-                    !bindResult) {
-                    return bindResult.error();
-                }
-            }
-
-            if (effectiveMaxDocs > 0) {
-                if (auto bindResult =
-                        stmt.bind(static_cast<int>(documentIds.size() + 2), effectiveMaxDocs);
+            for (size_t i = 0; i < effectiveIds.size(); ++i) {
+                if (auto bindResult = stmt.bind(static_cast<int>(i + 2), effectiveIds[i]);
                     !bindResult) {
                     return bindResult.error();
                 }

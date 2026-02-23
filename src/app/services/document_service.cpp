@@ -1614,45 +1614,20 @@ public:
         std::unordered_map<int64_t, std::string> snippetPreviewCache;
         bool snippetFetchFailed = false;
         if (!page.empty() && wantsSnippets) {
-            auto parseSnippetEnvInt = [](const char* name, int fallback, int minValue,
-                                         int maxValue) {
-                const char* raw = std::getenv(name);
-                if (!raw || !*raw)
-                    return fallback;
-                try {
-                    int parsed = std::stoi(raw);
-                    return std::clamp(parsed, minValue, maxValue);
-                } catch (...) {
-                    return fallback;
-                }
-            };
-
             std::vector<int64_t> docIds;
             docIds.reserve(page.size());
             for (const auto& doc : page)
                 docIds.push_back(doc.id);
 
             const int previewChars = std::clamp(req.snippetLength * 8, 256, 8192);
-            const int snippetBudgetMs =
-                parseSnippetEnvInt("YAMS_LIST_SNIPPET_BUDGET_MS", 40, 1, 5000);
-            const int snippetMaxDocsEnv =
-                parseSnippetEnvInt("YAMS_LIST_SNIPPET_MAX_DOCS", 256, 1, 50000);
-            const int inferredMaxDocs = std::max(1, snippetBudgetMs / 2);
-            const int maxPreviewDocs = std::min<int>(static_cast<int>(docIds.size()),
-                                                     std::min(snippetMaxDocsEnv, inferredMaxDocs));
-
             const auto previewStart = std::chrono::steady_clock::now();
             auto previewRes =
-                ctx_.metadataRepo->batchGetContentPreview(docIds, previewChars, maxPreviewDocs);
+                ctx_.metadataRepo->batchGetContentPreview(docIds, previewChars, 0);
             const auto previewElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                               std::chrono::steady_clock::now() - previewStart)
                                               .count();
             if (previewRes) {
                 snippetPreviewCache = std::move(previewRes.value());
-                if (previewElapsedMs > snippetBudgetMs) {
-                    spdlog::debug("[LIST] Snippet hydration exceeded budget: {}ms > {}ms",
-                                  previewElapsedMs, snippetBudgetMs);
-                }
             } else {
                 snippetFetchFailed = true;
             }

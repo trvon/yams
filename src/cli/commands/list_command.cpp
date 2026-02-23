@@ -1438,14 +1438,16 @@ private:
             cells.push_back(doc.getFormattedSize());
             if (snippetIndex != std::numeric_limits<size_t>::max()) {
                 std::string snippetDisplay;
-                if (doc.extractionStatus == "pending") {
+                if (!doc.contentSnippet.empty()) {
+                    snippetDisplay = formatSnippetForDisplay(doc.contentSnippet, snippetLength_);
+                    if (snippetDisplay.empty())
+                        snippetDisplay = "-";
+                } else if (doc.extractionStatus == "pending") {
                     snippetDisplay = "[pending]";
                 } else if (doc.extractionStatus == "failed") {
                     snippetDisplay = "[failed]";
                 } else {
-                    snippetDisplay = formatSnippetForDisplay(doc.contentSnippet, snippetLength_);
-                    if (snippetDisplay.empty())
-                        snippetDisplay = "-";
+                    snippetDisplay = "-";
                 }
                 cells.push_back(snippetDisplay);
             }

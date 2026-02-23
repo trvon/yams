@@ -38,6 +38,7 @@
 #include <fstream>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace yams::daemon {
 
@@ -623,6 +624,14 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
         size_t offset = 0;
         size_t totalEnqueued = 0;
 
+        // Preload all FTS5-indexed rowids once for O(1) lookups in the scan loop.
+        std::unordered_set<int64_t> ftsRowIds;
+        {
+            auto ftsRes = meta->getFts5IndexedRowIdSet();
+            if (ftsRes)
+                ftsRowIds = std::move(ftsRes.value());
+        }
+
         while (running_.load(std::memory_order_relaxed)) {
             metadata::DocumentQueryOptions opts;
             opts.limit = static_cast<int>(batchSize);
@@ -649,10 +658,16 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
                         auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(d.sha256Hash);
                         missingEmb = !hasEmbedRes || !hasEmbedRes.value();
                     }
-                    const bool missingFts =
+                    bool missingFts =
                         (!d.contentExtracted) &&
                         (d.extractionStatus != yams::metadata::ExtractionStatus::Skipped) &&
                         (d.extractionStatus != yams::metadata::ExtractionStatus::Success);
+                    // Also detect successful extraction with missing FTS5 entry.
+                    if (!missingFts &&
+                        d.extractionStatus == yams::metadata::ExtractionStatus::Success &&
+                        ftsRowIds.count(d.id) == 0) {
+                        missingFts = true;
+                    }
 
                     if (missingEmb || missingFts) {
                         if (pendingSet_.find(d.sha256Hash) == pendingSet_.end()) {
@@ -837,6 +852,13 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
                     if (canExtractDocument(d.mimeType, d.fileExtension, customExtractors, content,
                                            hash))
                         result.missingFts5.push_back(hash);
+                } else {
+                    // Extraction succeeded — verify FTS5 entry actually exists.
+                    // Small batch (per-hash), so per-document lookup is fine.
+                    auto ftsRes = meta->hasFtsEntry(d.id);
+                    if (ftsRes && !ftsRes.value()) {
+                        result.missingFts5.push_back(hash);
+                    }
                 }
             }
         }
@@ -1710,6 +1732,15 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
                                 ? services_->getContentExtractors()
                                 : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
 
+    // Pre-load all FTS5 rowids so the incremental skip check below is O(1)
+    // per document instead of one SQL round-trip each.
+    std::unordered_set<int64_t> ftsRowIds;
+    if (!force) {
+        auto ftsResult = meta->getFts5IndexedRowIdSet();
+        if (ftsResult)
+            ftsRowIds = std::move(ftsResult.value());
+    }
+
     result.processed = docs.value().size();
     const size_t totalDocs = docs.value().size();
     size_t docIdx = 0;
@@ -1772,14 +1803,18 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
         }
 
         // Incremental mode: skip documents that already have successful extraction
-        // with a valid content row. The ghost-success loop above already reset any
-        // documents that claim Success but lack content, so remaining Success docs
-        // are genuinely indexed. Use --force to unconditionally rebuild everything.
+        // with a valid content row AND a matching FTS5 index entry. The ghost-success
+        // loop above already reset any documents that claim Success but lack content,
+        // so remaining Success docs have content — but the FTS5 index may still be
+        // missing (e.g. after corruption or interrupted rebuild).
+        // Use --force to unconditionally rebuild everything.
         if (!force && d.extractionStatus == metadata::ExtractionStatus::Success) {
             auto contentRes = meta->getContent(d.id);
             if (contentRes && contentRes.value().has_value()) {
-                result.skipped++;
-                continue;
+                if (ftsRowIds.count(d.id)) {
+                    result.skipped++;
+                    continue;
+                }
             }
         }
 

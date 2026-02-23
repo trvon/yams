@@ -636,6 +636,104 @@ TEST_CASE("MetadataRepository: remove metadata", "[unit][metadata][repository]")
     CHECK_FALSE(getResult.value().has_value());
 }
 
+TEST_CASE("MetadataRepository: hasFtsEntry reports FTS5 presence correctly",
+          "[unit][metadata][repository][fts5]") {
+    MetadataRepositoryFixture fix;
+
+    DocumentInfo docInfo;
+    docInfo.sha256Hash = "fts5_entry_check";
+    docInfo.fileName = "fts5check.txt";
+    docInfo.fileSize = 100;
+    docInfo.mimeType = "text/plain";
+    docInfo.createdTime =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    docInfo.modifiedTime = docInfo.createdTime;
+
+    auto createResult = fix.repository_->insertDocument(docInfo);
+    REQUIRE(createResult.has_value());
+    auto docId = createResult.value();
+
+    SECTION("returns false before indexing") {
+        auto hasFts = fix.repository_->hasFtsEntry(docId);
+        REQUIRE(hasFts.has_value());
+        CHECK_FALSE(hasFts.value());
+    }
+
+    SECTION("returns true after indexing") {
+        auto indexResult = fix.repository_->indexDocumentContent(
+            docId, "Test Document", "Searchable content here", "text/plain");
+        REQUIRE(indexResult.has_value());
+
+        auto hasFts = fix.repository_->hasFtsEntry(docId);
+        REQUIRE(hasFts.has_value());
+        CHECK(hasFts.value());
+    }
+
+    SECTION("returns false for non-existent document ID") {
+        auto hasFts = fix.repository_->hasFtsEntry(999999);
+        REQUIRE(hasFts.has_value());
+        CHECK_FALSE(hasFts.value());
+    }
+}
+
+TEST_CASE("MetadataRepository: getFts5IndexedRowIdSet returns indexed document IDs",
+          "[unit][metadata][repository][fts5]") {
+    MetadataRepositoryFixture fix;
+
+    auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+
+    // Insert two documents
+    DocumentInfo doc1;
+    doc1.sha256Hash = "fts5_set_doc1";
+    doc1.fileName = "doc1.txt";
+    doc1.fileSize = 50;
+    doc1.mimeType = "text/plain";
+    doc1.createdTime = now;
+    doc1.modifiedTime = now;
+    auto id1Res = fix.repository_->insertDocument(doc1);
+    REQUIRE(id1Res.has_value());
+    auto docId1 = id1Res.value();
+
+    DocumentInfo doc2;
+    doc2.sha256Hash = "fts5_set_doc2";
+    doc2.fileName = "doc2.txt";
+    doc2.fileSize = 60;
+    doc2.mimeType = "text/plain";
+    doc2.createdTime = now;
+    doc2.modifiedTime = now;
+    auto id2Res = fix.repository_->insertDocument(doc2);
+    REQUIRE(id2Res.has_value());
+    auto docId2 = id2Res.value();
+
+    // Before indexing: set should be empty
+    auto setBefore = fix.repository_->getFts5IndexedRowIdSet();
+    REQUIRE(setBefore.has_value());
+    CHECK(setBefore.value().count(docId1) == 0);
+    CHECK(setBefore.value().count(docId2) == 0);
+
+    // Index only doc1
+    auto indexResult = fix.repository_->indexDocumentContent(
+        docId1, "Doc One", "First document content", "text/plain");
+    REQUIRE(indexResult.has_value());
+
+    // Set should contain only doc1
+    auto setAfter = fix.repository_->getFts5IndexedRowIdSet();
+    REQUIRE(setAfter.has_value());
+    CHECK(setAfter.value().count(docId1) == 1);
+    CHECK(setAfter.value().count(docId2) == 0);
+
+    // Index doc2
+    auto indexResult2 = fix.repository_->indexDocumentContent(
+        docId2, "Doc Two", "Second document content", "text/plain");
+    REQUIRE(indexResult2.has_value());
+
+    // Set should contain both
+    auto setFinal = fix.repository_->getFts5IndexedRowIdSet();
+    REQUIRE(setFinal.has_value());
+    CHECK(setFinal.value().count(docId1) == 1);
+    CHECK(setFinal.value().count(docId2) == 1);
+}
+
 TEST_CASE("MetadataRepository: search functionality", "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;
 

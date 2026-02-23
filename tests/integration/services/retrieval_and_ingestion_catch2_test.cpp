@@ -882,9 +882,18 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
     opts.explicitDataDir = storageDir_;
     opts.path = (fixtures_->root() / "hot_list").string();
     opts.recursive = true;
+    // Apply a tag via ingestion so we can assert metadata hydration under hot_only list mode.
+    opts.tags = {"it-list-hot"};
     opts.noEmbeddings = true;
     opts.timeoutMs = kRequestTimeoutMs;
     REQUIRE(ing.addViaDaemon(opts));
+
+    BarrierStats barrierStats;
+    const bool quiescent =
+        waitForPostIngestQuiescent(socketPath_, storageDir_, 8000ms, 50ms, &barrierStats);
+    CAPTURE(quiescent, barrierStats.statusPolls, barrierStats.statusErrors,
+            barrierStats.lastPostIngestQueued, barrierStats.lastPostIngestInflight,
+            barrierStats.lastPostIngestDrained, barrierStats.lastIndexVisible);
 
     auto* sm = daemon()->getServiceManager();
     REQUIRE(sm != nullptr);
@@ -898,14 +907,26 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
     rq.showTags = true;
     rq.showMetadata = true;
 
-    auto r1 = docSvc->list(rq);
-    REQUIRE(r1);
-    const auto& resp = r1.value();
-    REQUIRE_FALSE(resp.documents.empty());
+    // In hot_only mode the list path may depend on post-ingest indexing visibility.
+    // Retry briefly to reduce flakiness.
+    decltype(docSvc->list(rq)) r1;
+    std::optional<std::reference_wrapper<const yams::app::services::ListDocumentsResponse>> resp;
+    bool gotDocs = false;
+    for (int i = 0; i < 40; ++i) {
+        r1 = docSvc->list(rq);
+        REQUIRE(r1);
+        if (!r1.value().documents.empty()) {
+            resp = std::cref(r1.value());
+            gotDocs = true;
+            break;
+        }
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(gotDocs);
 
     bool foundTagMetadata = false;
-    for (const auto& e : resp.documents) {
-        if (e.metadata.find("tag:it-list-hot") != e.metadata.end()) {
+    for (const auto& e : resp->get().documents) {
+        if (e.metadata.contains("tag:it-list-hot")) {
             foundTagMetadata = true;
             break;
         }
@@ -1011,7 +1032,14 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
     addStdinLike.snapshotLabel = snapshotLabel;
     REQUIRE(ing.addViaDaemon(addStdinLike));
 
-    waitForPostIngestQuiescent(socketPath_, storageDir_, 5000ms);
+    BarrierStats barrierStats;
+    waitForPostIngestQuiescent(socketPath_, storageDir_, 8000ms, 50ms, &barrierStats);
+    const bool snapshotVisible = waitForSnapshotVisible(ctx.metadataRepo.get(), snapshotId,
+                                                        snapshotLabel, 3, 8000ms, 25ms,
+                                                        &barrierStats);
+    CAPTURE(snapshotVisible, barrierStats.snapshotPolls, barrierStats.lastSnapshotCount,
+            barrierStats.lastDocsByLabelCount);
+    REQUIRE(snapshotVisible);
 
     auto snaps = ctx.metadataRepo->listTreeSnapshots(200);
     REQUIRE(snaps);

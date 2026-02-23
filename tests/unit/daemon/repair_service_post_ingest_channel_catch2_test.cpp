@@ -411,3 +411,179 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 
     sm->shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// FTS5 blind-spot regression tests
+// ---------------------------------------------------------------------------
+// These tests verify that documents marked as successfully extracted but
+// missing their FTS5 index entries are correctly detected and repaired.
+// Before the fix, all three code paths (rebuildFts5Index, spawnInitialScan,
+// detectMissingWork) would silently skip these documents.
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "RepairService: rebuildFts5Index catches extraction-success docs with missing FTS5",
+                 "[daemon][repair][fts5][regression]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    auto meta = sm->getMetadataRepo();
+    auto store = sm->getContentStore();
+    REQUIRE(meta != nullptr);
+    REQUIRE(store != nullptr);
+
+    // Store real content so the extractor can find it.
+    const std::string text = "hello world searchable content for fts5 repair test";
+    const auto textBytes = std::as_bytes(std::span<const char>(text.data(), text.size()));
+    auto storeRes = store->storeBytes(textBytes);
+    REQUIRE(storeRes.has_value());
+    const auto hash = storeRes.value().contentHash;
+
+    // Insert document marked as successfully extracted.
+    metadata::DocumentInfo doc{};
+    doc.fileName = "fts5_missing.txt";
+    doc.filePath = (config_.dataDir / "fts5_missing.txt").string();
+    doc.fileExtension = "txt";
+    doc.fileSize = static_cast<int64_t>(text.size());
+    doc.sha256Hash = hash;
+    doc.mimeType = "text/plain";
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+
+    auto idRes = meta->insertDocument(doc);
+    REQUIRE(idRes.has_value());
+    const int64_t docId = idRes.value();
+
+    // Mark extraction as successful at the DB level.
+    auto statusRes = meta->updateDocumentExtractionStatus(
+        docId, true, metadata::ExtractionStatus::Success);
+    REQUIRE(statusRes.has_value());
+
+    // Insert a content row so the ghost-success loop doesn't reset the status.
+    metadata::DocumentContent content;
+    content.documentId = docId;
+    content.contentText = text;
+    content.contentLength = static_cast<int64_t>(text.size());
+    content.extractionMethod = "test";
+    content.language = "en";
+    auto contentRes = meta->insertContent(content);
+    REQUIRE(contentRes.has_value());
+
+    // Crucially: do NOT call indexDocumentContent(), so no FTS5 entry exists.
+    auto hasFts = meta->hasFtsEntry(docId);
+    REQUIRE(hasFts.has_value());
+    REQUIRE_FALSE(hasFts.value());
+
+    // Run repair with fts5 only.
+    RepairService::Config cfg;
+    cfg.enable = false;
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 0; }, cfg);
+    RepairRequest req;
+    req.repairFts5 = true;
+    req.dryRun = false;
+
+    auto resp = repair.executeRepair(req, nullptr);
+
+    // The document should have been rebuilt, not skipped.
+    auto ftsResult = findOperationResult(resp, "fts5");
+    REQUIRE(ftsResult.has_value());
+    CHECK(ftsResult->succeeded >= 1u);
+
+    // Verify an FTS5 entry now exists.
+    auto hasFtsAfter = meta->hasFtsEntry(docId);
+    REQUIRE(hasFtsAfter.has_value());
+    CHECK(hasFtsAfter.value());
+
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "RepairService: startup scan detects extraction-success docs with missing FTS5",
+                 "[daemon][repair][fts5][startup-scan][regression]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    auto meta = sm->getMetadataRepo();
+    REQUIRE(meta != nullptr);
+
+    // Insert document marked as successfully extracted but with no FTS5 entry.
+    metadata::DocumentInfo doc{};
+    doc.fileName = "fts5_scan.txt";
+    doc.filePath = (config_.dataDir / "fts5_scan.txt").string();
+    doc.fileExtension = "txt";
+    doc.fileSize = 42;
+    doc.sha256Hash = std::string(64, 'f');
+    doc.mimeType = "text/plain";
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+
+    auto idRes = meta->insertDocument(doc);
+    REQUIRE(idRes.has_value());
+    const int64_t docId = idRes.value();
+
+    // Mark as successfully extracted.
+    auto statusRes = meta->updateDocumentExtractionStatus(
+        docId, true, metadata::ExtractionStatus::Success);
+    REQUIRE(statusRes.has_value());
+
+    // Ensure repair status is Pending (eligible for scan).
+    auto repairRes =
+        meta->batchUpdateDocumentRepairStatuses({doc.sha256Hash}, metadata::RepairStatus::Pending);
+    REQUIRE(repairRes.has_value());
+
+    // Verify NO FTS5 entry exists.
+    auto hasFts = meta->hasFtsEntry(docId);
+    REQUIRE(hasFts.has_value());
+    REQUIRE_FALSE(hasFts.value());
+
+    // Clear backlog counter.
+    state_.stats.repairTotalBacklog.store(0, std::memory_order_relaxed);
+
+    // Start RepairService (triggers spawnInitialScan which should detect the gap).
+    RepairService::Config cfg;
+    cfg.enable = true;
+    cfg.maxBatch = 16;
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 0; }, cfg);
+    repair.start();
+
+    // spawnInitialScan is deferred by minDeferTicks (50 ticks * 100ms = ~5s).
+    // Poll until the backlog counter is incremented or a generous timeout expires.
+    const bool detected = waitForCondition(std::chrono::seconds(15), [&]() {
+        return state_.stats.repairTotalBacklog.load(std::memory_order_relaxed) >= 1u;
+    });
+    repair.stop();
+
+    // The document should have been enqueued (backlog > 0).
+    CHECK(detected);
+
+    sm->shutdown();
+}
