@@ -97,64 +97,66 @@ json MCPServer::describeOp(const std::string& target) const {
 
         ops["search"] = {
             "Search documents using hybrid search (vector + full-text + knowledge graph)",
-            json{{"type", "object"},
-                 {"properties",
-                  {{"query", {{"type", "string"}, {"description", "Search query"}}},
-                   {"limit", {{"type", "integer"},
-                              {"description", "Maximum results"},
-                              {"default", 10}}},
-                   {"fuzzy", {{"type", "boolean"},
-                              {"description", "Enable fuzzy search"},
-                              {"default", false}}},
-                   {"similarity", {{"type", "number"},
-                                   {"description", "Similarity threshold"},
-                                   {"default", 0.7}}},
-                   {"type", {{"type", "string"},
-                             {"description", "Search type"},
-                             {"default", "hybrid"}}},
-                   {"paths_only", {{"type", "boolean"},
-                                  {"description", "Return only paths"},
-                                  {"default", false}}},
-                   {"path_pattern", {{"type", "string"},
-                                    {"description", "Glob pattern to filter results"}}},
-                   {"include_patterns", {{"type", "array"},
-                                         {"items", {{"type", "string"}}},
-                                         {"description", "Multiple path patterns (OR logic)"}}},
-                   {"tags", {{"type", "array"},
-                             {"items", {{"type", "string"}}},
-                             {"description", "Filter by tags"}}},
-                   {"match_all_tags", {{"type", "boolean"},
-                                      {"description", "Require all tags to match (AND logic)"},
-                                      {"default", false}}},
-                   {"cwd", {{"type", "string"},
-                            {"description", "Scope search to files under this directory"}}}}},
-                 {"required", json::array({"query"})}},
-            "query",
-            true};
+            json{
+                {"type", "object"},
+                {"properties",
+                 {{"query", {{"type", "string"}, {"description", "Search query"}}},
+                  {"limit",
+                   {{"type", "integer"}, {"description", "Maximum results"}, {"default", 10}}},
+                  {"fuzzy",
+                   {{"type", "boolean"},
+                    {"description", "Enable fuzzy search"},
+                    {"default", false}}},
+                  {"similarity",
+                   {{"type", "number"}, {"description", "Similarity threshold"}, {"default", 0.7}}},
+                  {"type",
+                   {{"type", "string"}, {"description", "Search type"}, {"default", "hybrid"}}},
+                  {"paths_only",
+                   {{"type", "boolean"}, {"description", "Return only paths"}, {"default", false}}},
+                  {"path_pattern",
+                   {{"type", "string"}, {"description", "Glob pattern to filter results"}}},
+                  {"include_patterns",
+                   {{"type", "array"},
+                    {"items", {{"type", "string"}}},
+                    {"description", "Multiple path patterns (OR logic)"}}},
+                  {"tags",
+                   {{"type", "array"},
+                    {"items", {{"type", "string"}}},
+                    {"description", "Filter by tags"}}},
+                  {"match_all_tags",
+                   {{"type", "boolean"},
+                    {"description", "Require all tags to match (AND logic)"},
+                    {"default", false}}},
+                  {"cwd",
+                   {{"type", "string"},
+                    {"description", "Scope search to files under this directory"}}}}},
+                {"required", json::array({"query"})}},
+            "query", true};
 
         ops["grep"] = {
             "Search documents using regular expressions with grep-like functionality",
-            json{{"type", "object"},
-                 {"properties",
-                  {{"pattern", {{"type", "string"}, {"description", "Regex pattern"}}},
-                   {"name", {{"type", "string"}, {"description", "File name or subpath to scope"}}},
-                   {"paths", {{"type", "array"},
-                             {"items", {{"type", "string"}}},
-                             {"description", "Paths to search"}}},
-                   {"include_patterns", {{"type", "array"},
-                                         {"items", {{"type", "string"}}},
-                                         {"description", "File include globs"}}},
-                   {"ignore_case", {{"type", "boolean"},
-                                   {"description", "Case insensitive"},
-                                   {"default", false}}},
-                   {"line_numbers", {{"type", "boolean"},
-                                    {"description", "Show line numbers"},
-                                    {"default", false}}},
-                   {"context", {{"type", "integer"}, {"description", "Context lines"}, {"default", 0}}},
-                   {"cwd", {{"type", "string"}, {"description", "Scope grep to directory"}}}}},
-                 {"required", json::array({"pattern"})}},
-            "query",
-            true};
+            json{
+                {"type", "object"},
+                {"properties",
+                 {{"pattern", {{"type", "string"}, {"description", "Regex pattern"}}},
+                  {"name", {{"type", "string"}, {"description", "File name or subpath to scope"}}},
+                  {"paths",
+                   {{"type", "array"},
+                    {"items", {{"type", "string"}}},
+                    {"description", "Paths to search"}}},
+                  {"include_patterns",
+                   {{"type", "array"},
+                    {"items", {{"type", "string"}}},
+                    {"description", "File include globs"}}},
+                  {"ignore_case",
+                   {{"type", "boolean"}, {"description", "Case insensitive"}, {"default", false}}},
+                  {"line_numbers",
+                   {{"type", "boolean"}, {"description", "Show line numbers"}, {"default", false}}},
+                  {"context",
+                   {{"type", "integer"}, {"description", "Context lines"}, {"default", 0}}},
+                  {"cwd", {{"type", "string"}, {"description", "Scope grep to directory"}}}}},
+                {"required", json::array({"pattern"})}},
+            "query", true};
 
         ops["list"] = {
             "List documents with filtering by pattern, tags, type, or recency",
@@ -162,173 +164,217 @@ json MCPServer::describeOp(const std::string& target) const {
                  {"properties",
                   {{"pattern", {{"type", "string"}, {"description", "Name pattern filter"}}},
                    {"name", {{"type", "string"}, {"description", "Exact name filter"}}},
-                   {"tags", {{"type", "array"},
-                            {"items", {{"type", "string"}}},
-                            {"description", "Filter by tags"}}},
-                   {"recent", {{"type", "integer"}, {"description", "Show N most recent documents"}}},
-                   {"paths_only", {{"type", "boolean"},
-                                  {"description", "Output only file paths"},
-                                  {"default", false}}},
-                   {"limit", {{"type", "integer"}, {"description", "Maximum results"}, {"default", 100}}},
-                   {"offset", {{"type", "integer"}, {"description", "Pagination offset"}, {"default", 0}}}}}},
-            "query",
-            true};
+                   {"tags",
+                    {{"type", "array"},
+                     {"items", {{"type", "string"}}},
+                     {"description", "Filter by tags"}}},
+                   {"recent",
+                    {{"type", "integer"}, {"description", "Show N most recent documents"}}},
+                   {"paths_only",
+                    {{"type", "boolean"},
+                     {"description", "Output only file paths"},
+                     {"default", false}}},
+                   {"limit",
+                    {{"type", "integer"}, {"description", "Maximum results"}, {"default", 100}}},
+                   {"offset",
+                    {{"type", "integer"}, {"description", "Pagination offset"}, {"default", 0}}}}}},
+            "query", true};
 
         ops["get"] = {"Retrieve documents from storage by hash or name",
                       json{{"type", "object"},
                            {"properties",
                             {{"hash", {{"type", "string"}, {"description", "Document hash"}}},
                              {"name", {{"type", "string"}, {"description", "Document name"}}},
-                             {"include_content", {{"type", "boolean"},
-                                                 {"description", "Include content in response"},
-                                                 {"default", true}}}}}},
-                      "query",
-                      true};
+                             {"include_content",
+                              {{"type", "boolean"},
+                               {"description", "Include content in response"},
+                               {"default", true}}}}}},
+                      "query", true};
 
         ops["status"] = {"Get daemon status, readiness, and metrics",
-                          json{{"type", "object"},
-                               {"properties",
-                                {{"detailed", {{"type", "boolean"},
-                                              {"description", "Include verbose metrics"},
-                                              {"default", false}}}}}},
-                          "query",
-                          true};
-
-        ops["list_collections"] = {"List available collections", json{{"type", "object"}}, "query", true};
-
-        ops["list_snapshots"] = {"List available snapshots",
-                                 json{{"type", "object"},
-                                      {"properties",
-                                       {{"collection", {{"type", "string"}, {"description", "Filter by collection"}}},
-                                        {"with_labels", {{"type", "boolean"},
-                                                        {"description", "Include snapshot labels"},
-                                                        {"default", true}}}}}},
-                                 "query",
-                                 true};
-
-        ops["graph"] = {"Query the knowledge graph for relationships and entities",
-                        json{{"type", "object"},
-                             {"properties",
-                              {{"action", {{"type", "string"},
-                                          {"enum", json::array({"query", "ingest"})},
-                                          {"default", "query"}}},
-                               {"hash", {{"type", "string"}, {"description", "Document hash"}}},
-                               {"name", {{"type", "string"}, {"description", "Document name"}}},
-                               {"node_key", {{"type", "string"}, {"description", "Direct node key lookup"}}},
-                               {"list_types", {{"type", "boolean"},
-                                             {"description", "List available node types"},
-                                             {"default", false}}},
-                               {"relation", {{"type", "string"}, {"description", "Filter by relation type"}}},
-                               {"depth", {{"type", "integer"},
-                                         {"description", "BFS traversal depth (1-5)"},
-                                         {"default", 1}}},
-                               {"limit", {{"type", "integer"}, {"description", "Maximum results"}, {"default", 100}}}}}},
-                        "query",
-                        true};
-
-        ops["add"] = {"Store documents with deduplication",
-                      json{{"type", "object"},
-                           {"properties",
-                            {{"path", {{"type", "string"}, {"description", "File or directory path"}}},
-                             {"content", {{"type", "string"}, {"description", "Inline content"}}},
-                             {"name", {{"type", "string"}, {"description", "Document name"}}},
-                             {"recursive", {{"type", "boolean"},
-                                           {"description", "Recursively add from directories"},
-                                           {"default", false}}},
-                             {"tags", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Document tags"}}},
-                             {"metadata", {{"type", "object"}, {"description", "Metadata key/value pairs"}}}}}},
-                      "execute",
-                      false};
-
-        ops["update"] = {"Update metadata/tags by hash, name, path, or pattern",
                          json{{"type", "object"},
                               {"properties",
-                               {{"hash", {{"type", "string"}, {"description", "Document hash"}}},
-                                {"name", {{"type", "string"}, {"description", "Document name"}}},
-                                {"pattern", {{"type", "string"}, {"description", "Glob-like pattern"}}},
-                                {"metadata", {{"type", "object"}, {"description", "Metadata to update"}}},
-                                {"tags", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Tags to add"}}},
-                                {"remove_tags", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Tags to remove"}}},
-                                {"dry_run", {{"type", "boolean"}, {"description", "Preview changes only"}, {"default", false}}}}}},
-                         "execute",
-                         false};
+                               {{"detailed",
+                                 {{"type", "boolean"},
+                                  {"description", "Include verbose metrics"},
+                                  {"default", false}}}}}},
+                         "query", true};
 
-        ops["delete"] = {"Delete documents by name, names array, or pattern",
-                         json{{"type", "object"},
-                              {"properties",
-                               {{"name", {{"type", "string"}, {"description", "Single name to delete"}}},
-                                {"names", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Multiple names to delete"}}},
-                                {"pattern", {{"type", "string"}, {"description", "Glob pattern for matching names"}}},
-                                {"dry_run", {{"type", "boolean"}, {"description", "Preview what would be deleted"}, {"default", false}}}}}},
-                         "execute",
-                         false};
+        ops["list_collections"] = {"List available collections", json{{"type", "object"}}, "query",
+                                   true};
 
-        ops["restore"] = {"Restore documents from a collection or snapshot",
-                          json{{"type", "object"},
-                               {"properties",
-                                {{"collection", {{"type", "string"}, {"description", "Collection name"}}},
-                                 {"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
-                                 {"output_directory", {{"type", "string"}, {"description", "Output directory"}}},
-                                 {"overwrite", {{"type", "boolean"}, {"description", "Overwrite existing files"}, {"default", false}}},
-                                 {"dry_run", {{"type", "boolean"}, {"description", "Preview without writing"}, {"default", false}}}}},
-                               {"required", json::array({"output_directory"})}},
-                          "execute",
-                          false};
+        ops["list_snapshots"] = {
+            "List available snapshots",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"collection", {{"type", "string"}, {"description", "Filter by collection"}}},
+                   {"with_labels",
+                    {{"type", "boolean"},
+                     {"description", "Include snapshot labels"},
+                     {"default", true}}}}}},
+            "query", true};
 
-        ops["download"] = {"Download files from URLs and store in YAMS",
-                           json{{"type", "object"},
-                                {"properties",
-                                 {{"url", {{"type", "string"}, {"description", "URL to download"}}},
-                                  {"post_index", {{"type", "boolean"}, {"description", "Index after storing"}, {"default", true}}},
-                                  {"tags", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Tags for indexing"}}},
-                                  {"metadata", {{"type", "object"}, {"description", "Metadata for indexing"}}}}},
-                                {"required", json::array({"url"})}},
-                           "execute",
-                           false};
+        ops["graph"] = {
+            "Query the knowledge graph for relationships and entities",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"action",
+                    {{"type", "string"},
+                     {"enum", json::array({"query", "ingest"})},
+                     {"default", "query"}}},
+                   {"hash", {{"type", "string"}, {"description", "Document hash"}}},
+                   {"name", {{"type", "string"}, {"description", "Document name"}}},
+                   {"node_key", {{"type", "string"}, {"description", "Direct node key lookup"}}},
+                   {"list_types",
+                    {{"type", "boolean"},
+                     {"description", "List available node types"},
+                     {"default", false}}},
+                   {"relation", {{"type", "string"}, {"description", "Filter by relation type"}}},
+                   {"depth",
+                    {{"type", "integer"},
+                     {"description", "BFS traversal depth (1-5)"},
+                     {"default", 1}}},
+                   {"limit",
+                    {{"type", "integer"}, {"description", "Maximum results"}, {"default", 100}}}}}},
+            "query", true};
 
-        ops["session_start"] = {"Start (and optionally warm) a session",
-                                json{{"type", "object"},
-                                     {"properties",
-                                      {{"name", {{"type", "string"}, {"description", "Session name"}}},
-                                       {"description", {{"type", "string"}, {"description", "Session description"}}},
-                                       {"warm", {{"type", "boolean"}, {"default", true}}}}}},
-                                "session",
-                                false};
+        ops["add"] = {
+            "Store documents with deduplication",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"path", {{"type", "string"}, {"description", "File or directory path"}}},
+                   {"content", {{"type", "string"}, {"description", "Inline content"}}},
+                   {"name", {{"type", "string"}, {"description", "Document name"}}},
+                   {"recursive",
+                    {{"type", "boolean"},
+                     {"description", "Recursively add from directories"},
+                     {"default", false}}},
+                   {"tags",
+                    {{"type", "array"},
+                     {"items", {{"type", "string"}}},
+                     {"description", "Document tags"}}},
+                   {"metadata",
+                    {{"type", "object"}, {"description", "Metadata key/value pairs"}}}}}},
+            "execute", false};
 
-        ops["session_stop"] = {"Stop session (clear materialized cache)",
-                               json{{"type", "object"},
-                                    {"properties",
-                                     {{"name", {{"type", "string"}, {"description", "Session name"}}},
-                                      {"clear", {{"type", "boolean"}, {"default", true}}}}}},
-                               "session",
-                               false};
+        ops["update"] = {
+            "Update metadata/tags by hash, name, path, or pattern",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"hash", {{"type", "string"}, {"description", "Document hash"}}},
+                   {"name", {{"type", "string"}, {"description", "Document name"}}},
+                   {"pattern", {{"type", "string"}, {"description", "Glob-like pattern"}}},
+                   {"metadata", {{"type", "object"}, {"description", "Metadata to update"}}},
+                   {"tags",
+                    {{"type", "array"},
+                     {"items", {{"type", "string"}}},
+                     {"description", "Tags to add"}}},
+                   {"remove_tags",
+                    {{"type", "array"},
+                     {"items", {{"type", "string"}}},
+                     {"description", "Tags to remove"}}},
+                   {"dry_run",
+                    {{"type", "boolean"},
+                     {"description", "Preview changes only"},
+                     {"default", false}}}}}},
+            "execute", false};
 
-        ops["session_pin"] = {"Pin documents by path pattern",
-                              json{{"type", "object"},
-                                   {"properties",
-                                    {{"path", {{"type", "string"}, {"description", "Path glob pattern to pin"}}}}},
-                                   {"required", json::array({"path"})}},
-                              "session",
-                              false};
+        ops["delete"] = {
+            "Delete documents by name, names array, or pattern",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"name", {{"type", "string"}, {"description", "Single name to delete"}}},
+                   {"names",
+                    {{"type", "array"},
+                     {"items", {{"type", "string"}}},
+                     {"description", "Multiple names to delete"}}},
+                   {"pattern",
+                    {{"type", "string"}, {"description", "Glob pattern for matching names"}}},
+                   {"dry_run",
+                    {{"type", "boolean"},
+                     {"description", "Preview what would be deleted"},
+                     {"default", false}}}}}},
+            "execute", false};
 
-        ops["session_unpin"] = {"Unpin documents by path pattern",
-                                json{{"type", "object"},
-                                     {"properties",
-                                      {{"path", {{"type", "string"}, {"description", "Path glob pattern to unpin"}}}}},
-                                     {"required", json::array({"path"})}},
-                                "session",
-                                false};
+        ops["restore"] = {
+            "Restore documents from a collection or snapshot",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"collection", {{"type", "string"}, {"description", "Collection name"}}},
+                   {"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
+                   {"output_directory", {{"type", "string"}, {"description", "Output directory"}}},
+                   {"overwrite",
+                    {{"type", "boolean"},
+                     {"description", "Overwrite existing files"},
+                     {"default", false}}},
+                   {"dry_run",
+                    {{"type", "boolean"},
+                     {"description", "Preview without writing"},
+                     {"default", false}}}}},
+                 {"required", json::array({"output_directory"})}},
+            "execute", false};
 
-        ops["session_watch"] = {"Enable or disable auto-ingest for a project session",
-                                json{{"type", "object"},
-                                     {"properties",
-                                      {{"session", {{"type", "string"}, {"description", "Session name"}}},
-                                       {"root", {{"type", "string"}, {"description", "Project root to watch"}}},
-                                       {"enable", {{"type", "boolean"},
-                                                  {"description", "Enable watch (false disables)"},
-                                                  {"default", true}}}}}},
-                                "session",
-                                false};
+        ops["download"] = {
+            "Download files from URLs and store in YAMS",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"url", {{"type", "string"}, {"description", "URL to download"}}},
+                   {"post_index",
+                    {{"type", "boolean"},
+                     {"description", "Index after storing"},
+                     {"default", true}}},
+                   {"tags",
+                    {{"type", "array"},
+                     {"items", {{"type", "string"}}},
+                     {"description", "Tags for indexing"}}},
+                   {"metadata", {{"type", "object"}, {"description", "Metadata for indexing"}}}}},
+                 {"required", json::array({"url"})}},
+            "execute", false};
+
+        ops["session_start"] = {
+            "Start (and optionally warm) a session",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"name", {{"type", "string"}, {"description", "Session name"}}},
+                   {"description", {{"type", "string"}, {"description", "Session description"}}},
+                   {"warm", {{"type", "boolean"}, {"default", true}}}}}},
+            "session", false};
+
+        ops["session_stop"] = {
+            "Stop session (clear materialized cache)",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"name", {{"type", "string"}, {"description", "Session name"}}},
+                   {"clear", {{"type", "boolean"}, {"default", true}}}}}},
+            "session", false};
+
+        ops["session_pin"] = {
+            "Pin documents by path pattern",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"path", {{"type", "string"}, {"description", "Path glob pattern to pin"}}}}},
+                 {"required", json::array({"path"})}},
+            "session", false};
+
+        ops["session_unpin"] = {
+            "Unpin documents by path pattern",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"path", {{"type", "string"}, {"description", "Path glob pattern to unpin"}}}}},
+                 {"required", json::array({"path"})}},
+            "session", false};
+
+        ops["session_watch"] = {
+            "Enable or disable auto-ingest for a project session",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"session", {{"type", "string"}, {"description", "Session name"}}},
+                   {"root", {{"type", "string"}, {"description", "Project root to watch"}}},
+                   {"enable",
+                    {{"type", "boolean"},
+                     {"description", "Enable watch (false disables)"},
+                     {"default", true}}}}}},
+            "session", false};
 
         return ops;
     };
@@ -347,11 +393,11 @@ json MCPServer::describeOp(const std::string& target) const {
 }
 
 json MCPServer::describeAllOps() const {
-    return json{{"query_ops",
-                 json::array({"search", "grep", "list", "list_collections", "list_snapshots",
-                              "graph", "get", "status", "describe"})},
-                {"execute_ops", json::array({"add", "update", "delete", "restore", "download"})},
-                {"session_ops", json::array({"start", "stop", "pin", "unpin", "watch"})}};
+    return json{
+        {"query_ops", json::array({"search", "grep", "list", "list_collections", "list_snapshots",
+                                   "graph", "get", "status", "describe"})},
+        {"execute_ops", json::array({"add", "update", "delete", "restore", "download"})},
+        {"session_ops", json::array({"start", "stop", "pin", "unpin", "watch"})}};
 }
 
 boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
@@ -371,8 +417,8 @@ boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
 
         // Allowed read-only ops for the query tool
         static const std::unordered_set<std::string> allowedOps = {
-            "search", "grep", "list", "list_collections", "list_snapshots",
-            "graph", "get",  "status", "describe"};
+            "search", "grep", "list",   "list_collections", "list_snapshots",
+            "graph",  "get",  "status", "describe"};
 
         json prevResult = json::object();
         json allResults = json::array();
@@ -404,11 +450,10 @@ boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
 
             if (allowedOps.find(op) == allowedOps.end()) {
                 co_return wrapToolResultStructured(
-                    json::array(
-                        {content::text("Error: '" + op +
-                                       "' is not a read operation. Use the 'execute' tool "
-                                       "for write operations "
-                                       "(add, update, delete, restore, download).")}),
+                    json::array({content::text("Error: '" + op +
+                                               "' is not a read operation. Use the 'execute' tool "
+                                               "for write operations "
+                                               "(add, update, delete, restore, download).")}),
                     std::nullopt, true);
             }
 
@@ -442,10 +487,8 @@ boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
             if (isError)
                 hasError = true;
 
-            allResults.push_back(json{{"stepIndex", i},
-                                      {"op", op},
-                                      {"result", prevResult},
-                                      {"isError", isError}});
+            allResults.push_back(
+                json{{"stepIndex", i}, {"op", op}, {"result", prevResult}, {"isError", isError}});
 
             if (isError)
                 break; // Stop pipeline on error
@@ -524,8 +567,8 @@ boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
     try {
         if (!args.contains("operations") || !args["operations"].is_array()) {
             co_return wrapToolResultStructured(
-                json::array({content::text("Error: 'operations' array is required")}),
-                std::nullopt, true);
+                json::array({content::text("Error: 'operations' array is required")}), std::nullopt,
+                true);
         }
 
         const auto& operations = args["operations"];
@@ -565,13 +608,13 @@ boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
             auto op = operation["op"].get<std::string>();
             auto toolIt = opToTool.find(op);
             if (toolIt == opToTool.end()) {
-                auto errResult = json{{"stepIndex", i},
-                                      {"op", op},
-                                      {"success", false},
-                                      {"error",
-                                       "'" + op +
-                                           "' is not a write operation. Use the 'query' tool for "
-                                           "read operations (search, grep, list, etc)."}};
+                auto errResult =
+                    json{{"stepIndex", i},
+                         {"op", op},
+                         {"success", false},
+                         {"error", "'" + op +
+                                       "' is not a write operation. Use the 'query' tool for "
+                                       "read operations (search, grep, list, etc)."}};
                 results.push_back(errResult);
                 ++failed;
                 if (!continueOnError)
@@ -588,7 +631,8 @@ boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
             json stepResult = json{{"stepIndex", i}, {"op", op}, {"success", !isError}};
 
             // Extract data from tool result
-            if (toolResult.contains("structuredContent") && toolResult["structuredContent"].contains("data")) {
+            if (toolResult.contains("structuredContent") &&
+                toolResult["structuredContent"].contains("data")) {
                 stepResult["data"] = toolResult["structuredContent"]["data"];
             } else if (toolResult.contains("content") && toolResult["content"].is_array() &&
                        !toolResult["content"].empty()) {
@@ -623,9 +667,9 @@ boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
         }
 
         json finalResult = json{{"results", results},
-                               {"totalOps", operations.size()},
-                               {"succeeded", succeeded},
-                               {"failed", failed}};
+                                {"totalOps", operations.size()},
+                                {"succeeded", succeeded},
+                                {"failed", failed}};
 
         std::ostringstream summary;
         summary << "Execute: " << succeeded << " succeeded, " << failed << " failed out of "
@@ -676,7 +720,9 @@ boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
             }
             if (sawAddWithUrl || sawAddWithTitleOrDesc) {
                 contentItems.push_back(content::text(
-                    "Hint: execute op 'add' expects {path} or {content}+{name} (optional: mime_type, tags, metadata, collection, snapshot_id). If you're trying to fetch a URL, use op 'download' with {url} and optional {post_index:true}."));
+                    "Hint: execute op 'add' expects {path} or {content}+{name} (optional: "
+                    "mime_type, tags, metadata, collection, snapshot_id). If you're trying to "
+                    "fetch a URL, use op 'download' with {url} and optional {post_index:true}."));
             }
         }
 

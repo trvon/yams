@@ -44,8 +44,8 @@ TEST_CASE("AddCommand - reads from piped stdin and stores content",
 
     // Prefer the freshly built yams-cli when available; fall back to PATH.
     fs::path out = tmp / "out.json";
-    const fs::path builtYams = fs::current_path() / "build" / "release" / "tools" / "yams-cli" /
-                               "yams-cli";
+    const fs::path builtYams =
+        fs::current_path() / "build" / "release" / "tools" / "yams-cli" / "yams-cli";
     const std::string yamsBin = fs::exists(builtYams) ? builtYams.string() : std::string("yams");
     std::string cmd = "cat '" + in.string() + "' | '" + yamsBin +
                       "' --json add - --name piped.txt > '" + out.string() + "'";

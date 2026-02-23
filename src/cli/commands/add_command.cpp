@@ -747,8 +747,8 @@ public:
                         if (daemonSpinner.enabled()) {
                             daemonSpinner.setCounts(completedRequests, totalDaemonRequests);
                         }
-                     }
-                 }
+                    }
+                }
                 daemonSpinner.pause();
 
                 const size_t daemonRequestsAttempted = successfulRequests + daemonFailures.size();

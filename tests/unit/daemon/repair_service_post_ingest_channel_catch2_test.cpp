@@ -420,9 +420,10 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 // Before the fix, all three code paths (rebuildFts5Index, spawnInitialScan,
 // detectMissingWork) would silently skip these documents.
 
-TEST_CASE_METHOD(ServiceManagerFixture,
-                 "RepairService: rebuildFts5Index catches extraction-success docs with missing FTS5",
-                 "[daemon][repair][fts5][regression]") {
+TEST_CASE_METHOD(
+    ServiceManagerFixture,
+    "RepairService: rebuildFts5Index catches extraction-success docs with missing FTS5",
+    "[daemon][repair][fts5][regression]") {
     yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
                                             std::optional<std::string>{"1"});
     yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
@@ -469,8 +470,8 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     const int64_t docId = idRes.value();
 
     // Mark extraction as successful at the DB level.
-    auto statusRes = meta->updateDocumentExtractionStatus(
-        docId, true, metadata::ExtractionStatus::Success);
+    auto statusRes =
+        meta->updateDocumentExtractionStatus(docId, true, metadata::ExtractionStatus::Success);
     REQUIRE(statusRes.has_value());
 
     // Insert a content row so the ghost-success loop doesn't reset the status.
@@ -551,8 +552,8 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     const int64_t docId = idRes.value();
 
     // Mark as successfully extracted.
-    auto statusRes = meta->updateDocumentExtractionStatus(
-        docId, true, metadata::ExtractionStatus::Success);
+    auto statusRes =
+        meta->updateDocumentExtractionStatus(docId, true, metadata::ExtractionStatus::Success);
     REQUIRE(statusRes.has_value());
 
     // Ensure repair status is Pending (eligible for scan).

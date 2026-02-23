@@ -389,6 +389,66 @@ TEST_CASE("MetadataRepository: metadata value counts materialized view stays con
     CHECK(it->second.front().count == 1);
 }
 
+TEST_CASE("MetadataRepository: metadata value counts falls back when path FTS join fails",
+          "[unit][metadata][repository][fts-fallback]") {
+    MetadataRepositoryFixture fix;
+
+    auto docA = makeDocumentWithPath("/notes/todo.md", "fts-fallback-a");
+    auto docB = makeDocumentWithPath("/archive/todo-old.md", "fts-fallback-b");
+
+    auto aId = fix.repository_->insertDocument(docA);
+    auto bId = fix.repository_->insertDocument(docB);
+    REQUIRE(aId.has_value());
+    REQUIRE(bId.has_value());
+
+    MetadataValue ownerA;
+    ownerA.type = MetadataValueType::String;
+    ownerA.value = "alice";
+    REQUIRE(fix.repository_->setMetadata(aId.value(), "owner", ownerA).has_value());
+
+    MetadataValue ownerB;
+    ownerB.type = MetadataValueType::String;
+    ownerB.value = "bob";
+    REQUIRE(fix.repository_->setMetadata(bId.value(), "owner", ownerB).has_value());
+
+    // Force the FTS-join query path to fail while pathFtsAvailable_ remains true in the repository.
+    Database db;
+    REQUIRE(db.open(fix.dbPath_.string()).has_value());
+    REQUIRE(db.execute("DROP TABLE IF EXISTS documents_path_fts").has_value());
+    db.close();
+
+    DocumentQueryOptions fallbackOpts;
+    fallbackOpts.containsFragment = "todo.md";
+    fallbackOpts.containsUsesFts = true;
+
+    auto fallbackRes = fix.repository_->getMetadataValueCounts({"owner"}, fallbackOpts);
+    REQUIRE(fallbackRes.has_value());
+
+    DocumentQueryOptions baselineOpts = fallbackOpts;
+    baselineOpts.containsUsesFts = false;
+    auto baselineRes = fix.repository_->getMetadataValueCounts({"owner"}, baselineOpts);
+    REQUIRE(baselineRes.has_value());
+
+    const auto& fallbackMap = fallbackRes.value();
+    const auto& baselineMap = baselineRes.value();
+    REQUIRE(fallbackMap.contains("owner"));
+    REQUIRE(baselineMap.contains("owner"));
+    REQUIRE(fallbackMap.at("owner").size() == baselineMap.at("owner").size());
+
+    std::unordered_map<std::string, int64_t> fallbackCounts;
+    std::unordered_map<std::string, int64_t> baselineCounts;
+    for (const auto& row : fallbackMap.at("owner")) {
+        fallbackCounts[row.value] = row.count;
+    }
+    for (const auto& row : baselineMap.at("owner")) {
+        baselineCounts[row.value] = row.count;
+    }
+
+    CHECK(fallbackCounts == baselineCounts);
+    CHECK(fallbackCounts["alice"] == 1);
+    CHECK_FALSE(fallbackCounts.contains("bob"));
+}
+
 TEST_CASE("MetadataRepository: get document not found", "[unit][metadata][repository]") {
     MetadataRepositoryFixture fix;
 
@@ -513,6 +573,121 @@ TEST_CASE("MetadataRepository: query documents handles exact prefix and suffix",
         REQUIRE(extRes.has_value());
         REQUIRE(extRes.value().size() == 1);
         CHECK(extRes.value().front().filePath == "/notes/log.txt");
+    }
+}
+
+TEST_CASE("MetadataRepository: list projection matches queryDocuments for shared filters",
+          "[unit][metadata][repository][list-projection][parity]") {
+    MetadataRepositoryFixture fix;
+
+    auto docA = makeDocumentWithPath(
+        "/work/notes/todo.md", "1111111111111111111111111111111111111111111111111111111111111111");
+    auto docB = makeDocumentWithPath(
+        "/work/notes/log.txt", "2222222222222222222222222222222222222222222222222222222222222222");
+    auto docC = makeDocumentWithPath(
+        "/work/reports/summary.pdf",
+        "3333333333333333333333333333333333333333333333333333333333333333", "application/pdf");
+    auto docD = makeDocumentWithPath(
+        "/archive/notes/todo-old.md",
+        "4444444444444444444444444444444444444444444444444444444444444444");
+
+    docA.fileSize = 10;
+    docB.fileSize = 20;
+    docC.fileSize = 30;
+    docD.fileSize = 40;
+    docB.extractionStatus = ExtractionStatus::Failed;
+    docB.contentExtracted = false;
+
+    auto aId = fix.repository_->insertDocument(docA);
+    auto bId = fix.repository_->insertDocument(docB);
+    auto cId = fix.repository_->insertDocument(docC);
+    auto dId = fix.repository_->insertDocument(docD);
+    REQUIRE(aId.has_value());
+    REQUIRE(bId.has_value());
+    REQUIRE(cId.has_value());
+    REQUIRE(dId.has_value());
+
+    auto setStringMeta = [&](int64_t docId, const std::string& key, const std::string& value) {
+        MetadataValue mv;
+        mv.type = MetadataValueType::String;
+        mv.value = value;
+        REQUIRE(fix.repository_->setMetadata(docId, key, mv).has_value());
+    };
+
+    setStringMeta(aId.value(), "owner", "alice");
+    setStringMeta(bId.value(), "owner", "alice");
+    setStringMeta(cId.value(), "owner", "bob");
+    setStringMeta(aId.value(), "tag:notes", "notes");
+    setStringMeta(dId.value(), "tag:notes", "notes");
+
+    auto assertParity = [&](const DocumentQueryOptions& opts, const std::string& label) {
+        CAPTURE(label);
+        auto docsRes = fix.repository_->queryDocuments(opts);
+        auto projRes = fix.repository_->queryDocumentsForListProjection(opts);
+        REQUIRE(docsRes.has_value());
+        REQUIRE(projRes.has_value());
+
+        const auto& docs = docsRes.value();
+        const auto& projs = projRes.value();
+        REQUIRE(docs.size() == projs.size());
+
+        for (size_t i = 0; i < docs.size(); ++i) {
+            CAPTURE(i);
+            CHECK(projs[i].id == docs[i].id);
+            CHECK(projs[i].filePath == docs[i].filePath);
+            CHECK(projs[i].fileName == docs[i].fileName);
+            CHECK(projs[i].fileExtension == docs[i].fileExtension);
+            CHECK(projs[i].fileSize == docs[i].fileSize);
+            CHECK(projs[i].sha256Hash == docs[i].sha256Hash);
+            CHECK(projs[i].mimeType == docs[i].mimeType);
+            CHECK(projs[i].createdTime == docs[i].createdTime);
+            CHECK(projs[i].modifiedTime == docs[i].modifiedTime);
+            CHECK(projs[i].indexedTime == docs[i].indexedTime);
+            CHECK(projs[i].extractionStatus == docs[i].extractionStatus);
+        }
+    };
+
+    SECTION("exact path") {
+        DocumentQueryOptions opts;
+        opts.exactPath = "/work/notes/todo.md";
+        assertParity(opts, "exactPath");
+    }
+
+    SECTION("directory prefix") {
+        DocumentQueryOptions opts;
+        opts.pathPrefix = "/work/notes";
+        opts.prefixIsDirectory = true;
+        opts.includeSubdirectories = true;
+        opts.orderByNameAsc = true;
+        assertParity(opts, "pathPrefix");
+    }
+
+    SECTION("contains fragment via FTS") {
+        DocumentQueryOptions opts;
+        opts.containsFragment = "todo";
+        opts.containsUsesFts = true;
+        opts.orderByNameAsc = true;
+        assertParity(opts, "containsFragment");
+    }
+
+    SECTION("combined metadata and tag filter") {
+        DocumentQueryOptions opts;
+        opts.extension = ".md";
+        opts.metadataFilters.push_back({"owner", "alice"});
+        opts.tags.push_back("notes");
+        opts.orderByNameAsc = true;
+        assertParity(opts, "metadata+tag");
+    }
+
+    SECTION("extraction status plus pagination") {
+        DocumentQueryOptions opts;
+        opts.pathPrefix = "/work";
+        opts.prefixIsDirectory = true;
+        opts.orderByNameAsc = true;
+        opts.extractionStatuses = {ExtractionStatus::Success, ExtractionStatus::Failed};
+        opts.limit = 2;
+        opts.offset = 1;
+        assertParity(opts, "extractionStatuses+pagination");
     }
 }
 

@@ -161,9 +161,7 @@ public:
     Result<std::vector<int64_t>> getAllFts5IndexedDocumentIds() override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
-    Result<bool> hasFtsEntry(int64_t) override {
-        return Error{ErrorCode::NotImplemented, "NI"};
-    }
+    Result<bool> hasFtsEntry(int64_t) override { return Error{ErrorCode::NotImplemented, "NI"}; }
     Result<std::unordered_set<int64_t>> getFts5IndexedRowIdSet() override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }

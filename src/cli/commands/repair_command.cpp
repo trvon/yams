@@ -53,8 +53,9 @@ public:
         cmd->add_flag("--foreground", foreground_,
                       "Run embeddings repair in the foreground (stream progress)");
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed progress and transient errors");
-        cmd->add_flag("--force", force_,
-                      "Force full rebuild (skip incremental optimizations and confirmation prompts)");
+        cmd->add_flag(
+            "--force", force_,
+            "Force full rebuild (skip incremental optimizations and confirmation prompts)");
         cmd->add_option("--max-retries", maxRetries_, "Max retry attempts for stuck documents");
 
         cmd->callback([this]() {

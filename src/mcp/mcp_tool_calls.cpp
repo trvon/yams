@@ -109,8 +109,7 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
     } catch (const std::exception& e) {
         spdlog::error("MCP tool '{}' threw exception: {}", name, e.what());
         return {{"error",
-                 {{"code", -32603},
-                  {"message", std::string("Tool call failed: ") + e.what()}}}};
+                 {{"code", -32603}, {"message", std::string("Tool call failed: ") + e.what()}}}};
     }
 }
 

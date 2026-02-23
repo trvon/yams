@@ -91,7 +91,7 @@ json MCPServer::readResource(const std::string& uri) {
                          {{{{"uri", uri},
                             {"mimeType", "application/json"},
                             {"text", json({{"error", std::string("status error: ") +
-                                                        ensure.error().message}})
+                                                         ensure.error().message}})
                                          .dump()}}}}}};
             }
             auto st = yams::cli::run_result(daemon_client_->status(), std::chrono::seconds(3));
@@ -99,9 +99,9 @@ json MCPServer::readResource(const std::string& uri) {
                 return {{"contents",
                          {{{{"uri", uri},
                             {"mimeType", "application/json"},
-                            {"text", json({{"error", std::string("status error: ") +
-                                                        st.error().message}})
-                                         .dump()}}}}}};
+                            {"text",
+                             json({{"error", std::string("status error: ") + st.error().message}})
+                                 .dump()}}}}}};
             }
             const auto& s = st.value();
             json j;
@@ -125,8 +125,8 @@ json MCPServer::readResource(const std::string& uri) {
             j["counters"]["mcp_worker_queued"] = 0;
             j["counters"]["mcp_worker_processed"] = 0;
             j["counters"]["mcp_worker_failed"] = 0;
-            return {{"contents", {{{{"uri", uri}, {"mimeType", "application/json"},
-                                   {"text", j.dump()}}}}}};
+            return {{"contents",
+                     {{{{"uri", uri}, {"mimeType", "application/json"}, {"text", j.dump()}}}}}};
         } catch (...) {
             return {{"contents",
                      {{{{"uri", uri},
@@ -136,11 +136,11 @@ json MCPServer::readResource(const std::string& uri) {
     } else if (uri == "yams://recent") {
         // Get recent documents
         if (!metadataRepo_) {
-            return {{"contents",
-                     {{{{"uri", uri},
-                        {"mimeType", "application/json"},
-                        {"text", json({{"error", "Metadata repository not initialized"}})
-                                     .dump()}}}}}};
+            return {
+                {"contents",
+                 {{{{"uri", uri},
+                    {"mimeType", "application/json"},
+                    {"text", json({{"error", "Metadata repository not initialized"}}).dump()}}}}}};
         }
         auto docsResult = metadata::queryDocumentsByPattern(*metadataRepo_, "%");
         if (!docsResult) {
@@ -154,9 +154,10 @@ json MCPServer::readResource(const std::string& uri) {
 
         json docList = json::array();
         for (const auto& doc : docs) {
-            docList.push_back(
-                {{"hash", doc.sha256Hash}, {"name", doc.fileName}, {"size", doc.fileSize},
-                 {"mimeType", doc.mimeType}});
+            docList.push_back({{"hash", doc.sha256Hash},
+                               {"name", doc.fileName},
+                               {"size", doc.fileSize},
+                               {"mimeType", doc.mimeType}});
         }
 
         return {{"contents",

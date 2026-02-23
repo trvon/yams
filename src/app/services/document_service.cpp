@@ -1576,7 +1576,8 @@ public:
         };
 
         auto hydrateMetadata = [&](const std::vector<int64_t>& ids)
-            -> std::unordered_map<int64_t, std::unordered_map<std::string, metadata::MetadataValue>> {
+            -> std::unordered_map<int64_t,
+                                  std::unordered_map<std::string, metadata::MetadataValue>> {
             if (ids.empty()) {
                 return {};
             }

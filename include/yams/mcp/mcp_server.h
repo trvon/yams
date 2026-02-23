@@ -272,6 +272,9 @@ private:
     // Methods
     MessageResult handleRequest(const nlohmann::json& request);
     boost::asio::awaitable<MessageResult> handleRequestAsync(const nlohmann::json& request);
+    std::optional<MessageResult> dispatchCoreMethod(const nlohmann::json& id,
+                                                    const std::string& method,
+                                                    const nlohmann::json& params);
     nlohmann::json initialize(const nlohmann::json& params);
     nlohmann::json listTools();
     nlohmann::json callTool(const std::string& name, const nlohmann::json& arguments);
@@ -280,6 +283,8 @@ private:
     nlohmann::json listResources();
     nlohmann::json readResource(const std::string& uri);
     nlohmann::json listPrompts();
+    MessageResult handlePromptGet(const nlohmann::json& id, const std::string& name,
+                                  const nlohmann::json& args);
     void initializeToolRegistry();
     nlohmann::json createResponse(const nlohmann::json& id, const nlohmann::json& result);
     nlohmann::json createError(const nlohmann::json& id, int code, const std::string& message);

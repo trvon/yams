@@ -1034,9 +1034,8 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
 
     BarrierStats barrierStats;
     waitForPostIngestQuiescent(socketPath_, storageDir_, 8000ms, 50ms, &barrierStats);
-    const bool snapshotVisible = waitForSnapshotVisible(ctx.metadataRepo.get(), snapshotId,
-                                                        snapshotLabel, 3, 8000ms, 25ms,
-                                                        &barrierStats);
+    const bool snapshotVisible = waitForSnapshotVisible(
+        ctx.metadataRepo.get(), snapshotId, snapshotLabel, 3, 8000ms, 25ms, &barrierStats);
     CAPTURE(snapshotVisible, barrierStats.snapshotPolls, barrierStats.lastSnapshotCount,
             barrierStats.lastDocsByLabelCount);
     REQUIRE(snapshotVisible);

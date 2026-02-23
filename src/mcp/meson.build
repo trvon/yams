@@ -2,6 +2,8 @@
 
 yams_mcp_sources = [
   'mcp_server.cpp',
+  'mcp_prompts.cpp',
+  'mcp_request_routing.cpp',
   'mcp_handshake.cpp',
   'mcp_code_mode.cpp',
   'mcp_ui_resources.cpp',

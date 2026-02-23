@@ -106,8 +106,9 @@ void MCPServer::endSessionContext() {
 void MCPServer::notifyToolsListChanged() {
     // Send notifications/tools/list_changed per MCP spec
     // This is a server-initiated notification (no params needed)
-    json notification = {
-        {"jsonrpc", "2.0"}, {"method", "notifications/tools/list_changed"}, {"params", json::object()}};
+    json notification = {{"jsonrpc", "2.0"},
+                         {"method", "notifications/tools/list_changed"},
+                         {"params", json::object()}};
     sendResponse(notification);
     spdlog::debug("Sent notifications/tools/list_changed");
 }

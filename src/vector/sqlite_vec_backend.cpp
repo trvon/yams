@@ -1369,8 +1369,7 @@ public:
         }
 
         while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-            const char* hash =
-                reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
             if (hash) {
                 hashes.emplace(hash);
             }

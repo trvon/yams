@@ -1696,7 +1696,7 @@ RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool ver
 }
 
 RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
-                                                       ProgressFn progress) {
+                                                      ProgressFn progress) {
     RepairOperationResult result;
     result.operation = "fts5";
 
