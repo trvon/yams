@@ -458,6 +458,9 @@ std::size_t PostIngestQueue::adaptiveStageBatchSize(std::size_t queueDepth,
 }
 
 bool PostIngestQueue::isKgChannelBackpressured() const {
+    if (maxKgConcurrent() == 0) {
+        return false;
+    }
     return kgChannelFillRatio() >= PostIngestQueue::kKgBackpressureThreshold;
 }
 

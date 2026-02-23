@@ -56,6 +56,32 @@ namespace this_coro = boost::asio::this_coro;
 
 namespace {
 
+bool ipc_wait_trace_enabled() {
+    static const bool enabled = [] {
+        if (const char* raw = std::getenv("YAMS_IPC_WAIT_TRACE")) {
+            std::string v(raw);
+            for (auto& ch : v)
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            return (v == "1" || v == "true" || v == "on");
+        }
+        return false;
+    }();
+    return enabled;
+}
+
+int ipc_wait_warn_ms() {
+    static const int warn_ms = [] {
+        if (const char* raw = std::getenv("YAMS_IPC_WAIT_WARN_MS")) {
+            try {
+                return std::max(1, std::stoi(raw));
+            } catch (...) {
+            }
+        }
+        return 250;
+    }();
+    return warn_ms;
+}
+
 void retire_connection(const std::shared_ptr<AsioConnection>& conn, const char* reason) {
     if (!conn) {
         return;
@@ -350,9 +376,19 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
         co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
     }
 
+    const auto acquire_start = std::chrono::steady_clock::now();
     auto conn_res = co_await get_or_create_connection(opts_);
     if (!conn_res) {
         co_return conn_res.error();
+    }
+    if (ipc_wait_trace_enabled()) {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - acquire_start)
+                                    .count();
+        if (elapsed_ms >= ipc_wait_warn_ms()) {
+            spdlog::info("[IPCWait] stage=transport.acquire slow elapsed_ms={} socket='{}'",
+                         elapsed_ms, opts_.socketPath.string());
+        }
     }
     auto conn = std::move(conn_res).value();
     if (!conn || !conn->alive) {
@@ -398,7 +434,18 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     }
 
     auto pool = AsioConnectionPool::get_or_create(opts_);
+    const auto read_loop_start = std::chrono::steady_clock::now();
     co_await pool->ensure_read_loop_started(conn);
+    if (ipc_wait_trace_enabled()) {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - read_loop_start)
+                                    .count();
+        if (elapsed_ms >= ipc_wait_warn_ms()) {
+            spdlog::info(
+                "[IPCWait] stage=transport.ensure_read_loop slow elapsed_ms={} req_id={} type={}",
+                elapsed_ms, msg.requestId, static_cast<int>(req_type));
+        }
+    }
 
     auto frame_size = frame.size();
     spdlog::debug("AsioTransportAdapter::send_request about to write frame req_id={} type={} "
@@ -419,12 +466,12 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     spdlog::debug("AsioTransportAdapter::send_request wrote frame req_id={} type={} bytes={}",
                   msg.requestId, static_cast<int>(req_type), frame_size);
 
-    // Release connection AFTER writing frame - connection can now be reused while we wait for
-    // response
+    // Release connection after write so it can be reused while waiting for response
     conn->in_use.store(false, std::memory_order_release);
 
     // Poll future with timeout (similar to ServiceManager pattern)
     using namespace std::chrono_literals;
+    const auto wait_start = std::chrono::steady_clock::now();
     auto deadline = std::chrono::steady_clock::now() + opts_.requestTimeout;
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
@@ -434,11 +481,23 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
         if (cs.cancelled() != boost::asio::cancellation_type::none) {
             co_await boost::asio::dispatch(conn->strand, use_awaitable);
             conn->handlers.erase(msg.requestId);
+            conn->in_use.store(false, std::memory_order_release);
             co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
         }
 
         if (response_future.wait_for(0ms) == std::future_status::ready) {
             auto result = response_future.get();
+            conn->in_use.store(false, std::memory_order_release);
+            if (ipc_wait_trace_enabled()) {
+                const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::steady_clock::now() - wait_start)
+                                            .count();
+                if (elapsed_ms >= ipc_wait_warn_ms()) {
+                    spdlog::info("[IPCWait] stage=transport.response_wait slow elapsed_ms={} "
+                                 "req_id={} type={}",
+                                 elapsed_ms, msg.requestId, static_cast<int>(req_type));
+                }
+            }
             co_return result;
         }
         timer.expires_after(10ms);
@@ -451,6 +510,16 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
     conn->timed_out_requests.insert(msg.requestId);
     if (conn->timed_out_requests.size() > 256) {
         conn->timed_out_requests.clear();
+    }
+    conn->in_use.store(false, std::memory_order_release);
+    if (ipc_wait_trace_enabled()) {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - wait_start)
+                                    .count();
+        spdlog::warn("[IPCWait] stage=transport.response_wait timeout elapsed_ms={} req_id={} "
+                     "type={} timeout_ms={}",
+                     elapsed_ms, msg.requestId, static_cast<int>(req_type),
+                     opts_.requestTimeout.count());
     }
     co_return Error{ErrorCode::Timeout, "Request timeout waiting for response"};
 }
@@ -474,6 +543,7 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
             co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
         }
 
+        const auto acquire_start = std::chrono::steady_clock::now();
         auto conn_res = co_await get_or_create_connection(opts_);
         if (!conn_res) {
             lastErr = conn_res.error();
@@ -483,6 +553,16 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
                 continue;
             }
             co_return conn_res.error();
+        }
+        if (ipc_wait_trace_enabled()) {
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - acquire_start)
+                                        .count();
+            if (elapsed_ms >= ipc_wait_warn_ms()) {
+                spdlog::info("[IPCWait] stage=transport.streaming.acquire slow elapsed_ms={} "
+                             "attempt={} socket='{}'",
+                             elapsed_ms, attempt + 1, opts_.socketPath.string());
+            }
         }
         auto conn = std::move(conn_res).value();
         if (!conn || !conn->alive) {
@@ -549,7 +629,18 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         }
 
         auto pool = AsioConnectionPool::get_or_create(opts_);
+        const auto read_loop_start = std::chrono::steady_clock::now();
         co_await pool->ensure_read_loop_started(conn);
+        if (ipc_wait_trace_enabled()) {
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - read_loop_start)
+                                        .count();
+            if (elapsed_ms >= ipc_wait_warn_ms()) {
+                spdlog::info("[IPCWait] stage=transport.streaming.ensure_read_loop slow "
+                             "elapsed_ms={} req_id={} attempt={}",
+                             elapsed_ms, msg.requestId, attempt + 1);
+            }
+        }
 
         auto wres = co_await conn->async_write_frame(std::move(frame));
         if (!wres) {
@@ -573,6 +664,7 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         // (including keepalives).  This prevents long-running streaming
         // operations from timing out while the server is still actively working.
         const auto request_timeout = opts_.requestTimeout;
+        const auto stream_wait_start = std::chrono::steady_clock::now();
         boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
 
         auto is_timed_out = [&]() {
@@ -592,6 +684,19 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
 
             if (done_future.wait_for(0ms) == std::future_status::ready) {
                 auto result = done_future.get();
+
+                if (ipc_wait_trace_enabled()) {
+                    const auto elapsed_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - stream_wait_start)
+                            .count();
+                    if (elapsed_ms >= ipc_wait_warn_ms()) {
+                        spdlog::info("[IPCWait] stage=transport.streaming.response_wait slow "
+                                     "elapsed_ms={} req_id={} attempt={} ok={}",
+                                     elapsed_ms, msg.requestId, attempt + 1,
+                                     static_cast<bool>(result));
+                    }
+                }
 
                 if (!result && attempt < kMaxRetries) {
                     lastErr = result.error();
@@ -627,6 +732,14 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
                 pool->retire_connection(conn, "Streaming request timeout");
             } else {
                 retire_connection(conn, "Streaming request timeout");
+            }
+            if (ipc_wait_trace_enabled()) {
+                const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::steady_clock::now() - stream_wait_start)
+                                            .count();
+                spdlog::warn("[IPCWait] stage=transport.streaming.response_wait timeout "
+                             "elapsed_ms={} req_id={} attempt={} timeout_ms={}",
+                             elapsed_ms, msg.requestId, attempt + 1, request_timeout.count());
             }
             co_return Error{ErrorCode::Timeout, "Streaming request timeout"};
         }

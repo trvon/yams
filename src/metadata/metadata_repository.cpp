@@ -4051,6 +4051,445 @@ MetadataRepository::batchGetContent(const std::vector<int64_t>& documentIds) {
         });
 }
 
+Result<std::unordered_map<int64_t, std::string>>
+MetadataRepository::batchGetContentPreview(const std::vector<int64_t>& documentIds, int maxChars,
+                                           int maxDocs) {
+    if (documentIds.empty()) {
+        return std::unordered_map<int64_t, std::string>{};
+    }
+
+    const int effectiveMaxChars = std::max(1, maxChars);
+    const int effectiveMaxDocs = std::clamp(maxDocs, 0, static_cast<int>(documentIds.size()));
+
+    return executeReadQuery<std::unordered_map<int64_t, std::string>>(
+        [&](Database& db) -> Result<std::unordered_map<int64_t, std::string>> {
+            std::string sql = "SELECT document_id, substr(content_text, 1, ?) "
+                              "FROM document_content WHERE document_id IN (";
+            for (size_t i = 0; i < documentIds.size(); ++i) {
+                if (i > 0)
+                    sql += ",";
+                sql += "?";
+            }
+            sql += ")";
+            if (effectiveMaxDocs > 0) {
+                sql += " LIMIT ?";
+            }
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+
+            Statement stmt = std::move(stmtResult).value();
+
+            if (auto bindResult = stmt.bind(1, effectiveMaxChars); !bindResult) {
+                return bindResult.error();
+            }
+
+            for (size_t i = 0; i < documentIds.size(); ++i) {
+                if (auto bindResult = stmt.bind(static_cast<int>(i + 2), documentIds[i]);
+                    !bindResult) {
+                    return bindResult.error();
+                }
+            }
+
+            if (effectiveMaxDocs > 0) {
+                if (auto bindResult =
+                        stmt.bind(static_cast<int>(documentIds.size() + 2), effectiveMaxDocs);
+                    !bindResult) {
+                    return bindResult.error();
+                }
+            }
+
+            std::unordered_map<int64_t, std::string> result;
+
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult) {
+                    return stepResult.error();
+                }
+
+                if (!stepResult.value()) {
+                    break;
+                }
+
+                int64_t docId = stmt.getInt64(0);
+                result[docId] = stmt.getString(1);
+            }
+
+            return result;
+        });
+}
+
+Result<std::vector<ListDocumentProjection>>
+MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& options) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::queryDocumentsForListProjection");
+    return executeReadQuery<std::vector<ListDocumentProjection>>(
+        [&](Database& db) -> Result<std::vector<ListDocumentProjection>> {
+            const bool joinFtsForContains = options.containsFragment && options.containsUsesFts &&
+                                            !options.containsFragment->empty() && pathFtsAvailable_;
+
+            std::string sql =
+                "SELECT documents.id, documents.file_path, documents.file_name, "
+                "documents.file_extension, documents.file_size, documents.sha256_hash, "
+                "documents.mime_type, documents.created_time, documents.modified_time, "
+                "documents.indexed_time, documents.extraction_status FROM documents";
+            if (joinFtsForContains)
+                sql += " JOIN documents_path_fts ON documents.id = documents_path_fts.rowid";
+
+            std::vector<std::string> conditions;
+            struct BindParam {
+                enum class Type { Text, Int } type;
+                std::string text;
+                int64_t integer{0};
+            };
+            std::vector<BindParam> params;
+
+            auto addText = [&](std::string value) {
+                params.push_back(BindParam{BindParam::Type::Text, std::move(value), 0});
+            };
+            auto addInt = [&](int64_t value) {
+                params.push_back(BindParam{BindParam::Type::Int, {}, value});
+            };
+
+            if (options.exactPath) {
+                auto derived = computePathDerivedValues(*options.exactPath);
+                const bool pathsDiffer = derived.normalizedPath != *options.exactPath;
+                if (hasPathIndexing_) {
+                    std::string clause = "(path_hash = ? OR file_path = ?";
+                    addText(derived.pathHash);
+                    addText(derived.normalizedPath);
+                    if (pathsDiffer) {
+                        clause += " OR file_path = ?";
+                        addText(*options.exactPath);
+                    }
+                    clause += ')';
+                    conditions.emplace_back(std::move(clause));
+                } else {
+                    if (pathsDiffer) {
+                        conditions.emplace_back("(file_path = ? OR file_path = ?)");
+                        addText(derived.normalizedPath);
+                        addText(*options.exactPath);
+                    } else {
+                        conditions.emplace_back("file_path = ?");
+                        addText(derived.normalizedPath);
+                    }
+                }
+            }
+
+            if (options.pathPrefix && !options.pathPrefix->empty()) {
+                const std::string& originalPrefix = *options.pathPrefix;
+                bool treatAsDirectory = options.prefixIsDirectory;
+                if (!treatAsDirectory) {
+                    char tail = originalPrefix.back();
+                    treatAsDirectory = (tail == '/' || tail == '\\');
+                }
+
+                auto derived = computePathDerivedValues(originalPrefix);
+                std::string normalized = derived.normalizedPath;
+
+                if (treatAsDirectory) {
+                    if (!normalized.empty() && normalized.back() == '/')
+                        normalized.pop_back();
+
+                    if (!normalized.empty()) {
+                        if (hasPathIndexing_) {
+                            std::string clause = "(path_prefix = ?";
+                            addText(normalized);
+                            if (options.includeSubdirectories) {
+                                clause += " OR path_prefix LIKE ?";
+                                std::string likeValue = normalized;
+                                likeValue.append("/%");
+                                addText(likeValue);
+                            }
+                            clause += ')';
+                            conditions.emplace_back(std::move(clause));
+                        } else {
+                            std::string likeValue = normalized;
+                            likeValue.append("/%");
+                            conditions.emplace_back("file_path LIKE ?");
+                            addText(likeValue);
+                        }
+                    } else {
+                        if (!options.includeSubdirectories) {
+                            if (hasPathIndexing_) {
+                                conditions.emplace_back("path_prefix = ''");
+                            } else {
+                                conditions.emplace_back("file_path NOT LIKE '%/%'");
+                            }
+                        }
+                    }
+                } else {
+                    std::string lower = normalized;
+                    std::string upper = normalized;
+                    upper.push_back(static_cast<char>(0xFF));
+                    conditions.emplace_back("(file_path >= ? AND file_path < ?)");
+                    addText(lower);
+                    addText(upper);
+                }
+            }
+
+            if (options.containsFragment && !options.containsFragment->empty()) {
+                std::string fragment = *options.containsFragment;
+                std::replace(fragment.begin(), fragment.end(), '\\', '/');
+
+                if (joinFtsForContains) {
+                    if (hasAdvancedFts5Operators(fragment)) {
+                        std::string sanitized = sanitizeFts5UserQuery(fragment);
+                        if (!sanitized.empty()) {
+                            conditions.emplace_back("documents_path_fts MATCH ?");
+                            addText(sanitized);
+                        }
+                    } else {
+                        std::string ftsToken = fragment;
+                        auto slashPos = ftsToken.find_last_of('/');
+                        if (slashPos != std::string::npos)
+                            ftsToken = ftsToken.substr(slashPos + 1);
+                        bool prefix = true;
+                        if (!ftsToken.empty() && ftsToken.back() == '*') {
+                            ftsToken.pop_back();
+                        }
+                        ftsToken = stripPunctuation(std::move(ftsToken));
+                        if (!ftsToken.empty()) {
+                            conditions.emplace_back("documents_path_fts MATCH ?");
+                            addText(renderFts5Token(ftsToken, prefix));
+                        }
+                    }
+                }
+
+                if (hasPathIndexing_) {
+                    std::string reversed(fragment.rbegin(), fragment.rend());
+                    conditions.emplace_back("reverse_path LIKE ?");
+                    addText(reversed + "%");
+                } else {
+                    conditions.emplace_back("file_path LIKE ?");
+                    addText("%" + fragment + "%");
+                }
+            }
+
+            if (options.likePattern && !options.likePattern->empty()) {
+                conditions.emplace_back("file_path LIKE ?");
+                addText(*options.likePattern);
+            }
+
+            if (options.fileName && !options.fileName->empty()) {
+                conditions.emplace_back("file_name = ?");
+                addText(*options.fileName);
+            }
+
+            if (options.extension && !options.extension->empty()) {
+                conditions.emplace_back("file_extension = ?");
+                addText(*options.extension);
+            }
+
+            if (!options.extensions.empty()) {
+                std::vector<std::string> extConditions;
+                extConditions.reserve(options.extensions.size());
+                for (const auto& ext : options.extensions) {
+                    extConditions.emplace_back("file_extension = ?");
+                    addText(ext);
+                }
+                if (!extConditions.empty()) {
+                    std::string clause = "(";
+                    for (size_t i = 0; i < extConditions.size(); ++i) {
+                        if (i > 0)
+                            clause += " OR ";
+                        clause += extConditions[i];
+                    }
+                    clause += ')';
+                    conditions.emplace_back(std::move(clause));
+                }
+            }
+
+            if (options.mimeType && !options.mimeType->empty()) {
+                conditions.emplace_back("mime_type = ?");
+                addText(*options.mimeType);
+            }
+
+            if (options.textOnly) {
+                conditions.emplace_back("mime_type LIKE 'text/%'");
+            } else if (options.binaryOnly) {
+                conditions.emplace_back("mime_type NOT LIKE 'text/%'");
+            }
+
+            if (options.modifiedAfter) {
+                conditions.emplace_back("modified_time >= ?");
+                addInt(*options.modifiedAfter);
+            }
+
+            if (options.createdAfter) {
+                conditions.emplace_back("created_time >= ?");
+                addInt(*options.createdAfter);
+            }
+
+            if (options.createdBefore) {
+                conditions.emplace_back("created_time <= ?");
+                addInt(*options.createdBefore);
+            }
+
+            if (options.modifiedBefore) {
+                conditions.emplace_back("modified_time <= ?");
+                addInt(*options.modifiedBefore);
+            }
+
+            if (options.indexedAfter) {
+                conditions.emplace_back("indexed_time >= ?");
+                addInt(*options.indexedAfter);
+            }
+
+            if (options.indexedBefore) {
+                conditions.emplace_back("indexed_time <= ?");
+                addInt(*options.indexedBefore);
+            }
+
+            if (options.changedSince) {
+                conditions.emplace_back(
+                    "(modified_time >= ? OR created_time >= ? OR indexed_time >= ?)");
+                addInt(*options.changedSince);
+                addInt(*options.changedSince);
+                addInt(*options.changedSince);
+            }
+
+            for (const auto& tag : options.tags) {
+                conditions.emplace_back(
+                    "EXISTS (SELECT 1 FROM metadata m WHERE m.document_id = documents.id "
+                    "AND m.key = ? AND m.value = ?)");
+                addText(std::string("tag:") + tag);
+                addText(tag);
+            }
+
+            for (const auto& [key, value] : options.metadataFilters) {
+                conditions.emplace_back(
+                    "EXISTS (SELECT 1 FROM metadata m WHERE m.document_id = documents.id "
+                    "AND m.key = ? AND m.value = ?)");
+                addText(key);
+                addText(value);
+            }
+
+            if (!options.extractionStatuses.empty()) {
+                if (options.extractionStatuses.size() == 1) {
+                    conditions.emplace_back("extraction_status = ?");
+                    addText(ExtractionStatusUtils::toString(options.extractionStatuses[0]));
+                } else {
+                    std::string clause = "(";
+                    for (size_t i = 0; i < options.extractionStatuses.size(); ++i) {
+                        if (i > 0)
+                            clause += " OR ";
+                        clause += "extraction_status = ?";
+                        addText(ExtractionStatusUtils::toString(options.extractionStatuses[i]));
+                    }
+                    clause += ')';
+                    conditions.emplace_back(std::move(clause));
+                }
+            }
+
+            if (!options.repairStatuses.empty()) {
+                if (options.repairStatuses.size() == 1) {
+                    conditions.emplace_back("repair_status = ?");
+                    addText(RepairStatusUtils::toString(options.repairStatuses[0]));
+                } else {
+                    std::string clause = "(";
+                    for (size_t i = 0; i < options.repairStatuses.size(); ++i) {
+                        if (i > 0)
+                            clause += " OR ";
+                        clause += "repair_status = ?";
+                        addText(RepairStatusUtils::toString(options.repairStatuses[i]));
+                    }
+                    clause += ')';
+                    conditions.emplace_back(std::move(clause));
+                }
+            }
+
+            if (options.maxRepairAttempts > 0) {
+                conditions.emplace_back("repair_attempts < ?");
+                addInt(options.maxRepairAttempts);
+            }
+
+            if (options.onlyMissingContent) {
+                conditions.emplace_back("NOT EXISTS (SELECT 1 FROM document_content c "
+                                        "WHERE c.document_id = documents.id)");
+            }
+
+            if (options.stalledBefore) {
+                conditions.emplace_back("COALESCE(NULLIF(indexed_time, 0), modified_time) < ?");
+                addInt(*options.stalledBefore);
+            }
+
+            if (options.repairAttemptedBefore) {
+                conditions.emplace_back("repair_attempted_at < ?");
+                addInt(*options.repairAttemptedBefore);
+            }
+
+            if (!conditions.empty()) {
+                sql += " WHERE ";
+                for (size_t i = 0; i < conditions.size(); ++i) {
+                    if (i > 0)
+                        sql += " AND ";
+                    sql += conditions[i];
+                }
+            }
+
+            if (options.orderByNameAsc) {
+                sql += " ORDER BY file_name ASC";
+            } else if (options.orderByIndexedDesc) {
+                sql += " ORDER BY indexed_time DESC, id DESC";
+            }
+
+            if (options.limit > 0) {
+                sql += " LIMIT ?";
+                addInt(options.limit);
+            }
+            if (options.offset > 0) {
+                sql += " OFFSET ?";
+                addInt(options.offset);
+            }
+
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult) {
+                if (joinFtsForContains && options.containsUsesFts) {
+                    auto fallbackOpts = options;
+                    fallbackOpts.containsUsesFts = false;
+                    return queryDocumentsForListProjection(fallbackOpts);
+                }
+                return stmtResult.error();
+            }
+
+            Statement stmt = std::move(stmtResult).value();
+            int index = 1;
+            for (const auto& param : params) {
+                Result<void> bindResult;
+                if (param.type == BindParam::Type::Text) {
+                    bindResult = stmt.bind(index, param.text);
+                } else {
+                    bindResult = stmt.bind(index, param.integer);
+                }
+                if (!bindResult) {
+                    return bindResult.error();
+                }
+                ++index;
+            }
+
+            std::vector<ListDocumentProjection> docs;
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult) {
+                    if (joinFtsForContains && options.containsUsesFts) {
+                        auto fallbackOpts = options;
+                        fallbackOpts.containsUsesFts = false;
+                        return queryDocumentsForListProjection(fallbackOpts);
+                    }
+                    return stepResult.error();
+                }
+                if (!stepResult.value())
+                    break;
+
+                docs.push_back(mapListProjectionRow(stmt));
+            }
+
+            return docs;
+        });
+}
+
 Result<std::unordered_map<std::string, int64_t>>
 MetadataRepository::getDocumentCountsByExtension() {
     return executeReadQuery<std::unordered_map<std::string, int64_t>>(
@@ -6102,6 +6541,22 @@ DocumentInfo MetadataRepository::mapDocumentRow(Statement& stmt) const {
         info.repairAttemptedAt = std::chrono::sys_seconds{std::chrono::seconds{stmt.getInt64(19)}};
     }
     info.repairAttempts = stmt.getInt(20);
+    return info;
+}
+
+ListDocumentProjection MetadataRepository::mapListProjectionRow(Statement& stmt) const {
+    ListDocumentProjection info;
+    info.id = stmt.getInt64(0);
+    info.filePath = stmt.getString(1);
+    info.fileName = stmt.getString(2);
+    info.fileExtension = stmt.getString(3);
+    info.fileSize = stmt.getInt64(4);
+    info.sha256Hash = stmt.getString(5);
+    info.mimeType = stmt.getString(6);
+    info.createdTime = stmt.getTime(7);
+    info.modifiedTime = stmt.getTime(8);
+    info.indexedTime = stmt.getTime(9);
+    info.extractionStatus = ExtractionStatusUtils::fromString(stmt.getString(10));
     return info;
 }
 

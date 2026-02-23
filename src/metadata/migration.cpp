@@ -343,7 +343,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createTermStatsSchema(),
             repairSymbolMetadataUniqueness(),
             optimizeValueCountsQuery(),
-            createFeedbackEventsSchema()};
+            createFeedbackEventsSchema(),
+            addListSortCompositeIndex()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2459,6 +2460,24 @@ Migration YamsMetadataMigrations::createFeedbackEventsSchema() {
         DROP INDEX IF EXISTS idx_feedback_events_event_type_time;
         DROP INDEX IF EXISTS idx_feedback_events_trace_id;
         DROP TABLE IF EXISTS feedback_events;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::addListSortCompositeIndex() {
+    Migration m;
+    m.version = 29;
+    m.name = "Add composite index for list sort path";
+    m.created = std::chrono::system_clock::now();
+
+    m.upSQL = R"(
+        CREATE INDEX IF NOT EXISTS idx_documents_indexed_id
+            ON documents(indexed_time DESC, id DESC);
+    )";
+
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_documents_indexed_id;
     )";
 
     return m;

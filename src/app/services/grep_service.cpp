@@ -39,6 +39,22 @@ namespace yams::app::services {
 
 namespace {
 
+std::atomic<int> g_activeGrepRequests{0};
+
+class ActiveGrepRequestGuard {
+public:
+    explicit ActiveGrepRequestGuard(std::atomic<int>& counter)
+        : counter_(counter), active_(counter_.fetch_add(1, std::memory_order_acq_rel) + 1) {}
+
+    ~ActiveGrepRequestGuard() { counter_.fetch_sub(1, std::memory_order_acq_rel); }
+
+    int active() const { return active_; }
+
+private:
+    std::atomic<int>& counter_;
+    int active_{1};
+};
+
 static constexpr std::string_view kRegexSpecialChars = "\\^$.|?*+()[]{}";
 
 #if __cpp_lib_string_contains >= 202011L
@@ -380,6 +396,7 @@ public:
     }
 
     Result<GrepResponse> grep(const GrepRequest& req) override {
+        ActiveGrepRequestGuard activeGuard(g_activeGrepRequests);
         auto grep_start_time = std::chrono::steady_clock::now();
         spdlog::debug("[GrepTrace] GrepServiceImpl::grep started.");
         if (!ctx_.metadataRepo) {
@@ -447,10 +464,23 @@ public:
         };
         // PERFORMANCE: Lower default limits to prevent timeouts on large repos
         // Users can override with environment variables if needed
-        const int max_docs_hot = getenv_int("YAMS_GREP_MAX_DOCS_HOT", 500);
-        const int max_docs_cold = getenv_int("YAMS_GREP_MAX_DOCS_COLD", 50);
-        const int budget_ms = getenv_int("YAMS_GREP_TIME_BUDGET_MS", 10000);
+        int max_docs_hot = getenv_int("YAMS_GREP_MAX_DOCS_HOT", 500);
+        int max_docs_cold = getenv_int("YAMS_GREP_MAX_DOCS_COLD", 50);
+        int budget_ms = getenv_int("YAMS_GREP_TIME_BUDGET_MS", 10000);
         const int max_total_results = getenv_int("YAMS_GREP_MAX_RESULTS", 1000);
+
+        if (!req.useSession) {
+            max_docs_hot = std::min(max_docs_hot, 128);
+            max_docs_cold = std::min(max_docs_cold, 20);
+            budget_ms = std::min(budget_ms, 3000);
+        }
+
+        const int activeRequests = std::clamp(activeGuard.active(), 1, 4);
+        if (activeRequests > 1) {
+            max_docs_hot = std::max(64, max_docs_hot / activeRequests);
+            max_docs_cold = std::max(16, max_docs_cold / activeRequests);
+            budget_ms = std::max(2000, budget_ms / activeRequests);
+        }
         MetadataTelemetry metadataTelemetry;
         auto start_time = std::chrono::steady_clock::now();
 
@@ -829,12 +859,19 @@ public:
             rec = static_cast<size_t>(std::clamp(capacity, 1.0, static_cast<double>(hw)));
         }
 #endif
-        // Keep grep background-friendly by default: at most 4 workers (or fewer if docs < 4)
-        size_t workers = std::min<size_t>({rec, hw, static_cast<size_t>(4)});
+        size_t perRequestCap = 4;
+        if (activeGuard.active() >= 4) {
+            perRequestCap = 1;
+        } else if (activeGuard.active() >= 2) {
+            perRequestCap = 2;
+        }
+        size_t workers = std::min<size_t>({rec, hw, perRequestCap});
         workers = std::min(workers, docs.size() > 0 ? docs.size() : size_t{1});
 
-        spdlog::debug("[GrepService] starting worker scan: docs={} tags={} paths={} includes={}",
-                      docs.size(), req.tags.size(), req.paths.size(), req.includePatterns.size());
+        spdlog::debug("[GrepService] starting worker scan: docs={} tags={} paths={} includes={} "
+                      "active={} hot_cap={} cold_cap={} budget_ms={}",
+                      docs.size(), req.tags.size(), req.paths.size(), req.includePatterns.size(),
+                      activeRequests, max_docs_hot, max_docs_cold, budget_ms);
         auto before_workers_time = std::chrono::steady_clock::now();
         std::atomic<size_t> next{0};
         std::mutex outMutex;
@@ -982,6 +1019,14 @@ public:
                     if (stop.load(std::memory_order_relaxed))
                         return;
                     ++ln_counter;
+                    if (budget_ms > 0 && (ln_counter % 64 == 0)) {
+                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - start_time);
+                        if (elapsed.count() >= budget_ms) {
+                            stop.store(true, std::memory_order_relaxed);
+                            return;
+                        }
+                    }
                     size_t n = countMatches(line);
                     bool matched = (n > 0);
                     if (req.invert)
