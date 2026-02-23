@@ -747,7 +747,7 @@ private:
             }
 
             pid_t pidBeforeStop = readPidFromFile(pidFile_);
-            stopDaemon();
+            (void)stopDaemon(false, false);
 
             if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5),
                                    pidBeforeStop)) {
@@ -937,7 +937,7 @@ private:
         }
     }
 
-    void stopDaemon() {
+    bool stopDaemon(bool exitOnFailure = true, bool reportFailure = true) {
         // Resolve paths if not explicitly provided (do not persist into socketPath_)
         const std::string effectiveSocket =
             socketPath_.empty() ? daemon::DaemonClient::resolveSocketPathConfigFirst().string()
@@ -973,7 +973,7 @@ private:
                 spdlog::info("YAMS daemon is not running");
                 cleanupDaemonFiles(effectiveSocket, pidFile_);
                 stopSpinner();
-                return;
+                return true;
             }
         }
 
@@ -1158,8 +1158,50 @@ private:
         // Clean up files if daemon was stopped
         if (stopped) {
 #ifndef _WIN32
-            if (isDaemonProcessRunningForSocket(effectiveSocket)) {
-                spdlog::warn("Daemon process still running after stop verification");
+            // Final verification can race with graceful shutdown completion. Give the process a
+            // short grace window before reporting failure, and prefer PID checks when available.
+            pid_t verifyPid = readPidFromFile(pidFile_);
+            if (verifyPid <= 0) {
+                verifyPid = initialPid;
+            }
+
+            auto pidStillAlive = [&](pid_t pid) -> bool {
+                return pid > 0 && kill(pid, 0) == 0;
+            };
+
+            bool verifiedStopped = false;
+            for (int i = 0; i < 15; ++i) {
+                bool processAlive = false;
+                if (verifyPid > 0) {
+                    processAlive = pidStillAlive(verifyPid);
+                } else {
+                    processAlive = isDaemonProcessRunningForSocket(effectiveSocket);
+                }
+
+                if (!processAlive) {
+                    verifiedStopped = true;
+                    break;
+                }
+
+                if (i < 14) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+
+            if (!verifiedStopped) {
+                if (verifyPid > 0) {
+                    auto desc = describeProcess(verifyPid);
+                    if (!desc.empty()) {
+                        spdlog::warn("Daemon process still running after stop verification: {}",
+                                     desc);
+                    } else {
+                        spdlog::warn(
+                            "Daemon process still running after stop verification (PID {})",
+                            verifyPid);
+                    }
+                } else if (isDaemonProcessRunningForSocket(effectiveSocket)) {
+                    spdlog::warn("Daemon process still running after stop verification");
+                }
                 stopped = false;
             }
 #endif
@@ -1169,20 +1211,26 @@ private:
             cleanupDaemonFiles(effectiveSocket, pidFile_);
             stopSpinner();
             std::cout << "[OK] YAMS daemon stopped successfully\n";
+            return true;
         } else {
             stopSpinner();
-            spdlog::error("Failed to stop YAMS daemon");
-            std::cerr << "[FAIL] Failed to stop YAMS daemon\n";
-            std::cerr << "  💡 Hint: The daemon may be unresponsive or owned by another user\n";
-            if (!force_) {
-                std::cerr << "  📋 Try: yams daemon stop --force\n";
-            }
+            if (reportFailure) {
+                spdlog::error("Failed to stop YAMS daemon");
+                std::cerr << "[FAIL] Failed to stop YAMS daemon\n";
+                std::cerr << "  💡 Hint: The daemon may be unresponsive or owned by another user\n";
+                if (!force_) {
+                    std::cerr << "  📋 Try: yams daemon stop --force\n";
+                }
 #ifndef _WIN32
-            std::cerr << "  📋 Or manually: pkill yams-daemon\n";
+                std::cerr << "  📋 Or manually: pkill yams-daemon\n";
 #else
-            std::cerr << "  📋 Or manually (Windows): taskkill /IM yams-daemon.exe /T /F\n";
+                std::cerr << "  📋 Or manually (Windows): taskkill /IM yams-daemon.exe /T /F\n";
 #endif
-            std::exit(1);
+            }
+            if (exitOnFailure) {
+                std::exit(1);
+            }
+            return false;
         }
     }
 
@@ -2719,7 +2767,10 @@ private:
         }
 
         pid_t pidBeforeStop = readPidFromFile(pidFile_);
-        stopDaemon();
+        bool stopReportedSuccess = stopDaemon(false, false);
+        if (!stopReportedSuccess) {
+            spdlog::warn("Stop command reported failure during restart; waiting for daemon exit");
+        }
 
         if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5), pidBeforeStop)) {
             spdlog::error("Failed to stop daemon for restart");
