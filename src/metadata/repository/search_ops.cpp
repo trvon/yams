@@ -58,16 +58,25 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
 
         std::string sanitizedQuery = sanitizeFTS5Query(query);
         const auto ftsMode = parseFts5ModeEnv();
-        const bool nlAutoPhrase = (std::getenv("YAMS_FTS_NL_AUTO_PHRASE") &&
-                                   std::string(std::getenv("YAMS_FTS_NL_AUTO_PHRASE")) == "1");
-        const bool nlAutoPrefix = !(std::getenv("YAMS_FTS_NL_PREFIX") &&
-                                    std::string(std::getenv("YAMS_FTS_NL_PREFIX")) == "0");
+        auto parseEnvFlag = [](const char* key, bool defaultValue) {
+            const char* env = std::getenv(key);
+            if (!env || !*env) {
+                return defaultValue;
+            }
+
+            std::string value(env);
+            std::transform(value.begin(), value.end(), value.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return !(value == "0" || value == "false" || value == "off" || value == "no");
+        };
+
+        const bool nlAutoPhrase = parseEnvFlag("YAMS_FTS_NL_AUTO_PHRASE", true);
+        const bool nlAutoPrefix = parseEnvFlag("YAMS_FTS_NL_PREFIX", true);
         int nlMinResults = 3;
         if (const char* s = std::getenv("YAMS_FTS_NL_MIN_RESULTS"); s && *s) {
             nlMinResults = std::max(0, std::atoi(s));
         }
-        const bool useNlFallback = std::getenv("YAMS_FTS_NL_OR_FALLBACK") &&
-                                   std::string(std::getenv("YAMS_FTS_NL_OR_FALLBACK")) == "1";
+        const bool useNlFallback = parseEnvFlag("YAMS_FTS_NL_OR_FALLBACK", false);
         const bool isAdvancedQuery = hasAdvancedFts5Operators(query);
         bool usedNaturalLanguageQuery = false;
         if (!isAdvancedQuery) {
@@ -229,25 +238,50 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
 
             if (!out.results.empty()) {
                 const size_t resultSize = out.results.size();
-                const size_t requestedLimit = static_cast<size_t>(limit);
+                const size_t requestedLimit = static_cast<size_t>(effectiveLimit);
 
                 if (resultSize < requestedLimit) {
                     out.totalCount = resultSize;
                 } else {
                     constexpr int64_t kMaxCountLimit = 10000;
-                    auto countStmtResult = db.prepare(R"(
+                    std::string countSql = R"(
                             SELECT COUNT(*) FROM (
-                                SELECT 1 FROM documents_fts
+                                SELECT 1
+                                FROM documents_fts fts
+                                JOIN documents d ON d.id = fts.rowid
                                 WHERE documents_fts MATCH ?
-                                LIMIT ?
-                            )
-                        )");
+                        )";
+                    if (docIds && !docIds->empty()) {
+                        countSql += " AND d.id IN (";
+                        for (size_t i = 0; i < docIds->size(); ++i) {
+                            if (i > 0) {
+                                countSql += ',';
+                            }
+                            countSql += '?';
+                        }
+                        countSql += ')';
+                    }
+                    countSql += " LIMIT ? )";
+
+                    auto countStmtResult = db.prepare(countSql);
 
                     if (countStmtResult) {
                         Statement countStmt = std::move(countStmtResult).value();
-                        auto bindRes1 = countStmt.bind(1, queryText);
-                        auto bindRes2 = countStmt.bind(2, kMaxCountLimit);
-                        if (bindRes1.has_value() && bindRes2.has_value()) {
+                        int countBindIndex = 1;
+                        auto bindRes1 = countStmt.bind(countBindIndex++, queryText);
+                        bool bindOk = bindRes1.has_value();
+                        if (bindOk && docIds && !docIds->empty()) {
+                            for (auto id : *docIds) {
+                                auto bindDoc =
+                                    countStmt.bind(countBindIndex++, static_cast<int64_t>(id));
+                                if (!bindDoc.has_value()) {
+                                    bindOk = false;
+                                    break;
+                                }
+                            }
+                        }
+                        auto bindRes2 = countStmt.bind(countBindIndex++, kMaxCountLimit);
+                        if (bindOk && bindRes2.has_value()) {
                             auto stepRes = countStmt.step();
                             if (stepRes.has_value() && stepRes.value()) {
                                 int64_t boundedCount = countStmt.getInt64(0);

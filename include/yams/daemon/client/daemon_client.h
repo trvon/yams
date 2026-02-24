@@ -19,6 +19,12 @@
 
 namespace yams::daemon {
 
+enum class ClientTransportMode {
+    Auto,
+    Socket,
+    InProcess,
+};
+
 struct ClientConfig {
     std::filesystem::path socketPath;
     std::filesystem::path dataDir;
@@ -37,6 +43,7 @@ struct ClientConfig {
     bool singleUseConnections = false;
     bool disableStreamingForLargeQueries = false;
     bool acceptCompressed = false;
+    ClientTransportMode transportMode = ClientTransportMode::Auto;
     std::optional<boost::asio::any_io_executor> executor;
 };
 

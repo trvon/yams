@@ -4,6 +4,7 @@
 #include <utility>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/daemon_lifecycle.h>
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/vector/batch_metrics.h>
 #include <yams/vector/dynamic_batcher.h>
@@ -72,8 +73,8 @@ RequestDispatcher::handleGenerateEmbeddingRequest(const GenerateEmbeddingRequest
     try {
         auto provRes = yams::daemon::dispatch::check_provider_ready(serviceManager_);
         if (!provRes) {
-            if (daemon_)
-                daemon_->setSubsystemDegraded("embedding", true, "provider_unavailable");
+            if (lifecycle_)
+                lifecycle_->setSubsystemDegraded("embedding", true, "provider_unavailable");
             co_return makeErrorResponse(provRes.error().code, provRes.error().message);
         }
         const auto& provider = provRes.value();

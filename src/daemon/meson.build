@@ -140,6 +140,8 @@ endif
 yams_daemon_lib = static_library('yams_daemon',
   [
     'daemon.cpp',
+    'daemon_lifecycle.cpp',
+    'embedded_service_host.cpp',
     'tracy_memory_hooks.cpp',
     'components/BackgroundTaskManager.cpp',
     'components/CheckpointManager.cpp',

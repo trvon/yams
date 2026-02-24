@@ -30,21 +30,36 @@ static std::string quoteFTS5Term(const std::string& term) {
     return escaped;
 }
 
+static inline bool isLikelyUtf8WordByte(unsigned char c) {
+    return c >= 0x80 || std::isalnum(c);
+}
+
+static inline bool isLikelyUtf8LetterByte(unsigned char c) {
+    return c >= 0x80 || std::isalpha(c);
+}
+
+static inline char toLowerAscii(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') {
+        return static_cast<char>(c - 'A' + 'a');
+    }
+    return static_cast<char>(c);
+}
+
 // Strip leading and trailing punctuation from a term.
 // Preserves internal punctuation (e.g., hyphens in "sugar-sweetened").
 // This is critical for FTS5 matching: "India." won't match "India" in the index.
 std::string stripPunctuation(std::string term) {
     // Strip trailing punctuation
     while (!term.empty()) {
-        char c = term.back();
-        if (std::isalnum(static_cast<unsigned char>(c)))
+        unsigned char c = static_cast<unsigned char>(term.back());
+        if (isLikelyUtf8WordByte(c))
             break;
         term.pop_back();
     }
     // Strip leading punctuation (e.g., "(HSC)" -> "HSC")
     while (!term.empty()) {
-        char c = term.front();
-        if (std::isalnum(static_cast<unsigned char>(c)))
+        unsigned char c = static_cast<unsigned char>(term.front());
+        if (isLikelyUtf8WordByte(c))
             break;
         term.erase(term.begin());
     }
@@ -245,7 +260,8 @@ std::string sanitizeFts5UserQuery(std::string query, bool allowPrefixWildcard) {
 Fts5QueryMode parseFts5ModeEnv() {
     if (const char* env = std::getenv("YAMS_FTS_MODE"); env && *env) {
         std::string mode(env);
-        std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+        std::transform(mode.begin(), mode.end(), mode.begin(),
+                       [](unsigned char c) { return toLowerAscii(c); });
         if (mode == "simple") {
             return Fts5QueryMode::Simple;
         }
@@ -282,7 +298,7 @@ bool isLikelyNaturalLanguageQuery(std::string_view query) {
         totalLen += token.size();
         int alphaCount = 0;
         for (unsigned char c : token) {
-            if (std::isalpha(c)) {
+            if (isLikelyUtf8LetterByte(c)) {
                 alphaCount++;
             }
         }
@@ -451,8 +467,8 @@ static const std::unordered_set<std::string>& getStopwords() {
 static bool isStopword(const std::string& term) {
     std::string lower;
     lower.reserve(term.size());
-    for (char c : term) {
-        lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (unsigned char c : term) {
+        lower += toLowerAscii(c);
     }
     return getStopwords().count(lower) > 0;
 }
@@ -462,7 +478,8 @@ static std::vector<std::string> tokenizeNaturalLanguageQuery(std::string_view qu
     std::istringstream iss{std::string(query)};
     std::string term;
     while (iss >> term) {
-        std::transform(term.begin(), term.end(), term.begin(), ::tolower);
+        std::transform(term.begin(), term.end(), term.begin(),
+                       [](unsigned char c) { return toLowerAscii(c); });
         term = stripPunctuation(std::move(term));
         if (term.empty())
             continue;
@@ -503,6 +520,5 @@ bool includeSearchSnippets() {
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
-
 
 } // namespace yams::metadata

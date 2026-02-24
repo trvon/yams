@@ -12,6 +12,7 @@
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
+#include <yams/daemon/daemon_lifecycle.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/stream_metrics_registry.h>
@@ -438,7 +439,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             res.requestsProcessed = state_->stats.requestsProcessed.load();
             res.activeConnections = state_->stats.activeConnections.load();
             try {
-                auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+                auto lifecycleSnapshot =
+                    lifecycle_ ? lifecycle_->getLifecycleSnapshot() : LifecycleSnapshot{};
                 if (lifecycleSnapshot.state == LifecycleState::Ready ||
                     lifecycleSnapshot.state == LifecycleState::Degraded) {
                     res.memoryUsageMb = 0.0;
@@ -450,7 +452,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
         if (!metrics_) {
             // Align boolean readiness with lifecycle readiness in non-metrics path
             try {
-                auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+                auto lifecycleSnapshot =
+                    lifecycle_ ? lifecycle_->getLifecycleSnapshot() : LifecycleSnapshot{};
                 res.ready = (lifecycleSnapshot.state == LifecycleState::Ready);
             } catch (...) {
                 res.ready = false;
@@ -544,7 +547,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
         // request path. See MetricsSnapshot::vectorEmbeddingsAvailable, vectorScoringEnabled,
         // and searchEngineBuildReason fields.
         try {
-            auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+            auto lifecycleSnapshot =
+                lifecycle_ ? lifecycle_->getLifecycleSnapshot() : LifecycleSnapshot{};
             switch (lifecycleSnapshot.state) {
                 case LifecycleState::Ready:
                     res.overallStatus = "ready";
@@ -608,7 +612,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
         }
         if (!metrics_) {
             try {
-                auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+                auto lifecycleSnapshot =
+                    lifecycle_ ? lifecycle_->getLifecycleSnapshot() : LifecycleSnapshot{};
                 if (lifecycleSnapshot.state == LifecycleState::Ready ||
                     lifecycleSnapshot.state == LifecycleState::Degraded) {
                     auto snap = FsmMetricsRegistry::instance().snapshot();
@@ -635,7 +640,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
         }
         if (!metrics_) {
             try {
-                auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+                auto lifecycleSnapshot =
+                    lifecycle_ ? lifecycle_->getLifecycleSnapshot() : LifecycleSnapshot{};
                 if (lifecycleSnapshot.state == LifecycleState::Ready ||
                     lifecycleSnapshot.state == LifecycleState::Degraded) {
                     std::size_t threads = 0, active = 0, queued = 0;
@@ -791,7 +797,8 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
         // Minimal readiness hint (align to lifecycle readiness)
         bool notReady = true;
         try {
-            auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+            auto lifecycleSnapshot =
+                lifecycle_ ? lifecycle_->getLifecycleSnapshot() : LifecycleSnapshot{};
             if (lifecycleSnapshot.state == LifecycleState::Ready ||
                 lifecycleSnapshot.state == LifecycleState::Degraded) {
                 notReady = false;

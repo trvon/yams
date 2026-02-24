@@ -33,6 +33,16 @@ TEST_CASE("FTS5 sanitize - punctuation and hyphens", "[unit][metadata][fts5]") {
     CHECK(sanitizeFTS5Query("hello, world.") == "hello world");
 }
 
+TEST_CASE("FTS5 sanitize - preserves UTF-8 terms", "[unit][metadata][fts5]") {
+    using yams::metadata::sanitizeFTS5Query;
+
+    const std::string cafe = "caf\xC3\xA9";
+    const std::string resume = "r\xC3\xA9sum\xC3\xA9";
+
+    CHECK(sanitizeFTS5Query(cafe + ".") == cafe);
+    CHECK(sanitizeFTS5Query(cafe + " " + resume + ".") == (cafe + " " + resume));
+}
+
 TEST_CASE("FTS5 sanitize - advanced operators passthrough", "[unit][metadata][fts5]") {
     using yams::metadata::sanitizeFTS5Query;
 
@@ -245,6 +255,7 @@ TEST_CASE("FTS5 smart mode detection", "[unit][metadata][fts5]") {
     using yams::metadata::test::isLikelyNaturalLanguageQueryForTest;
     CHECK(isLikelyNaturalLanguageQueryForTest("how to install sqlite fts5"));
     CHECK(isLikelyNaturalLanguageQueryForTest("quick brown fox jumps"));
+    CHECK(isLikelyNaturalLanguageQueryForTest("caf\xC3\xA9 recipes guide"));
     CHECK_FALSE(isLikelyNaturalLanguageQueryForTest("title:report"));
     CHECK_FALSE(isLikelyNaturalLanguageQueryForTest("path/to/file"));
     CHECK_FALSE(isLikelyNaturalLanguageQueryForTest("foo_bar baz"));

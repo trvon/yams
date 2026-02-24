@@ -20,7 +20,7 @@
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
-#include <yams/daemon/daemon.h>
+#include <yams/daemon/daemon_lifecycle.h>
 #include <yams/daemon/ipc/request_context_registry.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/ingest/ingest_helpers.h>
@@ -556,8 +556,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
                 daemonResult.error = deleteResult.error.value_or("");
                 if (daemonResult.success) {
                     response.successCount++;
-                    if (daemon_ && !deleteResult.hash.empty()) {
-                        daemon_->onDocumentRemoved(deleteResult.hash);
+                    if (lifecycle_ && !deleteResult.hash.empty()) {
+                        lifecycle_->onDocumentRemoved(deleteResult.hash);
                     }
                 } else {
                     response.failureCount++;
@@ -630,9 +630,9 @@ RequestDispatcher::handleAddDocumentRequest(const AddDocumentRequest& req) {
 
             // Check if daemon is ready for synchronous operations
             bool daemonReady = false;
-            if (daemon_) {
+            if (lifecycle_) {
                 try {
-                    auto lifecycleSnapshot = daemon_->getLifecycle().snapshot();
+                    auto lifecycleSnapshot = lifecycle_->getLifecycleSnapshot();
                     daemonReady = (lifecycleSnapshot.state == LifecycleState::Ready ||
                                    lifecycleSnapshot.state == LifecycleState::Degraded);
                 } catch (...) {

@@ -7,7 +7,7 @@
 
 namespace yams::daemon {
 
-class YamsDaemon;
+class IDaemonLifecycle;
 class ServiceManager;
 struct StateComponent;
 
@@ -29,10 +29,11 @@ template <typename T> struct RequestHandlerTraits;
 
 class RequestDispatcher {
 public:
-    RequestDispatcher(YamsDaemon* daemon, ServiceManager* serviceManager, StateComponent* state);
+    RequestDispatcher(IDaemonLifecycle* lifecycle, ServiceManager* serviceManager,
+                      StateComponent* state);
     // Overload with metrics component for centralized status rendering
-    RequestDispatcher(YamsDaemon* daemon, ServiceManager* serviceManager, StateComponent* state,
-                      class DaemonMetrics* metrics);
+    RequestDispatcher(IDaemonLifecycle* lifecycle, ServiceManager* serviceManager,
+                      StateComponent* state, class DaemonMetrics* metrics);
     ~RequestDispatcher();
 
     boost::asio::awaitable<Response> dispatch(const Request& req);
@@ -170,7 +171,7 @@ private:
     // Legacy helper declarations removed after dispatcher split
 
 private:
-    YamsDaemon* daemon_;
+    IDaemonLifecycle* lifecycle_;
     ServiceManager* serviceManager_;
     StateComponent* state_;
     class DaemonMetrics* metrics_{nullptr};

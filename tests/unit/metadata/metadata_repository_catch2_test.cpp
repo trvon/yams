@@ -587,9 +587,9 @@ TEST_CASE("MetadataRepository: list projection matches queryDocuments for shared
     auto docC = makeDocumentWithPath(
         "/work/reports/summary.pdf",
         "3333333333333333333333333333333333333333333333333333333333333333", "application/pdf");
-    auto docD = makeDocumentWithPath(
-        "/archive/notes/todo-old.md",
-        "4444444444444444444444444444444444444444444444444444444444444444");
+    auto docD =
+        makeDocumentWithPath("/archive/notes/todo-old.md",
+                             "4444444444444444444444444444444444444444444444444444444444444444");
 
     docA.fileSize = 10;
     docB.fileSize = 20;
@@ -934,6 +934,40 @@ TEST_CASE("MetadataRepository: search functionality", "[unit][metadata][reposito
 
     auto results = searchResult.value();
     CHECK(results.results.size() > 0);
+}
+
+TEST_CASE("MetadataRepository: search totalCount honors docIds filter",
+          "[unit][metadata][repository]") {
+    MetadataRepositoryFixture fix;
+
+    auto doc1 = makeDocumentWithPath("/tmp/doc_count_1.txt", "search_doc_count_1");
+    auto doc2 = makeDocumentWithPath("/tmp/doc_count_2.txt", "search_doc_count_2");
+
+    auto insert1 = fix.repository_->insertDocument(doc1);
+    auto insert2 = fix.repository_->insertDocument(doc2);
+    REQUIRE(insert1.has_value());
+    REQUIRE(insert2.has_value());
+
+    auto docId1 = insert1.value();
+    auto docId2 = insert2.value();
+
+    REQUIRE(fix.repository_
+                ->indexDocumentContent(docId1, "Doc One", "needle token appears in doc one",
+                                       "text/plain")
+                .has_value());
+    REQUIRE(fix.repository_
+                ->indexDocumentContent(docId2, "Doc Two", "needle token appears in doc two",
+                                       "text/plain")
+                .has_value());
+
+    const std::optional<std::vector<int64_t>> scopedDocIds = std::vector<int64_t>{docId1};
+    auto searchResult = fix.repository_->search("needle", 1, 0, scopedDocIds);
+    REQUIRE(searchResult.has_value());
+
+    const auto& results = searchResult.value();
+    REQUIRE(results.results.size() == 1);
+    CHECK(results.results.front().document.id == docId1);
+    CHECK(results.totalCount == 1);
 }
 
 TEST_CASE("MetadataRepository: fuzzy search returns content matches",

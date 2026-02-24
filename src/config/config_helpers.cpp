@@ -278,6 +278,31 @@ std::filesystem::path resolve_data_dir_from_config() {
     return get_data_dir();
 }
 
+std::string resolve_daemon_mode_from_config() {
+    if (const char* env = std::getenv("YAMS_EMBEDDED"); env && *env) {
+        std::string value = env;
+        trim(value);
+        if (!value.empty()) {
+            return value;
+        }
+    }
+
+    std::filesystem::path config_path;
+    if (const char* cfg_env = std::getenv("YAMS_CONFIG"); cfg_env && *cfg_env) {
+        config_path = std::filesystem::path(cfg_env);
+    } else {
+        config_path = get_config_path();
+    }
+
+    if (!config_path.empty()) {
+        auto value = parse_config_value(config_path, "daemon", "mode");
+        trim(value);
+        return value;
+    }
+
+    return {};
+}
+
 std::vector<std::filesystem::path> parse_path_list(const std::string& raw) {
     std::vector<std::filesystem::path> out;
     if (raw.empty())
