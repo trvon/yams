@@ -160,7 +160,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.8.3] - Unreleased
 
+### Added
+- Search/grep CLI guidance for related results and improved graph suggestions in search.
+- Graph query efficiency improvements to support expanded search suggestions.
+
 ### Fixed
+- Release-please version pinned back to the current release.
+- Reranker timeout handling now uses a retry guard to prevent transient failures.
+- MCP large-graph responses are more reliable, with improved relational graph migrations and repair-service health/auto-repair logic.
+- Repair now fixes graph data issues and improves response limit handling in MCP.
+- IPC retry logic hardened for better resilience under transient failures.
 - **MCP download retrievability contract**: `download` no longer returns a non-retrievable hash when post-index ingest fails. On ingest failure, response now sets `indexed=false` and clears `hash` to prevent follow-up `get/cat` calls from hammering daemon CAS with repeated "File not found" lookups.
 - **Stuck-doc recovery enqueue**: Fixed repair stuck-document recovery enqueueing `PostIngestTask`s to an unused InternalEventBus channel. Recovery now enqueues to `post_ingest` (consumed by PostInestQueue), so re-extraction actually runs.
 - **Doctor FTS5 reindex SQLite TOOBIG**: Added best-effort truncation retry for oversized extracted text and report `truncated=<n>` in output.

@@ -45,6 +45,20 @@ protected:
 
     static bool canBindUnixSocketHere();
 
+    bool waitForDocumentVisible(const std::string& hash,
+                                std::chrono::milliseconds timeout = 5000ms) {
+        auto* sm = daemon_->getServiceManager();
+        auto ctx = sm->getAppContext();
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto doc = ctx.metadataRepo->getDocumentByHash(hash);
+            if (doc && doc.value().has_value())
+                return true;
+            std::this_thread::sleep_for(50ms);
+        }
+        return false;
+    }
+
     void SetUp() override {
         // Skip on Windows - daemon IPC tests are unstable there
         SKIP_DAEMON_TEST_ON_WINDOWS();
@@ -299,6 +313,8 @@ TEST_F(GrepServiceExpectationsIT, LiteralVsRegexWordBoundaries) {
     opts.noEmbeddings = true;
     auto add = ing.addViaDaemon(opts);
     ASSERT_TRUE(add);
+    ASSERT_TRUE(waitForDocumentVisible(add.value().hash))
+        << "Document words.txt not visible in metadata after ingestion";
 
     auto* sm = daemon_->getServiceManager();
     auto ctx = sm->getAppContext();
@@ -311,12 +327,18 @@ TEST_F(GrepServiceExpectationsIT, LiteralVsRegexWordBoundaries) {
         rq.literalText = true;
         rq.lineNumbers = true;
         rq.paths = {(root_ / "ingest").string()};
-        auto r = grepSvc->grep(rq);
-        ASSERT_TRUE(r);
         bool found = false;
-        for (const auto& fr : r.value().results) {
-            if (fr.file.find("words.txt") != std::string::npos && fr.matchCount > 0)
-                found = true;
+        for (int attempt = 0; attempt < 60 && !found; ++attempt) {
+            auto r = grepSvc->grep(rq);
+            ASSERT_TRUE(r);
+            for (const auto& fr : r.value().results) {
+                if (fr.file.find("words.txt") != std::string::npos && fr.matchCount > 0) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                std::this_thread::sleep_for(50ms);
         }
         EXPECT_TRUE(found);
     }
@@ -328,12 +350,17 @@ TEST_F(GrepServiceExpectationsIT, LiteralVsRegexWordBoundaries) {
         rq.word = true;
         rq.lineNumbers = true;
         rq.paths = {(root_ / "ingest").string()};
-        auto r = grepSvc->grep(rq);
-        ASSERT_TRUE(r);
-        // Expect exactly two word matches: "foo" and "(foo)"; not the segment in foo-bar or foobar
         size_t total = 0;
-        for (const auto& fr : r.value().results)
-            total += fr.matchCount;
+        for (int attempt = 0; attempt < 60 && total < 2u; ++attempt) {
+            auto r = grepSvc->grep(rq);
+            ASSERT_TRUE(r);
+            total = 0;
+            for (const auto& fr : r.value().results)
+                total += fr.matchCount;
+            if (total < 2u)
+                std::this_thread::sleep_for(50ms);
+        }
+        // Expect at least two word matches: "foo" and "(foo)"; not the segment in foo-bar or foobar
         EXPECT_GE(total, 2u);
     }
 }
@@ -424,7 +451,10 @@ TEST_F(GrepServiceExpectationsIT, InvertPathsOnly) {
     opts.path = f.string();
     opts.recursive = false;
     opts.noEmbeddings = true;
-    ASSERT_TRUE(ing.addViaDaemon(opts));
+    auto add = ing.addViaDaemon(opts);
+    ASSERT_TRUE(add);
+    ASSERT_TRUE(waitForDocumentVisible(add.value().hash))
+        << "Document c.txt not visible in metadata after ingestion";
 
     auto* sm = daemon_->getServiceManager();
     auto ctx = sm->getAppContext();
@@ -436,12 +466,19 @@ TEST_F(GrepServiceExpectationsIT, InvertPathsOnly) {
     rq.invert = true; // invert: should show file because pattern not present
     rq.pathsOnly = true;
     rq.paths = {(root_ / "ingest").string()};
-    auto r = grepSvc->grep(rq);
-    ASSERT_TRUE(r);
     bool hasC = false;
-    for (const auto& p : r.value().pathsOnly)
-        if (p.find("c.txt") != std::string::npos)
-            hasC = true;
+    for (int attempt = 0; attempt < 60 && !hasC; ++attempt) {
+        auto r = grepSvc->grep(rq);
+        ASSERT_TRUE(r);
+        for (const auto& p : r.value().pathsOnly) {
+            if (p.find("c.txt") != std::string::npos) {
+                hasC = true;
+                break;
+            }
+        }
+        if (!hasC)
+            std::this_thread::sleep_for(50ms);
+    }
     EXPECT_TRUE(hasC);
 }
 
@@ -459,7 +496,10 @@ TEST_F(GrepServiceExpectationsIT, UnicodeLiteralAndIgnoreCaseBestEffort) {
     opts.path = f.string();
     opts.recursive = false;
     opts.noEmbeddings = true;
-    ASSERT_TRUE(ing.addViaDaemon(opts));
+    auto add = ing.addViaDaemon(opts);
+    ASSERT_TRUE(add);
+    ASSERT_TRUE(waitForDocumentVisible(add.value().hash))
+        << "Document unicode.txt not visible in metadata after ingestion";
 
     auto* sm = daemon_->getServiceManager();
     auto ctx = sm->getAppContext();
@@ -471,12 +511,18 @@ TEST_F(GrepServiceExpectationsIT, UnicodeLiteralAndIgnoreCaseBestEffort) {
         rq.pattern = "Ångström";
         rq.literalText = true;
         rq.paths = {(root_ / "ingest").string()};
-        auto r = grepSvc->grep(rq);
-        ASSERT_TRUE(r) << (r ? "" : r.error().message);
         bool found = false;
-        for (const auto& fr : r.value().results) {
-            if (fr.file.find("unicode.txt") != std::string::npos && fr.matchCount > 0)
-                found = true;
+        for (int attempt = 0; attempt < 60 && !found; ++attempt) {
+            auto r = grepSvc->grep(rq);
+            ASSERT_TRUE(r) << (r ? "" : r.error().message);
+            for (const auto& fr : r.value().results) {
+                if (fr.file.find("unicode.txt") != std::string::npos && fr.matchCount > 0) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                std::this_thread::sleep_for(50ms);
         }
         EXPECT_TRUE(found);
     }
