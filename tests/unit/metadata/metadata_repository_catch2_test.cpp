@@ -587,9 +587,9 @@ TEST_CASE("MetadataRepository: list projection matches queryDocuments for shared
     auto docC = makeDocumentWithPath(
         "/work/reports/summary.pdf",
         "3333333333333333333333333333333333333333333333333333333333333333", "application/pdf");
-    auto docD =
-        makeDocumentWithPath("/archive/notes/todo-old.md",
-                             "4444444444444444444444444444444444444444444444444444444444444444");
+    auto docD = makeDocumentWithPath(
+        "/archive/notes/todo-old.md",
+        "4444444444444444444444444444444444444444444444444444444444444444");
 
     docA.fileSize = 10;
     docB.fileSize = 20;
