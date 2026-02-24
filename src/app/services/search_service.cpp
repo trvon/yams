@@ -599,6 +599,27 @@ public:
                 normalizedReq.pathPattern += " " + parsed.scope.name;
             }
         }
+
+        auto normalizePathPattern = [](std::string& pattern) {
+            if (pattern.empty()) {
+                return;
+            }
+            auto normalized = utils::normalizeLookupPath(pattern);
+            if (normalized.changed && !normalized.normalized.empty()) {
+                pattern = normalized.normalized;
+            }
+        };
+
+        normalizePathPattern(normalizedReq.pathPattern);
+        for (auto& pattern : normalizedReq.pathPatterns) {
+            normalizePathPattern(pattern);
+        }
+
+        // Keep legacy --path behavior aligned with multi-pattern filtering.
+        if (normalizedReq.pathPatterns.empty() && !normalizedReq.pathPattern.empty()) {
+            normalizedReq.pathPatterns.push_back(normalizedReq.pathPattern);
+        }
+
         if (normalizedReq.extension.empty() && !parsed.scope.ext.empty()) {
             normalizedReq.extension = parsed.scope.ext;
         }
@@ -680,55 +701,70 @@ public:
         }
 
         // Path filtering: prefer pathPatterns (multiple patterns) over legacy pathPattern
-        const auto& patterns =
-            !req.pathPatterns.empty()
-                ? req.pathPatterns
-                : (!req.pathPattern.empty() ? std::vector<std::string>{req.pathPattern}
-                                            : std::vector<std::string>{});
+        const auto& patterns = !normalizedReq.pathPatterns.empty()
+                                   ? normalizedReq.pathPatterns
+                                   : (!normalizedReq.pathPattern.empty()
+                                          ? std::vector<std::string>{normalizedReq.pathPattern}
+                                          : std::vector<std::string>{});
 
         if (result && !patterns.empty()) {
+            auto matchesPattern = [](const std::string& value,
+                                     const std::string& rawPattern) -> bool {
+                if (rawPattern.empty()) {
+                    return false;
+                }
+                if (hasWildcard(rawPattern)) {
+                    std::string normalized = rawPattern;
+                    // Normalize glob patterns for path matching:
+                    // - "*.ext" should match any path ending in .ext (prepend **/)
+                    // - "dir/*.ext" should match dir/*.ext (prepend **)
+                    // - "**/pattern" and "/pattern" are already absolute
+                    if (!normalized.empty() && normalized.front() == '*' &&
+                        (normalized.size() == 1 || normalized[1] != '*')) {
+                        // Single * at start (e.g., "*.md") - match anywhere in path
+                        normalized = "**/" + normalized;
+                    } else if (!normalized.empty() && normalized.front() != '*' &&
+                               normalized.front() != '/' &&
+                               normalized.find(":/") == std::string::npos &&
+                               normalized.find("**/") != 0) {
+                        // Relative pattern without leading ** (e.g., "src/*.cpp") - match
+                        // anywhere
+                        normalized = "**/" + normalized;
+                    }
+                    return wildcardMatch(value, normalized);
+                }
+                return value.find(rawPattern) != std::string::npos;
+            };
+
             auto resp = std::move(result).value();
-            std::vector<SearchItem> filtered;
-            for (const auto& item : resp.results) {
-                bool pathOk = false;
-                // Match ANY pattern (OR logic)
-                for (const auto& pattern : patterns) {
-                    if (hasWildcard(pattern)) {
-                        std::string normalized = pattern;
-                        // Normalize glob patterns for path matching:
-                        // - "*.ext" should match any path ending in .ext (prepend **/)
-                        // - "dir/*.ext" should match dir/*.ext (prepend **)
-                        // - "**/pattern" and "/pattern" are already absolute
-                        if (!normalized.empty() && normalized.front() == '*' &&
-                            (normalized.size() == 1 || normalized[1] != '*')) {
-                            // Single * at start (e.g., "*.md") - match anywhere in path
-                            normalized = "**/" + normalized;
-                        } else if (!normalized.empty() && normalized.front() != '*' &&
-                                   normalized.front() != '/' &&
-                                   normalized.find(":/") == std::string::npos &&
-                                   normalized.find("**/") != 0) {
-                            // Relative pattern without leading ** (e.g., "src/*.cpp") - match
-                            // anywhere
-                            normalized = "**/" + normalized;
-                        }
-                        if (wildcardMatch(item.path, normalized)) {
-                            pathOk = true;
-                            break;
-                        }
-                    } else {
-                        // Non-wildcard pattern: substring match
-                        if (item.path.find(pattern) != std::string::npos) {
-                            pathOk = true;
+            if (normalizedReq.pathsOnly) {
+                std::vector<std::string> filteredPaths;
+                filteredPaths.reserve(resp.paths.size());
+                for (const auto& path : resp.paths) {
+                    for (const auto& pattern : patterns) {
+                        if (matchesPattern(path, pattern)) {
+                            filteredPaths.push_back(path);
                             break;
                         }
                     }
                 }
-                if (pathOk) {
-                    filtered.push_back(item);
+                resp.paths = std::move(filteredPaths);
+                resp.total = resp.paths.size();
+            } else {
+                std::vector<SearchItem> filtered;
+                filtered.reserve(resp.results.size());
+                for (const auto& item : resp.results) {
+                    // Match ANY pattern (OR logic)
+                    for (const auto& pattern : patterns) {
+                        if (matchesPattern(item.path, pattern)) {
+                            filtered.push_back(item);
+                            break;
+                        }
+                    }
                 }
+                resp.results = std::move(filtered);
+                resp.total = resp.results.size();
             }
-            resp.results = std::move(filtered);
-            resp.total = resp.results.size();
             result = Result<SearchResponse>(std::move(resp));
         }
 

@@ -34,8 +34,8 @@ void appendCommonDocumentFilters(const DocumentQueryOptions& options, bool joinF
         auto derived = computePathDerivedValues(*options.exactPath);
         const bool pathsDiffer = derived.normalizedPath != *options.exactPath;
         if (hasPathIndexing) {
-            std::string clause = "(" + qcol(flavor, "path_hash") + " = ? OR " +
-                                 qcol(flavor, "file_path") + " = ?";
+            std::string clause =
+                "(" + qcol(flavor, "path_hash") + " = ? OR " + qcol(flavor, "file_path") + " = ?";
             addTextParam(params, derived.pathHash);
             addTextParam(params, derived.normalizedPath);
             if (pathsDiffer) {
@@ -248,12 +248,12 @@ void appendCommonDocumentFilters(const DocumentQueryOptions& options, bool joinF
     }
 
     for (const auto& tag : options.tags) {
-        conditions.emplace_back(
-            "EXISTS (SELECT 1 FROM metadata " + std::string(flavor.tagMetadataAlias) +
-            " WHERE " + std::string(flavor.tagMetadataAlias) + ".document_id = " +
-            std::string(flavor.outerDocumentIdExpr) + " AND " +
-            std::string(flavor.tagMetadataAlias) + ".key = ? AND " +
-            std::string(flavor.tagMetadataAlias) + ".value = ?)");
+        conditions.emplace_back("EXISTS (SELECT 1 FROM metadata " +
+                                std::string(flavor.tagMetadataAlias) + " WHERE " +
+                                std::string(flavor.tagMetadataAlias) +
+                                ".document_id = " + std::string(flavor.outerDocumentIdExpr) +
+                                " AND " + std::string(flavor.tagMetadataAlias) + ".key = ? AND " +
+                                std::string(flavor.tagMetadataAlias) + ".value = ?)");
         addTextParam(params, std::string("tag:") + tag);
         addTextParam(params, tag);
     }

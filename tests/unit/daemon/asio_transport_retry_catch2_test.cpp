@@ -67,10 +67,8 @@ std::vector<uint8_t> readFrame(boost::asio::local::stream_protocol::socket& sock
     std::memcpy(frame.data(), &netHeader, sizeof(netHeader));
 
     if (header.payload_size > 0) {
-        boost::asio::read(sock,
-                          boost::asio::buffer(frame.data() + sizeof(netHeader),
-                                              header.payload_size),
-                          ec);
+        boost::asio::read(
+            sock, boost::asio::buffer(frame.data() + sizeof(netHeader), header.payload_size), ec);
         if (ec) {
             throw std::runtime_error("read payload failed: " + ec.message());
         }
@@ -105,7 +103,8 @@ void writeStatusResponse(boost::asio::local::stream_protocol::socket& sock, uint
 
 } // namespace
 
-TEST_CASE("AsioTransportAdapter retries unary request after EOF", "[daemon][transport][unit][ipc]") {
+TEST_CASE("AsioTransportAdapter retries unary request after EOF",
+          "[daemon][transport][unit][ipc]") {
 #ifdef _WIN32
     SKIP("Unix domain socket tests skipped on Windows");
 #endif

@@ -504,5 +504,4 @@ bool includeSearchSnippets() {
     return enabled;
 }
 
-
 } // namespace yams::metadata
