@@ -319,6 +319,8 @@ TEST_F(GrepServiceExpectationsIT, LiteralVsRegexWordBoundaries) {
     auto* sm = daemon_->getServiceManager();
     auto ctx = sm->getAppContext();
     auto grepSvc = yams::app::services::makeGrepService(ctx);
+    auto searchSvc = yams::app::services::makeSearchService(ctx);
+    (void)searchSvc->lightIndexForHash(add.value().hash);
 
     // Literal: match parentheses without regex semantics
     {
@@ -459,6 +461,8 @@ TEST_F(GrepServiceExpectationsIT, InvertPathsOnly) {
     auto* sm = daemon_->getServiceManager();
     auto ctx = sm->getAppContext();
     auto grepSvc = yams::app::services::makeGrepService(ctx);
+    auto searchSvc = yams::app::services::makeSearchService(ctx);
+    (void)searchSvc->lightIndexForHash(add.value().hash);
 
     yams::app::services::GrepRequest rq;
     rq.pattern = "zzz"; // not present
@@ -504,6 +508,8 @@ TEST_F(GrepServiceExpectationsIT, UnicodeLiteralAndIgnoreCaseBestEffort) {
     auto* sm = daemon_->getServiceManager();
     auto ctx = sm->getAppContext();
     auto grepSvc = yams::app::services::makeGrepService(ctx);
+    auto searchSvc = yams::app::services::makeSearchService(ctx);
+    (void)searchSvc->lightIndexForHash(add.value().hash);
 
     // Literal Unicode token should be discoverable
     {

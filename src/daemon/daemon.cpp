@@ -349,6 +349,13 @@ Result<void> YamsDaemon::start() {
 
     if (auto result = socketServer_->start(); !result) {
         running_ = false;
+        if (socketServer_) {
+            try {
+                (void)socketServer_->stop();
+            } catch (...) {
+            }
+            socketServer_.reset();
+        }
         if (ioCoordinator_) {
             try {
                 ioCoordinator_->stop();
@@ -389,6 +396,7 @@ Result<void> YamsDaemon::start() {
             }
         } catch (...) {
         }
+        socketServer_.reset();
         if (ioCoordinator_) {
             try {
                 ioCoordinator_->stop();
@@ -819,6 +827,9 @@ Result<void> YamsDaemon::stop() {
         if (!stopResult) {
             spdlog::warn("Socket server stop returned error: {}", stopResult.error().message);
         }
+        // Destroy acceptors/sockets while IOCoordinator is still alive to avoid
+        // boost::asio service teardown reading freed io_context memory.
+        socketServer_.reset();
         state_.readiness.ipcServerReady = false;
     }
 
@@ -858,12 +869,6 @@ Result<void> YamsDaemon::stop() {
     // RepairService is now owned by ServiceManager; stopped during its Phase 6.0.5
 
     // Metrics already stopped earlier (before ServiceManager)
-
-    if (socketServer_) {
-        spdlog::debug("Resetting socket server...");
-        socketServer_.reset();
-        spdlog::debug("Socket server reset");
-    }
 
     if (lifecycleManager_) {
         lifecycleManager_->shutdown();

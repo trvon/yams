@@ -292,11 +292,12 @@ Result<void> SocketServer::start() {
 
 Result<void> SocketServer::stop() {
     try {
-        if (!running_.exchange(false)) {
-            return Error{ErrorCode::InvalidState, "Socket server not running"};
-        }
+        // Always attempt cleanup even when not marked running. This keeps partial
+        // startup failures from leaking acceptors bound to an io_context that may
+        // be destroyed during daemon teardown.
+        const bool wasRunning = running_.exchange(false);
 
-        spdlog::info("Stopping socket server");
+        spdlog::info("Stopping socket server{}", wasRunning ? "" : " (cleanup-only)");
         stopping_.store(true, std::memory_order_relaxed);
 
         // Request stop on all active connections via stop_source
