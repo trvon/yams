@@ -38,6 +38,7 @@
 #include <fstream>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace yams::daemon {
 
@@ -623,6 +624,14 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
         size_t offset = 0;
         size_t totalEnqueued = 0;
 
+        // Preload all FTS5-indexed rowids once for O(1) lookups in the scan loop.
+        std::unordered_set<int64_t> ftsRowIds;
+        {
+            auto ftsRes = meta->getFts5IndexedRowIdSet();
+            if (ftsRes)
+                ftsRowIds = std::move(ftsRes.value());
+        }
+
         while (running_.load(std::memory_order_relaxed)) {
             metadata::DocumentQueryOptions opts;
             opts.limit = static_cast<int>(batchSize);
@@ -649,10 +658,16 @@ boost::asio::awaitable<void> RepairService::spawnInitialScan() {
                         auto hasEmbedRes = meta->hasDocumentEmbeddingByHash(d.sha256Hash);
                         missingEmb = !hasEmbedRes || !hasEmbedRes.value();
                     }
-                    const bool missingFts =
+                    bool missingFts =
                         (!d.contentExtracted) &&
                         (d.extractionStatus != yams::metadata::ExtractionStatus::Skipped) &&
                         (d.extractionStatus != yams::metadata::ExtractionStatus::Success);
+                    // Also detect successful extraction with missing FTS5 entry.
+                    if (!missingFts &&
+                        d.extractionStatus == yams::metadata::ExtractionStatus::Success &&
+                        ftsRowIds.count(d.id) == 0) {
+                        missingFts = true;
+                    }
 
                     if (missingEmb || missingFts) {
                         if (pendingSet_.find(d.sha256Hash) == pendingSet_.end()) {
@@ -837,6 +852,13 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
                     if (canExtractDocument(d.mimeType, d.fileExtension, customExtractors, content,
                                            hash))
                         result.missingFts5.push_back(hash);
+                } else {
+                    // Extraction succeeded — verify FTS5 entry actually exists.
+                    // Small batch (per-hash), so per-document lookup is fine.
+                    auto ftsRes = meta->hasFtsEntry(d.id);
+                    if (ftsRes && !ftsRes.value()) {
+                        result.missingFts5.push_back(hash);
+                    }
                 }
             }
         }
@@ -932,6 +954,7 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
     bool doFts5 = request.repairFts5 || request.repairAll;
     bool doEmbeddings = request.repairEmbeddings || request.repairAll;
     bool doStuckDocs = request.repairStuckDocs || request.repairAll;
+    bool doGraph = request.repairGraph || request.repairAll;
     bool doOptimize = request.optimizeDb || request.repairAll;
 
     // Phase 0: Stuck document recovery
@@ -958,6 +981,10 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
     if (doBlockRefs)
         runOp("block_refs",
               [&] { return repairBlockReferences(request.dryRun, request.verbose, progress); });
+
+    // Phase 2.5: Knowledge graph repair
+    if (doGraph)
+        runOp("graph", [&] { return repairKnowledgeGraph(request, progress); });
 
     // Phase 3: Search index repair
     if (doFts5)
@@ -1431,6 +1458,437 @@ RepairOperationResult RepairService::rebuildPathTree(bool dryRun, bool verbose,
     return result;
 }
 
+RepairOperationResult RepairService::repairKnowledgeGraph(const RepairRequest& req,
+                                                          ProgressFn progress) {
+    RepairOperationResult result;
+    result.operation = "graph";
+
+    auto graphComponent = services_ ? services_->getGraphComponent() : nullptr;
+    auto kgStore = services_ ? services_->getKgStore() : nullptr;
+    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    if (!graphComponent || !kgStore || !meta) {
+        result.message = "Knowledge graph components not available";
+        return result;
+    }
+
+    auto repairRes = graphComponent->repairGraph(req.dryRun);
+    if (!repairRes) {
+        result.failed = 1;
+        result.message = "Graph repair failed: " + repairRes.error().message;
+        return result;
+    }
+
+    const auto& stats = repairRes.value();
+    result.processed += stats.nodesCreated + stats.nodesUpdated + stats.edgesCreated;
+    result.succeeded += stats.nodesCreated + stats.nodesUpdated + stats.edgesCreated;
+    result.failed += stats.errors;
+    for (const auto& issue : stats.issues) {
+        spdlog::warn("[RepairService] graph repair issue: {}", issue);
+    }
+
+    auto pathMigration = repairLegacyPathNodesInPlace(req.dryRun, req.verbose, progress);
+    result.processed += pathMigration.nodesScanned;
+    result.succeeded += pathMigration.nodesMigrated + pathMigration.edgesRewired;
+    result.skipped += pathMigration.skipped;
+    result.failed += pathMigration.errors;
+    for (const auto& issue : pathMigration.issues) {
+        spdlog::warn("[RepairService] graph path migration issue: {}", issue);
+    }
+
+    auto cleanup = cleanOrphanedKgEntries(req.dryRun, req.verbose, progress);
+    result.processed += cleanup.nodesScanned;
+    result.succeeded += cleanup.nodesDeleted + cleanup.edgesDeleted + cleanup.docEntitiesDeleted;
+    result.skipped += cleanup.skipped;
+    result.failed += cleanup.errors;
+    for (const auto& issue : cleanup.issues) {
+        spdlog::warn("[RepairService] graph cleanup issue: {}", issue);
+    }
+
+    std::string message = "Rebuilt graph nodes/edges (nodes=" + std::to_string(stats.nodesCreated) +
+                          ", edges=" + std::to_string(stats.edgesCreated) + ")";
+    if (pathMigration.nodesMigrated > 0 || pathMigration.edgesRewired > 0) {
+        message +=
+            "; migrated legacy path nodes (nodes=" + std::to_string(pathMigration.nodesMigrated) +
+            ", rewired_edges=" + std::to_string(pathMigration.edgesRewired) + ")";
+    }
+    if (cleanup.nodesDeleted > 0 || cleanup.edgesDeleted > 0 || cleanup.docEntitiesDeleted > 0) {
+        message += "; cleaned orphans (nodes=" + std::to_string(cleanup.nodesDeleted) +
+                   ", edges=" + std::to_string(cleanup.edgesDeleted) +
+                   ", doc_entities=" + std::to_string(cleanup.docEntitiesDeleted) + ")";
+    }
+    if (req.dryRun) {
+        message += " (dry-run: changes were not committed)";
+    }
+    result.message = std::move(message);
+    return result;
+}
+
+RepairService::PathNodeMigrationStats
+RepairService::repairLegacyPathNodesInPlace(bool dryRun, bool verbose, ProgressFn progress) {
+    (void)verbose;
+
+    PathNodeMigrationStats stats;
+    auto kgStore = services_ ? services_->getKgStore() : nullptr;
+    if (!kgStore) {
+        stats.errors = 1;
+        stats.issues.push_back("Knowledge graph store unavailable");
+        return stats;
+    }
+
+    auto emitProgress = [&](const std::string& message) {
+        if (!progress)
+            return;
+        RepairEvent ev;
+        ev.phase = "repairing";
+        ev.operation = "graph";
+        ev.processed = stats.nodesScanned;
+        ev.succeeded = stats.nodesMigrated + stats.edgesRewired;
+        ev.failed = stats.errors;
+        ev.skipped = stats.skipped;
+        ev.message = message;
+        progress(ev);
+    };
+
+    auto fetchAllEdges = [&](std::int64_t nodeId,
+                             bool outgoing) -> Result<std::vector<metadata::KGEdge>> {
+        constexpr std::size_t kPage = 1000;
+        std::size_t offset = 0;
+        std::vector<metadata::KGEdge> allEdges;
+
+        while (true) {
+            Result<std::vector<metadata::KGEdge>> edgesRes =
+                outgoing ? kgStore->getEdgesFrom(nodeId, std::nullopt, kPage, offset)
+                         : kgStore->getEdgesTo(nodeId, std::nullopt, kPage, offset);
+
+            if (!edgesRes) {
+                return edgesRes.error();
+            }
+
+            auto edges = std::move(edgesRes.value());
+            if (edges.empty()) {
+                break;
+            }
+
+            allEdges.insert(allEdges.end(), edges.begin(), edges.end());
+            if (edges.size() < kPage) {
+                break;
+            }
+            offset += edges.size();
+        }
+
+        return allEdges;
+    };
+
+    auto migrateType = [&](std::string_view type, std::string_view oldPrefix,
+                           std::string_view newPrefix) {
+        constexpr std::size_t kBatchSize = 300;
+        std::size_t offset = 0;
+
+        while (true) {
+            auto nodesRes = kgStore->findNodesByType(type, kBatchSize, offset);
+            if (!nodesRes) {
+                ++stats.errors;
+                stats.issues.push_back("findNodesByType(" + std::string(type) +
+                                       ") failed: " + nodesRes.error().message);
+                break;
+            }
+
+            const auto& nodes = nodesRes.value();
+            if (nodes.empty()) {
+                break;
+            }
+
+            std::size_t migratedInBatch = 0;
+            for (const auto& node : nodes) {
+                ++stats.nodesScanned;
+                if (node.nodeKey.compare(0, oldPrefix.size(), oldPrefix) != 0) {
+                    continue;
+                }
+
+                const std::string suffix = node.nodeKey.substr(oldPrefix.size());
+                if (suffix.empty()) {
+                    ++stats.skipped;
+                    continue;
+                }
+
+                const std::string newNodeKey = std::string(newPrefix) + suffix;
+                if (newNodeKey == node.nodeKey) {
+                    ++stats.skipped;
+                    continue;
+                }
+
+                std::optional<std::int64_t> newNodeId;
+                auto existingNew = kgStore->getNodeByKey(newNodeKey);
+                if (!existingNew) {
+                    ++stats.errors;
+                    stats.issues.push_back("getNodeByKey(" + newNodeKey +
+                                           ") failed: " + existingNew.error().message);
+                    continue;
+                }
+
+                if (existingNew.value().has_value()) {
+                    newNodeId = existingNew.value()->id;
+                } else if (!dryRun) {
+                    metadata::KGNode migratedNode;
+                    migratedNode.nodeKey = newNodeKey;
+                    migratedNode.label = node.label;
+                    migratedNode.type = node.type;
+                    migratedNode.properties = node.properties;
+                    auto upsertRes = kgStore->upsertNode(migratedNode);
+                    if (!upsertRes) {
+                        ++stats.errors;
+                        stats.issues.push_back("upsertNode(" + newNodeKey +
+                                               ") failed: " + upsertRes.error().message);
+                        continue;
+                    }
+                    newNodeId = upsertRes.value();
+                }
+
+                if (dryRun) {
+                    ++stats.nodesMigrated;
+                    continue;
+                }
+
+                auto outEdgesRes = fetchAllEdges(node.id, true);
+                if (!outEdgesRes) {
+                    ++stats.errors;
+                    stats.issues.push_back("getEdgesFrom failed for " + node.nodeKey + ": " +
+                                           outEdgesRes.error().message);
+                    continue;
+                }
+                auto inEdgesRes = fetchAllEdges(node.id, false);
+                if (!inEdgesRes) {
+                    ++stats.errors;
+                    stats.issues.push_back("getEdgesTo failed for " + node.nodeKey + ": " +
+                                           inEdgesRes.error().message);
+                    continue;
+                }
+
+                std::vector<metadata::KGEdge> rewiredEdges;
+                rewiredEdges.reserve(outEdgesRes.value().size() + inEdgesRes.value().size());
+                std::unordered_set<std::int64_t> seenEdgeIds;
+
+                auto appendRewired = [&](const metadata::KGEdge& edge) {
+                    if (edge.id > 0 && !seenEdgeIds.insert(edge.id).second) {
+                        return;
+                    }
+
+                    metadata::KGEdge rewired = edge;
+                    if (rewired.srcNodeId == node.id) {
+                        rewired.srcNodeId = *newNodeId;
+                    }
+                    if (rewired.dstNodeId == node.id) {
+                        rewired.dstNodeId = *newNodeId;
+                    }
+
+                    if (rewired.srcNodeId == node.id || rewired.dstNodeId == node.id) {
+                        return;
+                    }
+                    rewiredEdges.push_back(std::move(rewired));
+                };
+
+                for (const auto& edge : outEdgesRes.value()) {
+                    appendRewired(edge);
+                }
+                for (const auto& edge : inEdgesRes.value()) {
+                    appendRewired(edge);
+                }
+
+                if (!rewiredEdges.empty()) {
+                    auto addRes = kgStore->addEdgesUnique(rewiredEdges);
+                    if (!addRes) {
+                        ++stats.errors;
+                        stats.issues.push_back("addEdgesUnique failed for migrated node " +
+                                               node.nodeKey + ": " + addRes.error().message);
+                        continue;
+                    }
+                    stats.edgesRewired += rewiredEdges.size();
+                }
+
+                auto deleteRes = kgStore->deleteNodeById(node.id);
+                if (!deleteRes) {
+                    ++stats.errors;
+                    stats.issues.push_back("deleteNodeById failed for " + node.nodeKey + ": " +
+                                           deleteRes.error().message);
+                    continue;
+                }
+
+                ++stats.nodesMigrated;
+                ++migratedInBatch;
+
+                if (stats.nodesScanned % 200 == 0) {
+                    emitProgress(
+                        "Migrated legacy path nodes=" + std::to_string(stats.nodesMigrated) +
+                        ", rewired_edges=" + std::to_string(stats.edgesRewired));
+                }
+            }
+
+            if (nodes.size() < kBatchSize) {
+                break;
+            }
+
+            if (!dryRun && migratedInBatch > 0) {
+                if (offset >= migratedInBatch) {
+                    offset -= migratedInBatch;
+                } else {
+                    offset = 0;
+                }
+            }
+            offset += nodes.size();
+        }
+    };
+
+    migrateType("file", "file:", "path:file:");
+    migrateType("directory", "dir:", "path:dir:");
+
+    if (stats.nodesMigrated > 0) {
+        emitProgress("Migrated " + std::to_string(stats.nodesMigrated) +
+                     " legacy path nodes in-place");
+    }
+
+    return stats;
+}
+
+RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun, bool verbose,
+                                                                    ProgressFn progress) {
+    (void)verbose;
+    KgCleanupStats stats;
+    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
+    auto kgStore = services_ ? services_->getKgStore() : nullptr;
+    if (!meta || !kgStore) {
+        stats.errors = 1;
+        stats.issues.push_back("Metadata or KG store unavailable");
+        return stats;
+    }
+
+    auto emitProgress = [&](const std::string& message) {
+        if (!progress)
+            return;
+        RepairEvent ev;
+        ev.phase = "repairing";
+        ev.operation = "graph";
+        ev.processed = stats.nodesScanned;
+        ev.succeeded = stats.nodesDeleted + stats.edgesDeleted + stats.docEntitiesDeleted;
+        ev.failed = stats.errors;
+        ev.skipped = stats.skipped;
+        ev.message = message;
+        progress(ev);
+    };
+
+    auto scanType = [&](const std::string& type, const std::string& prefix, bool deleteByHash) {
+        constexpr std::size_t kBatchSize = 500;
+        std::size_t offset = 0;
+        while (true) {
+            auto nodesRes = kgStore->findNodesByType(type, kBatchSize, offset);
+            if (!nodesRes) {
+                ++stats.errors;
+                stats.issues.push_back("findNodesByType(" + type +
+                                       ") failed: " + nodesRes.error().message);
+                break;
+            }
+
+            const auto& nodes = nodesRes.value();
+            if (nodes.empty())
+                break;
+
+            std::size_t deletedNodesInBatch = 0;
+            for (const auto& node : nodes) {
+                ++stats.nodesScanned;
+                if (node.nodeKey.compare(0, prefix.size(), prefix) != 0)
+                    continue;
+
+                std::string hash = node.nodeKey.substr(prefix.size());
+                if (hash.empty())
+                    continue;
+
+                auto docRes = meta->getDocumentByHash(hash);
+                if (!docRes) {
+                    ++stats.errors;
+                    stats.issues.push_back("getDocumentByHash failed for " + hash + ": " +
+                                           docRes.error().message);
+                    continue;
+                }
+                if (!docRes.value().has_value()) {
+                    ++stats.orphanNodes;
+                    if (dryRun) {
+                        ++stats.skipped;
+                        continue;
+                    }
+                    if (deleteByHash) {
+                        auto delRes = kgStore->deleteNodesForDocumentHash(hash);
+                        if (!delRes) {
+                            ++stats.errors;
+                            stats.issues.push_back("deleteNodesForDocumentHash failed for " + hash +
+                                                   ": " + delRes.error().message);
+                            continue;
+                        }
+                        stats.nodesDeleted += static_cast<uint64_t>(delRes.value());
+                        ++deletedNodesInBatch;
+                    } else {
+                        auto delRes = kgStore->deleteNodeById(node.id);
+                        if (!delRes) {
+                            ++stats.errors;
+                            stats.issues.push_back("deleteNodeById failed for " + node.nodeKey +
+                                                   ": " + delRes.error().message);
+                            continue;
+                        }
+                        ++stats.nodesDeleted;
+                        ++deletedNodesInBatch;
+                    }
+                }
+
+                if (stats.nodesScanned % 200 == 0) {
+                    emitProgress("Scanned " + std::to_string(stats.nodesScanned) +
+                                 " KG nodes (orphans=" + std::to_string(stats.orphanNodes) + ")");
+                }
+            }
+
+            if (nodes.size() < kBatchSize)
+                break;
+
+            if (!dryRun && deletedNodesInBatch > 0) {
+                if (offset >= deletedNodesInBatch) {
+                    offset -= deletedNodesInBatch;
+                } else {
+                    offset = 0;
+                }
+            }
+            offset += nodes.size();
+        }
+    };
+
+    scanType("document", "doc:", true);
+    scanType("blob", "blob:", false);
+
+    if (!dryRun) {
+        auto edgeRes = kgStore->deleteOrphanedEdges();
+        if (!edgeRes) {
+            ++stats.errors;
+            stats.issues.push_back("deleteOrphanedEdges failed: " + edgeRes.error().message);
+        } else {
+            stats.edgesDeleted = static_cast<uint64_t>(edgeRes.value());
+        }
+
+        auto entityRes = kgStore->deleteOrphanedDocEntities();
+        if (!entityRes) {
+            ++stats.errors;
+            stats.issues.push_back("deleteOrphanedDocEntities failed: " +
+                                   entityRes.error().message);
+        } else {
+            stats.docEntitiesDeleted = static_cast<uint64_t>(entityRes.value());
+        }
+    } else {
+        emitProgress("Dry-run: skipped orphan edge/doc_entities cleanup");
+    }
+
+    if (stats.edgesDeleted > 0 || stats.docEntitiesDeleted > 0) {
+        emitProgress("Cleaned orphan edges=" + std::to_string(stats.edgesDeleted) +
+                     ", stale doc_entities=" + std::to_string(stats.docEntitiesDeleted));
+    }
+
+    return stats;
+}
+
 RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbose,
                                                          ProgressFn progress) {
     RepairOperationResult result;
@@ -1674,7 +2132,7 @@ RepairOperationResult RepairService::repairBlockReferences(bool dryRun, bool ver
 }
 
 RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
-                                                       ProgressFn progress) {
+                                                      ProgressFn progress) {
     RepairOperationResult result;
     result.operation = "fts5";
 
@@ -1709,6 +2167,15 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
     auto customExtractors = services_
                                 ? services_->getContentExtractors()
                                 : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
+
+    // Pre-load all FTS5 rowids so the incremental skip check below is O(1)
+    // per document instead of one SQL round-trip each.
+    std::unordered_set<int64_t> ftsRowIds;
+    if (!force) {
+        auto ftsResult = meta->getFts5IndexedRowIdSet();
+        if (ftsResult)
+            ftsRowIds = std::move(ftsResult.value());
+    }
 
     result.processed = docs.value().size();
     const size_t totalDocs = docs.value().size();
@@ -1772,14 +2239,18 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
         }
 
         // Incremental mode: skip documents that already have successful extraction
-        // with a valid content row. The ghost-success loop above already reset any
-        // documents that claim Success but lack content, so remaining Success docs
-        // are genuinely indexed. Use --force to unconditionally rebuild everything.
+        // with a valid content row AND a matching FTS5 index entry. The ghost-success
+        // loop above already reset any documents that claim Success but lack content,
+        // so remaining Success docs have content — but the FTS5 index may still be
+        // missing (e.g. after corruption or interrupted rebuild).
+        // Use --force to unconditionally rebuild everything.
         if (!force && d.extractionStatus == metadata::ExtractionStatus::Success) {
             auto contentRes = meta->getContent(d.id);
             if (contentRes && contentRes.value().has_value()) {
-                result.skipped++;
-                continue;
+                if (ftsRowIds.count(d.id)) {
+                    result.skipped++;
+                    continue;
+                }
             }
         }
 

@@ -2,6 +2,8 @@
 // Copyright (c) 2025 YAMS Contributors
 
 #include <spdlog/spdlog.h>
+#include <algorithm>
+#include <cctype>
 #include <unordered_set>
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/daemon/components/dispatch_response.hpp>
@@ -10,6 +12,56 @@
 #include <yams/metadata/knowledge_graph_store.h>
 
 namespace yams::daemon {
+
+namespace {
+
+std::string canonicalizeRelationName(std::string value) {
+    auto trimLeft = std::find_if_not(value.begin(), value.end(),
+                                     [](unsigned char c) { return std::isspace(c) != 0; });
+    auto trimRight = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) {
+                         return std::isspace(c) != 0;
+                     }).base();
+    if (trimLeft >= trimRight) {
+        return {};
+    }
+
+    std::string normalized(trimLeft, trimRight);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::replace(normalized.begin(), normalized.end(), '-', '_');
+    std::replace(normalized.begin(), normalized.end(), ' ', '_');
+
+    if (normalized == "call")
+        return "calls";
+    if (normalized == "include")
+        return "includes";
+    if (normalized == "inherit")
+        return "inherits";
+    if (normalized == "implement")
+        return "implements";
+    if (normalized == "reference")
+        return "references";
+    if (normalized == "rename_to")
+        return "renamed_to";
+    if (normalized == "rename_from")
+        return "renamed_from";
+
+    return normalized;
+}
+
+std::vector<std::string> canonicalizeRelationFilters(const std::vector<std::string>& input) {
+    std::vector<std::string> out;
+    out.reserve(input.size());
+    for (const auto& relation : input) {
+        auto canonical = canonicalizeRelationName(relation);
+        if (!canonical.empty()) {
+            out.push_back(std::move(canonical));
+        }
+    }
+    return out;
+}
+
+} // namespace
 
 using namespace yams::app::services;
 using namespace yams::metadata;
@@ -95,7 +147,7 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
     svcReq.hydrateFully = req.includeNodeProperties;
     svcReq.includeEdgeProperties = req.includeEdgeProperties;
     svcReq.reverseTraversal = req.reverseTraversal;
-    svcReq.relationNames = req.relationFilters;
+    svcReq.relationNames = canonicalizeRelationFilters(req.relationFilters);
 
     auto result = graphService->query(svcReq);
     if (!result) {
@@ -163,7 +215,8 @@ boost::asio::awaitable<Response>
 RequestDispatcher::handleGraphQueryIsolatedMode(const GraphQueryRequest& req,
                                                 KnowledgeGraphStore* kgStore) {
     std::string nodeType = req.nodeType.empty() ? "function" : req.nodeType;
-    std::string relation = req.isolatedRelation.empty() ? "calls" : req.isolatedRelation;
+    std::string relation =
+        req.isolatedRelation.empty() ? "calls" : canonicalizeRelationName(req.isolatedRelation);
 
     spdlog::debug("GraphQuery isolatedMode: type='{}', relation='{}', limit={}", nodeType, relation,
                   req.limit);

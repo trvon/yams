@@ -257,6 +257,11 @@ TEST_CASE("Socket path resolution: Priority ordering", "[daemon][components][soc
 
 #ifndef _WIN32
     SECTION("XDG_RUNTIME_DIR used when env var not set") {
+        if (::geteuid() == 0) {
+            // Root runs default to /var/run per resolve_socket_path().
+            // This test specifically targets non-root behavior.
+            SKIP("XDG_RUNTIME_DIR precedence test is for non-root users");
+        }
         unsetenv("YAMS_DAEMON_SOCKET");
 
         auto xdgDir = tempDir / "runtime";

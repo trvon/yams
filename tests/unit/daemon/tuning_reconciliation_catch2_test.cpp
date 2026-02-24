@@ -610,6 +610,47 @@ TEST_CASE("Queue-pressure rebalance shifts capacity to backlogged stages",
     }
 }
 
+TEST_CASE("Post-ingest scale test mode isolates zero-target policy",
+          "[daemon][tune][reconciliation][scale-mode][catch2]") {
+    class ScaleModeGuard {
+    public:
+        ScaleModeGuard() : previous_(TuningManager::testing_postIngestScaleTestMode()) {}
+        ~ScaleModeGuard() { TuningManager::testing_setPostIngestScaleTestMode(previous_); }
+
+    private:
+        TuningManager::PostIngestScaleTestMode previous_;
+    } guard;
+
+    SECTION("Normal mode allows zero only when daemon is idle and not busy") {
+        TuningManager::testing_setPostIngestScaleTestMode(
+            TuningManager::PostIngestScaleTestMode::Normal);
+
+        CHECK(TuningManager::testing_shouldAllowZeroPostIngestTargets(true, false));
+        CHECK_FALSE(TuningManager::testing_shouldAllowZeroPostIngestTargets(false, false));
+        CHECK_FALSE(TuningManager::testing_shouldAllowZeroPostIngestTargets(true, true));
+        CHECK_FALSE(TuningManager::testing_shouldAllowZeroPostIngestTargets(false, true));
+    }
+
+    SECTION("ForceBusy mode disables zero-target scale-down") {
+        TuningManager::testing_setPostIngestScaleTestMode(
+            TuningManager::PostIngestScaleTestMode::ForceBusy);
+
+        CHECK_FALSE(TuningManager::testing_shouldAllowZeroPostIngestTargets(true, false));
+        CHECK_FALSE(TuningManager::testing_shouldAllowZeroPostIngestTargets(false, false));
+        CHECK_FALSE(TuningManager::testing_shouldAllowZeroPostIngestTargets(true, true));
+    }
+
+    SECTION("ForceIdle mode enables zero-target scale-down") {
+        TuningManager::testing_setPostIngestScaleTestMode(
+            TuningManager::PostIngestScaleTestMode::ForceIdle);
+
+        CHECK(TuningManager::testing_shouldAllowZeroPostIngestTargets(true, false));
+        CHECK(TuningManager::testing_shouldAllowZeroPostIngestTargets(false, false));
+        CHECK(TuningManager::testing_shouldAllowZeroPostIngestTargets(true, true));
+        CHECK(TuningManager::testing_shouldAllowZeroPostIngestTargets(false, true));
+    }
+}
+
 // =============================================================================
 // Group E: Deterministic tuning simulation with GradientLimiter
 // =============================================================================

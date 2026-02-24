@@ -1,7 +1,4 @@
 #if !defined(YAMS_WASI)
-#include <boost/asio/local/stream_protocol.hpp>
-#endif
-#if !defined(YAMS_WASI)
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
@@ -38,11 +35,13 @@
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/migration.h>
-#include <yams/metadata/query_helpers.h>
 #endif
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#if !defined(YAMS_WASI)
+#include <boost/asio/local/stream_protocol.hpp>
+#endif
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/system_executor.hpp>
 #include <boost/asio/this_coro.hpp>
@@ -72,6 +71,7 @@
 #include <random>
 #include <regex>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 // Platform-specific includes for non-blocking I/O
@@ -97,6 +97,7 @@ inline int setenv(const char* name, const char* value, int overwrite) {
 #endif
 
 namespace yams::mcp {
+
 namespace {
 bool isInteractiveStream(FILE* stream) noexcept {
     if (!stream) {
@@ -181,9 +182,6 @@ Result<void> pooled_execute(Manager& manager, const TRequest& req,
 
 } // namespace
 
-thread_local std::string MCPServer::tlsSessionId_;
-thread_local nlohmann::json MCPServer::tlsProgressToken_ = nullptr;
-
 // In-band logging helper (level + message variant) - YAMS extension, not standard MCP
 static nlohmann::json createLogNotification(const std::string& level, const std::string& message) {
     // NOTE: This is a YAMS-specific extension. Standard MCP only supports notifications/log from
@@ -197,6 +195,15 @@ static nlohmann::json createLogNotification(const std::string& level, const std:
 
 // Unified send helper: prefers non-blocking transports and posts async sends when possible
 void MCPServer::sendResponse(const nlohmann::json& message) {
+    if (message.is_array()) {
+        for (const auto& entry : message) {
+            if (entry.is_object()) {
+                sendResponse(entry);
+            }
+        }
+        return;
+    }
+
     // Serialize once for both logging, telemetry and transport
     std::string payload;
     try {
@@ -204,6 +211,77 @@ void MCPServer::sendResponse(const nlohmann::json& message) {
     } catch (const std::exception& e) {
         spdlog::error("sendResponse: serialization failed: {}", e.what());
         return;
+    }
+
+    size_t maxPayloadBytes = 64 * 1024;
+    if (const char* env = std::getenv("YAMS_MCP_MAX_OUTPUT_BYTES")) {
+        try {
+            maxPayloadBytes = std::max<size_t>(4096, static_cast<size_t>(std::stoul(env)));
+        } catch (...) {
+            maxPayloadBytes = 64 * 1024;
+        }
+    }
+
+    if (payload.size() > maxPayloadBytes && message.is_object()) {
+        nlohmann::json adjusted = message;
+        bool shrunk = false;
+
+        try {
+            if (adjusted.contains("result") && adjusted["result"].is_object()) {
+                auto& result = adjusted["result"];
+                if (result.contains("output") && result["output"].is_string()) {
+                    const auto& output = result["output"].get_ref<const std::string&>();
+                    const size_t chunkSize = std::max<size_t>(1024, maxPayloadBytes / 4);
+                    const size_t total = (output.size() + chunkSize - 1) / chunkSize;
+
+                    for (size_t i = 0; i < total; ++i) {
+                        const size_t start = i * chunkSize;
+                        const size_t len = std::min(chunkSize, output.size() - start);
+                        nlohmann::json notif = createLogNotification(
+                            "info", "mcp output chunk " + std::to_string(i + 1) + "/" +
+                                        std::to_string(total));
+                        notif["params"]["data"]["chunk_index"] = i + 1;
+                        notif["params"]["data"]["chunk_total"] = total;
+                        notif["params"]["data"]["output_chunk"] = output.substr(start, len);
+                        try {
+                            auto chunkPayload = notif.dump();
+                            if (cachedStdioTransport_) {
+                                cachedStdioTransport_->sendFramedSerialized(chunkPayload);
+                            } else if (auto* stdio =
+                                           dynamic_cast<StdioTransport*>(transport_.get())) {
+                                cachedStdioTransport_ = stdio;
+                                stdio->sendFramedSerialized(chunkPayload);
+                            } else {
+                                enqueueOutbound(std::move(chunkPayload));
+                            }
+                        } catch (...) {
+                            break;
+                        }
+                    }
+
+                    result["output"] = "[truncated: output sent via notifications/message chunks]";
+                    result["truncated"] = true;
+                    result["chunk_count"] = total;
+                    shrunk = true;
+                }
+            }
+        } catch (...) {
+            // fall through
+        }
+
+        if (shrunk) {
+            try {
+                payload = adjusted.dump();
+            } catch (...) {
+            }
+        }
+
+        if (payload.size() > maxPayloadBytes) {
+            nlohmann::json errorResp =
+                createError(message.value("id", nlohmann::json(nullptr)), protocol::INTERNAL_ERROR,
+                            "response too large; truncated");
+            payload = errorResp.dump();
+        }
     }
 
     spdlog::debug("MCP server sending response: {}", payload);
@@ -301,337 +379,6 @@ boost::asio::awaitable<void> MCPServer::outboundDrainAsync() {
         }
     }
     co_return;
-}
-
-// Non-blocking send: enqueue message for writer thread
-void StdioTransport::sendAsync(json message) {
-    if (state_.load() != TransportState::Connected) {
-        return;
-    }
-    // Writer thread retired; fall back to immediate framed send
-    send(message);
-}
-
-// Dedicated writer thread: drains queue and writes framed messages to stdout
-void StdioTransport::writerLoop() { /* retired */ }
-
-// StdioTransport implementation
-StdioTransport::StdioTransport() {
-    // Ensure predictable stdio behavior. In tests, avoid changing global iostream
-    // configuration so that rdbuf redirection in unit tests works as expected.
-#ifndef YAMS_TESTING
-#ifdef _WIN32
-    // On Windows, keep sync_with_stdio(true) to ensure std::cin/cout stay synchronized
-    // with the underlying C stdio buffers and Windows handles. Disabling sync causes
-    // std::getline to block even when PeekNamedPipe shows data available, because
-    // the C++ stream buffer becomes disconnected from the Windows pipe state.
-    std::ios::sync_with_stdio(true);
-#else
-    std::ios::sync_with_stdio(false);
-#endif
-    std::cin.tie(nullptr);
-#endif
-
-    // Set stdin/stdout to binary mode on Windows to prevent CRLF translation
-#ifdef _WIN32
-    _setmode(_fileno(stdin), _O_BINARY);
-    _setmode(_fileno(stdout), _O_BINARY);
-    // Disable C-level buffering on stdout for Windows pipes - critical for MCP reliability.
-    // Without this, responses may be delayed in the CRT buffer causing client timeouts.
-    setvbuf(stdout, nullptr, _IONBF, 0);
-    // Also disable input buffering to ensure PeekNamedPipe state matches std::cin state
-    setvbuf(stdin, nullptr, _IONBF, 0);
-#endif
-
-    // MCP stdio transport: always use unbuffered output for immediate response delivery.
-    // On Windows pipes, buffered output can cause MCP client timeouts because responses
-    // may sit in the buffer even with explicit flush() calls. Always enable unitbuf for
-    // reliable real-time communication. stderr is also unbuffered for log visibility.
-    std::cout << std::unitbuf;
-    std::cerr << std::unitbuf;
-
-    // Configure receive timeout from environment, enforce a sane minimum
-    if (const char* env = std::getenv("YAMS_MCP_RECV_TIMEOUT_MS"); env && *env) {
-        try {
-            recvTimeoutMs_ = std::stoi(env);
-            if (recvTimeoutMs_ < 50)
-                recvTimeoutMs_ = 50;
-        } catch (...) {
-            // ignore and keep default
-        }
-    }
-    state_.store(TransportState::Connected);
-    // Writer thread retired; unified outbound path in MCPServer handles ordering
-    writerRunning_.store(false);
-}
-
-StdioTransport::~StdioTransport() {
-    state_.store(TransportState::Closing);
-    queueCv_.notify_all();
-    if (writerThread_.joinable()) {
-        try {
-            writerThread_.join();
-        } catch (...) {
-            // swallow any join exceptions
-        }
-    }
-}
-
-void StdioTransport::send(const json& message) {
-    auto currentState = state_.load();
-    if (currentState == TransportState::Connected) {
-        try {
-            std::lock_guard<std::mutex> lock(outMutex_);
-
-            sendSerialized(message.dump());
-
-        } catch (const std::exception& e) {
-            spdlog::error("StdioTransport::send exception: {}", e.what());
-        } catch (...) {
-            spdlog::error("StdioTransport::send unknown exception");
-        }
-    }
-}
-
-void StdioTransport::sendNdjson(const json& message) {
-    // For stdio transport, sendNdjson() is identical to send()
-    // Both output MCP spec-compliant NDJSON
-    send(message);
-}
-
-// Send helper for pre-serialized JSON payloads (outputs NDJSON per MCP spec)
-void StdioTransport::sendFramedSerialized(const std::string& payload) {
-    if (state_.load() != TransportState::Connected) {
-        return;
-    }
-    try {
-        std::lock_guard<std::mutex> lock(outMutex_);
-        sendSerialized(payload);
-    } catch (const std::exception& e) {
-        spdlog::error("StdioTransport::sendFramedSerialized exception: {}", e.what());
-    } catch (...) {
-        spdlog::error("StdioTransport::sendFramedSerialized unknown exception");
-    }
-}
-
-void StdioTransport::sendSerialized(const std::string& payload) {
-    // Per MCP spec: always output NDJSON (newline-delimited JSON)
-    // regardless of input framing mode. The lastFraming_ variable
-    // is only used for input parsing, not output formatting.
-    auto& out = std::cout;
-    out << payload << "\n";
-    out.flush();
-}
-
-bool StdioTransport::isInputAvailable(int timeoutMs) const {
-#if defined(_WIN32)
-    // Windows: Prefer PeekNamedPipe for pipes, fallback to console wait
-    HANDLE stdinHandle = GetStdHandle(STD_INPUT_HANDLE);
-    if (stdinHandle == INVALID_HANDLE_VALUE || stdinHandle == nullptr) {
-        return false;
-    }
-    DWORD fileType = GetFileType(stdinHandle);
-    if (fileType == FILE_TYPE_PIPE) {
-        DWORD bytesAvail = 0;
-        if (PeekNamedPipe(stdinHandle, nullptr, 0, nullptr, &bytesAvail, nullptr)) {
-            if (bytesAvail > 0)
-                return true;
-            // Simple timed wait: sleep for the timeout and check again once
-            if (timeoutMs > 0) {
-                Sleep(static_cast<DWORD>(timeoutMs));
-                bytesAvail = 0;
-                if (PeekNamedPipe(stdinHandle, nullptr, 0, nullptr, &bytesAvail, nullptr)) {
-                    return bytesAvail > 0;
-                }
-            }
-            return false;
-        }
-        // If PeekNamedPipe fails, fall back to a short sleep
-        if (timeoutMs > 0)
-            Sleep(static_cast<DWORD>(timeoutMs));
-        return false;
-    }
-    // Console input or unknown: WaitForSingleObject is acceptable
-    DWORD waitResult = WaitForSingleObject(stdinHandle, static_cast<DWORD>(timeoutMs));
-    return waitResult == WAIT_OBJECT_0;
-#elif defined(YAMS_WASI)
-    // WASI: no poll/PeekNamedPipe. Treat input availability as unknown; allow receive() to try.
-    (void)timeoutMs;
-    return true;
-#else
-    // Unix/Linux/macOS implementation using poll
-    struct pollfd fds;
-    fds.fd = STDIN_FILENO;
-    fds.events = POLLIN | POLLHUP;
-    fds.revents = 0;
-
-    int result = poll(&fds, 1, timeoutMs);
-
-    if (result == -1) {
-        if (errno == EINTR) {
-            // Signal interrupted, check shutdown
-            if (externalShutdown_ && !*externalShutdown_) {
-                return false;
-            }
-        }
-        return false;
-    } else if (result == 0) {
-        // Timeout - check shutdown
-        if (externalShutdown_ && !*externalShutdown_) {
-            return false;
-        }
-    }
-
-    // Treat POLLHUP as readable too.
-    // Some stdio clients can close stdin after writing, and C++ iostreams may still have
-    // buffered bytes to consume even if the fd no longer reports POLLIN.
-    return result > 0 && ((fds.revents & POLLIN) || (fds.revents & POLLHUP));
-#endif
-}
-
-MessageResult StdioTransport::receive() {
-    if (state_.load() != TransportState::Connected) {
-        return Error{ErrorCode::NetworkError, "Transport not connected"};
-    }
-    std::streambuf* inputBuffer = std::cin.rdbuf();
-    auto* stringBuffer = dynamic_cast<std::stringbuf*>(inputBuffer);
-    constexpr std::size_t kTestingIdleSpinLimit = 200;
-    std::size_t idleIterations = 0;
-
-    auto is_ws = [](unsigned char c) {
-        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
-    };
-
-    auto sanitizeLine = [&](std::string& line) {
-        if (!line.empty() && line.back() == '\r')
-            line.pop_back();
-
-        // Some clients may send leading whitespace (or whitespace-only keepalive lines).
-        auto firstNonWs =
-            std::find_if_not(line.begin(), line.end(), [&](unsigned char c) { return is_ws(c); });
-        if (firstNonWs == line.end()) {
-            line.clear();
-        } else if (firstNonWs != line.begin()) {
-            line.erase(line.begin(), firstNonWs);
-        }
-
-        // Tolerate occasional record separators / BOMs that may prefix JSON.
-        if (line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF &&
-            static_cast<unsigned char>(line[1]) == 0xBB &&
-            static_cast<unsigned char>(line[2]) == 0xBF) {
-            line.erase(0, 3);
-        }
-        while (!line.empty()) {
-            unsigned char c = static_cast<unsigned char>(line.front());
-            if (c == '{' || c == '[') {
-                break;
-            }
-            if (is_ws(c) || c == 0x1e || c < 0x20) {
-                line.erase(0, 1);
-                continue;
-            }
-            break;
-        }
-    };
-
-    while (state_.load() != TransportState::Closing) {
-        // MCP stdio spec: Read NDJSON (newline-delimited JSON)
-        std::string line;
-
-        if (stringBuffer) {
-            // Tests: avoid blocking forever.
-            if (stringBuffer->in_avail() <= 0) {
-                if (externalShutdown_ && !*externalShutdown_) {
-                    state_.store(TransportState::Closing);
-                    return Error{ErrorCode::NetworkError, "External shutdown requested"};
-                }
-                if (idleIterations++ >= kTestingIdleSpinLimit) {
-                    state_.store(TransportState::Disconnected);
-                    return Error{ErrorCode::NetworkError, "No stdin data available"};
-                }
-                std::this_thread::yield();
-                continue;
-            }
-            idleIterations = 0;
-
-            std::istream in(inputBuffer);
-            if (!std::getline(in, line)) {
-                recordError();
-                if (!shouldRetryAfterError()) {
-                    state_.store(TransportState::Disconnected);
-                    return Error{ErrorCode::NetworkError, "No stdin data available"};
-                }
-                std::this_thread::yield();
-                continue;
-            }
-        } else {
-            // Real stdio: keep it simple and block on getline.
-            // Using poll() here is fragile due to iostream buffering differences across platforms.
-            if (!std::getline(std::cin, line)) {
-                if (externalShutdown_ && !*externalShutdown_) {
-                    state_.store(TransportState::Closing);
-                    return Error{ErrorCode::NetworkError, "External shutdown requested"};
-                }
-
-                if (std::cin.eof()) {
-                    spdlog::info("StdioTransport: EOF on stdin; treating as client disconnect");
-                    state_.store(TransportState::Disconnected);
-                    return Error{ErrorCode::NetworkError, "EOF on stdin"};
-                }
-
-                // Transient stream failure; clear and retry.
-                std::cin.clear();
-                continue;
-            }
-        }
-
-        sanitizeLine(line);
-        if (line.empty()) {
-            continue;
-        }
-
-        spdlog::debug("StdioTransport: Read line: '{}'", line);
-
-        // NDJSON (newline-delimited JSON) - MCP stdio standard format
-        // Per MCP spec 2025-06-18: "Messages are delimited by newlines and MUST NOT
-        // contain embedded newlines. Implementations SHOULD reject messages that
-        // contain embedded newlines."
-        if (!line.empty() && (line.front() == '{' || line.front() == '[')) {
-            spdlog::debug("StdioTransport: Received NDJSON message (MCP stdio standard)");
-            auto parsed = json_utils::parse_json(line);
-            if (!parsed) {
-                spdlog::error("StdioTransport: Failed to parse JSON: {}", line);
-                recordError();
-                if (!shouldRetryAfterError())
-                    state_.store(TransportState::Error);
-                return parsed.error();
-            }
-            resetErrorCount();
-            return parsed.value();
-        }
-
-        // If the line doesn't start with '{' or '[', it's not valid NDJSON
-        spdlog::error("StdioTransport: Invalid message format (expected NDJSON): {}", line);
-        recordError();
-        if (!shouldRetryAfterError())
-            state_.store(TransportState::Error);
-        return Error{ErrorCode::InvalidData, "Invalid message format - expected NDJSON"};
-    }
-
-    return Error{ErrorCode::NetworkError, "Transport closed during receive"};
-}
-
-bool StdioTransport::shouldRetryAfterError() const noexcept {
-    constexpr size_t MAX_CONSECUTIVE_ERRORS = 5;
-    return errorCount_.load() < MAX_CONSECUTIVE_ERRORS;
-}
-
-void StdioTransport::recordError() noexcept {
-    errorCount_.fetch_add(1);
-}
-
-void StdioTransport::resetErrorCount() noexcept {
-    errorCount_.store(0);
 }
 
 // MCPServer implementation
@@ -1147,316 +894,14 @@ MessageResult MCPServer::handleRequest(const json& request) {
 
         spdlog::debug("MCP server handling method: '{}' with id: {}", method, id.dump());
 
-        // Route to appropriate handler
-        if (method == "initialize") {
-            spdlog::debug("MCP handling initialize request with params: {}", params.dump());
-            auto initResult = initialize(params);
-
-            // Diagnostic logging for empty result issues
-            spdlog::debug("MCP initialize returned: is_null={}, is_object={}, empty={}, size={}",
-                          initResult.is_null(), initResult.is_object(), initResult.empty(),
-                          initResult.size());
-
-            if (initResult.contains("_initialize_error")) {
-                spdlog::error("MCP initialize failed with error");
-                return json{{"jsonrpc", "2.0"},
-                            {"id", id},
-                            {"error",
-                             {{"code", initResult["code"]},
-                              {"message", initResult["message"]},
-                              {"data", initResult["data"]}}}};
-            }
-            spdlog::debug("MCP initialize successful, protocol version: {}",
-                          initResult.value("protocolVersion", "unknown"));
-
-            auto response = createResponse(id2, initResult);
-            spdlog::debug("MCP createResponse returned: is_null={}, is_object={}, size={}",
-                          response.is_null(), response.is_object(), response.size());
-
-            return response;
-        } else if (method == "notifications/cancelled") {
-            // MCP cancellation notification; tolerate either 'id' or 'requestId'
-            nlohmann::json cancelId;
-            if (params.contains("id")) {
-                cancelId = params["id"];
-            } else if (params.contains("requestId")) {
-                cancelId = params["requestId"];
-            } else {
-                spdlog::warn("notifications/cancelled missing id/requestId");
-                return Error{ErrorCode::InvalidArgument, "Missing id/requestId"};
-            }
-            cancelRequest(cancelId);
-            // Do not send a response for notifications
-            return Error{ErrorCode::Success, "notification"}; // notification: no response sent
-        } else if (method == "notifications/initialized") {
-            // MCP client signals readiness; no response required
-            markClientInitialized();
-            return Error{ErrorCode::Success, "notification"};
-        } else if (method == "ping") {
-            return createResponse(id2, json::object());
-        } else if (method == "shutdown") {
-            // Per LSP spec: prepare for exit but don't actually exit yet
-            // Just acknowledge the shutdown request
-            spdlog::debug("Shutdown request received, preparing for exit");
-            shutdownRequested_ = true;
-            return createResponse(id2, json::object());
-        } else if (method == "exit") {
-            // Per LSP spec: exit only after shutdown was requested
-            spdlog::debug("Exit request received");
-            if (externalShutdown_)
-                *externalShutdown_ = true;
-            running_ = false;
-            // Exit is a notification (no response expected)
-            return Error{ErrorCode::Success, "notification"};
-        } else if (method == "tools/list") {
-            recordEarlyFeatureUse();
-            return createResponse(id2, listTools());
-        } else if (method == "tools/call") {
-            recordEarlyFeatureUse();
-            const auto toolName = params.value("name", "");
-            const auto toolArgs = params.value("arguments", json::object());
-            spdlog::debug("MCP tool call: '{}' with args: {}", toolName, toolArgs.dump());
-            // Emit a coarse progress notification for visibility
-            sendProgress("tool", 0.0, std::string("calling ") + toolName);
-            json raw = callTool(toolName, toolArgs);
-
-            // If the tool returned a JSON-RPC style error object, propagate as error response
-            if (raw.is_object() && raw.contains("error")) {
-                json err = raw["error"];
-                return json{{"jsonrpc", protocol::JSONRPC_VERSION}, {"error", err}, {"id", id}};
-            }
-            // Otherwise, treat as successful tool result (typically content array)
-            sendProgress("tool", 100.0, std::string("completed ") + toolName);
-            return createResponse(id, raw);
-        } else if (method == "resources/list") {
-            return createResponse(id, listResources());
-        } else if (method == "resources/read") {
-            std::string uri = params.value("uri", "");
-            return createResponse(id, readResource(uri));
-        } else if (method == "prompts/list") {
-            return createResponse(id, listPrompts());
-        } else if (method == "prompts/get") {
-            std::string name = params.value("name", "");
-            json args = params.value("arguments", json::object());
-
-            auto textContent = [](const std::string& t) {
-                return json{{"type", "text"}, {"text", t}};
-            };
-            auto assistantMsg = [&](const std::string& t) {
-                return json{{"role", "assistant"}, {"content", textContent(t)}};
-            };
-            auto userMsg = [&](const std::string& t) {
-                return json{{"role", "user"}, {"content", textContent(t)}};
-            };
-
-            auto makeResponse = [&](std::vector<json> messages) {
-                return createResponse(id, json{{"messages", std::move(messages)}});
-            };
-
-            if (name == "search_codebase") {
-                const std::string pattern = args.value("pattern", "");
-                const std::string fileType = args.value("file_type", "");
-                std::string u =
-                    "Goal: find occurrences in the codebase and propose next steps.\n"
-                    "- Prefer tools/grep for regex/precise matches with contexts.\n"
-                    "- Prefer tools/search for fuzzy/hybrid discovery across names+content.\n"
-                    "- Respect session scoping by default (server may scope by session).\n"
-                    "- When using grep, include line numbers and filenames.\n"
-                    "- When using search, return names/paths and snippets.\n";
-                if (!pattern.empty()) {
-                    u += "\nRequested pattern: " + pattern + "\n";
-                }
-                if (!fileType.empty()) {
-                    u += "File type filter hint: " + fileType + "\n";
-                }
-                return makeResponse(
-                    {assistantMsg(
-                         "You are a code navigator that selects between grep and hybrid search."),
-                     userMsg(u)});
-            }
-
-            if (name == "summarize_document") {
-                const std::string docName = args.value("document_name", "");
-                const int maxLen = args.value("max_length", 200);
-                std::string u =
-                    "Task: summarize a single document retrieved from the knowledge store.\n"
-                    "Steps:\n"
-                    "1) Retrieve by name via tools/get (name=... latest=true) or by hash via "
-                    "tools/get.\n"
-                    "2) Produce a concise, faithful summary within " +
-                    std::to_string(maxLen) +
-                    " words.\n"
-                    "3) Include citation using the document name and/or hash.\n";
-                if (!docName.empty()) {
-                    u += "\nDocument name: " + docName + "\n";
-                }
-                return makeResponse(
-                    {assistantMsg("You are a precise summarizer. Cite sources by name/hash."),
-                     userMsg(u)});
-            }
-
-            if (name == "rag/rewrite_query") {
-                const std::string query = args.value("query", "");
-                const std::string intent = args.value("intent", "");
-                std::string u = "Rewrite the user query to optimize retrieval (hybrid search: text "
-                                "+ metadata).\n"
-                                "Guidelines:\n"
-                                "- Expand meaningful synonyms; preserve critical terms.\n"
-                                "- Add lightweight qualifiers (e.g., name:*.md, tag:pinned) only "
-                                "if clearly helpful.\n"
-                                "- Keep it concise and robust to typos.\n";
-                if (!query.empty()) {
-                    u += "\nOriginal query: " + query + "\n";
-                }
-                if (!intent.empty()) {
-                    u += "Intent hint: " + intent + "\n";
-                }
-                return makeResponse(
-                    {assistantMsg("You are a retrieval query rewriter for hybrid search."),
-                     userMsg(u)});
-            }
-
-            if (name == "rag/retrieve") {
-                const std::string query = args.value("query", "");
-                const int k = std::max(1, args.value("k", 10));
-                const std::string session = args.value("session", "");
-                std::string u =
-                    "Retrieve top-" + std::to_string(k) +
-                    " relevant items using tools/search.\n"
-                    "Requirements:\n"
-                    "- Use fuzzy=true and type=hybrid (server defaults may already do this).\n"
-                    "- Prefer session scoping if available; include name/path/hash/score/snippet.\n"
-                    "- Return a compact list suitable for follow-up fetches via tools/get "
-                    "(include_content=true).\n";
-                if (!query.empty()) {
-                    u += "\nQuery: " + query + "\n";
-                }
-                if (!session.empty()) {
-                    u += "Scope session: " + session + "\n";
-                }
-                return makeResponse(
-                    {assistantMsg(
-                         "You are a retrieval runner that returns compact, citeable candidates."),
-                     userMsg(u)});
-            }
-
-            if (name == "rag/retrieve_summarize") {
-                const std::string query = args.value("query", "");
-                const int k = std::max(1, args.value("k", 5));
-                const int maxWords = std::max(50, args.value("max_words", 250));
-                std::string u = "RAG pipeline: retrieve then summarize.\n"
-                                "Steps:\n"
-                                "1) tools/search with query (hybrid/fuzzy), top-" +
-                                std::to_string(k) +
-                                ".\n"
-                                "2) For each candidate, fetch content via tools/get "
-                                "(by hash/name, include_content=true).\n"
-                                "3) Synthesize a grounded summary in <= " +
-                                std::to_string(maxWords) +
-                                " words.\n"
-                                "4) Include inline citations like (name | hash:abcd...).\n"
-                                "5) Prefer diverse sources and de-dup near-identical results.\n";
-                if (!query.empty()) {
-                    u += "\nQuery: " + query + "\n";
-                }
-                return makeResponse(
-                    {assistantMsg(
-                         "You orchestrate retrieval and grounded summarization with citations."),
-                     userMsg(u)});
-            }
-
-            if (name == "rag/extract_citations") {
-                const std::string style = args.value("style", "inline");
-                const int k = std::max(1, args.value("k", 10));
-                std::string u =
-                    "From prior retrieval results, produce " + std::to_string(k) +
-                    " citations in style '" + style +
-                    "'.\n"
-                    "Include: name, hash (short), path (if available), and date/labels if known.\n";
-                return makeResponse(
-                    {assistantMsg("You format high-quality citations for retrieved artifacts."),
-                     userMsg(u)});
-            }
-
-            if (name == "rag/code_navigation") {
-                const std::string symbol = args.value("symbol", "");
-                const std::string lang = args.value("language", "");
-                std::string u =
-                    "Plan code navigation using grep+search:\n"
-                    "- Suggest regexes for tools/grep (e.g., function/class definitions; case "
-                    "sensitivity).\n"
-                    "- Suggest hybrid queries for tools/search (semantic context, filenames).\n"
-                    "- Respect session include patterns when unspecified.\n";
-                if (!symbol.empty()) {
-                    u += "\nTarget symbol: " + symbol + "\n";
-                }
-                if (!lang.empty()) {
-                    u += "Language hint: " + lang + "\n";
-                }
-                return makeResponse(
-                    {assistantMsg("You guide symbol discovery and code navigation."), userMsg(u)});
-            }
-
-            // File-backed prompt fallback: if name matches a file-based template, return its
-            // content
-            if (!name.empty() && !promptsDir_.empty()) {
-                auto fileFromName =
-                    [&](const std::string& n) -> std::optional<std::filesystem::path> {
-                    std::string stem = n;
-                    std::replace(stem.begin(), stem.end(), '_', '-');
-                    auto candidate = promptsDir_ / (std::string("PROMPT-") + stem + ".md");
-                    if (std::filesystem::exists(candidate))
-                        return candidate;
-                    return std::nullopt;
-                };
-                if (auto p = fileFromName(name)) {
-                    try {
-                        std::ifstream in(*p);
-                        std::stringstream buf;
-                        buf << in.rdbuf();
-                        std::string content = buf.str();
-                        return makeResponse({assistantMsg(content)});
-                    } catch (...) {
-                        // fall through to default
-                    }
-                }
-            }
-
-            // Default fallback
-            return makeResponse({assistantMsg(
-                "You provide retrieval-augmented workflows over YAMS via MCP tools.")});
-        } else if (method == "logging/setLevel") {
-            if (!areYamsExtensionsEnabled()) {
-                // logging/setLevel is a YAMS extension, and extensions are disabled
-                return json{
-                    {"jsonrpc", protocol::JSONRPC_VERSION},
-                    {"error",
-                     {{"code", -32601},
-                      {"message", "Method not available (extensions disabled): " + method}}},
-                    {"id", id}};
-            }
-            const auto level = params.value("level", "info");
-            spdlog::level::level_enum lvl = spdlog::level::info;
-            if (level == "trace")
-                lvl = spdlog::level::trace;
-            else if (level == "debug")
-                lvl = spdlog::level::debug;
-            else if (level == "info" || level == "notice")
-                lvl = spdlog::level::info;
-            else if (level == "warning" || level == "warn")
-                lvl = spdlog::level::warn;
-            else if (level == "error")
-                lvl = spdlog::level::err;
-            else if (level == "critical" || level == "alert" || level == "emergency")
-                lvl = spdlog::level::critical;
-            spdlog::set_level(lvl);
-            return createResponse(id, json::object());
-        } else {
-            // Unknown method - return proper JSON-RPC error
-            return json{{"jsonrpc", protocol::JSONRPC_VERSION},
-                        {"error", {{"code", -32601}, {"message", "Method not found: " + method}}},
-                        {"id", id}};
+        if (auto routed = dispatchCoreMethod(id2, method, params); routed.has_value()) {
+            return std::move(*routed);
         }
+
+        // Unknown method - return proper JSON-RPC error
+        return json{{"jsonrpc", protocol::JSONRPC_VERSION},
+                    {"error", {{"code", -32601}, {"message", "Method not found: " + method}}},
+                    {"id", id}};
     } catch (const json::exception& e) {
         return Error{ErrorCode::InvalidArgument, std::string("JSON error: ") + e.what()};
     } catch (const std::exception& e) {
@@ -1466,332 +911,6 @@ MessageResult MCPServer::handleRequest(const json& request) {
 
 boost::asio::awaitable<MessageResult> MCPServer::handleRequestAsync(const json& request) {
     co_return handleRequest(request);
-}
-
-json MCPServer::initialize(const json& params) {
-    static const std::vector<std::string> kSupported = {"2025-11-25", "2025-06-18", "2025-03-26",
-                                                        "2024-11-05", "2024-10-07"};
-    const std::string latest = "2025-11-25";
-
-    // Extract requested version (optional)
-    std::string requested = latest;
-    if (params.contains("protocolVersion") && params["protocolVersion"].is_string()) {
-        requested = params["protocolVersion"].get<std::string>();
-    }
-    spdlog::debug("MCP client requested protocol version: {}", requested);
-
-    // Negotiate (fallback to latest if unsupported)
-    std::string negotiated = latest;
-    bool matched = std::find(kSupported.begin(), kSupported.end(), requested) != kSupported.end();
-    if (matched) {
-        negotiated = requested;
-    } else if (strictProtocol_) {
-        json error_data = {{"supportedVersions", kSupported}};
-        return {{"_initialize_error", true},
-                {"code", kErrUnsupportedProtocolVersion},
-                {"message", "Unsupported protocol version requested by client"},
-                {"data", error_data}};
-    }
-
-    // Capture client info if present (tolerant)
-    if (params.contains("clientInfo") && params["clientInfo"].is_object()) {
-        clientInfo_.name = params["clientInfo"].value("name", "unknown");
-        clientInfo_.version = params["clientInfo"].value("version", "unknown");
-    } else {
-        clientInfo_.name = "unknown";
-        clientInfo_.version = "unknown";
-    }
-
-    negotiatedProtocolVersion_ = negotiated;
-
-    // --- MCP Apps Extension Capability Detection ---
-    // Check if client supports MCP Apps (io.modelcontextprotocol/ui extension)
-    mcpAppsSupported_.store(false);
-    mcpAppsMimeType_.clear();
-    if (params.contains("capabilities") && params["capabilities"].is_object()) {
-        const auto& caps = params["capabilities"];
-        if (caps.contains("extensions") && caps["extensions"].is_object()) {
-            const auto& extensions = caps["extensions"];
-            if (extensions.contains("io.modelcontextprotocol/ui") &&
-                extensions["io.modelcontextprotocol/ui"].is_object()) {
-                const auto& uiExt = extensions["io.modelcontextprotocol/ui"];
-                if (uiExt.contains("mimeTypes") && uiExt["mimeTypes"].is_array()) {
-                    // Check if client supports our mime type
-                    for (const auto& mimeType : uiExt["mimeTypes"]) {
-                        if (mimeType.is_string() &&
-                            mimeType.get<std::string>() == "text/html;profile=mcp-app") {
-                            mcpAppsSupported_.store(true);
-                            mcpAppsMimeType_ = "text/html;profile=mcp-app";
-                            spdlog::info("MCP Apps extension supported by client (mimeType: {})",
-                                         mcpAppsMimeType_);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Always build server capabilities (do NOT rely on client-supplied capabilities)
-    json caps = buildServerCapabilities();
-
-    json result = {{"protocolVersion", negotiated},
-                   {"serverInfo", {{"name", serverInfo_.name}, {"version", serverInfo_.version}}},
-                   {"capabilities", caps},
-                   {"_meta", {{"instanceId", instanceId_}}}};
-
-    // Debug logging to diagnose empty result issues
-    spdlog::debug("MCP initialize() result built:");
-    spdlog::debug("  - protocolVersion: {}", negotiated);
-    spdlog::debug("  - serverInfo.name: {}", serverInfo_.name);
-    spdlog::debug("  - serverInfo.version: {}", serverInfo_.version);
-    spdlog::debug("  - capabilities size: {}", caps.size());
-    spdlog::debug("  - result is_null: {}, is_object: {}, empty: {}, size: {}", result.is_null(),
-                  result.is_object(), result.empty(), result.size());
-
-    return result;
-}
-
-json MCPServer::listResources() {
-#if defined(YAMS_WASI)
-    // WASI profile: no file-backed resources.
-    return json{{"resources", json::array()}};
-#else
-    json resources = json::array();
-
-    // MCP Apps: include UI resources only when negotiated.
-    if (mcpAppsSupported_.load()) {
-        json ui = uiResourcesAsMcpResources();
-        if (ui.is_array()) {
-            for (auto& item : ui) {
-                resources.push_back(std::move(item));
-            }
-        }
-    }
-
-    // Add a resource for the YAMS storage statistics
-    resources.push_back({{"uri", "yams://stats"},
-                         {"name", "Storage Statistics"},
-                         {"description", "Current YAMS storage statistics and health status"},
-                         {"mimeType", "application/json"}});
-
-    // Daemon status (symmetry with stats)
-    resources.push_back({{"uri", "yams://status"},
-                         {"name", "Daemon Status"},
-                         {"description", "YAMS daemon status and readiness metrics"},
-                         {"mimeType", "application/json"}});
-
-    // Add a resource for recent documents
-    resources.push_back({{"uri", "yams://recent"},
-                         {"name", "Recent Documents"},
-                         {"description", "Recently added documents in YAMS storage"},
-                         {"mimeType", "application/json"}});
-
-    return {{"resources", resources}};
-#endif
-}
-
-json MCPServer::readResource(const std::string& uri) {
-#if defined(YAMS_WASI)
-    (void)uri;
-    throw std::runtime_error("Resources not supported in WASI build");
-#else
-    if (mcpAppsSupported_.load() && isUiResourceUri(uri)) {
-        return readUiResource(uri);
-    }
-
-    if (uri == "yams://stats") {
-        // Get storage statistics
-        if (!store_) {
-            return {{"contents",
-                     {{{"uri", uri},
-                       {"mimeType", "application/json"},
-                       {"text", json({{"error", "Storage not initialized"}}).dump()}}}}};
-        }
-        auto stats = store_->getStats();
-        auto health = store_->checkHealth();
-
-        return {{"contents",
-                 {{{"uri", uri},
-                   {"mimeType", "application/json"},
-                   {"text", json({{"storage",
-                                   {{"totalObjects", stats.totalObjects},
-                                    {"totalBytes", stats.totalBytes},
-                                    {"uniqueBlocks", stats.uniqueBlocks},
-                                    {"deduplicatedBytes", stats.deduplicatedBytes}}},
-                                  {"health",
-                                   {{"isHealthy", health.isHealthy},
-                                    {"status", health.status},
-                                    {"warnings", health.warnings},
-                                    {"errors", health.errors}}}})
-                                .dump()}}}}};
-    } else if (uri == "yams://status") {
-        try {
-            auto ensure = ensureDaemonClient();
-            if (!ensure) {
-                return {{"contents",
-                         {{{"uri", uri},
-                           {"mimeType", "application/json"},
-                           {"text", json({{"error",
-                                           std::string("status error: ") + ensure.error().message}})
-                                        .dump()}}}}};
-            }
-            auto st = yams::cli::run_result(daemon_client_->status(), std::chrono::seconds(3));
-            if (!st) {
-                return {{"contents",
-                         {{{"uri", uri},
-                           {"mimeType", "application/json"},
-                           {"text",
-                            json({{"error", std::string("status error: ") + st.error().message}})
-                                .dump()}}}}};
-            }
-            const auto& s = st.value();
-            json j;
-            j["running"] = s.running;
-            j["ready"] = s.ready;
-            j["uptimeSeconds"] = s.uptimeSeconds;
-            j["requestsProcessed"] = s.requestsProcessed;
-            j["activeConnections"] = s.activeConnections;
-            j["memoryUsageMb"] = s.memoryUsageMb;
-            j["cpuUsagePercent"] = s.cpuUsagePercent;
-            j["version"] = s.version;
-            j["overallStatus"] = s.overallStatus;
-            j["lifecycleState"] = s.lifecycleState;
-            j["lastError"] = s.lastError;
-            j["readinessStates"] = s.readinessStates;
-            j["initProgress"] = s.initProgress;
-            j["counters"] = s.requestCounts;
-            // MCP worker counters - thread pool removed, always 0
-            j["counters"]["mcp_worker_threads"] = 0;
-            j["counters"]["mcp_worker_active"] = false;
-            j["counters"]["mcp_worker_queued"] = 0;
-            j["counters"]["mcp_worker_processed"] = 0;
-            j["counters"]["mcp_worker_failed"] = 0;
-            return {{"contents",
-                     {{{"uri", uri}, {"mimeType", "application/json"}, {"text", j.dump()}}}}};
-        } catch (...) {
-            return {{"contents",
-                     {{{"uri", uri},
-                       {"mimeType", "application/json"},
-                       {"text", json({{"error", "status exception"}}).dump()}}}}};
-        }
-    } else if (uri == "yams://recent") {
-        // Get recent documents
-        if (!metadataRepo_) {
-            return {
-                {"contents",
-                 {{{"uri", uri},
-                   {"mimeType", "application/json"},
-                   {"text", json({{"error", "Metadata repository not initialized"}}).dump()}}}}};
-        }
-        auto docsResult = metadata::queryDocumentsByPattern(*metadataRepo_, "%");
-        if (!docsResult) {
-            return {{"contents", {{"text", "Failed to list documents"}}}};
-        }
-        auto docs = docsResult.value();
-        // Limit to 20 most recent
-        if (docs.size() > 20) {
-            docs.resize(20);
-        }
-
-        json docList = json::array();
-        for (const auto& doc : docs) {
-            docList.push_back({{"hash", doc.sha256Hash},
-                               {"name", doc.fileName},
-                               {"size", doc.fileSize},
-                               {"mimeType", doc.mimeType}});
-        }
-
-        return {{"contents",
-                 {{{"uri", uri},
-                   {"mimeType", "application/json"},
-                   {"text", json({{"documents", docList}}).dump()}}}}};
-    } else {
-        throw std::runtime_error("Unknown resource URI: " + uri);
-    }
-#endif
-}
-
-bool MCPServer::isUiResourceUri(const std::string& uri) const {
-    return uri.rfind("ui://", 0) == 0;
-}
-
-void MCPServer::ensureUiResourcesInitialized() {
-    std::call_once(uiResourcesInitOnce_, [this]() {
-        uiResources_.clear();
-
-        auto add = [&](std::string uri, std::string name, std::string desc, std::string html) {
-            UIResource r;
-            r.uri = std::move(uri);
-            r.name = std::move(name);
-            r.description = std::move(desc);
-            r.mimeType = mcpAppsMimeType_.empty() ? "text/html;profile=mcp-app" : mcpAppsMimeType_;
-            r.htmlContent = std::move(html);
-            r.meta = json::object();
-            uiResources_.emplace(r.uri, std::move(r));
-        };
-
-        // Minimal placeholder UI templates (hosts render in sandboxed iframe).
-        // These are intentionally small; Phase 2+ will provide richer apps.
-        add("ui://yams/dashboard", "YAMS Dashboard", "YAMS overview dashboard",
-            "<!doctype html><html><head><meta charset=\"utf-8\" /><title>YAMS Dashboard</title>"
-            "</head><body><h1>YAMS</h1><p>UI is enabled. This is a placeholder dashboard.</p>"
-            "</body></html>");
-
-        add("ui://yams/live-graph", "Live Graph Watcher",
-            "Real-time view of the CWD knowledge graph building",
-            "<!doctype html><html><head><meta charset=\"utf-8\" />"
-            "<title>Live Graph Watcher</title></head><body>"
-            "<h1>Live Graph Watcher</h1>"
-            "<p>Placeholder UI. Intended to visualize nodes/edges as they appear while "
-            "indexing.</p>"
-            "</body></html>");
-
-        add("ui://yams/blackboard", "Blackboard Task Viewer",
-            "View tasks/findings from opencode-blackboard and vscode-blackboard",
-            "<!doctype html><html><head><meta charset=\"utf-8\" />"
-            "<title>Blackboard</title></head><body>"
-            "<h1>Blackboard</h1>"
-            "<p>Placeholder UI. Intended to show tasks/findings and dependency graphs.</p>"
-            "</body></html>");
-    });
-}
-
-json MCPServer::uiResourcesAsMcpResources() {
-    ensureUiResourcesInitialized();
-    json arr = json::array();
-    for (const auto& [uri, r] : uiResources_) {
-        json item;
-        item["uri"] = r.uri;
-        item["name"] = r.name;
-        if (!r.description.empty()) {
-            item["description"] = r.description;
-        }
-        item["mimeType"] = r.mimeType;
-        if (r.meta.is_object() && !r.meta.empty()) {
-            item["_meta"] = r.meta;
-        }
-        arr.push_back(std::move(item));
-    }
-    return arr;
-}
-
-json MCPServer::readUiResource(const std::string& uri) {
-    ensureUiResourcesInitialized();
-    auto it = uiResources_.find(uri);
-    if (it == uiResources_.end()) {
-        throw std::runtime_error("Unknown UI resource URI: " + uri);
-    }
-
-    const auto& r = it->second;
-    json content;
-    content["uri"] = r.uri;
-    content["mimeType"] = r.mimeType;
-    content["text"] = r.htmlContent;
-    if (r.meta.is_object() && !r.meta.empty()) {
-        content["_meta"] = r.meta;
-    }
-    return json{{"contents", json::array({std::move(content)})}};
 }
 
 json MCPServer::listTools() {
@@ -1871,242 +990,7 @@ json MCPServer::listTools() {
     return out;
 }
 
-json yams::mcp::MCPServer::listPrompts() {
-#if defined(YAMS_WASI)
-    return {{"prompts", json::array()}};
-#else
-    auto builtins = json::array(
-        {{{"name", "search_codebase"},
-          {"description", "Search for code patterns in the codebase"},
-          {"arguments", json::array({{{"name", "pattern"},
-                                      {"description", "Code pattern to search for"},
-                                      {"required", true}},
-                                     {{"name", "file_type"},
-                                      {"description", "Filter by file type (e.g., cpp, py, js)"},
-                                      {"required", false}}})}},
-         {{"name", "summarize_document"},
-          {"description", "Generate a summary of a document"},
-          {"arguments", json::array({{{"name", "document_name"},
-                                      {"description", "Name of the document to summarize"},
-                                      {"required", true}},
-                                     {{"name", "max_length"},
-                                      {"description", "Maximum summary length in words"},
-                                      {"required", false}}})}},
-         {{"name", "rag/rewrite_query"},
-          {"description", "Rewrite a query to optimize hybrid retrieval"},
-          {"arguments", json::array({{{"name", "query"},
-                                      {"description", "Original user query text"},
-                                      {"required", true}},
-                                     {{"name", "intent"},
-                                      {"description", "Optional intent hint to guide rewriting"},
-                                      {"required", false}}})}},
-         {{"name", "rag/retrieve"},
-          {"description", "Retrieve top-k candidates via hybrid search"},
-          {"arguments",
-           json::array({{{"name", "query"},
-                         {"description", "Search query for retrieval"},
-                         {"required", true}},
-                        {{"name", "k"},
-                         {"description", "Number of candidates to return"},
-                         {"required", false}},
-                        {{"name", "session"},
-                         {"description", "Session name to scope retrieval (optional)"},
-                         {"required", false}},
-                        {{"name", "tags"},
-                         {"description", "Optional tag filters (comma-separated or array)"},
-                         {"required", false}}})}},
-         {{"name", "rag/retrieve_summarize"},
-          {"description", "RAG pipeline: retrieve then summarize with citations"},
-          {"arguments",
-           json::array({{{"name", "query"},
-                         {"description", "Search query for retrieval"},
-                         {"required", true}},
-                        {{"name", "k"},
-                         {"description", "Number of items to retrieve before summarization"},
-                         {"required", false}},
-                        {{"name", "max_words"},
-                         {"description", "Maximum words for the synthesized summary"},
-                         {"required", false}}})}},
-         {{"name", "rag/extract_citations"},
-          {"description", "Format citations from retrieved artifacts"},
-          {"arguments",
-           json::array({{{"name", "style"},
-                         {"description", "Citation style (e.g., inline, list)"},
-                         {"required", false}},
-                        {{"name", "k"},
-                         {"description", "Number of citations to produce"},
-                         {"required", false}},
-                        {{"name", "include_hashes"},
-                         {"description", "Whether to include content hashes in citations"},
-                         {"required", false}}})}},
-         {{"name", "rag/code_navigation"},
-          {"description", "Suggest grep and hybrid search strategies for symbol discovery"},
-          {"arguments", json::array({{{"name", "symbol"},
-                                      {"description", "Target symbol or identifier to locate"},
-                                      {"required", true}},
-                                     {{"name", "language"},
-                                      {"description", "Language hint (e.g., cpp, py, js)"},
-                                      {"required", false}}})}}});
-
-    // Merge file-backed prompts
-    std::unordered_set<std::string> seen;
-    for (const auto& t : builtins) {
-        if (t.is_object() && t.contains("name")) {
-            seen.insert(t.at("name").get<std::string>());
-        }
-    }
-
-    auto sanitize = [](std::string s) {
-        // PROMPT-foo-bar.md -> foo_bar
-        if (s.rfind("PROMPT-", 0) == 0)
-            s = s.substr(7);
-        auto pos = s.rfind('.');
-        if (pos != std::string::npos)
-            s = s.substr(0, pos);
-        std::replace(s.begin(), s.end(), '-', '_');
-        return s;
-    };
-
-    if (!promptsDir_.empty() && std::filesystem::exists(promptsDir_)) {
-        try {
-            for (const auto& de : std::filesystem::directory_iterator(promptsDir_)) {
-                if (!de.is_regular_file())
-                    continue;
-                auto fname = de.path().filename().string();
-                if (fname.rfind("PROMPT-", 0) != 0)
-                    continue;
-                if (de.path().extension() != ".md")
-                    continue;
-                auto name = sanitize(fname);
-                if (seen.count(name))
-                    continue;
-                // Description from first line if present
-                std::ifstream in(de.path());
-                std::string firstLine;
-                if (in) {
-                    std::getline(in, firstLine);
-                }
-                if (!firstLine.empty() && firstLine[0] == '#') {
-                    // trim leading # and spaces
-                    while (!firstLine.empty() && (firstLine[0] == '#' || firstLine[0] == ' '))
-                        firstLine.erase(firstLine.begin());
-                }
-                json t = {{"name", name},
-                          {"description", !firstLine.empty() ? firstLine
-                                                             : std::string{"Template from "} +
-                                                                   de.path().filename().string()},
-                          {"arguments", json::array()}};
-                builtins.push_back(std::move(t));
-                seen.insert(name);
-            }
-        } catch (...) {
-            // best effort
-        }
-    }
-
-    return {{"prompts", builtins}};
-#endif
-}
-
-json MCPServer::callTool(const std::string& name, const json& arguments) {
-    spdlog::info("MCP callTool invoked: name='{}', arguments={}", name, arguments.dump());
-
-    // Resolve registry: try public toolRegistry_ first (composite tools: query/execute/session),
-    // then fall back to internalRegistry_ (individual tools used for internal dispatch).
-    ToolRegistry* reg = nullptr;
-    if (toolRegistry_ && toolRegistry_->hasTool(name)) {
-        reg = toolRegistry_.get();
-    } else if (internalRegistry_ && internalRegistry_->hasTool(name)) {
-        reg = internalRegistry_.get();
-    } else if (toolRegistry_) {
-        reg = toolRegistry_.get(); // let it produce "Unknown tool" error
-    }
-    if (!reg) {
-        return {{"error", {{"code", -32603}, {"message", "Tool registry not initialized"}}}};
-    }
-
-    auto task = reg->callTool(name, arguments);
-
-    boost::asio::any_io_executor exec;
-#if defined(YAMS_WASI)
-    exec = boost::asio::system_executor();
-#else
-    exec = yams::daemon::GlobalIOContext::instance().get_io_context().get_executor();
-#endif
-    auto promise = std::make_shared<std::promise<json>>();
-    auto future = promise->get_future();
-
-    boost::asio::co_spawn(
-        exec,
-        [task = std::move(task), promise]() mutable -> boost::asio::awaitable<void> {
-            try {
-                auto result = co_await std::move(task);
-                promise->set_value(result);
-            } catch (...) {
-                promise->set_exception(std::current_exception());
-            }
-            co_return;
-        },
-        boost::asio::detached);
-
-    try {
-        json result = future.get();
-
-        spdlog::debug("MCP tool '{}' returned: {}", name, result.dump());
-
-        // Normalize errors: if registry returned content-based error, map to JSON-RPC error
-        if (result.is_object() && result.value("isError", false)) {
-            std::string msg;
-            try {
-                if (result.contains("content") && result["content"].is_array() &&
-                    !result["content"].empty()) {
-                    const auto& item = result["content"][0];
-                    msg = item.value("text", std::string{"Tool error"});
-                }
-            } catch (...) {
-                msg = "Tool error";
-            }
-            int code = -32602; // Invalid params by default
-            if (msg.rfind("Unknown tool:", 0) == 0) {
-                code = -32601; // Method not found
-            }
-            return json{{"error", json{{"code", code}, {"message", msg}}}};
-        }
-
-        // Ensure result is tool-result shaped (content array) when not error
-        if (result.is_object() && result.contains("content")) {
-            return result; // already wrapped
-        }
-        // Legacy/plain result: wrap into content per MCP spec
-        return yams::mcp::wrapToolResult(result, /*isError=*/false);
-
-    } catch (const std::exception& e) {
-        spdlog::error("MCP tool '{}' threw exception: {}", name, e.what());
-        return {{"error",
-                 {{"code", -32603}, {"message", std::string("Tool call failed: ") + e.what()}}}};
-    }
-}
-
-boost::asio::awaitable<json> MCPServer::callToolAsync(const std::string& name,
-                                                      const json& arguments) {
-    spdlog::debug("MCP callToolAsync invoked: '{}'", name);
-
-    // Resolve registry: try public toolRegistry_ first (composite tools: query/execute/session),
-    // then fall back to internalRegistry_ (individual tools).
-    ToolRegistry* reg = nullptr;
-    if (toolRegistry_ && toolRegistry_->hasTool(name)) {
-        reg = toolRegistry_.get();
-    } else if (internalRegistry_ && internalRegistry_->hasTool(name)) {
-        reg = internalRegistry_.get();
-    } else if (toolRegistry_) {
-        reg = toolRegistry_.get();
-    }
-    if (!reg) {
-        co_return json{{"error", {{"code", -32603}, {"message", "Tool registry not initialized"}}}};
-    }
-    auto result = co_await reg->callTool(name, arguments);
-    co_return result;
-}
+// Tool calls live in mcp_tool_calls.cpp
 
 // Modern C++20 tool handler implementations
 boost::asio::awaitable<Result<MCPSearchResponse>>
@@ -2277,6 +1161,42 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         co_return out;
     }
     // Full result objects (with robust path fallback)
+    auto parseMetaFloat = [](const std::map<std::string, std::string>& md,
+                             const std::string& key) -> std::optional<float> {
+        auto it = md.find(key);
+        if (it == md.end() || it->second.empty()) {
+            return std::nullopt;
+        }
+        try {
+            return std::stof(it->second);
+        } catch (...) {
+            return std::nullopt;
+        }
+    };
+    auto parseMetaUint = [](const std::map<std::string, std::string>& md,
+                            const std::string& key) -> std::optional<uint64_t> {
+        auto it = md.find(key);
+        if (it == md.end() || it->second.empty()) {
+            return std::nullopt;
+        }
+        try {
+            return static_cast<uint64_t>(std::stoull(it->second));
+        } catch (...) {
+            return std::nullopt;
+        }
+    };
+    auto parseMetaBool = [](const std::map<std::string, std::string>& md,
+                            const std::string& key) -> bool {
+        auto it = md.find(key);
+        if (it == md.end()) {
+            return false;
+        }
+        auto v = it->second;
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return v == "1" || v == "true" || v == "yes";
+    };
+
     for (const auto& item : r.results) {
         MCPSearchResponse::Result m;
         m.id = item.id;
@@ -2288,6 +1208,19 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                      : (item.metadata.count("path") ? item.metadata.at("path") : std::string());
         m.score = static_cast<float>(item.score);
         m.snippet = item.snippet;
+        m.vectorScore = parseMetaFloat(item.metadata, "vector_score");
+        m.keywordScore = parseMetaFloat(item.metadata, "keyword_score");
+        m.kgEntityScore = parseMetaFloat(item.metadata, "kg_entity_score");
+        m.structuralScore = parseMetaFloat(item.metadata, "structural_score");
+        m.lineStart = parseMetaUint(item.metadata, "line_start");
+        if (!m.lineStart.has_value()) {
+            m.lineStart = parseMetaUint(item.metadata, "line");
+        }
+        m.lineEnd = parseMetaUint(item.metadata, "line_end");
+        m.charStart = parseMetaUint(item.metadata, "char_start");
+        m.charEnd = parseMetaUint(item.metadata, "char_end");
+        m.snippetTruncated = parseMetaBool(item.metadata, "snippet_truncated") ||
+                             parseMetaBool(item.metadata, "truncated");
         out.results.push_back(std::move(m));
     }
     // Optional diff parity: when includeDiff=true and pathPattern is a local file, attach a
@@ -2564,21 +1497,76 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     const auto& r = res.value();
     out.matchCount = r.totalMatches;
     out.fileCount = r.filesSearched;
-    std::ostringstream oss;
-    std::unordered_set<std::string> seenFiles;
+    std::unordered_map<std::string, size_t> fileMatchCounts;
     for (const auto& m : r.matches) {
+        if (!m.file.empty()) {
+            fileMatchCounts[m.file]++;
+        }
+    }
+
+    std::ostringstream oss;
+    size_t maxOutputBytes = 16 * 1024;
+    if (const char* env = std::getenv("YAMS_MCP_GREP_MAX_OUTPUT_BYTES")) {
+        try {
+            maxOutputBytes = std::max<size_t>(1024, static_cast<size_t>(std::stoul(env)));
+        } catch (...) {
+            maxOutputBytes = 16 * 1024;
+        }
+    }
+    out.outputMaxBytes = maxOutputBytes;
+    auto estimateEscapedSize = [](const std::string& s) -> size_t {
+        size_t outSize = 0;
+        for (unsigned char ch : s) {
+            outSize += 1;
+            if (ch == '"' || ch == '\\' || ch < 0x20) {
+                outSize += 1;
+            }
+        }
+        return outSize;
+    };
+    size_t outputBytes = 0;
+    std::unordered_set<std::string> seenFiles;
+    size_t matchIdx = 0;
+    for (const auto& m : r.matches) {
+        ++matchIdx;
         if (!m.file.empty())
             seenFiles.insert(m.file);
+
+        MCPGrepResponse::Match sm;
+        sm.file = m.file;
+        sm.lineNumber = m.lineNumber;
+        sm.lineText = m.line;
+        sm.contextBefore = m.contextBefore;
+        sm.contextAfter = m.contextAfter;
+        sm.matchType = m.matchType;
+        sm.confidence = m.confidence;
+        sm.fileMatches = m.file.empty() ? 0 : fileMatchCounts[m.file];
+        sm.matchId = (m.file.empty() ? std::string("unknown") : m.file) + ":" +
+                     std::to_string(m.lineNumber) + ":" + std::to_string(matchIdx);
+        out.matches.push_back(std::move(sm));
+
+        std::string line;
         if (out.fileCount > 1 || req.withFilename) {
             if (!m.file.empty())
-                oss << m.file << ":";
+                line.append(m.file).append(":");
         }
         if (req.lineNumbers)
-            oss << m.lineNumber << ":";
-        oss << m.line << "\n";
+            line.append(std::to_string(m.lineNumber)).append(":");
+        line.append(m.line).append("\n");
+
+        const size_t escaped = estimateEscapedSize(line);
+        if (outputBytes + escaped > maxOutputBytes) {
+            out.outputTruncated = true;
+            break;
+        }
+        oss << line;
+        outputBytes += escaped;
     }
     if (out.fileCount == 0 && !seenFiles.empty()) {
         out.fileCount = seenFiles.size();
+    }
+    if (out.outputTruncated) {
+        oss << "[truncated: output exceeded max bytes]\n";
     }
     out.output = oss.str();
     co_return out;
@@ -3507,7 +2495,25 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
         } else {
             mcp_response.content = resp.content;
         }
+
+        size_t maxContentBytes = 32 * 1024;
+        if (const char* env = std::getenv("YAMS_MCP_GET_MAX_CONTENT_BYTES")) {
+            try {
+                maxContentBytes = std::max<size_t>(1024, static_cast<size_t>(std::stoul(env)));
+            } catch (...) {
+                maxContentBytes = 32 * 1024;
+            }
+        }
+        mcp_response.contentMaxBytes = static_cast<uint64_t>(maxContentBytes);
+        if (mcp_response.content.has_value()) {
+            if (mcp_response.content->size() > maxContentBytes) {
+                mcp_response.content->resize(maxContentBytes);
+                mcp_response.contentTruncated = true;
+            }
+            mcp_response.contentBytes = static_cast<uint64_t>(mcp_response.content->size());
+        }
     }
+    mcp_response.metadata = resp.metadata;
     mcp_response.graphEnabled = resp.graphEnabled;
     for (const auto& rel : resp.related) {
         json relatedJson = {{"hash", rel.hash}, {"path", rel.path}, {"distance", rel.distance}};
@@ -5701,731 +4707,7 @@ void MCPServer::initializeToolRegistry() {
             }
         }
 
-        // ── Code Mode helpers ──
-
-        // Resolve $prev references in a params object using the previous step's result.
-        // Supports: $prev, $prev.field, $prev.field[N], $prev.field[N].subfield
-        json MCPServer::resolvePrevRefs(const json& params, const json& prev) {
-            if (!params.is_object()) {
-                return params;
-            }
-
-            json resolved = params;
-            for (auto& [key, val] : resolved.items()) {
-                if (!val.is_string())
-                    continue;
-                auto s = val.get<std::string>();
-                if (!s.starts_with("$prev"))
-                    continue;
-
-                // Parse the path after "$prev"
-                std::string_view path(s);
-                path.remove_prefix(5); // strip "$prev"
-
-                const json* current = &prev;
-
-                while (!path.empty() && current != nullptr) {
-                    if (path.starts_with('.')) {
-                        path.remove_prefix(1);
-                        // Read field name until next . or [
-                        auto end = path.find_first_of(".[");
-                        auto field = std::string(path.substr(0, end));
-                        if (current->is_object() && current->contains(field)) {
-                            current = &(*current)[field];
-                        } else {
-                            current = nullptr;
-                        }
-                        path.remove_prefix(end == std::string_view::npos ? path.size() : end);
-                    } else if (path.starts_with('[')) {
-                        path.remove_prefix(1);
-                        auto close = path.find(']');
-                        if (close == std::string_view::npos) {
-                            current = nullptr;
-                            break;
-                        }
-                        auto idxStr = std::string(path.substr(0, close));
-                        path.remove_prefix(close + 1);
-                        try {
-                            auto idx = std::stoull(idxStr);
-                            if (current->is_array() && idx < current->size()) {
-                                current = &(*current)[idx];
-                            } else {
-                                current = nullptr;
-                            }
-                        } catch (...) {
-                            current = nullptr;
-                        }
-                    } else {
-                        current = nullptr;
-                    }
-                }
-
-                if (current != nullptr) {
-                    resolved[key] = *current;
-                } else {
-                    resolved[key] = nullptr;
-                }
-            }
-
-            return resolved;
-        }
-
-        // Describe a single operation or all operations
-        json MCPServer::describeOp(const std::string& target) const {
-            // Map op names to their schemas and descriptions
-            struct OpInfo {
-                std::string description;
-                json paramsSchema;
-                std::string category; // "query", "execute", "session"
-                bool readOnly;
-            };
-
-            static const auto buildOpMap = []() {
-                std::unordered_map<std::string, OpInfo> ops;
-
-                ops["search"] = {
-                    "Search documents using hybrid search (vector + full-text + knowledge graph)",
-                    json{
-                        {"type", "object"},
-                        {"properties",
-                         {{"query", {{"type", "string"}, {"description", "Search query"}}},
-                          {"limit",
-                           {{"type", "integer"},
-                            {"description", "Maximum results"},
-                            {"default", 10}}},
-                          {"fuzzy",
-                           {{"type", "boolean"},
-                            {"description", "Enable fuzzy search"},
-                            {"default", false}}},
-                          {"similarity",
-                           {{"type", "number"},
-                            {"description", "Similarity threshold"},
-                            {"default", 0.7}}},
-                          {"type",
-                           {{"type", "string"},
-                            {"description", "Search type"},
-                            {"default", "hybrid"}}},
-                          {"paths_only",
-                           {{"type", "boolean"},
-                            {"description", "Return only paths"},
-                            {"default", false}}},
-                          {"path_pattern",
-                           {{"type", "string"}, {"description", "Glob pattern to filter results"}}},
-                          {"include_patterns",
-                           {{"type", "array"},
-                            {"items", {{"type", "string"}}},
-                            {"description", "Multiple path patterns (OR logic)"}}},
-                          {"tags",
-                           {{"type", "array"},
-                            {"items", {{"type", "string"}}},
-                            {"description", "Filter by tags"}}},
-                          {"match_all_tags",
-                           {{"type", "boolean"},
-                            {"description", "Require all tags to match (AND logic)"},
-                            {"default", false}}},
-                          {"cwd",
-                           {{"type", "string"},
-                            {"description", "Scope search to files under this directory"}}}}},
-                        {"required", json::array({"query"})}},
-                    "query", true};
-
-                ops["grep"] = {
-                    "Search documents using regular expressions with grep-like functionality",
-                    json{
-                        {"type", "object"},
-                        {"properties",
-                         {{"pattern", {{"type", "string"}, {"description", "Regex pattern"}}},
-                          {"name",
-                           {{"type", "string"}, {"description", "File name or subpath to scope"}}},
-                          {"paths",
-                           {{"type", "array"},
-                            {"items", {{"type", "string"}}},
-                            {"description", "Paths to search"}}},
-                          {"include_patterns",
-                           {{"type", "array"},
-                            {"items", {{"type", "string"}}},
-                            {"description", "File include globs"}}},
-                          {"ignore_case",
-                           {{"type", "boolean"},
-                            {"description", "Case insensitive"},
-                            {"default", false}}},
-                          {"line_numbers",
-                           {{"type", "boolean"},
-                            {"description", "Show line numbers"},
-                            {"default", false}}},
-                          {"context",
-                           {{"type", "integer"}, {"description", "Context lines"}, {"default", 0}}},
-                          {"cwd",
-                           {{"type", "string"}, {"description", "Scope grep to directory"}}}}},
-                        {"required", json::array({"pattern"})}},
-                    "query", true};
-
-                ops["list"] = {
-                    "List documents with filtering by pattern, tags, type, or recency",
-                    json{
-                        {"type", "object"},
-                        {"properties",
-                         {{"pattern", {{"type", "string"}, {"description", "Name pattern filter"}}},
-                          {"name", {{"type", "string"}, {"description", "Exact name filter"}}},
-                          {"tags",
-                           {{"type", "array"},
-                            {"items", {{"type", "string"}}},
-                            {"description", "Filter by tags"}}},
-                          {"recent",
-                           {{"type", "integer"}, {"description", "Show N most recent documents"}}},
-                          {"paths_only",
-                           {{"type", "boolean"},
-                            {"description", "Output only file paths"},
-                            {"default", false}}},
-                          {"limit",
-                           {{"type", "integer"},
-                            {"description", "Maximum results"},
-                            {"default", 100}}},
-                          {"offset",
-                           {{"type", "integer"},
-                            {"description", "Pagination offset"},
-                            {"default", 0}}}}}},
-                    "query", true};
-
-                ops["get"] = {
-                    "Retrieve documents from storage by hash or name",
-                    json{{"type", "object"},
-                         {"properties",
-                          {{"hash", {{"type", "string"}, {"description", "Document hash"}}},
-                           {"name", {{"type", "string"}, {"description", "Document name"}}},
-                           {"include_content",
-                            {{"type", "boolean"},
-                             {"description", "Include content in response"},
-                             {"default", true}}}}}},
-                    "query", true};
-
-                ops["status"] = {"Get daemon status, readiness, and metrics",
-                                 json{{"type", "object"},
-                                      {"properties",
-                                       {{"detailed",
-                                         {{"type", "boolean"},
-                                          {"description", "Include verbose metrics"},
-                                          {"default", false}}}}}},
-                                 "query", true};
-
-                ops["list_collections"] = {"List available collections", json{{"type", "object"}},
-                                           "query", true};
-
-                ops["list_snapshots"] = {
-                    "List available snapshots",
-                    json{{"type", "object"},
-                         {"properties",
-                          {{"collection",
-                            {{"type", "string"}, {"description", "Filter by collection"}}},
-                           {"with_labels",
-                            {{"type", "boolean"},
-                             {"description", "Include snapshot labels"},
-                             {"default", true}}}}}},
-                    "query", true};
-
-                ops["graph"] = {
-                    "Query the knowledge graph for relationships and entities",
-                    json{{"type", "object"},
-                         {"properties",
-                          {{"action",
-                            {{"type", "string"},
-                             {"enum", json::array({"query", "ingest"})},
-                             {"default", "query"}}},
-                           {"hash", {{"type", "string"}, {"description", "Document hash"}}},
-                           {"name", {{"type", "string"}, {"description", "Document name"}}},
-                           {"node_key",
-                            {{"type", "string"}, {"description", "Direct node key lookup"}}},
-                           {"list_types",
-                            {{"type", "boolean"},
-                             {"description", "List available node types"},
-                             {"default", false}}},
-                           {"relation",
-                            {{"type", "string"}, {"description", "Filter by relation type"}}},
-                           {"depth",
-                            {{"type", "integer"},
-                             {"description", "BFS traversal depth (1-5)"},
-                             {"default", 1}}},
-                           {"limit",
-                            {{"type", "integer"},
-                             {"description", "Maximum results"},
-                             {"default", 100}}}}}},
-                    "query", true};
-
-                ops["add"] = {
-                    "Store documents with deduplication",
-                    json{
-                        {"type", "object"},
-                        {"properties",
-                         {{"path", {{"type", "string"}, {"description", "File or directory path"}}},
-                          {"content", {{"type", "string"}, {"description", "Inline content"}}},
-                          {"name", {{"type", "string"}, {"description", "Document name"}}},
-                          {"recursive",
-                           {{"type", "boolean"},
-                            {"description", "Recursively add from directories"},
-                            {"default", false}}},
-                          {"tags",
-                           {{"type", "array"},
-                            {"items", {{"type", "string"}}},
-                            {"description", "Document tags"}}},
-                          {"metadata",
-                           {{"type", "object"}, {"description", "Metadata key/value pairs"}}}}}},
-                    "execute", false};
-
-                ops["update"] = {
-                    "Update metadata/tags by hash, name, path, or pattern",
-                    json{
-                        {"type", "object"},
-                        {"properties",
-                         {{"hash", {{"type", "string"}, {"description", "Document hash"}}},
-                          {"name", {{"type", "string"}, {"description", "Document name"}}},
-                          {"pattern", {{"type", "string"}, {"description", "Glob-like pattern"}}},
-                          {"metadata", {{"type", "object"}, {"description", "Metadata to update"}}},
-                          {"tags",
-                           {{"type", "array"},
-                            {"items", {{"type", "string"}}},
-                            {"description", "Tags to add"}}},
-                          {"remove_tags",
-                           {{"type", "array"},
-                            {"items", {{"type", "string"}}},
-                            {"description", "Tags to remove"}}},
-                          {"dry_run",
-                           {{"type", "boolean"},
-                            {"description", "Preview changes only"},
-                            {"default", false}}}}}},
-                    "execute", false};
-
-                ops["delete"] = {
-                    "Delete documents by name, names array, or pattern",
-                    json{{"type", "object"},
-                         {"properties",
-                          {{"name", {{"type", "string"}, {"description", "Single name to delete"}}},
-                           {"names",
-                            {{"type", "array"},
-                             {"items", {{"type", "string"}}},
-                             {"description", "Multiple names to delete"}}},
-                           {"pattern",
-                            {{"type", "string"},
-                             {"description", "Glob pattern for matching names"}}},
-                           {"dry_run",
-                            {{"type", "boolean"},
-                             {"description", "Preview what would be deleted"},
-                             {"default", false}}}}}},
-                    "execute", false};
-
-                ops["restore"] = {
-                    "Restore documents from a collection or snapshot",
-                    json{{"type", "object"},
-                         {"properties",
-                          {{"collection", {{"type", "string"}, {"description", "Collection name"}}},
-                           {"snapshot_id", {{"type", "string"}, {"description", "Snapshot ID"}}},
-                           {"output_directory",
-                            {{"type", "string"}, {"description", "Output directory"}}},
-                           {"overwrite",
-                            {{"type", "boolean"},
-                             {"description", "Overwrite existing files"},
-                             {"default", false}}},
-                           {"dry_run",
-                            {{"type", "boolean"},
-                             {"description", "Preview without writing"},
-                             {"default", false}}}}},
-                         {"required", json::array({"output_directory"})}},
-                    "execute", false};
-
-                ops["download"] = {
-                    "Download files from URLs and store in YAMS",
-                    json{{"type", "object"},
-                         {"properties",
-                          {{"url", {{"type", "string"}, {"description", "URL to download"}}},
-                           {"post_index",
-                            {{"type", "boolean"},
-                             {"description", "Index after storing"},
-                             {"default", true}}},
-                           {"tags",
-                            {{"type", "array"},
-                             {"items", {{"type", "string"}}},
-                             {"description", "Tags for indexing"}}},
-                           {"metadata",
-                            {{"type", "object"}, {"description", "Metadata for indexing"}}}}},
-                         {"required", json::array({"url"})}},
-                    "execute", false};
-
-                ops["session_start"] = {
-                    "Start (and optionally warm) a session",
-                    json{{"type", "object"},
-                         {"properties",
-                          {{"name", {{"type", "string"}, {"description", "Session name"}}},
-                           {"description",
-                            {{"type", "string"}, {"description", "Session description"}}},
-                           {"warm", {{"type", "boolean"}, {"default", true}}}}}},
-                    "session", false};
-
-                ops["session_stop"] = {
-                    "Stop session (clear materialized cache)",
-                    json{{"type", "object"},
-                         {"properties",
-                          {{"name", {{"type", "string"}, {"description", "Session name"}}},
-                           {"clear", {{"type", "boolean"}, {"default", true}}}}}},
-                    "session", false};
-
-                ops["session_pin"] = {
-                    "Pin documents by path pattern",
-                    json{{"type", "object"},
-                         {"properties",
-                          {{"path",
-                            {{"type", "string"}, {"description", "Path glob pattern to pin"}}}}},
-                         {"required", json::array({"path"})}},
-                    "session", false};
-
-                ops["session_unpin"] = {
-                    "Unpin documents by path pattern",
-                    json{{"type", "object"},
-                         {"properties",
-                          {{"path",
-                            {{"type", "string"}, {"description", "Path glob pattern to unpin"}}}}},
-                         {"required", json::array({"path"})}},
-                    "session", false};
-
-                ops["session_watch"] = {
-                    "Enable or disable auto-ingest for a project session",
-                    json{{"type", "object"},
-                         {"properties",
-                          {{"session", {{"type", "string"}, {"description", "Session name"}}},
-                           {"root", {{"type", "string"}, {"description", "Project root to watch"}}},
-                           {"enable",
-                            {{"type", "boolean"},
-                             {"description", "Enable watch (false disables)"},
-                             {"default", true}}}}}},
-                    "session", false};
-
-                return ops;
-            };
-
-            static const auto opMap = buildOpMap();
-
-            if (auto it = opMap.find(target); it != opMap.end()) {
-                return json{{"op", target},
-                            {"description", it->second.description},
-                            {"paramsSchema", it->second.paramsSchema},
-                            {"category", it->second.category},
-                            {"readOnly", it->second.readOnly}};
-            }
-
-            return json{{"error", "Unknown operation: " + target}, {"available", describeAllOps()}};
-        }
-
-        json MCPServer::describeAllOps() const {
-            return json{
-                {"query_ops",
-                 json::array({"search", "grep", "list", "list_collections", "list_snapshots",
-                              "graph", "get", "status", "describe"})},
-                {"execute_ops", json::array({"add", "update", "delete", "restore", "download"})},
-                {"session_ops", json::array({"start", "stop", "pin", "unpin", "watch"})}};
-        }
-
-        // Pipeline query handler: sequential read ops with $prev chaining
-        boost::asio::awaitable<json> MCPServer::handlePipelineQuery(const json& args) {
-            try {
-                if (!args.contains("steps") || !args["steps"].is_array()) {
-                    co_return wrapToolResultStructured(
-                        json::array({content::text("Error: 'steps' array is required")}),
-                        std::nullopt, true);
-                }
-
-                const auto& steps = args["steps"];
-                if (steps.empty()) {
-                    co_return wrapToolResultStructured(
-                        json::array({content::text("Error: 'steps' array must not be empty")}),
-                        std::nullopt, true);
-                }
-
-                // Allowed read-only ops for the query tool
-                static const std::unordered_set<std::string> allowedOps = {
-                    "search", "grep", "list",   "list_collections", "list_snapshots",
-                    "graph",  "get",  "status", "describe"};
-
-                json prevResult = json::object();
-                json allResults = json::array();
-                bool hasError = false;
-
-                for (size_t i = 0; i < steps.size(); ++i) {
-                    const auto& step = steps[i];
-                    if (!step.is_object() || !step.contains("op")) {
-                        co_return wrapToolResultStructured(
-                            json::array({content::text("Error: step " + std::to_string(i) +
-                                                       " missing 'op' field")}),
-                            std::nullopt, true);
-                    }
-
-                    auto op = step["op"].get<std::string>();
-
-                    // Handle describe specially (no dispatch needed)
-                    if (op == "describe") {
-                        auto params = step.value("params", json::object());
-                        auto target = params.value("target", std::string{});
-                        if (target.empty()) {
-                            prevResult = describeAllOps();
-                        } else {
-                            prevResult = describeOp(target);
-                        }
-                        allResults.push_back(
-                            json{{"stepIndex", i}, {"op", op}, {"result", prevResult}});
-                        continue;
-                    }
-
-                    if (allowedOps.find(op) == allowedOps.end()) {
-                        co_return wrapToolResultStructured(
-                            json::array(
-                                {content::text("Error: '" + op +
-                                               "' is not a read operation. Use the 'execute' tool "
-                                               "for write operations "
-                                               "(add, update, delete, restore, download).")}),
-                            std::nullopt, true);
-                    }
-
-                    // Resolve $prev references in params
-                    auto params = step.value("params", json::object());
-                    auto resolvedParams = resolvePrevRefs(params, prevResult);
-
-                    // Dispatch via the internal registry (all individual tools)
-                    auto toolResult = co_await internalRegistry_->callTool(op, resolvedParams);
-
-                    // Extract the structured data from the tool result for $prev chaining.
-                    // Tool results come back as { "content": [...], "structuredContent": {...} }
-                    // We want the data for chaining, not the MCP wrapper.
-                    if (toolResult.contains("structuredContent") &&
-                        toolResult["structuredContent"].contains("data")) {
-                        prevResult = toolResult["structuredContent"]["data"];
-                    } else if (toolResult.contains("content") && toolResult["content"].is_array() &&
-                               !toolResult["content"].empty()) {
-                        // Try to parse the text content as JSON for chaining
-                        auto& firstContent = toolResult["content"][0];
-                        if (firstContent.contains("text")) {
-                            try {
-                                prevResult = json::parse(firstContent["text"].get<std::string>());
-                            } catch (...) {
-                                prevResult = json{{"text", firstContent["text"]}};
-                            }
-                        }
-                    }
-
-                    bool isError = toolResult.value("isError", false);
-                    if (isError)
-                        hasError = true;
-
-                    allResults.push_back(json{{"stepIndex", i},
-                                              {"op", op},
-                                              {"result", prevResult},
-                                              {"isError", isError}});
-
-                    if (isError)
-                        break; // Stop pipeline on error
-                }
-
-                // For single-step pipelines, return the direct result
-                json finalResult;
-                if (steps.size() == 1) {
-                    finalResult = allResults[0]["result"];
-                } else {
-                    finalResult = json{{"steps", allResults},
-                                       {"totalSteps", steps.size()},
-                                       {"completedSteps", allResults.size()}};
-                }
-
-                // Build summary text
-                std::ostringstream summary;
-                summary << "Pipeline: " << allResults.size() << "/" << steps.size() << " steps";
-                if (hasError)
-                    summary << " (stopped on error)";
-
-                std::optional<json> structured;
-                if (negotiatedProtocolVersion_ >= "2024-11-05") {
-                    structured = json{{"type", "tool_result"}, {"data", finalResult}};
-                }
-
-                co_return wrapToolResultStructured(json::array({content::text(summary.str())}),
-                                                   structured, hasError);
-            } catch (const json::exception& e) {
-                co_return wrapToolResultStructured(
-                    json::array({content::text(std::string("JSON error: ") + e.what())}),
-                    std::nullopt, true);
-            } catch (const std::exception& e) {
-                co_return wrapToolResultStructured(
-                    json::array({content::text(std::string("Error: ") + e.what())}), std::nullopt,
-                    true);
-            }
-        }
-
-        // Batch execute handler: sequential write ops with optional continueOnError
-        boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
-            try {
-                if (!args.contains("operations") || !args["operations"].is_array()) {
-                    co_return wrapToolResultStructured(
-                        json::array({content::text("Error: 'operations' array is required")}),
-                        std::nullopt, true);
-                }
-
-                const auto& operations = args["operations"];
-                if (operations.empty()) {
-                    co_return wrapToolResultStructured(
-                        json::array({content::text("Error: 'operations' array must not be empty")}),
-                        std::nullopt, true);
-                }
-
-                bool continueOnError = args.value("continueOnError", false);
-
-                // Allowed write ops
-                // "delete" maps to the "delete_by_name" tool internally
-                static const std::unordered_map<std::string, std::string> opToTool = {
-                    {"add", "add"},         {"update", "update"},     {"delete", "delete_by_name"},
-                    {"restore", "restore"}, {"download", "download"},
-                };
-
-                json results = json::array();
-                size_t succeeded = 0;
-                size_t failed = 0;
-
-                for (size_t i = 0; i < operations.size(); ++i) {
-                    const auto& operation = operations[i];
-                    if (!operation.is_object() || !operation.contains("op")) {
-                        auto errResult = json{{"stepIndex", i},
-                                              {"op", "unknown"},
-                                              {"success", false},
-                                              {"error", "Missing 'op' field"}};
-                        results.push_back(errResult);
-                        ++failed;
-                        if (!continueOnError)
-                            break;
-                        continue;
-                    }
-
-                    auto op = operation["op"].get<std::string>();
-                    auto toolIt = opToTool.find(op);
-                    if (toolIt == opToTool.end()) {
-                        auto errResult = json{
-                            {"stepIndex", i},
-                            {"op", op},
-                            {"success", false},
-                            {"error", "'" + op +
-                                          "' is not a write operation. Use the 'query' tool for "
-                                          "read operations (search, grep, list, etc)."}};
-                        results.push_back(errResult);
-                        ++failed;
-                        if (!continueOnError)
-                            break;
-                        continue;
-                    }
-
-                    auto params = operation.value("params", json::object());
-
-                    // Dispatch via the internal registry
-                    auto toolResult = co_await internalRegistry_->callTool(toolIt->second, params);
-
-                    bool isError = toolResult.value("isError", false);
-                    json stepResult = json{{"stepIndex", i}, {"op", op}, {"success", !isError}};
-
-                    // Extract data from tool result
-                    if (toolResult.contains("structuredContent") &&
-                        toolResult["structuredContent"].contains("data")) {
-                        stepResult["data"] = toolResult["structuredContent"]["data"];
-                    } else if (toolResult.contains("content") && toolResult["content"].is_array() &&
-                               !toolResult["content"].empty()) {
-                        auto& firstContent = toolResult["content"][0];
-                        if (firstContent.contains("text")) {
-                            try {
-                                stepResult["data"] =
-                                    json::parse(firstContent["text"].get<std::string>());
-                            } catch (...) {
-                                stepResult["data"] = json{{"text", firstContent["text"]}};
-                            }
-                        }
-                    }
-
-                    if (isError) {
-                        ++failed;
-                        // Extract error message
-                        if (toolResult.contains("content") && toolResult["content"].is_array() &&
-                            !toolResult["content"].empty()) {
-                            auto& fc = toolResult["content"][0];
-                            if (fc.contains("text")) {
-                                stepResult["error"] = fc["text"];
-                            }
-                        }
-                    } else {
-                        ++succeeded;
-                    }
-
-                    results.push_back(stepResult);
-
-                    if (isError && !continueOnError)
-                        break;
-                }
-
-                json finalResult = json{{"results", results},
-                                        {"totalOps", operations.size()},
-                                        {"succeeded", succeeded},
-                                        {"failed", failed}};
-
-                std::ostringstream summary;
-                summary << "Execute: " << succeeded << " succeeded, " << failed << " failed out of "
-                        << operations.size() << " operations";
-
-                std::optional<json> structured;
-                if (negotiatedProtocolVersion_ >= "2024-11-05") {
-                    structured = json{{"type", "tool_result"}, {"data", finalResult}};
-                }
-
-                co_return wrapToolResultStructured(json::array({content::text(summary.str())}),
-                                                   structured, failed > 0);
-            } catch (const json::exception& e) {
-                co_return wrapToolResultStructured(
-                    json::array({content::text(std::string("JSON error: ") + e.what())}),
-                    std::nullopt, true);
-            } catch (const std::exception& e) {
-                co_return wrapToolResultStructured(
-                    json::array({content::text(std::string("Error: ") + e.what())}), std::nullopt,
-                    true);
-            }
-        }
-
-        // Session action handler: dispatch to session_start/stop/pin/unpin/watch
-        boost::asio::awaitable<json> MCPServer::handleSessionAction(const json& args) {
-            try {
-                if (!args.contains("action") || !args["action"].is_string()) {
-                    co_return wrapToolResultStructured(
-                        json::array({content::text("Error: 'action' string is required")}),
-                        std::nullopt, true);
-                }
-
-                auto action = args["action"].get<std::string>();
-                auto params = args.value("params", json::object());
-
-                // Map action names to tool names
-                static const std::unordered_map<std::string, std::string> actionToTool = {
-                    {"start", "session_start"}, {"stop", "session_stop"}, {"pin", "session_pin"},
-                    {"unpin", "session_unpin"}, {"watch", "watch"},
-                };
-
-                auto toolIt = actionToTool.find(action);
-                if (toolIt == actionToTool.end()) {
-                    co_return wrapToolResultStructured(
-                        json::array(
-                            {content::text("Error: Unknown session action '" + action +
-                                           "'. Valid actions: start, stop, pin, unpin, watch")}),
-                        std::nullopt, true);
-                }
-
-                // Dispatch via the internal registry
-                co_return co_await internalRegistry_->callTool(toolIt->second, params);
-            } catch (const json::exception& e) {
-                co_return wrapToolResultStructured(
-                    json::array({content::text(std::string("JSON error: ") + e.what())}),
-                    std::nullopt, true);
-            } catch (const std::exception& e) {
-                co_return wrapToolResultStructured(
-                    json::array({content::text(std::string("Error: ") + e.what())}), std::nullopt,
-                    true);
-            }
-        }
+        // Code Mode composite tool helpers/handlers live in src/mcp/mcp_code_mode.cpp
 
         json MCPServer::createResponse(const json& id, const json& result) {
             return json{{"jsonrpc", "2.0"}, {"id", id}, {"result", result}};
@@ -7145,40 +5427,6 @@ void MCPServer::initializeToolRegistry() {
             }
         }
 
-        // --- Cancellation + capability helpers ---
-
-        void MCPServer::registerCancelable(const nlohmann::json& id) {
-            if (id.is_null())
-                return;
-            std::lock_guard<std::mutex> lk(cancelMutex_);
-            std::string key = id.is_string() ? id.get<std::string>() : id.dump();
-            if (cancelTokens_.find(key) == cancelTokens_.end()) {
-                cancelTokens_[key] = std::make_shared<std::atomic<bool>>(false);
-            }
-        }
-
-        void MCPServer::cancelRequest(const nlohmann::json& id) {
-            if (id.is_null())
-                return;
-            std::lock_guard<std::mutex> lk(cancelMutex_);
-            std::string key = id.is_string() ? id.get<std::string>() : id.dump();
-            auto it = cancelTokens_.find(key);
-            if (it != cancelTokens_.end()) {
-                it->second->store(true);
-            }
-        }
-
-        bool MCPServer::isCanceled(const nlohmann::json& id) const {
-            if (id.is_null())
-                return false;
-            std::lock_guard<std::mutex> lk(cancelMutex_);
-            std::string key = id.is_string() ? id.get<std::string>() : id.dump();
-            auto it = cancelTokens_.find(key);
-            if (it == cancelTokens_.end())
-                return false;
-            return it->second->load();
-        }
-
         json MCPServer::buildServerCapabilities() const {
             // Per MCP 2025-06-18 spec: advertise listChanged:true since we support the notification
             // even though tools are primarily static (registered at startup)
@@ -7208,82 +5456,12 @@ void MCPServer::initializeToolRegistry() {
             return caps;
         }
 
-        // --- Cancel & Progress Helper Implementations ---
-        void MCPServer::handleCancelRequest(const nlohmann::json& params,
-                                            [[maybe_unused]] const nlohmann::json& id) {
-            // Expect params: { "id": <original request id> } but also accept { "requestId": ... }
-            nlohmann::json target;
-            if (params.contains("id")) {
-                target = params["id"];
-            } else if (params.contains("requestId")) {
-                target = params["requestId"];
-            } else {
-                spdlog::warn("cancel: missing id/requestId field");
-                return;
-            }
-            cancelRequest(target);
-            spdlog::info("Cancel requested for original id '{}'",
-                         target.is_string() ? target.get<std::string>() : target.dump());
-            // Optionally emit a progress notification indicating cancellation acknowledged
-            sendProgress("cancel", 100.0, "Cancellation acknowledged");
-        }
-
-        void MCPServer::sendProgress(const std::string& /*phase*/, double percent,
-                                     const std::string& message,
-                                     std::optional<nlohmann::json> progressToken) {
-            // Per MCP spec, notifications/progress MUST include a progressToken from the request's
-            // params._meta.progressToken. If absent, do not emit a progress notification.
-            nlohmann::json token = nullptr;
-            if (progressToken)
-                token = *progressToken;
-            else if (!MCPServer::tlsProgressToken_.is_null())
-                token = MCPServer::tlsProgressToken_;
-
-            if (token.is_null()) {
-                return; // No valid token available; skip
-            }
-
-            double clamped = percent;
-            if (clamped < 0.0)
-                clamped = 0.0;
-            if (clamped > 100.0)
-                clamped = 100.0;
-
-            json p = {{"progressToken", token}, {"progress", clamped}, {"total", 100.0}};
-            if (!message.empty())
-                p["message"] = message;
-            sendResponse({{"jsonrpc", "2.0"}, {"method", "notifications/progress"}, {"params", p}});
-        }
-
         void MCPServer::scheduleAutoReady() {
             // Removed - not part of MCP spec
         }
 
         bool MCPServer::shouldAutoInitialize() const {
             return false;
-        }
-
-        // --- HTTP mode session context helpers ---
-        void MCPServer::beginSessionContext(
-            std::string sessionId,
-            std::function<void(const std::string&, const nlohmann::json&)> publisher) {
-            tlsSessionId_ = std::move(sessionId);
-            httpPublisher_ = std::move(publisher);
-        }
-
-        void MCPServer::endSessionContext() {
-            tlsSessionId_.clear();
-            httpPublisher_ = nullptr;
-        }
-
-        void MCPServer::notifyToolsListChanged() {
-            // Send notifications/tools/list_changed per MCP spec
-            // This is a server-initiated notification (no params needed)
-            json notification = {{"jsonrpc", "2.0"},
-                                 {"method", "notifications/tools/list_changed"},
-                                 {"params", json::object()}};
-            sendResponse(notification);
-            spdlog::debug("Sent notifications/tools/list_changed");
         }
 
     } // namespace yams::mcp

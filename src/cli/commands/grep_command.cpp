@@ -24,6 +24,7 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
 #include <yams/metadata/document_metadata.h>
+#include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/search/search_engine.h>
@@ -440,6 +441,14 @@ public:
 
                 auto render = [&,
                                jsonMode](const yams::daemon::GrepResponse& resp) -> Result<void> {
+                    std::set<std::string> relationFiles;
+                    for (const auto& match : resp.matches) {
+                        if (!match.file.empty()) {
+                            relationFiles.insert(match.file);
+                        }
+                    }
+                    const auto relationSummaries = buildRelationSummaryMap(relationFiles);
+
                     // JSON output mode
                     if (jsonMode) {
                         nlohmann::json j;
@@ -461,7 +470,19 @@ public:
                             if (!match.contextAfter.empty()) {
                                 m["context_after"] = match.contextAfter;
                             }
+                            auto relationSummary =
+                                relationHintForFile(relationSummaries, match.file);
+                            if (!relationSummary.empty()) {
+                                m["relation_summary"] = relationSummary;
+                            }
                             j["matches"].push_back(m);
+                        }
+                        if (!relationSummaries.empty()) {
+                            nlohmann::json rel = nlohmann::json::object();
+                            for (const auto& [file, summary] : relationSummaries) {
+                                rel[file] = summary;
+                            }
+                            j["relation_summaries"] = std::move(rel);
                         }
                         std::cout << j.dump(2) << std::endl;
                         return Result<void>();
@@ -521,11 +542,17 @@ public:
                                                "[S:" + std::to_string(itS->second).substr(0, 4) +
                                                    "]",
                                                ui::Ansi::CYAN)
-                                        << " " << ui::colorize(file, ui::Ansi::MAGENTA)
-                                        << std::endl;
+                                        << " " << ui::colorize(file, ui::Ansi::MAGENTA);
                                 } else {
-                                    std::cout << ui::colorize(file, ui::Ansi::MAGENTA) << std::endl;
+                                    std::cout << ui::colorize(file, ui::Ansi::MAGENTA);
                                 }
+                                auto relationSummary = relationHintForFile(relationSummaries, file);
+                                if (!relationSummary.empty()) {
+                                    std::cout << " "
+                                              << ui::colorize("[rel: " + relationSummary + "]",
+                                                              ui::Ansi::DIM);
+                                }
+                                std::cout << std::endl;
                             }
                         }
                     } else if (countOnly_) {
@@ -562,6 +589,12 @@ public:
                                 }
                                 std::cout << ui::colorize(std::to_string(count), ui::Ansi::GREEN)
                                           << std::endl;
+                                auto relationSummary = relationHintForFile(relationSummaries, file);
+                                if (!relationSummary.empty()) {
+                                    std::cout
+                                        << ui::colorize("  rel: " + relationSummary, ui::Ansi::DIM)
+                                        << std::endl;
+                                }
                             }
                             if (!semanticOnly.empty()) {
                                 std::cout << ui::colorize("\nSemantic suggestions:", ui::Ansi::DIM)
@@ -571,8 +604,15 @@ public:
                                         << ui::colorize("[S:" + std::to_string(conf).substr(0, 4) +
                                                             "]",
                                                         ui::Ansi::CYAN)
-                                        << " " << ui::colorize(file, ui::Ansi::MAGENTA)
-                                        << std::endl;
+                                        << " " << ui::colorize(file, ui::Ansi::MAGENTA);
+                                    auto relationSummary =
+                                        relationHintForFile(relationSummaries, file);
+                                    if (!relationSummary.empty()) {
+                                        std::cout << " "
+                                                  << ui::colorize("[rel: " + relationSummary + "]",
+                                                                  ui::Ansi::DIM);
+                                    }
+                                    std::cout << std::endl;
                                 }
                             }
                         }
@@ -657,6 +697,13 @@ public:
 
                                 if (!ext.empty()) {
                                     std::cout << ui::colorize(" [" + ext + "]", ui::Ansi::DIM);
+                                }
+                                auto relationSummary =
+                                    relationHintForFile(relationSummaries, filename);
+                                if (!relationSummary.empty()) {
+                                    std::cout << " "
+                                              << ui::colorize("[rel: " + relationSummary + "]",
+                                                              ui::Ansi::DIM);
                                 }
                                 std::cout << std::endl;
 
@@ -833,6 +880,75 @@ private:
                 std::cerr << "\n";
             }
         }
+    }
+
+    std::unordered_map<std::string, std::string>
+    buildRelationSummaryMap(const std::set<std::string>& files, std::size_t maxLookups = 64) const {
+        std::unordered_map<std::string, std::string> summaryByFile;
+        if (!cli_ || files.empty()) {
+            return summaryByFile;
+        }
+        auto kgStore = cli_->getKnowledgeGraphStore();
+        if (!kgStore) {
+            return summaryByFile;
+        }
+
+        std::size_t lookedUp = 0;
+        for (const auto& file : files) {
+            if (file.empty() || lookedUp >= maxLookups) {
+                continue;
+            }
+            auto summary = metadata::collectFileRelationSummary(kgStore.get(), file);
+            if (summary.has_value()) {
+                auto formatted =
+                    metadata::formatRelationSummary(summary->topRelations, true /*humanReadable*/);
+                if (!formatted.empty()) {
+                    summaryByFile[file] = std::move(formatted);
+                }
+            }
+            ++lookedUp;
+        }
+        return summaryByFile;
+    }
+
+    std::string relationHintForFile(const std::unordered_map<std::string, std::string>& summaries,
+                                    const std::string& file) const {
+        if (auto it = summaries.find(file); it != summaries.end()) {
+            return it->second;
+        }
+
+        const auto normalizedFile = yams::app::services::utils::normalizeLookupPath(file);
+        if (!normalizedFile.normalized.empty()) {
+            for (const auto& [candidate, summary] : summaries) {
+                if (yams::app::services::utils::normalizeLookupPath(candidate).normalized ==
+                    normalizedFile.normalized) {
+                    return summary;
+                }
+            }
+        }
+
+        const auto filename = std::filesystem::path(file).filename().string();
+        if (filename.empty()) {
+            return {};
+        }
+
+        std::string match;
+        for (const auto& [candidate, summary] : summaries) {
+            if (std::filesystem::path(candidate).filename().string() != filename) {
+                continue;
+            }
+            if (match.empty()) {
+                match = summary;
+                continue;
+            }
+            if (match != summary) {
+                return {};
+            }
+        }
+        if (!match.empty()) {
+            return match;
+        }
+        return {};
     }
 
     std::string formatSnippet(std::string_view snippet) const {
@@ -1191,6 +1307,17 @@ private:
         }
 
         // Output results based on mode
+        std::set<std::string> relationFiles;
+        for (const auto& [filePath, _] : allRegexMatches) {
+            relationFiles.insert(filePath);
+        }
+        for (const auto& result : semanticResults) {
+            if (!result.document.filePath.empty()) {
+                relationFiles.insert(result.document.filePath);
+            }
+        }
+        auto relationSummaries = buildRelationSummaryMap(relationFiles);
+
         if (filesOnly_ || pathsOnly_) {
             // Show files from regex and semantic results (semantic marked with confidence when no
             // regex)
@@ -1220,10 +1347,16 @@ private:
                         std::cout << ui::colorize("[S:" + std::to_string(itc->second).substr(0, 4) +
                                                       "]",
                                                   ui::Ansi::CYAN)
-                                  << " " << ui::colorize(file, ui::Ansi::MAGENTA) << std::endl;
+                                  << " " << ui::colorize(file, ui::Ansi::MAGENTA);
                     } else {
-                        std::cout << ui::colorize(file, ui::Ansi::MAGENTA) << std::endl;
+                        std::cout << ui::colorize(file, ui::Ansi::MAGENTA);
                     }
+                    auto relationSummary = relationHintForFile(relationSummaries, file);
+                    if (!relationSummary.empty()) {
+                        std::cout << " "
+                                  << ui::colorize("[rel: " + relationSummary + "]", ui::Ansi::DIM);
+                    }
+                    std::cout << std::endl;
                 }
             }
         } else if (countOnly_) {
@@ -1234,6 +1367,11 @@ private:
                 }
                 std::cout << ui::colorize(std::to_string(matches.size()), ui::Ansi::GREEN)
                           << std::endl;
+                auto relationSummary = relationHintForFile(relationSummaries, filePath);
+                if (!relationSummary.empty()) {
+                    std::cout << ui::colorize("  rel: " + relationSummary, ui::Ansi::DIM)
+                              << std::endl;
+                }
             }
         } else if (filesWithoutMatch_) {
             // Handle files-without-match option
@@ -1276,7 +1414,8 @@ private:
                                 limitedMatches.resize(maxCount_);
                             }
 
-                            printMatchesColorized(filePath, content, limitedMatches);
+                            printMatchesColorized(filePath, content, limitedMatches,
+                                                  relationHintForFile(relationSummaries, filePath));
                         }
                     }
                     fileCount++;
@@ -1315,8 +1454,14 @@ private:
                     std::cout << " "
                               << ui::colorize("[S:" + std::to_string(result.score).substr(0, 4) +
                                                   "]",
-                                              scoreColor)
-                              << std::endl;
+                                              scoreColor);
+
+                    auto relationSummary = relationHintForFile(relationSummaries, path);
+                    if (!relationSummary.empty()) {
+                        std::cout << " "
+                                  << ui::colorize("[rel: " + relationSummary + "]", ui::Ansi::DIM);
+                    }
+                    std::cout << std::endl;
 
                     // Show snippet if available
                     if (!result.snippet.empty()) {
@@ -1487,7 +1632,8 @@ private:
     }
 
     void printMatchesColorized(const std::string& filename, const std::string& content,
-                               const std::vector<Match>& matches) {
+                               const std::vector<Match>& matches,
+                               std::string relationSummary = std::string{}) {
         // Split content into lines for context printing
         std::vector<std::string> lines;
         std::istringstream stream(content);
@@ -1508,6 +1654,9 @@ private:
         if (dotPos != std::string::npos) {
             ext = filename.substr(dotPos + 1);
             std::cout << ui::colorize(" [" + ext + "]", ui::Ansi::DIM);
+        }
+        if (!relationSummary.empty()) {
+            std::cout << " " << ui::colorize("[rel: " + relationSummary + "]", ui::Ansi::DIM);
         }
         std::cout << std::endl;
 

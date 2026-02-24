@@ -160,6 +160,19 @@ MCPSearchResponse MCPSearchResponse::fromJson(const json& j) {
             r.path = result.value("path", std::string{});
             r.score = result.value("score", 0.0f);
             r.snippet = result.value("snippet", std::string{});
+            if (auto it = result.find("line_start"); it != result.end() && !it->is_null()) {
+                r.lineStart = it->get<uint64_t>();
+            }
+            if (auto it = result.find("line_end"); it != result.end() && !it->is_null()) {
+                r.lineEnd = it->get<uint64_t>();
+            }
+            if (auto it = result.find("char_start"); it != result.end() && !it->is_null()) {
+                r.charStart = it->get<uint64_t>();
+            }
+            if (auto it = result.find("char_end"); it != result.end() && !it->is_null()) {
+                r.charEnd = it->get<uint64_t>();
+            }
+            r.snippetTruncated = result.value("snippet_truncated", false);
 
             if (result.contains("diff") && !result["diff"].is_null()) {
                 r.diff = result["diff"];
@@ -217,6 +230,16 @@ json MCPSearchResponse::toJson() const {
         r["score"] = result.score;
         if (!result.snippet.empty())
             r["snippet"] = result.snippet;
+        if (result.lineStart)
+            r["line_start"] = *result.lineStart;
+        if (result.lineEnd)
+            r["line_end"] = *result.lineEnd;
+        if (result.charStart)
+            r["char_start"] = *result.charStart;
+        if (result.charEnd)
+            r["char_end"] = *result.charEnd;
+        if (result.snippetTruncated)
+            r["snippet_truncated"] = true;
         if (result.diff)
             r["diff"] = *result.diff;
         if (result.localInputFile)
@@ -318,11 +341,51 @@ MCPGrepResponse MCPGrepResponse::fromJson(const json& j) {
     resp.output = j.value("output", std::string{});
     resp.matchCount = j.value("match_count", size_t{0});
     resp.fileCount = j.value("file_count", size_t{0});
+    resp.outputTruncated = j.value("output_truncated", false);
+    resp.outputMaxBytes = j.value("output_max_bytes", size_t{0});
+    if (j.contains("matches") && j["matches"].is_array()) {
+        for (const auto& m : j["matches"]) {
+            MCPGrepResponse::Match gm;
+            gm.file = m.value("file", std::string{});
+            gm.lineNumber = m.value("line_number", size_t{0});
+            gm.lineText = m.value("line_text", std::string{});
+            detail::readStringArray(m, "context_before", gm.contextBefore);
+            detail::readStringArray(m, "context_after", gm.contextAfter);
+            gm.matchType = m.value("match_type", std::string{"regex"});
+            gm.confidence = m.value("confidence", 1.0);
+            gm.matchId = m.value("match_id", std::string{});
+            gm.fileMatches = m.value("file_matches", size_t{0});
+            resp.matches.push_back(std::move(gm));
+        }
+    }
     return resp;
 }
 
 json MCPGrepResponse::toJson() const {
-    return json{{"output", output}, {"match_count", matchCount}, {"file_count", fileCount}};
+    json j{{"output", output}, {"match_count", matchCount}, {"file_count", fileCount}};
+    if (outputTruncated)
+        j["output_truncated"] = true;
+    if (outputMaxBytes > 0)
+        j["output_max_bytes"] = outputMaxBytes;
+    if (!matches.empty()) {
+        json arr = json::array();
+        for (const auto& m : matches) {
+            json jm{{"file", m.file},
+                    {"line_number", m.lineNumber},
+                    {"line_text", m.lineText},
+                    {"context_before", m.contextBefore},
+                    {"context_after", m.contextAfter},
+                    {"match_type", m.matchType},
+                    {"confidence", m.confidence}};
+            if (!m.matchId.empty())
+                jm["match_id"] = m.matchId;
+            if (m.fileMatches > 0)
+                jm["file_matches"] = m.fileMatches;
+            arr.push_back(std::move(jm));
+        }
+        j["matches"] = std::move(arr);
+    }
+    return j;
 }
 
 // MCPDownloadRequest implementation
@@ -519,7 +582,7 @@ MCPRetrieveDocumentRequest MCPRetrieveDocumentRequest::fromJson(const json& j) {
     req.outputPath = j.value("output_path", std::string{});
     req.graph = j.value("graph", false);
     req.depth = j.value("depth", 1);
-    req.includeContent = j.value("include_content", false);
+    req.includeContent = j.value("include_content", true);
     req.useSession = j.value("use_session", true);
     req.sessionName = j.value("session", std::string{});
     return req;
@@ -566,6 +629,16 @@ MCPRetrieveDocumentResponse MCPRetrieveDocumentResponse::fromJson(const json& j)
     if (j.contains("content")) {
         resp.content = j["content"].get<std::string>();
     }
+    resp.contentTruncated = j.value("content_truncated", false);
+    resp.contentBytes = j.value("content_bytes", uint64_t{0});
+    resp.contentMaxBytes = j.value("content_max_bytes", uint64_t{0});
+    if (j.contains("metadata") && j["metadata"].is_object()) {
+        for (auto it = j["metadata"].begin(); it != j["metadata"].end(); ++it) {
+            if (it.value().is_string()) {
+                resp.metadata[it.key()] = it.value().get<std::string>();
+            }
+        }
+    }
     resp.graphEnabled = j.value("graph_enabled", false);
     if (j.contains("related") && j["related"].is_array()) {
         resp.related = j["related"];
@@ -583,6 +656,14 @@ json MCPRetrieveDocumentResponse::toJson() const {
            {"graph_enabled", graphEnabled}};
     if (content)
         j["content"] = *content;
+    if (contentTruncated)
+        j["content_truncated"] = true;
+    if (contentBytes > 0)
+        j["content_bytes"] = contentBytes;
+    if (contentMaxBytes > 0)
+        j["content_max_bytes"] = contentMaxBytes;
+    if (!metadata.empty())
+        j["metadata"] = metadata;
     if (!related.empty())
         j["related"] = related;
     if (compressionAlgorithm.has_value())

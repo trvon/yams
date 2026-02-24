@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <unordered_set>
 
+#include <yams/metadata/path_utils.h>
+
 namespace yams::cli {
 
 std::vector<std::string> build_graph_file_node_candidates(const std::string& name) {
@@ -17,6 +19,15 @@ std::vector<std::string> build_graph_file_node_candidates(const std::string& nam
     };
 
     push_unique(name);
+
+    try {
+        auto derived = yams::metadata::computePathDerivedValues(name);
+        if (!derived.normalizedPath.empty()) {
+            push_unique(derived.normalizedPath);
+        }
+    } catch (const std::exception& e) {
+        spdlog::trace("Path derivation failed for '{}': {}", name, e.what());
+    }
 
     try {
         std::filesystem::path input(name);

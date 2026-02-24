@@ -597,8 +597,6 @@ auto validateStorageIntegrity(const std::filesystem::path& basePath) -> Result<b
             return false;
         }
 
-
-
         return true;
 
     } catch (const std::exception& e) {

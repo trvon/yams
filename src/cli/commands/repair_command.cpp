@@ -44,6 +44,8 @@ public:
                       "Repair block_references with correct sizes from CAS files");
         cmd->add_flag("--stuck", repairStuckDocs_,
                       "Recover stuck documents (failed extraction, ghost success, stalled)");
+        cmd->add_flag("--graph", repairGraph_,
+                      "Rebuild knowledge graph nodes/edges and clean orphaned KG entries");
         cmd->add_option("--include-mime", includeMime_,
                         "Additional MIME types to embed (e.g., application/pdf). Repeatable.")
             ->type_size(-1);
@@ -53,8 +55,9 @@ public:
         cmd->add_flag("--foreground", foreground_,
                       "Run embeddings repair in the foreground (stream progress)");
         cmd->add_flag("-v,--verbose", verbose_, "Show detailed progress and transient errors");
-        cmd->add_flag("--force", force_,
-                      "Force full rebuild (skip incremental optimizations and confirmation prompts)");
+        cmd->add_flag(
+            "--force", force_,
+            "Force full rebuild (skip incremental optimizations and confirmation prompts)");
         cmd->add_option("--max-retries", maxRetries_, "Max retry attempts for stuck documents");
 
         cmd->callback([this]() {
@@ -86,7 +89,7 @@ public:
         // If no specific repair requested, default to orphans
         if (!repairOrphans_ && !repairMime_ && !repairChunks_ && !repairEmbeddings_ &&
             !repairFts5_ && !optimizeDb_ && !repairDownloads_ && !repairPathTree_ &&
-            !repairBlockRefs_ && !repairStuckDocs_ && !repairAll_) {
+            !repairBlockRefs_ && !repairStuckDocs_ && !repairGraph_ && !repairAll_) {
             repairOrphans_ = true;
         }
 
@@ -104,6 +107,7 @@ public:
         req.repairFts5 = repairFts5_ || effectiveAll;
         req.repairEmbeddings = repairEmbeddings_ || effectiveAll;
         req.repairStuckDocs = repairStuckDocs_ || effectiveAll;
+        req.repairGraph = repairGraph_ || effectiveAll;
         req.optimizeDb = optimizeDb_ || effectiveAll;
         req.repairAll = false;
         req.dryRun = dryRun_;
@@ -298,6 +302,7 @@ private:
     bool repairPathTree_ = false;
     bool repairBlockRefs_ = false;
     bool repairStuckDocs_ = false;
+    bool repairGraph_ = false;
     bool foreground_ = false;
     std::vector<std::string> includeMime_;
     std::string embeddingModel_;

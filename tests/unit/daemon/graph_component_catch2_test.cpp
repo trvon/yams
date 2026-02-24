@@ -431,11 +431,11 @@ TEST_CASE("GraphComponent: Repair graph (stub)", "[daemon][graph][maintenance]")
     REQUIRE(docNode.has_value());
     REQUIRE(docNode.value().has_value());
 
-    auto fileNode = fixture.kgStore->getNodeByKey("file:" + normalizedPath);
+    auto fileNode = fixture.kgStore->getNodeByKey("path:file:" + normalizedPath);
     REQUIRE(fileNode.has_value());
     REQUIRE(fileNode.value().has_value());
 
-    auto dirNode = fixture.kgStore->getNodeByKey("dir:" + parentPath);
+    auto dirNode = fixture.kgStore->getNodeByKey("path:dir:" + parentPath);
     REQUIRE(dirNode.has_value());
     REQUIRE(dirNode.value().has_value());
 
@@ -677,7 +677,7 @@ TEST_CASE("KnowledgeGraphStore: getNodeTypeCounts", "[daemon][graph][query]") {
     }
     for (int i = 0; i < 3; i++) {
         KGNode node;
-        node.nodeKey = "file:file:" + std::to_string(i);
+        node.nodeKey = "path:file:file:" + std::to_string(i);
         node.label = "File" + std::to_string(i);
         node.type = "file";
         REQUIRE(fixture.kgStore->upsertNode(node).has_value());

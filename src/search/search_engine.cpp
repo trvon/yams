@@ -133,6 +133,12 @@ std::string_view::size_type ci_find(std::string_view haystack, std::string_view 
     return std::string_view::npos;
 }
 
+constexpr auto kRerankerErrorCooldown = std::chrono::seconds(60);
+
+bool isRerankerCooldownError(ErrorCode code) {
+    return code == ErrorCode::NotImplemented || code == ErrorCode::InvalidState;
+}
+
 bool cpuSupportsSimdSearch() {
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #if defined(__clang__) || defined(__GNUC__)
@@ -654,6 +660,7 @@ private:
     mutable SearchEngine::Statistics stats_;
     EntityExtractionFunc conceptExtractor_; // GLiNER concept extractor (optional)
     std::shared_ptr<IReranker> reranker_;   // Cross-encoder reranker (optional)
+    std::atomic<int64_t> rerankerCooldownUntilMicros_{0};
 };
 
 Result<std::vector<SearchResult>> SearchEngine::Impl::search(const std::string& query,
@@ -1314,8 +1321,22 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         YAMS_ZONE_SCOPED_N("reranking");
         const size_t rerankWindow = std::min(config_.rerankTopK, response.results.size());
 
+        const int64_t nowMicros = std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now().time_since_epoch())
+                                      .count();
+        const int64_t cooldownUntilMicros =
+            rerankerCooldownUntilMicros_.load(std::memory_order_relaxed);
+        const bool rerankerCoolingDown = cooldownUntilMicros > nowMicros;
+
+        if (rerankerCoolingDown) {
+            skipped.push_back("reranker");
+            const int64_t remainingMs = (cooldownUntilMicros - nowMicros) / 1000;
+            spdlog::debug("[reranker] Cooldown active; skipping rerank ({} ms remaining)",
+                          std::max<int64_t>(remainingMs, 0));
+        }
+
         bool skipRerank = false;
-        if (rerankWindow >= 2 && config_.rerankScoreGapThreshold > 0.0f) {
+        if (!rerankerCoolingDown && rerankWindow >= 2 && config_.rerankScoreGapThreshold > 0.0f) {
             const double scoreGap = response.results[0].score - response.results[1].score;
             if (scoreGap >= static_cast<double>(config_.rerankScoreGapThreshold)) {
                 spdlog::debug("[reranker] Skipping rerank (score gap {:.4f} >= {:.4f})", scoreGap,
@@ -1324,7 +1345,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             }
         }
 
-        if (!skipRerank) {
+        if (!rerankerCoolingDown && !skipRerank) {
             // Extract document snippets for reranking
             std::vector<std::string> snippets;
             std::vector<size_t> rerankIndices;
@@ -1344,6 +1365,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             if (!snippets.empty()) {
                 auto rerankResult = reranker_->scoreDocuments(query, snippets);
                 if (rerankResult) {
+                    rerankerCooldownUntilMicros_.store(0, std::memory_order_relaxed);
                     const auto& scores = rerankResult.value();
                     spdlog::debug("[reranker] Reranked {} documents", scores.size());
 
@@ -1374,7 +1396,24 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
                     contributing.push_back("reranker");
                 } else {
-                    spdlog::warn("[reranker] Reranking failed: {}", rerankResult.error().message);
+                    if (isRerankerCooldownError(rerankResult.error().code)) {
+                        const int64_t nextCooldown =
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                (std::chrono::steady_clock::now() + kRerankerErrorCooldown)
+                                    .time_since_epoch())
+                                .count();
+                        rerankerCooldownUntilMicros_.store(nextCooldown, std::memory_order_relaxed);
+                        spdlog::warn(
+                            "[reranker] Reranking unavailable (code={}): {}. Cooling down "
+                            "for {}s",
+                            static_cast<int>(rerankResult.error().code),
+                            rerankResult.error().message,
+                            std::chrono::duration_cast<std::chrono::seconds>(kRerankerErrorCooldown)
+                                .count());
+                    } else {
+                        spdlog::warn("[reranker] Reranking failed: {}",
+                                     rerankResult.error().message);
+                    }
                 }
             } else {
                 spdlog::debug("[reranker] Skipping rerank: no snippets available");

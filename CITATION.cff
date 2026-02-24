@@ -37,7 +37,7 @@ keywords:
   - content-addressed-storage
   - deduplication
 license: GPL-3.0-or-later
-version: "0.9.0" # x-release-please-version
+version: "0.10.0" # x-release-please-version
 date-released: "2025-08-10"
 identifiers:
   - type: url

@@ -22,6 +22,7 @@ namespace yams::daemon {
  * ## Architecture
  * - **Fts5Job Consumer**: Handles FTS5 full-text indexing and orphan cleanup operations.
  * - **OrphanScan Task**: Periodic scan for orphaned FTS5 index entries.
+ * - **AutoRepair Task**: Tiered health checks + targeted repair runs.
  *
  * NOTE: EmbedJob is handled by EmbeddingService (on a strand for proper serialization).
  *
@@ -84,6 +85,7 @@ public:
      * - PathTreeRepair task
      * - Checkpoint task
      * - StorageGc task
+     * - AutoRepair task
      *
      * @note Idempotent - safe to call multiple times (no-op if already running).
      * @throws std::runtime_error if ServiceManager weak_ptr has expired
@@ -150,6 +152,14 @@ private:
      * When enabled via config, prunes older version nodes to keep recent history.
      */
     void launchGraphPruneTask();
+
+    /**
+     * @brief Launches the auto-repair periodic task.
+     *
+     * Runs tiered health checks and triggers RepairService operations based on
+     * missing FTS5, embeddings, and graph integrity.
+     */
+    void launchAutoRepairTask();
 
     Dependencies deps_;                ///< Dependency injection container
     std::atomic<bool> running_{false}; ///< Tracks whether tasks are active

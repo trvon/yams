@@ -1,6 +1,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -19,6 +20,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_utils.h>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -55,7 +57,7 @@ public:
 
         // Relation filtering for traversal
         cmd->add_option("--relation,-r", relationFilter_,
-                        "Filter edges by relation (e.g., CALLS, CONTAINS, IMPORTS)");
+                        "Filter edges by relation (e.g., calls, contains, imports)");
 
         // Output options
         cmd->add_option("--limit,-l", limit_, "Maximum results to return")->default_val(100);
@@ -134,6 +136,52 @@ public:
     }
 
 private:
+    static std::string canonicalizeRelationName(std::string value) {
+        auto trimLeft = std::find_if_not(value.begin(), value.end(),
+                                         [](unsigned char c) { return std::isspace(c) != 0; });
+        auto trimRight = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) {
+                             return std::isspace(c) != 0;
+                         }).base();
+        if (trimLeft >= trimRight) {
+            return {};
+        }
+
+        std::string normalized(trimLeft, trimRight);
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::replace(normalized.begin(), normalized.end(), '-', '_');
+        std::replace(normalized.begin(), normalized.end(), ' ', '_');
+
+        if (normalized == "call")
+            return "calls";
+        if (normalized == "include")
+            return "includes";
+        if (normalized == "inherit")
+            return "inherits";
+        if (normalized == "implement")
+            return "implements";
+        if (normalized == "reference")
+            return "references";
+        if (normalized == "rename_to")
+            return "renamed_to";
+        if (normalized == "rename_from")
+            return "renamed_from";
+
+        return normalized;
+    }
+
+    static std::string buildPathFileNodeKey(const std::string& path) {
+        try {
+            auto derived = yams::metadata::computePathDerivedValues(path);
+            if (!derived.normalizedPath.empty()) {
+                return "path:file:" + derived.normalizedPath;
+            }
+        } catch (...) {
+            // Fall through to raw path fallback.
+        }
+        return "path:file:" + path;
+    }
+
     // yams-66h: List available node types with counts
     boost::asio::awaitable<Result<void>> executeListTypes() {
         using namespace yams::daemon;
@@ -576,7 +624,11 @@ private:
         auto leaseHandle = std::move(leaseRes.value());
         auto& client = **leaseHandle;
 
-        std::string relation = relationFilter_.empty() ? "calls" : relationFilter_;
+        std::string relation =
+            relationFilter_.empty() ? "calls" : canonicalizeRelationName(relationFilter_);
+        if (relation.empty()) {
+            relation = "calls";
+        }
 
         // Use optimized isolated mode query (single SQL query instead of N+1)
         GraphQueryRequest req;
@@ -740,8 +792,20 @@ private:
 
     static std::optional<std::filesystem::path>
     extractNodePath(const yams::daemon::GraphNode& node) {
-        if (node.nodeKey.rfind("file:", 0) == 0) {
-            return std::filesystem::path(node.nodeKey.substr(5));
+        if (node.nodeKey.rfind("path:file:", 0) == 0) {
+            return std::filesystem::path(node.nodeKey.substr(10));
+        }
+        if (node.nodeKey.rfind("path:dir:", 0) == 0) {
+            return std::filesystem::path(node.nodeKey.substr(9));
+        }
+        if (node.nodeKey.rfind("path:logical:", 0) == 0) {
+            return std::filesystem::path(node.nodeKey.substr(13));
+        }
+        if (node.nodeKey.rfind("path:", 0) == 0) {
+            auto secondColon = node.nodeKey.find(':', 5);
+            if (secondColon != std::string::npos && secondColon + 1 < node.nodeKey.size()) {
+                return std::filesystem::path(node.nodeKey.substr(secondColon + 1));
+            }
         }
         auto at = node.nodeKey.rfind('@');
         if (at != std::string::npos && at + 1 < node.nodeKey.size()) {
@@ -919,7 +983,10 @@ private:
             gReq.includeEdgeProperties = verbose_;
 
             if (!relationFilter_.empty()) {
-                gReq.relationFilters.push_back(relationFilter_);
+                auto canonicalRelation = canonicalizeRelationName(relationFilter_);
+                if (!canonicalRelation.empty()) {
+                    gReq.relationFilters.push_back(std::move(canonicalRelation));
+                }
             }
 
             auto r = co_await client.call(gReq);
@@ -936,7 +1003,7 @@ private:
         if (!name_.empty()) {
             auto candidates = build_graph_file_node_candidates(name_);
             for (const auto& candidate : candidates) {
-                std::string fileNodeKey = "file:" + candidate;
+                std::string fileNodeKey = buildPathFileNodeKey(candidate);
 
                 GraphQueryRequest gReq;
                 gReq.nodeKey = fileNodeKey;
@@ -949,7 +1016,10 @@ private:
                 gReq.includeEdgeProperties = verbose_;
 
                 if (!relationFilter_.empty()) {
-                    gReq.relationFilters.push_back(relationFilter_);
+                    auto canonicalRelation = canonicalizeRelationName(relationFilter_);
+                    if (!canonicalRelation.empty()) {
+                        gReq.relationFilters.push_back(std::move(canonicalRelation));
+                    }
                 }
 
                 auto r = co_await client.call(gReq);

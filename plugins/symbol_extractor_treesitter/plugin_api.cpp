@@ -231,6 +231,7 @@ static int get_capabilities_json_abi(void* /*self*/, char** out_json) {
     if (!out_json)
         return YAMS_PLUGIN_ERR_INVALID;
     std::string json = R"({
+      "name": "symbol_extractor_treesitter",
       "languages": ["cpp", "c++", "c", "python", "go", "rust", "javascript", "typescript", "java", "csharp", "php", "kotlin", "perl", "r", "sql", "solidity", "sol", "dart", "p4"],
       "features": ["symbols", "relations", "auto_grammar_loading"],
       "version": "1.0.0"

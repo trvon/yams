@@ -455,7 +455,7 @@ void processData() {
         // At least one type of location edge should exist
         CHECK((foundDefinedInEdge || foundLocatedInEdge));
 
-        auto fileNodeRes = kg->getNodeByKey("file:" + filePath);
+        auto fileNodeRes = kg->getNodeByKey("path:file:" + filePath);
         REQUIRE(fileNodeRes.has_value());
         REQUIRE(fileNodeRes.value().has_value());
         auto fileEdgesRes = kg->getEdgesFrom(fileNodeRes.value()->id, std::nullopt, 100, 0);

@@ -1402,6 +1402,48 @@ public:
         });
     }
 
+    Result<std::int64_t> deleteOrphanedEdges() override {
+        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            auto stmtR = db.prepare(R"(
+                DELETE FROM kg_edges
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM kg_nodes n WHERE n.id = kg_edges.src_node_id
+                ) OR NOT EXISTS (
+                    SELECT 1 FROM kg_nodes n WHERE n.id = kg_edges.dst_node_id
+                )
+            )");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto execR = stmt.execute();
+            if (!execR)
+                return execR.error();
+            auto deleted = db.changes();
+            spdlog::debug("deleteOrphanedEdges: deleted {} edges", deleted);
+            return deleted;
+        });
+    }
+
+    Result<std::int64_t> deleteOrphanedDocEntities() override {
+        return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            auto stmtR = db.prepare(R"(
+                DELETE FROM kg_doc_entities
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM documents d WHERE d.id = kg_doc_entities.document_id
+                )
+            )");
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            auto execR = stmt.execute();
+            if (!execR)
+                return execR.error();
+            auto deleted = db.changes();
+            spdlog::debug("deleteOrphanedDocEntities: deleted {} rows", deleted);
+            return deleted;
+        });
+    }
+
     Result<std::vector<KGNode>> findIsolatedNodes(std::string_view nodeType,
                                                   std::string_view relation,
                                                   std::size_t limit) override {

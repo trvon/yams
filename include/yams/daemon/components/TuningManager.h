@@ -23,6 +23,12 @@ struct StateComponent;
 // resource allocation across daemon subsystems (IPC CPU/IO pools, writer budgets, etc.).
 class TuningManager {
 public:
+    enum class PostIngestScaleTestMode : uint8_t {
+        Normal = 0,
+        ForceBusy,
+        ForceIdle,
+    };
+
     TuningManager(ServiceManager* sm, StateComponent* state, WorkCoordinator* coordinator);
     ~TuningManager();
 
@@ -54,6 +60,9 @@ public:
     static int32_t testing_computeContentionBudgetAdjustment(
         std::size_t waitingRequests, std::uint64_t waitMicrosDelta, std::size_t timeoutDelta,
         std::size_t failedDelta, std::size_t processedDelta, std::uint32_t healthyTicks);
+    static void testing_setPostIngestScaleTestMode(PostIngestScaleTestMode mode);
+    static PostIngestScaleTestMode testing_postIngestScaleTestMode();
+    static bool testing_shouldAllowZeroPostIngestTargets(bool daemonIdle, bool postIngestBusy);
 
 private:
     boost::asio::awaitable<void> tuningLoop();
@@ -68,6 +77,7 @@ private:
     computeContentionBudgetAdjustment(std::size_t waitingRequests, std::uint64_t waitMicrosDelta,
                                       std::size_t timeoutDelta, std::size_t failedDelta,
                                       std::size_t processedDelta, std::uint32_t healthyTicks);
+    static bool shouldAllowZeroPostIngestTargets(bool daemonIdle, bool postIngestBusy);
 
     ServiceManager* sm_;
     StateComponent* state_;

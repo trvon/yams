@@ -5,6 +5,7 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <ranges>
 #include <string>
@@ -274,6 +275,11 @@ struct MCPSearchResponse {
         std::string path;
         float score = 0.0f;
         std::string snippet;
+        std::optional<uint64_t> lineStart;
+        std::optional<uint64_t> lineEnd;
+        std::optional<uint64_t> charStart;
+        std::optional<uint64_t> charEnd;
+        bool snippetTruncated = false;
         std::optional<float> vectorScore;
         std::optional<float> keywordScore;
         std::optional<float> kgEntityScore;
@@ -327,9 +333,24 @@ struct MCPGrepRequest {
 struct MCPGrepResponse {
     using ResponseType = MCPGrepResponse;
 
+    struct Match {
+        std::string file;
+        size_t lineNumber = 0;
+        std::string lineText;
+        std::vector<std::string> contextBefore;
+        std::vector<std::string> contextAfter;
+        std::string matchType = "regex";
+        double confidence = 1.0;
+        std::string matchId;
+        size_t fileMatches = 0;
+    };
+
     std::string output;
     size_t matchCount = 0;
     size_t fileCount = 0;
+    bool outputTruncated = false;
+    size_t outputMaxBytes = 0;
+    std::vector<Match> matches;
 
     static MCPGrepResponse fromJson(const json& j);
     json toJson() const;
@@ -455,6 +476,10 @@ struct MCPRetrieveDocumentResponse {
     std::optional<uint32_t> uncompressedCrc32;
     std::optional<std::string> compressionHeader;
     std::optional<std::string> content;
+    bool contentTruncated = false;
+    uint64_t contentBytes = 0;
+    uint64_t contentMaxBytes = 0;
+    std::map<std::string, std::string> metadata;
     bool graphEnabled = false;
     std::vector<json> related;
 

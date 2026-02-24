@@ -25,6 +25,11 @@
 
 namespace yams::daemon {
 
+namespace {
+std::atomic<uint8_t> gPostIngestScaleTestMode{
+    static_cast<uint8_t>(TuningManager::PostIngestScaleTestMode::Normal)};
+}
+
 TuningManager::TuningManager(ServiceManager* sm, StateComponent* state,
                              WorkCoordinator* coordinator)
     : sm_(sm), state_(state), coordinator_(coordinator), strand_(coordinator->getExecutor()) {}
@@ -244,6 +249,32 @@ int32_t TuningManager::testing_computeContentionBudgetAdjustment(
     std::size_t failedDelta, std::size_t processedDelta, std::uint32_t healthyTicks) {
     return computeContentionBudgetAdjustment(waitingRequests, waitMicrosDelta, timeoutDelta,
                                              failedDelta, processedDelta, healthyTicks);
+}
+
+void TuningManager::testing_setPostIngestScaleTestMode(PostIngestScaleTestMode mode) {
+    gPostIngestScaleTestMode.store(static_cast<uint8_t>(mode), std::memory_order_relaxed);
+}
+
+TuningManager::PostIngestScaleTestMode TuningManager::testing_postIngestScaleTestMode() {
+    return static_cast<PostIngestScaleTestMode>(
+        gPostIngestScaleTestMode.load(std::memory_order_relaxed));
+}
+
+bool TuningManager::shouldAllowZeroPostIngestTargets(bool daemonIdle, bool postIngestBusy) {
+    const auto mode = testing_postIngestScaleTestMode();
+    switch (mode) {
+        case PostIngestScaleTestMode::ForceBusy:
+            return false;
+        case PostIngestScaleTestMode::ForceIdle:
+            return true;
+        case PostIngestScaleTestMode::Normal:
+        default:
+            return daemonIdle && !postIngestBusy;
+    }
+}
+
+bool TuningManager::testing_shouldAllowZeroPostIngestTargets(bool daemonIdle, bool postIngestBusy) {
+    return shouldAllowZeroPostIngestTargets(daemonIdle, postIngestBusy);
 }
 
 void TuningManager::configureOnnxConcurrencyRegistry() {
@@ -686,12 +717,48 @@ void TuningManager::tick_once() {
                 applyActiveMask(1u << 3u, entityTarget);
                 applyActiveMask(1u << 4u, titleTarget);
                 applyActiveMask(1u << 5u, embedTarget);
-                const std::array<bool, 6> stageAllowed = {extractionTarget > 0, kgTarget > 0,
-                                                          symbolTarget > 0,     entityTarget > 0,
-                                                          titleTarget > 0,      embedTarget > 0};
+                const bool daemonIdle =
+                    (activeConns == 0) && (workerQueued == 0) && (muxQueuedBytes == 0);
+                const bool postIngestBusy = (queuedItems > 0) || (currentInFlight > 0) ||
+                                            (kgQueued > 0) || (symbolQueued > 0) ||
+                                            (entityQueued > 0) || (titleQueued > 0) ||
+                                            (embedQueued > 0) || (embedInFlight > 0);
+                const bool allowZeroTargets =
+                    shouldAllowZeroPostIngestTargets(daemonIdle, postIngestBusy);
 
-                const bool extractionActive = extractionTarget > 0;
-                const uint32_t minExtraction = (totalBudget >= 1 && extractionActive) ? 1u : 0u;
+                const std::array<bool, 6> stageAllowed = {
+                    (activeMask & (1u << 0u)) != 0u, (activeMask & (1u << 1u)) != 0u,
+                    (activeMask & (1u << 2u)) != 0u, (activeMask & (1u << 3u)) != 0u,
+                    (activeMask & (1u << 4u)) != 0u, (activeMask & (1u << 5u)) != 0u,
+                };
+
+                const uint32_t minExtraction =
+                    (totalBudget >= 1 && stageAllowed[0] && !allowZeroTargets) ? 1u : 0u;
+                const uint32_t minKg = (stageAllowed[1] && !allowZeroTargets) ? 1u : 0u;
+                const uint32_t minSymbol = (stageAllowed[2] && !allowZeroTargets) ? 1u : 0u;
+                const uint32_t minEntity = (stageAllowed[3] && !allowZeroTargets) ? 1u : 0u;
+                const uint32_t minTitle = (stageAllowed[4] && !allowZeroTargets) ? 1u : 0u;
+                const uint32_t minEmbed =
+                    (stageAllowed[5] && !allowZeroTargets) ? std::max(embedFloor, 1u) : 0u;
+
+                if (minExtraction > 0) {
+                    extractionTarget = std::max(extractionTarget, minExtraction);
+                }
+                if (minKg > 0) {
+                    kgTarget = std::max(kgTarget, minKg);
+                }
+                if (minSymbol > 0) {
+                    symbolTarget = std::max(symbolTarget, minSymbol);
+                }
+                if (minEntity > 0) {
+                    entityTarget = std::max(entityTarget, minEntity);
+                }
+                if (minTitle > 0) {
+                    titleTarget = std::max(titleTarget, minTitle);
+                }
+                if (minEmbed > 0) {
+                    embedTarget = std::max(embedTarget, minEmbed);
+                }
 
                 auto sumTargets = [&]() {
                     return extractionTarget + kgTarget + symbolTarget + entityTarget + titleTarget +
@@ -705,12 +772,12 @@ void TuningManager::tick_once() {
                         uint32_t minValue;
                     };
                     std::array<StageRef, 6> reduceOrder = {
-                        StageRef{&entityTarget, 0u},
-                        StageRef{&titleTarget, 0u},
-                        StageRef{&symbolTarget, 0u},
-                        StageRef{&kgTarget, 0u},
+                        StageRef{&entityTarget, minEntity},
+                        StageRef{&titleTarget, minTitle},
+                        StageRef{&symbolTarget, minSymbol},
+                        StageRef{&kgTarget, minKg},
                         StageRef{&extractionTarget, minExtraction},
-                        StageRef{&embedTarget, embedFloor}};
+                        StageRef{&embedTarget, minEmbed}};
 
                     while (totalTarget > totalBudget) {
                         bool progressed = false;
@@ -786,7 +853,8 @@ void TuningManager::tick_once() {
                 // Dynamic stage-agnostic rebalance by queue pressure.
                 std::array<uint32_t, 6> stageTargets = {extractionTarget, kgTarget,    symbolTarget,
                                                         entityTarget,     titleTarget, embedTarget};
-                std::array<uint32_t, 6> stageFloors = {minExtraction, 0u, 0u, 0u, 0u, embedFloor};
+                std::array<uint32_t, 6> stageFloors = {minExtraction, minKg,    minSymbol,
+                                                       minEntity,     minTitle, minEmbed};
                 std::array<std::size_t, 6> queueDepths = {queuedItems,  kgQueued,    symbolQueued,
                                                           entityQueued, titleQueued, embedQueued};
                 rebalanceTargetsByQueue(stageTargets, stageFloors, queueDepths, stageAllowed);

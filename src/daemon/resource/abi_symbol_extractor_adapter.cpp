@@ -1,9 +1,105 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <iomanip>
 #include <set>
+#include <sstream>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 
 namespace yams::daemon {
+
+namespace {
+
+std::string normalizeToken(std::string_view token) {
+    std::string out;
+    out.reserve(token.size());
+    for (unsigned char c : token) {
+        if (std::isalnum(c) != 0 || c == '_' || c == '-' || c == '.' || c == ':') {
+            out.push_back(static_cast<char>(std::tolower(c)));
+        }
+    }
+    return out;
+}
+
+std::string fnv1a64Hex(std::string_view input) {
+    constexpr std::uint64_t kOffset = 1469598103934665603ull;
+    constexpr std::uint64_t kPrime = 1099511628211ull;
+
+    std::uint64_t hash = kOffset;
+    for (unsigned char c : input) {
+        hash ^= c;
+        hash *= kPrime;
+    }
+
+    std::ostringstream oss;
+    oss << std::hex << std::nouppercase << std::setw(16) << std::setfill('0') << hash;
+    return oss.str();
+}
+
+std::string buildCapabilitiesFingerprint(const nlohmann::json& j) {
+    std::vector<std::string> parts;
+
+    if (j.contains("languages") && j["languages"].is_array()) {
+        for (const auto& lang : j["languages"]) {
+            if (lang.is_string()) {
+                auto normalized = normalizeToken(lang.get<std::string>());
+                if (!normalized.empty()) {
+                    parts.push_back("lang=" + normalized);
+                }
+            } else if (lang.is_object() && lang.contains("id") && lang["id"].is_string()) {
+                auto normalized = normalizeToken(lang["id"].get<std::string>());
+                if (!normalized.empty()) {
+                    parts.push_back("lang=" + normalized);
+                }
+            }
+        }
+    }
+
+    if (j.contains("features") && j["features"].is_array()) {
+        for (const auto& feature : j["features"]) {
+            if (feature.is_string()) {
+                auto normalized = normalizeToken(feature.get<std::string>());
+                if (!normalized.empty()) {
+                    parts.push_back("feature=" + normalized);
+                }
+            }
+        }
+    }
+
+    if (j.contains("version") && j["version"].is_string()) {
+        auto version = normalizeToken(j["version"].get<std::string>());
+        if (!version.empty()) {
+            parts.push_back("version=" + version);
+        }
+    }
+
+    if (j.contains("name") && j["name"].is_string()) {
+        auto name = normalizeToken(j["name"].get<std::string>());
+        if (!name.empty()) {
+            parts.push_back("name=" + name);
+        }
+    }
+
+    if (parts.empty()) {
+        return fnv1a64Hex(j.dump());
+    }
+
+    std::sort(parts.begin(), parts.end());
+    parts.erase(std::unique(parts.begin(), parts.end()), parts.end());
+
+    std::string joined;
+    for (const auto& part : parts) {
+        if (!joined.empty()) {
+            joined.push_back('|');
+        }
+        joined += part;
+    }
+    return fnv1a64Hex(joined);
+}
+
+} // namespace
 
 // Default extension-to-language mappings for common languages
 static const std::unordered_map<std::string, std::string> kDefaultExtensionMap = {
@@ -164,6 +260,8 @@ std::string AbiSymbolExtractorAdapter::getExtractorId() const {
         return "unknown";
     }
 
+    std::string name = "symbol_extractor_v1";
+
     // Try to get name and version from capabilities JSON
     if (table_->get_capabilities_json) {
         char* json_str = nullptr;
@@ -171,14 +269,21 @@ std::string AbiSymbolExtractorAdapter::getExtractorId() const {
         if (ret == 0 && json_str) {
             try {
                 auto j = nlohmann::json::parse(json_str);
-                std::string name = "symbol_extractor";
                 std::string version;
 
                 if (j.contains("name") && j["name"].is_string()) {
-                    name = j["name"].get<std::string>();
+                    auto normalizedName = normalizeToken(j["name"].get<std::string>());
+                    if (!normalizedName.empty()) {
+                        name = std::move(normalizedName);
+                    }
+                } else if (j.contains("plugin") && j["plugin"].is_string()) {
+                    auto normalizedName = normalizeToken(j["plugin"].get<std::string>());
+                    if (!normalizedName.empty()) {
+                        name = std::move(normalizedName);
+                    }
                 }
                 if (j.contains("version") && j["version"].is_string()) {
-                    version = j["version"].get<std::string>();
+                    version = normalizeToken(j["version"].get<std::string>());
                 }
 
                 if (table_->free_string) {
@@ -188,7 +293,12 @@ std::string AbiSymbolExtractorAdapter::getExtractorId() const {
                 if (!version.empty()) {
                     return name + ":" + version;
                 }
-                return name + ":v" + std::to_string(table_->abi_version);
+
+                const std::string fingerprint = buildCapabilitiesFingerprint(j);
+                if (!fingerprint.empty()) {
+                    return name + ":cap-" + fingerprint;
+                }
+                return name + ":abi" + std::to_string(table_->abi_version);
             } catch (...) {
                 // Fall through to default
             }
@@ -200,7 +310,7 @@ std::string AbiSymbolExtractorAdapter::getExtractorId() const {
     }
 
     // Fallback: use ABI version
-    return "symbol_extractor_v1:abi" + std::to_string(table_->abi_version);
+    return name + ":abi" + std::to_string(table_->abi_version);
 }
 
 } // namespace yams::daemon

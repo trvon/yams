@@ -193,8 +193,14 @@ Result<void> KGWriteQueue::applyBatches(std::vector<std::unique_ptr<DeferredKGBa
     std::size_t totalNodes = 0;
     std::size_t totalEdges = 0;
     std::size_t totalDocs = batches.size();
+    std::size_t skippedDeferredEdges = 0;
+    std::size_t skippedDeferredAliases = 0;
+    std::size_t skippedDeferredDocEntities = 0;
 
-    // Apply each deferred batch
+    std::unordered_map<std::string, std::int64_t> globalNodeKeyToId;
+    std::unordered_map<std::string, std::optional<std::int64_t>> resolutionCache;
+
+    // Phase 1: apply per-batch deletions and upsert all nodes.
     for (auto& batch : batches) {
         // Handle deletions first
         if (batch->documentIdToDelete.has_value()) {
@@ -227,29 +233,92 @@ Result<void> KGWriteQueue::applyBatches(std::vector<std::unique_ptr<DeferredKGBa
                 const auto& ids = nodesResult.value();
                 for (std::size_t i = 0; i < batch->nodes.size() && i < ids.size(); ++i) {
                     batch->nodeKeyToId[batch->nodes[i].nodeKey] = ids[i];
+                    globalNodeKeyToId[batch->nodes[i].nodeKey] = ids[i];
                 }
                 totalNodes += ids.size();
             }
         }
 
+        // Add pre-resolved edges (legacy path)
+        if (!batch->edges.empty()) {
+            auto edgesResult = writeBatch->addEdgesUnique(batch->edges);
+            if (!edgesResult) {
+                spdlog::warn("[KGWriteQueue] Failed to add {} edges for {}: {}",
+                             batch->edges.size(), batch->sourceFile, edgesResult.error().message);
+            } else {
+                totalEdges += batch->edges.size();
+            }
+        }
+
+        // Add pre-resolved doc entities (legacy path)
+        if (!batch->docEntities.empty()) {
+            auto deResult = writeBatch->addDocEntities(batch->docEntities);
+            if (!deResult) {
+                spdlog::warn("[KGWriteQueue] Failed to add {} doc entities for {}: {}",
+                             batch->docEntities.size(), batch->sourceFile,
+                             deResult.error().message);
+            }
+        }
+
+        // Upsert symbol metadata
+        if (!batch->symbolMetadata.empty()) {
+            auto smResult = writeBatch->upsertSymbolMetadata(batch->symbolMetadata);
+            if (!smResult) {
+                spdlog::warn("[KGWriteQueue] Failed to upsert {} symbols for {}: {}",
+                             batch->symbolMetadata.size(), batch->sourceFile,
+                             smResult.error().message);
+            }
+        }
+    }
+
+    auto resolveNodeId = [&](const DeferredKGBatch& batch,
+                             const std::string& nodeKey) -> std::optional<std::int64_t> {
+        auto localIt = batch.nodeKeyToId.find(nodeKey);
+        if (localIt != batch.nodeKeyToId.end()) {
+            return localIt->second;
+        }
+
+        auto globalIt = globalNodeKeyToId.find(nodeKey);
+        if (globalIt != globalNodeKeyToId.end()) {
+            return globalIt->second;
+        }
+
+        auto cacheIt = resolutionCache.find(nodeKey);
+        if (cacheIt != resolutionCache.end()) {
+            return cacheIt->second;
+        }
+
+        auto nodeRes = kg_->getNodeByKey(nodeKey);
+        if (nodeRes && nodeRes.value().has_value()) {
+            resolutionCache[nodeKey] = nodeRes.value()->id;
+            return nodeRes.value()->id;
+        }
+
+        resolutionCache[nodeKey] = std::nullopt;
+        return std::nullopt;
+    };
+
+    // Phase 2: resolve deferred references across the full group of batches.
+    for (auto& batch : batches) {
         // Resolve deferred edges (nodeKey → nodeId) and add them
         if (!batch->deferredEdges.empty()) {
             std::vector<metadata::KGEdge> resolvedEdges;
             resolvedEdges.reserve(batch->deferredEdges.size());
 
             for (const auto& de : batch->deferredEdges) {
-                auto srcIt = batch->nodeKeyToId.find(de.srcNodeKey);
-                auto dstIt = batch->nodeKeyToId.find(de.dstNodeKey);
+                auto srcNodeId = resolveNodeId(*batch, de.srcNodeKey);
+                auto dstNodeId = resolveNodeId(*batch, de.dstNodeKey);
 
-                if (srcIt == batch->nodeKeyToId.end() || dstIt == batch->nodeKeyToId.end()) {
+                if (!srcNodeId.has_value() || !dstNodeId.has_value()) {
+                    skippedDeferredEdges++;
                     spdlog::debug("[KGWriteQueue] Skipping edge {}->{}: nodeKey not found",
                                   de.srcNodeKey.substr(0, 20), de.dstNodeKey.substr(0, 20));
                     continue;
                 }
 
                 metadata::KGEdge edge;
-                edge.srcNodeId = srcIt->second;
-                edge.dstNodeId = dstIt->second;
+                edge.srcNodeId = srcNodeId.value();
+                edge.dstNodeId = dstNodeId.value();
                 edge.relation = de.relation;
                 edge.weight = de.weight;
                 edge.properties = de.properties;
@@ -268,17 +337,6 @@ Result<void> KGWriteQueue::applyBatches(std::vector<std::unique_ptr<DeferredKGBa
             }
         }
 
-        // Add pre-resolved edges (legacy path)
-        if (!batch->edges.empty()) {
-            auto edgesResult = writeBatch->addEdgesUnique(batch->edges);
-            if (!edgesResult) {
-                spdlog::warn("[KGWriteQueue] Failed to add {} edges for {}: {}",
-                             batch->edges.size(), batch->sourceFile, edgesResult.error().message);
-            } else {
-                totalEdges += batch->edges.size();
-            }
-        }
-
         // Add aliases (resolve nodeId if encoded in source field)
         if (!batch->aliases.empty()) {
             std::vector<metadata::KGAlias> resolvedAliases;
@@ -293,12 +351,13 @@ Result<void> KGWriteQueue::applyBatches(std::vector<std::unique_ptr<DeferredKGBa
                         std::string nodeKey = srcStr.substr(pipePos + 1);
                         std::string realSource = srcStr.substr(0, pipePos);
 
-                        auto nodeIt = batch->nodeKeyToId.find(nodeKey);
-                        if (nodeIt != batch->nodeKeyToId.end()) {
-                            alias.nodeId = nodeIt->second;
+                        auto nodeId = resolveNodeId(*batch, nodeKey);
+                        if (nodeId.has_value()) {
+                            alias.nodeId = nodeId.value();
                             alias.source = realSource;
                             resolvedAliases.push_back(std::move(alias));
                         } else {
+                            skippedDeferredAliases++;
                             spdlog::debug("[KGWriteQueue] Skipping alias '{}': nodeKey not found",
                                           alias.alias.substr(0, 30));
                         }
@@ -328,8 +387,9 @@ Result<void> KGWriteQueue::applyBatches(std::vector<std::unique_ptr<DeferredKGBa
             resolvedDocEntities.reserve(batch->deferredDocEntities.size());
 
             for (const auto& dde : batch->deferredDocEntities) {
-                auto nodeIt = batch->nodeKeyToId.find(dde.nodeKey);
-                if (nodeIt == batch->nodeKeyToId.end()) {
+                auto nodeId = resolveNodeId(*batch, dde.nodeKey);
+                if (!nodeId.has_value()) {
+                    skippedDeferredDocEntities++;
                     spdlog::debug("[KGWriteQueue] Skipping doc entity for nodeKey {}: not found",
                                   dde.nodeKey.substr(0, 30));
                     continue;
@@ -338,7 +398,7 @@ Result<void> KGWriteQueue::applyBatches(std::vector<std::unique_ptr<DeferredKGBa
                 metadata::DocEntity de;
                 de.documentId = dde.documentId;
                 de.entityText = dde.entityText;
-                de.nodeId = nodeIt->second;
+                de.nodeId = nodeId.value();
                 de.startOffset = dde.startOffset;
                 de.endOffset = dde.endOffset;
                 de.confidence = dde.confidence;
@@ -353,26 +413,6 @@ Result<void> KGWriteQueue::applyBatches(std::vector<std::unique_ptr<DeferredKGBa
                                  resolvedDocEntities.size(), batch->sourceFile,
                                  deResult.error().message);
                 }
-            }
-        }
-
-        // Add pre-resolved doc entities (legacy path)
-        if (!batch->docEntities.empty()) {
-            auto deResult = writeBatch->addDocEntities(batch->docEntities);
-            if (!deResult) {
-                spdlog::warn("[KGWriteQueue] Failed to add {} doc entities for {}: {}",
-                             batch->docEntities.size(), batch->sourceFile,
-                             deResult.error().message);
-            }
-        }
-
-        // Upsert symbol metadata
-        if (!batch->symbolMetadata.empty()) {
-            auto smResult = writeBatch->upsertSymbolMetadata(batch->symbolMetadata);
-            if (!smResult) {
-                spdlog::warn("[KGWriteQueue] Failed to upsert {} symbols for {}: {}",
-                             batch->symbolMetadata.size(), batch->sourceFile,
-                             smResult.error().message);
             }
         }
     }
@@ -403,8 +443,10 @@ Result<void> KGWriteQueue::applyBatches(std::vector<std::unique_ptr<DeferredKGBa
         stats_.edgesInserted += totalEdges;
     }
 
-    spdlog::info("[KGWriteQueue] Committed {} batches ({} nodes, {} edges) in {}ms", totalDocs,
-                 totalNodes, totalEdges, elapsed.count());
+    spdlog::info("[KGWriteQueue] Committed {} batches ({} nodes, {} edges) in {}ms"
+                 " [skipped deferred: edges={}, aliases={}, doc_entities={}]",
+                 totalDocs, totalNodes, totalEdges, elapsed.count(), skippedDeferredEdges,
+                 skippedDeferredAliases, skippedDeferredDocEntities);
 
     return Result<void>();
 }

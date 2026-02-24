@@ -101,38 +101,6 @@ inline void addMetadataToMap(const std::unordered_map<std::string, std::string>&
     }
 }
 
-// Generate a content snippet by truncating and cleaning whitespace
-inline std::string generateSnippet(const std::string& contentText, int snippetLength) {
-    if (contentText.empty() || contentText.length() <= 3) {
-        return {};
-    }
-    std::string snippet = contentText;
-    if (snippet.length() > static_cast<size_t>(snippetLength)) {
-        snippet.resize(static_cast<size_t>(snippetLength - 3));
-        size_t lastSpace = snippet.find_last_of(' ');
-        if (lastSpace != std::string::npos && lastSpace > static_cast<size_t>(snippetLength / 2)) {
-            snippet.resize(lastSpace);
-        }
-        snippet += "...";
-    }
-    // Collapse whitespace
-    std::string cleaned;
-    cleaned.reserve(snippet.size());
-    bool lastWasSpace = false;
-    for (char c : snippet) {
-        if (std::isspace(static_cast<unsigned char>(c))) {
-            if (!lastWasSpace) {
-                cleaned += ' ';
-                lastWasSpace = true;
-            }
-        } else {
-            cleaned += c;
-            lastWasSpace = false;
-        }
-    }
-    return cleaned;
-}
-
 // Returns true if s consists only of hex digits
 inline bool isHex(const std::string& s) {
     return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isxdigit(c) != 0; });
@@ -1280,6 +1248,26 @@ public:
         metadata::MetadataOpScope metadataScope("client_list");
 
         std::vector<metadata::DocumentInfo> docs;
+        auto appendProjectedToDocs =
+            [&](std::vector<metadata::ListDocumentProjection>&& projected) {
+                docs.clear();
+                docs.reserve(projected.size());
+                for (auto& p : projected) {
+                    metadata::DocumentInfo d;
+                    d.id = p.id;
+                    d.filePath = std::move(p.filePath);
+                    d.fileName = std::move(p.fileName);
+                    d.fileExtension = std::move(p.fileExtension);
+                    d.fileSize = p.fileSize;
+                    d.sha256Hash = std::move(p.sha256Hash);
+                    d.mimeType = std::move(p.mimeType);
+                    d.createdTime = p.createdTime;
+                    d.modifiedTime = p.modifiedTime;
+                    d.indexedTime = p.indexedTime;
+                    d.extractionStatus = p.extractionStatus;
+                    docs.push_back(std::move(d));
+                }
+            };
         bool usedQuery = false;
         std::size_t totalFoundApprox = 0;
 
@@ -1397,9 +1385,9 @@ public:
         // Try tree-based query for path prefix patterns with full filter support
         if (useTree && !treePrefix.empty()) {
             // Pass full queryOpts to support tags, mime, extension, etc.
-            auto treeDocsRes = ctx_.metadataRepo->queryDocuments(queryOpts);
+            auto treeDocsRes = ctx_.metadataRepo->queryDocumentsForListProjection(queryOpts);
             if (treeDocsRes) {
-                docs = std::move(treeDocsRes.value());
+                appendProjectedToDocs(std::move(treeDocsRes.value()));
                 usedQuery = true;
                 totalFoundApprox = docs.size();
             } else {
@@ -1411,12 +1399,12 @@ public:
         }
 
         if (!useFallback && !useTree) {
-            auto docsRes = ctx_.metadataRepo->queryDocuments(queryOpts);
+            auto docsRes = ctx_.metadataRepo->queryDocumentsForListProjection(queryOpts);
             if (!docsRes) {
                 return Error{ErrorCode::InternalError,
                              "Failed to query documents: " + docsRes.error().message};
             }
-            docs = std::move(docsRes.value());
+            appendProjectedToDocs(std::move(docsRes.value()));
             usedQuery = true;
             totalFoundApprox = static_cast<std::size_t>(queryOpts.offset) + docs.size();
         }
@@ -1540,20 +1528,6 @@ public:
             page.assign(itStart, itEnd);
         }
 
-        std::unordered_map<int64_t, std::unordered_map<std::string, metadata::MetadataValue>>
-            metadataCache;
-        if (!page.empty() &&
-            (req.showMetadata || req.showTags || (!req.tags.empty() && !usedQuery))) {
-            std::vector<int64_t> docIds;
-            docIds.reserve(page.size());
-            for (const auto& doc : page)
-                docIds.push_back(doc.id);
-            auto metaRes =
-                ctx_.metadataRepo->getMetadataForDocuments(std::span<const int64_t>(docIds));
-            if (metaRes)
-                metadataCache = std::move(metaRes.value());
-        }
-
         ListDocumentsResponse out;
         out.totalFound = usedQuery ? totalFoundApprox : docs.size();
         out.count = page.size();
@@ -1564,11 +1538,14 @@ public:
         if (!req.tags.empty())
             out.filteredByTags = req.tags;
 
-        // Hot path: paths-only/minimal listing avoids metadata/snippet hydration entirely.
-        // Also engage when environment forces hot mode.
+        // Hot path: minimal listing avoids metadata/snippet hydration entirely.
+        // When environment forces hot mode, still hydrate when the request explicitly asks.
         yams::cli::HotColdMode listMode = yams::cli::getListMode();
         bool forceHot = yams::cli::isForceHot(listMode);
-        if (req.pathsOnly || forceHot) {
+        const bool wantsSnippets = req.showSnippets && req.snippetLength > 0;
+        const bool wantsMetadata = req.showMetadata || req.showTags;
+        const bool wantsHydration = wantsSnippets || wantsMetadata;
+        if (req.pathsOnly || (forceHot && !wantsHydration)) {
             out.documents.reserve(page.size());
             for (const auto& d : page) {
                 DocumentEntry e;
@@ -1589,6 +1566,108 @@ public:
             return out;
         }
 
+        auto collectDocIds =
+            [](const std::vector<metadata::DocumentInfo>& docs) -> std::vector<int64_t> {
+            std::vector<int64_t> ids;
+            ids.reserve(docs.size());
+            for (const auto& doc : docs)
+                ids.push_back(doc.id);
+            return ids;
+        };
+
+        auto hydrateMetadata = [&](const std::vector<int64_t>& ids)
+            -> std::unordered_map<int64_t,
+                                  std::unordered_map<std::string, metadata::MetadataValue>> {
+            if (ids.empty()) {
+                return {};
+            }
+            auto metaRes =
+                ctx_.metadataRepo->getMetadataForDocuments(std::span<const int64_t>(ids));
+            if (!metaRes) {
+                return {};
+            }
+            return std::move(metaRes.value());
+        };
+
+        auto hydrateSnippets = [&](const std::vector<int64_t>& ids)
+            -> std::pair<std::unordered_map<int64_t, std::string>, bool> {
+            if (ids.empty()) {
+                return {std::unordered_map<int64_t, std::string>{}, false};
+            }
+            const int previewChars = std::clamp(req.snippetLength * 8, 256, 8192);
+            const auto previewStart = std::chrono::steady_clock::now();
+            auto previewRes = ctx_.metadataRepo->batchGetContentPreview(ids, previewChars, 0);
+            const auto previewElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now() - previewStart)
+                                              .count();
+            (void)previewElapsedMs;
+            if (previewRes) {
+                return {std::move(previewRes.value()), false};
+            }
+            return {std::unordered_map<int64_t, std::string>{}, true};
+        };
+
+        const std::vector<int64_t> docIds = collectDocIds(page);
+        std::unordered_map<int64_t, std::unordered_map<std::string, metadata::MetadataValue>>
+            metadataCache;
+        if (wantsMetadata) {
+            metadataCache = hydrateMetadata(docIds);
+        }
+
+        std::unordered_map<int64_t, std::string> snippetPreviewCache;
+        bool snippetFetchFailed = false;
+        if (wantsSnippets) {
+            auto hydrated = hydrateSnippets(docIds);
+            snippetPreviewCache = std::move(hydrated.first);
+            snippetFetchFailed = hydrated.second;
+        }
+
+        auto buildEntryForDoc = [&](const metadata::DocumentInfo& d) -> DocumentEntry {
+            DocumentEntry e;
+            e.name = d.fileName;
+            e.fileName = d.fileName;
+            e.hash = d.sha256Hash;
+            e.path = d.filePath;
+            e.extension = d.fileExtension;
+            e.size = static_cast<uint64_t>(d.fileSize);
+            e.mimeType = d.mimeType;
+            e.fileType = toFileType(d.mimeType);
+            e.created = toEpochSeconds(d.createdTime);
+            e.modified = toEpochSeconds(d.modifiedTime);
+            e.indexed = toEpochSeconds(d.indexedTime);
+            e.extractionStatus = metadata::ExtractionStatusUtils::toString(d.extractionStatus);
+            const auto* cachedMetadata =
+                [&]() -> const std::unordered_map<std::string, metadata::MetadataValue>* {
+                auto it = metadataCache.find(d.id);
+                return it == metadataCache.end() ? nullptr : &it->second;
+            }();
+            if (req.showSnippets && req.snippetLength > 0) {
+                auto sit = snippetPreviewCache.find(d.id);
+                if (sit != snippetPreviewCache.end()) {
+                    auto snippet = utils::createSnippet(
+                        sit->second, static_cast<size_t>(req.snippetLength), true);
+                    e.snippet = snippet.empty() ? "[No text content]" : std::move(snippet);
+                } else if (snippetFetchFailed) {
+                    e.snippet = "[Content extraction failed]";
+                } else {
+                    e.snippet = "[Content not available]";
+                }
+            }
+            if (req.showTags || req.showMetadata) {
+                if (cachedMetadata) {
+                    if (req.showTags) {
+                        e.tags = extractTags(*cachedMetadata);
+                    }
+                    if (req.showMetadata) {
+                        for (const auto& [key, value] : *cachedMetadata) {
+                            e.metadata[key] = value.value;
+                        }
+                    }
+                }
+            }
+            return e;
+        };
+
         // Build entries in parallel when large pages, else sequential
         const bool useParallel = page.size() >= 200 || std::getenv("YAMS_LIST_CONCURRENCY");
         if (useParallel) {
@@ -1605,55 +1684,7 @@ public:
                 }
             }
             workers = std::min(workers, page.size() > 0 ? page.size() : size_t{1});
-            auto buildOne = [&](size_t i) {
-                const auto& d = page[i];
-                DocumentEntry e;
-                e.name = d.fileName;
-                e.fileName = d.fileName;
-                e.hash = d.sha256Hash;
-                e.path = d.filePath;
-                e.extension = d.fileExtension;
-                e.size = static_cast<uint64_t>(d.fileSize);
-                e.mimeType = d.mimeType;
-                e.fileType = toFileType(d.mimeType);
-                e.created = toEpochSeconds(d.createdTime);
-                e.modified = toEpochSeconds(d.modifiedTime);
-                e.indexed = toEpochSeconds(d.indexedTime);
-                e.extractionStatus = metadata::ExtractionStatusUtils::toString(d.extractionStatus);
-                const auto* cachedMetadata =
-                    [&]() -> const std::unordered_map<std::string, metadata::MetadataValue>* {
-                    auto it = metadataCache.find(d.id);
-                    return it == metadataCache.end() ? nullptr : &it->second;
-                }();
-                if (req.showSnippets && req.snippetLength > 0) {
-                    auto contentResult = ctx_.metadataRepo->getContent(d.id);
-                    if (contentResult) {
-                        const auto& optionalContent = contentResult.value();
-                        if (optionalContent.has_value()) {
-                            auto snippet = generateSnippet(optionalContent.value().contentText,
-                                                           req.snippetLength);
-                            e.snippet = snippet.empty() ? "[No text content]" : std::move(snippet);
-                        } else {
-                            e.snippet = "[Content not available]";
-                        }
-                    } else {
-                        e.snippet = "[Content extraction failed]";
-                    }
-                }
-                if (req.showTags || req.showMetadata) {
-                    if (cachedMetadata) {
-                        if (req.showTags) {
-                            e.tags = extractTags(*cachedMetadata);
-                        }
-                        if (req.showMetadata) {
-                            for (const auto& [key, value] : *cachedMetadata) {
-                                e.metadata[key] = value.value;
-                            }
-                        }
-                    }
-                }
-                tmp[i] = std::move(e);
-            };
+            auto buildOne = [&](size_t i) { tmp[i] = buildEntryForDoc(page[i]); };
             std::vector<std::thread> ths;
             ths.reserve(workers);
             for (size_t t = 0; t < workers; ++t) {
@@ -1673,52 +1704,7 @@ public:
             }
         } else {
             for (const auto& d : page) {
-                DocumentEntry e;
-                e.name = d.fileName;
-                e.fileName = d.fileName;
-                e.hash = d.sha256Hash;
-                e.path = d.filePath;
-                e.extension = d.fileExtension;
-                e.size = static_cast<uint64_t>(d.fileSize);
-                e.mimeType = d.mimeType;
-                e.fileType = toFileType(d.mimeType);
-                e.created = toEpochSeconds(d.createdTime);
-                e.modified = toEpochSeconds(d.modifiedTime);
-                e.indexed = toEpochSeconds(d.indexedTime);
-                e.extractionStatus = metadata::ExtractionStatusUtils::toString(d.extractionStatus);
-                const auto* cachedMetadata =
-                    [&]() -> const std::unordered_map<std::string, metadata::MetadataValue>* {
-                    auto it = metadataCache.find(d.id);
-                    return it == metadataCache.end() ? nullptr : &it->second;
-                }();
-                if (req.showSnippets && req.snippetLength > 0) {
-                    auto contentResult = ctx_.metadataRepo->getContent(d.id);
-                    if (contentResult) {
-                        const auto& optionalContent = contentResult.value();
-                        if (optionalContent.has_value()) {
-                            auto snippet = generateSnippet(optionalContent.value().contentText,
-                                                           req.snippetLength);
-                            e.snippet = snippet.empty() ? "[No text content]" : std::move(snippet);
-                        } else {
-                            e.snippet = "[Content not available]";
-                        }
-                    } else {
-                        e.snippet = "[Content extraction failed]";
-                    }
-                }
-                if (req.showTags || req.showMetadata) {
-                    if (cachedMetadata) {
-                        if (req.showTags) {
-                            e.tags = extractTags(*cachedMetadata);
-                        }
-                        if (req.showMetadata) {
-                            for (const auto& [key, value] : *cachedMetadata) {
-                                e.metadata[key] = value.value;
-                            }
-                        }
-                    }
-                }
-                out.documents.push_back(std::move(e));
+                out.documents.push_back(buildEntryForDoc(d));
             }
         }
 

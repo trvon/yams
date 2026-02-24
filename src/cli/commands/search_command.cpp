@@ -22,6 +22,7 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/common/utf8_utils.h>
 #include <yams/config/config_helpers.h>
+#include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
 #include <yams/search/search_engine_builder.h>
@@ -46,6 +47,50 @@ namespace yams::cli {
 
 using json = nlohmann::json;
 using yams::app::services::utils::normalizeLookupPath;
+
+namespace {
+
+std::string relationTypesToHuman(std::string relationTypes) {
+    if (relationTypes.empty()) {
+        return relationTypes;
+    }
+    std::string out;
+    std::stringstream ss(relationTypes);
+    std::string tok;
+    bool first = true;
+    while (std::getline(ss, tok, ',')) {
+        auto colon = tok.find(':');
+        std::string relation = colon == std::string::npos ? tok : tok.substr(0, colon);
+        std::string count = colon == std::string::npos ? "" : tok.substr(colon + 1);
+        relation = metadata::normalizeRelationName(std::move(relation));
+        if (relation.empty()) {
+            continue;
+        }
+        if (!first) {
+            out += ", ";
+        }
+        first = false;
+        if (count.empty()) {
+            out += relation;
+        } else {
+            out += relation + "(" + count + ")";
+        }
+    }
+    return out;
+}
+
+std::size_t parseRelationCount(const std::string& text) {
+    if (text.empty()) {
+        return 0;
+    }
+    try {
+        return static_cast<std::size_t>(std::stoull(text));
+    } catch (...) {
+        return 0;
+    }
+}
+
+} // namespace
 
 class SearchCommand : public ICommand {
 private:
@@ -131,6 +176,8 @@ private:
         std::string mimeType;
         std::string fileType;
         double score{0.0};
+        std::size_t relationCount{0};
+        std::string relationSummary;
         // Optional score breakdowns for verbose output
         std::optional<double> vectorScore;
         std::optional<double> keywordScore;
@@ -157,6 +204,13 @@ private:
                 item.fileType = it->second;
             if (auto it = r.metadata.find("fileType"); it != r.metadata.end())
                 item.fileType = it->second;
+            if (auto it = r.metadata.find("relation_count"); it != r.metadata.end())
+                item.relationCount = parseRelationCount(it->second);
+            if (auto it = r.metadata.find("relation_summary"); it != r.metadata.end()) {
+                item.relationSummary = it->second;
+            } else if (auto it = r.metadata.find("relation_types"); it != r.metadata.end()) {
+                item.relationSummary = relationTypesToHuman(it->second);
+            }
             return item;
         }
 
@@ -175,6 +229,13 @@ private:
             item.keywordScore = r.keywordScore;
             item.kgEntityScore = r.kgEntityScore;
             item.structuralScore = r.structuralScore;
+            if (auto it = r.metadata.find("relation_count"); it != r.metadata.end())
+                item.relationCount = parseRelationCount(it->second);
+            if (auto it = r.metadata.find("relation_summary"); it != r.metadata.end()) {
+                item.relationSummary = it->second;
+            } else if (auto it = r.metadata.find("relation_types"); it != r.metadata.end()) {
+                item.relationSummary = relationTypesToHuman(it->second);
+            }
             return item;
         }
 
@@ -202,6 +263,8 @@ private:
 
     // Unified rendering function for search results
     Result<void> renderResults(std::vector<UnifiedItem>& items, const RenderContext& ctx) {
+        enrichRelations(items);
+
         auto emitTagHint = [&]() {
             if (!filterTags_.empty()) {
                 std::cerr
@@ -264,6 +327,10 @@ private:
                 doc["score"] = item.score;
                 if (auto snippet = buildSnippet(item, 200))
                     doc["snippet"] = *snippet;
+                if (item.relationCount > 0)
+                    doc["relation_count"] = item.relationCount;
+                if (!item.relationSummary.empty())
+                    doc["relations"] = item.relationSummary;
 
                 if (verbose_ && (item.vectorScore || item.keywordScore || item.kgEntityScore ||
                                  item.structuralScore)) {
@@ -325,6 +392,10 @@ private:
                 if (auto snippet = buildSnippet(item, 200)) {
                     std::cout << ui::colorize("  1:", ui::Ansi::DIM) << " " << *snippet << "\n";
                 }
+                if (!item.relationSummary.empty()) {
+                    std::cout << ui::colorize("  rel: " + item.relationSummary, ui::Ansi::DIM)
+                              << "\n";
+                }
                 std::cout << "\n";
             }
         } else {
@@ -366,6 +437,10 @@ private:
                         bestJ["hash"] = best.hash;
                     if (auto snippet = buildSnippet(best, 200))
                         bestJ["snippet"] = *snippet;
+                    if (best.relationCount > 0)
+                        bestJ["relation_count"] = best.relationCount;
+                    if (!best.relationSummary.empty())
+                        bestJ["relations"] = best.relationSummary;
                     g["best"] = bestJ;
                     nlohmann::json vers = nlohmann::json::array();
                     std::size_t cap = versionsMode_ == "all" ? versionsTopk_ : 1;
@@ -380,6 +455,10 @@ private:
                             vj["hash"] = v.hash;
                         if (auto snippet = buildSnippet(v, 200))
                             vj["snippet"] = *snippet;
+                        if (v.relationCount > 0)
+                            vj["relation_count"] = v.relationCount;
+                        if (!v.relationSummary.empty())
+                            vj["relations"] = v.relationSummary;
                         vers.push_back(vj);
                     }
                     g["versions"] = vers;
@@ -440,6 +519,13 @@ private:
                                                          ? ui::colorize("     1:", ui::Ansi::DIM)
                                                          : ui::colorize("  1:", ui::Ansi::DIM);
                             std::cout << linePrefix << " " << *snippet << "\n";
+                        }
+                        if (!v.relationSummary.empty()) {
+                            const std::string relIndent = vec.size() > 1 ? "     " : "  ";
+                            std::cout << ui::colorize(relIndent + std::string("rel: ") +
+                                                          v.relationSummary,
+                                                      ui::Ansi::DIM)
+                                      << "\n";
                         }
 
                         if (showTools_ && !hash8.empty() && i == 0) {
@@ -599,6 +685,31 @@ private:
             return std::nullopt;
         }
         return formatSnippet(item, maxLength);
+    }
+
+    void enrichRelations(std::vector<UnifiedItem>& items) const {
+        if (!cli_ || items.empty()) {
+            return;
+        }
+        auto kgStore = cli_->getKnowledgeGraphStore();
+        if (!kgStore) {
+            return;
+        }
+        constexpr std::size_t kMaxLookups = 32;
+        std::size_t attempted = 0;
+        for (auto& item : items) {
+            if (!item.relationSummary.empty() || attempted >= kMaxLookups) {
+                continue;
+            }
+            auto summary =
+                metadata::collectFileRelationSummary(kgStore.get(), item.path, item.hash);
+            if (summary.has_value()) {
+                item.relationCount = summary->totalEdges;
+                item.relationSummary =
+                    metadata::formatRelationSummary(summary->topRelations, true /*humanReadable*/);
+            }
+            ++attempted;
+        }
     }
 
     static std::string trim(const std::string& s) {

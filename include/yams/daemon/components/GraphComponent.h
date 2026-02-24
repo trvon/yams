@@ -97,6 +97,8 @@ public:
     EntityStats getEntityStats() const;
 
 private:
+    std::string resolveSymbolExtractorIdForLanguage(const std::string& language) const;
+
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
     std::shared_ptr<app::services::IGraphQueryService> queryService_;

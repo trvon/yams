@@ -76,7 +76,7 @@ TEST_CASE("GraphQueryService: relation name filters apply", "[services][graph]")
     REQUIRE(calleeId.has_value());
 
     KGNode includeTarget;
-    includeTarget.nodeKey = "file:/include/header.h";
+    includeTarget.nodeKey = "path:file:/include/header.h";
     includeTarget.label = "header.h";
     includeTarget.type = "file";
     auto includeId = fixture.kgStore->upsertNode(includeTarget);
@@ -188,4 +188,82 @@ TEST_CASE("GraphQueryService: RenamedFrom includes renamed_to edges", "[services
 
     REQUIRE(resp.allConnectedNodes.size() == 1);
     REQUIRE(resp.allConnectedNodes[0].nodeMetadata.node.nodeKey == "path:snap2:/repo/new.cpp");
+}
+
+TEST_CASE("GraphQueryService: relation names are canonicalized", "[services][graph]") {
+    GraphQueryServiceFixture fixture;
+    auto service = makeGraphQueryService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE(service != nullptr);
+
+    KGNode caller;
+    caller.nodeKey = "symbol:canonical:caller";
+    caller.label = "caller";
+    caller.type = "function";
+    auto callerId = fixture.kgStore->upsertNode(caller);
+    REQUIRE(callerId.has_value());
+
+    KGNode callee;
+    callee.nodeKey = "symbol:canonical:callee";
+    callee.label = "callee";
+    callee.type = "function";
+    auto calleeId = fixture.kgStore->upsertNode(callee);
+    REQUIRE(calleeId.has_value());
+
+    KGEdge callEdge;
+    callEdge.srcNodeId = callerId.value();
+    callEdge.dstNodeId = calleeId.value();
+    callEdge.relation = "calls";
+    callEdge.weight = 1.0f;
+    REQUIRE(fixture.kgStore->addEdge(callEdge).has_value());
+
+    GraphQueryRequest req;
+    req.nodeId = callerId.value();
+    req.maxDepth = 1;
+    req.maxResults = 10;
+    req.relationNames = {"CALL"};
+
+    auto result = service->query(req);
+    REQUIRE(result.has_value());
+    const auto& resp = result.value();
+    REQUIRE(resp.allConnectedNodes.size() == 1);
+    REQUIRE(resp.allConnectedNodes[0].nodeMetadata.node.nodeKey == "symbol:canonical:callee");
+}
+
+TEST_CASE("GraphQueryService: SymbolReference enum includes calls", "[services][graph]") {
+    GraphQueryServiceFixture fixture;
+    auto service = makeGraphQueryService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE(service != nullptr);
+
+    KGNode caller;
+    caller.nodeKey = "symbol:enum:caller";
+    caller.label = "caller";
+    caller.type = "function";
+    auto callerId = fixture.kgStore->upsertNode(caller);
+    REQUIRE(callerId.has_value());
+
+    KGNode callee;
+    callee.nodeKey = "symbol:enum:callee";
+    callee.label = "callee";
+    callee.type = "function";
+    auto calleeId = fixture.kgStore->upsertNode(callee);
+    REQUIRE(calleeId.has_value());
+
+    KGEdge callEdge;
+    callEdge.srcNodeId = callerId.value();
+    callEdge.dstNodeId = calleeId.value();
+    callEdge.relation = "calls";
+    callEdge.weight = 1.0f;
+    REQUIRE(fixture.kgStore->addEdge(callEdge).has_value());
+
+    GraphQueryRequest req;
+    req.nodeId = callerId.value();
+    req.maxDepth = 1;
+    req.maxResults = 10;
+    req.relationFilters = {GraphRelationType::SymbolReference};
+
+    auto result = service->query(req);
+    REQUIRE(result.has_value());
+    const auto& resp = result.value();
+    REQUIRE(resp.allConnectedNodes.size() == 1);
+    REQUIRE(resp.allConnectedNodes[0].nodeMetadata.node.nodeKey == "symbol:enum:callee");
 }

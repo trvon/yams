@@ -4,12 +4,21 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <yams/compat/unistd.h>
 #include <yams/core/types.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_utils.h>
 #include <yams/search/reranker_adapter.h>
 #include <yams/search/search_engine.h>
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <filesystem>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -326,6 +335,141 @@ TEST_CASE("SearchResult: rerankerScore field", "[search][reranker][result]") {
         CHECK_THAT(result.score, Catch::Matchers::WithinAbs(0.5, 0.001));
         CHECK_THAT(result.rerankerScore.value(), Catch::Matchers::WithinAbs(0.9, 0.001));
     }
+}
+
+namespace {
+
+std::filesystem::path makeTempDbPath() {
+    namespace fs = std::filesystem;
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    auto dbPath = fs::temp_directory_path() / ("reranker_cooldown_" + std::to_string(::getpid()) +
+                                               "_" + std::to_string(now) + ".db");
+    std::error_code ec;
+    fs::remove(dbPath, ec);
+    return dbPath;
+}
+
+yams::metadata::DocumentInfo makeDocument(const std::string& filePath, const std::string& hash) {
+    yams::metadata::DocumentInfo doc;
+    doc.filePath = filePath;
+    auto derived = yams::metadata::computePathDerivedValues(filePath);
+    doc.fileName = std::filesystem::path(derived.normalizedPath).filename().string();
+    doc.fileExtension = std::filesystem::path(doc.fileName).extension().string();
+    doc.sha256Hash = hash;
+    doc.pathPrefix = derived.pathPrefix;
+    doc.reversePath = derived.reversePath;
+    doc.pathHash = derived.pathHash;
+    doc.parentHash = derived.parentHash;
+    doc.pathDepth = derived.pathDepth;
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.createdTime = now;
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+    return doc;
+}
+
+class NotImplementedReranker : public IReranker {
+public:
+    Result<std::vector<float>> scoreDocuments(const std::string&,
+                                              const std::vector<std::string>&) override {
+        callCount_.fetch_add(1, std::memory_order_relaxed);
+        return Error{ErrorCode::NotImplemented, "plugin error: score_documents"};
+    }
+
+    bool isReady() const override { return true; }
+
+    int callCount() const { return callCount_.load(std::memory_order_relaxed); }
+
+private:
+    std::atomic<int> callCount_{0};
+};
+
+class SearchEngineRerankerFixture {
+public:
+    SearchEngineRerankerFixture() : dbPath_(makeTempDbPath()) {
+        pool_ = std::make_unique<yams::metadata::ConnectionPool>(dbPath_.string());
+        auto init = pool_->initialize();
+        if (!init) {
+            throw std::runtime_error("Failed to initialize connection pool");
+        }
+        repo_ = std::make_shared<yams::metadata::MetadataRepository>(*pool_);
+    }
+
+    ~SearchEngineRerankerFixture() {
+        if (pool_) {
+            pool_->shutdown();
+        }
+        std::error_code ec;
+        std::filesystem::remove(dbPath_, ec);
+    }
+
+    void addIndexedDocument(const std::string& filePath, const std::string& hash,
+                            const std::string& title, const std::string& content) {
+        auto doc = makeDocument(filePath, hash);
+        auto idRes = repo_->insertDocument(doc);
+        if (!idRes) {
+            throw std::runtime_error("Failed to insert test document");
+        }
+
+        auto indexRes = repo_->indexDocumentContent(idRes.value(), title, content, "text/plain");
+        if (!indexRes) {
+            throw std::runtime_error("Failed to index test document content");
+        }
+    }
+
+    std::shared_ptr<yams::metadata::MetadataRepository> repo() const { return repo_; }
+
+private:
+    std::filesystem::path dbPath_;
+    std::unique_ptr<yams::metadata::ConnectionPool> pool_;
+    std::shared_ptr<yams::metadata::MetadataRepository> repo_;
+};
+
+} // namespace
+
+TEST_CASE("SearchEngine: reranker not-implemented errors enter cooldown",
+          "[search][reranker][cooldown]") {
+    SearchEngineRerankerFixture fixture;
+    fixture.addIndexedDocument(
+        "/tmp/reranker_cooldown_doc.md", "HASH_RERANK_COOLDOWN_DOC", "How YAMS stores documents",
+        "YAMS can store documents with metadata. Explain how YAMS stores documents.");
+
+    SearchEngineConfig config;
+    config.textWeight = 0.0f;
+    config.pathTreeWeight = 1.0f;
+    config.kgWeight = 0.0f;
+    config.vectorWeight = 0.0f;
+    config.entityVectorWeight = 0.0f;
+    config.tagWeight = 0.0f;
+    config.metadataWeight = 0.0f;
+    config.enableParallelExecution = false;
+    config.enableReranking = true;
+    config.rerankTopK = 5;
+    config.rerankScoreGapThreshold = 0.0f;
+
+    auto engine = createSearchEngine(fixture.repo(), nullptr, nullptr, nullptr, config);
+    REQUIRE(engine != nullptr);
+
+    auto reranker = std::make_shared<NotImplementedReranker>();
+    engine->setReranker(reranker);
+
+    const std::string query = "/tmp/reranker_cooldown_doc.md";
+
+    auto first = engine->searchWithResponse(query, {});
+    REQUIRE(first.has_value());
+    REQUIRE_FALSE(first.value().results.empty());
+    CHECK(reranker->callCount() == 1);
+
+    auto second = engine->searchWithResponse(query, {});
+    REQUIRE(second.has_value());
+    REQUIRE_FALSE(second.value().results.empty());
+
+    // Cooldown should prevent repeated plugin calls immediately after an
+    // unsupported reranker failure.
+    CHECK(reranker->callCount() == 1);
+    CHECK(std::find(second.value().skippedComponents.begin(),
+                    second.value().skippedComponents.end(),
+                    "reranker") != second.value().skippedComponents.end());
 }
 
 } // namespace yams::search

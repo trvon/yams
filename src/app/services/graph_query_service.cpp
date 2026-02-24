@@ -1,8 +1,10 @@
 #include <yams/app/services/graph_query_service.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <queue>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <spdlog/spdlog.h>
@@ -11,58 +13,127 @@ namespace yams::app::services {
 
 namespace {
 
-// Helper: Convert GraphRelationType enum to KG relation string
+struct NormalizedRelationFilter {
+    bool allowAll{true};
+    std::unordered_set<std::string> allowed;
+};
+
+std::string normalizeRelationName(std::string relation) {
+    auto trimLeft = std::find_if_not(relation.begin(), relation.end(),
+                                     [](unsigned char c) { return std::isspace(c) != 0; });
+    auto trimRight = std::find_if_not(relation.rbegin(), relation.rend(), [](unsigned char c) {
+                         return std::isspace(c) != 0;
+                     }).base();
+
+    if (trimLeft >= trimRight) {
+        return {};
+    }
+
+    std::string normalized(trimLeft, trimRight);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::replace(normalized.begin(), normalized.end(), '-', '_');
+    std::replace(normalized.begin(), normalized.end(), ' ', '_');
+
+    // Canonical aliases accepted from CLI/API callers.
+    if (normalized == "call")
+        return "calls";
+    if (normalized == "include")
+        return "includes";
+    if (normalized == "inherit")
+        return "inherits";
+    if (normalized == "implement")
+        return "implements";
+    if (normalized == "reference")
+        return "references";
+    if (normalized == "rename_to")
+        return "renamed_to";
+    if (normalized == "rename_from")
+        return "renamed_from";
+    if (normalized == "move_to")
+        return "moved_to";
+    if (normalized == "move_from")
+        return "moved_from";
+    if (normalized == "version")
+        return "has_version";
+    if (normalized == "blob_version")
+        return "has_version";
+
+    return normalized;
+}
+
+// Helper: Convert GraphRelationType enum to KG relation strings
 std::vector<std::string> relationTypeToStrings(GraphRelationType type) {
     switch (type) {
         case GraphRelationType::All:
             return {}; // Empty = no filter
         case GraphRelationType::SameContent:
-            return {"same_content", "blob_version"};
+            return {"same_content", "blob_version", "has_blob", "blob_at_path"};
         case GraphRelationType::RenamedFrom:
             return {"renamed_from", "moved_from", "renamed_to"};
         case GraphRelationType::RenamedTo:
             return {"renamed_to", "moved_to", "renamed_from"};
         case GraphRelationType::DirectoryChild:
-            return {"contains", "directory_child"};
+            return {"contains", "directory_child", "scoped_by"};
         case GraphRelationType::SymbolReference:
-            return {"symbol_reference", "entity_reference"};
+            return {"symbol_reference", "entity_reference", "references",  "calls",
+                    "includes",         "inherits",         "implements",  "defined_in",
+                    "located_in",       "scoped_by",        "observed_as", "mentioned_in",
+                    "co_mentioned_with"};
         case GraphRelationType::PathVersion:
-            return {"has_version", "path_version", "blob_at_path"};
+            return {"has_version", "path_version", "blob_at_path", "observed_as"};
         default:
             return {};
     }
 }
 
-// Helper: Check if an edge matches the relation filters
-bool matchesRelationFilter(const metadata::KGEdge& edge,
-                           const std::vector<GraphRelationType>& filters,
-                           const std::vector<std::string>& relationNames) {
+NormalizedRelationFilter buildRelationFilter(const std::vector<GraphRelationType>& filters,
+                                             const std::vector<std::string>& relationNames) {
+    NormalizedRelationFilter out;
+
     if (!relationNames.empty()) {
-        for (const auto& name : relationNames) {
-            if (edge.relation == name) {
-                return true;
+        out.allowAll = false;
+        for (const auto& relationName : relationNames) {
+            std::string normalized = normalizeRelationName(relationName);
+            if (!normalized.empty()) {
+                out.allowed.insert(std::move(normalized));
             }
         }
-        return false;
+        return out;
     }
 
     if (filters.empty()) {
-        return true; // No filter = all edges match
+        out.allowAll = true;
+        return out;
     }
 
     for (const auto& filterType : filters) {
         auto allowedRelations = relationTypeToStrings(filterType);
         if (allowedRelations.empty()) {
-            return true; // "All" type matches everything
+            out.allowAll = true;
+            out.allowed.clear();
+            return out;
         }
 
-        for (const auto& allowed : allowedRelations) {
-            if (edge.relation == allowed) {
-                return true;
+        out.allowAll = false;
+        for (auto allowed : allowedRelations) {
+            allowed = normalizeRelationName(std::move(allowed));
+            if (!allowed.empty()) {
+                out.allowed.insert(std::move(allowed));
             }
         }
     }
-    return false;
+
+    return out;
+}
+
+// Helper: Check if an edge matches the normalized relation filter.
+bool matchesRelationFilter(const metadata::KGEdge& edge, const NormalizedRelationFilter& filter) {
+    if (filter.allowAll) {
+        return true;
+    }
+    const std::string normalized = normalizeRelationName(edge.relation);
+    return filter.allowed.find(normalized) != filter.allowed.end();
 }
 
 } // anonymous namespace
@@ -109,7 +180,8 @@ public:
         response.originNode = std::move(originMetadataResult.value());
 
         // Step 3: Perform BFS traversal
-        auto traversalResult = performBFSTraversal(originNodeId, req, response);
+        const auto relationFilter = buildRelationFilter(req.relationFilters, req.relationNames);
+        auto traversalResult = performBFSTraversal(originNodeId, req, relationFilter, response);
         if (!traversalResult) {
             return Result<GraphQueryResponse>(traversalResult.error());
         }
@@ -336,8 +408,7 @@ private:
 
     // Collect neighbors and cache edges for later reuse
     void collectNeighborsWithCache(std::int64_t nodeId, int distance, int maxDepth,
-                                   const std::vector<GraphRelationType>& relationFilters,
-                                   const std::vector<std::string>& relationNames,
+                                   const NormalizedRelationFilter& relationFilter,
                                    std::unordered_set<std::int64_t>& visited,
                                    std::queue<std::pair<std::int64_t, int>>& queue,
                                    EdgeCache& edgeCache, bool reverseTraversal = false) {
@@ -354,7 +425,7 @@ private:
         // Normal traversal: follow outgoing edges (A calls B -> traverse to B)
         // Reverse traversal: follow incoming edges (A calls B -> traverse to A)
         for (const auto& edge : allEdges.value()) {
-            if (!matchesRelationFilter(edge, relationFilters, relationNames))
+            if (!matchesRelationFilter(edge, relationFilter))
                 continue;
 
             std::int64_t neighborId;
@@ -378,6 +449,7 @@ private:
     }
 
     Result<void> performBFSTraversal(std::int64_t originNodeId, const GraphQueryRequest& req,
+                                     const NormalizedRelationFilter& relationFilter,
                                      GraphQueryResponse& response) {
         std::queue<std::pair<std::int64_t, int>> queue;
         std::unordered_set<std::int64_t> visited;
@@ -394,9 +466,8 @@ private:
             queue.pop();
 
             if (distance == 0) {
-                collectNeighborsWithCache(currentNodeId, distance, req.maxDepth,
-                                          req.relationFilters, req.relationNames, visited, queue,
-                                          edgeCache, req.reverseTraversal);
+                collectNeighborsWithCache(currentNodeId, distance, req.maxDepth, relationFilter,
+                                          visited, queue, edgeCache, req.reverseTraversal);
                 continue;
             }
 
@@ -427,6 +498,10 @@ private:
 
             // Build connecting edges from cached/fetched edges
             for (const auto& edge : nodeEdges) {
+                if (!matchesRelationFilter(edge, relationFilter)) {
+                    continue;
+                }
+
                 // Check if edge connects to a visited node
                 bool connects = false;
                 if (edge.srcNodeId == currentNodeId &&
@@ -460,9 +535,8 @@ private:
                 continue;
             }
 
-            collectNeighborsWithCache(currentNodeId, distance, req.maxDepth, req.relationFilters,
-                                      req.relationNames, visited, queue, edgeCache,
-                                      req.reverseTraversal);
+            collectNeighborsWithCache(currentNodeId, distance, req.maxDepth, relationFilter,
+                                      visited, queue, edgeCache, req.reverseTraversal);
 
             response.maxDepthReached = std::max(response.maxDepthReached, distance);
         }

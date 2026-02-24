@@ -926,6 +926,7 @@ message RepairRequest {
   bool repair_fts5 = 7;
   bool repair_embeddings = 8;
   bool repair_stuck_docs = 9;
+  bool repair_graph = 19;
   bool optimize_db = 10;
   bool repair_all = 11;
 

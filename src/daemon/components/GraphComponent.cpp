@@ -405,7 +405,9 @@ Result<void> GraphComponent::submitEntityExtraction(EntityExtractionJob job) {
         return Error{ErrorCode::NotSupported, "EntityGraphService not available"};
     }
 
-    if (shouldSkipEntityExtraction(kgStore_, job.documentHash)) {
+    const std::string expectedExtractorId = resolveSymbolExtractorIdForLanguage(job.language);
+
+    if (shouldSkipEntityExtraction(kgStore_, job.documentHash, expectedExtractorId)) {
         spdlog::debug("[GraphComponent] Skip entity extraction for {} (already extracted)",
                       job.documentHash.substr(0, 12));
         return Result<void>();
@@ -420,6 +422,20 @@ Result<void> GraphComponent::submitEntityExtraction(EntityExtractionJob job) {
     };
 
     return entityService_->submitExtraction(std::move(entityJob));
+}
+
+std::string GraphComponent::resolveSymbolExtractorIdForLanguage(const std::string& language) const {
+    if (!serviceManager_ || language.empty()) {
+        return {};
+    }
+
+    const auto& extractors = serviceManager_->getSymbolExtractors();
+    for (const auto& extractor : extractors) {
+        if (extractor && extractor->supportsLanguage(language)) {
+            return extractor->getExtractorId();
+        }
+    }
+    return {};
 }
 
 Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun) {
@@ -542,17 +558,17 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun) {
                 addNode(std::move(doc));
             }
 
-            // file:<path> and dir:<parent>
+            // path:file:<path> and path:dir:<parent>
             if (!normalizedPath.empty()) {
                 metadata::KGNode file;
-                file.nodeKey = "file:" + normalizedPath;
+                file.nodeKey = "path:file:" + normalizedPath;
                 file.label = normalizedPath;
                 file.type = "file";
                 addNode(std::move(file));
 
                 if (!parentPath.empty()) {
                     metadata::KGNode dir;
-                    dir.nodeKey = "dir:" + parentPath;
+                    dir.nodeKey = "path:dir:" + parentPath;
                     dir.label = parentPath;
                     dir.type = "directory";
                     addNode(std::move(dir));
@@ -631,7 +647,7 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun) {
             }
 
             if (!normalizedPath.empty()) {
-                const std::string fileKey = "file:" + normalizedPath;
+                const std::string fileKey = "path:file:" + normalizedPath;
                 auto fileIdIt = idByKey.find(fileKey);
                 if (fileIdIt != idByKey.end()) {
                     const auto fileId = fileIdIt->second;
@@ -655,7 +671,7 @@ Result<GraphComponent::RepairStats> GraphComponent::repairGraph(bool dryRun) {
                     }
 
                     if (!parentPath.empty()) {
-                        const std::string dirKey = "dir:" + parentPath;
+                        const std::string dirKey = "path:dir:" + parentPath;
                         auto dirIdIt = idByKey.find(dirKey);
                         if (dirIdIt != idByKey.end()) {
                             metadata::KGEdge e;

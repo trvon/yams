@@ -18,6 +18,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/core/types.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
@@ -342,6 +343,43 @@ TEST_CASE("PostIngestQueue - Synchronous Indexing", "[daemon][post-ingest][sync]
         REQUIRE(result);
         REQUIRE(result.value().results.size() > 0);
     }
+}
+
+TEST_CASE("PostIngestQueue - continues processing when KG stage is paused",
+          "[daemon][post-ingest][sync][kg-paused]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+    PostIngestQueueFixture fixture;
+
+    auto queue = fixture.serviceManager_->getPostIngestQueue();
+    REQUIRE(queue != nullptr);
+
+    queue->pauseStage(PostIngestQueue::Stage::KnowledgeGraph);
+
+    auto hash = fixture.storeDocument("kg_paused_test.txt",
+                                      "Pipeline should still index this content when KG is paused");
+    fixture.serviceManager_->enqueuePostIngest(hash, "text/plain");
+
+    REQUIRE(fixture.waitForQueueDrain(std::chrono::seconds(5)));
+
+    auto appContext = fixture.serviceManager_->getAppContext();
+    auto searchService = makeSearchService(appContext);
+    REQUIRE(searchService);
+
+    app::services::SearchRequest req;
+    req.query = "Pipeline should still index";
+    req.type = "keyword";
+    req.limit = 10;
+    req.globalSearch = true;
+
+    boost::asio::io_context ioc;
+    auto fut = boost::asio::co_spawn(ioc, searchService->search(req), boost::asio::use_future);
+    ioc.run();
+    auto result = fut.get();
+
+    REQUIRE(result);
+    REQUIRE(result.value().results.size() > 0);
+
+    queue->resumeStage(PostIngestQueue::Stage::KnowledgeGraph);
 }
 
 // ============================================================================

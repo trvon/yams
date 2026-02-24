@@ -8,6 +8,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/detection/file_type_detector.h>
+#include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 #ifdef YAMS_ENABLE_DAEMON_FEATURES
@@ -79,6 +80,34 @@ static std::string escapeRegex(const std::string& text) {
         escaped += c;
     }
     return escaped;
+}
+
+std::size_t annotateResultRelations(std::vector<SearchItem>& results,
+                                    metadata::KnowledgeGraphStore* kgStore,
+                                    std::size_t maxItems = 32) {
+    if (!kgStore || results.empty()) {
+        return 0;
+    }
+
+    const std::size_t count = std::min(results.size(), maxItems);
+    std::size_t enriched = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        auto summary =
+            metadata::collectFileRelationSummary(kgStore, results[i].path, results[i].hash);
+        if (!summary.has_value()) {
+            continue;
+        }
+        results[i].metadata["relation_count"] = std::to_string(summary->totalEdges);
+        results[i].metadata["relation_types"] =
+            metadata::formatRelationSummary(summary->topRelations, false /*humanReadable*/);
+        results[i].metadata["relation_summary"] =
+            metadata::formatRelationSummary(summary->topRelations, true /*humanReadable*/);
+        if (!summary->topRelations.empty()) {
+            results[i].metadata["primary_relation"] = summary->topRelations.front().first;
+        }
+        ++enriched;
+    }
+    return enriched;
 }
 
 std::vector<search::SearchResultItem> toPostProcessItems(const std::vector<SearchItem>& items) {
@@ -727,6 +756,10 @@ public:
                 } else {
                     resp.queryInfo += " (degraded fallback: " + fallbackReason + ")";
                 }
+            }
+            if (!resp.results.empty() && ctx_.kgStore) {
+                const auto enriched = annotateResultRelations(resp.results, ctx_.kgStore.get());
+                resp.searchStats["relation_results_enriched"] = std::to_string(enriched);
             }
             auto totalElapsed = duration_cast<milliseconds>(steady_clock::now() - t0).count();
             resp.executionTimeMs = static_cast<int64_t>(totalElapsed);

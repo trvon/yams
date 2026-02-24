@@ -138,6 +138,7 @@ private:
     RepairOperationResult rebuildPathTree(bool dryRun, bool verbose, ProgressFn progress);
     RepairOperationResult cleanOrphanedChunks(bool dryRun, bool verbose, ProgressFn progress);
     RepairOperationResult repairBlockReferences(bool dryRun, bool verbose, ProgressFn progress);
+    RepairOperationResult repairKnowledgeGraph(const RepairRequest& req, ProgressFn progress);
     RepairOperationResult rebuildFts5Index(const RepairRequest& req, ProgressFn progress);
     RepairOperationResult generateMissingEmbeddings(const RepairRequest& req, ProgressFn progress);
     RepairOperationResult optimizeDatabase(bool dryRun, bool verbose, ProgressFn progress);
@@ -154,6 +155,29 @@ private:
         int repairAttempts{0};
     };
     std::vector<StuckDocumentInfo> detectStuckDocuments(int32_t maxRetries);
+
+    struct KgCleanupStats {
+        uint64_t nodesScanned{0};
+        uint64_t orphanNodes{0};
+        uint64_t nodesDeleted{0};
+        uint64_t edgesDeleted{0};
+        uint64_t docEntitiesDeleted{0};
+        uint64_t skipped{0};
+        uint64_t errors{0};
+        std::vector<std::string> issues;
+    };
+    KgCleanupStats cleanOrphanedKgEntries(bool dryRun, bool verbose, ProgressFn progress);
+
+    struct PathNodeMigrationStats {
+        uint64_t nodesScanned{0};
+        uint64_t nodesMigrated{0};
+        uint64_t edgesRewired{0};
+        uint64_t skipped{0};
+        uint64_t errors{0};
+        std::vector<std::string> issues;
+    };
+    PathNodeMigrationStats repairLegacyPathNodesInPlace(bool dryRun, bool verbose,
+                                                        ProgressFn progress);
 
     // ── Symbol extraction scheduling (ported from RepairCoordinator) ──
     virtual std::shared_ptr<GraphComponent> getGraphComponentForScheduling() const;

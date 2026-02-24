@@ -74,6 +74,32 @@ using boost::asio::use_future;
 
 namespace {
 
+bool ipc_wait_trace_enabled() {
+    static const bool enabled = [] {
+        if (const char* raw = std::getenv("YAMS_IPC_WAIT_TRACE")) {
+            std::string v(raw);
+            for (auto& ch : v)
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            return (v == "1" || v == "true" || v == "on");
+        }
+        return false;
+    }();
+    return enabled;
+}
+
+int ipc_wait_warn_ms() {
+    static const int warn_ms = [] {
+        if (const char* raw = std::getenv("YAMS_IPC_WAIT_WARN_MS")) {
+            try {
+                return std::max(1, std::stoi(raw));
+            } catch (...) {
+            }
+        }
+        return 250;
+    }();
+    return warn_ms;
+}
+
 awaitable<Result<std::unique_ptr<AsioConnection::socket_t>>>
 async_connect_with_timeout(const TransportOptions& opts) {
     // Check cancellation before proceeding
@@ -102,6 +128,7 @@ async_connect_with_timeout(const TransportOptions& opts) {
     // Race connect against timeout using async_initiate (no experimental APIs)
     using ConnectResult = std::tuple<boost::system::error_code>;
     using RaceResult = std::variant<ConnectResult, bool>;
+    const auto connect_start = std::chrono::steady_clock::now();
 
     auto connect_result = co_await boost::asio::async_initiate<
         decltype(use_awaitable), void(std::exception_ptr, RaceResult)>(
@@ -140,6 +167,14 @@ async_connect_with_timeout(const TransportOptions& opts) {
         use_awaitable);
 
     if (connect_result.index() == 1) {
+        if (ipc_wait_trace_enabled()) {
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - connect_start)
+                                        .count();
+            spdlog::warn(
+                "[IPCWait] stage=pool.connect timeout elapsed_ms={} timeout_ms={} socket='{}'",
+                elapsed_ms, opts.requestTimeout.count(), opts.socketPath.string());
+        }
         socket->close();
         co_return Error{ErrorCode::Timeout, formatIpcFailure(IpcFailureKind::Timeout,
                                                              "Connection timeout (socket='" +
@@ -148,6 +183,13 @@ async_connect_with_timeout(const TransportOptions& opts) {
 
     auto& [ec] = std::get<0>(connect_result);
     if (ec) {
+        if (ipc_wait_trace_enabled()) {
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - connect_start)
+                                        .count();
+            spdlog::warn("[IPCWait] stage=pool.connect error='{}' elapsed_ms={} socket='{}'",
+                         ec.message(), elapsed_ms, opts.socketPath.string());
+        }
         if (ec == boost::asio::error::connection_refused ||
             ec == make_error_code(boost::system::errc::connection_refused)) {
             co_return Error{
@@ -167,6 +209,16 @@ async_connect_with_timeout(const TransportOptions& opts) {
     if (trace) {
         spdlog::info("stream-trace: async_connect succeeded socket='{}'", opts.socketPath.string());
     }
+    if (ipc_wait_trace_enabled()) {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - connect_start)
+                                    .count();
+        if (elapsed_ms >= ipc_wait_warn_ms()) {
+            spdlog::info(
+                "[IPCWait] stage=pool.connect slow elapsed_ms={} timeout_ms={} socket='{}'",
+                elapsed_ms, opts.requestTimeout.count(), opts.socketPath.string());
+        }
+    }
     co_return std::move(socket);
 }
 
@@ -185,6 +237,7 @@ async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::mil
     using ReadResult = std::tuple<boost::system::error_code, std::size_t>;
     using RaceResult = std::variant<ReadResult, bool>;
 
+    const auto read_start = std::chrono::steady_clock::now();
     auto read_result = co_await boost::asio::async_initiate<decltype(use_awaitable),
                                                             void(std::exception_ptr, RaceResult)>(
         [&socket, &buffer, executor, timeout](auto handler) mutable {
@@ -225,12 +278,26 @@ async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::mil
         use_awaitable);
 
     if (read_result.index() == 1) {
+        if (ipc_wait_trace_enabled()) {
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - read_start)
+                                        .count();
+            spdlog::warn("[IPCWait] stage=pool.read timeout elapsed_ms={} size={} timeout_ms={}",
+                         elapsed_ms, size, timeout.count());
+        }
         co_return Error{ErrorCode::Timeout,
                         formatIpcFailure(IpcFailureKind::Timeout, "Read timeout")};
     }
 
     auto& [ec, bytes_read] = std::get<0>(read_result);
     if (ec) {
+        if (ipc_wait_trace_enabled()) {
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - read_start)
+                                        .count();
+            spdlog::warn("[IPCWait] stage=pool.read error='{}' elapsed_ms={} size={}", ec.message(),
+                         elapsed_ms, size);
+        }
         if (ec == boost::asio::error::eof) {
             co_return Error{ErrorCode::NetworkError,
                             formatIpcFailure(IpcFailureKind::Eof, ec.message())};
@@ -250,6 +317,17 @@ async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::mil
                             formatIpcFailure(IpcFailureKind::ResetOrBrokenPipe, msg)};
         }
         co_return Error{ErrorCode::NetworkError, formatIpcFailure(IpcFailureKind::Other, msg)};
+    }
+
+    if (ipc_wait_trace_enabled()) {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - read_start)
+                                    .count();
+        if (elapsed_ms >= ipc_wait_warn_ms()) {
+            spdlog::info(
+                "[IPCWait] stage=pool.read slow elapsed_ms={} size={} bytes={} timeout_ms={}",
+                elapsed_ms, size, bytes_read, timeout.count());
+        }
     }
 
     co_return buffer;
@@ -398,6 +476,7 @@ void AsioConnectionPool::retire_connection(const std::shared_ptr<AsioConnection>
 
 awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::acquire() {
     YAMS_ZONE_SCOPED_N("ConnectionPool::acquire");
+    const auto acquire_start = std::chrono::steady_clock::now();
     // Check if pool is being shut down
     if (shutdown_.load(std::memory_order_acquire)) {
         co_return Error{ErrorCode::SystemShutdown, "Connection pool is shut down"};
@@ -411,23 +490,30 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::acquire()
 
         for (auto& weak : connection_pool_) {
             if (auto conn = weak.lock()) {
-                // Check if connection is alive and not currently in use
                 if (conn->alive.load(std::memory_order_acquire) &&
                     !conn->in_use.exchange(true, std::memory_order_acq_rel)) {
-                    if (conn->read_loop_future.valid()) {
-                        if (conn->read_loop_future.wait_for(std::chrono::milliseconds(0)) ==
+                    if (conn->read_loop_future.valid() &&
+                        conn->read_loop_future.wait_for(std::chrono::milliseconds(0)) ==
                             std::future_status::ready) {
-                            conn->alive.store(false, std::memory_order_release);
-                            conn->in_use.store(false, std::memory_order_release);
-                            continue;
-                        }
+                        conn->alive.store(false, std::memory_order_release);
+                        conn->in_use.store(false, std::memory_order_release);
+                        continue;
                     }
-                    // Verify socket is still open
                     if (conn->socket && conn->socket->is_open() &&
                         socket_looks_healthy(*conn->socket)) {
+                        if (ipc_wait_trace_enabled()) {
+                            const auto elapsed_ms =
+                                std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - acquire_start)
+                                    .count();
+                            if (elapsed_ms >= ipc_wait_warn_ms()) {
+                                spdlog::info("[IPCWait] stage=pool.acquire.reuse slow "
+                                             "elapsed_ms={} pool_size={}",
+                                             elapsed_ms, connection_pool_.size());
+                            }
+                        }
                         co_return conn;
                     }
-                    // Socket closed, mark as dead and continue searching
                     conn->alive.store(false, std::memory_order_release);
                     conn->in_use.store(false, std::memory_order_release);
                 }
@@ -436,7 +522,17 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::acquire()
     }
 
     // Slow path: create new connection
-    co_return co_await create_connection();
+    auto created = co_await create_connection();
+    if (ipc_wait_trace_enabled()) {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - acquire_start)
+                                    .count();
+        if (elapsed_ms >= ipc_wait_warn_ms()) {
+            spdlog::info("[IPCWait] stage=pool.acquire.create slow elapsed_ms={} ok={}", elapsed_ms,
+                         static_cast<bool>(created));
+        }
+    }
+    co_return created;
 }
 
 void AsioConnectionPool::release(const std::shared_ptr<AsioConnection>& conn) {
@@ -480,6 +576,7 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
 
 awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_connection() {
     YAMS_ZONE_SCOPED_N("ConnectionPool::create_connection");
+    const auto create_start = std::chrono::steady_clock::now();
     // Check shutdown before starting
     if (shutdown_.load(std::memory_order_acquire)) {
         co_return Error{ErrorCode::SystemShutdown, "Connection pool is shut down"};
@@ -493,9 +590,11 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
 
     constexpr int kMaxRetries = 3;
     auto backoff = std::chrono::milliseconds(50);
+    int attempts_used = 0;
     Result<std::unique_ptr<AsioConnection::socket_t>> socket_res =
         Error{ErrorCode::NetworkError, "Connection failed"};
     for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+        attempts_used = attempt + 1;
         if (socketMissing()) {
             if (attempt + 1 < kMaxRetries) {
                 auto exec = co_await this_coro::executor;
@@ -576,6 +675,17 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
     }
 
     ConnectionRegistry::instance().add(conn);
+
+    if (ipc_wait_trace_enabled()) {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - create_start)
+                                    .count();
+        if (elapsed_ms >= ipc_wait_warn_ms()) {
+            spdlog::info(
+                "[IPCWait] stage=pool.create_connection slow elapsed_ms={} attempts={} socket='{}'",
+                elapsed_ms, attempts_used, opts_.socketPath.string());
+        }
+    }
 
     co_return conn;
 }

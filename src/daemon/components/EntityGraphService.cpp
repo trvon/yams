@@ -2,7 +2,6 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
-#include <yams/common/utf8_utils.h>
 #include <chrono>
 #include <filesystem>
 #include <unordered_map>
@@ -12,6 +11,7 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <yams/common/utf8_utils.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -20,9 +20,36 @@
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_utils.h>
 #include <yams/plugins/symbol_extractor_v1.h>
 
 namespace yams::daemon {
+
+namespace {
+
+std::string normalizeGraphPath(const std::string& path) {
+    if (path.empty()) {
+        return {};
+    }
+    try {
+        auto derived = yams::metadata::computePathDerivedValues(path);
+        if (!derived.normalizedPath.empty()) {
+            return derived.normalizedPath;
+        }
+    } catch (...) {
+    }
+    return path;
+}
+
+std::string makePathFileNodeKey(const std::string& path) {
+    return "path:file:" + normalizeGraphPath(path);
+}
+
+std::string makePathDirNodeKey(const std::string& path) {
+    return "path:dir:" + normalizeGraphPath(path);
+}
+
+} // namespace
 
 EntityGraphService::EntityGraphService(ServiceManager* services, std::size_t /*workers*/)
     : services_(services) {}
@@ -258,7 +285,8 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
     // Build a DeferredKGBatch with all operations using nodeKey references
     // This eliminates lock contention by batching writes from multiple documents
     auto batch = std::make_unique<DeferredKGBatch>();
-    batch->sourceFile = job.filePath;
+    const std::string normalizedFilePath = normalizeGraphPath(job.filePath);
+    batch->sourceFile = normalizedFilePath.empty() ? job.filePath : normalizedFilePath;
 
     auto now = std::chrono::system_clock::now().time_since_epoch().count();
     const bool hasSnapshot = !job.documentHash.empty();
@@ -275,7 +303,7 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
 
     // Optionally cleanup stale edges for this file
     if (job.documentHash.empty() && !job.filePath.empty()) {
-        batch->sourceFileToDelete = job.filePath;
+        batch->sourceFileToDelete = normalizedFilePath.empty() ? job.filePath : normalizedFilePath;
     }
 
     // === Build context nodes ===
@@ -291,7 +319,7 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
         docNode.type = "document";
         nlohmann::json docProps;
         docProps["hash"] = job.documentHash;
-        docProps["path"] = common::sanitizeUtf8(job.filePath);
+        docProps["path"] = common::sanitizeUtf8(batch->sourceFile);
         docProps["language"] = common::sanitizeUtf8(job.language);
         docNode.properties = docProps.dump();
         batch->nodes.push_back(std::move(docNode));
@@ -299,18 +327,18 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
 
     // File node
     std::string fileNodeKey;
-    if (!job.filePath.empty()) {
-        fileNodeKey = "file:" + job.filePath;
+    if (!batch->sourceFile.empty()) {
+        fileNodeKey = makePathFileNodeKey(batch->sourceFile);
 
         yams::metadata::KGNode fileNode;
         fileNode.nodeKey = fileNodeKey;
-        fileNode.label = common::sanitizeUtf8(job.filePath);
+        fileNode.label = common::sanitizeUtf8(batch->sourceFile);
         fileNode.type = "file";
         nlohmann::json fileProps;
-        fileProps["path"] = common::sanitizeUtf8(job.filePath);
+        fileProps["path"] = common::sanitizeUtf8(batch->sourceFile);
         fileProps["language"] = common::sanitizeUtf8(job.language);
         fileProps["basename"] =
-            common::sanitizeUtf8(std::filesystem::path(job.filePath).filename().string());
+            common::sanitizeUtf8(std::filesystem::path(batch->sourceFile).filename().string());
         if (hasSnapshot) {
             fileProps["current_hash"] = job.documentHash;
         }
@@ -320,11 +348,11 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
 
     // Directory node
     std::string dirNodeKey;
-    if (!job.filePath.empty()) {
-        size_t lastSlash = job.filePath.rfind('/');
-        if (lastSlash != std::string::npos) {
-            std::string dirPath = job.filePath.substr(0, lastSlash);
-            dirNodeKey = "dir:" + dirPath;
+    if (!batch->sourceFile.empty()) {
+        auto parent = std::filesystem::path(batch->sourceFile).parent_path().generic_string();
+        if (!parent.empty()) {
+            std::string dirPath = normalizeGraphPath(parent);
+            dirNodeKey = makePathDirNodeKey(dirPath);
 
             yams::metadata::KGNode dirNode;
             dirNode.nodeKey = dirNodeKey;
@@ -374,7 +402,7 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
         std::string qualName = sym.qualified_name ? std::string(sym.qualified_name)
                                                   : (sym.name ? std::string(sym.name) : "");
         std::string kind = sym.kind ? std::string(sym.kind) : "symbol";
-        std::string canonicalKey = kind + ":" + qualName + "@" + job.filePath;
+        std::string canonicalKey = kind + ":" + qualName + "@" + batch->sourceFile;
         canonicalNodeKeys.push_back(canonicalKey);
         qualifiedNames.push_back(qualName);
 
@@ -387,7 +415,8 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
         nlohmann::json canonicalProps;
         canonicalProps["qualified_name"] = qualName;
         canonicalProps["simple_name"] = sym.name ? std::string(sym.name) : "";
-        canonicalProps["file_path"] = sym.file_path ? std::string(sym.file_path) : job.filePath;
+        canonicalProps["file_path"] =
+            sym.file_path ? normalizeGraphPath(std::string(sym.file_path)) : batch->sourceFile;
         canonicalProps["language"] = job.language;
         canonicalNode.properties = canonicalProps.dump();
         batch->nodes.push_back(std::move(canonicalNode));
@@ -405,7 +434,8 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
             nlohmann::json props;
             props["qualified_name"] = qualName;
             props["simple_name"] = sym.name ? std::string(sym.name) : "";
-            props["file_path"] = sym.file_path ? std::string(sym.file_path) : job.filePath;
+            props["file_path"] =
+                sym.file_path ? normalizeGraphPath(std::string(sym.file_path)) : batch->sourceFile;
             props["language"] = job.language;
             props["start_line"] = sym.start_line;
             props["end_line"] = sym.end_line;
@@ -443,7 +473,8 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
 
             yams::metadata::SymbolMetadata meta;
             meta.documentHash = job.documentHash;
-            meta.filePath = sym.file_path ? std::string(sym.file_path) : job.filePath;
+            meta.filePath =
+                sym.file_path ? normalizeGraphPath(std::string(sym.file_path)) : batch->sourceFile;
             meta.symbolName = sym.name ? std::string(sym.name) : "";
             meta.qualifiedName = sym.qualified_name ? std::string(sym.qualified_name)
                                                     : (sym.name ? std::string(sym.name) : "");
@@ -616,7 +647,7 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
             if (kind == "includes") {
                 // For includes: src is current file, dst is included file
                 srcNodeKey = fileNodeKey;
-                dstNodeKey = "file:" + dst; // External file reference
+                dstNodeKey = makePathFileNodeKey(dst); // External file reference
             } else {
                 // For calls, inherits, etc.: resolve as symbols
                 auto srcIt = qualNameToNodeKey.find(src);
@@ -636,7 +667,7 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
                 edge.relation = kind;
                 edge.weight = static_cast<float>(rel.weight);
                 nlohmann::json relProps;
-                relProps["source_file"] = job.filePath;
+                relProps["source_file"] = batch->sourceFile;
                 if (hasSnapshot)
                     relProps["snapshot_id"] = job.documentHash;
                 relProps["timestamp"] = now;

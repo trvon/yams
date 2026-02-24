@@ -166,6 +166,8 @@ public:
             return computeMockScore(query, document);
         }
 
+        std::lock_guard<std::mutex> lock(inferMutex_);
+
         if (!isLoaded_) {
             if (auto r = loadModel(); !r)
                 return r.error();
@@ -184,6 +186,8 @@ public:
             }
             return scores;
         }
+
+        std::lock_guard<std::mutex> lock(inferMutex_);
 
         if (!isLoaded_) {
             if (auto r = loadModel(); !r)
@@ -495,6 +499,7 @@ private:
     size_t maxSequenceLength_ = 512;
     bool isLoaded_ = false;
     bool testMode_ = false;
+    std::mutex inferMutex_;
 };
 
 // ============================================================================

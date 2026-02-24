@@ -19,17 +19,18 @@
 #include <thread>
 #include <unordered_set>
 
+#include <spdlog/spdlog.h>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
-#include <spdlog/spdlog.h>
 
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/services.hpp>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/search_engine.h>
@@ -152,6 +153,13 @@ struct SearchServiceFixture {
         pool = std::make_unique<ConnectionPool>(dbPath.string(), poolConfig);
         metadataRepo = std::make_shared<MetadataRepository>(*pool);
 
+        KnowledgeGraphStoreConfig kgConfig;
+        kgConfig.enable_wal = false;
+        auto kgResult = makeSqliteKnowledgeGraphStore(*pool, kgConfig);
+        REQUIRE(kgResult);
+        kgStore = std::shared_ptr<KnowledgeGraphStore>(std::move(kgResult).value());
+        metadataRepo->setKnowledgeGraphStore(kgStore);
+
         MigrationManager mm(*database);
         auto initResult = mm.initialize();
         REQUIRE(initResult);
@@ -176,6 +184,7 @@ struct SearchServiceFixture {
         appContext.store = contentStore;
         appContext.metadataRepo = metadataRepo;
         appContext.searchEngine = searchEngine;
+        appContext.kgStore = kgStore;
         appContext.workerExecutor = boost::asio::system_executor();
         searchService = makeSearchService(appContext);
 
@@ -207,8 +216,10 @@ struct SearchServiceFixture {
         searchService.reset();
         searchEngine.reset();
         appContext.searchEngine.reset();
+        appContext.kgStore.reset();
         appContext.store.reset();
         appContext.metadataRepo.reset();
+        kgStore.reset();
         contentStore.reset();
         metadataRepo.reset();
         fixtureManager.reset();
@@ -246,11 +257,64 @@ struct SearchServiceFixture {
         return request;
     }
 
+    void seedRelationsForResult(const SearchItem& item) const {
+        REQUIRE(kgStore != nullptr);
+        REQUIRE_FALSE(item.path.empty());
+        REQUIRE_FALSE(item.hash.empty());
+
+        KGNode fileNode;
+        fileNode.nodeKey = "path:file:" + item.path;
+        fileNode.type = std::string("file");
+        fileNode.label = item.fileName.empty() ? item.path : item.fileName;
+        auto fileNodeId = kgStore->upsertNode(fileNode);
+        REQUIRE(fileNodeId.has_value());
+
+        KGNode docNode;
+        docNode.nodeKey = "doc:" + item.hash;
+        docNode.type = std::string("document");
+        docNode.label = item.fileName.empty() ? item.path : item.fileName;
+        auto docNodeId = kgStore->upsertNode(docNode);
+        REQUIRE(docNodeId.has_value());
+
+        KGNode symbolOne;
+        symbolOne.nodeKey = "symbol:test:one:" + item.hash;
+        symbolOne.type = std::string("symbol");
+        symbolOne.label = std::string("SymbolOne");
+        auto symbolOneId = kgStore->upsertNode(symbolOne);
+        REQUIRE(symbolOneId.has_value());
+
+        KGNode symbolTwo;
+        symbolTwo.nodeKey = "symbol:test:two:" + item.hash;
+        symbolTwo.type = std::string("symbol");
+        symbolTwo.label = std::string("SymbolTwo");
+        auto symbolTwoId = kgStore->upsertNode(symbolTwo);
+        REQUIRE(symbolTwoId.has_value());
+
+        KGEdge versionEdge;
+        versionEdge.srcNodeId = fileNodeId.value();
+        versionEdge.dstNodeId = docNodeId.value();
+        versionEdge.relation = "has-version";
+        REQUIRE(kgStore->addEdge(versionEdge).has_value());
+
+        KGEdge definesOne;
+        definesOne.srcNodeId = docNodeId.value();
+        definesOne.dstNodeId = symbolOneId.value();
+        definesOne.relation = "defines";
+        REQUIRE(kgStore->addEdge(definesOne).has_value());
+
+        KGEdge definesTwo;
+        definesTwo.srcNodeId = docNodeId.value();
+        definesTwo.dstNodeId = symbolTwoId.value();
+        definesTwo.relation = "defines";
+        REQUIRE(kgStore->addEdge(definesTwo).has_value());
+    }
+
     std::filesystem::path testDir;
     std::filesystem::path dbPath;
     std::unique_ptr<Database> database;
     std::unique_ptr<ConnectionPool> pool;
     std::shared_ptr<MetadataRepository> metadataRepo;
+    std::shared_ptr<KnowledgeGraphStore> kgStore;
     std::shared_ptr<IContentStore> contentStore;
     std::shared_ptr<search::SearchEngine> searchEngine;
     AppContext appContext;
@@ -281,6 +345,38 @@ TEST_CASE("SearchService: basic text search", "[unit][services][search]") {
         CHECK_FALSE(doc.hash.empty());
         CHECK(doc.score >= 0.0);
     }
+}
+
+TEST_CASE("SearchService: relation metadata enrichment", "[unit][services][search][relations]") {
+    SearchServiceFixture f;
+    auto request = f.createBasicSearchRequest("artificial");
+    request.showHash = true;
+
+    auto baseline = runAwait(f.searchService->search(request));
+    REQUIRE(baseline);
+    REQUIRE_FALSE(baseline.value().results.empty());
+
+    const auto seedItem = baseline.value().results.front();
+    f.seedRelationsForResult(seedItem);
+
+    auto enriched = runAwait(f.searchService->search(request));
+    REQUIRE(enriched);
+
+    auto it = std::find_if(enriched.value().results.begin(), enriched.value().results.end(),
+                           [&](const SearchItem& item) { return item.hash == seedItem.hash; });
+    REQUIRE(it != enriched.value().results.end());
+
+    REQUIRE(it->metadata.contains("relation_count"));
+    CHECK(it->metadata.at("relation_count") == "3");
+    REQUIRE(it->metadata.contains("relation_types"));
+    CHECK_THAT(it->metadata.at("relation_types"), ContainsSubstring("defines:2"));
+    REQUIRE(it->metadata.contains("relation_summary"));
+    CHECK_THAT(it->metadata.at("relation_summary"), ContainsSubstring("defines(2)"));
+    REQUIRE(it->metadata.contains("primary_relation"));
+    CHECK(it->metadata.at("primary_relation") == "defines");
+
+    REQUIRE(enriched.value().searchStats.contains("relation_results_enriched"));
+    CHECK(enriched.value().searchStats.at("relation_results_enriched") != "0");
 }
 
 TEST_CASE("SearchService: multiple terms ranked by relevance", "[unit][services][search]") {

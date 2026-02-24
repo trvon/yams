@@ -2,8 +2,9 @@
 
 # Explicit file list keeps configuration deterministic and fast
 dbg = (get_option('buildtype') == 'debug')
+
+# GTest-based services integration suite (multi-test binary)
 if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and gtest_dep.found()
-  # GTest-based services tests (excluding retrieval_and_ingestion which moved to Catch2)
   services_integration_srcs = files(
     'ipc_conformance_test.cpp',
     'ui_cli_expectations_test.cpp',
@@ -44,8 +45,16 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     timeout: get_option('integration-ui-timeout'),
     args: ['--gtest_filter=UiCliExpectationsIT.*:GrepServiceExpectationsIT.*']
   )
+elif get_option('enable-integration-tests')
+  if not gtest_dep.found()
+    message('integration_services suite disabled (GTest not found).')
+  else
+    message('integration_services suite disabled (enable with -Denable-integration-services=true).')
+  endif
+endif
 
-  # Catch2 migration: Retrieval and Ingestion service tests (uses DaemonHarness)
+# Catch2 migration: Retrieval and Ingestion service tests (uses DaemonHarness)
+if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integration-services') or dbg) and tests_has_cli and catch2_dep.found()
   catch2_retrieval_ingestion_exe = executable('catch2_retrieval_ingestion',
     files('retrieval_and_ingestion_catch2_test.cpp'),
     include_directories: incs,
@@ -67,12 +76,6 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     # Allow exit 0 when all tests skip (Windows daemon shutdown not yet implemented)
     args: ['--allow-running-no-tests'],
   )
-elif get_option('enable-integration-tests')
-  if not gtest_dep.found()
-    message('integration_services suite disabled (GTest not found).')
-  else
-    message('integration_services suite disabled (enable with -Denable-integration-services=true).')
-  endif
 endif
 
 # Catch2 migration: Sync Indexing tests

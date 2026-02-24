@@ -311,14 +311,17 @@ TEST_CASE("SearchTuner: getParams returns correct params", "[unit][search_tuner]
     CorpusStats stats;
     stats.docCount = 5000;
     stats.codeRatio = 0.85f;
+    stats.symbolDensity = 0.0f; // No KG: kgWeight is zeroed and remaining weights are normalized
 
     SearchTuner tuner(stats);
     const auto& params = tuner.getParams();
 
     // Should be LARGE_CODE
     CHECK(params.rrfK == 60);
-    CHECK(params.textWeight == Approx(0.40f));
-    CHECK(params.vectorWeight == Approx(0.20f));
+    CHECK(stats.hasKnowledgeGraph() == false);
+    CHECK(params.kgWeight == Approx(0.0f));
+    CHECK(params.textWeight == Approx(0.42105263f));
+    CHECK(params.vectorWeight == Approx(0.21052632f));
 }
 
 TEST_CASE("SearchTuner: getConfig returns valid SearchEngineConfig", "[unit][search_tuner]") {
@@ -356,7 +359,9 @@ TEST_CASE("SearchTuner: toJson serialization", "[unit][search_tuner]") {
     CHECK(json["state"] == "MIXED");
     CHECK_FALSE(json["reason"].get<std::string>().empty());
     CHECK(json["rrf_k"] == 45);
-    CHECK(json["params"]["text_weight"].get<float>() == Approx(0.40f));
+    // When KG is present, graph-aware adjustments shift weights toward KG.
+    CHECK(json["params"]["text_weight"].get<float>() == Approx(0.323f));
+    CHECK(json["params"]["kg_weight"].get<float>() == Approx(0.19f));
     CHECK(json["corpus"]["doc_count"] == 1000);
     CHECK(json["corpus"]["code_ratio"].get<float>() == Approx(0.4f));
     CHECK(json["corpus"]["prose_ratio"].get<float>() == Approx(0.4f));

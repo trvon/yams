@@ -3,6 +3,7 @@
 #include <atomic>
 #include <filesystem>
 #include <future>
+#include <optional>
 #include <sstream>
 #include <string_view>
 #include <thread>
@@ -54,6 +55,12 @@ bool query_trace_enabled() {
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
+
+std::atomic<uint32_t> g_inflightListRequests{0};
+
+struct ListInflightGuard {
+    ~ListInflightGuard() { g_inflightListRequests.fetch_sub(1, std::memory_order_acq_rel); }
+};
 
 int computeEnqueueDelayMs(const AddDocumentRequest& req, int attempt, int baseDelayMs,
                           int maxDelayMs) {
@@ -323,6 +330,19 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetEndRequest(const Ge
 boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const ListRequest& req) {
     spdlog::debug("[handleListRequest] START limit={}", req.limit);
     try {
+        const int listInflightLimit = envIntOrDefault("YAMS_LIST_INFLIGHT_LIMIT", 8, 0, 1024);
+        std::optional<ListInflightGuard> inflightGuard;
+        if (listInflightLimit > 0) {
+            const uint32_t priorInflight =
+                g_inflightListRequests.fetch_add(1, std::memory_order_acq_rel);
+            if (priorInflight >= static_cast<uint32_t>(listInflightLimit)) {
+                g_inflightListRequests.fetch_sub(1, std::memory_order_acq_rel);
+                co_return ErrorResponse{ErrorCode::ResourceExhausted,
+                                        "List concurrency limit reached; retry shortly"};
+            }
+            inflightGuard.emplace();
+        }
+
         const auto requestStart = std::chrono::steady_clock::now();
         auto appContext = serviceManager_->getAppContext();
         auto docService = app::services::makeDocumentService(appContext);

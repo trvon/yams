@@ -127,13 +127,19 @@ struct SearchResultMapper {
         resultItem.snippet = item.snippet;
 
         if (!pathsOnly) {
-            if (!item.hash.empty()) {
+            if constexpr (requires { item.metadata; }) {
+                for (const auto& [key, value] : item.metadata) {
+                    resultItem.metadata[key] = value;
+                }
+            }
+
+            if (!item.hash.empty() && !resultItem.metadata.contains("hash")) {
                 resultItem.metadata["hash"] = item.hash;
             }
-            if (!item.path.empty()) {
+            if (!item.path.empty() && !resultItem.metadata.contains("path")) {
                 resultItem.metadata["path"] = item.path;
             }
-            if (!item.title.empty()) {
+            if (!item.title.empty() && !resultItem.metadata.contains("title")) {
                 resultItem.metadata["title"] = item.title;
             }
         }

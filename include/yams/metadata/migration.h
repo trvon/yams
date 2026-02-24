@@ -219,6 +219,12 @@ private:
     // Version 24: SymSpell fuzzy search tables for fast edit-distance queries
     static Migration createSymSpellSchema();
 
+    // Version 29: Composite index for dominant list sort path (indexed_time, id)
+    static Migration addListSortCompositeIndex();
+
+    // Version 30: Migrate legacy file:/dir: KG node keys to path:* namespace
+    static Migration migrateLegacyPathNodePrefixes();
+
     // Version 25: Term statistics for IDF computation and query weighting
     static Migration createTermStatsSchema();
 

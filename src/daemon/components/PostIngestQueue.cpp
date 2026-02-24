@@ -16,8 +16,8 @@
 #include <yams/api/content_store.h>
 #include <yams/common/utf8_utils.h>
 #include <yams/daemon/async_batcher.h>
-#include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/KGWriteQueue.h>
 #include <yams/daemon/components/PostIngestQueue.h>
@@ -31,6 +31,7 @@
 #include <yams/extraction/text_extractor.h>
 #include <yams/ingest/ingest_helpers.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/path_utils.h>
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
@@ -45,6 +46,24 @@ namespace {
 constexpr size_t kMaxGlinerChars = 2000;
 constexpr float kMinTitleConfidence = 0.55f;
 constexpr float kMinNlEntityConfidence = 0.45f;
+
+std::string normalizeGraphPath(const std::string& path) {
+    if (path.empty()) {
+        return {};
+    }
+    try {
+        auto derived = yams::metadata::computePathDerivedValues(path);
+        if (!derived.normalizedPath.empty()) {
+            return derived.normalizedPath;
+        }
+    } catch (...) {
+    }
+    return path;
+}
+
+std::string makePathFileNodeKey(const std::string& path) {
+    return "path:file:" + normalizeGraphPath(path);
+}
 
 std::string normalizeEntityTextForKey(std::string_view text) {
     std::string out;
@@ -458,6 +477,9 @@ std::size_t PostIngestQueue::adaptiveStageBatchSize(std::size_t queueDepth,
 }
 
 bool PostIngestQueue::isKgChannelBackpressured() const {
+    if (maxKgConcurrent() == 0) {
+        return false;
+    }
     return kgChannelFillRatio() >= PostIngestQueue::kKgBackpressureThreshold;
 }
 
@@ -1201,13 +1223,6 @@ void PostIngestQueue::processSymbolExtractionBatch(
             continue;
         }
         try {
-            // Skip already-extracted docs before loading content.
-            if (GraphComponent::shouldSkipEntityExtraction(kg_, hash)) {
-                spdlog::debug("[PostIngestQueue] Skip symbol extraction for {} (already extracted)",
-                              hash.substr(0, 12));
-                continue;
-            }
-
             std::vector<std::byte> bytes;
             if (j.contentBytes) {
                 bytes = *j.contentBytes;
@@ -1869,7 +1884,8 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
         // Populate KG with NL entities if we have any and KGWriteQueue is available
         if (!nlEntities.empty() && kgWriteQueue_ && kg_) {
             auto batch = std::make_unique<DeferredKGBatch>();
-            batch->sourceFile = filePath;
+            const std::string normalizedFilePath = normalizeGraphPath(filePath);
+            batch->sourceFile = normalizedFilePath.empty() ? filePath : normalizedFilePath;
 
             auto now = std::chrono::system_clock::now().time_since_epoch().count();
 
@@ -1891,7 +1907,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                 docNode.type = "document";
                 nlohmann::json docProps;
                 docProps["hash"] = hash;
-                docProps["path"] = common::sanitizeUtf8(filePath);
+                docProps["path"] = common::sanitizeUtf8(batch->sourceFile);
                 docProps["language"] = common::sanitizeUtf8(language);
                 docNode.properties = docProps.dump();
                 batch->nodes.push_back(std::move(docNode));
@@ -1900,18 +1916,18 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
             // Build file context node
             std::string fileNodeKey;
             if (!filePath.empty()) {
-                fileNodeKey = "file:" + filePath;
+                fileNodeKey = makePathFileNodeKey(batch->sourceFile);
 
                 metadata::KGNode fileNode;
                 fileNode.nodeKey = fileNodeKey;
-                fileNode.label = common::sanitizeUtf8(filePath);
+                fileNode.label = common::sanitizeUtf8(batch->sourceFile);
                 fileNode.type = "file";
                 nlohmann::json fileProps;
-                fileProps["path"] = common::sanitizeUtf8(filePath);
+                fileProps["path"] = common::sanitizeUtf8(batch->sourceFile);
                 fileProps["language"] = common::sanitizeUtf8(language);
-                if (!filePath.empty()) {
-                    fileProps["basename"] =
-                        common::sanitizeUtf8(std::filesystem::path(filePath).filename().string());
+                if (!batch->sourceFile.empty()) {
+                    fileProps["basename"] = common::sanitizeUtf8(
+                        std::filesystem::path(batch->sourceFile).filename().string());
                 }
                 if (!hash.empty()) {
                     fileProps["current_hash"] = hash;

@@ -394,10 +394,17 @@ TEST_CASE("WorkCoordinator load handling", "[daemon][work_coordinator][load]") {
             });
         }
 
+        // Ensure all posted work is drained before stopping. stop() resets the work guard and
+        // stops the io_context, which can prevent queued handlers from running.
+        bool drained = wait_for_condition(5000ms, 10ms, [&]() {
+            return completed.load(std::memory_order_relaxed) == heavy_load;
+        });
+
         coordinator.stop();
         coordinator.join();
 
-        REQUIRE(completed.load() == heavy_load);
+        REQUIRE(drained);
+        REQUIRE(completed.load(std::memory_order_relaxed) == heavy_load);
     }
 
     SECTION("Work stealing across threads") {

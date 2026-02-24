@@ -148,6 +148,19 @@ inline int stepWithRetry(sqlite3_stmt* stmt) {
     return SQLITE_BUSY;                       // Max retries exceeded
 }
 
+// RAII guard to ensure prepared statements are reset after use.
+// Un-reset statements can hold shared WAL read locks, preventing checkpoints.
+struct StmtResetGuard {
+    sqlite3_stmt* stmt;
+    explicit StmtResetGuard(sqlite3_stmt* s) : stmt(s) {}
+    ~StmtResetGuard() {
+        if (stmt)
+            sqlite3_reset(stmt);
+    }
+    StmtResetGuard(const StmtResetGuard&) = delete;
+    StmtResetGuard& operator=(const StmtResetGuard&) = delete;
+};
+
 // SQL statements
 constexpr const char* kCreateVectorsTable = R"sql(
 CREATE TABLE IF NOT EXISTS vectors (
@@ -367,6 +380,10 @@ public:
             }
             return Error{ErrorCode::DatabaseError, "Failed to open database: " + err};
         }
+
+        // Set busy timeout so lock contention waits rather than failing immediately.
+        // 5 seconds matches the retry budget used elsewhere in the vector backend.
+        sqlite3_busy_timeout(db_, 5000);
 
         // Enable WAL mode for better concurrency
         sqlite3_exec(db_, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr);
@@ -1294,6 +1311,7 @@ public:
 
         if (stmt_select_by_doc_) {
             sqlite3_reset(stmt_select_by_doc_);
+            StmtResetGuard guard(stmt_select_by_doc_);
             sqlite3_bind_text(stmt_select_by_doc_, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
 
             while (sqlite3_step(stmt_select_by_doc_) == SQLITE_ROW) {
@@ -1324,6 +1342,7 @@ public:
 
         if (stmt_has_embedding_) {
             sqlite3_reset(stmt_has_embedding_);
+            StmtResetGuard guard(stmt_has_embedding_);
             sqlite3_bind_text(stmt_has_embedding_, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
 
             return sqlite3_step(stmt_has_embedding_) == SQLITE_ROW;
@@ -1350,8 +1369,7 @@ public:
         }
 
         while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-            const char* hash =
-                reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
             if (hash) {
                 hashes.emplace(hash);
             }
@@ -1376,6 +1394,7 @@ public:
 
         if (stmt_count_) {
             sqlite3_reset(stmt_count_);
+            StmtResetGuard guard(stmt_count_);
             if (sqlite3_step(stmt_count_) == SQLITE_ROW) {
                 return static_cast<size_t>(sqlite3_column_int64(stmt_count_, 0));
             }
@@ -1396,6 +1415,7 @@ public:
         // Get vector count
         if (stmt_count_) {
             sqlite3_reset(stmt_count_);
+            StmtResetGuard countGuard(stmt_count_);
             if (sqlite3_step(stmt_count_) == SQLITE_ROW) {
                 stats.total_vectors = static_cast<size_t>(sqlite3_column_int64(stmt_count_, 0));
             }
@@ -2120,6 +2140,7 @@ private:
         }
 
         sqlite3_reset(stmt_get_rowid_);
+        StmtResetGuard guard(stmt_get_rowid_);
         sqlite3_bind_text(stmt_get_rowid_, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
 
         if (sqlite3_step(stmt_get_rowid_) == SQLITE_ROW) {
@@ -2136,6 +2157,7 @@ private:
         }
 
         sqlite3_reset(stmt_select_by_chunk_id_);
+        StmtResetGuard guard(stmt_select_by_chunk_id_);
         sqlite3_bind_text(stmt_select_by_chunk_id_, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
 
         if (sqlite3_step(stmt_select_by_chunk_id_) == SQLITE_ROW) {
@@ -2152,6 +2174,7 @@ private:
         }
 
         sqlite3_reset(stmt_select_by_rowid_);
+        StmtResetGuard guard(stmt_select_by_rowid_);
         sqlite3_bind_int64(stmt_select_by_rowid_, 1, rowid);
 
         if (sqlite3_step(stmt_select_by_rowid_) == SQLITE_ROW) {
@@ -2173,6 +2196,7 @@ private:
         }
 
         sqlite3_reset(stmt_filter_by_rowid_);
+        StmtResetGuard guard(stmt_filter_by_rowid_);
         sqlite3_bind_int64(stmt_filter_by_rowid_, 1, rowid);
 
         if (sqlite3_step(stmt_filter_by_rowid_) == SQLITE_ROW) {
@@ -2607,6 +2631,7 @@ private:
         size_t corpus_size = 0;
         if (stmt_count_) {
             sqlite3_reset(stmt_count_);
+            StmtResetGuard guard(stmt_count_);
             if (sqlite3_step(stmt_count_) == SQLITE_ROW) {
                 corpus_size = static_cast<size_t>(sqlite3_column_int64(stmt_count_, 0));
             }

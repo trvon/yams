@@ -3,10 +3,12 @@
 #include <yams/app/services/services.hpp>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/metadata/query_helpers.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <ranges>
@@ -95,6 +97,13 @@ struct GrepFixture {
         pool_ = std::make_unique<ConnectionPool>(dbPath.string(), ConnectionPoolConfig{});
         repo_ = std::make_shared<MetadataRepository>(*pool_);
 
+        KnowledgeGraphStoreConfig kgConfig;
+        kgConfig.enable_wal = false;
+        auto kgResult = makeSqliteKnowledgeGraphStore(*pool_, kgConfig);
+        REQUIRE(kgResult.has_value());
+        kgStore_ = std::shared_ptr<KnowledgeGraphStore>(std::move(kgResult).value());
+        repo_->setKnowledgeGraphStore(kgStore_);
+
         MigrationManager mm(*db_);
         REQUIRE(mm.initialize());
         mm.registerMigrations(YamsMetadataMigrations::getAllMigrations());
@@ -113,6 +122,7 @@ struct GrepFixture {
         ctx_.store = store_;
         ctx_.metadataRepo = repo_;
         ctx_.searchEngine = nullptr;
+        ctx_.kgStore = kgStore_;
 
         grepService_ = makeGrepService(ctx_);
     }
@@ -122,7 +132,9 @@ struct GrepFixture {
         ctx_.metadataRepo.reset();
         ctx_.store.reset();
         ctx_.searchEngine.reset();
+        ctx_.kgStore.reset();
         repo_.reset();
+        kgStore_.reset();
         pool_.reset();
         db_.reset();
         store_.reset();
@@ -141,10 +153,63 @@ struct GrepFixture {
 
     auto grep(const GrepRequest& req) const { return grepService_->grep(req); }
 
+    void seedRelationsForFile(const std::string& filePath, const std::string& hash) const {
+        REQUIRE(kgStore_ != nullptr);
+        REQUIRE_FALSE(filePath.empty());
+        REQUIRE_FALSE(hash.empty());
+
+        KGNode fileNode;
+        fileNode.nodeKey = "path:file:" + filePath;
+        fileNode.type = std::string("file");
+        fileNode.label = filePath;
+        auto fileNodeId = kgStore_->upsertNode(fileNode);
+        REQUIRE(fileNodeId.has_value());
+
+        KGNode docNode;
+        docNode.nodeKey = "doc:" + hash;
+        docNode.type = std::string("document");
+        docNode.label = filePath;
+        auto docNodeId = kgStore_->upsertNode(docNode);
+        REQUIRE(docNodeId.has_value());
+
+        KGNode symbolNode;
+        symbolNode.nodeKey = "symbol:test:" + hash;
+        symbolNode.type = std::string("symbol");
+        symbolNode.label = std::string("SeededSymbol");
+        auto symbolNodeId = kgStore_->upsertNode(symbolNode);
+        REQUIRE(symbolNodeId.has_value());
+
+        KGNode moduleNode;
+        moduleNode.nodeKey = "module:test:" + hash;
+        moduleNode.type = std::string("module");
+        moduleNode.label = std::string("SeededModule");
+        auto moduleNodeId = kgStore_->upsertNode(moduleNode);
+        REQUIRE(moduleNodeId.has_value());
+
+        KGEdge versionEdge;
+        versionEdge.srcNodeId = fileNodeId.value();
+        versionEdge.dstNodeId = docNodeId.value();
+        versionEdge.relation = "has_version";
+        REQUIRE(kgStore_->addEdge(versionEdge).has_value());
+
+        KGEdge usesOne;
+        usesOne.srcNodeId = fileNodeId.value();
+        usesOne.dstNodeId = symbolNodeId.value();
+        usesOne.relation = "uses";
+        REQUIRE(kgStore_->addEdge(usesOne).has_value());
+
+        KGEdge usesTwo;
+        usesTwo.srcNodeId = fileNodeId.value();
+        usesTwo.dstNodeId = moduleNodeId.value();
+        usesTwo.relation = "uses";
+        REQUIRE(kgStore_->addEdge(usesTwo).has_value());
+    }
+
     std::filesystem::path tmpDir_;
     std::unique_ptr<Database> db_;
     std::unique_ptr<ConnectionPool> pool_;
     std::shared_ptr<MetadataRepository> repo_;
+    std::shared_ptr<KnowledgeGraphStore> kgStore_;
     std::shared_ptr<IContentStore> store_;
     AppContext ctx_;
     std::shared_ptr<IGrepService> grepService_;
@@ -174,6 +239,36 @@ TEST_CASE("GrepService - Basic Functionality", "[grep][service][basic]") {
         REQUIRE(res.value().searchStats.contains("metadata_operations"));
         CHECK(res.value().searchStats.at("metadata_operations") != "0");
         REQUIRE(res.value().searchStats.contains("latency_ms"));
+    }
+
+    SECTION("Relation metadata is added for matched files") {
+        auto docRes = fixture.repo_->findDocumentByExactPath((fixture.tmpDir_ / "a.txt").string());
+        REQUIRE(docRes.has_value());
+        REQUIRE(docRes.value().has_value());
+        fixture.seedRelationsForFile(docRes.value()->filePath, docRes.value()->sha256Hash);
+
+        GrepRequest req;
+        req.pattern = "regex";
+        req.regexOnly = true;
+
+        auto res = fixture.grep(req);
+
+        REQUIRE(res);
+        auto it = std::find_if(res.value().results.begin(), res.value().results.end(),
+                               [](const GrepFileResult& file) { return file.fileName == "a.txt"; });
+        REQUIRE(it != res.value().results.end());
+
+        REQUIRE(it->metadata.contains("relation_count"));
+        CHECK(it->metadata.at("relation_count") == "3");
+        REQUIRE(it->metadata.contains("relation_types"));
+        CHECK(it->metadata.at("relation_types").find("uses:2") != std::string::npos);
+        REQUIRE(it->metadata.contains("relation_summary"));
+        CHECK(it->metadata.at("relation_summary").find("uses(2)") != std::string::npos);
+        REQUIRE(it->metadata.contains("primary_relation"));
+        CHECK(it->metadata.at("primary_relation") == "uses");
+
+        REQUIRE(res.value().searchStats.contains("relation_results_enriched"));
+        CHECK(res.value().searchStats.at("relation_results_enriched") != "0");
     }
 
     SECTION("Literal short pattern matches with boundaries") {

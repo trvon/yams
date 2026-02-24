@@ -377,6 +377,12 @@ public:
     // Returns the count of edges deleted.
     virtual Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) = 0;
 
+    // Delete edges that reference missing nodes. Returns the count of edges deleted.
+    virtual Result<std::int64_t> deleteOrphanedEdges() = 0;
+
+    // Delete doc_entities rows referencing missing documents. Returns the count deleted.
+    virtual Result<std::int64_t> deleteOrphanedDocEntities() = 0;
+
     // Find isolated nodes of a given type (nodes with no incoming edges of specified relation).
     // More efficient than N+1 queries - single SQL query with LEFT JOIN.
     virtual Result<std::vector<KGNode>> findIsolatedNodes(std::string_view nodeType,

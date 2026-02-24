@@ -41,6 +41,32 @@ namespace {
 constexpr int kRequestTimeoutMs = 5000;
 constexpr int kBodyTimeoutMs = 15000;
 
+class EnvGuard {
+    std::string name_;
+    std::string prev_;
+    bool hadPrev_{false};
+
+public:
+    EnvGuard(const char* name, const char* value) : name_(name) {
+        if (const char* existing = std::getenv(name)) {
+            prev_ = existing;
+            hadPrev_ = true;
+        }
+        setenv(name, value, 1);
+    }
+
+    ~EnvGuard() {
+        if (hadPrev_) {
+            setenv(name_.c_str(), prev_.c_str(), 1);
+        } else {
+            unsetenv(name_.c_str());
+        }
+    }
+
+    EnvGuard(const EnvGuard&) = delete;
+    EnvGuard& operator=(const EnvGuard&) = delete;
+};
+
 struct BarrierStats {
     std::uint64_t lastPostIngestQueued{0};
     std::uint64_t lastPostIngestInflight{0};
@@ -837,6 +863,77 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "RetrievalListEchoesTotalCou
     }
 }
 
+TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
+                 "AppDocumentList_HotOnlyStillHydratesMetadataWhenRequested",
+                 "[integration][services][document][list][hot_only]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
+    EnvGuard listMode("YAMS_LIST_MODE", "hot_only");
+    REQUIRE(startDaemon());
+
+    using yams::app::services::ListDocumentsRequest;
+    using yams::app::services::makeDocumentService;
+
+    fs::create_directories(fixtures_->root() / "hot_list");
+    fixtures_->createTextFixture("hot_list/one.txt", "one", {"it-list-hot"});
+
+    yams::app::services::DocumentIngestionService ing;
+    yams::app::services::AddOptions opts;
+    opts.socketPath = socketPath_;
+    opts.explicitDataDir = storageDir_;
+    opts.path = (fixtures_->root() / "hot_list").string();
+    opts.recursive = true;
+    // Apply a tag via ingestion so we can assert metadata hydration under hot_only list mode.
+    opts.tags = {"it-list-hot"};
+    opts.noEmbeddings = true;
+    opts.timeoutMs = kRequestTimeoutMs;
+    REQUIRE(ing.addViaDaemon(opts));
+
+    BarrierStats barrierStats;
+    const bool quiescent =
+        waitForPostIngestQuiescent(socketPath_, storageDir_, 8000ms, 50ms, &barrierStats);
+    CAPTURE(quiescent, barrierStats.statusPolls, barrierStats.statusErrors,
+            barrierStats.lastPostIngestQueued, barrierStats.lastPostIngestInflight,
+            barrierStats.lastPostIngestDrained, barrierStats.lastIndexVisible);
+
+    auto* sm = daemon()->getServiceManager();
+    REQUIRE(sm != nullptr);
+    auto ctx = sm->getAppContext();
+    auto docSvc = makeDocumentService(ctx);
+
+    ListDocumentsRequest rq;
+    rq.limit = 10;
+    rq.pattern = (fixtures_->root() / "hot_list" / "**").string();
+    rq.showSnippets = false;
+    rq.showTags = true;
+    rq.showMetadata = true;
+
+    // In hot_only mode the list path may depend on post-ingest indexing visibility.
+    // Retry briefly to reduce flakiness.
+    decltype(docSvc->list(rq)) r1;
+    std::optional<std::reference_wrapper<const yams::app::services::ListDocumentsResponse>> resp;
+    bool gotDocs = false;
+    for (int i = 0; i < 40; ++i) {
+        r1 = docSvc->list(rq);
+        REQUIRE(r1);
+        if (!r1.value().documents.empty()) {
+            resp = std::cref(r1.value());
+            gotDocs = true;
+            break;
+        }
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(gotDocs);
+
+    bool foundTagMetadata = false;
+    for (const auto& e : resp->get().documents) {
+        if (e.metadata.contains("tag:it-list-hot")) {
+            foundTagMetadata = true;
+            break;
+        }
+    }
+    CHECK(foundTagMetadata);
+}
+
 TEST_CASE_METHOD(ServicesRetrievalIngestionFixture, "AppDocumentListEchoDetailsAndBurst",
                  "[integration][services][document][list][burst]") {
     SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
@@ -935,7 +1032,13 @@ TEST_CASE_METHOD(ServicesRetrievalIngestionFixture,
     addStdinLike.snapshotLabel = snapshotLabel;
     REQUIRE(ing.addViaDaemon(addStdinLike));
 
-    waitForPostIngestQuiescent(socketPath_, storageDir_, 5000ms);
+    BarrierStats barrierStats;
+    waitForPostIngestQuiescent(socketPath_, storageDir_, 8000ms, 50ms, &barrierStats);
+    const bool snapshotVisible = waitForSnapshotVisible(
+        ctx.metadataRepo.get(), snapshotId, snapshotLabel, 3, 8000ms, 25ms, &barrierStats);
+    CAPTURE(snapshotVisible, barrierStats.snapshotPolls, barrierStats.lastSnapshotCount,
+            barrierStats.lastDocsByLabelCount);
+    REQUIRE(snapshotVisible);
 
     auto snaps = ctx.metadataRepo->listTreeSnapshots(200);
     REQUIRE(snaps);

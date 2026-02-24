@@ -582,6 +582,59 @@ public:
         return def;
     }
 
+    // Auto-repair tick scheduling (tiered). Set to 0 to disable a tier.
+    static uint32_t repairAutoInitialDelayMinutes() {
+        uint32_t def = 10;
+        if (const char* s = std::getenv("YAMS_REPAIR_AUTO_INITIAL_DELAY_MIN")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v <= 1440)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return def;
+    }
+
+    static uint32_t repairAutoFastMinutes() {
+        uint32_t def = 30;
+        if (const char* s = std::getenv("YAMS_REPAIR_AUTO_FAST_MIN")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v <= 1440)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return def;
+    }
+
+    static uint32_t repairAutoWarmHours() {
+        uint32_t def = 6;
+        if (const char* s = std::getenv("YAMS_REPAIR_AUTO_WARM_HOURS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v <= 168)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return def;
+    }
+
+    static uint32_t repairAutoColdHours() {
+        uint32_t def = 168;
+        if (const char* s = std::getenv("YAMS_REPAIR_AUTO_COLD_HOURS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v <= 720)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return def;
+    }
+
     // Fts5Job consumer startup delay (ms). Default 2000ms.
     // Gives time for daemon to fully initialize before processing FTS5 jobs.
     static uint32_t fts5StartupDelayMs() {

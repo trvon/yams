@@ -5,6 +5,9 @@
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/repair/repair_health_probe.h>
+#include <yams/daemon/components/repair/repair_plan_builder.h>
+#include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningSnapshot.h>
@@ -76,6 +79,7 @@ void BackgroundTaskManager::start() {
         launchCheckpointTask();
         launchStorageGcTask();
         launchGraphPruneTask();
+        launchAutoRepairTask();
         spdlog::debug("[BackgroundTaskManager] Background tasks launched successfully");
     } catch (const std::exception& e) {
         spdlog::error("[BackgroundTaskManager] Failed to launch background tasks: {}", e.what());
@@ -604,6 +608,178 @@ void BackgroundTaskManager::launchGraphPruneTask() {
                 co_await timer.async_wait(boost::asio::use_awaitable);
             }
 
+            co_return;
+        },
+        boost::asio::detached);
+}
+
+void BackgroundTaskManager::launchAutoRepairTask() {
+    auto self = deps_.serviceManager.lock();
+    if (!self) {
+        throw std::runtime_error(
+            "BackgroundTaskManager: ServiceManager weak_ptr expired in launchAutoRepairTask");
+    }
+
+    if (!self->getConfig().enableAutoRepair) {
+        spdlog::debug("[BackgroundTaskManager] Auto-repair disabled, skipping task");
+        return;
+    }
+
+    const auto initialDelay = std::chrono::minutes(TuneAdvisor::repairAutoInitialDelayMinutes());
+    const auto fastInterval = std::chrono::minutes(TuneAdvisor::repairAutoFastMinutes());
+    const auto warmInterval = std::chrono::hours(TuneAdvisor::repairAutoWarmHours());
+    const auto coldInterval = std::chrono::hours(TuneAdvisor::repairAutoColdHours());
+    const auto retryDelay = std::chrono::minutes(2);
+
+    if (fastInterval.count() == 0 && warmInterval.count() == 0 && coldInterval.count() == 0) {
+        spdlog::debug("[BackgroundTaskManager] Auto-repair intervals disabled, skipping task");
+        return;
+    }
+
+    auto exec = deps_.executor;
+    auto stopFlag = stopRequested_;
+
+    spdlog::debug("[BackgroundTaskManager] Launching AutoRepair task");
+    boost::asio::co_spawn(
+        exec,
+        [self, stopFlag, initialDelay, fastInterval, warmInterval, coldInterval,
+         retryDelay]() -> boost::asio::awaitable<void> {
+            using namespace std::chrono_literals;
+            auto executor = co_await boost::asio::this_coro::executor;
+            boost::asio::steady_timer timer(executor);
+
+            if (initialDelay.count() > 0) {
+                timer.expires_after(initialDelay);
+                try {
+                    co_await timer.async_wait(boost::asio::use_awaitable);
+                } catch (const boost::system::system_error& e) {
+                    if (e.code() == boost::asio::error::operation_aborted) {
+                        co_return;
+                    }
+                    throw;
+                }
+            }
+
+            const auto maxTime = std::chrono::steady_clock::time_point::max();
+            auto now = std::chrono::steady_clock::now();
+            auto nextFast = (fastInterval.count() > 0) ? now + fastInterval : maxTime;
+            auto nextWarm = (warmInterval.count() > 0) ? now + warmInterval : maxTime;
+            auto nextCold = (coldInterval.count() > 0) ? now + coldInterval : maxTime;
+
+            while (!stopFlag->load(std::memory_order_acquire)) {
+                now = std::chrono::steady_clock::now();
+
+                auto rs = self->getRepairServiceShared();
+                if (!rs) {
+                    timer.expires_after(1min);
+                    try {
+                        co_await timer.async_wait(boost::asio::use_awaitable);
+                    } catch (const boost::system::system_error& e) {
+                        if (e.code() == boost::asio::error::operation_aborted) {
+                            break;
+                        }
+                        throw;
+                    }
+                    continue;
+                }
+
+                const auto& state = self->getState();
+                const bool queueEmpty =
+                    state.stats.repairQueueDepth.load(std::memory_order_relaxed) == 0;
+                const bool busy = state.stats.activeConnections.load(std::memory_order_relaxed) > 0;
+
+                auto canRunAuto = [&]() {
+                    if (busy)
+                        return false;
+                    if (!queueEmpty)
+                        return false;
+                    if (rs->isRepairInProgress())
+                        return false;
+                    return true;
+                };
+
+                auto runPlan = [&](const std::string& tier, const RepairRequest& req) {
+                    if (!repair::RepairPlanBuilder::hasWork(req))
+                        return;
+                    spdlog::info("[AutoRepair] tick {}: executing", tier);
+                    auto resp = rs->executeRepair(req, nullptr);
+                    if (!resp.success && !resp.errors.empty()) {
+                        spdlog::warn("[AutoRepair] {} completed with errors: {}", tier,
+                                     resp.errors.front());
+                    }
+                };
+
+                if (fastInterval.count() > 0 && now >= nextFast) {
+                    if (canRunAuto()) {
+                        repair::RepairHealthProbe probe(
+                            self->getMetadataRepo(), self->getVectorDatabase(),
+                            self->getGraphComponent(), self->getKgStore());
+                        repair::RepairHealthOptions opts;
+                        opts.checkFts5 = false;
+                        opts.checkEmbeddings = false;
+                        opts.checkGraph = true;
+                        opts.scanDocuments = false;
+                        auto health = probe.probe(opts);
+                        auto req = repair::RepairPlanBuilder::buildFast(health);
+                        runPlan("fast", req);
+                        nextFast = now + fastInterval;
+                    } else {
+                        nextFast = now + retryDelay;
+                    }
+                }
+
+                if (warmInterval.count() > 0 && now >= nextWarm) {
+                    if (canRunAuto()) {
+                        repair::RepairHealthProbe probe(
+                            self->getMetadataRepo(), self->getVectorDatabase(),
+                            self->getGraphComponent(), self->getKgStore());
+                        repair::RepairHealthOptions opts;
+                        auto health = probe.probe(opts);
+                        spdlog::info(
+                            "[AutoRepair] health: docs={} fts5_missing={} embed_missing={} "
+                            "graph_gap={} graph_ok={}",
+                            health.documentsScanned, health.missingFts5, health.missingEmbeddings,
+                            health.graphDocNodeGap, health.graphIntegrityOk);
+                        for (const auto& issue : health.issues) {
+                            spdlog::debug("[AutoRepair] health issue: {}", issue);
+                        }
+                        auto req = repair::RepairPlanBuilder::buildWarm(health, 3);
+                        runPlan("warm", req);
+                        nextWarm = now + warmInterval;
+                    } else {
+                        nextWarm = now + retryDelay;
+                    }
+                }
+
+                if (coldInterval.count() > 0 && now >= nextCold) {
+                    if (canRunAuto()) {
+                        auto req = repair::RepairPlanBuilder::buildCold();
+                        runPlan("cold", req);
+                        nextCold = now + coldInterval;
+                    } else {
+                        nextCold = now + retryDelay;
+                    }
+                }
+
+                auto nextWake = std::min(nextFast, std::min(nextWarm, nextCold));
+                if (nextWake == maxTime) {
+                    timer.expires_after(5min);
+                } else {
+                    auto wait = (nextWake > now) ? (nextWake - now) : 1s;
+                    if (wait < 1s)
+                        wait = 1s;
+                    timer.expires_after(wait);
+                }
+
+                try {
+                    co_await timer.async_wait(boost::asio::use_awaitable);
+                } catch (const boost::system::system_error& e) {
+                    if (e.code() == boost::asio::error::operation_aborted) {
+                        break;
+                    }
+                    throw;
+                }
+            }
             co_return;
         },
         boost::asio::detached);

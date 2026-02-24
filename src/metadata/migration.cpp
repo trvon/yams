@@ -343,7 +343,9 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createTermStatsSchema(),
             repairSymbolMetadataUniqueness(),
             optimizeValueCountsQuery(),
-            createFeedbackEventsSchema()};
+            createFeedbackEventsSchema(),
+            addListSortCompositeIndex(),
+            migrateLegacyPathNodePrefixes()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2460,6 +2462,94 @@ Migration YamsMetadataMigrations::createFeedbackEventsSchema() {
         DROP INDEX IF EXISTS idx_feedback_events_trace_id;
         DROP TABLE IF EXISTS feedback_events;
     )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::addListSortCompositeIndex() {
+    Migration m;
+    m.version = 29;
+    m.name = "Add composite index for list sort path";
+    m.created = std::chrono::system_clock::now();
+
+    m.upSQL = R"(
+        CREATE INDEX IF NOT EXISTS idx_documents_indexed_id
+            ON documents(indexed_time DESC, id DESC);
+    )";
+
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_documents_indexed_id;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::migrateLegacyPathNodePrefixes() {
+    Migration m;
+    m.version = 30;
+    m.name = "Migrate legacy file and dir node key prefixes to path namespace";
+    m.created = std::chrono::system_clock::now();
+
+    m.upFunc = [](Database& db) -> Result<void> {
+        auto hasKgNodes = db.tableExists("kg_nodes");
+        if (!hasKgNodes) {
+            return hasKgNodes.error();
+        }
+        if (!hasKgNodes.value()) {
+            return Result<void>();
+        }
+
+        auto updateFiles = db.execute(R"(
+            UPDATE kg_nodes
+               SET node_key = 'path:file:' || substr(node_key, 6)
+             WHERE node_key LIKE 'file:%'
+        )");
+        if (!updateFiles) {
+            return updateFiles;
+        }
+
+        auto updateDirs = db.execute(R"(
+            UPDATE kg_nodes
+               SET node_key = 'path:dir:' || substr(node_key, 5)
+             WHERE node_key LIKE 'dir:%'
+        )");
+        if (!updateDirs) {
+            return updateDirs;
+        }
+
+        spdlog::info("v30: Migrated legacy file:/dir: node keys to path:file:/path:dir:");
+        return Result<void>();
+    };
+
+    m.downFunc = [](Database& db) -> Result<void> {
+        auto hasKgNodes = db.tableExists("kg_nodes");
+        if (!hasKgNodes) {
+            return hasKgNodes.error();
+        }
+        if (!hasKgNodes.value()) {
+            return Result<void>();
+        }
+
+        auto revertFiles = db.execute(R"(
+            UPDATE kg_nodes
+               SET node_key = 'file:' || substr(node_key, 11)
+             WHERE node_key LIKE 'path:file:%'
+        )");
+        if (!revertFiles) {
+            return revertFiles;
+        }
+
+        auto revertDirs = db.execute(R"(
+            UPDATE kg_nodes
+               SET node_key = 'dir:' || substr(node_key, 10)
+             WHERE node_key LIKE 'path:dir:%'
+        )");
+        if (!revertDirs) {
+            return revertDirs;
+        }
+
+        return Result<void>();
+    };
 
     return m;
 }

@@ -2999,6 +2999,7 @@ template <> struct ProtoBinding<RepairRequest> {
         o->set_repair_fts5(r.repairFts5);
         o->set_repair_embeddings(r.repairEmbeddings);
         o->set_repair_stuck_docs(r.repairStuckDocs);
+        o->set_repair_graph(r.repairGraph);
         o->set_optimize_db(r.optimizeDb);
         o->set_repair_all(r.repairAll);
         o->set_dry_run(r.dryRun);
@@ -3021,6 +3022,7 @@ template <> struct ProtoBinding<RepairRequest> {
         r.repairFts5 = i.repair_fts5();
         r.repairEmbeddings = i.repair_embeddings();
         r.repairStuckDocs = i.repair_stuck_docs();
+        r.repairGraph = i.repair_graph();
         r.optimizeDb = i.optimize_db();
         r.repairAll = i.repair_all();
         r.dryRun = i.dry_run();

@@ -3047,6 +3047,7 @@ struct RepairRequest {
     bool repairFts5{false};
     bool repairEmbeddings{false};
     bool repairStuckDocs{false};
+    bool repairGraph{false};
     bool optimizeDb{false};
     bool repairAll{false};
 
@@ -3063,8 +3064,8 @@ struct RepairRequest {
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         ser << repairOrphans << repairMime << repairDownloads << repairPathTree << repairChunks
-            << repairBlockRefs << repairFts5 << repairEmbeddings << repairStuckDocs << optimizeDb
-            << repairAll << dryRun << verbose << force << foreground << embeddingModel
+            << repairBlockRefs << repairFts5 << repairEmbeddings << repairStuckDocs << repairGraph
+            << optimizeDb << repairAll << dryRun << verbose << force << foreground << embeddingModel
             << includeMime << maxRetries;
     }
 
@@ -3096,6 +3097,8 @@ struct RepairRequest {
         if (!readBool(req.repairEmbeddings))
             return Error{ErrorCode::SerializationError, "RepairRequest"};
         if (!readBool(req.repairStuckDocs))
+            return Error{ErrorCode::SerializationError, "RepairRequest"};
+        if (!readBool(req.repairGraph))
             return Error{ErrorCode::SerializationError, "RepairRequest"};
         if (!readBool(req.optimizeDb))
             return Error{ErrorCode::SerializationError, "RepairRequest"};

@@ -192,6 +192,20 @@ struct DocumentQueryOptions {
     std::optional<int64_t> repairAttemptedBefore;
 };
 
+struct ListDocumentProjection {
+    int64_t id{0};
+    std::string filePath;
+    std::string fileName;
+    std::string fileExtension;
+    int64_t fileSize{0};
+    std::string sha256Hash;
+    std::string mimeType;
+    std::chrono::sys_seconds createdTime;
+    std::chrono::sys_seconds modifiedTime;
+    std::chrono::sys_seconds indexedTime;
+    ExtractionStatus extractionStatus{ExtractionStatus::Pending};
+};
+
 struct MetadataValueCount {
     std::string value;
     int64_t count{0};
@@ -268,6 +282,8 @@ public:
     virtual Result<void> removeFromIndex(int64_t documentId) = 0;
     virtual Result<void> removeFromIndexByHash(const std::string& hash) = 0;
     virtual Result<size_t> removeFromIndexByHashBatch(const std::vector<std::string>& hashes) = 0;
+    virtual Result<bool> hasFtsEntry(int64_t documentId) = 0;
+    virtual Result<std::unordered_set<int64_t>> getFts5IndexedRowIdSet() = 0;
     virtual Result<std::vector<int64_t>> getAllFts5IndexedDocumentIds() = 0;
     virtual Result<SearchResults>
     search(const std::string& query, int limit = 50, int offset = 0,
@@ -399,7 +415,6 @@ public:
     virtual Result<std::vector<DocumentInfo>>
     findDocumentsByPathTreePrefix(std::string_view pathPrefix, bool includeSubdirectories = true,
                                   int limit = 0) = 0;
-
     // Tree diff persistence (PBI-043)
     virtual Result<void> upsertTreeSnapshot(const TreeSnapshotRecord& record) = 0;
     virtual Result<std::optional<TreeSnapshotRecord>>
@@ -500,6 +515,8 @@ public:
     Result<void> removeFromIndex(int64_t documentId) override;
     Result<void> removeFromIndexByHash(const std::string& hash) override;
     Result<size_t> removeFromIndexByHashBatch(const std::vector<std::string>& hashes) override;
+    Result<bool> hasFtsEntry(int64_t documentId) override;
+    Result<std::unordered_set<int64_t>> getFts5IndexedRowIdSet() override;
     Result<std::vector<int64_t>> getAllFts5IndexedDocumentIds() override;
     Result<SearchResults>
     search(const std::string& query, int limit = 50, int offset = 0,
@@ -580,6 +597,8 @@ public:
 
     Result<std::optional<DocumentInfo>> findDocumentByExactPath(const std::string& path) override;
     Result<std::vector<DocumentInfo>> queryDocuments(const DocumentQueryOptions& options) override;
+    Result<std::vector<ListDocumentProjection>>
+    queryDocumentsForListProjection(const DocumentQueryOptions& options);
     Result<std::vector<std::string>> getSnapshots() override;
     Result<std::vector<std::string>> getSnapshotLabels() override;
     Result<SnapshotInfo> getSnapshotInfo(const std::string& snapshotId) override;
@@ -637,6 +656,10 @@ public:
 
     Result<std::unordered_map<int64_t, DocumentContent>>
     batchGetContent(const std::vector<int64_t>& documentIds) override;
+
+    // Batch fetch content previews for list/snippet hydration without reading full blobs.
+    Result<std::unordered_map<int64_t, std::string>>
+    batchGetContentPreview(const std::vector<int64_t>& documentIds, int maxChars, int maxDocs = 0);
 
     // Embedding status operations
     Result<void> updateDocumentEmbeddingStatus(int64_t documentId, bool hasEmbedding,
@@ -835,6 +858,7 @@ private:
 
     // Helper methods for row mapping
     DocumentInfo mapDocumentRow(Statement& stmt) const;
+    ListDocumentProjection mapListProjectionRow(Statement& stmt) const;
     const char* documentColumnList(bool qualified) const;
 
     Result<std::optional<DocumentInfo>>

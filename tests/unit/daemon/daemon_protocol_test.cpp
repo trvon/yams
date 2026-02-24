@@ -552,7 +552,7 @@ TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serializati
     SECTION("GraphQueryResponse includes edges") {
         GraphQueryResponse gr;
         gr.originNode.nodeId = 1;
-        gr.originNode.nodeKey = "file:/root/a.cpp";
+        gr.originNode.nodeKey = "path:file:/root/a.cpp";
         gr.originNode.label = "a.cpp";
         gr.originNode.type = "file";
 

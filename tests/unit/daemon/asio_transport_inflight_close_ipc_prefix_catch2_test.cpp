@@ -97,7 +97,9 @@ TEST_CASE("AsioTransportAdapter preserves [ipc:*] prefix when server closes with
     TransportOptions opts;
     opts.socketPath = socketPath;
     opts.poolEnabled = true;
-    opts.maxInflight = 8;
+    // Keep per-connection inflight low to ensure at least one request observes
+    // a clean EOF when the server closes with requests still pending.
+    opts.maxInflight = 1;
     opts.requestTimeout = 10s;
     opts.headerTimeout = 2s;
     opts.bodyTimeout = 2s;

@@ -101,6 +101,7 @@ struct BenchConfig {
     // Use real model provider instead of mock (requires ONNX runtime + models)
     bool useRealModelProvider{false};
     bool useMcpPath{false};
+    std::string usageProfile{"mixed"};
 
     static BenchConfig fromEnv() {
         BenchConfig cfg;
@@ -153,6 +154,9 @@ struct BenchConfig {
         if (auto* v = std::getenv("YAMS_BENCH_USE_MCP")) {
             std::string s(v);
             cfg.useMcpPath = (s == "1" || s == "true" || s == "yes");
+        }
+        if (auto* v = std::getenv("YAMS_BENCH_USAGE_PROFILE")) {
+            cfg.usageProfile = v;
         }
 
         return cfg;
@@ -1768,10 +1772,14 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     //   YAMS_BENCH_CAT_EVERY_N           - cat cadence among non-status status/get ops
     //                                      (default: 3)
     //   YAMS_BENCH_LIST_INFLIGHT_CAP     - max concurrent list ops (0 = unlimited, default: 0)
+    //   YAMS_BENCH_USAGE_PROFILE         - mixed|extension_direct (default: mixed)
     auto cfg = BenchConfig::fromEnv();
     if (!cfg.dataDir) {
         SKIP("Set YAMS_BENCH_DATA_DIR to an existing YAMS corpus to run this benchmark");
     }
+
+    const bool extensionLikeProfile =
+        (cfg.usageProfile == "extension_direct" || cfg.usageProfile == "vscode_blackboard");
 
     // --- Configurable layout ---
     auto envInt = [](const char* name, int def) {
@@ -1779,17 +1787,27 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
             return std::max(1, std::atoi(v));
         return def;
     };
-    const int kSearchClients = envInt("YAMS_BENCH_SEARCH_CLIENTS", 4);
-    const int kListClients = envInt("YAMS_BENCH_LIST_CLIENTS", 4);
-    const int kGrepClients = envInt("YAMS_BENCH_GREP_CLIENTS", 2);
-    const int kStatusGetClients = envInt("YAMS_BENCH_STATUS_GET_CLIENTS", 4);
+    const int defaultSearchClients = extensionLikeProfile ? 6 : 4;
+    const int defaultListClients = extensionLikeProfile ? 6 : 4;
+    const int defaultGrepClients = extensionLikeProfile ? 1 : 2;
+    const int defaultStatusGetClients = extensionLikeProfile ? 10 : 4;
+    const int defaultOpsPerClient = extensionLikeProfile ? 80 : 50;
+    const int defaultStatusEveryN = extensionLikeProfile ? 8 : 4;
+    const int defaultCatEveryN = extensionLikeProfile ? 10 : 3;
+    const int defaultListInflightCap = extensionLikeProfile ? 2 : 0;
+
+    const int kSearchClients = envInt("YAMS_BENCH_SEARCH_CLIENTS", defaultSearchClients);
+    const int kListClients = envInt("YAMS_BENCH_LIST_CLIENTS", defaultListClients);
+    const int kGrepClients = envInt("YAMS_BENCH_GREP_CLIENTS", defaultGrepClients);
+    const int kStatusGetClients = envInt("YAMS_BENCH_STATUS_GET_CLIENTS", defaultStatusGetClients);
     const int kTotalClients = kSearchClients + kListClients + kGrepClients + kStatusGetClients;
-    const int kOpsPerClient = envInt("YAMS_BENCH_OPS_PER_CLIENT", 50);
+    const int kOpsPerClient = envInt("YAMS_BENCH_OPS_PER_CLIENT", defaultOpsPerClient);
     const int kOpTimeoutS = envInt("YAMS_BENCH_OP_TIMEOUT_S", 60);
     const auto kOpTimeout = std::chrono::seconds(kOpTimeoutS);
-    const int kStatusEveryN = std::max(1, envInt("YAMS_BENCH_STATUS_EVERY_N", 4));
-    const int kCatEveryN = std::max(1, envInt("YAMS_BENCH_CAT_EVERY_N", 3));
-    const int kListInflightCap = std::max(0, envInt("YAMS_BENCH_LIST_INFLIGHT_CAP", 0));
+    const int kStatusEveryN = std::max(1, envInt("YAMS_BENCH_STATUS_EVERY_N", defaultStatusEveryN));
+    const int kCatEveryN = std::max(1, envInt("YAMS_BENCH_CAT_EVERY_N", defaultCatEveryN));
+    const int kListInflightCap =
+        std::max(0, envInt("YAMS_BENCH_LIST_INFLIGHT_CAP", defaultListInflightCap));
     const int kDiscoverPageSize = envInt("YAMS_BENCH_DISCOVER_PAGE_SIZE", 500);
     const int kDiscoverHashLimit = envInt("YAMS_BENCH_DISCOVER_HASH_LIMIT", 5000);
     const int kHotspotWindowMs = envInt("YAMS_BENCH_HOTSPOT_WINDOW_MS", 1000);
@@ -1813,6 +1831,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     std::cout << "  Discover page:  " << kDiscoverPageSize << " (limit " << kDiscoverHashLimit
               << ")\n";
     std::cout << "  Hotspot window: " << kHotspotWindowMs << "ms\n";
+    std::cout << "  Usage profile: " << cfg.usageProfile << "\n";
     std::cout << "  Transport path: " << (useMcpPath ? "mcp(query-or-direct-tools)" : "daemon-ipc")
               << "\n";
     if (useMcpPath) {
@@ -2390,6 +2409,230 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
 
             for (int i = 0; i < kOpsPerClient; ++i) {
                 auto t0 = std::chrono::steady_clock::now();
+                if (extensionLikeProfile) {
+                    const int slot = (i + g) % 20;
+                    const bool doStatus = (slot == 0) || knownHashes.empty();
+                    const bool doSearch = !doStatus && (slot >= 1 && slot <= 4);
+                    const bool doList = !doStatus && !doSearch && (slot >= 5 && slot <= 10);
+                    const bool doCat = !doStatus && !doSearch && !doList && (slot == 19);
+
+                    if (doStatus) {
+                        yams::Result<nlohmann::json> res;
+                        if (useMcpPath) {
+                            res = sharedMcpPool->queryStepForSlot(
+                                static_cast<size_t>(tid), "status", nlohmann::json::object());
+                        } else {
+                            auto direct = yams::cli::run_sync(client->status(), kOpTimeout);
+                            if (direct) {
+                                res = nlohmann::json::object();
+                            } else {
+                                res = yams::Error{direct.error()};
+                            }
+                        }
+                        auto t1 = std::chrono::steady_clock::now();
+                        auto latUs =
+                            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+                        auto wallMs =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - globalStart)
+                                .count();
+
+                        OpTrace trace;
+                        trace.opType = "status";
+                        trace.threadId = tid;
+                        trace.opIndex = i;
+                        trace.latencyUs = latUs;
+                        trace.wallClockMs = wallMs;
+                        if (res) {
+                            trace.success = true;
+                            statusOps.fetch_add(1);
+                        } else {
+                            trace.success = false;
+                            trace.errorMsg = res.error().message;
+                            statusFails.fetch_add(1);
+                        }
+                        perThreadTraces[tid].push_back(std::move(trace));
+                        totalCompleted.fetch_add(1);
+                        continue;
+                    }
+
+                    if (doSearch) {
+                        SearchRequest req;
+                        req.query = corpusQueries[(g * kOpsPerClient + i) % 10];
+                        req.limit = 5;
+                        yams::Result<nlohmann::json> res;
+                        if (useMcpPath) {
+                            res = sharedMcpPool->queryStepForSlot(
+                                static_cast<size_t>(tid), "search",
+                                {{"query", req.query}, {"limit", req.limit}});
+                        } else {
+                            auto direct = yams::cli::run_sync(client->search(req), kOpTimeout);
+                            if (direct) {
+                                nlohmann::json j;
+                                j["results"] = nlohmann::json::array();
+                                for (const auto& r : direct.value().results) {
+                                    j["results"].push_back({{"id", r.id}});
+                                }
+                                res = j;
+                            } else {
+                                res = yams::Error{direct.error()};
+                            }
+                        }
+                        auto t1 = std::chrono::steady_clock::now();
+                        auto latUs =
+                            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+                        auto wallMs =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - globalStart)
+                                .count();
+
+                        OpTrace trace;
+                        trace.opType = "search";
+                        trace.threadId = tid;
+                        trace.opIndex = i;
+                        trace.latencyUs = latUs;
+                        trace.wallClockMs = wallMs;
+                        if (res) {
+                            trace.success = true;
+                            if (res.value().contains("results") &&
+                                res.value()["results"].is_array()) {
+                                trace.resultCount = static_cast<int>(res.value()["results"].size());
+                            }
+                            searchOps.fetch_add(1);
+                        } else {
+                            trace.success = false;
+                            trace.errorMsg = res.error().message;
+                            searchFails.fetch_add(1);
+                        }
+                        perThreadTraces[tid].push_back(std::move(trace));
+                        totalCompleted.fetch_add(1);
+                        continue;
+                    }
+
+                    if (doList) {
+                        ListRequest req;
+                        req.limit = ((i % 2) == 0) ? 10 : 25;
+                        yams::Result<nlohmann::json> res;
+                        if (useMcpPath) {
+                            res = sharedMcpPool->queryStepForSlot(static_cast<size_t>(tid), "list",
+                                                                  {{"limit", req.limit}});
+                        } else {
+                            auto direct = yams::cli::run_sync(client->list(req), kOpTimeout);
+                            if (direct) {
+                                nlohmann::json j;
+                                j["items"] = nlohmann::json::array();
+                                for (const auto& it : direct.value().items) {
+                                    j["items"].push_back({{"hash", it.hash}});
+                                }
+                                res = j;
+                            } else {
+                                res = yams::Error{direct.error()};
+                            }
+                        }
+                        auto t1 = std::chrono::steady_clock::now();
+                        auto latUs =
+                            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+                        auto wallMs =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - globalStart)
+                                .count();
+
+                        OpTrace trace;
+                        trace.opType = "list";
+                        trace.threadId = tid;
+                        trace.opIndex = i;
+                        trace.latencyUs = latUs;
+                        trace.wallClockMs = wallMs;
+                        if (res) {
+                            trace.success = true;
+                            if (res.value().contains("items") && res.value()["items"].is_array()) {
+                                trace.resultCount = static_cast<int>(res.value()["items"].size());
+                            }
+                            listOps.fetch_add(1);
+                        } else {
+                            trace.success = false;
+                            trace.errorMsg = res.error().message;
+                            listFails.fetch_add(1);
+                        }
+                        perThreadTraces[tid].push_back(std::move(trace));
+                        totalCompleted.fetch_add(1);
+                        continue;
+                    }
+
+                    std::uniform_int_distribution<std::size_t> dist(0, knownHashes.size() - 1);
+                    std::string hash = knownHashes[dist(rng)];
+                    yams::Result<nlohmann::json> res;
+                    if (doCat) {
+                        if (useMcpPath) {
+                            res = sharedMcpPool->queryStepForSlot(
+                                static_cast<size_t>(tid), "get",
+                                {{"hash", hash}, {"include_content", true}});
+                        } else {
+                            CatRequest req;
+                            req.hash = hash;
+                            auto direct = yams::cli::run_sync(client->cat(req), kOpTimeout);
+                            if (direct) {
+                                nlohmann::json j;
+                                j["has_content"] = direct.value().hasContent;
+                                j["size"] = direct.value().size;
+                                res = j;
+                            } else {
+                                res = yams::Error{direct.error()};
+                            }
+                        }
+                    } else {
+                        if (useMcpPath) {
+                            res = sharedMcpPool->queryStepForSlot(
+                                static_cast<size_t>(tid), "get",
+                                {{"hash", hash}, {"include_content", false}});
+                        } else {
+                            GetRequest req;
+                            req.hash = hash;
+                            req.metadataOnly = true;
+                            auto direct = yams::cli::run_sync(client->get(req), kOpTimeout);
+                            if (direct) {
+                                res = nlohmann::json::object();
+                            } else {
+                                res = yams::Error{direct.error()};
+                            }
+                        }
+                    }
+
+                    auto t1 = std::chrono::steady_clock::now();
+                    auto latUs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+                    auto wallMs =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - globalStart)
+                            .count();
+
+                    OpTrace trace;
+                    trace.opType = doCat ? "cat" : "get";
+                    trace.threadId = tid;
+                    trace.opIndex = i;
+                    trace.latencyUs = latUs;
+                    trace.wallClockMs = wallMs;
+                    if (res) {
+                        trace.success = true;
+                        if (doCat) {
+                            if (res.value().contains("size") && res.value()["size"].is_number()) {
+                                trace.resultCount =
+                                    static_cast<int>(res.value()["size"].get<uint64_t>());
+                            }
+                            catOps.fetch_add(1);
+                        } else {
+                            getOps.fetch_add(1);
+                        }
+                    } else {
+                        trace.success = false;
+                        trace.errorMsg = res.error().message;
+                        if (doCat) {
+                            catFails.fetch_add(1);
+                        } else {
+                            getFails.fetch_add(1);
+                        }
+                    }
+                    perThreadTraces[tid].push_back(std::move(trace));
+                    totalCompleted.fetch_add(1);
+                    continue;
+                }
+
                 bool isStatus = (i % kStatusEveryN == 0) || knownHashes.empty();
 
                 if (isStatus) {
@@ -2818,7 +3061,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         {"op_timeout_s", kOpTimeoutS},
                         {"status_every_n", kStatusEveryN},
                         {"cat_every_n", kCatEveryN},
-                        {"list_inflight_cap", kListInflightCap}}},
+                        {"list_inflight_cap", kListInflightCap},
+                        {"usage_profile", cfg.usageProfile}}},
         {"total_ops", totalOps},
         {"total_failures", totalFails},
         {"elapsed_seconds", globalElapsed},
