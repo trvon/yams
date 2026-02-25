@@ -5,6 +5,7 @@
 #include <atomic>
 #include <csignal>
 #include <cstdlib>
+#include <memory>
 #include <thread>
 
 #include <CLI/CLI.hpp>
@@ -133,9 +134,11 @@ int main(int argc, char* argv[]) {
         std::unique_ptr<yams::mcp::ITransport> transport =
             std::make_unique<yams::mcp::StdioTransport>();
 
-        auto server = std::make_unique<yams::mcp::MCPServer>(std::move(transport), &g_running);
+        // MCPServer uses enable_shared_from_this and spawns detached coroutines that capture
+        // shared_ptr<MCPServer>; it must be owned by a shared_ptr.
+        auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport), &g_running);
 
-        std::thread server_thread([&server]() { server->start(); });
+        std::thread server_thread([server]() { server->start(); });
 
         spdlog::info("MCP server started successfully");
         spdlog::info("Press Ctrl+C to stop");
