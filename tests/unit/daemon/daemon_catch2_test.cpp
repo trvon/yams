@@ -17,10 +17,10 @@
 #include <nlohmann/json.hpp>
 using nlohmann::json;
 
+#include <yams/compat/unistd.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/proto_serializer.h>
-#include <yams/compat/unistd.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_index_manager.h>
@@ -343,6 +343,30 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon invalid socket path configuration", "[da
 
     auto result = daemon_->start();
     REQUIRE_FALSE(result);
+}
+
+TEST_CASE_METHOD(DaemonFixture,
+                 "Daemon socket preflight does not clean unrelated stale PID artifacts",
+                 "[daemon][config][lifecycle]") {
+    SKIP_ON_WINDOWS();
+
+    // Seed a stale PID artifact that this process does not own.
+    {
+        std::ofstream pidFile(config_.pidFile);
+        pidFile << "99999999\n";
+    }
+    REQUIRE(fs::exists(config_.pidFile));
+
+    // Force an AF_UNIX-overlong socket path so start fails in preflight, before lifecycle init.
+    config_.socketPath = runtime_root_ / std::string(140, 'x') / "daemon.sock";
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+
+    auto result = daemon_->start();
+    REQUIRE_FALSE(result);
+    CHECK(result.error().message.find("Socket path too long") != std::string::npos);
+
+    // Preflight failure must not mutate stale PID artifacts we did not create.
+    CHECK(fs::exists(config_.pidFile));
 }
 
 TEST_CASE_METHOD(DaemonFixture, "Daemon concurrent start attempts", "[daemon][concurrency]") {

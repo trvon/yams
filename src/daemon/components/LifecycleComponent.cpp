@@ -225,6 +225,7 @@ Result<void> LifecycleComponent::initialize() {
             pidFileFd_ = -1;
         }
         removePidFile();
+        pidFileOwned_ = false;
     };
 
     // Acquire data-dir lock to prevent multiple daemons from sharing the same data directory.
@@ -298,8 +299,12 @@ void LifecycleComponent::shutdown() {
         pidFileFd_ = -1;
     }
 
-    // Now safe to remove the unlocked file
-    removePidFile();
+    // Remove PID file only when this process created/owns it.
+    if (pidFileOwned_) {
+        // Now safe to remove the unlocked file
+        removePidFile();
+        pidFileOwned_ = false;
+    }
 }
 
 bool LifecycleComponent::isAnotherInstanceRunning() const {
@@ -418,6 +423,7 @@ Result<void> LifecycleComponent::createPidFile() {
                      "Failed to write to PID file: " + std::string(strerror(errno))};
     }
 #endif
+    pidFileOwned_ = true;
     return Result<void>();
 }
 

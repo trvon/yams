@@ -22,6 +22,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -73,6 +74,21 @@ using boost::asio::as_tuple;
 using boost::asio::use_future;
 
 namespace {
+
+bool env_truthy(const char* value) {
+    if (!value) {
+        return false;
+    }
+    std::string normalized(value);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return !(normalized.empty() || normalized == "0" || normalized == "false" ||
+             normalized == "off" || normalized == "no");
+}
+
+bool cli_one_shot_shutdown_enabled() {
+    return env_truthy(std::getenv("YAMS_CLI_ONE_SHOT"));
+}
 
 bool ipc_wait_trace_enabled() {
     static const bool enabled = [] {
@@ -555,15 +571,20 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
 
     std::lock_guard<std::mutex> lk(mutex_);
 
+    auto effective_timeout = timeout;
+    if (cli_one_shot_shutdown_enabled()) {
+        effective_timeout = std::chrono::milliseconds(0);
+    }
+
     for (auto& weak : connection_pool_) {
         if (auto conn = weak.lock()) {
             // Use cancel() to emit cancellation signals to all pending coroutines
             // This properly notifies waiters before closing the socket
             conn->cancel();
 
-            if (conn->read_loop_future.valid()) {
+            if (effective_timeout.count() > 0 && conn->read_loop_future.valid()) {
                 try {
-                    auto status = conn->read_loop_future.wait_for(timeout);
+                    auto status = conn->read_loop_future.wait_for(effective_timeout);
                     (void)status;
                 } catch (...) {
                 }

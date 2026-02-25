@@ -9,6 +9,7 @@
 #include <thread>
 #ifndef _WIN32
 #include <unistd.h>
+#include <sys/un.h>
 #endif // For getuid(), geteuid(), getpid()
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/thread_pool.hpp>
@@ -44,6 +45,30 @@ void set_current_thread_name(const std::string& name) {
 #elif __APPLE__
     pthread_setname_np(name.c_str());
 #endif
+}
+
+yams::Result<void> validate_socket_path_preflight(const std::filesystem::path& socketPath) {
+#ifndef _WIN32
+    std::filesystem::path effectivePath = socketPath;
+    if (!effectivePath.is_absolute()) {
+        std::error_code ec;
+        auto abs = std::filesystem::absolute(effectivePath, ec);
+        if (!ec) {
+            effectivePath = abs;
+        }
+    }
+
+    const auto sp = effectivePath.string();
+    if (sp.size() >= sizeof(sockaddr_un::sun_path)) {
+        return yams::Error{yams::ErrorCode::InvalidArgument,
+                           std::string("Socket path too long for AF_UNIX (") +
+                               std::to_string(sp.size()) + "/" +
+                               std::to_string(sizeof(sockaddr_un::sun_path)) + ") : '" + sp + "'"};
+    }
+#else
+    (void)socketPath;
+#endif
+    return yams::Result<void>();
 }
 } // namespace
 // IPC server implementation removed in PBI-007; client uses Boost.Asio path.
@@ -244,6 +269,11 @@ Result<void> YamsDaemon::start() {
         } catch (const std::exception& e) {
             spdlog::warn("Failed to recreate TuningManager: {}", e.what());
         }
+    }
+
+    if (auto preflight = validate_socket_path_preflight(config_.socketPath); !preflight) {
+        running_ = false;
+        return preflight.error();
     }
 
     spdlog::info("[Startup] Phase: LifecycleManager Init");

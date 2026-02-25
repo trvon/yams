@@ -365,37 +365,34 @@ private:
     void pruning_loop() {
         using namespace std::chrono_literals;
         while (true) {
-            {
-                std::unique_lock<std::mutex> lk(mtx_);
-                if (stop_) {
-                    break;
-                }
-
-                auto now = std::chrono::steady_clock::now();
-                // Keep at least min_clients
-                if (entries_.size() > cfg_.min_clients) {
-                    // Remove idle entries older than idle_timeout and not in use
-                    size_t removed = 0;
-                    for (size_t i = 0; i < entries_.size();) {
-                        auto& e = entries_[i];
-                        if (!e->in_use && (now - e->last_used) > cfg_.idle_timeout &&
-                            entries_.size() - removed > cfg_.min_clients) {
-                            if (cfg_.verbose) {
-                                spdlog::debug("[DaemonClientPool] Pruning idle client {}", e->id);
-                            }
-                            // erase by swap-pop
-                            using std::swap;
-                            swap(entries_[i], entries_.back());
-                            entries_.pop_back();
-                            removed++;
-                            continue;
-                        }
-                        ++i;
-                    }
-                    (void)removed;
-                }
+            std::unique_lock<std::mutex> lk(mtx_);
+            if (cv_.wait_for(lk, 1s, [this] { return stop_; })) {
+                break;
             }
-            std::this_thread::sleep_for(1s);
+
+            auto now = std::chrono::steady_clock::now();
+            // Keep at least min_clients
+            if (entries_.size() > cfg_.min_clients) {
+                // Remove idle entries older than idle_timeout and not in use
+                size_t removed = 0;
+                for (size_t i = 0; i < entries_.size();) {
+                    auto& e = entries_[i];
+                    if (!e->in_use && (now - e->last_used) > cfg_.idle_timeout &&
+                        entries_.size() - removed > cfg_.min_clients) {
+                        if (cfg_.verbose) {
+                            spdlog::debug("[DaemonClientPool] Pruning idle client {}", e->id);
+                        }
+                        // erase by swap-pop
+                        using std::swap;
+                        swap(entries_[i], entries_.back());
+                        entries_.pop_back();
+                        removed++;
+                        continue;
+                    }
+                    ++i;
+                }
+                (void)removed;
+            }
         }
     }
 

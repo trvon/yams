@@ -85,6 +85,7 @@ private:
     YamsDaemon* daemon_; // Non-owning pointer to the main daemon class to signal shutdown
     std::filesystem::path pidFile_;
     int pidFileFd_ = -1; // File descriptor for the locked PID file
+    bool pidFileOwned_ = false;
     std::string instanceToken_;
     std::uint64_t startTimeNs_ = 0;
 

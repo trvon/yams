@@ -1481,6 +1481,7 @@ if catch2_dep.found()
       'unit/cli/add_command_stdin_catch2_test.cpp',
       'unit/cli/cli_option_isolation_catch2_test.cpp',
       'unit/cli/config_command_catch2_test.cpp',
+      'unit/cli/daemon_helpers_pool_catch2_test.cpp',
       'unit/cli/daemon_command_catch2_test.cpp',
       'unit/cli/data_dir_resolution_catch2_test.cpp',
       'unit/cli/doctor_command_catch2_test.cpp',

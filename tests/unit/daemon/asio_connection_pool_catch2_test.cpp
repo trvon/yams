@@ -12,10 +12,11 @@
 #include <future>
 #include <thread>
 
+#include "../../common/test_helpers_catch2.h"
+#include <yams/compat/unistd.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/client/ipc_failure.h>
-#include <yams/compat/unistd.h>
 
 #ifndef _WIN32
 #include <sys/socket.h>
@@ -542,6 +543,74 @@ TEST_CASE("AsioConnectionPool does not double-wrap IPC failure prefixes",
     REQUIRE(parseIpcFailureKind(msg).has_value());
     CHECK(msg.find(std::string(kIpcFailurePrefix), 1) == std::string::npos);
 
+    fs::remove(socketPath, ec);
+    AsioConnectionPool::shutdown_all(100ms);
+}
+
+TEST_CASE("AsioConnectionPool shutdown short-circuits in one-shot CLI mode",
+          "[daemon][connection-pool][unit][lifecycle]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    auto runtimeDir = makeTempRuntimeDir("one-shot-shutdown-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    boost::asio::io_context server_io;
+    boost::asio::local::stream_protocol::acceptor acceptor(
+        server_io, boost::asio::local::stream_protocol::endpoint(socketPath.string()));
+
+    std::atomic<bool> stop{false};
+    std::promise<void> connected;
+    std::thread server_thread([&] {
+        boost::system::error_code bec;
+        boost::asio::local::stream_protocol::socket sock(server_io);
+        acceptor.accept(sock, bec);
+        if (!bec) {
+            connected.set_value();
+            while (!stop.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(10ms);
+            }
+            sock.close(bec);
+        }
+    });
+
+    yams::test::ScopedEnvVar oneShot("YAMS_CLI_ONE_SHOT", std::string("1"));
+
+    TransportOptions opts;
+    opts.socketPath = socketPath;
+    opts.requestTimeout = 500ms;
+    opts.poolEnabled = true;
+
+    auto pool = AsioConnectionPool::get_or_create(opts);
+    auto fut = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                     boost::asio::use_future);
+    REQUIRE(fut.wait_for(2s) == std::future_status::ready);
+    auto conn_res = fut.get();
+    REQUIRE(conn_res);
+    auto conn = conn_res.value();
+    REQUIRE(conn);
+    REQUIRE(connected.get_future().wait_for(1s) == std::future_status::ready);
+
+    // Inject a valid but unresolved future to emulate a stuck read loop.
+    std::promise<void> pendingReadLoop;
+    conn->read_loop_future = pendingReadLoop.get_future();
+    pool->release(conn);
+
+    const auto start = std::chrono::steady_clock::now();
+    pool->shutdown(500ms);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    CHECK(elapsed < 150ms);
+
+    pendingReadLoop.set_value();
+    stop.store(true, std::memory_order_release);
+    boost::system::error_code bec;
+    acceptor.close(bec);
+    server_thread.join();
     fs::remove(socketPath, ec);
     AsioConnectionPool::shutdown_all(100ms);
 }
