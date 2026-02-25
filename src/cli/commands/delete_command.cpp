@@ -248,7 +248,8 @@ public:
                 }
                 cfg.enableChunkedResponses = false;
                 cfg.requestTimeout = std::chrono::milliseconds(30000);
-                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+                    cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
                 if (!leaseRes) {
                     co_return leaseRes.error();
                 }

@@ -1178,8 +1178,14 @@ public:
                 ::setenv("YAMS_DATA_DIR", clientConfig.dataDir.string().c_str(), 1);
 #endif
             }
-            yams::daemon::DaemonClient client(clientConfig);
-            client.setStreamingEnabled(clientConfig.enableChunkedResponses);
+            auto daemonLeaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+                clientConfig, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+            std::shared_ptr<yams::cli::DaemonClientPool::Lease> daemonLease;
+            if (daemonLeaseRes) {
+                daemonLease = std::move(daemonLeaseRes.value());
+                auto& client = **daemonLease;
+                client.setStreamingEnabled(clientConfig.enableChunkedResponses);
+            }
 
             // Create search request
             yams::daemon::SearchRequest dreq;
@@ -1392,14 +1398,24 @@ public:
                 (void)printDiffForSearchResult(resp);
                 return renderResult;
             };
+            if (!daemonLease) {
+                spdlog::warn("search: unable to acquire daemon client: {}",
+                             daemonLeaseRes.error().message);
+                auto fb = fallback();
+                if (!fb)
+                    return fb.error();
+                return Result<void>();
+            }
+
             // Fully async daemon path with a single co_spawn and promise completion
             spdlog::info("[CLI:Search] About to create async daemon request, streaming={}",
                          clientConfig.enableChunkedResponses);
             std::promise<Result<void>> done;
             auto fut = done.get_future();
             auto work = [&, dreq, enableStream = clientConfig.enableChunkedResponses,
-                         bodyTimeoutMs = bodyTimeoutMs_, fuzzyFlag = fuzzySearch_,
+                         bodyTimeoutMs = bodyTimeoutMs_, daemonLease, fuzzyFlag = fuzzySearch_,
                          literalFlag = literalText_]() -> boost::asio::awaitable<void> {
+                auto& client = **daemonLease;
                 spdlog::info("[CLI:Search] Work coroutine started, enableStream={}", enableStream);
                 auto callOnce = [&](const yams::daemon::SearchRequest& rq)
                     -> boost::asio::awaitable<Result<yams::daemon::SearchResponse>> {
@@ -1698,7 +1714,8 @@ public:
                 clientConfig.dataDir = dp;
         }
 
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(clientConfig);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            clientConfig, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
             spdlog::warn("search: unable to acquire daemon client: {}", leaseRes.error().message);
             if (!(jsonOutput_ || (cli_ && cli_->getJsonOutput()))) {

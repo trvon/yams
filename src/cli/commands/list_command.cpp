@@ -642,12 +642,18 @@ private:
         spdlog::info("Showing file history for: {}", filepath);
 
         try {
-            // Create daemon client
+            // Acquire daemon client (allow in-process fallback in sandboxed environments)
             daemon::ClientConfig config;
             if (cli_ && cli_->hasExplicitDataDir()) {
                 config.dataDir = cli_->getDataPath();
             }
-            daemon::DaemonClient client(config);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+                config, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+            if (!leaseRes) {
+                return Error{ErrorCode::NetworkError,
+                             "Cannot connect to daemon: " + leaseRes.error().message};
+            }
+            auto leaseHandle = std::move(leaseRes.value());
 
             // Prepare request
             daemon::FileHistoryRequest req;
@@ -659,8 +665,9 @@ private:
 
             boost::asio::co_spawn(
                 getExecutor(),
-                [&client, req,
+                [leaseHandle, req,
                  promise = std::move(promise)]() mutable -> boost::asio::awaitable<void> {
+                    auto& client = **leaseHandle;
                     auto result = co_await client.fileHistory(req);
                     promise.set_value(std::move(result));
                     co_return;

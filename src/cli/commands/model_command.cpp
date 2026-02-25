@@ -443,7 +443,8 @@ public:
                 using namespace yams::daemon;
                 ClientConfig cfg;
                 cfg.requestTimeout = std::chrono::milliseconds(3000);
-                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+                    cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
                 if (!leaseRes) {
                     throw std::runtime_error("daemon unavailable");
                 }
@@ -582,7 +583,8 @@ private:
                 try {
                     yams::daemon::ClientConfig cfg;
                     cfg.requestTimeout = std::chrono::milliseconds(800);
-                    auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                    auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+                        cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
                     if (!leaseRes) {
                         throw std::runtime_error("daemon unavailable");
                     }

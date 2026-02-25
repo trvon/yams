@@ -137,6 +137,30 @@ public:
     }
 
 private:
+    Result<yams::cli::CliDaemonClientLease> acquireGraphClientLease() const {
+        yams::daemon::ClientConfig cfg;
+        if (cli_ && cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
+        cfg.requestTimeout = std::chrono::milliseconds(60000);
+        return yams::cli::acquire_cli_daemon_client_shared_with_policy(
+            cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback, 1, 12,
+            std::chrono::milliseconds(10000));
+    }
+
+    void printFallbackNoticeIfNeeded(const yams::cli::CliDaemonClientPlan& plan) const {
+        if (!plan.usedInProcessFallback) {
+            return;
+        }
+        if (jsonOutput_ || outputFormat_ == "json") {
+            return;
+        }
+        std::cout << "Daemon unavailable; continuing with in-process transport" << "\n";
+        if (!plan.fallbackReason.empty()) {
+            std::cout << "  Reason: " << plan.fallbackReason << "\n";
+        }
+    }
+
     static std::string canonicalizeRelationName(std::string value) {
         auto trimLeft = std::find_if_not(value.begin(), value.end(),
                                          [](unsigned char c) { return std::isspace(c) != 0; });
@@ -289,18 +313,13 @@ private:
     boost::asio::awaitable<Result<void>> executeListTypes() {
         using namespace yams::daemon;
 
-        ClientConfig cfg;
-        if (cli_ && cli_->hasExplicitDataDir()) {
-            cfg.dataDir = cli_->getDataPath();
-        }
-        cfg.requestTimeout = std::chrono::milliseconds(60000);
-
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
             co_return leaseRes.error();
         }
         auto leaseHandle = std::move(leaseRes.value());
-        auto& client = **leaseHandle;
+        printFallbackNoticeIfNeeded(leaseHandle.plan);
+        auto& client = **leaseHandle.lease;
 
         // Build GraphQueryRequest with listTypes mode
         GraphQueryRequest req;
@@ -366,18 +385,13 @@ private:
     boost::asio::awaitable<Result<void>> executeListRelations() {
         using namespace yams::daemon;
 
-        ClientConfig cfg;
-        if (cli_ && cli_->hasExplicitDataDir()) {
-            cfg.dataDir = cli_->getDataPath();
-        }
-        cfg.requestTimeout = std::chrono::milliseconds(60000);
-
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
             co_return leaseRes.error();
         }
         auto leaseHandle = std::move(leaseRes.value());
-        auto& client = **leaseHandle;
+        printFallbackNoticeIfNeeded(leaseHandle.plan);
+        auto& client = **leaseHandle.lease;
 
         // Build GraphQueryRequest with listRelations mode
         GraphQueryRequest req;
@@ -444,18 +458,13 @@ private:
     boost::asio::awaitable<Result<void>> executeSearch() {
         using namespace yams::daemon;
 
-        ClientConfig cfg;
-        if (cli_ && cli_->hasExplicitDataDir()) {
-            cfg.dataDir = cli_->getDataPath();
-        }
-        cfg.requestTimeout = std::chrono::milliseconds(60000);
-
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
             co_return leaseRes.error();
         }
         auto leaseHandle = std::move(leaseRes.value());
-        auto& client = **leaseHandle;
+        printFallbackNoticeIfNeeded(leaseHandle.plan);
+        auto& client = **leaseHandle.lease;
 
         // Build GraphQueryRequest with search mode
         GraphQueryRequest req;
@@ -545,18 +554,13 @@ private:
     boost::asio::awaitable<Result<void>> executeListByType() {
         using namespace yams::daemon;
 
-        ClientConfig cfg;
-        if (cli_ && cli_->hasExplicitDataDir()) {
-            cfg.dataDir = cli_->getDataPath();
-        }
-        cfg.requestTimeout = std::chrono::milliseconds(60000);
-
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
             co_return leaseRes.error();
         }
         auto leaseHandle = std::move(leaseRes.value());
-        auto& client = **leaseHandle;
+        printFallbackNoticeIfNeeded(leaseHandle.plan);
+        auto& client = **leaseHandle.lease;
 
         // Build GraphQueryRequest with listByType mode
         GraphQueryRequest req;
@@ -714,18 +718,13 @@ private:
     boost::asio::awaitable<Result<void>> executeIsolatedNodes() {
         using namespace yams::daemon;
 
-        ClientConfig cfg;
-        if (cli_ && cli_->hasExplicitDataDir()) {
-            cfg.dataDir = cli_->getDataPath();
-        }
-        cfg.requestTimeout = std::chrono::milliseconds(60000);
-
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
             co_return leaseRes.error();
         }
         auto leaseHandle = std::move(leaseRes.value());
-        auto& client = **leaseHandle;
+        printFallbackNoticeIfNeeded(leaseHandle.plan);
+        auto& client = **leaseHandle.lease;
 
         std::string relation =
             relationFilter_.empty() ? "calls" : canonicalizeRelationName(relationFilter_);
@@ -985,18 +984,13 @@ private:
     boost::asio::awaitable<Result<void>> executeDeadCodeReport() {
         using namespace yams::daemon;
 
-        ClientConfig cfg;
-        if (cli_ && cli_->hasExplicitDataDir()) {
-            cfg.dataDir = cli_->getDataPath();
-        }
-        cfg.requestTimeout = std::chrono::milliseconds(60000);
-
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
             co_return leaseRes.error();
         }
         auto leaseHandle = std::move(leaseRes.value());
-        auto& client = **leaseHandle;
+        printFallbackNoticeIfNeeded(leaseHandle.plan);
+        auto& client = **leaseHandle.lease;
 
         std::vector<DeadCodeTarget> targets = {
             {"function", "calls", "Isolated functions (no incoming calls)"},
@@ -1132,18 +1126,13 @@ private:
     boost::asio::awaitable<Result<void>> executeGraphTraversal() {
         using namespace yams::daemon;
 
-        ClientConfig cfg;
-        if (cli_ && cli_->hasExplicitDataDir()) {
-            cfg.dataDir = cli_->getDataPath();
-        }
-        cfg.requestTimeout = std::chrono::milliseconds(60000);
-
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
             co_return leaseRes.error();
         }
         auto leaseHandle = std::move(leaseRes.value());
-        auto& client = **leaseHandle;
+        printFallbackNoticeIfNeeded(leaseHandle.plan);
+        auto& client = **leaseHandle.lease;
 
         // If using node-key or node-id, use GraphQueryRequest directly
         if (!nodeKey_.empty() || nodeId_ >= 0) {

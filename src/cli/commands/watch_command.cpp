@@ -1,9 +1,9 @@
 #include <yams/app/services/services.hpp>
-#include <yams/core/uuid.h>
 #include <yams/app/services/session_service.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/core/uuid.h>
 #include <yams/daemon/client/daemon_client.h>
 
 #include <spdlog/spdlog.h>
@@ -153,26 +153,24 @@ public:
         }
 
         if (!stop_) {
-            std::filesystem::path effectiveSocket =
-                yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
-            if (!yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                yams::daemon::ClientConfig startCfg;
-                if (cli_->hasExplicitDataDir()) {
-                    startCfg.dataDir = cli_->getDataPath();
-                }
-                if (auto r = yams::daemon::DaemonClient::startDaemon(startCfg); !r) {
-                    return Error{ErrorCode::InternalError,
-                                 std::string("Failed to start daemon: ") + r.error().message};
-                }
+            yams::daemon::ClientConfig cfg;
+            if (cli_->hasExplicitDataDir()) {
+                cfg.dataDir = cli_->getDataPath();
             }
+
+            const auto timeout = std::chrono::milliseconds(std::max(0, daemonReadyTimeoutMs_));
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_policy(
+                cfg, yams::cli::CliDaemonAccessPolicy::RequireSocket, 1, 1, timeout);
+            if (!leaseRes) {
+                return Error{ErrorCode::InternalError,
+                             std::string("Failed to initialize daemon watch backend: ") +
+                                 leaseRes.error().message};
+            }
+
+            auto daemonLease = std::move(leaseRes.value());
+
             if (daemonReadyTimeoutMs_ > 0) {
-                yams::daemon::ClientConfig cfg;
-                cfg.socketPath = effectiveSocket;
-                if (cli_->hasExplicitDataDir()) {
-                    cfg.dataDir = cli_->getDataPath();
-                }
-                yams::daemon::DaemonClient client(cfg);
-                const auto timeout = std::chrono::milliseconds(std::max(0, daemonReadyTimeoutMs_));
+                auto& client = **daemonLease.lease;
                 const auto deadline = std::chrono::steady_clock::now() + timeout;
                 auto sleepFor = std::chrono::milliseconds(100);
                 while (std::chrono::steady_clock::now() < deadline) {

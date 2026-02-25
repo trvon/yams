@@ -140,7 +140,8 @@ public:
         cfg.headerTimeout = std::chrono::milliseconds(600000);
         cfg.bodyTimeout = std::chrono::milliseconds(600000);
 
-        auto leaseRes = acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = acquire_cli_daemon_client_shared_with_fallback(
+            cfg, CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
             return Error{ErrorCode::NetworkError,
                          "Cannot connect to daemon: " + leaseRes.error().message +

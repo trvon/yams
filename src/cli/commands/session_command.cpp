@@ -858,7 +858,8 @@ private:
             if (cli_ && cli_->hasExplicitDataDir()) {
                 cfg.dataDir = cli_->getDataPath();
             }
-            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg, 1, 1);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+                cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback, 1, 1);
             if (leaseRes) {
                 auto leaseHandle = std::move(leaseRes.value());
                 yams::daemon::PrepareSessionRequest dreq;

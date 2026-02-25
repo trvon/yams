@@ -82,7 +82,8 @@ public:
                 if (cli_->hasExplicitDataDir()) {
                     cfg.dataDir = cli_->getDataPath();
                 }
-                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+                    cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
                 if (leaseRes) {
                     auto leaseHandle = std::move(leaseRes.value());
                     auto& client = **leaseHandle;
@@ -1158,7 +1159,8 @@ private:
         info.autoGenerationEnabled = embeddingService && embeddingService->isAvailable();
         info.preferredModel = info.hasModels ? info.availableModels[0] : "none";
 
-        auto leaseProbe = yams::cli::acquire_cli_daemon_client_shared(yams::daemon::ClientConfig{});
+        auto leaseProbe = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            yams::daemon::ClientConfig{}, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (leaseProbe) {
             auto leaseHandle = std::move(leaseProbe.value());
             std::promise<Result<yams::daemon::StatusResponse>> promProbe;

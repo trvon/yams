@@ -343,11 +343,6 @@ public:
 
     Result<void> execute() override {
         try {
-            auto socketPath = yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
-            if (!yams::daemon::DaemonClient::isDaemonRunning(socketPath)) {
-                spdlog::debug("grep: daemon not running; using local execution");
-                return executeLocal();
-            }
             // Attempt daemon-first grep with complete protocol mapping
             {
                 std::vector<std::string> cwdPatterns;
@@ -804,9 +799,14 @@ public:
                 auto gres = rsvc.grep(dreq, ropts);
                 stopSpinner();
                 if (!gres) {
-                    if (gres.error().code == ErrorCode::Timeout) {
-                        spdlog::warn(
-                            "grep: daemon call timed out; falling back to local execution");
+                    const auto ipcFailureKind =
+                        yams::daemon::parseIpcFailureKind(gres.error().message);
+                    const bool transportFailure =
+                        gres.error().code == ErrorCode::Timeout || ipcFailureKind.has_value();
+                    if (transportFailure) {
+                        spdlog::warn("grep: daemon unavailable ({}); falling back to local "
+                                     "execution",
+                                     gres.error().message);
                         return executeLocal();
                     }
                     // Check if it's a regex error and provide helpful hint

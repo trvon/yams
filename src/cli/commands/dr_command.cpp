@@ -43,7 +43,8 @@ private:
                 cfg.dataDir = cli_->getDataPath();
             }
             cfg.requestTimeout = std::chrono::milliseconds(4000);
-            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+                cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
             if (!leaseRes) {
                 spdlog::warn("Unable to contact daemon for DR gate: {}", leaseRes.error().message);
                 return;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -12,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -26,6 +28,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/client/ipc_failure.h>
+#include <yams/daemon/client/sandbox_detection.h>
 #include <yams/daemon/ipc/response_of.hpp>
 
 namespace yams::cli {
@@ -679,6 +682,134 @@ inline bool& cli_pool_initialized() {
     return initialized;
 }
 
+enum class CliDaemonAccessPolicy {
+    AllowInProcessFallback,
+    RequireSocket,
+};
+
+struct CliDaemonClientPlan {
+    yams::daemon::ClientConfig config{};
+    yams::daemon::ClientTransportMode resolvedMode{yams::daemon::ClientTransportMode::Auto};
+    bool usedInProcessFallback{false};
+    std::string fallbackReason;
+};
+
+struct CliDaemonClientLease {
+    std::shared_ptr<DaemonClientPool::Lease> lease;
+    CliDaemonClientPlan plan;
+};
+
+namespace detail {
+
+inline std::string to_lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+inline std::string trim_copy(std::string_view sv) {
+    std::size_t start = 0;
+    std::size_t end = sv.size();
+    while (start < end && std::isspace(static_cast<unsigned char>(sv[start])) != 0) {
+        ++start;
+    }
+    while (end > start && std::isspace(static_cast<unsigned char>(sv[end - 1])) != 0) {
+        --end;
+    }
+    return std::string(sv.substr(start, end - start));
+}
+
+inline bool is_socket_mode_forced_by_env() {
+    const char* raw = std::getenv("YAMS_EMBEDDED");
+    if (raw == nullptr || *raw == '\0') {
+        return false;
+    }
+    auto mode = to_lower_copy(trim_copy(raw));
+    return mode == "0" || mode == "false" || mode == "off" || mode == "no" || mode == "socket" ||
+           mode == "daemon";
+}
+
+inline Result<void> ensure_socket_daemon_ready(
+    const yams::daemon::ClientConfig& cfg,
+    std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{10000}) {
+    auto effectiveSocket = cfg.socketPath.empty()
+                               ? yams::daemon::DaemonClient::resolveSocketPathConfigFirst()
+                               : cfg.socketPath;
+
+    if (!yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+        if (!cfg.autoStart) {
+            return Error{ErrorCode::NotInitialized, "Daemon is not running"};
+        }
+
+        yams::daemon::ClientConfig startCfg;
+        startCfg.socketPath = effectiveSocket;
+        startCfg.dataDir = cfg.dataDir;
+        if (auto r = yams::daemon::DaemonClient::startDaemon(startCfg); !r) {
+            return Error{ErrorCode::InternalError,
+                         std::string("Failed to start daemon: ") + r.error().message};
+        }
+    }
+
+    if (readyTimeout.count() <= 0) {
+        return Result<void>();
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + readyTimeout;
+    auto sleepFor = std::chrono::milliseconds(50);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+            return Result<void>();
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            break;
+        }
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+        std::this_thread::sleep_for(std::min(sleepFor, remaining));
+        sleepFor = std::min(sleepFor * 2, std::chrono::milliseconds(500));
+    }
+
+    return Error{ErrorCode::Timeout, "Daemon did not become ready in time"};
+}
+
+} // namespace detail
+
+inline Result<CliDaemonClientPlan> prepare_cli_daemon_client_plan(
+    const yams::daemon::ClientConfig& requestedCfg,
+    CliDaemonAccessPolicy policy = CliDaemonAccessPolicy::AllowInProcessFallback,
+    std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{10000}) {
+    CliDaemonClientPlan plan;
+    plan.config = requestedCfg;
+
+    const bool socketForcedByEnv = detail::is_socket_mode_forced_by_env();
+    const bool requireSocket =
+        socketForcedByEnv || (policy == CliDaemonAccessPolicy::RequireSocket);
+
+    const auto resolvedMode = yams::daemon::resolve_transport_mode(plan.config);
+    plan.resolvedMode = resolvedMode;
+    plan.config.transportMode = resolvedMode;
+
+    if (resolvedMode == yams::daemon::ClientTransportMode::InProcess && requireSocket) {
+        return Error{ErrorCode::InvalidState,
+                     "Socket transport required by configuration (YAMS_EMBEDDED)"};
+    }
+
+    if (resolvedMode == yams::daemon::ClientTransportMode::Socket) {
+        auto ready = detail::ensure_socket_daemon_ready(plan.config, readyTimeout);
+        if (!ready) {
+            if (requireSocket) {
+                return ready.error();
+            }
+            plan.usedInProcessFallback = true;
+            plan.fallbackReason = ready.error().message;
+            plan.resolvedMode = yams::daemon::ClientTransportMode::InProcess;
+            plan.config.transportMode = yams::daemon::ClientTransportMode::InProcess;
+        }
+    }
+
+    return plan;
+}
+
 #if defined(YAMS_TESTING)
 inline void cli_pool_reset_for_test() {
     std::lock_guard<std::mutex> lk(cli_pool_mutex());
@@ -753,6 +884,47 @@ acquire_cli_daemon_client_shared(const yams::daemon::ClientConfig& cfg, size_t m
             (void)poolStrong;
         });
     return sharedLease;
+}
+
+inline Result<CliDaemonClientLease> acquire_cli_daemon_client_shared_with_policy(
+    const yams::daemon::ClientConfig& requestedCfg,
+    CliDaemonAccessPolicy policy = CliDaemonAccessPolicy::AllowInProcessFallback,
+    size_t min_clients = 1, size_t max_clients = 12,
+    std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{10000}) {
+    auto planRes = prepare_cli_daemon_client_plan(requestedCfg, policy, readyTimeout);
+    if (!planRes) {
+        return planRes.error();
+    }
+
+    auto plan = std::move(planRes.value());
+    auto leaseRes = acquire_cli_daemon_client_shared(plan.config, min_clients, max_clients);
+    if (!leaseRes) {
+        return leaseRes.error();
+    }
+
+    CliDaemonClientLease out;
+    out.plan = std::move(plan);
+    out.lease = std::move(leaseRes.value());
+    return out;
+}
+
+inline Result<std::shared_ptr<DaemonClientPool::Lease>>
+acquire_cli_daemon_client_shared_with_fallback(
+    const yams::daemon::ClientConfig& requestedCfg,
+    CliDaemonAccessPolicy policy = CliDaemonAccessPolicy::AllowInProcessFallback,
+    size_t min_clients = 1, size_t max_clients = 12,
+    std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{10000},
+    CliDaemonClientPlan* outPlan = nullptr) {
+    auto leaseRes = acquire_cli_daemon_client_shared_with_policy(requestedCfg, policy, min_clients,
+                                                                 max_clients, readyTimeout);
+    if (!leaseRes) {
+        return leaseRes.error();
+    }
+    auto lease = std::move(leaseRes.value());
+    if (outPlan != nullptr) {
+        *outPlan = lease.plan;
+    }
+    return std::move(lease.lease);
 }
 
 // Generic runner for any boost::asio::awaitable<Result<T>>. Optional timeout (0 => no timeout).

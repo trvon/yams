@@ -125,7 +125,8 @@ Result<void> UpdateCommand::execute() {
                     cfg.dataDir = cli_->getDataPath();
                 cfg.enableChunkedResponses = false;
                 cfg.requestTimeout = std::chrono::milliseconds(30000);
-                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+                auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+                    cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
                 if (!leaseRes) {
                     spdlog::warn("Update: unable to acquire daemon client: {}",
                                  leaseRes.error().message);
@@ -238,7 +239,8 @@ boost::asio::awaitable<Result<void>> UpdateCommand::executeAsync() {
             cfg.requestTimeout = std::chrono::milliseconds(30000);
             cfg.headerTimeout = std::chrono::milliseconds(3000);
             cfg.bodyTimeout = std::chrono::milliseconds(20000);
-            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+                cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
             if (!leaseRes) {
                 spdlog::warn("Update: unable to acquire daemon client: {}",
                              leaseRes.error().message);

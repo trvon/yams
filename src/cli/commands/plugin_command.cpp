@@ -278,7 +278,8 @@ void PluginCommand::listPlugins() {
         cfg.enableChunkedResponses = false;
         cfg.requestTimeout = std::chrono::milliseconds(5000); // Fast timeout for simple list
         cfg.autoStart = true;
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
             std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
             return;
@@ -382,7 +383,8 @@ void PluginCommand::showPluginInfo(const std::string& name) {
         }
         cfg.enableChunkedResponses = false;
         cfg.requestTimeout = std::chrono::milliseconds(10000);
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
             std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
             return;
@@ -491,7 +493,8 @@ void PluginCommand::showPluginHealth(const std::string& name) {
         cfg.enableChunkedResponses = false;
         // Use shorter timeout for health check - it uses cached daemon metrics
         cfg.requestTimeout = std::chrono::milliseconds(5000);
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
             std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
             return;
@@ -628,7 +631,8 @@ void PluginCommand::scanPlugins(const std::string& dir, const std::string& targe
             cfg.dataDir = cli_->getDataPath();
         }
         cfg.requestTimeout = std::chrono::milliseconds(15000);
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
             std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
             return;
@@ -673,7 +677,8 @@ void PluginCommand::loadPlugin(const std::string& arg, const std::string& cfgJso
             cfg.dataDir = cli_->getDataPath();
         }
         cfg.requestTimeout = std::chrono::milliseconds(20000);
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
             std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
             return;
@@ -713,7 +718,8 @@ void PluginCommand::unloadPlugin(const std::string& name) {
             cfg.dataDir = cli_->getDataPath();
         }
         cfg.requestTimeout = std::chrono::milliseconds(10000);
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
             std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
             return;
@@ -747,7 +753,8 @@ void PluginCommand::trustList() {
             cfg.dataDir = cli_->getDataPath();
         }
         cfg.requestTimeout = std::chrono::milliseconds(15000);
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
             std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
             return;
@@ -783,7 +790,8 @@ void PluginCommand::trustAdd(const std::string& path) {
             cfg.dataDir = cli_->getDataPath();
         }
         cfg.requestTimeout = std::chrono::milliseconds(15000);
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
             std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
             return;
@@ -818,7 +826,8 @@ void PluginCommand::trustRemove(const std::string& path) {
             cfg.dataDir = cli_->getDataPath();
         }
         cfg.requestTimeout = std::chrono::milliseconds(15000);
-        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
             std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
             return;
