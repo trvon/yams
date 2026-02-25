@@ -222,7 +222,7 @@ TEST_CASE_METHOD(CompressionPolicyFixture, "CompressionPolicy - ThreadSafety",
     auto pattern = createAccessPattern(std::chrono::hours(24 * 10));
 
     for (int i = 0; i < numThreads; ++i) {
-        threads.emplace_back([this, &metadata, &pattern, &successCount, numOperations]() {
+        threads.emplace_back([this, &metadata, &pattern, &successCount]() {
             for (int j = 0; j < numOperations; ++j) {
                 if (j % 10 == 0) {
                     auto rules = policy_->rules();

@@ -36,6 +36,9 @@ struct MockProviderContext {
 // Mock implementation of plugin functions
 yams_status_t mock_generate_embedding(void* self, const char* model_id, const uint8_t* text,
                                       size_t text_len, float** out_vec, size_t* out_dim) {
+    (void)model_id;
+    (void)text;
+    (void)text_len;
     auto* ctx = static_cast<MockProviderContext*>(self);
     if (ctx->simulateDimensionMismatch) {
         // Return wrong dimension
@@ -58,6 +61,7 @@ yams_status_t mock_generate_embedding_batch(void* self, const char* model_id,
                                             const uint8_t* const* inputs, const size_t* input_lens,
                                             size_t batch_size, float** out_vecs, size_t* out_batch,
                                             size_t* out_dim) {
+    (void)model_id;
     auto* ctx = static_cast<MockProviderContext*>(self);
     ctx->batchCalls++;
     if (ctx->simulateDimensionMismatch) {
@@ -90,31 +94,43 @@ yams_status_t mock_generate_embedding_batch(void* self, const char* model_id,
 }
 
 void mock_free_embedding(void* self, float* vec, size_t dim) {
+    (void)self;
+    (void)dim;
     free(vec);
 }
 
 void mock_free_embedding_batch(void* self, float* vecs, size_t batch, size_t dim) {
+    (void)self;
+    (void)batch;
+    (void)dim;
     free(vecs);
 }
 
 yams_status_t mock_load_model(void* self, const char* model_id, const char* model_path,
                               const char* options) {
+    (void)model_id;
+    (void)model_path;
+    (void)options;
     auto* ctx = static_cast<MockProviderContext*>(self);
     return ctx->nextStatus;
 }
 
 yams_status_t mock_is_model_loaded(void* self, const char* model_id, bool* loaded) {
+    (void)self;
+    (void)model_id;
     *loaded = true;
     return YAMS_OK;
 }
 
 yams_status_t mock_get_embedding_dim(void* self, const char* model_id, size_t* dim) {
+    (void)model_id;
     auto* ctx = static_cast<MockProviderContext*>(self);
     *dim = ctx->outputDim;
     return YAMS_OK;
 }
 
 yams_status_t mock_get_loaded_models(void* self, const char*** model_ids, size_t* count) {
+    (void)self;
     static const char* models[] = {"test-model"};
     *model_ids = models;
     *count = 1;
@@ -122,6 +138,9 @@ yams_status_t mock_get_loaded_models(void* self, const char*** model_ids, size_t
 }
 
 void mock_free_model_list(void* self, const char** model_ids, size_t count) {
+    (void)self;
+    (void)model_ids;
+    (void)count;
     // Static array, no need to free
 }
 

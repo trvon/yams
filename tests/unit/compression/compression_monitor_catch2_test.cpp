@@ -210,7 +210,7 @@ TEST_CASE_METHOD(CompressionMonitorFixture, "CompressionMonitor - ConcurrentOper
     std::vector<std::thread> threads;
 
     for (int t = 0; t < numThreads; ++t) {
-        threads.emplace_back([t, operationsPerThread]() {
+        threads.emplace_back([t]() {
             for (int i = 0; i < operationsPerThread; ++i) {
                 CompressionTracker tracker(t % 2 == 0 ? CompressionAlgorithm::Zstandard
                                                       : CompressionAlgorithm::LZMA,

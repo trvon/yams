@@ -161,6 +161,29 @@ TEST_CASE("SHA256Hasher - Basic hashing", "[crypto][sha256]") {
         auto hash = SHA256Hasher::hash(std::span<const std::byte>(data.data(), data.size()));
         REQUIRE(hash == TestVectors::ABC_SHA256);
     }
+
+    SECTION("Static hash handles empty input") {
+        std::vector<std::byte> data;
+        auto hash = SHA256Hasher::hash(std::span<const std::byte>(data.data(), data.size()));
+        REQUIRE(hash == TestVectors::EMPTY_SHA256);
+    }
+}
+
+TEST_CASE("SHA256Hasher - Static path consistency", "[crypto][sha256][static]") {
+    CryptoTestFixture fixture;
+
+    const std::vector<size_t> sizes = {0, 1, 17, 4096, 65537};
+    for (const auto size : sizes) {
+        auto data = generateRandomBytes(size);
+
+        fixture.hasher->init();
+        fixture.hasher->update(std::span<const std::byte>(data.data(), data.size()));
+        const auto streamingHash = fixture.hasher->finalize();
+
+        const auto staticHash =
+            SHA256Hasher::hash(std::span<const std::byte>(data.data(), data.size()));
+        REQUIRE(staticHash == streamingHash);
+    }
 }
 
 TEST_CASE("SHA256Hasher - Large input handling", "[crypto][sha256]") {

@@ -68,7 +68,7 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent get
     std::latch startLatch(numThreads);
 
     for (int t = 0; t < numThreads; ++t) {
-        threads.emplace_back([&, threadId = t]() {
+        threads.emplace_back([&]() {
             // Wait for all threads to be ready
             startLatch.arrive_and_wait();
 

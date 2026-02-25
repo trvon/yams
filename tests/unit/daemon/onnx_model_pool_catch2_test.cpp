@@ -295,7 +295,7 @@ TEST_CASE_METHOD(OnnxModelPoolFixture, "OnnxModelPool: LRU eviction", "[daemon]"
     // This test verifies the API exists and doesn't crash
     auto stats = pool_->getStats();
     CHECK(stats.loadedModels >= 0);
-    CHECK(stats.loadedModels <= static_cast<int>(config_.maxLoadedModels));
+    CHECK(stats.loadedModels <= config_.maxLoadedModels);
 }
 
 // Test memory limit enforcement

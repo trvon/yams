@@ -209,7 +209,7 @@ TEST_F(SyncIndexingIT, MinimalQueueGrowthWithSyncAdd) {
     // Queue growth should be minimal (only KG/embeddings, not FTS5 metadata)
     // With sync indexing, we skip the metadata stage in the queue
     uint64_t queueGrowth = (queueAfter > queueBefore) ? (queueAfter - queueBefore) : 0;
-    EXPECT_LE(queueGrowth, 2) << "Queue grew too much (" << queueGrowth
+    EXPECT_LE(queueGrowth, 2u) << "Queue grew too much (" << queueGrowth
                               << "), suggesting async path was used instead of sync";
 
     // Content should be immediately searchable

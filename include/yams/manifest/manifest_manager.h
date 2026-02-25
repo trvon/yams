@@ -209,7 +209,7 @@ public:
 
         // Verify chunk count doesn't exceed limit
         auto chunkCount = std::ranges::distance(chunks);
-        if (chunkCount > config_.maxChunksPerManifest) {
+        if (chunkCount > static_cast<decltype(chunkCount)>(config_.maxChunksPerManifest)) {
             return Result<Manifest>(ErrorCode::InvalidArgument);
         }
 

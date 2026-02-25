@@ -500,4 +500,45 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
         // Should have taken at least ~100ms with 2 threads (10 tasks * 20ms / 2 threads)
         REQUIRE(duration >= 100ms);
     }
+
+    SECTION("joinWithTimeout avoids timeout-length waits when workers exit quickly") {
+        constexpr auto kTimeout = 300ms;
+        constexpr auto kSlowThreshold = 260ms;
+        constexpr int kIterations = 80;
+
+        int slowJoinCount = 0;
+        auto maxElapsed = 0ms;
+
+        for (int i = 0; i < kIterations; ++i) {
+            WorkCoordinator coordinator;
+            coordinator.start(1);
+
+            std::atomic<bool> posted{false};
+            boost::asio::post(coordinator.getExecutor(),
+                              [&]() { posted.store(true, std::memory_order_release); });
+
+            bool postedDone = wait_for_condition(
+                1000ms, 2ms, [&]() { return posted.load(std::memory_order_acquire); });
+            REQUIRE(postedDone);
+
+            coordinator.stop();
+
+            const auto joinStart = std::chrono::steady_clock::now();
+            bool joined = coordinator.joinWithTimeout(kTimeout);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - joinStart);
+
+            REQUIRE(joined);
+            if (elapsed > maxElapsed) {
+                maxElapsed = elapsed;
+            }
+            if (elapsed >= kSlowThreshold) {
+                ++slowJoinCount;
+            }
+        }
+
+        INFO("max joinWithTimeout elapsed: " << maxElapsed.count() << "ms over " << kIterations
+                                             << " iterations");
+        REQUIRE(slowJoinCount == 0);
+    }
 }

@@ -758,8 +758,8 @@ TEST_F(UiCliExpectationsIT, PathsOnlyWithPatternAndMatchAllTagsStrict) {
     fs::create_directories(root_ / "ingest" / "tags2");
     auto p1 = (root_ / "ingest" / "tags2" / "d1.md");
     auto p2 = (root_ / "ingest" / "tags2" / "d2.md");
-    std::ofstream(p1) << "hello tags";
-    std::ofstream(p2) << "hello tags";
+    std::ofstream(p1) << "hello tags d1";
+    std::ofstream(p2) << "hello tags d2";
 
     yams::app::services::DocumentIngestionService ing;
     yams::app::services::AddOptions a;
@@ -777,6 +777,8 @@ TEST_F(UiCliExpectationsIT, PathsOnlyWithPatternAndMatchAllTagsStrict) {
     a.path = p2.string();
     auto add2 = ing.addViaDaemon(a);
     ASSERT_TRUE(add2) << (add2 ? "" : add2.error().message);
+    ASSERT_NE(add1.value().hash, add2.value().hash)
+        << "Test requires distinct hashes; use distinct file contents.";
 
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);
@@ -825,6 +827,9 @@ TEST_F(UiCliExpectationsIT, PathsOnlyWithPatternAndMatchAllTagsStrict) {
 
     {
         bool strictReady = false;
+        bool lastHasD1 = false;
+        bool lastHasD2 = false;
+        size_t lastStrictCount = 0;
         std::string lastStrictError;
         for (int i = 0; i < 50; ++i) {
             auto strictDocs = ctx.metadataRepo->findDocumentsByTags({"docs", "A", "B"}, true);
@@ -845,6 +850,10 @@ TEST_F(UiCliExpectationsIT, PathsOnlyWithPatternAndMatchAllTagsStrict) {
                 }
             }
 
+            lastHasD1 = hasD1;
+            lastHasD2 = hasD2;
+            lastStrictCount = strictDocs.value().size();
+
             if (hasD1 && !hasD2) {
                 strictReady = true;
                 break;
@@ -854,7 +863,9 @@ TEST_F(UiCliExpectationsIT, PathsOnlyWithPatternAndMatchAllTagsStrict) {
         }
 
         ASSERT_TRUE(strictReady) << "Strict tag lookup did not converge to {d1 only}. Last error='"
-                                 << lastStrictError << "'";
+                                 << lastStrictError << "' lastHasD1=" << lastHasD1
+                                 << " lastHasD2=" << lastHasD2
+                                 << " lastStrictCount=" << lastStrictCount;
     }
 
     yams::app::services::SearchRequest s;
@@ -1534,8 +1545,8 @@ TEST_F(UiCliExpectationsIT, FuzzyBoundsSimilarityZeroAndOne) {
 // 9) Search — tag filters: matchAny vs matchAll
 TEST_F(UiCliExpectationsIT, TagFilterMatchAnyVsAll) {
     fs::create_directories(root_ / "ingest" / "tags");
-    std::ofstream(root_ / "ingest" / "tags" / "d1.md") << "hello tags";
-    std::ofstream(root_ / "ingest" / "tags" / "d2.txt") << "hello tags";
+    std::ofstream(root_ / "ingest" / "tags" / "d1.md") << "hello tags md";
+    std::ofstream(root_ / "ingest" / "tags" / "d2.txt") << "hello tags txt";
 
     yams::app::services::DocumentIngestionService ing;
     yams::app::services::AddOptions a;
@@ -1554,6 +1565,8 @@ TEST_F(UiCliExpectationsIT, TagFilterMatchAnyVsAll) {
     a.path = p2;
     auto add2 = ing.addViaDaemon(a);
     ASSERT_TRUE(add2) << (add2 ? "" : add2.error().message);
+    ASSERT_NE(add1.value().hash, add2.value().hash)
+        << "Test requires distinct hashes; use distinct file contents.";
 
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);

@@ -6,6 +6,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <fstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -790,6 +791,57 @@ private:
         return paths;
     }
 
+    static bool isWordBoundary(char c) {
+        return !(std::isalnum(static_cast<unsigned char>(c)) || c == '_');
+    }
+
+    static std::size_t countWholeWordOccurrences(std::string_view text, std::string_view token) {
+        if (token.empty() || text.empty()) {
+            return 0;
+        }
+
+        std::size_t count = 0;
+        std::size_t pos = 0;
+        while (pos < text.size()) {
+            pos = text.find(token, pos);
+            if (pos == std::string_view::npos) {
+                break;
+            }
+
+            const bool leftOk = (pos == 0) || isWordBoundary(text[pos - 1]);
+            const std::size_t end = pos + token.size();
+            const bool rightOk = (end >= text.size()) || isWordBoundary(text[end]);
+
+            if (leftOk && rightOk) {
+                ++count;
+            }
+            pos = end;
+        }
+        return count;
+    }
+
+    static bool hasLocalSymbolUsage(const std::filesystem::path& cwd, const std::string& relPath,
+                                    const std::string& symbol) {
+        if (relPath.empty() || symbol.empty()) {
+            return false;
+        }
+
+        std::error_code ec;
+        auto absPath = (cwd / relPath).lexically_normal();
+        if (!std::filesystem::exists(absPath, ec) || ec) {
+            return false;
+        }
+
+        std::ifstream ifs(absPath, std::ios::in | std::ios::binary);
+        if (!ifs) {
+            return false;
+        }
+        std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        // Definition + one additional usage in the same file is enough to suppress obvious
+        // false positives for local helper types (e.g., local structs).
+        return countWholeWordOccurrences(content, symbol) >= 2;
+    }
+
     static std::optional<std::filesystem::path>
     extractNodePath(const yams::daemon::GraphNode& node) {
         if (node.nodeKey.rfind("path:file:", 0) == 0) {
@@ -845,8 +897,8 @@ private:
 
         std::vector<DeadCodeTarget> targets = {
             {"function", "calls", "Isolated functions (no incoming calls)"},
-            {"class", "calls", "Isolated classes (no incoming calls)"},
-            {"struct", "calls", "Isolated structs (no incoming calls)"},
+            {"class", "references", "Isolated classes (no incoming references)"},
+            {"struct", "references", "Isolated structs (no incoming references)"},
             {"file", "includes", "Isolated files (no incoming includes)"},
         };
 
@@ -911,10 +963,26 @@ private:
             }
         }
 
+        std::size_t suppressedLocalRefs = 0;
+        if (!allRows.empty()) {
+            std::vector<DeadCodeRow> filtered;
+            filtered.reserve(allRows.size());
+            for (const auto& row : allRows) {
+                if ((row.type == "class" || row.type == "struct") &&
+                    hasLocalSymbolUsage(cwd, row.path, row.label)) {
+                    ++suppressedLocalRefs;
+                    continue;
+                }
+                filtered.push_back(row);
+            }
+            allRows.swap(filtered);
+        }
+
         if (jsonOutput_ || outputFormat_ == "json") {
             json out;
             out["cwd"] = cwd.generic_string();
             out["total"] = allRows.size();
+            out["suppressedLocalRefs"] = suppressedLocalRefs;
             json rows = json::array();
             for (const auto& row : allRows) {
                 rows.push_back({{"type", row.type},
@@ -930,6 +998,11 @@ private:
                              "Scoped to src/** and include/** via path tree (excluding tests/, "
                              "benchmarks/, third_party/, node_modules/, build*)")
                       << "\n\n";
+            if (suppressedLocalRefs > 0) {
+                std::cout << yams::cli::ui::status_info("Suppressed likely-local references: " +
+                                                        std::to_string(suppressedLocalRefs))
+                          << "\n\n";
+            }
 
             if (allRows.empty()) {
                 std::cout << yams::cli::ui::status_info("No isolated nodes found in scope") << "\n";

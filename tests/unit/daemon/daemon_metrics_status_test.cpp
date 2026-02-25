@@ -17,6 +17,7 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/daemon_lifecycle.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/proto_serializer.h>
@@ -150,10 +151,11 @@ TEST_CASE("DaemonMetrics: WAL metrics in GetStats", "[daemon][metrics][wal]") {
     cfg.dataDir = makeTempDir("yams_metrics_wal_");
 
     YamsDaemon daemon(cfg);
+    DaemonLifecycleAdapter lifecycleAdapter(&daemon);
     StateComponent state;
     DaemonLifecycleFsm lifecycleFsm;
     ServiceManager svc(cfg, state, lifecycleFsm);
-    RequestDispatcher dispatcher(&daemon, &svc, &state);
+    RequestDispatcher dispatcher(&lifecycleAdapter, &svc, &state);
 
     SECTION("GetStats includes WAL metric keys") {
         GetStatsRequest req;
@@ -180,10 +182,11 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
     cfg.dataDir = makeTempDir("yams_status_readiness_flags_");
 
     YamsDaemon daemon(cfg);
+    DaemonLifecycleAdapter lifecycleAdapter(&daemon);
     StateComponent state;
     DaemonLifecycleFsm lifecycleFsm;
     ServiceManager svc(cfg, state, lifecycleFsm);
-    RequestDispatcher dispatcher(&daemon, &svc, &state);
+    RequestDispatcher dispatcher(&lifecycleAdapter, &svc, &state);
 
     StatusRequest req;
     req.detailed = false;
@@ -231,6 +234,7 @@ TEST_CASE("RequestDispatcher: status includes repair metrics and flags",
     cfg.dataDir = makeTempDir("yams_status_repair_metrics_");
 
     YamsDaemon daemon(cfg);
+    DaemonLifecycleAdapter lifecycleAdapter(&daemon);
     StateComponent state;
     state.stats.repairQueueDepth.store(7);
     state.stats.repairBatchesAttempted.store(11);
@@ -241,7 +245,7 @@ TEST_CASE("RequestDispatcher: status includes repair metrics and flags",
     state.stats.repairBusyTicks.store(33);
     DaemonLifecycleFsm lifecycleFsm;
     ServiceManager svc(cfg, state, lifecycleFsm);
-    RequestDispatcher dispatcher(&daemon, &svc, &state);
+    RequestDispatcher dispatcher(&lifecycleAdapter, &svc, &state);
 
     StatusRequest req;
     req.detailed = true;
@@ -272,6 +276,7 @@ TEST_CASE("RequestDispatcher: status responds even when lifecycle not ready",
     cfg.dataDir = makeTempDir("yams_status_not_ready_");
 
     YamsDaemon daemon(cfg);
+    DaemonLifecycleAdapter lifecycleAdapter(&daemon);
     // Daemon is not started; lifecycle state is expected to be non-ready.
     {
         const auto snap = daemon.getLifecycle().snapshot();
@@ -282,7 +287,7 @@ TEST_CASE("RequestDispatcher: status responds even when lifecycle not ready",
     StateComponent state;
     DaemonLifecycleFsm lifecycleFsm;
     ServiceManager svc(cfg, state, lifecycleFsm);
-    RequestDispatcher dispatcher(&daemon, &svc, &state);
+    RequestDispatcher dispatcher(&lifecycleAdapter, &svc, &state);
 
     StatusRequest req;
     req.detailed = true;

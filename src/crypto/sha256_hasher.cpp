@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <openssl/evp.h>
+#include <openssl/sha.h>
 #include <yams/crypto/hasher.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
@@ -13,6 +14,23 @@ namespace yamsfmt = fmt;
 #include <mutex>
 
 namespace yams::crypto {
+
+namespace {
+
+std::string bytesToHex(const unsigned char* data, unsigned int size) {
+    static constexpr char kHexDigits[] = "0123456789abcdef";
+    std::string out;
+    out.resize(static_cast<std::string::size_type>(size) * 2U);
+    for (unsigned int i = 0; i < size; ++i) {
+        const unsigned int value = data[i];
+        const size_t pos = static_cast<size_t>(i) * 2U;
+        out[pos] = kHexDigits[(value >> 4U) & 0x0FU];
+        out[pos + 1U] = kHexDigits[value & 0x0FU];
+    }
+    return out;
+}
+
+} // namespace
 
 struct SHA256Hasher::Impl {
     std::mutex mtx;
@@ -85,14 +103,7 @@ std::string SHA256Hasher::finalize() {
         throw std::runtime_error("Failed to finalize SHA256");
     }
 
-    // Convert to hex string
-    std::string result;
-    result.reserve(static_cast<std::string::size_type>(hashLen) *
-                   static_cast<std::string::size_type>(2));
-
-    for (unsigned int i = 0; i < hashLen; ++i) {
-        result += yamsfmt::format("{:02x}", hash[i]);
-    }
+    std::string result = bytesToHex(hash.data(), hashLen);
 
     // Reset for potential reuse
     if (EVP_DigestInit_ex(pImpl->ctx, EVP_sha256(), nullptr) != 1) {
@@ -141,13 +152,7 @@ std::string SHA256Hasher::hashFile(const std::filesystem::path& path) {
         throw std::runtime_error("Failed to finalize SHA256 for hashFile");
     }
 
-    std::string result;
-    result.reserve(static_cast<std::string::size_type>(hashLen) * 2);
-    for (unsigned int i = 0; i < hashLen; ++i) {
-        result += yamsfmt::format("{:02x}", hash[i]);
-    }
-
-    return result;
+    return bytesToHex(hash.data(), hashLen);
 }
 
 std::future<Result<std::string>> SHA256Hasher::hashFileAsync(const std::filesystem::path& path) {
@@ -167,9 +172,21 @@ void SHA256Hasher::setProgressCallback(ProgressCallback callback) {
 }
 
 std::string SHA256Hasher::hash(std::span<const std::byte> data) {
-    SHA256Hasher hasher;
-    hasher.update(data);
-    return hasher.finalize();
+    SHA256_CTX ctx;
+    std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
+    if (SHA256_Init(&ctx) != 1) {
+        throw std::runtime_error("Failed to initialize one-shot SHA256 context");
+    }
+    if (!data.empty()) {
+        const auto* input = reinterpret_cast<const unsigned char*>(data.data());
+        if (SHA256_Update(&ctx, input, data.size()) != 1) {
+            throw std::runtime_error("Failed to update one-shot SHA256 hash");
+        }
+    }
+    if (SHA256_Final(digest.data(), &ctx) != 1) {
+        throw std::runtime_error("Failed to finalize one-shot SHA256 hash");
+    }
+    return bytesToHex(digest.data(), SHA256_DIGEST_LENGTH);
 }
 
 std::unique_ptr<IContentHasher> createSHA256Hasher() {

@@ -19,8 +19,6 @@
 #include <fstream>
 #include <thread>
 
-// Test timeout constant - tests should complete well within this
-constexpr auto TEST_TIMEOUT = std::chrono::seconds{15};
 // PyInstaller executables need ~3s to unpack/start on first run (can be slower on CI)
 constexpr auto PROCESS_STARTUP_WAIT = std::chrono::seconds{3};
 // PyInstaller executables may need extra time to respond after stdin is closed

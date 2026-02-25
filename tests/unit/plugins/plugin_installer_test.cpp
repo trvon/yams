@@ -254,9 +254,6 @@ TEST_CASE("InstallProgress stages", "[plugins][installer][progress]") {
         auto downloading = InstallProgress::Stage::Downloading;
         auto verifying = InstallProgress::Stage::Verifying;
         auto extracting = InstallProgress::Stage::Extracting;
-        auto installing = InstallProgress::Stage::Installing;
-        auto trusting = InstallProgress::Stage::Trusting;
-        auto loading = InstallProgress::Stage::Loading;
         auto complete = InstallProgress::Stage::Complete;
 
         CHECK(querying != downloading);

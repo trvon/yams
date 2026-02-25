@@ -22,6 +22,7 @@ namespace {
 class MockRequestProcessor : public RequestProcessor {
 public:
     boost::asio::awaitable<Response> process(const Request& request) override {
+        (void)request;
         co_return SuccessResponse{"OK"};
     }
 
@@ -34,7 +35,10 @@ public:
         co_return SuccessResponse{"Streamed"};
     }
 
-    bool supports_streaming(const Request& request) const override { return true; }
+    bool supports_streaming(const Request& request) const override {
+        (void)request;
+        return true;
+    }
 };
 
 } // anonymous namespace

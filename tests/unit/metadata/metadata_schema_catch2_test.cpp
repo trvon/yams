@@ -632,7 +632,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Statistics", "[unit][metadata][schema][
     SECTION("Get document count") {
         auto countResult = repo_->getDocumentCount();
         REQUIRE(countResult.has_value());
-        CHECK(countResult.value() == extensions.size());
+        CHECK(static_cast<std::size_t>(countResult.value()) == extensions.size());
     }
 
     SECTION("Get indexed document count") {
