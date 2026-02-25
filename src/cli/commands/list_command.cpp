@@ -9,7 +9,6 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
-#include <yams/daemon/client/ipc_failure.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/document_metadata.h>
@@ -426,41 +425,39 @@ public:
                 return Result<void>();
             };
 
-            // Use RetrievalService (daemon-first). On failure, fallback to service path
+            // Use RetrievalService with helper-resolved daemon transport plan.
             {
-                yams::daemon::ClientConfig preflightCfg;
-                preflightCfg.autoStart = false;
+                yams::daemon::ClientConfig daemonCfg;
                 if (cli_->hasExplicitDataDir()) {
-                    preflightCfg.dataDir = cli_->getDataPath();
+                    daemonCfg.dataDir = cli_->getDataPath();
                 }
+
                 auto planRes = yams::cli::prepare_cli_daemon_client_plan(
-                    preflightCfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
-                if (!planRes || planRes.value().usedInProcessFallback) {
+                    daemonCfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+                if (!planRes) {
                     if (spinner) {
                         spinner->stop();
                     }
-                    if (verbose_ || cli_->getVerbose()) {
-                        const auto reason =
-                            planRes ? planRes.value().fallbackReason : planRes.error().message;
-                        std::cout << "Using local list path (socket daemon not ready)" << "\n";
-                        if (!reason.empty()) {
-                            std::cout << "  Reason: " << reason << "\n";
-                        }
-                    }
-                    return executeWithServices(&spinner);
+                    return planRes.error();
+                }
+                auto daemonPlan = std::move(planRes.value());
+
+                if (daemonPlan.usedInProcessFallback) {
+                    spdlog::info(
+                        "list: socket transport unavailable; using in-process transport: {}",
+                        daemonPlan.fallbackReason);
                 }
 
                 yams::app::services::RetrievalService rsvc;
                 yams::app::services::RetrievalOptions ropts;
-                if (cli_->hasExplicitDataDir()) {
-                    ropts.explicitDataDir = cli_->getDataPath();
-                }
                 ropts.enableStreaming = enableStreaming_;
                 ropts.progressiveOutput = false;
                 ropts.singleUseConnections = false;
                 ropts.requestTimeoutMs = 30000;
                 ropts.headerTimeoutMs = 30000;
                 ropts.bodyTimeoutMs = 120000;
+                yams::cli::apply_cli_daemon_plan_to_retrieval_options(daemonPlan, ropts);
+
                 auto res = rsvc.list(dreq, ropts);
                 if (res) {
                     auto r = render(res.value());
@@ -468,17 +465,17 @@ public:
                         return r;
                     return Result<void>();
                 }
+
                 if (spinner) {
                     spinner->stop();
                 }
-                const auto ipcKind = yams::daemon::parseIpcFailureKind(res.error().message);
-                if (ipcKind.has_value()) {
-                    spdlog::debug("list: daemon unavailable ({}); using local services",
-                                  res.error().message);
-                } else {
-                    spdlog::warn("list: daemon path failed ({}); using local services",
-                                 res.error().message);
+
+                if (yams::cli::is_transport_failure(res.error())) {
+                    return res.error();
                 }
+
+                spdlog::warn("list: daemon path failed ({}); using local services",
+                             res.error().message);
             }
 
             return executeWithServices(&spinner);
@@ -1608,8 +1605,16 @@ private:
             // Retrieve indexed content
             yams::app::services::RetrievalService rsvc;
             yams::app::services::RetrievalOptions ropts;
-            if (cli_->hasExplicitDataDir())
-                ropts.explicitDataDir = cli_->getDataPath();
+            yams::daemon::ClientConfig daemonCfg;
+            if (cli_->hasExplicitDataDir()) {
+                daemonCfg.dataDir = cli_->getDataPath();
+            }
+            auto daemonPlanRes = yams::cli::prepare_cli_daemon_client_plan(
+                daemonCfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+            if (!daemonPlanRes) {
+                return Result<void>();
+            }
+            yams::cli::apply_cli_daemon_plan_to_retrieval_options(daemonPlanRes.value(), ropts);
             yams::app::services::GetOptions greq;
             greq.hash = chosen->hash;
             greq.metadataOnly = false;

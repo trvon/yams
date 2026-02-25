@@ -860,7 +860,13 @@ private:
             }
             auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
                 cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback, 1, 1);
-            if (leaseRes) {
+            if (!leaseRes) {
+                if (yams::cli::is_transport_failure(leaseRes.error())) {
+                    return leaseRes.error();
+                }
+                spdlog::debug("session warm: daemon unavailable, using local path: {}",
+                              leaseRes.error().message);
+            } else {
                 auto leaseHandle = std::move(leaseRes.value());
                 yams::daemon::PrepareSessionRequest dreq;
                 dreq.sessionName = ""; // use current

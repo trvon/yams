@@ -976,6 +976,15 @@ Result<void> LifecycleComponent::acquireDataDirLock() {
             if (!result) {
                 spdlog::warn("Shutdown request to existing daemon failed: {}",
                              result.error().message);
+                if (aggressiveModeEnabled() && existingInfo.pid > 0 &&
+                    existingInfo.pid != getpid() && isProcessRunning(existingInfo.pid)) {
+                    spdlog::warn("Attempting forced termination for stale daemon PID {}",
+                                 existingInfo.pid);
+                    if (auto term = terminateProcess(existingInfo.pid); !term) {
+                        spdlog::warn("Failed to terminate stale daemon PID {}: {}",
+                                     existingInfo.pid, term.error().message);
+                    }
+                }
             }
 
             // Wait for lock to be released (up to 15 seconds)
@@ -997,6 +1006,37 @@ Result<void> LifecycleComponent::acquireDataDirLock() {
                 }
 #endif
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+
+            if (!lockAcquired && aggressiveModeEnabled() && existingInfo.pid > 0 &&
+                existingInfo.pid != getpid() && isProcessRunning(existingInfo.pid)) {
+                spdlog::warn("Data-dir lock still held by PID {}, forcing termination",
+                             existingInfo.pid);
+                if (auto term = terminateProcess(existingInfo.pid); !term) {
+                    spdlog::warn("Forced termination failed for PID {}: {}", existingInfo.pid,
+                                 term.error().message);
+                } else {
+                    auto retryDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                    while (std::chrono::steady_clock::now() < retryDeadline) {
+#ifdef _WIN32
+                        if (hFile != INVALID_HANDLE_VALUE) {
+                            OVERLAPPED overlapped = {0};
+                            if (LockFileEx(hFile,
+                                           LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
+                                           1, 0, &overlapped)) {
+                                lockAcquired = true;
+                                break;
+                            }
+                        }
+#else
+                        if (flock(dataDirLockFd_, LOCK_EX | LOCK_NB) == 0) {
+                            lockAcquired = true;
+                            break;
+                        }
+#endif
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                }
             }
         }
 

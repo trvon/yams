@@ -152,6 +152,9 @@ public:
                     return printDaemonResult(daemonRes.value().value());
                 }
             } else {
+                if (yams::cli::is_transport_failure(daemonRes.error())) {
+                    return daemonRes.error();
+                }
                 spdlog::warn("download: daemon path failed ({}); using local services",
                              daemonRes.error().message);
             }

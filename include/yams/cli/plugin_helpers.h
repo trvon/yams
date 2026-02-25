@@ -40,6 +40,10 @@ print_plugin_not_ready_hint(const std::optional<yams::daemon::StatusResponse>& s
 template <typename FetchStatusFn>
 inline bool handle_plugin_rpc_error(const Error& err, const FetchStatusFn& fetchStatus,
                                     const std::string& actionLabel) {
+    if (yams::cli::is_transport_failure(err)) {
+        std::cout << actionLabel << " failed: " << err.message << '\n';
+        return false;
+    }
     if (err.code == ErrorCode::InvalidState) {
         std::optional<yams::daemon::StatusResponse> statusOpt;
         auto status = fetchStatus();

@@ -777,8 +777,16 @@ private:
 
         yams::app::services::RetrievalService rsvc;
         yams::app::services::RetrievalOptions ropts;
-        if (cli_->hasExplicitDataDir())
-            ropts.explicitDataDir = cli_->getDataPath();
+        yams::daemon::ClientConfig daemonCfg;
+        if (cli_->hasExplicitDataDir()) {
+            daemonCfg.dataDir = cli_->getDataPath();
+        }
+        auto daemonPlanRes = yams::cli::prepare_cli_daemon_client_plan(
+            daemonCfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+        if (!daemonPlanRes) {
+            return Result<void>();
+        }
+        yams::cli::apply_cli_daemon_plan_to_retrieval_options(daemonPlanRes.value(), ropts);
 
         yams::app::services::GetOptions greq;
         greq.hash = resolvedHash;
@@ -1399,6 +1407,9 @@ public:
                 return renderResult;
             };
             if (!daemonLease) {
+                if (yams::cli::is_transport_failure(daemonLeaseRes.error())) {
+                    return daemonLeaseRes.error();
+                }
                 spdlog::warn("search: unable to acquire daemon client: {}",
                              daemonLeaseRes.error().message);
                 auto fb = fallback();
@@ -1493,11 +1504,7 @@ public:
             auto coroFut = boost::asio::co_spawn(getExecutor(), work(), boost::asio::use_future);
             spdlog::info("[CLI:Search] co_spawn returned, waiting on future...");
             if (fut.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
-                spdlog::warn("search: daemon call timed out; falling back to local execution");
-                auto fb = fallback();
-                if (!fb)
-                    return fb.error();
-                return Result<void>();
+                return Error{ErrorCode::Timeout, "search daemon call timed out"};
             }
             auto rv = fut.get();
             // Ensure coroutine cleanup completes before destroying captured references
@@ -1506,7 +1513,10 @@ public:
             }
             if (rv)
                 return Result<void>();
-            // Fallback to local when daemon path returns error
+            if (yams::cli::is_transport_failure(rv.error())) {
+                return rv.error();
+            }
+            // Fallback to local only for non-transport failures.
             {
                 auto fb = fallback();
                 if (!fb)
@@ -1717,10 +1727,10 @@ public:
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
             clientConfig, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
-            spdlog::warn("search: unable to acquire daemon client: {}", leaseRes.error().message);
-            if (!(jsonOutput_ || (cli_ && cli_->getJsonOutput()))) {
-                std::cout << "Daemon unavailable; falling back to local search.\n";
+            if (yams::cli::is_transport_failure(leaseRes.error())) {
+                co_return leaseRes.error();
             }
+            spdlog::warn("search: unable to acquire daemon client: {}", leaseRes.error().message);
             co_return co_await localFallback();
         }
         auto leaseHandle = std::move(leaseRes.value());
@@ -1889,6 +1899,9 @@ public:
                     co_return render(ur.value());
                 // If unary retry also failed, fallback to local
                 if (!ur) {
+                    if (yams::cli::is_transport_failure(ur.error())) {
+                        co_return ur.error();
+                    }
                     if (auto appContext = cli_->getAppContext()) {
                         auto searchService = app::services::makeSearchService(*appContext);
                         if (searchService) {
@@ -1966,6 +1979,10 @@ public:
             auto rr = co_await callOnce(retryReq);
             if (rr)
                 co_return render(rr.value());
+        }
+
+        if (yams::cli::is_transport_failure(derr)) {
+            co_return derr;
         }
 
         // Fallback to local services via co_await

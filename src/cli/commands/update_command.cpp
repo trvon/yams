@@ -128,6 +128,9 @@ Result<void> UpdateCommand::execute() {
                 auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
                     cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
                 if (!leaseRes) {
+                    if (yams::cli::is_transport_failure(leaseRes.error())) {
+                        return leaseRes.error();
+                    }
                     spdlog::warn("Update: unable to acquire daemon client: {}",
                                  leaseRes.error().message);
                     throw std::runtime_error("daemon unavailable");
@@ -179,8 +182,13 @@ Result<void> UpdateCommand::execute() {
                             backoff = std::min(backoff * 2, std::chrono::milliseconds{500});
                             continue;
                         }
+                    } else {
+                        last_err = Error{ErrorCode::Timeout, "Update daemon call timed out"};
                     }
                     break; // timeout or non-transient
+                }
+                if (yams::cli::is_transport_failure(last_err)) {
+                    return last_err;
                 }
             } catch (...) {
                 // fall through to local execution
@@ -242,6 +250,9 @@ boost::asio::awaitable<Result<void>> UpdateCommand::executeAsync() {
             auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
                 cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
             if (!leaseRes) {
+                if (yams::cli::is_transport_failure(leaseRes.error())) {
+                    co_return leaseRes.error();
+                }
                 spdlog::warn("Update: unable to acquire daemon client: {}",
                              leaseRes.error().message);
                 co_return executeLocal();
@@ -255,6 +266,9 @@ boost::asio::awaitable<Result<void>> UpdateCommand::executeAsync() {
                 if (!r)
                     co_return r.error();
                 co_return Result<void>();
+            }
+            if (yams::cli::is_transport_failure(result.error())) {
+                co_return result.error();
             }
             spdlog::warn("Update: daemon unavailable or failed ({}); using local path.",
                          result.error().message);
@@ -546,11 +560,26 @@ Result<std::string> UpdateCommand::resolveNameToHashSmart(const std::string& nam
         }
     }
 
+    // Use RetrievalService to resolve by name via helper-resolved daemon transport.
+    yams::daemon::ClientConfig daemonCfg;
+    if (cli_ && cli_->hasExplicitDataDir()) {
+        daemonCfg.dataDir = cli_->getDataPath();
+    }
+    auto daemonPlanRes = yams::cli::prepare_cli_daemon_client_plan(
+        daemonCfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+    if (!daemonPlanRes) {
+        return daemonPlanRes.error();
+    }
+    auto daemonPlan = std::move(daemonPlanRes.value());
+    if (daemonPlan.usedInProcessFallback) {
+        spdlog::info("update: socket transport unavailable; using in-process transport: {}",
+                     daemonPlan.fallbackReason);
+    }
+
     // Use RetrievalService to resolve by name via daemon when available; fall back to service
     yams::app::services::RetrievalService rsvc;
     yams::app::services::RetrievalOptions ropts;
-    if (cli_ && cli_->hasExplicitDataDir())
-        ropts.explicitDataDir = cli_->getDataPath();
+    yams::cli::apply_cli_daemon_plan_to_retrieval_options(daemonPlan, ropts);
 
     bool pickOldest = oldest_;
     bool includeContent = false;

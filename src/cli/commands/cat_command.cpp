@@ -8,6 +8,7 @@
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -80,12 +81,25 @@ public:
                 }
             }
 
+            yams::daemon::ClientConfig daemonCfg;
+            if (cli_->hasExplicitDataDir()) {
+                daemonCfg.dataDir = cli_->getDataPath();
+            }
+            auto daemonPlanRes = yams::cli::prepare_cli_daemon_client_plan(
+                daemonCfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+            if (!daemonPlanRes) {
+                return daemonPlanRes.error();
+            }
+            auto daemonPlan = std::move(daemonPlanRes.value());
+            if (daemonPlan.usedInProcessFallback) {
+                spdlog::info("cat: socket transport unavailable; using in-process transport: {}",
+                             daemonPlan.fallbackReason);
+            }
+
             yams::app::services::RetrievalService rsvc;
             yams::app::services::RetrievalOptions ropts;
-            if (cli_->hasExplicitDataDir()) {
-                ropts.explicitDataDir = cli_->getDataPath();
-            }
             ropts.requestTimeoutMs = 60000;
+            yams::cli::apply_cli_daemon_plan_to_retrieval_options(daemonPlan, ropts);
 
             auto renderResponse = [&](const yams::daemon::GetResponse& resp) -> Result<void> {
                 if (!resp.hasContent) {

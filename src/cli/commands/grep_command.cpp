@@ -773,16 +773,30 @@ public:
                     return Result<void>();
                 };
 
-                // Use RetrievalService facade (daemon-first)
+                yams::daemon::ClientConfig daemonCfg;
+                if (cli_ && cli_->hasExplicitDataDir()) {
+                    daemonCfg.dataDir = cli_->getDataPath();
+                }
+                auto daemonPlanRes = yams::cli::prepare_cli_daemon_client_plan(
+                    daemonCfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+                if (!daemonPlanRes) {
+                    return daemonPlanRes.error();
+                }
+                auto daemonPlan = std::move(daemonPlanRes.value());
+                if (daemonPlan.usedInProcessFallback) {
+                    spdlog::info(
+                        "grep: socket transport unavailable; using in-process transport: {}",
+                        daemonPlan.fallbackReason);
+                }
+
+                // Use RetrievalService facade with helper-resolved transport plan.
                 yams::app::services::RetrievalService rsvc;
                 yams::app::services::RetrievalOptions ropts;
-                if (cli_ && cli_->hasExplicitDataDir()) {
-                    ropts.explicitDataDir = cli_->getDataPath();
-                }
                 ropts.enableStreaming = enableStreaming_;
                 ropts.headerTimeoutMs = 30000;
                 ropts.bodyTimeoutMs = 120000;
                 ropts.requestTimeoutMs = 30000;
+                yams::cli::apply_cli_daemon_plan_to_retrieval_options(daemonPlan, ropts);
 
                 // Show spinner during search
                 std::shared_ptr<ui::SpinnerRunner> spinner =
@@ -799,15 +813,9 @@ public:
                 auto gres = rsvc.grep(dreq, ropts);
                 stopSpinner();
                 if (!gres) {
-                    const auto ipcFailureKind =
-                        yams::daemon::parseIpcFailureKind(gres.error().message);
-                    const bool transportFailure =
-                        gres.error().code == ErrorCode::Timeout || ipcFailureKind.has_value();
+                    const bool transportFailure = yams::cli::is_transport_failure(gres.error());
                     if (transportFailure) {
-                        spdlog::warn("grep: daemon unavailable ({}); falling back to local "
-                                     "execution",
-                                     gres.error().message);
-                        return executeLocal();
+                        return gres.error();
                     }
                     // Check if it's a regex error and provide helpful hint
                     std::string errMsg = gres.error().message;

@@ -1,9 +1,9 @@
 #include <yams/daemon/components/gliner_query_extractor.h>
 
-#include <array>
-#include <chrono>
-#include <cctype>
 #include <spdlog/spdlog.h>
+#include <array>
+#include <cctype>
+#include <chrono>
 #include <yams/daemon/resource/abi_entity_extractor_adapter.h>
 #include <yams/plugins/entity_extractor_v2.h>
 
@@ -135,7 +135,7 @@ createGlinerExtractionFunc(std::vector<std::shared_ptr<AbiEntityExtractorAdapter
     }
 
     if (!textExtractor) {
-        spdlog::warn("createGlinerExtractionFunc: No GLiNER extractor found");
+        spdlog::debug("createGlinerExtractionFunc: No GLiNER extractor found");
         return nullptr;
     }
 

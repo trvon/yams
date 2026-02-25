@@ -24,6 +24,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_future.hpp>
+#include <yams/app/services/retrieval_service.h>
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
@@ -690,6 +691,10 @@ enum class CliDaemonAccessPolicy {
 struct CliDaemonClientPlan {
     yams::daemon::ClientConfig config{};
     yams::daemon::ClientTransportMode resolvedMode{yams::daemon::ClientTransportMode::Auto};
+    bool requireSocket{false};
+    bool allowInProcessFallback{true};
+    bool allowLocalServiceFallback{false};
+    bool allowSocketAutoStart{false};
     bool usedInProcessFallback{false};
     std::string fallbackReason;
 };
@@ -784,6 +789,15 @@ inline Result<CliDaemonClientPlan> prepare_cli_daemon_client_plan(
     const bool socketForcedByEnv = detail::is_socket_mode_forced_by_env();
     const bool requireSocket =
         socketForcedByEnv || (policy == CliDaemonAccessPolicy::RequireSocket);
+    plan.requireSocket = requireSocket;
+    plan.allowInProcessFallback = !requireSocket;
+    plan.allowLocalServiceFallback = false;
+    plan.allowSocketAutoStart = requireSocket;
+
+    if (!requireSocket) {
+        // For normal CLI flows, avoid daemon auto-start storms and prefer in-process fallback.
+        plan.config.autoStart = false;
+    }
 
     auto effectiveReadyTimeout = readyTimeout;
     if (effectiveReadyTimeout.count() < 0) {
@@ -810,10 +824,31 @@ inline Result<CliDaemonClientPlan> prepare_cli_daemon_client_plan(
             plan.fallbackReason = ready.error().message;
             plan.resolvedMode = yams::daemon::ClientTransportMode::InProcess;
             plan.config.transportMode = yams::daemon::ClientTransportMode::InProcess;
+            plan.config.autoStart = false;
         }
     }
 
     return plan;
+}
+
+inline void
+apply_cli_daemon_plan_to_retrieval_options(const CliDaemonClientPlan& plan,
+                                           yams::app::services::RetrievalOptions& opts) {
+    opts.transportMode = plan.resolvedMode;
+    opts.autoStart = plan.config.autoStart;
+    if (!plan.config.socketPath.empty()) {
+        opts.socketPath = plan.config.socketPath;
+    }
+    if (!plan.config.dataDir.empty()) {
+        opts.explicitDataDir = plan.config.dataDir;
+    }
+}
+
+inline bool is_transport_failure(const yams::Error& err) {
+    if (err.code == ErrorCode::Timeout) {
+        return true;
+    }
+    return yams::daemon::parseIpcFailureKind(err.message).has_value();
 }
 
 #if defined(YAMS_TESTING)

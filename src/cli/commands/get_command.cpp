@@ -168,14 +168,27 @@ public:
                 hash_ = normalized;
             }
 
+            yams::daemon::ClientConfig daemonCfg;
+            if (cli_->hasExplicitDataDir()) {
+                daemonCfg.dataDir = cli_->getDataPath();
+            }
+            auto daemonPlanRes = yams::cli::prepare_cli_daemon_client_plan(
+                daemonCfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+            if (!daemonPlanRes) {
+                return daemonPlanRes.error();
+            }
+            auto daemonPlan = std::move(daemonPlanRes.value());
+            if (daemonPlan.usedInProcessFallback) {
+                spdlog::info("get: socket transport unavailable; using in-process transport: {}",
+                             daemonPlan.fallbackReason);
+            }
+
             yams::app::services::RetrievalService rsvc;
             yams::app::services::RetrievalOptions ropts;
-            if (cli_->hasExplicitDataDir()) {
-                ropts.explicitDataDir = cli_->getDataPath();
-            }
             ropts.requestTimeoutMs = 60000;
             ropts.headerTimeoutMs = 30000;
             ropts.bodyTimeoutMs = 120000;
+            yams::cli::apply_cli_daemon_plan_to_retrieval_options(daemonPlan, ropts);
 
             std::optional<std::string> resolvedHash;
             if (!hash_.empty()) {

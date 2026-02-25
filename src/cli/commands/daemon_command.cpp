@@ -11,6 +11,7 @@
 #include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/daemon.h>
 #include <yams/version.hpp>
@@ -970,6 +971,57 @@ private:
                 spdlog::warn("Found daemon process (PID {}) not responding on socket", pid);
                 daemonRunning = true;
             } else {
+                // PID file may be missing while data-dir lock still points to an alive daemon.
+                pid_t lockPid = -1;
+                std::filesystem::path lockFile;
+                try {
+                    std::filesystem::path dataDir;
+                    if (!dataDir_.empty()) {
+                        dataDir = std::filesystem::path(dataDir_);
+                    } else if (cli_) {
+                        auto cliData = cli_->getDataPath();
+                        if (!cliData.empty()) {
+                            dataDir = cliData;
+                        }
+                    }
+                    if (dataDir.empty()) {
+                        dataDir = yams::config::resolve_data_dir_from_config();
+                    }
+                    lockFile = dataDir / ".yams-lock";
+                    if (safe_exists(lockFile)) {
+                        std::ifstream in(lockFile);
+                        std::string content;
+                        std::getline(in, content, '\0');
+                        auto parsed = json::parse(content, nullptr, false);
+                        if (!parsed.is_discarded() && parsed.is_object()) {
+                            lockPid = static_cast<pid_t>(parsed.value("pid", -1));
+                        }
+                    }
+                } catch (...) {
+                }
+
+                if (lockPid > 0 && lockPid != getpid() && kill(lockPid, 0) == 0) {
+                    auto desc = describeProcess(lockPid);
+                    const bool looksLikeDaemon =
+                        !desc.empty() && desc.find("yams-daemon") != std::string::npos;
+                    if (looksLikeDaemon) {
+                        spdlog::debug("Found lock-holder daemon process (PID {}) with missing "
+                                      "socket/PID file; attempting termination",
+                                      lockPid);
+                        if (killDaemonByPid(lockPid, force_)) {
+                            cleanupDaemonFiles(effectiveSocket, pidFile_);
+                            stopSpinner();
+                            std::cout << "[OK] YAMS daemon stopped successfully\n";
+                            return;
+                        }
+                    } else {
+                        spdlog::warn(
+                            "Lock file {} references PID {} that does not look like yams-daemon; "
+                            "not terminating",
+                            lockFile.string(), lockPid);
+                    }
+                }
+
                 spdlog::info("YAMS daemon is not running");
                 cleanupDaemonFiles(effectiveSocket, pidFile_);
                 stopSpinner();

@@ -2,11 +2,14 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -79,6 +82,12 @@ public:
         // Dead-code report (scoped isolated nodes with allowlist)
         cmd->add_flag("--dead-code-report", deadCodeReport_,
                       "Generate dead-code report for src/** (scoped isolated nodes)");
+        cmd->add_option("--min-confidence", minConfidence_,
+                        "Minimum confidence threshold for candidate reporting (0.0-1.0)")
+            ->default_val(0.8)
+            ->check(CLI::Range(0.0, 1.0));
+        cmd->add_flag("--show-low-confidence", showLowConfidence_,
+                      "Include low-confidence candidates below --min-confidence");
         cmd->add_flag("--scope-cwd", scopeToCwd_,
                       "Scope list/isolated results to src/** and include/** under CWD");
 
@@ -849,6 +858,16 @@ private:
         std::string label;
     };
 
+    struct DeadCodeRow {
+        std::string type;
+        std::string relation;
+        std::string label;
+        std::string nodeKey;
+        std::string path;
+        double confidence = 0.0;
+        std::vector<std::string> reasons;
+    };
+
     static std::string normalizePath(const std::filesystem::path& path,
                                      const std::filesystem::path& cwd) {
         std::filesystem::path normalized = path;
@@ -954,6 +973,93 @@ private:
         return countWholeWordOccurrences(content, symbol) >= 3;
     }
 
+    static bool pathContainsSegment(std::string_view path, std::string_view segment) {
+        return path.find(segment) != std::string_view::npos;
+    }
+
+    static bool fileContainsAnyPattern(const std::filesystem::path& cwd, const std::string& relPath,
+                                       const std::vector<std::string>& patterns) {
+        if (relPath.empty() || patterns.empty()) {
+            return false;
+        }
+        std::error_code ec;
+        auto absPath = (cwd / relPath).lexically_normal();
+        if (!std::filesystem::exists(absPath, ec) || ec) {
+            return false;
+        }
+        std::ifstream ifs(absPath, std::ios::in | std::ios::binary);
+        if (!ifs) {
+            return false;
+        }
+        std::string content((std::istreambuf_iterator<char>(ifs)),
+                            std::istreambuf_iterator<char>());
+        for (const auto& pattern : patterns) {
+            if (!pattern.empty() && content.find(pattern) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static void scoreDeadCodeCandidate(const std::filesystem::path& cwd, DeadCodeRow& row) {
+        double score = 0.45;
+        row.reasons.clear();
+        row.reasons.push_back("isolated_by_" + row.relation);
+
+        if (row.type == "function") {
+            score += 0.20;
+            row.reasons.push_back("function_isolation_signal");
+        } else if (row.type == "file") {
+            score += 0.15;
+            row.reasons.push_back("file_isolation_signal");
+        } else if (row.type == "class") {
+            score += 0.05;
+            row.reasons.push_back("class_isolation_weak_signal");
+        } else if (row.type == "struct") {
+            row.reasons.push_back("struct_isolation_weak_signal");
+        }
+
+        if (pathContainsSegment(row.path, "/tests/") || pathContainsSegment(row.path, "tests/")) {
+            score -= 0.50;
+            row.reasons.push_back("test_path");
+        }
+        if (pathContainsSegment(row.path, "/bench") || pathContainsSegment(row.path, "bench/")) {
+            score -= 0.40;
+            row.reasons.push_back("benchmark_path");
+        }
+        if (pathContainsSegment(row.path, "/examples/") ||
+            pathContainsSegment(row.path, "examples/")) {
+            score -= 0.25;
+            row.reasons.push_back("example_path");
+        }
+        if (pathContainsSegment(row.path, "src/cli/commands/") &&
+            (row.type == "class" || row.type == "function")) {
+            score -= 0.25;
+            row.reasons.push_back("cli_command_pattern_prone");
+        }
+        if (hasLocalSymbolUsage(cwd, row.path, row.label)) {
+            score -= 0.20;
+            row.reasons.push_back("local_symbol_usage");
+        }
+        if (!row.label.empty()) {
+            std::vector<std::string> patterns = {"make_unique<" + row.label + ">",
+                                                 "create" + row.label + "(", "registerCommand("};
+            if (fileContainsAnyPattern(cwd, row.path, patterns)) {
+                score -= 0.25;
+                row.reasons.push_back("local_factory_or_registration_pattern");
+            }
+        }
+
+        score = std::clamp(score, 0.0, 1.0);
+        row.confidence = std::round(score * 100.0) / 100.0;
+    }
+
+    static std::string formatConfidenceScore(double value) {
+        std::ostringstream os;
+        os << std::fixed << std::setprecision(2) << value;
+        return os.str();
+    }
+
     static std::optional<std::filesystem::path>
     extractNodePath(const yams::daemon::GraphNode& node) {
         if (node.nodeKey.rfind("path:file:", 0) == 0) {
@@ -1011,13 +1117,6 @@ private:
 
         const auto cwd = std::filesystem::current_path();
 
-        struct DeadCodeRow {
-            std::string type;
-            std::string label;
-            std::string nodeKey;
-            std::string path;
-        };
-
         std::vector<DeadCodeRow> allRows;
         std::unordered_set<std::string> scopedPaths;
         {
@@ -1063,6 +1162,7 @@ private:
                 }
                 DeadCodeRow row;
                 row.type = target.type;
+                row.relation = target.relation;
                 row.label = node.label;
                 row.nodeKey = node.nodeKey;
                 row.path = rel.generic_string();
@@ -1087,18 +1187,46 @@ private:
             allRows.swap(filtered);
         }
 
+        for (auto& row : allRows) {
+            scoreDeadCodeCandidate(cwd, row);
+        }
+
+        std::vector<DeadCodeRow> lowConfidenceRows;
+        if (!showLowConfidence_ && !allRows.empty()) {
+            std::vector<DeadCodeRow> filtered;
+            filtered.reserve(allRows.size());
+            for (const auto& row : allRows) {
+                if (row.confidence < minConfidence_) {
+                    lowConfidenceRows.push_back(row);
+                    continue;
+                }
+                filtered.push_back(row);
+            }
+            allRows.swap(filtered);
+        }
+
         if (jsonOutput_ || outputFormat_ == "json") {
             json out;
             out["cwd"] = cwd.generic_string();
+            out["mode"] = "unused-candidate-report";
             out["total"] = allRows.size();
+            out["totalCandidates"] = allRows.size();
+            out["minConfidence"] = minConfidence_;
+            out["showLowConfidence"] = showLowConfidence_;
             out["suppressedLocalRefs"] = suppressedLocalRefs;
+            out["filteredLowConfidence"] = lowConfidenceRows.size();
             json rows = json::array();
             for (const auto& row : allRows) {
                 rows.push_back({{"type", row.type},
+                                {"relation", row.relation},
                                 {"label", row.label},
                                 {"path", row.path},
-                                {"nodeKey", row.nodeKey}});
+                                {"nodeKey", row.nodeKey},
+                                {"confidence", row.confidence},
+                                {"reasons", row.reasons}});
             }
+            out["candidates"] = rows;
+            // Compatibility: keep legacy key for existing tooling.
             out["nodes"] = rows;
             if (!suppressedRows.empty()) {
                 json suppressed = json::array();
@@ -1111,16 +1239,37 @@ private:
                 }
                 out["suppressedNodes"] = suppressed;
             }
+            if (!lowConfidenceRows.empty()) {
+                json filtered = json::array();
+                for (const auto& row : lowConfidenceRows) {
+                    filtered.push_back({{"type", row.type},
+                                        {"relation", row.relation},
+                                        {"label", row.label},
+                                        {"path", row.path},
+                                        {"nodeKey", row.nodeKey},
+                                        {"confidence", row.confidence},
+                                        {"reasons", row.reasons}});
+                }
+                out["lowConfidenceCandidates"] = filtered;
+            }
             std::cout << out.dump(2) << "\n";
         } else {
-            std::cout << yams::cli::ui::section_header("Dead-code report") << "\n\n";
+            std::cout << yams::cli::ui::section_header("Unused-candidate report") << "\n\n";
             std::cout << yams::cli::ui::status_info(
                              "Scoped to src/** and include/** via path tree (excluding tests/, "
                              "benchmarks/, third_party/, node_modules/, build*)")
                       << "\n\n";
+            std::cout << yams::cli::ui::status_info("Confidence threshold: " +
+                                                    std::to_string(minConfidence_))
+                      << "\n\n";
             if (suppressedLocalRefs > 0) {
                 std::cout << yams::cli::ui::status_info("Suppressed likely-local references: " +
                                                         std::to_string(suppressedLocalRefs))
+                          << "\n\n";
+            }
+            if (!lowConfidenceRows.empty() && !showLowConfidence_) {
+                std::cout << yams::cli::ui::status_info("Filtered low-confidence candidates: " +
+                                                        std::to_string(lowConfidenceRows.size()))
                           << "\n\n";
             }
 
@@ -1158,10 +1307,11 @@ private:
             }
 
             yams::cli::ui::Table table;
-            table.headers = {"TYPE", "LABEL", "PATH"};
+            table.headers = {"TYPE", "CONF", "LABEL", "PATH"};
             table.has_header = true;
             for (const auto& row : allRows) {
-                table.add_row({row.type, yams::cli::ui::truncate_to_width(row.label, 40),
+                table.add_row({row.type, formatConfidenceScore(row.confidence),
+                               yams::cli::ui::truncate_to_width(row.label, 40),
                                yams::cli::ui::truncate_to_width(row.path, 50)});
             }
             yams::cli::ui::render_table(std::cout, table);
@@ -1552,6 +1702,8 @@ private:
     std::string propFilter_;
     bool showIsolated_{false};
     bool deadCodeReport_{false};
+    double minConfidence_{0.8};
+    bool showLowConfidence_{false};
     bool listTypes_{false};
     bool listRelations_{false};
     std::string searchPattern_;

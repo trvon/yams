@@ -439,6 +439,18 @@ public:
         auto* sub_provider =
             cmd->add_subcommand("provider", "Show active model provider and preferred model");
         sub_provider->callback([this]() {
+            auto printPreferredModel = []() {
+                std::string preferred;
+                auto cfgp = yams::config::get_config_path();
+                auto config = yams::config::parse_simple_toml(cfgp);
+                if (auto it = config.find("embeddings.preferred_model"); it != config.end()) {
+                    preferred = it->second;
+                }
+                if (!preferred.empty())
+                    std::cout << "Preferred model: " << preferred << "\n";
+                else
+                    std::cout << "Preferred model: (not set)\n";
+            };
             try {
                 using namespace yams::daemon;
                 ClientConfig cfg;
@@ -446,7 +458,10 @@ public:
                 auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
                     cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
                 if (!leaseRes) {
-                    throw std::runtime_error("daemon unavailable");
+                    std::cout << "Model Provider\n==============\n";
+                    std::cout << "Status: unavailable - " << leaseRes.error().message << "\n";
+                    printPreferredModel();
+                    return;
                 }
                 auto leaseHandle = std::move(leaseRes.value());
                 // Query model status (lists loaded models if any)
@@ -479,19 +494,7 @@ public:
                             std::cout << "  - " << m.name << (m.loaded ? " (loaded)" : "") << "\n";
                     }
                 }
-                // Read preferred model from config
-                std::string preferred;
-                {
-                    auto cfgp = yams::config::get_config_path();
-                    auto config = yams::config::parse_simple_toml(cfgp);
-                    if (auto it = config.find("embeddings.preferred_model"); it != config.end()) {
-                        preferred = it->second;
-                    }
-                }
-                if (!preferred.empty())
-                    std::cout << "Preferred model: " << preferred << "\n";
-                else
-                    std::cout << "Preferred model: (not set)\n";
+                printPreferredModel();
             } catch (const std::exception& e) {
                 std::cout << "Model provider: error - " << e.what() << "\n";
             }
@@ -586,7 +589,11 @@ private:
                     auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
                         cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
                     if (!leaseRes) {
-                        throw std::runtime_error("daemon unavailable");
+                        if (yams::cli::is_transport_failure(leaseRes.error())) {
+                            spdlog::debug("model list: daemon transport unavailable: {}",
+                                          leaseRes.error().message);
+                        }
+                        throw std::runtime_error(leaseRes.error().message);
                     }
                     auto leaseHandle = std::move(leaseRes.value());
                     yams::daemon::ModelStatusRequest msr;

@@ -268,6 +268,18 @@ std::unique_ptr<ICommand> createPluginCommand() {
 
 namespace yams::cli {
 
+namespace {
+
+void printDaemonAcquireFailure(const char* actionLabel, const yams::Error& err) {
+    if (yams::cli::is_transport_failure(err)) {
+        std::cout << actionLabel << " failed: " << err.message << "\n";
+        return;
+    }
+    std::cout << "Failed to acquire daemon client: " << err.message << "\n";
+}
+
+} // namespace
+
 void PluginCommand::listPlugins() {
     using namespace yams::daemon;
     try {
@@ -281,7 +293,7 @@ void PluginCommand::listPlugins() {
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
             cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
-            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            printDaemonAcquireFailure("Plugin list", leaseRes.error());
             return;
         }
         auto leaseHandle = std::move(leaseRes.value());
@@ -293,7 +305,7 @@ void PluginCommand::listPlugins() {
         auto sres = yams::cli::run_result<StatusResponse>(client.call(sreq),
                                                           std::chrono::milliseconds(5000));
         if (!sres) {
-            std::cout << "Failed to query daemon for plugins: " << sres.error().message << "\n";
+            std::cout << "Plugin list failed: " << sres.error().message << "\n";
             return;
         }
 
@@ -386,7 +398,7 @@ void PluginCommand::showPluginInfo(const std::string& name) {
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
             cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
-            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            printDaemonAcquireFailure("Plugin info", leaseRes.error());
             return;
         }
         auto leaseHandle = std::move(leaseRes.value());
@@ -496,7 +508,7 @@ void PluginCommand::showPluginHealth(const std::string& name) {
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
             cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
-            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            printDaemonAcquireFailure("Plugin health", leaseRes.error());
             return;
         }
         auto leaseHandle = std::move(leaseRes.value());
@@ -508,7 +520,7 @@ void PluginCommand::showPluginHealth(const std::string& name) {
         auto sres = yams::cli::run_result<StatusResponse>(client.call(sreq),
                                                           std::chrono::milliseconds(5000));
         if (!sres) {
-            std::cout << "Failed to query daemon status: " << sres.error().message << "\n";
+            std::cout << "Plugin health failed: " << sres.error().message << "\n";
             return;
         }
 
@@ -634,7 +646,7 @@ void PluginCommand::scanPlugins(const std::string& dir, const std::string& targe
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
             cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
-            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            printDaemonAcquireFailure("Plugin scan", leaseRes.error());
             return;
         }
         auto leaseHandle = std::move(leaseRes.value());
@@ -680,7 +692,7 @@ void PluginCommand::loadPlugin(const std::string& arg, const std::string& cfgJso
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
             cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
-            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            printDaemonAcquireFailure("Plugin load", leaseRes.error());
             return;
         }
         auto leaseHandle = std::move(leaseRes.value());
@@ -721,7 +733,7 @@ void PluginCommand::unloadPlugin(const std::string& name) {
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
             cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
-            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            printDaemonAcquireFailure("Plugin unload", leaseRes.error());
             return;
         }
         auto leaseHandle = std::move(leaseRes.value());
@@ -756,7 +768,7 @@ void PluginCommand::trustList() {
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
             cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
-            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            printDaemonAcquireFailure("Plugin trust list", leaseRes.error());
             return;
         }
         auto leaseHandle = std::move(leaseRes.value());
@@ -793,7 +805,7 @@ void PluginCommand::trustAdd(const std::string& path) {
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
             cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
-            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            printDaemonAcquireFailure("Plugin trust add", leaseRes.error());
             return;
         }
         auto leaseHandle = std::move(leaseRes.value());
@@ -829,7 +841,7 @@ void PluginCommand::trustRemove(const std::string& path) {
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
             cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {
-            std::cout << "Failed to acquire daemon client: " << leaseRes.error().message << "\n";
+            printDaemonAcquireFailure("Plugin trust remove", leaseRes.error());
             return;
         }
         auto leaseHandle = std::move(leaseRes.value());
