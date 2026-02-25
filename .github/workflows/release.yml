@@ -5,6 +5,7 @@ name: Release
   push:
     tags:
       - "v*"
+      - "yams-v*"
   schedule:
     - cron: '0 6 * * *' # 06:00 UTC daily
   workflow_dispatch:
@@ -344,8 +345,11 @@ jobs:
           # Derive version and tag
           if [ "$channel" = "stable" ]; then
             TAG="${GITHUB_REF_NAME}"
-            VERSION="${TAG#v}"
-            TAG_OUT="${GITHUB_REF_NAME}"
+            VERSION="${TAG#yams-v}"
+            if [ "$VERSION" = "$TAG" ]; then
+              VERSION="${TAG#v}"
+            fi
+            TAG_OUT="$TAG"
             RELEASE_NAME="YAMS ${VERSION}"
           elif [ "$channel" = "nightly" ]; then
             DATE_ISO=$(date -u +%Y-%m-%d)
@@ -1088,8 +1092,11 @@ jobs:
           # Derive version and tag
           if [ "$channel" = "stable" ]; then
             TAG="${GITHUB_REF_NAME}"
-            VERSION="${TAG#v}"
-            TAG_OUT="${GITHUB_REF_NAME}"
+            VERSION="${TAG#yams-v}"
+            if [ "$VERSION" = "$TAG" ]; then
+              VERSION="${TAG#v}"
+            fi
+            TAG_OUT="$TAG"
             RELEASE_NAME="YAMS ${VERSION}"
           elif [ "$channel" = "nightly" ]; then
             DATE_ISO=$(date -u +%Y-%m-%d)
