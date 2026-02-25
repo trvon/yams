@@ -899,6 +899,26 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
             config.tuningProfile = "";
             break;
     }
+
+    // Optional env overrides for focused local profiling runs.
+    // These apply per benchmark case so users can narrow workload size/mode
+    // without changing the registered benchmark matrix.
+    if (const char* env = std::getenv("YAMS_BENCH_DOC_COUNT")) {
+        try {
+            const auto parsed = std::stoull(env);
+            if (parsed > 0) {
+                config.documentCount = static_cast<size_t>(parsed);
+            }
+        } catch (...) {
+        }
+    }
+    if (const char* env = std::getenv("YAMS_BENCH_ENABLE_EMBEDDINGS")) {
+        config.enableEmbeddings = (std::string(env) == "1");
+    }
+    if (const char* env = std::getenv("YAMS_TUNING_PROFILE")) {
+        config.tuningProfile = env;
+    }
+
     config.duplicationRate = getDuplicationRate();
 
     // Setup harness

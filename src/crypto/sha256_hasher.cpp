@@ -19,8 +19,7 @@ namespace {
 
 std::string bytesToHex(const unsigned char* data, unsigned int size) {
     static constexpr char kHexDigits[] = "0123456789abcdef";
-    std::string out;
-    out.resize(static_cast<std::string::size_type>(size) * 2U);
+    std::string out(static_cast<std::string::size_type>(size) * 2U, '\0');
     for (unsigned int i = 0; i < size; ++i) {
         const unsigned int value = data[i];
         const size_t pos = static_cast<size_t>(i) * 2U;

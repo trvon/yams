@@ -10,7 +10,6 @@ namespace yamsfmt = fmt;
 #endif
 
 #include <algorithm>
-#include <cstring>
 #include <fstream>
 #include <limits>
 #include <unordered_set>
@@ -155,8 +154,6 @@ std::vector<Chunk> RabinChunker::chunkData(std::span<const std::byte> data) {
 
     RabinWindow window{};
     size_t pos = 0;
-    const auto* bytes = data.data();
-
     while (pos < data.size()) {
         auto [chunkEnd, foundBoundary] = findChunkBoundary(data, pos, window);
         (void)foundBoundary;
@@ -166,12 +163,9 @@ std::vector<Chunk> RabinChunker::chunkData(std::span<const std::byte> data) {
         Chunk& chunk = chunks.back();
         chunk.offset = pos;
         chunk.size = chunkSize;
-        chunk.data.resize(chunkSize);
-        if (chunkSize > 0) {
-            std::memcpy(chunk.data.data(), bytes + pos, chunkSize);
-        }
-        chunk.hash =
-            crypto::SHA256Hasher::hash(std::span<const std::byte>(chunk.data.data(), chunkSize));
+        auto chunkSpan = data.subspan(pos, chunkSize);
+        chunk.hash = crypto::SHA256Hasher::hash(chunkSpan);
+        chunk.data.assign(chunkSpan.begin(), chunkSpan.end());
         pos = chunkEnd;
 
         // Report progress if callback is set
