@@ -3,10 +3,10 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <optional>
-#include <fstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -181,6 +181,108 @@ private:
             // Fall through to raw path fallback.
         }
         return "path:file:" + path;
+    }
+
+    static std::string displayNodePath(const yams::daemon::GraphNode& node) {
+        if (!node.documentPath.empty()) {
+            return node.documentPath;
+        }
+        auto extracted = extractNodePath(node);
+        if (extracted.has_value()) {
+            return extracted->generic_string();
+        }
+        return {};
+    }
+
+    static std::string
+    formatRelationCounts(const std::unordered_map<std::string, std::size_t>& counts,
+                         std::size_t topLimit = 3) {
+        if (counts.empty()) {
+            return "-";
+        }
+
+        std::vector<std::pair<std::string, std::size_t>> sorted(counts.begin(), counts.end());
+        std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+            if (a.second != b.second) {
+                return a.second > b.second;
+            }
+            return a.first < b.first;
+        });
+
+        const std::size_t shown = std::min(topLimit, sorted.size());
+        std::string out;
+        for (std::size_t i = 0; i < shown; ++i) {
+            if (!out.empty()) {
+                out += ", ";
+            }
+            out += sorted[i].first + "(" + std::to_string(sorted[i].second) + ")";
+        }
+        if (sorted.size() > shown) {
+            out += ", +" + std::to_string(sorted.size() - shown) + " more";
+        }
+        return out;
+    }
+
+    static std::unordered_map<int64_t, std::string>
+    buildTraversalRelationHints(const yams::daemon::GraphQueryResponse& resp) {
+        std::unordered_map<int64_t, std::string> hints;
+        if (resp.connectedNodes.empty() || resp.edges.empty()) {
+            return hints;
+        }
+
+        std::unordered_set<int64_t> connectedIds;
+        connectedIds.reserve(resp.connectedNodes.size());
+
+        std::unordered_map<int64_t, int32_t> distanceByNode;
+        distanceByNode.reserve(resp.connectedNodes.size() + 1);
+        for (const auto& node : resp.connectedNodes) {
+            connectedIds.insert(node.nodeId);
+            distanceByNode[node.nodeId] = node.distance;
+        }
+        distanceByNode[resp.originNode.nodeId] = 0;
+
+        std::unordered_map<int64_t, std::unordered_map<std::string, std::size_t>> preferred;
+        std::unordered_map<int64_t, std::unordered_map<std::string, std::size_t>> fallback;
+
+        auto accumulate = [&](int64_t nodeId, int64_t otherNodeId,
+                              const std::string& relationLabel) {
+            if (connectedIds.find(nodeId) == connectedIds.end()) {
+                return;
+            }
+
+            fallback[nodeId][relationLabel] += 1;
+
+            auto distIt = distanceByNode.find(nodeId);
+            auto otherDistIt = distanceByNode.find(otherNodeId);
+            if (distIt == distanceByNode.end() || otherDistIt == distanceByNode.end()) {
+                return;
+            }
+            if (distIt->second > 0 && otherDistIt->second == distIt->second - 1) {
+                preferred[nodeId][relationLabel] += 1;
+            }
+        };
+
+        for (const auto& edge : resp.edges) {
+            const std::string relationLabel = edge.relation.empty() ? "edge" : edge.relation;
+            accumulate(edge.srcNodeId, edge.dstNodeId, relationLabel);
+            accumulate(edge.dstNodeId, edge.srcNodeId, relationLabel);
+        }
+
+        hints.reserve(resp.connectedNodes.size());
+        for (const auto& node : resp.connectedNodes) {
+            if (auto it = preferred.find(node.nodeId);
+                it != preferred.end() && !it->second.empty()) {
+                hints[node.nodeId] = formatRelationCounts(it->second);
+                continue;
+            }
+            if (auto it = fallback.find(node.nodeId); it != fallback.end() && !it->second.empty()) {
+                hints[node.nodeId] = formatRelationCounts(it->second);
+                continue;
+            }
+            hints[node.nodeId] = "-";
+        }
+
+        return hints;
     }
 
     // yams-66h: List available node types with counts
@@ -836,7 +938,8 @@ private:
         if (!ifs) {
             return false;
         }
-        std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        std::string content((std::istreambuf_iterator<char>(ifs)),
+                            std::istreambuf_iterator<char>());
         // Definition + one additional usage in the same file is enough to suppress obvious
         // false positives for local helper types (e.g., local structs).
         return countWholeWordOccurrences(content, symbol) >= 2;
@@ -1133,6 +1236,8 @@ private:
             return Result<void>();
         }
 
+        const auto traversalHints = buildTraversalRelationHints(resp);
+
         if (jsonOutput_ || outputFormat_ == "json") {
             json out;
             out["origin"] = {{"nodeId", resp.originNode.nodeId},
@@ -1154,6 +1259,13 @@ private:
                 n["distance"] = node.distance;
                 if (!node.documentHash.empty()) {
                     n["documentHash"] = node.documentHash;
+                }
+                if (auto nodePath = displayNodePath(node); !nodePath.empty()) {
+                    n["path"] = nodePath;
+                }
+                if (auto hintIt = traversalHints.find(node.nodeId);
+                    hintIt != traversalHints.end()) {
+                    n["via"] = hintIt->second;
                 }
                 if (!node.properties.empty()) {
                     try {
@@ -1244,13 +1356,15 @@ private:
             // Summary
             std::string summary =
                 "Connected: " + yams::cli::ui::format_number(resp.connectedNodes.size()) + " of " +
-                yams::cli::ui::format_number(resp.totalNodesFound) + " nodes";
+                yams::cli::ui::format_number(resp.totalNodesFound) + " nodes, " +
+                yams::cli::ui::format_number(resp.totalEdgesTraversed) + " edges";
             std::cout << yams::cli::ui::status_info(summary) << "\n\n";
 
             // Build table
             yams::cli::ui::Table table;
-            table.headers = {"LABEL", "TYPE", "DIST"};
+            table.headers = {"LABEL", "TYPE", "DIST", "VIA"};
             if (verbose_) {
+                table.headers.push_back("PATH");
                 table.headers.push_back("KEY");
                 table.headers.push_back("HASH");
             }
@@ -1261,7 +1375,15 @@ private:
                 row.push_back(yams::cli::ui::truncate_to_width(node.label, 35));
                 row.push_back(node.type.empty() ? "-" : node.type);
                 row.push_back(std::to_string(node.distance));
+                std::string viaDisplay = "-";
+                if (auto it = traversalHints.find(node.nodeId); it != traversalHints.end()) {
+                    viaDisplay = it->second;
+                }
+                row.push_back(yams::cli::ui::truncate_to_width(viaDisplay, 34));
                 if (verbose_) {
+                    auto nodePath = displayNodePath(node);
+                    row.push_back(
+                        nodePath.empty() ? "-" : yams::cli::ui::truncate_to_width(nodePath, 42));
                     row.push_back(yams::cli::ui::truncate_to_width(node.nodeKey, 25));
                     std::string hashDisplay =
                         node.documentHash.empty() ? "-" : node.documentHash.substr(0, 12) + "...";

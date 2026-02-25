@@ -32,6 +32,10 @@ else
     'client_timeout_recovery_test.cpp',
   )
 
+  codex_sandbox_embedding_regression_srcs = files(
+    'codex_sandbox_embedding_regression_test.cpp',
+  )
+
   # idle_streaming and writer_drain tests removed - timing-sensitive and flaky in CI
   # See git history for original implementation if needed
 
@@ -321,6 +325,23 @@ else
     test('ghidra_kg_entity_ingestion',
       ghidra_kg_entity_ingestion_exe,
       suite: ['integration', 'daemon', 'catch2', 'kg', 'ghidra', 'pbi-3jb'],
+      env: _kg_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['--allow-running-no-tests'],
+    )
+
+    codex_sandbox_embedding_regression_exe = executable('yams_codex_sandbox_embedding_regression_tests_catch2',
+      codex_sandbox_embedding_regression_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('codex_sandbox_embedding_regression',
+      codex_sandbox_embedding_regression_exe,
+      suite: ['integration', 'daemon', 'catch2', 'sandbox', 'embeddings'],
       env: _kg_test_env,
       is_parallel: false,
       timeout: get_option('integration-daemon-timeout'),

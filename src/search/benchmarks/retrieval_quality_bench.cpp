@@ -53,8 +53,8 @@
 #include <yams/daemon/client/daemon_client.h>
 
 #include <algorithm>
-#include <chrono>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -599,8 +599,20 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
             }
             return false;
         }();
+        const bool benchVerbose = []() -> bool {
+            if (const char* env = std::getenv("YAMS_BENCH_VERBOSE"); env) {
+                std::string value(env);
+                std::transform(value.begin(), value.end(), value.begin(), [](char c) {
+                    return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                });
+                return value == "1" || value == "true" || value == "yes" || value == "on";
+            }
+            return false;
+        }();
 
-        spdlog::info("Executing search query: '{}'", tq.query);
+        if (benchVerbose) {
+            spdlog::info("Executing search query: '{}'", tq.query);
+        }
         // Wait at least as long as the query timeout, plus a small margin.
         // Using a shorter run_sync deadline can leave in-flight requests behind,
         // which can cascade into timeouts/backpressure across subsequent queries.
@@ -625,10 +637,12 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
             literalRetryCount++;
 
         const auto& results = run.value().response.results;
-        spdlog::info("Search returned {} results for query '{}' (attempts={}, streaming={}, "
-                     "fuzzy_retry={}, literal_retry={})",
-                     results.size(), tq.query, run.value().attempts, run.value().usedStreaming,
-                     run.value().usedFuzzyRetry, run.value().usedLiteralTextRetry);
+        if (benchVerbose) {
+            spdlog::info("Search returned {} results for query '{}' (attempts={}, streaming={}, "
+                         "fuzzy_retry={}, literal_retry={})",
+                         results.size(), tq.query, run.value().attempts, run.value().usedStreaming,
+                         run.value().usedFuzzyRetry, run.value().usedLiteralTextRetry);
+        }
 
         // Detailed result logging for debugging retrieval quality
         if (benchDiagEnabled) {

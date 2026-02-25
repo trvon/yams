@@ -1297,6 +1297,51 @@ TEST_F(UiCliExpectationsIT, CliSearchHumanIncludesRelationHint) {
     EXPECT_NE(output.find("defines"), std::string::npos);
 }
 
+TEST_F(UiCliExpectationsIT, CliGraphTraversalShowsViaAndPathColumns) {
+    fs::create_directories(root_ / "ingest" / "graph");
+    const auto filePath = root_ / "ingest" / "graph" / "via_path_target.cpp";
+    std::ofstream(filePath) << "int main() { return 0; }\n";
+
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
+    auto ctx = sm->getAppContext();
+    ASSERT_NE(ctx.kgStore, nullptr);
+
+    yams::metadata::KGNode dirNode;
+    dirNode.nodeKey = "path:dir:" + (root_ / "ingest" / "graph").string();
+    dirNode.type = std::string("directory");
+    dirNode.label = std::string("graph");
+    auto dirNodeId = ctx.kgStore->upsertNode(dirNode);
+    ASSERT_TRUE(dirNodeId) << dirNodeId.error().message;
+
+    yams::metadata::KGNode fileNode;
+    fileNode.nodeKey = "path:file:" + filePath.string();
+    fileNode.type = std::string("file");
+    fileNode.label = std::string("via_path_target.cpp");
+    auto fileNodeId = ctx.kgStore->upsertNode(fileNode);
+    ASSERT_TRUE(fileNodeId) << fileNodeId.error().message;
+
+    yams::metadata::KGEdge containsEdge;
+    containsEdge.srcNodeId = dirNodeId.value();
+    containsEdge.dstNodeId = fileNodeId.value();
+    containsEdge.relation = "contains";
+    ASSERT_TRUE(ctx.kgStore->addEdge(containsEdge));
+
+    ScopedEnvVar socketEnv("YAMS_DAEMON_SOCKET", socketPath_.string());
+    ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");
+    CaptureStdout capture;
+    int rc = runCliCommand({"yams", "--data-dir", storageDir_.string(), "graph", "--node-key",
+                            dirNode.nodeKey, "--depth", "1", "--limit", "10", "--verbose"});
+    EXPECT_EQ(rc, 0);
+
+    const std::string output = capture.str();
+    EXPECT_NE(output.find("Knowledge Graph Query"), std::string::npos);
+    EXPECT_NE(output.find("VIA"), std::string::npos);
+    EXPECT_NE(output.find("PATH"), std::string::npos);
+    EXPECT_NE(output.find("contains(1)"), std::string::npos);
+    EXPECT_NE(output.find("via_path_target.cpp"), std::string::npos);
+}
+
 // 12) Search — explicit hash search normalization
 TEST_F(UiCliExpectationsIT, HashSearchNormalization) {
     // Ingest one file and query by its hash (full and partial)

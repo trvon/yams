@@ -575,6 +575,25 @@ TEST_CASE("MCP DTO parsing - GraphResponse optional emission", "[mcp][dto][graph
 
     {
         MCPGraphResponse r;
+        r.connectedNodes = json::array({json{{"nodeId", 7},
+                                             {"nodeKey", "symbol:main"},
+                                             {"distance", 2},
+                                             {"documentPath", "/repo/src/main.cpp"},
+                                             {"via", "calls(1)"}}});
+
+        const auto j = r.toJson();
+        REQUIRE(j.contains("connected_nodes"));
+        REQUIRE(j["connected_nodes"].is_array());
+        REQUIRE(j["connected_nodes"].size() == 1);
+        CHECK(j["connected_nodes"][0]["via"] == "calls(1)");
+        CHECK(j["connected_nodes"][0]["documentPath"] == "/repo/src/main.cpp");
+
+        const auto roundTrip = MCPGraphResponse::fromJson(j).toJson();
+        CHECK(roundTrip["connected_nodes"][0]["via"] == "calls(1)");
+    }
+
+    {
+        MCPGraphResponse r;
         r.action = "ingest";
         r.nodesInserted = 2;
         r.edgesInserted = 1;

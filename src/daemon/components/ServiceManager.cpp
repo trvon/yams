@@ -1075,7 +1075,8 @@ void ServiceManager::shutdown() {
     spdlog::info("[ServiceManager] Phase 6.5: Embedding lifecycle managed by model provider");
 
     spdlog::info("[ServiceManager] Phase 6.6: Shutting down model provider");
-    if (modelProvider_) {
+    auto modelProvider = loadModelProvider();
+    if (modelProvider) {
         try {
             // Avoid unloading individual models during shutdown for ABI-backed providers.
             // The ONNX plugin can have a background preload/warmup thread; unloading models here
@@ -1083,18 +1084,18 @@ void ServiceManager::shutdown() {
             // std::system_error("mutex lock failed: Invalid argument") during teardown).
             // For ABI providers, rely on plugin shutdown (Phase 6.9) to join background threads
             // and release resources safely.
-            if (dynamic_cast<AbiModelProviderAdapter*>(modelProvider_.get()) == nullptr) {
-                auto loaded = modelProvider_->getLoadedModels();
+            if (dynamic_cast<AbiModelProviderAdapter*>(modelProvider.get()) == nullptr) {
+                auto loaded = modelProvider->getLoadedModels();
                 for (const auto& name : loaded) {
-                    (void)modelProvider_->unloadModel(name);
+                    (void)modelProvider->unloadModel(name);
                 }
             }
-            modelProvider_->shutdown();
-            modelProvider_.reset();
+            modelProvider->shutdown();
+            storeModelProvider(nullptr);
         } catch (const std::exception& e) {
             spdlog::warn("[ServiceManager] Phase 6.6: Model provider shutdown failed: {}",
                          e.what());
-            modelProvider_.reset();
+            storeModelProvider(nullptr);
         }
     } else {
         spdlog::info("[ServiceManager] Phase 6.6: No model provider to shut down");
@@ -1415,9 +1416,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             [this, reason, includeVector]() -> boost::asio::awaitable<void> {
                 try {
                     std::shared_ptr<vector::EmbeddingGenerator> embGen;
-                    if (includeVector && modelProvider_) {
+                    auto modelProvider = loadModelProvider();
+                    if (includeVector && modelProvider) {
                         try {
-                            embGen = modelProvider_->getEmbeddingGenerator();
+                            embGen = modelProvider->getEmbeddingGenerator();
                         } catch (...) {
                         }
                     }
@@ -1876,7 +1878,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
         auto initRes = embeddingService_->initialize();
         if (initRes) {
-            embeddingService_->setProviders([this]() { return this->modelProvider_; },
+            embeddingService_->setProviders([this]() { return this->loadModelProvider(); },
                                             [this]() { return this->resolvePreferredModel(); },
                                             [this]() { return this->vectorDatabase_; });
             embeddingService_->start();
@@ -2118,13 +2120,14 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
         // Get embedding generator from model provider if available
         std::shared_ptr<vector::EmbeddingGenerator> embGen;
+        auto modelProvider = loadModelProvider();
         spdlog::info("[SearchBuild] Checking embedding generator: modelProvider_={} isAvailable={} "
                      "modelName='{}'",
-                     modelProvider_ != nullptr,
-                     modelProvider_ ? modelProvider_->isAvailable() : false, embeddingModelName_);
-        if (modelProvider_ && modelProvider_->isAvailable() && !embeddingModelName_.empty()) {
+                     modelProvider != nullptr, modelProvider ? modelProvider->isAvailable() : false,
+                     embeddingModelName_);
+        if (modelProvider && modelProvider->isAvailable() && !embeddingModelName_.empty()) {
             try {
-                embGen = modelProvider_->getEmbeddingGenerator(embeddingModelName_);
+                embGen = modelProvider->getEmbeddingGenerator(embeddingModelName_);
                 spdlog::info("[SearchBuild] Got embedding generator: {}", embGen != nullptr);
             } catch (const std::exception& e) {
                 spdlog::warn("[SearchBuild] Failed to get embedding generator: {}", e.what());
@@ -2459,17 +2462,18 @@ Result<bool> ServiceManager::adoptModelProviderFromHosts(const std::string& pref
         auto result = pluginManager_->adoptModelProvider(preferredName);
         if (result && result.value()) {
             // Sync local members from PluginManager for backward compatibility
-            modelProvider_ = pluginManager_->getModelProvider();
+            auto modelProvider = pluginManager_->getModelProvider();
+            storeModelProvider(modelProvider);
             embeddingModelName_ = pluginManager_->getEmbeddingModelName();
-            state_.readiness.modelProviderReady = (modelProvider_ != nullptr);
+            state_.readiness.modelProviderReady = (modelProvider != nullptr);
             spdlog::info("[ServiceManager] Synced model provider: model='{}', provider={}",
-                         embeddingModelName_, modelProvider_ ? "valid" : "null");
+                         embeddingModelName_, modelProvider ? "valid" : "null");
 
             // Initialize reranker adapter using model provider's scoreDocuments capability
             // This is a lazy-init adapter - it fetches the provider on each call
             if (!rerankerAdapter_) {
                 rerankerAdapter_ = std::make_shared<yams::search::ModelProviderRerankerAdapter>(
-                    [this]() { return this->modelProvider_; });
+                    [this]() { return this->loadModelProvider(); });
                 spdlog::info("[Reranker] Initialized model provider reranker adapter");
             }
         }
@@ -2641,9 +2645,10 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
         // Get embedding generator from model provider if available
         std::shared_ptr<vector::EmbeddingGenerator> embGen;
-        if (modelProvider_ && modelProvider_->isAvailable() && !embeddingModelName_.empty()) {
+        auto modelProvider = loadModelProvider();
+        if (modelProvider && modelProvider->isAvailable() && !embeddingModelName_.empty()) {
             try {
-                embGen = modelProvider_->getEmbeddingGenerator(embeddingModelName_);
+                embGen = modelProvider->getEmbeddingGenerator(embeddingModelName_);
             } catch (...) {
             }
         }
@@ -2732,9 +2737,10 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
 
             // Get embedding generator from model provider if available
             std::shared_ptr<vector::EmbeddingGenerator> embGen;
-            if (modelProvider_ && modelProvider_->isAvailable() && !embeddingModelName_.empty()) {
+            auto modelProvider = loadModelProvider();
+            if (modelProvider && modelProvider->isAvailable() && !embeddingModelName_.empty()) {
                 try {
-                    embGen = modelProvider_->getEmbeddingGenerator(embeddingModelName_);
+                    embGen = modelProvider->getEmbeddingGenerator(embeddingModelName_);
                 } catch (...) {
                 }
             }
@@ -2825,7 +2831,8 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
     ctx.contentExtractors = contentExtractors_;
 
     // Log vector capability status
-    bool vectorCapable = (modelProvider_ && modelProvider_->isAvailable());
+    auto modelProvider = loadModelProvider();
+    bool vectorCapable = (modelProvider && modelProvider->isAvailable());
     spdlog::debug("AppContext: vector_capabilities={}", vectorCapable ? "active" : "unavailable");
 
     // Populate degraded/repair flags for search.
@@ -2919,13 +2926,14 @@ bool ServiceManager::detectEmbeddingPreloadFlag() const {
 }
 
 size_t ServiceManager::getEmbeddingDimension() const {
-    if (!modelProvider_ || !modelProvider_->isAvailable())
+    auto modelProvider = loadModelProvider();
+    if (!modelProvider || !modelProvider->isAvailable())
         return 0;
     try {
         std::string modelName = resolvePreferredModel();
         if (modelName.empty())
             return 0;
-        return modelProvider_->getEmbeddingDim(modelName);
+        return modelProvider->getEmbeddingDim(modelName);
     } catch (...) {
         return 0;
     }
@@ -3130,10 +3138,11 @@ ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_s
                                bool includeEmbeddingGenerator) {
     auto exec = getWorkerExecutor();
     std::shared_ptr<vector::EmbeddingGenerator> gen;
-    if (includeEmbeddingGenerator && modelProvider_ && modelProvider_->isAvailable() &&
+    auto modelProvider = loadModelProvider();
+    if (includeEmbeddingGenerator && modelProvider && modelProvider->isAvailable() &&
         !embeddingModelName_.empty()) {
         try {
-            gen = modelProvider_->getEmbeddingGenerator(embeddingModelName_);
+            gen = modelProvider->getEmbeddingGenerator(embeddingModelName_);
         } catch (...) {
         }
     }

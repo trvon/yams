@@ -137,7 +137,7 @@ public:
         }
         return metadataRepo_; // Fallback to old member
     }
-    std::shared_ptr<IModelProvider> getModelProvider() const { return modelProvider_; }
+    std::shared_ptr<IModelProvider> getModelProvider() const { return loadModelProvider(); }
     std::shared_ptr<yams::search::SearchEngine> getSearchEngineSnapshot() const;
     std::string getEmbeddingModelName() const { return embeddingModelName_; }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
@@ -480,7 +480,7 @@ public:
 
     // Test helpers: inject mock provider and tweak provider state/name
     void __test_setModelProvider(std::shared_ptr<IModelProvider> provider) {
-        modelProvider_ = std::move(provider);
+        storeModelProvider(std::move(provider));
     }
     void __test_setAdoptedProviderPluginName(const std::string& name) {
         adoptedProviderPluginName_ = name;
@@ -506,6 +506,14 @@ public:
     }
 
 private:
+    std::shared_ptr<IModelProvider> loadModelProvider() const {
+        return std::atomic_load_explicit(&modelProvider_, std::memory_order_acquire);
+    }
+
+    void storeModelProvider(std::shared_ptr<IModelProvider> provider) {
+        std::atomic_store_explicit(&modelProvider_, std::move(provider), std::memory_order_release);
+    }
+
     size_t getEmbeddingDimension() const;
 
     boost::asio::awaitable<yams::Result<void>>

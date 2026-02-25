@@ -161,6 +161,94 @@ static std::string sanitizeName(std::string s) {
     return s;
 }
 
+static std::string formatRelationCounts(const std::unordered_map<std::string, std::size_t>& counts,
+                                        std::size_t topLimit = 3) {
+    if (counts.empty()) {
+        return "-";
+    }
+
+    std::vector<std::pair<std::string, std::size_t>> sorted(counts.begin(), counts.end());
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+        if (a.second != b.second) {
+            return a.second > b.second;
+        }
+        return a.first < b.first;
+    });
+
+    const std::size_t shown = std::min(topLimit, sorted.size());
+    std::string out;
+    for (std::size_t i = 0; i < shown; ++i) {
+        if (!out.empty()) {
+            out += ", ";
+        }
+        out += sorted[i].first + "(" + std::to_string(sorted[i].second) + ")";
+    }
+    if (sorted.size() > shown) {
+        out += ", +" + std::to_string(sorted.size() - shown) + " more";
+    }
+    return out;
+}
+
+static std::unordered_map<int64_t, std::string>
+buildTraversalRelationHints(const yams::daemon::GraphQueryResponse& resp) {
+    std::unordered_map<int64_t, std::string> hints;
+    if (resp.connectedNodes.empty() || resp.edges.empty()) {
+        return hints;
+    }
+
+    std::unordered_set<int64_t> connectedIds;
+    connectedIds.reserve(resp.connectedNodes.size());
+
+    std::unordered_map<int64_t, int32_t> distanceByNode;
+    distanceByNode.reserve(resp.connectedNodes.size() + 1);
+    for (const auto& node : resp.connectedNodes) {
+        connectedIds.insert(node.nodeId);
+        distanceByNode[node.nodeId] = node.distance;
+    }
+    distanceByNode[resp.originNode.nodeId] = 0;
+
+    std::unordered_map<int64_t, std::unordered_map<std::string, std::size_t>> preferred;
+    std::unordered_map<int64_t, std::unordered_map<std::string, std::size_t>> fallback;
+
+    auto accumulate = [&](int64_t nodeId, int64_t otherNodeId, const std::string& relationLabel) {
+        if (connectedIds.find(nodeId) == connectedIds.end()) {
+            return;
+        }
+
+        fallback[nodeId][relationLabel] += 1;
+
+        auto distIt = distanceByNode.find(nodeId);
+        auto otherDistIt = distanceByNode.find(otherNodeId);
+        if (distIt == distanceByNode.end() || otherDistIt == distanceByNode.end()) {
+            return;
+        }
+        if (distIt->second > 0 && otherDistIt->second == distIt->second - 1) {
+            preferred[nodeId][relationLabel] += 1;
+        }
+    };
+
+    for (const auto& edge : resp.edges) {
+        const std::string relationLabel = edge.relation.empty() ? "edge" : edge.relation;
+        accumulate(edge.srcNodeId, edge.dstNodeId, relationLabel);
+        accumulate(edge.dstNodeId, edge.srcNodeId, relationLabel);
+    }
+
+    hints.reserve(resp.connectedNodes.size());
+    for (const auto& node : resp.connectedNodes) {
+        if (auto it = preferred.find(node.nodeId); it != preferred.end() && !it->second.empty()) {
+            hints[node.nodeId] = formatRelationCounts(it->second);
+            continue;
+        }
+        if (auto it = fallback.find(node.nodeId); it != fallback.end() && !it->second.empty()) {
+            hints[node.nodeId] = formatRelationCounts(it->second);
+            continue;
+        }
+        hints[node.nodeId] = "-";
+    }
+
+    return hints;
+}
+
 // Synchronous pooled_execute is deprecated and returns NotImplemented
 // This is kept only for toolRegistry compatibility until it's migrated to async
 template <typename Manager, typename TRequest, typename Render>
@@ -3684,6 +3772,7 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
     }
 
     const auto& resp = res.value();
+    const auto traversalHints = buildTraversalRelationHints(resp);
 
     // Build MCP response
     MCPGraphResponse out;
@@ -3715,6 +3804,9 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
         jnode["documentHash"] = node.documentHash;
         jnode["documentPath"] = node.documentPath;
         jnode["distance"] = node.distance;
+        if (auto hintIt = traversalHints.find(node.nodeId); hintIt != traversalHints.end()) {
+            jnode["via"] = hintIt->second;
+        }
         if (!node.label.empty()) {
             jnode["label"] = node.label;
         }

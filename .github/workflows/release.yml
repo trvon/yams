@@ -34,7 +34,7 @@ jobs:
   check-commits:
     name: Check for new commits (nightly only)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' && github.actor != 'nektos/act'
     outputs:
       has_new_commits: ${{ steps.check.outputs.has_new_commits }}
       last_release_sha: ${{ steps.check.outputs.last_release_sha }}
@@ -102,6 +102,7 @@ jobs:
     needs: [check-commits]
     if: |
       always() &&
+      github.actor != 'nektos/act' &&
       (needs.check-commits.result == 'skipped' || 
        needs.check-commits.outputs.has_new_commits == 'true' ||
        github.event_name == 'push' ||
@@ -175,7 +176,7 @@ jobs:
           git submodule update --init --depth 1 third_party/sqlite-vec-cpp
           git submodule update --init --depth 1 third_party/symspell
       - name: Skip non-linux entries under act (build)
-        if: github.actor == 'nektos/act' && matrix.os != 'linux-hosted'
+        if: github.actor == 'nektos/act' && !startsWith(matrix.os, 'linux-hosted')
         shell: bash
         run: |
           echo "Skipping build-release job steps for ${{ matrix.os }} under act"
@@ -458,7 +459,16 @@ jobs:
             brew update || true
             brew install meson ninja ccache || true
           elif [ "$RUNNER_OS" = "Linux" ]; then
-            python3 -m pip install --user --upgrade meson 'ninja>=1.10' || python -m pip install --user --upgrade meson 'ninja>=1.10'
+            if command -v meson >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1; then
+              echo "meson/ninja already available on PATH"
+            else
+              sudo apt-get update || true
+              sudo apt-get install -y --no-install-recommends meson ninja-build || true
+            fi
+            if ! command -v meson >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1; then
+              python3 -m pip install --user --upgrade --break-system-packages meson 'ninja>=1.10' || \
+                python -m pip install --user --upgrade --break-system-packages meson 'ninja>=1.10' || true
+            fi
             if [ -n "${GITHUB_PATH:-}" ]; then
               echo "$HOME/.local/bin" >> "$GITHUB_PATH"
             else
@@ -968,7 +978,7 @@ jobs:
           echo "Created asset: $OUTDIR/$ASSET"
 
       - name: Build Linux packages (DEB/RPM)
-        if: ${{ matrix.build_packages == true && matrix.os == 'linux-hosted' && inputs.fast_mode != 'true' && github.actor != 'nektos/act' }}
+        if: ${{ matrix.build_packages == true && runner.os == 'Linux' && inputs.fast_mode != 'true' && github.actor != 'nektos/act' }}
         env:
           BASE_VERSION: ${{ steps.meta.outputs.base_version }}
         shell: bash
@@ -1023,14 +1033,20 @@ jobs:
           retention-days: 1
 
       - name: Verify Linux package artifacts
-        if: ${{ matrix.os == 'linux-hosted' && github.actor != 'nektos/act' && inputs.fast_mode != 'true' }}
+        if: ${{ matrix.build_packages == true && runner.os == 'Linux' && github.actor != 'nektos/act' && inputs.fast_mode != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "Verifying expected Linux package artifacts (DEB/RPM)"
-          ls -1 yams-*linux-x86_64.deb 2>/dev/null || { echo "ERROR: Missing .deb package" >&2; exit 1; }
+          case "${{ matrix.suffix }}" in
+            linux-x86_64) expected_arch="x86_64" ;;
+            linux-arm64) expected_arch="aarch64" ;;
+            *) echo "Skipping Linux package verification for unexpected suffix: ${{ matrix.suffix }}" >&2; exit 0 ;;
+          esac
+
+          echo "Verifying expected Linux package artifacts (DEB/RPM) for ${expected_arch}"
+          ls -1 yams-*linux-${expected_arch}.deb 2>/dev/null || { echo "ERROR: Missing .deb package for ${expected_arch}" >&2; exit 1; }
           if command -v rpmbuild >/dev/null 2>&1; then
-            ls -1 yams-*linux-x86_64.rpm 2>/dev/null || { echo "ERROR: Missing .rpm package" >&2; exit 1; }
+            ls -1 yams-*linux-${expected_arch}.rpm 2>/dev/null || { echo "ERROR: Missing .rpm package for ${expected_arch}" >&2; exit 1; }
           else
             echo "rpmbuild unavailable; RPM check skipped" >&2
           fi
@@ -1494,37 +1510,78 @@ jobs:
           POOL_DIR="$REPO_ROOT/pool/main/y/yams"
           DIST=stable
           COMPONENT=main
-          ARCH=amd64
-          mkdir -p "$POOL_DIR" "$REPO_ROOT/dists/$DIST/$COMPONENT/binary-$ARCH"
-          # Copy & normalize deb naming (yams_<version>_amd64.deb)
+          mkdir -p "$POOL_DIR"
+
+          # Copy and normalize Debian filenames by architecture.
+          # Source naming is expected as yams-<version>-linux-x86_64.deb or yams-<version>-linux-aarch64.deb.
+          seen_amd64=0
+          seen_arm64=0
           for deb in assets/*.deb; do
-            cp "$deb" "$POOL_DIR/$(echo "$deb" | sed -E "s|.*yams-([^-]+)-linux-x86_64\.deb|yams_${BASE_VERSION}_amd64.deb|")" || true
+            deb_name="$(basename "$deb")"
+            case "$deb_name" in
+              *-linux-x86_64.deb)
+                target_name="yams_${BASE_VERSION}_amd64.deb"
+                seen_amd64=1
+                ;;
+              *-linux-aarch64.deb|*-linux-arm64.deb)
+                target_name="yams_${BASE_VERSION}_arm64.deb"
+                seen_arm64=1
+                ;;
+              *)
+                echo "Skipping unrecognized .deb naming pattern: $deb_name" >&2
+                continue
+                ;;
+            esac
+            cp "$deb" "$POOL_DIR/$target_name"
           done
+
+          ARCHES=()
+          [ "$seen_amd64" -eq 1 ] && ARCHES+=(amd64)
+          [ "$seen_arm64" -eq 1 ] && ARCHES+=(arm64)
+          if [ ${#ARCHES[@]} -eq 0 ]; then
+            echo "No recognized .deb package architectures found in assets; skipping APT metadata generation" >&2
+            exit 0
+          fi
+
           # Install dpkg-dev if missing (for dpkg-scanpackages)
           if ! command -v dpkg-scanpackages >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install -y dpkg-dev
           fi
           pushd "$REPO_ROOT" >/dev/null
-          dpkg-scanpackages --multiversion pool > dists/$DIST/$COMPONENT/binary-$ARCH/Packages
-          gzip -c dists/$DIST/$COMPONENT/binary-$ARCH/Packages > dists/$DIST/$COMPONENT/binary-$ARCH/Packages.gz
+
+          # Scan pool once, then split package stanzas per architecture.
+          dpkg-scanpackages --multiversion pool > dists/$DIST/$COMPONENT/Packages.all
+          for ARCH in "${ARCHES[@]}"; do
+            mkdir -p "dists/$DIST/$COMPONENT/binary-$ARCH"
+            awk -v arch="$ARCH" '
+              BEGIN { RS=""; ORS="\n\n" }
+              $0 ~ ("(^|\\n)Architecture: " arch "(\\n|$)") { print $0 }
+            ' "dists/$DIST/$COMPONENT/Packages.all" > "dists/$DIST/$COMPONENT/binary-$ARCH/Packages"
+            gzip -c "dists/$DIST/$COMPONENT/binary-$ARCH/Packages" > "dists/$DIST/$COMPONENT/binary-$ARCH/Packages.gz"
+          done
+          rm -f "dists/$DIST/$COMPONENT/Packages.all"
+
+          ARCH_LIST="${ARCHES[*]}"
           # Generate Release file with proper Date and SHA256 hash entries
           {
             echo "Origin: YAMS"
             echo "Label: YAMS"
             echo "Suite: $DIST"
             echo "Codename: $DIST"
-            echo "Architectures: $ARCH"
+            echo "Architectures: $ARCH_LIST"
             echo "Components: $COMPONENT"
             echo "Date: $(date -Ru)"
             echo "Description: YAMS APT repository"
             echo "SHA256:"
-            for f in $COMPONENT/binary-$ARCH/Packages $COMPONENT/binary-$ARCH/Packages.gz; do
-              if [ -f "dists/$DIST/$f" ]; then
-                hash=$(sha256sum "dists/$DIST/$f" | awk '{print $1}')
-                size=$(stat --format='%s' "dists/$DIST/$f" 2>/dev/null || stat -f '%z' "dists/$DIST/$f")
-                printf " %s %16d %s\n" "$hash" "$size" "$f"
-              fi
+            for ARCH in "${ARCHES[@]}"; do
+              for f in "$COMPONENT/binary-$ARCH/Packages" "$COMPONENT/binary-$ARCH/Packages.gz"; do
+                if [ -f "dists/$DIST/$f" ]; then
+                  hash=$(sha256sum "dists/$DIST/$f" | awk '{print $1}')
+                  size=$(stat --format='%s' "dists/$DIST/$f" 2>/dev/null || stat -f '%z' "dists/$DIST/$f")
+                  printf " %s %16d %s\n" "$hash" "$size" "$f"
+                fi
+              done
             done
           } > dists/$DIST/Release
           # Optional GPG signing if secret present
@@ -1538,11 +1595,11 @@ jobs:
           printf '%s\n' \
             'Add this APT repo (unsigned example):' \
             '  curl -fsSL https://repo.yamsmemory.ai/gpg.key -o /usr/share/keyrings/yams.gpg' \
-            '  echo "deb [signed-by=/usr/share/keyrings/yams.gpg] https://repo.yamsmemory.ai/aptrepo stable main" | sudo tee /etc/apt/sources.list.d/yams.list' \
+            '  echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/yams.gpg] https://repo.yamsmemory.ai/aptrepo stable main" | sudo tee /etc/apt/sources.list.d/yams.list' \
             '  sudo apt-get update && sudo apt-get install yams' \
             '' \
             'If unsigned (temporary/testing):' \
-            '  echo "deb [trusted=yes] https://repo.yamsmemory.ai/aptrepo stable main" | sudo tee /etc/apt/sources.list.d/yams.list' \
+            '  echo "deb [arch=amd64,arm64 trusted=yes] https://repo.yamsmemory.ai/aptrepo stable main" | sudo tee /etc/apt/sources.list.d/yams.list' \
             '  sudo apt-get update && sudo apt-get install yams' \
             > "$REPO_ROOT/USAGE.txt"
 

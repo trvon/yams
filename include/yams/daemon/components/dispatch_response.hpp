@@ -181,6 +181,8 @@ struct GraphNodeMapper {
         graphNode.label = meta.node.label.value_or("");
         graphNode.type = meta.node.type.value_or("");
         graphNode.documentHash = meta.documentHash.value_or("");
+        graphNode.documentPath = meta.documentPath.value_or("");
+        graphNode.snapshotId = meta.snapshotId.value_or("");
         graphNode.distance = distance;
         return graphNode;
     }
@@ -257,6 +259,8 @@ struct GraphQueryResponseMapper {
         graphNode.label = cn.nodeMetadata.node.label.value_or("");
         graphNode.type = cn.nodeMetadata.node.type.value_or("");
         graphNode.documentHash = cn.nodeMetadata.documentHash.value_or("");
+        graphNode.documentPath = cn.nodeMetadata.documentPath.value_or("");
+        graphNode.snapshotId = cn.nodeMetadata.snapshotId.value_or("");
         graphNode.distance = cn.distance;
         nodes.push_back(std::move(graphNode));
 
