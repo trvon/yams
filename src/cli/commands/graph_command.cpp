@@ -152,10 +152,20 @@ private:
         if (!plan.usedInProcessFallback) {
             return;
         }
+        if (!plan.fallbackReason.empty()) {
+            spdlog::info("graph: socket transport unavailable; using in-process transport: {}",
+                         plan.fallbackReason);
+        } else {
+            spdlog::info("graph: socket transport unavailable; using in-process transport");
+        }
         if (jsonOutput_ || outputFormat_ == "json") {
             return;
         }
-        std::cout << "Daemon unavailable; continuing with in-process transport" << "\n";
+        const bool verboseMode = verbose_ || (cli_ != nullptr && cli_->getVerbose());
+        if (!verboseMode) {
+            return;
+        }
+        std::cout << "Using in-process transport (socket daemon not ready)" << "\n";
         if (!plan.fallbackReason.empty()) {
             std::cout << "  Reason: " << plan.fallbackReason << "\n";
         }
@@ -939,9 +949,9 @@ private:
         }
         std::string content((std::istreambuf_iterator<char>(ifs)),
                             std::istreambuf_iterator<char>());
-        // Definition + one additional usage in the same file is enough to suppress obvious
-        // false positives for local helper types (e.g., local structs).
-        return countWholeWordOccurrences(content, symbol) >= 2;
+        // Require at least two additional mentions beyond the likely definition to avoid
+        // suppressing plausible dead-code candidates too aggressively.
+        return countWholeWordOccurrences(content, symbol) >= 3;
     }
 
     static std::optional<std::filesystem::path>
@@ -1061,6 +1071,7 @@ private:
         }
 
         std::size_t suppressedLocalRefs = 0;
+        std::vector<DeadCodeRow> suppressedRows;
         if (!allRows.empty()) {
             std::vector<DeadCodeRow> filtered;
             filtered.reserve(allRows.size());
@@ -1068,6 +1079,7 @@ private:
                 if ((row.type == "class" || row.type == "struct") &&
                     hasLocalSymbolUsage(cwd, row.path, row.label)) {
                     ++suppressedLocalRefs;
+                    suppressedRows.push_back(row);
                     continue;
                 }
                 filtered.push_back(row);
@@ -1088,6 +1100,17 @@ private:
                                 {"nodeKey", row.nodeKey}});
             }
             out["nodes"] = rows;
+            if (!suppressedRows.empty()) {
+                json suppressed = json::array();
+                for (const auto& row : suppressedRows) {
+                    suppressed.push_back({{"type", row.type},
+                                          {"label", row.label},
+                                          {"path", row.path},
+                                          {"nodeKey", row.nodeKey},
+                                          {"reason", "local_symbol_usage"}});
+                }
+                out["suppressedNodes"] = suppressed;
+            }
             std::cout << out.dump(2) << "\n";
         } else {
             std::cout << yams::cli::ui::section_header("Dead-code report") << "\n\n";
@@ -1102,6 +1125,34 @@ private:
             }
 
             if (allRows.empty()) {
+                if (!suppressedRows.empty()) {
+                    std::cout << yams::cli::ui::status_warning(
+                                     "All candidates were suppressed by local-symbol heuristic")
+                              << "\n\n";
+                    yams::cli::ui::Table suppressedTable;
+                    suppressedTable.headers = {"TYPE", "LABEL", "PATH"};
+                    suppressedTable.has_header = true;
+                    const std::size_t kMaxRows = 10;
+                    std::size_t shown = 0;
+                    for (const auto& row : suppressedRows) {
+                        if (shown++ >= kMaxRows) {
+                            break;
+                        }
+                        suppressedTable.add_row({row.type,
+                                                 yams::cli::ui::truncate_to_width(row.label, 40),
+                                                 yams::cli::ui::truncate_to_width(row.path, 50)});
+                    }
+                    yams::cli::ui::render_table(std::cout, suppressedTable);
+                    if (suppressedRows.size() > kMaxRows) {
+                        std::cout << "\n"
+                                  << yams::cli::ui::status_info(
+                                         "Showing first " + std::to_string(kMaxRows) + " of " +
+                                         std::to_string(suppressedRows.size()) +
+                                         " suppressed nodes")
+                                  << "\n";
+                    }
+                    std::cout << "\n";
+                }
                 std::cout << yams::cli::ui::status_info("No isolated nodes found in scope") << "\n";
                 co_return Result<void>();
             }

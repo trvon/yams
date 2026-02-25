@@ -777,13 +777,19 @@ inline Result<void> ensure_socket_daemon_ready(
 inline Result<CliDaemonClientPlan> prepare_cli_daemon_client_plan(
     const yams::daemon::ClientConfig& requestedCfg,
     CliDaemonAccessPolicy policy = CliDaemonAccessPolicy::AllowInProcessFallback,
-    std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{10000}) {
+    std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{-1}) {
     CliDaemonClientPlan plan;
     plan.config = requestedCfg;
 
     const bool socketForcedByEnv = detail::is_socket_mode_forced_by_env();
     const bool requireSocket =
         socketForcedByEnv || (policy == CliDaemonAccessPolicy::RequireSocket);
+
+    auto effectiveReadyTimeout = readyTimeout;
+    if (effectiveReadyTimeout.count() < 0) {
+        effectiveReadyTimeout =
+            requireSocket ? std::chrono::milliseconds(10000) : std::chrono::milliseconds(1200);
+    }
 
     const auto resolvedMode = yams::daemon::resolve_transport_mode(plan.config);
     plan.resolvedMode = resolvedMode;
@@ -795,7 +801,7 @@ inline Result<CliDaemonClientPlan> prepare_cli_daemon_client_plan(
     }
 
     if (resolvedMode == yams::daemon::ClientTransportMode::Socket) {
-        auto ready = detail::ensure_socket_daemon_ready(plan.config, readyTimeout);
+        auto ready = detail::ensure_socket_daemon_ready(plan.config, effectiveReadyTimeout);
         if (!ready) {
             if (requireSocket) {
                 return ready.error();
@@ -890,7 +896,7 @@ inline Result<CliDaemonClientLease> acquire_cli_daemon_client_shared_with_policy
     const yams::daemon::ClientConfig& requestedCfg,
     CliDaemonAccessPolicy policy = CliDaemonAccessPolicy::AllowInProcessFallback,
     size_t min_clients = 1, size_t max_clients = 12,
-    std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{10000}) {
+    std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{-1}) {
     auto planRes = prepare_cli_daemon_client_plan(requestedCfg, policy, readyTimeout);
     if (!planRes) {
         return planRes.error();
@@ -913,7 +919,7 @@ acquire_cli_daemon_client_shared_with_fallback(
     const yams::daemon::ClientConfig& requestedCfg,
     CliDaemonAccessPolicy policy = CliDaemonAccessPolicy::AllowInProcessFallback,
     size_t min_clients = 1, size_t max_clients = 12,
-    std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{10000},
+    std::chrono::milliseconds readyTimeout = std::chrono::milliseconds{-1},
     CliDaemonClientPlan* outPlan = nullptr) {
     auto leaseRes = acquire_cli_daemon_client_shared_with_policy(requestedCfg, policy, min_clients,
                                                                  max_clients, readyTimeout);

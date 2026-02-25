@@ -86,6 +86,17 @@ bool hasUnsupportedControlChars(std::string_view sv) {
     });
 }
 
+bool indicatesAsyncAcceptance(std::string_view message) {
+    if (message.empty()) {
+        return false;
+    }
+    std::string lowered(message);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return lowered.find("asynchronous processing") != std::string::npos ||
+           lowered.find("accepted for asynchronous") != std::string::npos;
+}
+
 bool isStdoutTty() {
 #ifdef _WIN32
     return _isatty(STDOUT_FILENO) != 0;
@@ -424,15 +435,20 @@ public:
                 }
                 auto daemonPlan = std::move(planRes.value());
 
-                if (daemonPlan.usedInProcessFallback && !cli_->getJsonOutput()) {
-                    daemonSpinner.pause();
-                    std::cout << "Daemon unavailable; continuing with in-process transport"
-                              << std::endl;
-                    if (!daemonPlan.fallbackReason.empty()) {
-                        std::cout << "  Reason: "
-                                  << scrubDaemonLoadMessage(daemonPlan.fallbackReason) << std::endl;
+                if (daemonPlan.usedInProcessFallback) {
+                    const auto reason = scrubDaemonLoadMessage(daemonPlan.fallbackReason);
+                    spdlog::info(
+                        "add: socket transport unavailable; using in-process transport: {}",
+                        reason);
+                    if (!cli_->getJsonOutput() && cli_->getVerbose()) {
+                        daemonSpinner.pause();
+                        std::cout << "Using in-process transport (socket daemon not ready)"
+                                  << std::endl;
+                        if (!reason.empty()) {
+                            std::cout << "  Reason: " << reason << std::endl;
+                        }
+                        daemonSpinner.resume();
                     }
-                    daemonSpinner.resume();
                 }
 
                 auto sanitizedTagsRes = sanitizeStringList(tags_, "Tag", kMaxTagLength);
@@ -501,7 +517,7 @@ public:
                 // Process each group
                 size_t successfulRequests = 0;
                 std::vector<std::pair<std::filesystem::path, Error>> daemonFailures;
-                size_t totalAdded = 0, totalUpdated = 0, totalSkipped = 0;
+                size_t totalAdded = 0, totalUpdated = 0, totalSkipped = 0, totalQueued = 0;
                 const size_t totalDaemonRequests = singleFiles.size() + groupedPaths.size();
                 size_t completedRequests = 0;
                 if (daemonSpinner.enabled() && totalDaemonRequests > 0) {
@@ -519,11 +535,16 @@ public:
                 json jsonResults = json::array();
                 auto recordJsonSuccess = [&](const yams::daemon::AddDocumentResponse& resp,
                                              const std::filesystem::path& path) {
+                    const bool queued = resp.documentsAdded == 0 && resp.documentsUpdated == 0 &&
+                                        resp.documentsSkipped == 0 &&
+                                        indicatesAsyncAcceptance(resp.message);
                     jsonResults.push_back(json{{"path", path.string()},
                                                {"success", true},
                                                {"documentsAdded", resp.documentsAdded},
                                                {"documentsUpdated", resp.documentsUpdated},
                                                {"documentsSkipped", resp.documentsSkipped},
+                                               {"queued", queued},
+                                               {"extractionStatus", resp.extractionStatus},
                                                {"hash", resp.hash},
                                                {"message", resp.message}});
                 };
@@ -537,6 +558,12 @@ public:
 
                 auto render = [&](const yams::daemon::AddDocumentResponse& resp,
                                   const std::filesystem::path& path) -> void {
+                    const bool queued = resp.documentsAdded == 0 && resp.documentsUpdated == 0 &&
+                                        resp.documentsSkipped == 0 &&
+                                        indicatesAsyncAcceptance(resp.message);
+                    if (queued) {
+                        totalQueued++;
+                    }
                     if (cli_->getJsonOutput()) {
                         recordJsonSuccess(resp, path);
                         return;
@@ -743,11 +770,22 @@ public:
                         output["summary"] = json{{"added", totalAdded},
                                                  {"updated", totalUpdated},
                                                  {"skipped", totalSkipped},
+                                                 {"queued", totalQueued},
                                                  {"failed", daemonFailures.size()}};
                         std::cout << output.dump(2) << std::endl;
                     } else {
-                        std::cout << "Summary: added=" << totalAdded << ", updated=" << totalUpdated
-                                  << ", skipped=" << totalSkipped;
+                        if (totalAdded == 0 && totalUpdated == 0 && totalSkipped == 0 &&
+                            totalQueued > 0) {
+                            std::cout << "Summary: queued=" << totalQueued
+                                      << " for asynchronous processing";
+                        } else {
+                            std::cout << "Summary: added=" << totalAdded
+                                      << ", updated=" << totalUpdated
+                                      << ", skipped=" << totalSkipped;
+                            if (totalQueued > 0) {
+                                std::cout << ", queued=" << totalQueued;
+                            }
+                        }
                         if (!daemonFailures.empty()) {
                             std::cout << ", failed=" << daemonFailures.size();
                         }

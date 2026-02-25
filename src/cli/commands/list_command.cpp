@@ -9,6 +9,7 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
+#include <yams/daemon/client/ipc_failure.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/document_metadata.h>
@@ -427,6 +428,28 @@ public:
 
             // Use RetrievalService (daemon-first). On failure, fallback to service path
             {
+                yams::daemon::ClientConfig preflightCfg;
+                preflightCfg.autoStart = false;
+                if (cli_->hasExplicitDataDir()) {
+                    preflightCfg.dataDir = cli_->getDataPath();
+                }
+                auto planRes = yams::cli::prepare_cli_daemon_client_plan(
+                    preflightCfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+                if (!planRes || planRes.value().usedInProcessFallback) {
+                    if (spinner) {
+                        spinner->stop();
+                    }
+                    if (verbose_ || cli_->getVerbose()) {
+                        const auto reason =
+                            planRes ? planRes.value().fallbackReason : planRes.error().message;
+                        std::cout << "Using local list path (socket daemon not ready)" << "\n";
+                        if (!reason.empty()) {
+                            std::cout << "  Reason: " << reason << "\n";
+                        }
+                    }
+                    return executeWithServices(&spinner);
+                }
+
                 yams::app::services::RetrievalService rsvc;
                 yams::app::services::RetrievalOptions ropts;
                 if (cli_->hasExplicitDataDir()) {
@@ -448,8 +471,14 @@ public:
                 if (spinner) {
                     spinner->stop();
                 }
-                spdlog::warn("list: daemon path failed ({}); using local services",
-                             res.error().message);
+                const auto ipcKind = yams::daemon::parseIpcFailureKind(res.error().message);
+                if (ipcKind.has_value()) {
+                    spdlog::debug("list: daemon unavailable ({}); using local services",
+                                  res.error().message);
+                } else {
+                    spdlog::warn("list: daemon path failed ({}); using local services",
+                                 res.error().message);
+                }
             }
 
             return executeWithServices(&spinner);

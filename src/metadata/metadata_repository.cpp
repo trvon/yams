@@ -44,8 +44,8 @@ namespace yams::metadata {
 // Import result helpers for cleaner error handling (ADR-0004 Phase 2)
 using repository::addIntParam;
 using repository::appendDocumentQueryFilters;
-using repository::runMetadataValueCountQuery;
 using repository::BindParam;
+using repository::runMetadataValueCountQuery;
 using repository::scope_exit;
 
 namespace {
@@ -101,9 +101,9 @@ std::string buildInList(size_t count) {
 }
 
 template <typename RowT, typename RowMapper, typename RowVisitor>
-Result<std::vector<RowT>>
-executePreparedVectorQuery(Database& db, const std::string& sql, const std::vector<BindParam>& params,
-                          RowMapper&& mapRow, RowVisitor&& onRow) {
+Result<std::vector<RowT>> executePreparedVectorQuery(Database& db, const std::string& sql,
+                                                     const std::vector<BindParam>& params,
+                                                     RowMapper&& mapRow, RowVisitor&& onRow) {
     auto stmtResult = db.prepare(sql);
     if (!stmtResult) {
         return stmtResult.error();
@@ -142,11 +142,11 @@ executePreparedVectorQuery(Database& db, const std::string& sql, const std::vect
 }
 
 template <typename RowT, typename RowMapper>
-Result<std::vector<RowT>>
-executePreparedVectorQuery(Database& db, const std::string& sql, const std::vector<BindParam>& params,
-                          RowMapper&& mapRow) {
-    return executePreparedVectorQuery<RowT>(
-        db, sql, params, std::forward<RowMapper>(mapRow), [](RowT&) {});
+Result<std::vector<RowT>> executePreparedVectorQuery(Database& db, const std::string& sql,
+                                                     const std::vector<BindParam>& params,
+                                                     RowMapper&& mapRow) {
+    return executePreparedVectorQuery<RowT>(db, sql, params, std::forward<RowMapper>(mapRow),
+                                            [](RowT&) {});
 }
 
 Result<void> bindIdList(Statement& stmt, int startIndex, const std::vector<int64_t>& ids) {
@@ -1755,9 +1755,9 @@ MetadataRepository::getMetadataValueCounts(const std::vector<std::string>& keys,
                     !options.containsFragment->empty() && pathFtsAvailable_;
 
                 std::string sql;
-                auto runResult = runMetadataValueCountQuery(db, keys, options, needsDocumentJoin,
-                                                            joinFtsForContains, hasPathIndexing_,
-                                                            &sql);
+                auto runResult =
+                    runMetadataValueCountQuery(db, keys, options, needsDocumentJoin,
+                                               joinFtsForContains, hasPathIndexing_, &sql);
                 if (!runResult) {
                     if (joinFtsForContains && options.containsUsesFts) {
                         spdlog::debug("MetadataRepository::getMetadataValueCounts query failed "
@@ -2331,7 +2331,6 @@ Result<std::vector<int64_t>> MetadataRepository::getAllFts5IndexedDocumentIds() 
             return docIds;
         });
 }
-
 
 // Bulk operations
 Result<std::optional<DocumentInfo>>
@@ -4971,7 +4970,6 @@ std::vector<std::string> MetadataQueryBuilder::getParameters() const {
 MetadataTransaction::MetadataTransaction(MetadataRepository& repo) : repo_(repo) {}
 
 MetadataTransaction::~MetadataTransaction() = default;
-
 
 // Snapshot operations (collections use generic metadata query via getMetadataValueCounts)
 Result<std::vector<DocumentInfo>>

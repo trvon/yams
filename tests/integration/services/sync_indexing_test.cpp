@@ -210,7 +210,7 @@ TEST_F(SyncIndexingIT, MinimalQueueGrowthWithSyncAdd) {
     // With sync indexing, we skip the metadata stage in the queue
     uint64_t queueGrowth = (queueAfter > queueBefore) ? (queueAfter - queueBefore) : 0;
     EXPECT_LE(queueGrowth, 2u) << "Queue grew too much (" << queueGrowth
-                              << "), suggesting async path was used instead of sync";
+                               << "), suggesting async path was used instead of sync";
 
     // Content should be immediately searchable
     EXPECT_TRUE(grepFindsContent("SYNCLOG", 1));
