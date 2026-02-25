@@ -3,11 +3,11 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <future>
-#include <thread>
-#include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -38,28 +38,51 @@ makeIngestionClientConfig(const std::optional<std::filesystem::path>& socketPath
     return cfg;
 }
 
+static bool isSameIngestionClientConfig(const yams::daemon::ClientConfig& lhs,
+                                        const yams::daemon::ClientConfig& rhs) {
+    return lhs.socketPath == rhs.socketPath && lhs.dataDir == rhs.dataDir &&
+           lhs.requestTimeout == rhs.requestTimeout &&
+           lhs.enableChunkedResponses == rhs.enableChunkedResponses &&
+           lhs.singleUseConnections == rhs.singleUseConnections;
+}
+
 std::shared_ptr<yams::daemon::DaemonClient>
 DocumentIngestionService::getOrCreateClient(const AddOptions& opts) const {
-    if (client_)
+    const auto cfg =
+        makeIngestionClientConfig(opts.socketPath, opts.explicitDataDir, opts.timeoutMs);
+    std::lock_guard<std::mutex> lock{clientMutex_};
+    if (client_ && cachedClientConfig_ && isSameIngestionClientConfig(*cachedClientConfig_, cfg)) {
         return client_;
-    return std::make_shared<yams::daemon::DaemonClient>(
-        makeIngestionClientConfig(opts.socketPath, opts.explicitDataDir, opts.timeoutMs));
+    }
+    client_ = std::make_shared<yams::daemon::DaemonClient>(cfg);
+    cachedClientConfig_ = cfg;
+    return client_;
 }
 
 std::shared_ptr<yams::daemon::DaemonClient>
 DocumentIngestionService::getOrCreateClient(const DeleteOptions& opts) const {
-    if (client_)
+    const auto cfg =
+        makeIngestionClientConfig(opts.socketPath, opts.explicitDataDir, opts.timeoutMs);
+    std::lock_guard<std::mutex> lock{clientMutex_};
+    if (client_ && cachedClientConfig_ && isSameIngestionClientConfig(*cachedClientConfig_, cfg)) {
         return client_;
-    return std::make_shared<yams::daemon::DaemonClient>(
-        makeIngestionClientConfig(opts.socketPath, opts.explicitDataDir, opts.timeoutMs));
+    }
+    client_ = std::make_shared<yams::daemon::DaemonClient>(cfg);
+    cachedClientConfig_ = cfg;
+    return client_;
 }
 
 std::shared_ptr<yams::daemon::DaemonClient>
 DocumentIngestionService::getOrCreateClient(const UpdateOptions& opts) const {
-    if (client_)
+    const auto cfg =
+        makeIngestionClientConfig(opts.socketPath, opts.explicitDataDir, opts.timeoutMs);
+    std::lock_guard<std::mutex> lock{clientMutex_};
+    if (client_ && cachedClientConfig_ && isSameIngestionClientConfig(*cachedClientConfig_, cfg)) {
         return client_;
-    return std::make_shared<yams::daemon::DaemonClient>(
-        makeIngestionClientConfig(opts.socketPath, opts.explicitDataDir, opts.timeoutMs));
+    }
+    client_ = std::make_shared<yams::daemon::DaemonClient>(cfg);
+    cachedClientConfig_ = cfg;
+    return client_;
 }
 
 std::string DocumentIngestionService::normalizePath(const std::string& inPath) {

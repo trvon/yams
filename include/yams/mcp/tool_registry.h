@@ -246,7 +246,7 @@ struct MCPSearchRequest {
     bool matchAllTags = false;
     bool includeDiff = false; // include structured diff when pathPattern refers to a local file
     // Session scoping
-    bool useSession = true;  // default: scope to current session when available
+    bool useSession = false; // default: global scope unless explicitly requested
     std::string sessionName; // optional: target a specific session
 
     // Symbol ranking
@@ -266,6 +266,7 @@ struct MCPSearchResponse {
     std::string type;
     uint64_t executionTimeMs = 0;
     std::string traceId;
+    bool pathsOnly = false;
     std::vector<std::string> paths;
 
     struct Result {
@@ -316,7 +317,7 @@ struct MCPGrepRequest {
     std::string color = "auto";
     bool fastFirst = false;
     // Session scoping
-    bool useSession = true;
+    bool useSession = false;
     std::string sessionName;
 
     // Tag filtering
@@ -453,7 +454,7 @@ struct MCPRetrieveDocumentRequest {
     int depth = 1;
     bool includeContent = false;
     // Session scoping for name resolution
-    bool useSession = true;
+    bool useSession = false;
     std::string sessionName;
 
     static MCPRetrieveDocumentRequest fromJson(const json& j);

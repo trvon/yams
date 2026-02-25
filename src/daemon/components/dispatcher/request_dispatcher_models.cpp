@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
+#include <yams/daemon/daemon_lifecycle.h>
 
 namespace yams::daemon {
 
@@ -95,15 +96,15 @@ RequestDispatcher::handleLoadModelRequest(const LoadModelRequest& req) {
         Result<void> r = co_await yams::daemon::dispatch::ensure_model_loaded(
             serviceManager_, provider, req.modelName, timeout_ms, req.optionsJson);
         if (!r) {
-            if (daemon_) {
-                daemon_->setSubsystemDegraded("embedding", true, "provider_load_failed");
+            if (lifecycle_) {
+                lifecycle_->setSubsystemDegraded("embedding", true, "provider_load_failed");
             }
             co_return makeError(r.error().code, r.error().message);
         }
         // Model is now loaded via provider, embeddings are ready
         try {
-            if (serviceManager_ && daemon_) {
-                daemon_->setSubsystemDegraded("embedding", false, "");
+            if (serviceManager_ && lifecycle_) {
+                lifecycle_->setSubsystemDegraded("embedding", false, "");
                 try {
                     // Only rebuild when it helps:
                     // - A model transitioned from not-loaded -> loaded (vector scoring can now be

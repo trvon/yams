@@ -60,6 +60,16 @@ static std::string makePatternData(size_t n) {
 }
 
 /**
+ * @brief Hash a byte span via streaming hasher path (EVP-based)
+ */
+static std::string hashWithStreamingHasher(std::span<const std::byte> bytes) {
+    auto hasher = yams::crypto::createSHA256Hasher();
+    hasher->init();
+    hasher->update(bytes);
+    return hasher->finalize();
+}
+
+/**
  * @brief Streambuf that segments reads into fixed-size chunks
  *
  * Simulates fragmented stream reads to test buffer management.
@@ -166,6 +176,51 @@ TEST_CASE("RabinChunker - Chunk invariants", "[chunking][rabin]") {
         for (const auto& c : chunks) {
             REQUIRE(c.offset == expectedOffset);
             expectedOffset += c.size;
+        }
+    }
+}
+
+TEST_CASE("RabinChunker - Data and hash correctness", "[chunking][rabin][hash]") {
+    const auto pattern = makePatternData(256 * 1024 + 777);
+    std::vector<std::byte> data(pattern.size());
+    std::memcpy(data.data(), pattern.data(), pattern.size());
+
+    ChunkingConfig cfg;
+    cfg.minChunkSize = 2 * 1024;
+    cfg.targetChunkSize = 8 * 1024;
+    cfg.maxChunkSize = 16 * 1024;
+
+    RabinChunker chunker(cfg);
+    const auto chunks = chunker.chunkData(data);
+
+    REQUIRE_FALSE(chunks.empty());
+
+    uint64_t expectedOffset = 0;
+    const auto source = std::span<const std::byte>(data.data(), data.size());
+    for (const auto& chunk : chunks) {
+        REQUIRE(chunk.offset == expectedOffset);
+        REQUIRE(chunk.data.size() == chunk.size);
+
+        const auto sourceSlice =
+            source.subspan(static_cast<size_t>(chunk.offset), static_cast<size_t>(chunk.size));
+        REQUIRE(std::equal(chunk.data.begin(), chunk.data.end(), sourceSlice.begin(),
+                           sourceSlice.end()));
+
+        const auto expectedHash = hashWithStreamingHasher(sourceSlice);
+        REQUIRE(chunk.hash == expectedHash);
+
+        expectedOffset += chunk.size;
+    }
+    REQUIRE(expectedOffset == data.size());
+
+    SECTION("Chunking remains deterministic over repeated runs") {
+        const auto chunks2 = chunker.chunkData(data);
+        REQUIRE(chunks2.size() == chunks.size());
+
+        for (size_t i = 0; i < chunks.size(); ++i) {
+            REQUIRE(chunks2[i].offset == chunks[i].offset);
+            REQUIRE(chunks2[i].size == chunks[i].size);
+            REQUIRE(chunks2[i].hash == chunks[i].hash);
         }
     }
 }

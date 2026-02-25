@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -108,7 +109,9 @@ public:
     static yams::daemon::AddDocumentRequest buildRequest(const AddOptions& opts);
 
 private:
-    std::shared_ptr<yams::daemon::DaemonClient> client_;
+    mutable std::shared_ptr<yams::daemon::DaemonClient> client_;
+    mutable std::optional<yams::daemon::ClientConfig> cachedClientConfig_;
+    mutable std::mutex clientMutex_;
     std::shared_ptr<yams::daemon::DaemonClient> getOrCreateClient(const AddOptions& opts) const;
     std::shared_ptr<yams::daemon::DaemonClient> getOrCreateClient(const DeleteOptions& opts) const;
     std::shared_ptr<yams::daemon::DaemonClient> getOrCreateClient(const UpdateOptions& opts) const;

@@ -1072,6 +1072,24 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_in_process_transport_exe = executable('catch2_in_process_transport',
+    files('unit/daemon/in_process_transport_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_sandbox_detection_exe = executable('catch2_sandbox_detection',
+    files('unit/daemon/sandbox_detection_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_multiplex_client_exe = executable('catch2_multiplex_client',
     files('unit/daemon/multiplex_client_catch2_test.cpp'),
     include_directories: incs,
@@ -2708,6 +2726,18 @@ if catch2_dep.found()
 
   test('streaming_processor', catch2_streaming_processor_exe,
     suite: ['catch2', 'unit', 'daemon', 'streaming', 'yams-3s4'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('in_process_transport', catch2_in_process_transport_exe,
+    suite: ['catch2', 'unit', 'daemon', 'streaming', 'inprocess'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('sandbox_detection', catch2_sandbox_detection_exe,
+    suite: ['catch2', 'unit', 'daemon', 'sandbox'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )

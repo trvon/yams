@@ -112,6 +112,7 @@ std::filesystem::path get_runtime_dir();
 // Daemon-specific config resolution (env → config → defaults)
 std::filesystem::path resolve_socket_path_from_config();
 std::filesystem::path resolve_data_dir_from_config();
+std::string resolve_daemon_mode_from_config();
 
 // ============================================================================
 // Full TOML config parsing and writing utilities

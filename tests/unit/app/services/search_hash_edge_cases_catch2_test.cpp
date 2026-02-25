@@ -159,6 +159,22 @@ TEST_CASE("Hash edge cases: 8-char prefix paths-only mixed case",
     CHECK_FALSE(r.value().paths.empty());
 }
 
+TEST_CASE("Hash edge cases: pathPatterns filter is honored", "[unit][services][search][hash]") {
+    SearchHashFixture f;
+    REQUIRE_FALSE(f.hashes.empty());
+
+    SearchRequest rq;
+    rq.query = f.hashes.front().substr(0, 8);
+    rq.limit = 10;
+    rq.pathPatterns = {"**/does-not-match-any-hash-doc.txt"};
+
+    auto r = runAwait(f.search->search(rq));
+    REQUIRE(r);
+    CHECK(r.value().type == "hash");
+    CHECK(r.value().total == 0);
+    CHECK(r.value().results.empty());
+}
+
 TEST_CASE("Hash edge cases: too-short prefix falls back", "[unit][services][search][hash]") {
     SearchHashFixture f;
     REQUIRE_FALSE(f.hashes.empty());

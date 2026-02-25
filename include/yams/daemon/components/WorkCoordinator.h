@@ -246,6 +246,27 @@ private:
     /// Condition variable for joinWithTimeout() to wait on worker exit
     std::condition_variable joinCV_;
 
+    /// Protects worker lifecycle snapshots used by shutdown diagnostics
+    mutable std::mutex workerStateMutex_;
+
+    /// Per-worker thread id (aligned to workers_ index)
+    std::vector<std::thread::id> workerThreadIds_;
+
+    /// Per-worker run-loop enter timestamp (steady clock)
+    std::vector<std::chrono::steady_clock::time_point> workerRunStart_;
+
+    /// Per-worker run-loop exit timestamp (steady clock)
+    std::vector<std::chrono::steady_clock::time_point> workerRunEnd_;
+
+    /// Per-worker run-loop exited flag (true after io_context::run loop exits)
+    std::vector<bool> workerExited_;
+
+    /// Stop-request timestamp used to attribute shutdown delay to specific workers
+    std::chrono::steady_clock::time_point stopRequestedAt_{};
+
+    /// Whether stopRequestedAt_ is valid for current shutdown cycle
+    bool stopRequestedSet_ = false;
+
     /// Priority-isolated executors bound to the shared io_context
     boost::asio::strand<boost::asio::io_context::executor_type> highPriorityStrand_;
     boost::asio::strand<boost::asio::io_context::executor_type> normalPriorityStrand_;

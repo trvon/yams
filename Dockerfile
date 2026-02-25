@@ -96,7 +96,14 @@ RUN --mount=type=cache,target=/root/.conan2 \
   sed -i 's/\r$//' setup.sh && chmod +x setup.sh && \
   for attempt in 1 2 3; do \
   echo "=== Build attempt $attempt ==="; \
-  if ./setup.sh Release; then \
+  if [ "${BUILD_TESTS}" = "true" ]; then \
+  echo "BUILD_TESTS=true: enabling Release tests"; \
+  SETUP_ARGS="Release --with-tests"; \
+  else \
+  SETUP_ARGS="Release"; \
+  fi; \
+  # shellcheck disable=SC2086
+  if ./setup.sh ${SETUP_ARGS}; then \
   break; \
   else \
   echo "setup.sh attempt $attempt failed"; \
@@ -112,11 +119,87 @@ RUN --mount=type=cache,target=/root/.conan2 \
   fi; \
   done; \
   meson compile -C build/release -j${BUILD_JOBS} && \
-  meson install -C build/release --destdir /opt/yams
+  meson install -C build/release --destdir /opt/yams && \
+  # Ensure Conan-provided runtime libs are present as real files (not only symlinks)
+  # so that Meson tests can run in later stages without access to /root/.conan2.
+  python3 - <<'PY'
+import glob
+import os
+import shutil
+import re
+
+dst = '/src/build/release'
+os.makedirs(dst, exist_ok=True)
+
+copied = set()
+for pat in [
+    '/root/.conan2/p/**/p/lib/libtbb*.so*',
+    '/root/.conan2/p/**/p/lib/libtbbbind*.so*',
+    '/root/.conan2/p/**/p/lib/libonnxruntime*.so*',
+]:
+    for p in glob.glob(pat, recursive=True):
+        rp = os.path.realpath(p)
+        if not os.path.isfile(rp):
+            continue
+        base = os.path.basename(rp)
+        if base in copied:
+            continue
+        shutil.copy2(rp, os.path.join(dst, base))
+        copied.add(base)
+
+def ensure_soname_links(directory: str) -> int:
+    created = 0
+    # If we have libfoo.so.M.N or libfoo.so.M.N.K, create libfoo.so.M -> that file.
+    rx = re.compile(r'^(?P<stem>lib.+\.so\.(?P<maj>\d+))\.(?P<rest>\d+(?:\.\d+)*)$')
+    for name in os.listdir(directory):
+        m = rx.match(name)
+        if not m:
+            continue
+        target = name
+        link_name = m.group('stem')
+        link_path = os.path.join(directory, link_name)
+        if os.path.exists(link_path):
+            continue
+        os.symlink(target, link_path)
+        created += 1
+    return created
+
+links = ensure_soname_links(dst)
+
+print(f'Copied {len(copied)} runtime libs into {dst}; created {links} SONAME symlinks')
+PY
+
+# Stage 1.25: smoke tests (optional)
+# Note: kept separate so Linux builder images can be produced even when
+# unrelated tests are failing.
+FROM builder AS smoke-tests
+ARG BUILD_TESTS=false
+ARG BUILD_JOBS=2
+RUN set -eux; \
+  if [ "${BUILD_TESTS}" != "true" ]; then \
+  echo "BUILD_TESTS=false: skipping smoke tests"; \
+  exit 0; \
+  fi; \
+  # Conan runtime_deploy copies shared libs into build dir; add it to loader path.
+  export LD_LIBRARY_PATH="/src/build/release:${LD_LIBRARY_PATH:-}"; \
+  meson test -C build/release -j${BUILD_JOBS} --no-rebuild --print-errorlogs mcp_submodule cli_submodule
+
+# Stage 1.3: full test suite (optional)
+FROM builder AS tests
+ARG BUILD_TESTS=false
+ARG BUILD_JOBS=2
+RUN set -eux; \
+  if [ "${BUILD_TESTS}" != "true" ]; then \
+  echo "BUILD_TESTS=false: skipping full test suite"; \
+  exit 0; \
+  fi; \
+  export LD_LIBRARY_PATH="/src/build/release:${LD_LIBRARY_PATH:-}"; \
+  meson test -C build/release -j${BUILD_JOBS} --no-rebuild --print-errorlogs
 
 # Stage 1.5: runtime self-test (fails the build if runtime deps are missing)
 FROM builder AS runtime-test
 RUN set -eux; \
+  export LD_LIBRARY_PATH="/opt/yams/usr/local/lib:${LD_LIBRARY_PATH:-}"; \
   /opt/yams/usr/local/bin/yams --version >/dev/null; \
   if [ -x /opt/yams/usr/local/bin/yams-mcp-server ]; then /opt/yams/usr/local/bin/yams-mcp-server --help >/dev/null; fi
 
@@ -133,6 +216,7 @@ RUN groupadd -r yams && useradd -r -g yams -s /bin/false yams
 COPY --from=builder /opt/yams /opt/yams
 ENV YAMS_PREFIX=/opt/yams/usr/local
 ENV PATH="${YAMS_PREFIX}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${YAMS_PREFIX}/lib:${LD_LIBRARY_PATH}"
 # Backward compatibility: retain standalone yams symlink
 RUN ln -sf ${YAMS_PREFIX}/bin/yams /usr/local/bin/yams && \
   if [ -f ${YAMS_PREFIX}/bin/yams-daemon ]; then ln -sf ${YAMS_PREFIX}/bin/yams-daemon /usr/local/bin/yams-daemon; fi && \

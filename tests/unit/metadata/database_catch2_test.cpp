@@ -309,7 +309,7 @@ TEST_CASE("Database: Migrations", "[unit][metadata][database]") {
         auto currentVersion = mm.getCurrentVersion();
         REQUIRE(currentVersion.has_value());
         CHECK(currentVersion.value() ==
-              29); // Latest schema version (keep in sync with migration.cpp)
+              30); // Latest schema version (keep in sync with migration.cpp)
 
         // Verify tables exist
         auto docExists = db.tableExists("documents");
@@ -350,7 +350,7 @@ TEST_CASE("Database: Concurrent access", "[unit][metadata][database][.slow]") {
     std::vector<std::thread> threads;
 
     for (int i = 0; i < numThreads; ++i) {
-        threads.emplace_back([&pool, incrementsPerThread]() {
+        threads.emplace_back([&pool]() {
             for (int j = 0; j < incrementsPerThread; ++j) {
                 pool.withConnection([](Database& db) -> Result<void> {
                     return db.transaction([&db]() -> Result<void> {

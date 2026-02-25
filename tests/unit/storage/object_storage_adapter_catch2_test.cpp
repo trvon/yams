@@ -33,9 +33,9 @@ struct FakeBackend : public IObjectStorageBackend {
                                                       std::optional<int> /*maxKeys*/) override {
         Page<ObjectSummary> p;
         // Return items under prefix "a/"
-        p.items.push_back(ObjectSummary{std::string(prefix) + "b/c.txt", 0});
-        p.items.push_back(ObjectSummary{std::string(prefix) + "d/e.txt", 0});
-        p.items.push_back(ObjectSummary{std::string(prefix) + "f.txt", 0});
+        p.items.push_back(ObjectSummary{.key = std::string(prefix) + "b/c.txt", .size = 0});
+        p.items.push_back(ObjectSummary{.key = std::string(prefix) + "d/e.txt", .size = 0});
+        p.items.push_back(ObjectSummary{.key = std::string(prefix) + "f.txt", .size = 0});
         return p;
     }
     VerifyResult verifyObject(std::string_view, std::optional<ChecksumAlgo>) override { return {}; }

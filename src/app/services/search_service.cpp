@@ -68,6 +68,41 @@ static bool hasWildcard(const std::string& s) {
     return s.find('*') != std::string::npos || s.find('?') != std::string::npos;
 }
 
+static void appendMacPathAliases(std::vector<std::string>& patterns) {
+#if defined(__APPLE__)
+    if (patterns.empty()) {
+        return;
+    }
+
+    std::unordered_set<std::string> seen(patterns.begin(), patterns.end());
+    std::vector<std::string> aliases;
+    aliases.reserve(patterns.size());
+
+    for (const auto& pattern : patterns) {
+        std::string alias;
+        if (pattern == "/var") {
+            alias = "/private/var";
+        } else if (pattern.rfind("/var/", 0) == 0) {
+            alias = "/private" + pattern;
+        } else if (pattern == "/private/var") {
+            alias = "/var";
+        } else if (pattern.rfind("/private/var/", 0) == 0) {
+            alias = pattern.substr(std::string("/private").size());
+        }
+
+        if (!alias.empty() && seen.insert(alias).second) {
+            aliases.push_back(std::move(alias));
+        }
+    }
+
+    if (!aliases.empty()) {
+        patterns.insert(patterns.end(), aliases.begin(), aliases.end());
+    }
+#else
+    (void)patterns;
+#endif
+}
+
 // Helper function to escape regex special characters
 static std::string escapeRegex(const std::string& text) {
     static const std::string specialChars = "\\^$.|?*+()[]{}";
@@ -312,6 +347,74 @@ static bool looksLikePathQuery(const std::string& raw) {
         return false;
 
     return looksLikePathToken(token);
+}
+
+static std::string toLowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+static std::size_t pathDepth(std::string_view path) {
+    return static_cast<std::size_t>(
+        std::count_if(path.begin(), path.end(), [](char c) { return c == '/' || c == '\\'; }));
+}
+
+static std::string_view basenameView(std::string_view path) {
+    const auto pos = path.find_last_of("/\\");
+    if (pos == std::string_view::npos) {
+        return path;
+    }
+    return path.substr(pos + 1);
+}
+
+static double computePathMatchScore(const metadata::DocumentInfo& doc, const std::string& query,
+                                    bool wildcard) {
+    const std::string path = !doc.filePath.empty() ? doc.filePath : doc.fileName;
+    const std::string pathLower = toLowerAscii(path);
+    const std::string nameLower = toLowerAscii(doc.fileName);
+    const std::string queryLower = toLowerAscii(trimCopy(query));
+
+    if (queryLower.empty()) {
+        return 0.01;
+    }
+
+    double score = 0.60;
+    const bool exactPath = pathLower == queryLower;
+    const bool exactName = nameLower == queryLower;
+    const bool endsWithPath =
+        pathLower.size() >= queryLower.size() &&
+        pathLower.compare(pathLower.size() - queryLower.size(), queryLower.size(), queryLower) == 0;
+    const auto queryPos = pathLower.rfind(queryLower);
+
+    if (exactPath) {
+        score = 1.00;
+    } else if (exactName) {
+        score = 0.98;
+    } else if (endsWithPath) {
+        score = 0.94;
+    } else if (nameLower.find(queryLower) != std::string::npos) {
+        score = 0.90;
+    } else if (queryPos != std::string::npos) {
+        score = 0.80;
+    }
+
+    if (queryPos != std::string::npos) {
+        const auto tailDistance = pathLower.size() - (queryPos + queryLower.size());
+        const double tailBonus = std::max(0.0, 0.08 - static_cast<double>(tailDistance) * 0.002);
+        score += tailBonus;
+    }
+
+    if (basenameView(pathLower) == queryLower) {
+        score += 0.03;
+    }
+
+    if (wildcard) {
+        score -= 0.03;
+    }
+
+    score -= std::min(0.20, static_cast<double>(pathDepth(pathLower)) * 0.01);
+    return std::clamp(score, 0.01, 1.00);
 }
 
 // Presence-based tag match using metadata repository
@@ -619,6 +722,7 @@ public:
         if (normalizedReq.pathPatterns.empty() && !normalizedReq.pathPattern.empty()) {
             normalizedReq.pathPatterns.push_back(normalizedReq.pathPattern);
         }
+        appendMacPathAliases(normalizedReq.pathPatterns);
 
         if (normalizedReq.extension.empty() && !parsed.scope.ext.empty()) {
             normalizedReq.extension = parsed.scope.ext;
@@ -1164,14 +1268,24 @@ private:
         resp.usedHybrid = false;
         std::vector<metadata::DocumentInfo> docs;
 
-        const bool wildcard = hasWildcard(req.query);
+        std::string pathQuery = trimCopy(req.query);
+        const bool quotedPathQuery =
+            (pathQuery.size() >= 2 && ((pathQuery.front() == '"' && pathQuery.back() == '"') ||
+                                       (pathQuery.front() == '\'' && pathQuery.back() == '\'')));
+        if (quotedPathQuery) {
+            pathQuery = pathQuery.substr(1, pathQuery.size() - 2);
+        }
+
+        const bool wildcard = hasWildcard(pathQuery);
 
         std::string likePattern;
         if (wildcard) {
-            likePattern = globToSqlLike(req.query);
+            likePattern = globToSqlLike(pathQuery);
         } else {
-            likePattern = "%" + req.query + "%";
+            likePattern = "%" + pathQuery + "%";
         }
+
+        std::vector<std::pair<std::string, double>> rankedPaths;
 
         auto r = co_await retryMetadataOp(
             [&]() { return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, likePattern); }, 4,
@@ -1194,31 +1308,55 @@ private:
             if (!(co_await metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
                                            req.matchAllTags, telemetry)))
                 co_return;
+            const std::string resolvedPath = !d.filePath.empty() ? d.filePath : d.fileName;
+            const double score = computePathMatchScore(d, pathQuery, wildcard);
+
             if (req.pathsOnly) {
-                resp.paths.push_back(!d.filePath.empty() ? d.filePath : d.fileName);
+                rankedPaths.emplace_back(resolvedPath, score);
             } else {
                 SearchItem it;
                 it.id = d.id;
                 it.hash = d.sha256Hash;
                 it.title = d.fileName;
-                it.path = d.filePath;
-                it.score = 1.0; // neutral score for path matches
+                it.path = resolvedPath;
+                it.score = score;
                 resp.results.push_back(std::move(it));
             }
         };
         for (const auto& d : docs) {
             co_await push_path(d);
-            if (req.limit != 0) {
-                if (req.pathsOnly && resp.paths.size() >= req.limit)
-                    break;
-                if (!req.pathsOnly && resp.results.size() >= req.limit)
-                    break;
-            }
         }
-        if (req.pathsOnly)
+
+        if (req.pathsOnly) {
+            std::sort(rankedPaths.begin(), rankedPaths.end(), [](const auto& lhs, const auto& rhs) {
+                if (lhs.second == rhs.second) {
+                    return lhs.first < rhs.first;
+                }
+                return lhs.second > rhs.second;
+            });
+
+            const std::size_t effectiveLimit = req.limit > 0 ? req.limit : rankedPaths.size();
+            const std::size_t count = std::min(effectiveLimit, rankedPaths.size());
+            resp.paths.reserve(count);
+            for (std::size_t i = 0; i < count; ++i) {
+                resp.paths.push_back(rankedPaths[i].first);
+            }
             resp.total = resp.paths.size();
-        else
+        } else {
+            std::sort(resp.results.begin(), resp.results.end(),
+                      [](const SearchItem& lhs, const SearchItem& rhs) {
+                          if (lhs.score == rhs.score) {
+                              return lhs.path < rhs.path;
+                          }
+                          return lhs.score > rhs.score;
+                      });
+
+            if (req.limit != 0 && resp.results.size() > req.limit) {
+                resp.results.resize(req.limit);
+            }
             resp.total = resp.results.size();
+        }
+
         co_return resp;
     }
 
@@ -1262,19 +1400,40 @@ private:
         }
 
         const auto& docs = docsResult.value();
+
+        std::vector<std::string> effectivePathPatterns = req.pathPatterns;
+        if (effectivePathPatterns.empty() && !req.pathPattern.empty()) {
+            effectivePathPatterns.push_back(req.pathPattern);
+        }
+
+        auto matchesPathPattern = [](const std::string& filePath,
+                                     const std::string& rawPattern) -> bool {
+            if (rawPattern.empty()) {
+                return false;
+            }
+            if (hasWildcard(rawPattern)) {
+                std::string pattern = rawPattern;
+                if (!pattern.empty() && pattern.front() == '*' &&
+                    (pattern.size() == 1 || pattern[1] != '*')) {
+                    pattern = "**/" + pattern;
+                } else if (!pattern.empty() && pattern.front() != '*' && pattern.front() != '/' &&
+                           pattern.find(":/") == std::string::npos && pattern.find("**/") != 0) {
+                    pattern = "**/" + pattern;
+                }
+                return wildcardMatch(filePath, pattern);
+            }
+            return filePath.find(rawPattern) != std::string::npos;
+        };
+
         for (const auto& doc : docs) {
             // Optional path and tag filters for CLI parity
-            bool pathOk = true;
-            if (!req.pathPattern.empty()) {
-                if (hasWildcard(req.pathPattern)) {
-                    std::string pattern = req.pathPattern;
-                    if (!pattern.empty() && pattern.front() != '*' && pattern.front() != '/' &&
-                        pattern.find(":/") == std::string::npos) {
-                        pattern = "*" + pattern;
+            bool pathOk = effectivePathPatterns.empty();
+            if (!effectivePathPatterns.empty()) {
+                for (const auto& pattern : effectivePathPatterns) {
+                    if (matchesPathPattern(doc.filePath, pattern)) {
+                        pathOk = true;
+                        break;
                     }
-                    pathOk = wildcardMatch(doc.filePath, pattern);
-                } else {
-                    pathOk = doc.filePath.find(req.pathPattern) != std::string::npos;
                 }
             }
 

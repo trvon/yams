@@ -38,7 +38,6 @@ TEST_CASE("MultiplexClient concurrent unary out of order",
     const int N = 16;
     int ok = 0;
     for (int i = 0; i < N; ++i) {
-        yams::daemon::StatusRequest req;
         auto res = yams::cli::run_sync(client.status(), 2s);
         if (res)
             ok++;
@@ -64,7 +63,6 @@ TEST_CASE("MultiplexClient concurrent unary parallel", "[daemon][multiplex][.req
 
     for (int i = 0; i < N; ++i) {
         futs.emplace_back(std::async(std::launch::async, [&client]() {
-            yams::daemon::StatusRequest req;
             auto res = yams::cli::run_sync(client.status(), 3s);
             return res.has_value();
         }));
@@ -90,7 +88,6 @@ TEST_CASE("MultiplexClient non-chunked status smoke", "[daemon][multiplex][.requ
     cfg.maxInflight = 8;
     yams::daemon::DaemonClient client(cfg);
 
-    yams::daemon::StatusRequest req;
     auto res = yams::cli::run_sync(client.status(), 2s);
     REQUIRE(res);
     REQUIRE(res.value().running);

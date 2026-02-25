@@ -112,7 +112,7 @@ MCPSearchRequest MCPSearchRequest::fromJson(const json& j) {
     detail::readStringArray(j, "tags", req.tags);
     req.matchAllTags = detail::jsonValueOr(j, "match_all_tags", false);
     req.includeDiff = detail::jsonValueOr(j, "include_diff", false);
-    req.useSession = detail::jsonValueOr(j, "use_session", true);
+    req.useSession = detail::jsonValueOr(j, "use_session", false);
     req.sessionName = j.value("session", std::string{});
     req.cwd = j.value("cwd", std::string{});
 
@@ -148,6 +148,7 @@ MCPSearchResponse MCPSearchResponse::fromJson(const json& j) {
     resp.type = j.value("type", std::string{});
     resp.executionTimeMs = j.value("execution_time_ms", uint64_t{0});
     resp.traceId = j.value("trace_id", std::string{});
+    resp.pathsOnly = j.contains("paths");
 
     detail::readStringArray(j, "paths", resp.paths);
 
@@ -212,7 +213,7 @@ json MCPSearchResponse::toJson() const {
     if (!traceId.empty())
         j["trace_id"] = traceId;
 
-    if (!paths.empty()) {
+    if (pathsOnly || !paths.empty()) {
         j["paths"] = paths;
         return j; // paths_only mode
     }
@@ -291,7 +292,7 @@ MCPGrepRequest MCPGrepRequest::fromJson(const json& j) {
     req.beforeContext = parse_int_tolerant(j, "before_context", 0);
     req.context = parse_int_tolerant(j, "context", 0);
     req.color = j.value("color", std::string{"auto"});
-    req.useSession = j.value("use_session", true);
+    req.useSession = j.value("use_session", false);
     req.sessionName = j.value("session", std::string{});
     req.cwd = j.value("cwd", std::string{});
 
@@ -583,7 +584,7 @@ MCPRetrieveDocumentRequest MCPRetrieveDocumentRequest::fromJson(const json& j) {
     req.graph = j.value("graph", false);
     req.depth = j.value("depth", 1);
     req.includeContent = j.value("include_content", true);
-    req.useSession = j.value("use_session", true);
+    req.useSession = j.value("use_session", false);
     req.sessionName = j.value("session", std::string{});
     return req;
 }

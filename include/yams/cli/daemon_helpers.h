@@ -650,7 +650,8 @@ inline bool operator==(const yams::daemon::ClientConfig& lhs,
            lhs.maxChunkSize == rhs.maxChunkSize && lhs.maxInflight == rhs.maxInflight &&
            lhs.progressiveOutput == rhs.progressiveOutput &&
            lhs.singleUseConnections == rhs.singleUseConnections &&
-           lhs.disableStreamingForLargeQueries == rhs.disableStreamingForLargeQueries;
+           lhs.disableStreamingForLargeQueries == rhs.disableStreamingForLargeQueries &&
+           lhs.acceptCompressed == rhs.acceptCompressed && lhs.transportMode == rhs.transportMode;
 }
 
 inline bool operator!=(const yams::daemon::ClientConfig& lhs,

@@ -116,7 +116,8 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine exists check
     CHECK_FALSE(exists1.value());
 
     // Store and check again
-    engine->store(hash, data);
+    auto storeResult = engine->store(hash, data);
+    REQUIRE(storeResult.has_value());
 
     auto exists2 = engine->exists(hash);
     REQUIRE(exists2.has_value());
@@ -170,7 +171,8 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine statistics",
     for (int i = 0; i < 5; ++i) {
         std::string hash = std::format("{:064x}", i);
         auto data = generateCompressibleData(4096 + i * 100);
-        engine->store(hash, data);
+        auto storeResult = engine->store(hash, data);
+        REQUIRE(storeResult.has_value());
     }
 
     // Get stats
@@ -193,7 +195,8 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine remove",
     std::string hash(64, 'd');
     auto data = generateCompressibleData(2048);
 
-    engine->store(hash, data);
+    auto storeResult = engine->store(hash, data);
+    REQUIRE(storeResult.has_value());
     REQUIRE(engine->exists(hash).value());
 
     auto removeResult = engine->remove(hash);

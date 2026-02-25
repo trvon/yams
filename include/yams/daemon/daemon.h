@@ -24,6 +24,7 @@ namespace yams::daemon {
 
 // Forward declarations for components
 class LifecycleComponent;
+class DaemonLifecycleAdapter;
 class ServiceManager;
 class RequestDispatcher;
 class DaemonMetrics;
@@ -136,6 +137,7 @@ public:
     StateComponent state_;
     std::unique_ptr<LifecycleComponent> lifecycleManager_;
     std::shared_ptr<ServiceManager> serviceManager_;
+    std::unique_ptr<DaemonLifecycleAdapter> lifecycleAdapter_;
     std::unique_ptr<RequestDispatcher> requestDispatcher_;
     // Accessed from multiple threads (runLoop + request handling/shutdown). Guard with mutex.
     mutable std::mutex metricsMutex_;

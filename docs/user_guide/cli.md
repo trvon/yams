@@ -1323,6 +1323,9 @@ Description:
 
 Notes:
 - When client/daemon protocol versions differ, a one-time warning may be shown; upgrade the daemon if features appear limited.
+- Runtime mode selection supports socket and embedded in-process transports.
+- Set `YAMS_EMBEDDED=1|true|on|yes` to force in-process mode, `0|false|off|no` to force socket mode, or `auto` to probe.
+- Config fallback: `[daemon].mode = "embedded" | "socket" | "auto"`.
 
 Examples:
 ```

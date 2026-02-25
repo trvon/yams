@@ -2322,8 +2322,7 @@ private:
                     auto it = status.requestCounts.find(key);
                     return it != status.requestCounts.end() ? it->second : 0ULL;
                 };
-                const uint64_t docs =
-                    std::max(findCount("documents_total"), findCount("storage_documents"));
+                const uint64_t docs = findCount("documents_total");
                 const uint64_t indexed = findCount("documents_indexed");
                 if (docs > 0 || indexed > 0) {
                     std::ostringstream docsVal;
@@ -2331,6 +2330,12 @@ private:
                     if (indexed > 0)
                         docsVal << " · indexed " << indexed;
                     storageRows.push_back({"Documents", docsVal.str(), ""});
+                }
+                const uint64_t casObjects = findCount("storage_documents");
+                if (casObjects > 0) {
+                    std::ostringstream casVal;
+                    casVal << casObjects << " objects";
+                    storageRows.push_back({"CAS Objects", casVal.str(), ""});
                 }
                 const uint64_t logical = findCount("storage_logical_bytes");
                 const uint64_t physical = findCount("physical_total_bytes");

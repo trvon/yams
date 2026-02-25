@@ -758,8 +758,8 @@ TEST_F(UiCliExpectationsIT, PathsOnlyWithPatternAndMatchAllTagsStrict) {
     fs::create_directories(root_ / "ingest" / "tags2");
     auto p1 = (root_ / "ingest" / "tags2" / "d1.md");
     auto p2 = (root_ / "ingest" / "tags2" / "d2.md");
-    std::ofstream(p1) << "hello tags";
-    std::ofstream(p2) << "hello tags";
+    std::ofstream(p1) << "hello tags d1";
+    std::ofstream(p2) << "hello tags d2";
 
     yams::app::services::DocumentIngestionService ing;
     yams::app::services::AddOptions a;
@@ -777,6 +777,8 @@ TEST_F(UiCliExpectationsIT, PathsOnlyWithPatternAndMatchAllTagsStrict) {
     a.path = p2.string();
     auto add2 = ing.addViaDaemon(a);
     ASSERT_TRUE(add2) << (add2 ? "" : add2.error().message);
+    ASSERT_NE(add1.value().hash, add2.value().hash)
+        << "Test requires distinct hashes; use distinct file contents.";
 
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);
@@ -820,16 +822,71 @@ TEST_F(UiCliExpectationsIT, PathsOnlyWithPatternAndMatchAllTagsStrict) {
         return false;
     };
 
-    EXPECT_TRUE(ensureTagsVisible(add1.value().hash, {"docs", "A", "B"}));
-    EXPECT_TRUE(ensureTagsVisible(add2.value().hash, {"docs", "A"}));
+    ASSERT_TRUE(ensureTagsVisible(add1.value().hash, {"docs", "A", "B"}));
+    ASSERT_TRUE(ensureTagsVisible(add2.value().hash, {"docs", "A"}));
+
+    {
+        bool strictReady = false;
+        bool lastHasD1 = false;
+        bool lastHasD2 = false;
+        size_t lastStrictCount = 0;
+        std::string lastStrictError;
+        for (int i = 0; i < 50; ++i) {
+            auto strictDocs = ctx.metadataRepo->findDocumentsByTags({"docs", "A", "B"}, true);
+            if (!strictDocs) {
+                lastStrictError = strictDocs.error().message;
+                std::this_thread::sleep_for(100ms);
+                continue;
+            }
+
+            bool hasD1 = false;
+            bool hasD2 = false;
+            for (const auto& doc : strictDocs.value()) {
+                if (doc.sha256Hash == add1.value().hash) {
+                    hasD1 = true;
+                }
+                if (doc.sha256Hash == add2.value().hash) {
+                    hasD2 = true;
+                }
+            }
+
+            lastHasD1 = hasD1;
+            lastHasD2 = hasD2;
+            lastStrictCount = strictDocs.value().size();
+
+            if (hasD1 && !hasD2) {
+                strictReady = true;
+                break;
+            }
+
+            std::this_thread::sleep_for(100ms);
+        }
+
+        ASSERT_TRUE(strictReady) << "Strict tag lookup did not converge to {d1 only}. Last error='"
+                                 << lastStrictError << "' lastHasD1=" << lastHasD1
+                                 << " lastHasD2=" << lastHasD2
+                                 << " lastStrictCount=" << lastStrictCount;
+    }
 
     yams::app::services::SearchRequest s;
-    s.query = "hello";
-    s.type = "keyword";
-    s.fuzzy = true;
+    s.query = (root_ / "ingest" / "tags2").string();
+    s.type = "path";
+    s.fuzzy = false;
     s.similarity = 0.6f;
     s.pathsOnly = true;
-    s.pathPattern = (root_ / "ingest" / "tags2" / "**").string();
+    const std::string strictPathPattern = (root_ / "ingest" / "tags2" / "**").string();
+    s.pathPattern = strictPathPattern;
+    s.pathPatterns = {strictPathPattern};
+    {
+        std::error_code ec;
+        auto canonical = fs::weakly_canonical(root_ / "ingest" / "tags2", ec);
+        if (!ec && !canonical.empty()) {
+            std::string canonicalPattern = (canonical / "**").string();
+            if (canonicalPattern != strictPathPattern) {
+                s.pathPatterns.push_back(std::move(canonicalPattern));
+            }
+        }
+    }
     s.tags = {"docs", "A", "B"};
     s.matchAllTags = true; // strict: must have all three
 
@@ -837,32 +894,42 @@ TEST_F(UiCliExpectationsIT, PathsOnlyWithPatternAndMatchAllTagsStrict) {
     yams::app::services::SearchRequest warm = s;
     warm.tags.clear();
     warm.matchAllTags = false;
-    for (int i = 0; i < 60; ++i) {
+    bool warmReady = false;
+    for (int i = 0; i < 80; ++i) {
         auto rr = yams::test_async::res(searchSvc->search(warm), 2s);
-        if (rr && rr.value().paths.size() >= 2) {
-            break;
+        if (rr) {
+            for (const auto& p : rr.value().paths) {
+                if (p.find("d1.md") != std::string::npos || p.find("d2.md") != std::string::npos) {
+                    warmReady = true;
+                    break;
+                }
+            }
+            if (warmReady) {
+                break;
+            }
         }
         std::this_thread::sleep_for(100ms);
     }
+    ASSERT_TRUE(warmReady) << "Warmup search did not observe tagged docs in time.";
 
-    // Bounded polling to avoid flakes: wait up to ~6s for strict result shape.
-    bool ok = false;
-    for (int i = 0; i < 60 && !ok; ++i) {
+    // Bounded polling to avoid flakes: strict results may be temporarily empty on cold starts,
+    // but they must eventually include d1.md and must never include d2.md.
+    bool sawD1 = false;
+    bool sawD2 = false;
+    for (int i = 0; i < 60 && !sawD1 && !sawD2; ++i) {
         auto r = yams::test_async::res(searchSvc->search(s), 2s);
         ASSERT_TRUE(r) << r.error().message;
-        bool hasD1 = false, hasD2 = false;
         for (const auto& p : r.value().paths) {
             if (p.find("d1.md") != std::string::npos)
-                hasD1 = true;
+                sawD1 = true;
             if (p.find("d2.md") != std::string::npos)
-                hasD2 = true;
+                sawD2 = true;
         }
-        ok = (hasD1 && !hasD2);
-        if (!ok)
+        if (!sawD1 && !sawD2)
             std::this_thread::sleep_for(100ms);
     }
-    EXPECT_TRUE(ok)
-        << "Strict matchAllTags should include d1.md and exclude d2.md within bounded wait.";
+    EXPECT_TRUE(sawD1) << "Strict matchAllTags should eventually include d1.md.";
+    EXPECT_FALSE(sawD2) << "Strict matchAllTags should never include d2.md.";
 }
 
 // 6c) Search — pathsOnly with pattern + matchAny tags (tolerant)
@@ -1478,8 +1545,8 @@ TEST_F(UiCliExpectationsIT, FuzzyBoundsSimilarityZeroAndOne) {
 // 9) Search — tag filters: matchAny vs matchAll
 TEST_F(UiCliExpectationsIT, TagFilterMatchAnyVsAll) {
     fs::create_directories(root_ / "ingest" / "tags");
-    std::ofstream(root_ / "ingest" / "tags" / "d1.md") << "hello tags";
-    std::ofstream(root_ / "ingest" / "tags" / "d2.txt") << "hello tags";
+    std::ofstream(root_ / "ingest" / "tags" / "d1.md") << "hello tags md";
+    std::ofstream(root_ / "ingest" / "tags" / "d2.txt") << "hello tags txt";
 
     yams::app::services::DocumentIngestionService ing;
     yams::app::services::AddOptions a;
@@ -1498,6 +1565,8 @@ TEST_F(UiCliExpectationsIT, TagFilterMatchAnyVsAll) {
     a.path = p2;
     auto add2 = ing.addViaDaemon(a);
     ASSERT_TRUE(add2) << (add2 ? "" : add2.error().message);
+    ASSERT_NE(add1.value().hash, add2.value().hash)
+        << "Test requires distinct hashes; use distinct file contents.";
 
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);
@@ -1514,14 +1583,55 @@ TEST_F(UiCliExpectationsIT, TagFilterMatchAnyVsAll) {
     (void)searchSvc->lightIndexForHash(add1.value().hash);
     (void)searchSvc->lightIndexForHash(add2.value().hash);
 
+    auto ensureTagsVisible = [&](const std::string& hash,
+                                 const std::vector<std::string>& expected) {
+        for (int i = 0; i < 30; ++i) {
+            auto dres = ctx.metadataRepo->getDocumentByHash(hash);
+            if (dres && dres.value().has_value()) {
+                auto di = dres.value().value();
+                auto all = ctx.metadataRepo->getAllMetadata(di.id);
+                if (all) {
+                    bool ok = true;
+                    for (const auto& t : expected) {
+                        auto it = all.value().find("tag:" + t);
+                        if (it == all.value().end()) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if (ok) {
+                        return true;
+                    }
+                }
+            }
+            std::this_thread::sleep_for(100ms);
+        }
+        return false;
+    };
+
+    ASSERT_TRUE(ensureTagsVisible(add1.value().hash, {"docs", "md"}));
+    ASSERT_TRUE(ensureTagsVisible(add2.value().hash, {"docs", "txt"}));
+
     yams::app::services::SearchRequest anyReq;
-    anyReq.query = "hello";
-    anyReq.type = "keyword";
-    anyReq.fuzzy = true;
+    anyReq.query = (root_ / "ingest" / "tags").string();
+    anyReq.type = "path";
+    anyReq.fuzzy = false;
     anyReq.similarity = 0.6f;
     anyReq.pathsOnly = true;
     anyReq.limit = 10;
-    anyReq.pathPattern = (root_ / "ingest" / "**").string();
+    const std::string anyPathPattern = (root_ / "ingest" / "**").string();
+    anyReq.pathPattern = anyPathPattern;
+    anyReq.pathPatterns = {anyPathPattern};
+    {
+        std::error_code ec;
+        auto canonical = fs::weakly_canonical(root_ / "ingest", ec);
+        if (!ec && !canonical.empty()) {
+            std::string canonicalPattern = (canonical / "**").string();
+            if (canonicalPattern != anyPathPattern) {
+                anyReq.pathPatterns.push_back(std::move(canonicalPattern));
+            }
+        }
+    }
     anyReq.tags = {"docs", "md"};
     anyReq.matchAllTags = false; // match any
 
@@ -1529,10 +1639,31 @@ TEST_F(UiCliExpectationsIT, TagFilterMatchAnyVsAll) {
     allReq.matchAllTags = true; // require both
     allReq.extension = "md";
 
-    // Poll briefly for post-ingest/light-index visibility under load.
+    // Ensure both docs are query-visible before asserting tag behavior.
+    yams::app::services::SearchRequest warm = anyReq;
+    warm.tags.clear();
+    warm.matchAllTags = false;
+    bool warmReady = false;
+    for (int i = 0; i < 80; ++i) {
+        auto rw = yams::test_async::res(searchSvc->search(warm), 2s);
+        ASSERT_TRUE(rw) << rw.error().message;
+        for (const auto& p : rw.value().paths) {
+            if (p.find("d1.md") != std::string::npos || p.find("d2.txt") != std::string::npos) {
+                warmReady = true;
+                break;
+            }
+        }
+        if (warmReady) {
+            break;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    ASSERT_TRUE(warmReady) << "Warmup search did not observe tagged docs in time.";
+
+    // Poll for strict/any tag behavior once results are generally visible.
     bool allOnlyMd = false;
     bool anyHasMd = false;
-    for (int i = 0; i < 40 && !(allOnlyMd && anyHasMd); ++i) {
+    for (int i = 0; i < 60 && !(allOnlyMd && anyHasMd); ++i) {
         auto rAny = yams::test_async::res(searchSvc->search(anyReq), 2s);
         ASSERT_TRUE(rAny) << rAny.error().message;
         auto rAll = yams::test_async::res(searchSvc->search(allReq), 2s);

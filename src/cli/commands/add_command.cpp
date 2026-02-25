@@ -33,6 +33,7 @@
 // Daemon client API for daemon-first add
 #include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/sandbox_detection.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
 // Async helpers for interim non-blocking daemon operations
@@ -407,40 +408,54 @@ public:
                 // Session ID is read from YAMS_SESSION_CURRENT env var (set by `yams session use`)
                 std::string activeSessionId = getActiveSessionId(cli_, bypassSession_, false);
 
+                yams::daemon::ClientConfig transportProbeCfg;
+                if (cli_->hasExplicitDataDir()) {
+                    transportProbeCfg.dataDir = cli_->getDataPath();
+                }
+                const auto resolvedTransportMode =
+                    yams::daemon::resolve_transport_mode(transportProbeCfg);
+                const bool useEmbeddedTransport =
+                    (resolvedTransportMode == yams::daemon::ClientTransportMode::InProcess);
+
                 // Ensure daemon is running; auto-start if necessary
-                std::filesystem::path effectiveSocket =
-                    yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
-                if (!yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                    yams::daemon::ClientConfig startCfg;
-                    if (cli_->hasExplicitDataDir()) {
-                        startCfg.dataDir = cli_->getDataPath();
-                    }
-                    if (auto r = yams::daemon::DaemonClient::startDaemon(startCfg); !r) {
-                        return Error{ErrorCode::InternalError,
-                                     std::string("Failed to start daemon: ") + r.error().message};
-                    }
-                    const auto readyTimeout =
-                        std::chrono::milliseconds(std::max(0, daemonReadyTimeoutMs_));
-                    if (readyTimeout.count() > 0) {
-                        const auto deadline = std::chrono::steady_clock::now() + readyTimeout;
-                        auto sleepFor = std::chrono::milliseconds(50);
-                        bool ready = false;
-                        while (std::chrono::steady_clock::now() < deadline) {
-                            if (yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                                ready = true;
-                                break;
-                            }
-                            auto now = std::chrono::steady_clock::now();
-                            if (now >= deadline) {
-                                break;
-                            }
-                            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                deadline - now);
-                            std::this_thread::sleep_for(std::min(sleepFor, remaining));
-                            sleepFor = std::min(sleepFor * 2, std::chrono::milliseconds(500));
+                if (!useEmbeddedTransport) {
+                    std::filesystem::path effectiveSocket =
+                        yams::daemon::DaemonClient::resolveSocketPathConfigFirst();
+                    if (!yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+                        yams::daemon::ClientConfig startCfg;
+                        if (cli_->hasExplicitDataDir()) {
+                            startCfg.dataDir = cli_->getDataPath();
                         }
-                        if (!ready) {
-                            return Error{ErrorCode::Timeout, "Daemon did not become ready in time"};
+                        if (auto r = yams::daemon::DaemonClient::startDaemon(startCfg); !r) {
+                            return Error{ErrorCode::InternalError,
+                                         std::string("Failed to start daemon: ") +
+                                             r.error().message};
+                        }
+                        const auto readyTimeout =
+                            std::chrono::milliseconds(std::max(0, daemonReadyTimeoutMs_));
+                        if (readyTimeout.count() > 0) {
+                            const auto deadline = std::chrono::steady_clock::now() + readyTimeout;
+                            auto sleepFor = std::chrono::milliseconds(50);
+                            bool ready = false;
+                            while (std::chrono::steady_clock::now() < deadline) {
+                                if (yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
+                                    ready = true;
+                                    break;
+                                }
+                                auto now = std::chrono::steady_clock::now();
+                                if (now >= deadline) {
+                                    break;
+                                }
+                                auto remaining =
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
+                                                                                          now);
+                                std::this_thread::sleep_for(std::min(sleepFor, remaining));
+                                sleepFor = std::min(sleepFor * 2, std::chrono::milliseconds(500));
+                            }
+                            if (!ready) {
+                                return Error{ErrorCode::Timeout,
+                                             "Daemon did not become ready in time"};
+                            }
                         }
                     }
                 }
@@ -590,6 +605,7 @@ public:
                 if (cli_->hasExplicitDataDir()) {
                     sharedClientCfg.dataDir = cli_->getDataPath();
                 }
+                sharedClientCfg.transportMode = resolvedTransportMode;
                 sharedClientCfg.enableChunkedResponses = false;
                 sharedClientCfg.singleUseConnections = false;
                 sharedClientCfg.requestTimeout =

@@ -76,7 +76,7 @@ TEST_CASE_METHOD(RepairFixture, "RepairManager basic operations", "[integrity][r
     SECTION("canRepair checks availability of repair sources") {
         // canRepair returns true when repair sources are configured,
         // even if the block doesn't exist (it checks capability, not block existence)
-        bool canRepairResult = manager->canRepair("some-hash");
+        (void)manager->canRepair("some-hash");
         // Just verify the method is callable without crashing
         CHECK(true);
     }
@@ -110,7 +110,7 @@ TEST_CASE("RepairManager with working backup fetcher", "[integrity][repair]") {
 
     SECTION("attemptRepair succeeds when backup fetcher returns data") {
         // The repair should attempt to use the backup fetcher
-        bool repaired = manager.attemptRepair("recoverable-hash");
+        (void)manager.attemptRepair("recoverable-hash");
         // Note: actual success depends on hash validation, but we test the flow
         CHECK(true); // Verify no exception thrown
     }
@@ -140,7 +140,7 @@ TEST_CASE("RepairManager repair strategy order", "[integrity][repair]") {
     RepairManager manager(storage, config);
 
     SECTION("attempts repair strategies in configured order") {
-        manager.attemptRepair("some-hash");
+        (void)manager.attemptRepair("some-hash");
         REQUIRE(callOrder.size() >= 1u);
         CHECK(callOrder[0] == "backup");
         if (callOrder.size() >= 2u) {

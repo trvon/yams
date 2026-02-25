@@ -155,8 +155,8 @@ public:
     }
     void setDaemonClientSocketPathForTest(const std::filesystem::path& p) {
         daemon_client_config_.socketPath = p;
+        daemon_client_shared_.reset();
         daemon_client_ = nullptr;
-        daemon_client_lease_.reset();
         yams::cli::cli_pool_reset_for_test();
     }
 #endif
@@ -250,15 +250,15 @@ private:
     mutable std::mutex cancelMutex_;
     std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> cancelTokens_;
 
-    // Single multiplexed daemon client lease (shared transport context)
+    // Single multiplexed daemon client instance shared across MCP handlers.
 #if !defined(YAMS_WASI)
-    std::shared_ptr<yams::cli::DaemonClientPool::Lease> daemon_client_lease_;
+    std::shared_ptr<yams::daemon::DaemonClient> daemon_client_shared_;
     yams::daemon::DaemonClient* daemon_client_{nullptr};
     yams::daemon::ClientConfig daemon_client_config_{};
     std::filesystem::path daemonSocketOverride_;
     std::function<Result<void>(const yams::daemon::ClientConfig&)> testEnsureDaemonClientHook_{};
 
-    // Service facades sharing daemon_client_ via non-owning shared_ptr
+    // Service facades sharing daemon_client_shared_
     std::unique_ptr<app::services::RetrievalService> retrieval_svc_;
     std::unique_ptr<app::services::DocumentIngestionService> ingestion_svc_;
 #else
@@ -367,8 +367,8 @@ public:
 
     void testConfigureDaemonClient(const yams::daemon::ClientConfig& cfg) {
         daemon_client_config_ = cfg;
+        daemon_client_shared_.reset();
         daemon_client_ = nullptr;
-        daemon_client_lease_.reset();
     }
 
     // Expose modern handle* methods for testing

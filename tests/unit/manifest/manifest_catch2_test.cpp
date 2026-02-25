@@ -451,7 +451,7 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager concurrent operations",
     auto fileInfo = createTestFileInfo(chunks);
 
     for (int i = 0; i < numThreads; ++i) {
-        threads.emplace_back([this, &chunks, &fileInfo, &successCount, operationsPerThread]() {
+        threads.emplace_back([this, &chunks, &fileInfo, &successCount]() {
             for (int j = 0; j < operationsPerThread; ++j) {
                 // Create manifest
                 auto createResult = manager->createManifest(fileInfo, chunks);

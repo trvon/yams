@@ -65,10 +65,8 @@ private:
 struct RabinChunker::Impl {
     std::unique_ptr<RabinTables> tables;
     ProgressCallback progressCallback;
-    std::unique_ptr<crypto::IContentHasher> hasher;
 
-    explicit Impl(uint64_t polynomial)
-        : tables(std::make_unique<RabinTables>(polynomial)), hasher(crypto::createSHA256Hasher()) {}
+    explicit Impl(uint64_t polynomial) : tables(std::make_unique<RabinTables>(polynomial)) {}
 };
 
 RabinChunker::RabinChunker(ChunkingConfig config)
@@ -87,7 +85,10 @@ void RabinChunker::updateHash(RabinWindow& window, std::byte newByte) {
 
     // Update window
     window.window[window.pos] = newByte;
-    window.pos = (window.pos + 1) % config_.windowSize;
+    ++window.pos;
+    if (window.pos == config_.windowSize) {
+        window.pos = 0;
+    }
 
     // Update hash using precomputed tables
     uint64_t oldHash = pImpl->tables->outTable[static_cast<uint8_t>(oldByte)];
@@ -98,49 +99,73 @@ void RabinChunker::updateHash(RabinWindow& window, std::byte newByte) {
 
 std::pair<size_t, bool> RabinChunker::findChunkBoundary(std::span<const std::byte> data,
                                                         size_t start, RabinWindow& window) {
-    size_t pos = start;
-    size_t chunkStart = start;
+    const size_t dataSize = data.size();
+    const auto* bytes = data.data();
+    const size_t minBoundary = std::min(start + config_.minChunkSize, dataSize);
+    const size_t maxBoundary = std::min(start + config_.maxChunkSize, dataSize);
+    const size_t windowSize = config_.windowSize;
+    const uint64_t chunkMask = config_.chunkMask;
+    const auto& outTable = pImpl->tables->outTable;
 
-    // Skip to minimum chunk size
-    size_t minBoundary = std::min(chunkStart + config_.minChunkSize, data.size());
-    while (pos < minBoundary && pos < data.size()) {
-        updateHash(window, data[pos++]);
+    auto& ring = window.window;
+    size_t& ringPos = window.pos;
+    uint64_t hash = window.hash;
+
+    size_t pos = start;
+    while (pos < minBoundary) {
+        const std::byte newByte = bytes[pos++];
+        const std::byte oldByte = ring[ringPos];
+        ring[ringPos] = newByte;
+        ++ringPos;
+        if (ringPos == windowSize) {
+            ringPos = 0;
+        }
+        hash = ((hash - outTable[static_cast<uint8_t>(oldByte)]) << 8) ^
+               outTable[static_cast<uint8_t>(newByte)];
     }
 
-    // Look for chunk boundary
-    size_t maxBoundary = std::min(chunkStart + config_.maxChunkSize, data.size());
     while (pos < maxBoundary) {
-        updateHash(window, data[pos]);
+        const std::byte newByte = bytes[pos];
+        const std::byte oldByte = ring[ringPos];
+        ring[ringPos] = newByte;
+        ++ringPos;
+        if (ringPos == windowSize) {
+            ringPos = 0;
+        }
+        hash = ((hash - outTable[static_cast<uint8_t>(oldByte)]) << 8) ^
+               outTable[static_cast<uint8_t>(newByte)];
 
-        // Check if we've found a boundary
-        if ((window.hash & config_.chunkMask) == config_.chunkMask) {
+        if ((hash & chunkMask) == chunkMask) {
+            window.hash = hash;
             return {pos + 1, true};
         }
-        pos++;
+        ++pos;
     }
 
-    // Forced boundary at max chunk size or end of data
+    window.hash = hash;
     return {pos, false};
 }
 
 std::vector<Chunk> RabinChunker::chunkData(std::span<const std::byte> data) {
     std::vector<Chunk> chunks;
+    if (config_.targetChunkSize > 0) {
+        chunks.reserve((data.size() / config_.targetChunkSize) + 1);
+    }
+
     RabinWindow window{};
     size_t pos = 0;
-
     while (pos < data.size()) {
         auto [chunkEnd, foundBoundary] = findChunkBoundary(data, pos, window);
+        (void)foundBoundary;
         size_t chunkSize = chunkEnd - pos;
 
-        // Create chunk
-        Chunk chunk;
+        chunks.emplace_back();
+        Chunk& chunk = chunks.back();
         chunk.offset = pos;
         chunk.size = chunkSize;
-        chunk.data.assign(data.begin() + static_cast<std::ptrdiff_t>(pos),
-                          data.begin() + static_cast<std::ptrdiff_t>(chunkEnd));
-        chunk.hash = pImpl->hasher->hash(chunk.data);
-
-        chunks.push_back(std::move(chunk));
+        auto chunkSpan = data.subspan(pos, chunkSize);
+        chunk.hash = crypto::SHA256Hasher::hash(chunkSpan);
+        chunk.data.assign(chunkSpan.begin(), chunkSpan.end());
         pos = chunkEnd;
 
         // Report progress if callback is set

@@ -10,6 +10,7 @@
 #include <boost/asio/local/stream_protocol.hpp>
 #include <yams/core/types.h>
 #include <yams/daemon/client/asio_connection.h>
+#include <yams/daemon/client/client_transport.h>
 #include <yams/daemon/client/transport_options.h>
 #include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -19,24 +20,24 @@ namespace yams::daemon {
 
 // A minimal transport that uses native boost::asio to send framed requests
 // and receive framed responses (unary and streaming).
-class AsioTransportAdapter {
+class AsioTransportAdapter : public IClientTransport {
 public:
     using Connection = AsioConnection;
     using Options = TransportOptions;
 
     explicit AsioTransportAdapter(const Options& opts);
 
-    boost::asio::awaitable<Result<Response>> send_request(const Request& req);
-    boost::asio::awaitable<Result<Response>> send_request(Request&& req);
+    boost::asio::awaitable<Result<Response>> send_request(const Request& req) override;
+    boost::asio::awaitable<Result<Response>> send_request(Request&& req) override;
 
-    using HeaderCallback = std::function<void(const Response&)>;
-    using ChunkCallback = std::function<bool(const Response&, bool)>;
-    using ErrorCallback = std::function<void(const Error&)>;
-    using CompleteCallback = std::function<void()>;
+    using HeaderCallback = IClientTransport::HeaderCallback;
+    using ChunkCallback = IClientTransport::ChunkCallback;
+    using ErrorCallback = IClientTransport::ErrorCallback;
+    using CompleteCallback = IClientTransport::CompleteCallback;
 
     boost::asio::awaitable<Result<void>>
     send_request_streaming(const Request& req, HeaderCallback onHeader, ChunkCallback onChunk,
-                           ErrorCallback onError, CompleteCallback onComplete);
+                           ErrorCallback onError, CompleteCallback onComplete) override;
 
 public:
     // Toggle FSM metrics and snapshot logging for transport observability

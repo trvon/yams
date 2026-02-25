@@ -19,6 +19,8 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <chrono>
+#include <functional>
 #include <stdexcept>
 
 #include <boost/asio/detail/concurrency_hint.hpp>
@@ -77,9 +79,30 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
         numThreads.value_or(std::max<std::size_t>(1, std::thread::hardware_concurrency()));
 
     workers_.reserve(workerCount);
+    {
+        std::lock_guard<std::mutex> stateLock(workerStateMutex_);
+        workerThreadIds_.assign(workerCount, std::thread::id{});
+        workerRunStart_.assign(workerCount, std::chrono::steady_clock::time_point{});
+        workerRunEnd_.assign(workerCount, std::chrono::steady_clock::time_point{});
+        workerExited_.assign(workerCount, false);
+        stopRequestedSet_ = false;
+    }
+
     try {
         for (std::size_t i = 0; i < workerCount; ++i) {
             workers_.emplace_back([this, i]() {
+                {
+                    std::lock_guard<std::mutex> stateLock(workerStateMutex_);
+                    if (i < workerThreadIds_.size()) {
+                        workerThreadIds_[i] = std::this_thread::get_id();
+                    }
+                    if (i < workerRunStart_.size()) {
+                        workerRunStart_[i] = std::chrono::steady_clock::now();
+                    }
+                    if (i < workerExited_.size()) {
+                        workerExited_[i] = false;
+                    }
+                }
                 activeWorkers_.fetch_add(1, std::memory_order_release);
                 try {
                     spdlog::trace("[WorkCoordinator] Worker {} starting io_context.run()", i);
@@ -113,6 +136,15 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
                 try {
                     spdlog::trace("[WorkCoordinator] Worker {} exited io_context.run()", i);
                 } catch (...) {
+                }
+                {
+                    std::lock_guard<std::mutex> stateLock(workerStateMutex_);
+                    if (i < workerRunEnd_.size()) {
+                        workerRunEnd_[i] = std::chrono::steady_clock::now();
+                    }
+                    if (i < workerExited_.size()) {
+                        workerExited_[i] = true;
+                    }
                 }
                 activeWorkers_.fetch_sub(1, std::memory_order_release);
                 joinCV_.notify_all();
@@ -153,6 +185,11 @@ void WorkCoordinator::stop() {
     try {
         spdlog::debug("[WorkCoordinator] Stopping...");
     } catch (...) {
+    }
+    {
+        std::lock_guard<std::mutex> stateLock(workerStateMutex_);
+        stopRequestedAt_ = std::chrono::steady_clock::now();
+        stopRequestedSet_ = true;
     }
     workGuard_.reset();
     ioContext_->stop();
@@ -223,9 +260,97 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
     } catch (...) {
     }
 
+    auto joinStart = std::chrono::steady_clock::now();
     std::unique_lock<std::mutex> lock(joinMutex_);
-    bool completed = joinCV_.wait_for(
-        lock, timeout, [this]() { return activeWorkers_.load(std::memory_order_acquire) == 0; });
+    const auto joinDeadline = joinStart + timeout;
+    bool completed = false;
+    while (true) {
+        if (activeWorkers_.load(std::memory_order_acquire) == 0) {
+            completed = true;
+            break;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= joinDeadline) {
+            break;
+        }
+
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(joinDeadline - now);
+        const auto slice =
+            std::min<std::chrono::milliseconds>(remaining, std::chrono::milliseconds(50));
+        joinCV_.wait_for(lock, slice);
+    }
+
+    auto joinEnd = std::chrono::steady_clock::now();
+    auto joinDurationMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(joinEnd - joinStart).count();
+
+    struct WorkerSnapshot {
+        std::size_t index = 0;
+        std::size_t tidHash = 0;
+        bool exited = false;
+        long long runMs = -1;
+        long long exitAfterStopMs = -1;
+    };
+
+    std::vector<WorkerSnapshot> workersStillRunning;
+    WorkerSnapshot slowestExited{};
+    bool haveSlowestExited = false;
+
+    {
+        std::lock_guard<std::mutex> stateLock(workerStateMutex_);
+        for (std::size_t i = 0; i < workers_.size(); ++i) {
+            WorkerSnapshot snap;
+            snap.index = i;
+            if (i < workerThreadIds_.size() && workerThreadIds_[i] != std::thread::id{}) {
+                snap.tidHash = std::hash<std::thread::id>{}(workerThreadIds_[i]);
+            }
+            const auto startTs = i < workerRunStart_.size()
+                                     ? workerRunStart_[i]
+                                     : std::chrono::steady_clock::time_point{};
+            const auto endTs = i < workerRunEnd_.size() ? workerRunEnd_[i]
+                                                        : std::chrono::steady_clock::time_point{};
+            snap.exited = (i < workerExited_.size()) ? workerExited_[i] : false;
+
+            if (startTs != std::chrono::steady_clock::time_point{}) {
+                const auto runUntil =
+                    snap.exited && endTs != std::chrono::steady_clock::time_point{} ? endTs
+                                                                                    : joinEnd;
+                snap.runMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(runUntil - startTs)
+                        .count();
+            }
+
+            if (stopRequestedSet_ && snap.exited &&
+                endTs != std::chrono::steady_clock::time_point{}) {
+                snap.exitAfterStopMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(endTs - stopRequestedAt_)
+                        .count();
+                if (!haveSlowestExited || snap.exitAfterStopMs > slowestExited.exitAfterStopMs) {
+                    slowestExited = snap;
+                    haveSlowestExited = true;
+                }
+            }
+
+            if (!snap.exited) {
+                workersStillRunning.push_back(snap);
+            }
+        }
+    }
+
+    if (!completed || joinDurationMs >= 500) {
+        if (haveSlowestExited) {
+            spdlog::warn("[WorkCoordinator] joinWithTimeout diagnostics: elapsed={}ms completed={} "
+                         "slowest_worker={} tid_hash={} exit_after_stop={}ms run={}ms",
+                         joinDurationMs, completed, slowestExited.index, slowestExited.tidHash,
+                         slowestExited.exitAfterStopMs, slowestExited.runMs);
+        } else {
+            spdlog::warn("[WorkCoordinator] joinWithTimeout diagnostics: elapsed={}ms completed={} "
+                         "no worker exit samples",
+                         joinDurationMs, completed);
+        }
+    }
 
     if (!completed) {
         try {
@@ -233,24 +358,20 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
                 "[WorkCoordinator] CRITICAL: Timeout expired with {} workers still active. "
                 "Attempting to join remaining threads...",
                 activeWorkers_.load());
+            for (const auto& snap : workersStillRunning) {
+                spdlog::error("[WorkCoordinator] timeout worker detail: worker={} tid_hash={} "
+                              "exited={} run={}ms",
+                              snap.index, snap.tidHash, snap.exited, snap.runMs);
+            }
         } catch (...) {
         }
-        // Instead of detaching, try to join with a longer wait
-        // Detached threads can cause use-after-free when they access daemon resources
+        lock.unlock();
         for (auto& worker : workers_) {
             if (worker.joinable()) {
                 try {
-                    // Use a longer timeout for joining
-                    auto start = std::chrono::steady_clock::now();
-                    while (worker.joinable() &&
-                           std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    }
-                    if (worker.joinable()) {
-                        spdlog::error("[WorkCoordinator] Failed to join worker thread after "
-                                      "extended timeout, detaching as last resort");
-                        worker.detach();
-                    }
+                    spdlog::error(
+                        "[WorkCoordinator] Detaching worker as last resort after join timeout");
+                    worker.detach();
                 } catch (...) {
                     spdlog::error("[WorkCoordinator] Exception while joining worker thread");
                     worker.detach();
@@ -258,6 +379,7 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
             }
         }
     } else {
+        lock.unlock();
         // Join all workers that have exited
         for (auto& worker : workers_) {
             if (worker.joinable()) {

@@ -24,6 +24,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/daemon_lifecycle.h>
 #include <yams/daemon/ipc/connection_fsm.h>
 #if defined(TRACY_ENABLE)
 #include <tracy/Tracy.hpp>
@@ -66,6 +67,7 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
 
     lifecycleManager_ = std::make_unique<LifecycleComponent>(this, config_.pidFile);
     serviceManager_ = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    lifecycleAdapter_ = std::make_unique<DaemonLifecycleAdapter>(this);
 
     // Create metrics aggregator before the dispatcher so status can pull from a single snapshot
     {
@@ -74,7 +76,7 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
                                                    serviceManager_->getWorkCoordinator());
     }
     requestDispatcher_ = std::make_unique<RequestDispatcher>(
-        this, serviceManager_.get(), &state_, [&]() -> DaemonMetrics* {
+        lifecycleAdapter_.get(), serviceManager_.get(), &state_, [&]() -> DaemonMetrics* {
             std::lock_guard<std::mutex> lk(metricsMutex_);
             return metrics_.get();
         }());
@@ -221,8 +223,8 @@ Result<void> YamsDaemon::start() {
             std::lock_guard<std::mutex> lk(metricsMutex_);
             m = metrics_.get();
         }
-        requestDispatcher_ =
-            std::make_unique<RequestDispatcher>(this, serviceManager_.get(), &state_, m);
+        requestDispatcher_ = std::make_unique<RequestDispatcher>(lifecycleAdapter_.get(),
+                                                                 serviceManager_.get(), &state_, m);
     }
 
     // Recreate tuning manager if destroyed
@@ -349,6 +351,13 @@ Result<void> YamsDaemon::start() {
 
     if (auto result = socketServer_->start(); !result) {
         running_ = false;
+        if (socketServer_) {
+            try {
+                (void)socketServer_->stop();
+            } catch (...) {
+            }
+            socketServer_.reset();
+        }
         if (ioCoordinator_) {
             try {
                 ioCoordinator_->stop();
@@ -389,6 +398,7 @@ Result<void> YamsDaemon::start() {
             }
         } catch (...) {
         }
+        socketServer_.reset();
         if (ioCoordinator_) {
             try {
                 ioCoordinator_->stop();
@@ -819,6 +829,9 @@ Result<void> YamsDaemon::stop() {
         if (!stopResult) {
             spdlog::warn("Socket server stop returned error: {}", stopResult.error().message);
         }
+        // Destroy acceptors/sockets while IOCoordinator is still alive to avoid
+        // boost::asio service teardown reading freed io_context memory.
+        socketServer_.reset();
         state_.readiness.ipcServerReady = false;
     }
 
@@ -858,12 +871,6 @@ Result<void> YamsDaemon::stop() {
     // RepairService is now owned by ServiceManager; stopped during its Phase 6.0.5
 
     // Metrics already stopped earlier (before ServiceManager)
-
-    if (socketServer_) {
-        spdlog::debug("Resetting socket server...");
-        socketServer_.reset();
-        spdlog::debug("Socket server reset");
-    }
 
     if (lifecycleManager_) {
         lifecycleManager_->shutdown();
