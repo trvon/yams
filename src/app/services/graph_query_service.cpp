@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
 namespace yams::app::services {
@@ -134,6 +135,68 @@ bool matchesRelationFilter(const metadata::KGEdge& edge, const NormalizedRelatio
     }
     const std::string normalized = normalizeRelationName(edge.relation);
     return filter.allowed.find(normalized) != filter.allowed.end();
+}
+
+int relationSignalWeight(std::string_view relation) {
+    const std::string normalized = normalizeRelationName(std::string(relation));
+
+    if (normalized == "calls" || normalized == "references" || normalized == "inherits" ||
+        normalized == "implements" || normalized == "mentioned_in") {
+        return 100;
+    }
+
+    if (normalized == "includes" || normalized == "defined_in" || normalized == "located_in" ||
+        normalized == "observed_as" || normalized == "co_mentioned_with" ||
+        normalized == "symbol_reference" || normalized == "entity_reference") {
+        return 75;
+    }
+
+    if (normalized == "has_version" || normalized == "path_version" ||
+        normalized == "blob_at_path" || normalized == "renamed_from" ||
+        normalized == "renamed_to" || normalized == "moved_from" || normalized == "moved_to" ||
+        normalized == "same_content") {
+        return 45;
+    }
+
+    if (normalized == "contains" || normalized == "has_blob" || normalized == "scoped_by" ||
+        normalized == "directory_child" || normalized == "has_tag") {
+        return 15;
+    }
+
+    return 30;
+}
+
+double extractEdgeConfidence(const metadata::KGEdge& edge) {
+    if (edge.properties.has_value()) {
+        try {
+            const auto props = nlohmann::json::parse(edge.properties.value());
+            if (props.contains("confidence") && props["confidence"].is_number()) {
+                return std::clamp(props["confidence"].get<double>(), 0.0, 1.0);
+            }
+            if (props.contains("provenance") && props["provenance"].is_object()) {
+                const auto& provenance = props["provenance"];
+                if (provenance.contains("confidence") && provenance["confidence"].is_number()) {
+                    return std::clamp(provenance["confidence"].get<double>(), 0.0, 1.0);
+                }
+            }
+        } catch (...) {
+        }
+    }
+
+    return std::clamp(static_cast<double>(edge.weight), 0.0, 1.0);
+}
+
+double relationPriorityScore(const metadata::KGEdge& edge) {
+    const int signal = relationSignalWeight(edge.relation);
+    const double confidence = extractEdgeConfidence(edge);
+    return static_cast<double>(signal) + (confidence * 10.0) +
+           (static_cast<double>(edge.weight) * 0.5);
+}
+
+double computeNodeRelevance(const metadata::KGEdge& edge, int distance) {
+    const double base = relationPriorityScore(edge);
+    const double depthPenalty = static_cast<double>(std::max(distance - 1, 0)) * 2.0;
+    return base - depthPenalty;
 }
 
 } // anonymous namespace
@@ -406,57 +469,93 @@ private:
     // Edge cache type: nodeId -> vector of all edges (both incoming and outgoing)
     using EdgeCache = std::unordered_map<std::int64_t, std::vector<metadata::KGEdge>>;
 
-    // Collect neighbors and cache edges for later reuse
-    void collectNeighborsWithCache(std::int64_t nodeId, int distance, int maxDepth,
-                                   const NormalizedRelationFilter& relationFilter,
-                                   std::unordered_set<std::int64_t>& visited,
-                                   std::queue<std::pair<std::int64_t, int>>& queue,
-                                   EdgeCache& edgeCache, bool reverseTraversal = false) {
-        // Use bidirectional query to get all edges in one call (optimization: reduces 2 queries to
-        // 1)
-        auto allEdges = kgStore_->getEdgesBidirectional(nodeId);
-        if (!allEdges) {
-            return;
-        }
-
-        // Cache edges for this node (used later for connectingEdges)
-        edgeCache[nodeId] = allEdges.value();
-
-        // Normal traversal: follow outgoing edges (A calls B -> traverse to B)
-        // Reverse traversal: follow incoming edges (A calls B -> traverse to A)
-        for (const auto& edge : allEdges.value()) {
-            if (!matchesRelationFilter(edge, relationFilter))
-                continue;
-
-            std::int64_t neighborId;
-            if (!reverseTraversal) {
-                // Follow outgoing: nodeId is src, neighbor is dst
-                if (edge.srcNodeId != nodeId)
-                    continue;
-                neighborId = edge.dstNodeId;
-            } else {
-                // Follow incoming: nodeId is dst, neighbor is src
-                if (edge.dstNodeId != nodeId)
-                    continue;
-                neighborId = edge.srcNodeId;
-            }
-
-            if (visited.find(neighborId) == visited.end() && distance + 1 <= maxDepth) {
-                queue.push({neighborId, distance + 1});
-                visited.insert(neighborId);
-            }
-        }
-    }
-
     Result<void> performBFSTraversal(std::int64_t originNodeId, const GraphQueryRequest& req,
                                      const NormalizedRelationFilter& relationFilter,
                                      GraphQueryResponse& response) {
+        struct TraversalParent {
+            std::int64_t parentNodeId{0};
+            metadata::KGEdge edge;
+        };
+
+        auto edgePreference = [](const metadata::KGEdge& lhs, const metadata::KGEdge& rhs) {
+            const double lhsScore = relationPriorityScore(lhs);
+            const double rhsScore = relationPriorityScore(rhs);
+            if (lhsScore != rhsScore) {
+                return lhsScore > rhsScore;
+            }
+
+            const std::string lhsRelation = normalizeRelationName(lhs.relation);
+            const std::string rhsRelation = normalizeRelationName(rhs.relation);
+            if (lhsRelation != rhsRelation) {
+                return lhsRelation < rhsRelation;
+            }
+
+            if (lhs.id != rhs.id) {
+                return lhs.id < rhs.id;
+            }
+
+            if (lhs.srcNodeId != rhs.srcNodeId) {
+                return lhs.srcNodeId < rhs.srcNodeId;
+            }
+            return lhs.dstNodeId < rhs.dstNodeId;
+        };
+
+        auto isBetterParent = [&](const metadata::KGEdge& candidate,
+                                  const metadata::KGEdge& existing) -> bool {
+            return edgePreference(candidate, existing);
+        };
+
+        auto getCachedEdges =
+            [&](std::int64_t nodeId,
+                EdgeCache& cache) -> Result<const std::vector<metadata::KGEdge>*> {
+            auto cacheIt = cache.find(nodeId);
+            if (cacheIt == cache.end()) {
+                auto edgeRes = kgStore_->getEdgesBidirectional(nodeId);
+                if (!edgeRes) {
+                    return Result<const std::vector<metadata::KGEdge>*>(edgeRes.error());
+                }
+                cacheIt = cache.emplace(nodeId, std::move(edgeRes.value())).first;
+            }
+            return &cacheIt->second;
+        };
+
+        auto collectTraversalEdges = [&](std::int64_t nodeId,
+                                         const std::vector<metadata::KGEdge>& allEdges,
+                                         bool reverseTraversal) {
+            std::vector<metadata::KGEdge> traversalEdges;
+            traversalEdges.reserve(allEdges.size());
+
+            for (const auto& edge : allEdges) {
+                if (!matchesRelationFilter(edge, relationFilter)) {
+                    continue;
+                }
+
+                if (!reverseTraversal) {
+                    if (edge.srcNodeId != nodeId) {
+                        continue;
+                    }
+                } else {
+                    if (edge.dstNodeId != nodeId) {
+                        continue;
+                    }
+                }
+
+                traversalEdges.push_back(edge);
+            }
+
+            std::sort(traversalEdges.begin(), traversalEdges.end(), edgePreference);
+            return traversalEdges;
+        };
+
         std::queue<std::pair<std::int64_t, int>> queue;
         std::unordered_set<std::int64_t> visited;
+        std::unordered_map<std::int64_t, int> distanceByNode;
+        std::unordered_map<std::int64_t, TraversalParent> parentByNode;
         EdgeCache edgeCache; // Cache edges to avoid duplicate queries
 
         queue.push({originNodeId, 0});
         visited.insert(originNodeId);
+        distanceByNode.emplace(originNodeId, 0);
 
         std::size_t totalNodes = 0;
         std::size_t totalEdges = 0;
@@ -465,9 +564,47 @@ private:
             auto [currentNodeId, distance] = queue.front();
             queue.pop();
 
+            const auto allEdgesRes = getCachedEdges(currentNodeId, edgeCache);
+            if (!allEdgesRes) {
+                spdlog::warn("Failed to fetch edges for node {}: {}", currentNodeId,
+                             allEdgesRes.error().message);
+                continue;
+            }
+
+            const auto& allEdges = *allEdgesRes.value();
+            const auto traversalEdges =
+                collectTraversalEdges(currentNodeId, allEdges, req.reverseTraversal);
+
+            if (distance < req.maxDepth) {
+                for (const auto& edge : traversalEdges) {
+                    const std::int64_t neighborId =
+                        req.reverseTraversal ? edge.srcNodeId : edge.dstNodeId;
+                    const int neighborDistance = distance + 1;
+
+                    auto depthIt = distanceByNode.find(neighborId);
+                    const bool seenBefore = (depthIt != distanceByNode.end());
+
+                    if (!seenBefore) {
+                        distanceByNode.emplace(neighborId, neighborDistance);
+                        parentByNode[neighborId] = TraversalParent{currentNodeId, edge};
+                        queue.push({neighborId, neighborDistance});
+                        visited.insert(neighborId);
+                        continue;
+                    }
+
+                    // If there are multiple paths at the same BFS depth, prefer the
+                    // higher-signal relation for attribution.
+                    if (depthIt->second == neighborDistance) {
+                        auto parentIt = parentByNode.find(neighborId);
+                        if (parentIt == parentByNode.end() ||
+                            isBetterParent(edge, parentIt->second.edge)) {
+                            parentByNode[neighborId] = TraversalParent{currentNodeId, edge};
+                        }
+                    }
+                }
+            }
+
             if (distance == 0) {
-                collectNeighborsWithCache(currentNodeId, distance, req.maxDepth, relationFilter,
-                                          visited, queue, edgeCache, req.reverseTraversal);
                 continue;
             }
 
@@ -482,63 +619,62 @@ private:
             connectedNode.nodeMetadata = std::move(nodeMetadataResult.value());
             connectedNode.distance = distance;
 
-            // Use cached edges if available, otherwise fetch with bidirectional query
-            auto cacheIt = edgeCache.find(currentNodeId);
-            std::vector<metadata::KGEdge> nodeEdges;
-            if (cacheIt != edgeCache.end()) {
-                nodeEdges = cacheIt->second;
-            } else {
-                // Fetch edges using single bidirectional query (optimization: 1 query instead of 2)
-                auto allEdges = kgStore_->getEdgesBidirectional(currentNodeId);
-                if (allEdges) {
-                    nodeEdges = std::move(allEdges.value());
-                    edgeCache[currentNodeId] = nodeEdges;
+            auto parentIt = parentByNode.find(currentNodeId);
+            if (parentIt != parentByNode.end()) {
+                const auto& parentEdge = parentIt->second.edge;
+                GraphEdgeDescriptor edgeDesc;
+                edgeDesc.edgeId = parentEdge.id;
+                edgeDesc.srcNodeId = parentEdge.srcNodeId;
+                edgeDesc.dstNodeId = parentEdge.dstNodeId;
+                edgeDesc.relation = parentEdge.relation;
+                edgeDesc.weight = parentEdge.weight;
+                if (req.includeEdgeProperties) {
+                    edgeDesc.properties = parentEdge.properties;
                 }
+                connectedNode.connectingEdges.push_back(std::move(edgeDesc));
+                connectedNode.relevanceScore = computeNodeRelevance(parentEdge, distance);
+                totalEdges += 1;
             }
 
-            // Build connecting edges from cached/fetched edges
-            for (const auto& edge : nodeEdges) {
-                if (!matchesRelationFilter(edge, relationFilter)) {
-                    continue;
-                }
-
-                // Check if edge connects to a visited node
-                bool connects = false;
-                if (edge.srcNodeId == currentNodeId &&
-                    visited.find(edge.dstNodeId) != visited.end()) {
-                    connects = true;
-                } else if (edge.dstNodeId == currentNodeId &&
-                           visited.find(edge.srcNodeId) != visited.end()) {
-                    connects = true;
-                }
-
-                if (connects) {
-                    GraphEdgeDescriptor edgeDesc;
-                    edgeDesc.edgeId = edge.id;
-                    edgeDesc.srcNodeId = edge.srcNodeId;
-                    edgeDesc.dstNodeId = edge.dstNodeId;
-                    edgeDesc.relation = edge.relation;
-                    edgeDesc.weight = edge.weight;
-                    if (req.includeEdgeProperties)
-                        edgeDesc.properties = edge.properties;
-                    connectedNode.connectingEdges.push_back(std::move(edgeDesc));
-                    totalEdges++;
-                }
-            }
-
-            response.nodesByDistance[distance].push_back(connectedNode);
-            response.allConnectedNodes.push_back(std::move(connectedNode));
-            totalNodes++;
-
-            if (response.nodesByDistance[distance].size() >= req.maxResultsPerDepth) {
+            auto& depthBucket = response.nodesByDistance[distance];
+            if (depthBucket.size() >= req.maxResultsPerDepth) {
                 response.truncated = true;
                 continue;
             }
-
-            collectNeighborsWithCache(currentNodeId, distance, req.maxDepth, relationFilter,
-                                      visited, queue, edgeCache, req.reverseTraversal);
+            depthBucket.push_back(std::move(connectedNode));
+            totalNodes++;
 
             response.maxDepthReached = std::max(response.maxDepthReached, distance);
+        }
+
+        auto nodeOrder = [](const GraphConnectedNode& lhs, const GraphConnectedNode& rhs) {
+            if (lhs.relevanceScore != rhs.relevanceScore) {
+                return lhs.relevanceScore > rhs.relevanceScore;
+            }
+            if (lhs.nodeMetadata.node.nodeKey != rhs.nodeMetadata.node.nodeKey) {
+                return lhs.nodeMetadata.node.nodeKey < rhs.nodeMetadata.node.nodeKey;
+            }
+            return lhs.nodeMetadata.node.nodeId < rhs.nodeMetadata.node.nodeId;
+        };
+
+        std::vector<int> distances;
+        distances.reserve(response.nodesByDistance.size());
+        for (const auto& [distance, _] : response.nodesByDistance) {
+            distances.push_back(distance);
+        }
+        std::sort(distances.begin(), distances.end());
+
+        response.allConnectedNodes.clear();
+        for (int distance : distances) {
+            auto bucketIt = response.nodesByDistance.find(distance);
+            if (bucketIt == response.nodesByDistance.end()) {
+                continue;
+            }
+            auto& bucket = bucketIt->second;
+            std::sort(bucket.begin(), bucket.end(), nodeOrder);
+            for (const auto& node : bucket) {
+                response.allConnectedNodes.push_back(node);
+            }
         }
 
         response.totalNodesFound = totalNodes;

@@ -1590,9 +1590,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
 
     if (response.isDegraded && response.hasResults()) {
-        spdlog::info("Search returned {} results (degraded: {} timed out, {} failed)",
-                     response.results.size(), response.timedOutComponents.size(),
-                     response.failedComponents.size());
+        spdlog::debug("Search returned {} results (degraded: {} timed out, {} failed)",
+                      response.results.size(), response.timedOutComponents.size(),
+                      response.failedComponents.size());
     }
 
     return response;
@@ -1778,8 +1778,8 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFullText(const std
             }
         }
 
-        spdlog::info("queryFullText: {} results for query '{}' (limit={})", results.size(),
-                     query.substr(0, 50), limit);
+        spdlog::debug("queryFullText: {} results for query '{}' (limit={})", results.size(),
+                      query.substr(0, 50), limit);
 
         if (const char* env = std::getenv("YAMS_SEARCH_DIAG"); env && std::string(env) == "1") {
             spdlog::warn("[search_diag] text_hits={} limit={} query='{}'", results.size(), limit,
@@ -2010,8 +2010,8 @@ SearchEngine::Impl::queryKnowledgeGraph(const std::string& query, size_t limit) 
             results.push_back(std::move(result));
         }
 
-        spdlog::info("queryKnowledgeGraph: {} results for query '{}' (batch: {} terms)",
-                     results.size(), query.substr(0, 50), searchTerms.size());
+        spdlog::debug("queryKnowledgeGraph: {} results for query '{}' (batch: {} terms)",
+                      results.size(), query.substr(0, 50), searchTerms.size());
 
     } catch (const std::exception& e) {
         spdlog::warn("KG query exception: {}", e.what());
@@ -2113,8 +2113,8 @@ SearchEngine::Impl::queryVectorIndex(const std::vector<float>& embedding, size_t
             results.push_back(std::move(result));
         }
 
-        spdlog::info("queryVectorIndex: {} results (limit={}, threshold={})", results.size(), limit,
-                     config_.similarityThreshold);
+        spdlog::debug("queryVectorIndex: {} results (limit={}, threshold={})", results.size(),
+                      limit, config_.similarityThreshold);
 
     } catch (const std::exception& e) {
         spdlog::warn("Vector search exception: {}", e.what());

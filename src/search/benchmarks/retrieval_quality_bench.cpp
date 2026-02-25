@@ -611,7 +611,7 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         }();
 
         if (benchVerbose) {
-            spdlog::info("Executing search query: '{}'", tq.query);
+            spdlog::debug("Executing search query: '{}'", tq.query);
         }
         // Wait at least as long as the query timeout, plus a small margin.
         // Using a shorter run_sync deadline can leave in-flight requests behind,
@@ -638,16 +638,16 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
 
         const auto& results = run.value().response.results;
         if (benchVerbose) {
-            spdlog::info("Search returned {} results for query '{}' (attempts={}, streaming={}, "
-                         "fuzzy_retry={}, literal_retry={})",
-                         results.size(), tq.query, run.value().attempts, run.value().usedStreaming,
-                         run.value().usedFuzzyRetry, run.value().usedLiteralTextRetry);
+            spdlog::debug("Search returned {} results for query '{}' (attempts={}, streaming={}, "
+                          "fuzzy_retry={}, literal_retry={})",
+                          results.size(), tq.query, run.value().attempts, run.value().usedStreaming,
+                          run.value().usedFuzzyRetry, run.value().usedLiteralTextRetry);
         }
 
         // Detailed result logging for debugging retrieval quality
         if (benchDiagEnabled) {
-            spdlog::info("  [{}] Expected relevant: {}", searchType,
-                         fmt::join(tq.relevantDocIds, ", "));
+            spdlog::debug("  [{}] Expected relevant: {}", searchType,
+                          fmt::join(tq.relevantDocIds, ", "));
             for (size_t i = 0; i < std::min((size_t)5, results.size()); ++i) {
                 std::string filename = fs::path(results[i].path).filename().string();
                 std::string docId = filename;
@@ -655,9 +655,9 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
                     docId = docId.substr(0, docId.size() - 4);
                 }
                 bool relevant = tq.relevantDocIds.count(docId) > 0;
-                spdlog::info("  [{}] Result {}: path='{}' docId='{}' score={:.4f} {}", searchType,
-                             i, results[i].path, docId, results[i].score,
-                             relevant ? "RELEVANT" : "");
+                spdlog::debug("  [{}] Result {}: path='{}' docId='{}' score={:.4f} {}", searchType,
+                              i, results[i].path, docId, results[i].score,
+                              relevant ? "RELEVANT" : "");
             }
         }
 

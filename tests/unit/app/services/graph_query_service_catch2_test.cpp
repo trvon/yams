@@ -267,3 +267,293 @@ TEST_CASE("GraphQueryService: SymbolReference enum includes calls", "[services][
     REQUIRE(resp.allConnectedNodes.size() == 1);
     REQUIRE(resp.allConnectedNodes[0].nodeMetadata.node.nodeKey == "symbol:enum:callee");
 }
+
+TEST_CASE("GraphQueryService: BFS uses discovered parent edge for attribution",
+          "[services][graph]") {
+    GraphQueryServiceFixture fixture;
+    auto service = makeGraphQueryService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE(service != nullptr);
+
+    KGNode origin;
+    origin.nodeKey = "symbol:path:origin";
+    origin.label = "origin";
+    origin.type = "function";
+    auto originId = fixture.kgStore->upsertNode(origin);
+    REQUIRE(originId.has_value());
+
+    KGNode mid;
+    mid.nodeKey = "symbol:path:mid";
+    mid.label = "mid";
+    mid.type = "function";
+    auto midId = fixture.kgStore->upsertNode(mid);
+    REQUIRE(midId.has_value());
+
+    KGNode target;
+    target.nodeKey = "symbol:path:target";
+    target.label = "target";
+    target.type = "function";
+    auto targetId = fixture.kgStore->upsertNode(target);
+    REQUIRE(targetId.has_value());
+
+    KGEdge edge1;
+    edge1.srcNodeId = originId.value();
+    edge1.dstNodeId = midId.value();
+    edge1.relation = "contains";
+    edge1.weight = 1.0f;
+    REQUIRE(fixture.kgStore->addEdge(edge1).has_value());
+
+    KGEdge edge2;
+    edge2.srcNodeId = midId.value();
+    edge2.dstNodeId = targetId.value();
+    edge2.relation = "calls";
+    edge2.weight = 0.9f;
+    edge2.properties = R"({"source":"unit","confidence":0.73})";
+    REQUIRE(fixture.kgStore->addEdge(edge2).has_value());
+
+    GraphQueryRequest req;
+    req.nodeId = originId.value();
+    req.maxDepth = 2;
+    req.maxResults = 10;
+    req.hydrateFully = false;
+    req.includeEdgeProperties = true;
+
+    auto result = service->query(req);
+    REQUIRE(result.has_value());
+    const auto& resp = result.value();
+
+    REQUIRE(resp.allConnectedNodes.size() == 2);
+
+    const auto* targetNode = [&]() -> const GraphConnectedNode* {
+        for (const auto& node : resp.allConnectedNodes) {
+            if (node.nodeMetadata.node.nodeKey == "symbol:path:target") {
+                return &node;
+            }
+        }
+        return nullptr;
+    }();
+
+    REQUIRE(targetNode != nullptr);
+    CHECK(targetNode->distance == 2);
+    REQUIRE(targetNode->connectingEdges.size() == 1);
+    CHECK(targetNode->connectingEdges[0].srcNodeId == midId.value());
+    CHECK(targetNode->connectingEdges[0].dstNodeId == targetId.value());
+    CHECK(targetNode->connectingEdges[0].relation == "calls");
+    REQUIRE(targetNode->connectingEdges[0].properties.has_value());
+    CHECK(targetNode->connectingEdges[0].properties.value().find("\"confidence\":0.73") !=
+          std::string::npos);
+}
+
+TEST_CASE("GraphQueryService: multi-path chooses higher-signal parent relation",
+          "[services][graph]") {
+    GraphQueryServiceFixture fixture;
+    auto service = makeGraphQueryService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE(service != nullptr);
+
+    KGNode origin{.nodeKey = "symbol:multi:origin", .label = "origin", .type = "function"};
+    KGNode structHop{.nodeKey = "symbol:multi:struct", .label = "structHop", .type = "file"};
+    KGNode semanticHop{
+        .nodeKey = "symbol:multi:semantic", .label = "semanticHop", .type = "function"};
+    KGNode target{.nodeKey = "symbol:multi:target", .label = "target", .type = "function"};
+
+    auto originId = fixture.kgStore->upsertNode(origin);
+    auto structHopId = fixture.kgStore->upsertNode(structHop);
+    auto semanticHopId = fixture.kgStore->upsertNode(semanticHop);
+    auto targetId = fixture.kgStore->upsertNode(target);
+    REQUIRE(originId.has_value());
+    REQUIRE(structHopId.has_value());
+    REQUIRE(semanticHopId.has_value());
+    REQUIRE(targetId.has_value());
+
+    KGEdge e1{.srcNodeId = originId.value(),
+              .dstNodeId = structHopId.value(),
+              .relation = "contains",
+              .weight = 1.0f};
+    KGEdge e2{.srcNodeId = originId.value(),
+              .dstNodeId = semanticHopId.value(),
+              .relation = "calls",
+              .weight = 1.0f};
+    KGEdge e3{.srcNodeId = structHopId.value(),
+              .dstNodeId = targetId.value(),
+              .relation = "contains",
+              .weight = 1.0f};
+    KGEdge e4{.srcNodeId = semanticHopId.value(),
+              .dstNodeId = targetId.value(),
+              .relation = "calls",
+              .weight = 1.0f};
+    REQUIRE(fixture.kgStore->addEdge(e1).has_value());
+    REQUIRE(fixture.kgStore->addEdge(e2).has_value());
+    REQUIRE(fixture.kgStore->addEdge(e3).has_value());
+    REQUIRE(fixture.kgStore->addEdge(e4).has_value());
+
+    GraphQueryRequest req;
+    req.nodeId = originId.value();
+    req.maxDepth = 2;
+    req.maxResults = 10;
+    req.hydrateFully = false;
+
+    auto result = service->query(req);
+    REQUIRE(result.has_value());
+    const auto& resp = result.value();
+
+    const auto* targetNode = [&]() -> const GraphConnectedNode* {
+        for (const auto& node : resp.allConnectedNodes) {
+            if (node.nodeMetadata.node.nodeKey == "symbol:multi:target") {
+                return &node;
+            }
+        }
+        return nullptr;
+    }();
+
+    REQUIRE(targetNode != nullptr);
+    REQUIRE(targetNode->connectingEdges.size() == 1);
+    CHECK(targetNode->connectingEdges[0].srcNodeId == semanticHopId.value());
+    CHECK(targetNode->connectingEdges[0].relation == "calls");
+}
+
+TEST_CASE("GraphQueryService: cycles keep path attribution stable", "[services][graph]") {
+    GraphQueryServiceFixture fixture;
+    auto service = makeGraphQueryService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE(service != nullptr);
+
+    KGNode origin{.nodeKey = "symbol:cycle:origin", .label = "origin", .type = "function"};
+    KGNode mid{.nodeKey = "symbol:cycle:mid", .label = "mid", .type = "function"};
+    KGNode target{.nodeKey = "symbol:cycle:target", .label = "target", .type = "function"};
+
+    auto originId = fixture.kgStore->upsertNode(origin);
+    auto midId = fixture.kgStore->upsertNode(mid);
+    auto targetId = fixture.kgStore->upsertNode(target);
+    REQUIRE(originId.has_value());
+    REQUIRE(midId.has_value());
+    REQUIRE(targetId.has_value());
+
+    REQUIRE(fixture.kgStore
+                ->addEdge(KGEdge{.srcNodeId = originId.value(),
+                                 .dstNodeId = midId.value(),
+                                 .relation = "calls",
+                                 .weight = 1.0f})
+                .has_value());
+    REQUIRE(fixture.kgStore
+                ->addEdge(KGEdge{.srcNodeId = midId.value(),
+                                 .dstNodeId = originId.value(),
+                                 .relation = "calls",
+                                 .weight = 1.0f})
+                .has_value());
+    REQUIRE(fixture.kgStore
+                ->addEdge(KGEdge{.srcNodeId = midId.value(),
+                                 .dstNodeId = targetId.value(),
+                                 .relation = "references",
+                                 .weight = 1.0f})
+                .has_value());
+
+    GraphQueryRequest req;
+    req.nodeId = originId.value();
+    req.maxDepth = 2;
+    req.maxResults = 10;
+    req.hydrateFully = false;
+
+    auto result = service->query(req);
+    REQUIRE(result.has_value());
+    const auto& resp = result.value();
+
+    REQUIRE(resp.allConnectedNodes.size() == 2);
+    const auto& depthOne = resp.nodesByDistance.at(1);
+    REQUIRE(depthOne.size() == 1);
+    CHECK(depthOne.front().nodeMetadata.node.nodeKey == "symbol:cycle:mid");
+
+    const auto& depthTwo = resp.nodesByDistance.at(2);
+    REQUIRE(depthTwo.size() == 1);
+    CHECK(depthTwo.front().nodeMetadata.node.nodeKey == "symbol:cycle:target");
+    REQUIRE(depthTwo.front().connectingEdges.size() == 1);
+    CHECK(depthTwo.front().connectingEdges.front().srcNodeId == midId.value());
+    CHECK(depthTwo.front().connectingEdges.front().relation == "references");
+}
+
+TEST_CASE("GraphQueryService: relation filters apply before traversal expansion",
+          "[services][graph]") {
+    GraphQueryServiceFixture fixture;
+    auto service = makeGraphQueryService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE(service != nullptr);
+
+    KGNode origin{.nodeKey = "symbol:filter:path:origin", .label = "origin", .type = "function"};
+    KGNode mid{.nodeKey = "symbol:filter:path:mid", .label = "mid", .type = "file"};
+    KGNode target{.nodeKey = "symbol:filter:path:target", .label = "target", .type = "function"};
+
+    auto originId = fixture.kgStore->upsertNode(origin);
+    auto midId = fixture.kgStore->upsertNode(mid);
+    auto targetId = fixture.kgStore->upsertNode(target);
+    REQUIRE(originId.has_value());
+    REQUIRE(midId.has_value());
+    REQUIRE(targetId.has_value());
+
+    REQUIRE(fixture.kgStore
+                ->addEdge(KGEdge{.srcNodeId = originId.value(),
+                                 .dstNodeId = midId.value(),
+                                 .relation = "contains",
+                                 .weight = 1.0f})
+                .has_value());
+    REQUIRE(fixture.kgStore
+                ->addEdge(KGEdge{.srcNodeId = midId.value(),
+                                 .dstNodeId = targetId.value(),
+                                 .relation = "calls",
+                                 .weight = 1.0f})
+                .has_value());
+
+    GraphQueryRequest req;
+    req.nodeId = originId.value();
+    req.maxDepth = 2;
+    req.maxResults = 10;
+    req.hydrateFully = false;
+    req.relationNames = {"contains"};
+
+    auto result = service->query(req);
+    REQUIRE(result.has_value());
+    const auto& resp = result.value();
+
+    REQUIRE(resp.allConnectedNodes.size() == 1);
+    CHECK(resp.allConnectedNodes.front().nodeMetadata.node.nodeKey == "symbol:filter:path:mid");
+}
+
+TEST_CASE("GraphQueryService: semantic relations rank above structural at same depth",
+          "[services][graph]") {
+    GraphQueryServiceFixture fixture;
+    auto service = makeGraphQueryService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE(service != nullptr);
+
+    KGNode origin{.nodeKey = "symbol:rank:origin", .label = "origin", .type = "function"};
+    KGNode semantic{.nodeKey = "symbol:rank:semantic", .label = "semantic", .type = "function"};
+    KGNode structural{.nodeKey = "symbol:rank:structural", .label = "structural", .type = "file"};
+
+    auto originId = fixture.kgStore->upsertNode(origin);
+    auto semanticId = fixture.kgStore->upsertNode(semantic);
+    auto structuralId = fixture.kgStore->upsertNode(structural);
+    REQUIRE(originId.has_value());
+    REQUIRE(semanticId.has_value());
+    REQUIRE(structuralId.has_value());
+
+    REQUIRE(fixture.kgStore
+                ->addEdge(KGEdge{.srcNodeId = originId.value(),
+                                 .dstNodeId = structuralId.value(),
+                                 .relation = "contains",
+                                 .weight = 1.0f})
+                .has_value());
+    REQUIRE(fixture.kgStore
+                ->addEdge(KGEdge{.srcNodeId = originId.value(),
+                                 .dstNodeId = semanticId.value(),
+                                 .relation = "calls",
+                                 .weight = 1.0f})
+                .has_value());
+
+    GraphQueryRequest req;
+    req.nodeId = originId.value();
+    req.maxDepth = 1;
+    req.maxResults = 10;
+    req.hydrateFully = false;
+
+    auto result = service->query(req);
+    REQUIRE(result.has_value());
+    const auto& resp = result.value();
+
+    REQUIRE(resp.allConnectedNodes.size() == 2);
+    CHECK(resp.allConnectedNodes.front().nodeMetadata.node.nodeKey == "symbol:rank:semantic");
+    CHECK(resp.allConnectedNodes.back().nodeMetadata.node.nodeKey == "symbol:rank:structural");
+}

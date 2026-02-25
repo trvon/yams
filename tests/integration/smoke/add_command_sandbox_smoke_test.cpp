@@ -148,3 +148,42 @@ TEST(IntegrationSmoke, AddCommandSandboxOperations) {
     std::error_code ec;
     fs::remove_all(root, ec);
 }
+
+TEST(IntegrationSmoke, AddCommandFallsBackToInProcessWhenDaemonStartupUnavailable) {
+    const fs::path root = yams::test::make_temp_dir("yams_add_fallback_");
+    const fs::path dataDir = root / "data";
+    const fs::path blockedSocketDir = root / "blocked-socket";
+    const fs::path inputFile = root / "fallback.txt";
+    fs::create_directories(dataDir);
+    fs::create_directories(blockedSocketDir);
+
+    yams::test::write_file(inputFile, "fallback add content\n");
+
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
+    yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", dataDir.string());
+    yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", dataDir.string());
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::string("1"));
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::string("1"));
+    yams::test::ScopedEnvVar disableWatcher("YAMS_DISABLE_SESSION_WATCHER", std::string("1"));
+    yams::test::ScopedEnvVar daemonSocket("YAMS_DAEMON_SOCKET",
+                                          (blockedSocketDir / "daemon.sock").string());
+
+    std::error_code ec;
+    fs::permissions(blockedSocketDir, fs::perms::none, fs::perm_options::replace, ec);
+
+    std::string out;
+    const int rc =
+        run_cli({"yams", "--json", "add", inputFile.string(), "--tags", "fallback"}, &out);
+
+    fs::permissions(blockedSocketDir, fs::perms::owner_all, fs::perm_options::replace, ec);
+
+    ASSERT_EQ(rc, 0) << out;
+    auto j = parse_json_output(out);
+    ASSERT_TRUE(j.is_object()) << out;
+    ASSERT_TRUE(j.contains("summary"));
+    EXPECT_EQ(j["summary"]["failed"].get<int>(), 0);
+    ASSERT_TRUE(j.contains("results"));
+    ASSERT_FALSE(j["results"].empty());
+    EXPECT_TRUE(j["results"][0]["success"].get<bool>());
+}

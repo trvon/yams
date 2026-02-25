@@ -95,6 +95,19 @@ bool isStdoutTty() {
 #endif
 }
 
+bool isSocketModeForcedByEnv() {
+    const char* raw = std::getenv("YAMS_EMBEDDED");
+    if (raw == nullptr || *raw == '\0') {
+        return false;
+    }
+
+    auto mode = trimCopy(raw);
+    std::transform(mode.begin(), mode.end(), mode.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return mode == "0" || mode == "false" || mode == "off" || mode == "no" || mode == "socket" ||
+           mode == "daemon";
+}
+
 class SpinnerThread {
 public:
     SpinnerThread() = default;
@@ -416,6 +429,9 @@ public:
                     yams::daemon::resolve_transport_mode(transportProbeCfg);
                 const bool useEmbeddedTransport =
                     (resolvedTransportMode == yams::daemon::ClientTransportMode::InProcess);
+                const bool socketModeForced = isSocketModeForcedByEnv();
+                bool fallbackToEmbeddedTransport = false;
+                std::string fallbackReason;
 
                 // Ensure daemon is running; auto-start if necessary
                 if (!useEmbeddedTransport) {
@@ -427,37 +443,61 @@ public:
                             startCfg.dataDir = cli_->getDataPath();
                         }
                         if (auto r = yams::daemon::DaemonClient::startDaemon(startCfg); !r) {
-                            return Error{ErrorCode::InternalError,
-                                         std::string("Failed to start daemon: ") +
-                                             r.error().message};
-                        }
-                        const auto readyTimeout =
-                            std::chrono::milliseconds(std::max(0, daemonReadyTimeoutMs_));
-                        if (readyTimeout.count() > 0) {
-                            const auto deadline = std::chrono::steady_clock::now() + readyTimeout;
-                            auto sleepFor = std::chrono::milliseconds(50);
-                            bool ready = false;
-                            while (std::chrono::steady_clock::now() < deadline) {
-                                if (yams::daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                                    ready = true;
-                                    break;
-                                }
-                                auto now = std::chrono::steady_clock::now();
-                                if (now >= deadline) {
-                                    break;
-                                }
-                                auto remaining =
-                                    std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
-                                                                                          now);
-                                std::this_thread::sleep_for(std::min(sleepFor, remaining));
-                                sleepFor = std::min(sleepFor * 2, std::chrono::milliseconds(500));
+                            if (socketModeForced) {
+                                return Error{ErrorCode::InternalError,
+                                             std::string("Failed to start daemon: ") +
+                                                 r.error().message};
                             }
-                            if (!ready) {
-                                return Error{ErrorCode::Timeout,
-                                             "Daemon did not become ready in time"};
+                            fallbackToEmbeddedTransport = true;
+                            fallbackReason = "Daemon start unavailable (" +
+                                             scrubDaemonLoadMessage(r.error().message) + ")";
+                        }
+                        if (!fallbackToEmbeddedTransport) {
+                            const auto readyTimeout =
+                                std::chrono::milliseconds(std::max(0, daemonReadyTimeoutMs_));
+                            if (readyTimeout.count() > 0) {
+                                const auto deadline =
+                                    std::chrono::steady_clock::now() + readyTimeout;
+                                auto sleepFor = std::chrono::milliseconds(50);
+                                bool ready = false;
+                                while (std::chrono::steady_clock::now() < deadline) {
+                                    if (yams::daemon::DaemonClient::isDaemonRunning(
+                                            effectiveSocket)) {
+                                        ready = true;
+                                        break;
+                                    }
+                                    auto now = std::chrono::steady_clock::now();
+                                    if (now >= deadline) {
+                                        break;
+                                    }
+                                    auto remaining =
+                                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            deadline - now);
+                                    std::this_thread::sleep_for(std::min(sleepFor, remaining));
+                                    sleepFor =
+                                        std::min(sleepFor * 2, std::chrono::milliseconds(500));
+                                }
+                                if (!ready) {
+                                    if (socketModeForced) {
+                                        return Error{ErrorCode::Timeout,
+                                                     "Daemon did not become ready in time"};
+                                    }
+                                    fallbackToEmbeddedTransport = true;
+                                    fallbackReason = "Daemon did not become ready in time";
+                                }
                             }
                         }
                     }
+                }
+
+                if (fallbackToEmbeddedTransport && !cli_->getJsonOutput()) {
+                    daemonSpinner.pause();
+                    std::cout << "Daemon unavailable; continuing with in-process transport"
+                              << std::endl;
+                    if (!fallbackReason.empty()) {
+                        std::cout << "  Reason: " << fallbackReason << std::endl;
+                    }
+                    daemonSpinner.resume();
                 }
 
                 auto sanitizedTagsRes = sanitizeStringList(tags_, "Tag", kMaxTagLength);
@@ -605,7 +645,9 @@ public:
                 if (cli_->hasExplicitDataDir()) {
                     sharedClientCfg.dataDir = cli_->getDataPath();
                 }
-                sharedClientCfg.transportMode = resolvedTransportMode;
+                sharedClientCfg.transportMode = fallbackToEmbeddedTransport
+                                                    ? yams::daemon::ClientTransportMode::InProcess
+                                                    : resolvedTransportMode;
                 sharedClientCfg.enableChunkedResponses = false;
                 sharedClientCfg.singleUseConnections = false;
                 sharedClientCfg.requestTimeout =

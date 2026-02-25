@@ -766,11 +766,11 @@ public:
                          requestedType, detail);
         }
 
-        spdlog::info("SearchService: type='{}' fuzzy={} sim={} pathsOnly={} literal={} limit={} "
-                     "filters: ext='{}' mime='{}' path='{}' pathPatterns={} tags={} allTags={}",
-                     type, req.fuzzy, req.similarity, req.pathsOnly, req.literalText, req.limit,
-                     req.extension, req.mimeType, req.pathPattern, req.pathPatterns.size(),
-                     req.tags.size(), req.matchAllTags);
+        spdlog::debug("SearchService: type='{}' fuzzy={} sim={} pathsOnly={} literal={} limit={} "
+                      "filters: ext='{}' mime='{}' path='{}' pathPatterns={} tags={} allTags={}",
+                      type, req.fuzzy, req.similarity, req.pathsOnly, req.literalText, req.limit,
+                      req.extension, req.mimeType, req.pathPattern, req.pathPatterns.size(),
+                      req.tags.size(), req.matchAllTags);
 
         Result<SearchResponse> result(Error{ErrorCode::Unknown, "Search path not taken"});
 

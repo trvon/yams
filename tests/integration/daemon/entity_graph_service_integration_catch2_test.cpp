@@ -5,6 +5,7 @@
 // Tests end-to-end flow: symbol extraction → KG node/edge creation → KG queries
 // Part of yams-h54: Graph Navigation & Symbol Coverage Expansion
 
+#include <nlohmann/json.hpp>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -1200,6 +1201,92 @@ void callerFunction() {
             }
         }
     }
+}
+
+TEST_CASE("EntityGraphService: Cross-file call linking via alias resolution",
+          "[integration][daemon][kg][pbi-009][relations][cross-file]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
+    EntityGraphIntegrationFixture fixture;
+
+    if (!fixture.supportsCpp()) {
+        SKIP("C++ grammar not available");
+    }
+
+    const std::string calleeCode = R"(
+int sharedHelper() {
+    return 7;
+}
+)";
+
+    const std::string callerCode = R"(
+int callerFunction() {
+    return sharedHelper();
+}
+)";
+
+    auto calleeHash = fixture.storeContent("cross_helper.cpp", calleeCode);
+    auto callerHash = fixture.storeContent("cross_caller.cpp", callerCode);
+
+    const std::string calleePath = fixture.buildFilePath("cross_helper.cpp");
+    const std::string callerPath = fixture.buildFilePath("cross_caller.cpp");
+
+    REQUIRE(fixture.submitAndWaitForExtraction(calleeHash, calleePath, calleeCode, "cpp", 3000));
+    REQUIRE(fixture.submitAndWaitForExtraction(callerHash, callerPath, callerCode, "cpp", 3000));
+
+    auto kg = fixture.getKgStore();
+    REQUIRE(kg != nullptr);
+
+    auto functionNodes = kg->findNodesByType("function_version", 500, 0);
+    REQUIRE(functionNodes.has_value());
+
+    std::optional<int64_t> callerNodeId;
+    std::optional<int64_t> calleeNodeId;
+
+    for (const auto& node : functionNodes.value()) {
+        if (node.label.has_value() && node.label.value() == "callerFunction" &&
+            node.nodeKey.find("cross_caller.cpp") != std::string::npos) {
+            callerNodeId = node.id;
+        }
+        if (node.label.has_value() && node.label.value() == "sharedHelper" &&
+            node.nodeKey.find("cross_helper.cpp") != std::string::npos) {
+            calleeNodeId = node.id;
+        }
+    }
+
+    REQUIRE(callerNodeId.has_value());
+    REQUIRE(calleeNodeId.has_value());
+
+    auto callerEdges = kg->getEdgesFrom(*callerNodeId, std::nullopt, 200, 0);
+    REQUIRE(callerEdges.has_value());
+
+    bool foundCrossFileCall = false;
+    bool foundProvenance = false;
+    bool foundResolution = false;
+
+    for (const auto& edge : callerEdges.value()) {
+        if (edge.relation != "calls" || edge.dstNodeId != *calleeNodeId) {
+            continue;
+        }
+
+        foundCrossFileCall = true;
+        REQUIRE(edge.properties.has_value());
+
+        auto props = nlohmann::json::parse(*edge.properties, nullptr, false);
+        REQUIRE(!props.is_discarded());
+        if (props.contains("provenance") && props["provenance"].is_object()) {
+            foundProvenance = props["provenance"].value("source", std::string{}) == "treesitter";
+        }
+        if (props.contains("resolution") && props["resolution"].is_string()) {
+            const std::string resolution = props["resolution"].get<std::string>();
+            foundResolution =
+                resolution == "alias_exact" || resolution == "alias_tail" || resolution == "local";
+        }
+        break;
+    }
+
+    REQUIRE(foundCrossFileCall);
+    CHECK(foundProvenance);
+    CHECK(foundResolution);
 }
 
 TEST_CASE("EntityGraphService: Member variables extraction",

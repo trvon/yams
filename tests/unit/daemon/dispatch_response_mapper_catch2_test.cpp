@@ -6,6 +6,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/dispatch_response.hpp>
 
+#include <string>
 #include <unordered_set>
 
 using namespace yams::app::services;
@@ -64,6 +65,8 @@ TEST_CASE("GraphQueryResponseMapper maps traversal node context", "[unit][daemon
     edge.dstNodeId = 7;
     edge.relation = "calls";
     edge.weight = 1.0f;
+    edge.properties =
+        R"({"source":"treesitter","confidence":0.88,"provenance":{"source":"treesitter","confidence":0.88}})";
     connected.connectingEdges.push_back(edge);
 
     std::vector<yams::daemon::GraphNode> nodes;
@@ -82,4 +85,5 @@ TEST_CASE("GraphQueryResponseMapper maps traversal node context", "[unit][daemon
     REQUIRE(edges.size() == 1);
     CHECK(edges.front().edgeId == 99);
     CHECK(edges.front().relation == "calls");
+    CHECK(edges.front().properties.find("\"source\":\"treesitter\"") != std::string::npos);
 }

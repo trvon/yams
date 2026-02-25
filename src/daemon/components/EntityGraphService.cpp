@@ -2,9 +2,12 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <cctype>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <unordered_map>
+#include <unordered_set>
 #include <boost/asio.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -47,6 +50,44 @@ std::string makePathFileNodeKey(const std::string& path) {
 
 std::string makePathDirNodeKey(const std::string& path) {
     return "path:dir:" + normalizeGraphPath(path);
+}
+
+std::string normalizeSymbolRefKey(std::string_view symbol) {
+    std::string out;
+    out.reserve(symbol.size());
+    bool inWs = false;
+    for (unsigned char c : symbol) {
+        if (std::isspace(c) != 0) {
+            if (!inWs) {
+                out.push_back('_');
+                inWs = true;
+            }
+            continue;
+        }
+        inWs = false;
+        if (std::isalnum(c) != 0 || c == '_' || c == ':' || c == '.') {
+            out.push_back(static_cast<char>(std::tolower(c)));
+        } else {
+            out.push_back('_');
+        }
+    }
+
+    while (!out.empty() && out.front() == '_') {
+        out.erase(out.begin());
+    }
+    while (!out.empty() && out.back() == '_') {
+        out.pop_back();
+    }
+
+    if (out.empty()) {
+        out = "unknown";
+    }
+    return out;
+}
+
+bool isSemanticRelation(std::string_view relation) {
+    return relation == "calls" || relation == "references" || relation == "inherits" ||
+           relation == "implements" || relation == "includes" || relation == "contains";
 }
 
 } // namespace
@@ -561,6 +602,9 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
             nlohmann::json edgeProps;
             edgeProps["line_start"] = result->symbols[i].start_line;
             edgeProps["line_end"] = result->symbols[i].end_line;
+            edgeProps["source"] = "treesitter";
+            edgeProps["confidence"] = 1.0;
+            edgeProps["provenance"] = nlohmann::json{{"source", "treesitter"}, {"confidence", 1.0}};
             if (hasSnapshot)
                 edgeProps["snapshot_id"] = job.documentHash;
             edge.properties = edgeProps.dump();
@@ -574,6 +618,11 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
             edge.dstNodeKey = fileNodeKey;
             edge.relation = "located_in";
             edge.weight = 1.0f;
+            edge.properties = nlohmann::json{{"source", "treesitter"},
+                                             {"confidence", 1.0},
+                                             {"provenance", nlohmann::json{{"source", "treesitter"},
+                                                                           {"confidence", 1.0}}}}
+                                  .dump();
             batch->deferredEdges.push_back(std::move(edge));
         }
 
@@ -584,6 +633,11 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
             edge.dstNodeKey = dirNodeKey;
             edge.relation = "scoped_by";
             edge.weight = 0.5f;
+            edge.properties = nlohmann::json{{"source", "treesitter"},
+                                             {"confidence", 0.5},
+                                             {"provenance", nlohmann::json{{"source", "treesitter"},
+                                                                           {"confidence", 0.5}}}}
+                                  .dump();
             batch->deferredEdges.push_back(std::move(edge));
         }
     }
@@ -600,6 +654,9 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
             nlohmann::json edgeProps;
             edgeProps["line_start"] = result->symbols[i].start_line;
             edgeProps["line_end"] = result->symbols[i].end_line;
+            edgeProps["source"] = "treesitter";
+            edgeProps["confidence"] = 1.0;
+            edgeProps["provenance"] = nlohmann::json{{"source", "treesitter"}, {"confidence", 1.0}};
             if (hasSnapshot)
                 edgeProps["snapshot_id"] = job.documentHash;
             edge.properties = edgeProps.dump();
@@ -618,62 +675,265 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
             nlohmann::json props;
             props["snapshot_id"] = job.documentHash;
             props["document_hash"] = job.documentHash;
+            props["source"] = "treesitter";
+            props["confidence"] = 1.0;
+            props["provenance"] = nlohmann::json{{"source", "treesitter"}, {"confidence", 1.0}};
             edge.properties = props.dump();
             batch->deferredEdges.push_back(std::move(edge));
         }
     }
 
     // === Build symbol relation edges ===
-    // Note: For deferred path, we can only handle intra-file relations reliably
-    // Cross-file references would need the target symbol to be in the nodeKeyToId map
     if (result->relation_count > 0) {
         std::unordered_map<std::string, std::string> qualNameToNodeKey;
+        std::unordered_map<std::string, std::string> simpleNameToNodeKey;
+        qualNameToNodeKey.reserve(qualifiedNames.size());
+        simpleNameToNodeKey.reserve(result->symbol_count);
         for (size_t i = 0; i < qualifiedNames.size(); ++i) {
             qualNameToNodeKey[qualifiedNames[i]] = versionNodeKeys[i];
+            const auto& sym = result->symbols[i];
+            if (sym.name && std::strlen(sym.name) > 0) {
+                simpleNameToNodeKey[sym.name] = versionNodeKeys[i];
+            }
         }
+
+        std::unordered_set<std::string> includePathNodeKeys;
+        std::vector<std::string> includePathHints;
+        includePathNodeKeys.reserve(result->relation_count);
+
+        auto resolveIncludeTarget = [&](const std::string& includeTarget) {
+            std::string normalizedTarget = includeTarget;
+            try {
+                std::filesystem::path includePath(includeTarget);
+                if (!includePath.is_absolute() && !batch->sourceFile.empty() &&
+                    includeTarget.find(':') == std::string::npos) {
+                    includePath =
+                        std::filesystem::path(batch->sourceFile).parent_path() / includePath;
+                }
+                normalizedTarget =
+                    normalizeGraphPath(includePath.lexically_normal().generic_string());
+            } catch (...) {
+                normalizedTarget = normalizeGraphPath(includeTarget);
+            }
+
+            const std::string nodeKey = makePathFileNodeKey(normalizedTarget);
+            includePathNodeKeys.insert(nodeKey);
+            includePathHints.push_back(normalizedTarget);
+            return std::pair<std::string, std::string>{nodeKey, normalizedTarget};
+        };
+
+        auto tryResolveByAlias = [&](const std::string& symbolText)
+            -> std::pair<std::optional<std::string>, std::string> {
+            auto aliasRes = kg->resolveAliasExact(symbolText, 12);
+            if (!aliasRes || aliasRes.value().empty()) {
+                return {std::nullopt, "none"};
+            }
+
+            auto pickNodeKey = [&](const std::vector<metadata::AliasResolution>& candidates)
+                -> std::pair<std::optional<std::string>, std::string> {
+                std::vector<std::pair<std::string, bool>> resolved;
+                resolved.reserve(candidates.size());
+
+                for (const auto& candidate : candidates) {
+                    auto nodeRes = kg->getNodeById(candidate.nodeId);
+                    if (!nodeRes || !nodeRes.value().has_value()) {
+                        continue;
+                    }
+
+                    const auto& node = nodeRes.value().value();
+                    bool includeMatched = false;
+                    for (const auto& hint : includePathHints) {
+                        if (node.nodeKey.find("@" + hint) != std::string::npos) {
+                            includeMatched = true;
+                            break;
+                        }
+                    }
+
+                    if (!includeMatched && node.properties.has_value()) {
+                        try {
+                            auto props = nlohmann::json::parse(node.properties.value());
+                            if (props.contains("file_path") && props["file_path"].is_string()) {
+                                const std::string nodeFile =
+                                    normalizeGraphPath(props["file_path"].get<std::string>());
+                                for (const auto& hint : includePathHints) {
+                                    if (nodeFile == hint) {
+                                        includeMatched = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        } catch (...) {
+                        }
+                    }
+
+                    resolved.emplace_back(node.nodeKey, includeMatched);
+                }
+
+                if (resolved.empty()) {
+                    return {std::nullopt, "none"};
+                }
+
+                std::size_t includeMatches = 0;
+                std::string includeNodeKey;
+                for (const auto& [nodeKey, includeMatched] : resolved) {
+                    if (includeMatched) {
+                        ++includeMatches;
+                        includeNodeKey = nodeKey;
+                    }
+                }
+                if (includeMatches == 1) {
+                    return {includeNodeKey, "alias_include_hint"};
+                }
+
+                if (resolved.size() == 1) {
+                    return {resolved.front().first, "alias_exact"};
+                }
+
+                return {std::nullopt, "ambiguous"};
+            };
+
+            auto picked = pickNodeKey(aliasRes.value());
+            if (picked.first.has_value()) {
+                return picked;
+            }
+
+            auto lastScopeSep = symbolText.rfind("::");
+            if (lastScopeSep != std::string::npos && lastScopeSep + 2 < symbolText.size()) {
+                auto tail = symbolText.substr(lastScopeSep + 2);
+                auto tailRes = kg->resolveAliasExact(tail, 12);
+                if (tailRes && !tailRes.value().empty()) {
+                    auto tailPicked = pickNodeKey(tailRes.value());
+                    if (tailPicked.first.has_value()) {
+                        return {tailPicked.first, "alias_tail"};
+                    }
+                }
+            }
+
+            return {std::nullopt, "none"};
+        };
+
+        std::unordered_set<std::string> createdReferenceNodes;
+        createdReferenceNodes.reserve(result->relation_count);
+
+        auto ensureReferenceNode = [&](const std::string& nodeKey, const std::string& label,
+                                       const std::string& type, const std::string& source,
+                                       double confidence) {
+            if (!createdReferenceNodes.insert(nodeKey).second) {
+                return;
+            }
+
+            metadata::KGNode refNode;
+            refNode.nodeKey = nodeKey;
+            refNode.label = label;
+            refNode.type = type;
+            refNode.properties =
+                nlohmann::json{
+                    {"unresolved", true},
+                    {"source_file", batch->sourceFile},
+                    {"source", source},
+                    {"confidence", confidence},
+                    {"provenance", nlohmann::json{{"source", source}, {"confidence", confidence}}}}
+                    .dump();
+            batch->nodes.push_back(std::move(refNode));
+        };
+
+        auto makeUnresolvedSymbolNodeKey = [&](const std::string& symbolText) {
+            return std::string("symbol_ref:") + normalizeSymbolRefKey(symbolText);
+        };
 
         for (size_t i = 0; i < result->relation_count; ++i) {
             const auto& rel = result->relations[i];
-            if (!rel.src_symbol || !rel.dst_symbol || !rel.kind)
+            if (!rel.src_symbol || !rel.dst_symbol || !rel.kind) {
                 continue;
+            }
 
-            std::string src(rel.src_symbol);
-            std::string dst(rel.dst_symbol);
-            std::string kind(rel.kind);
+            const std::string src(rel.src_symbol);
+            const std::string dst(rel.dst_symbol);
+            const std::string kind(rel.kind);
 
             std::string srcNodeKey;
             std::string dstNodeKey;
+            std::string resolution = "none";
+            double confidence = std::clamp(rel.weight, 0.05, 1.0);
 
             if (kind == "includes") {
-                // For includes: src is current file, dst is included file
                 srcNodeKey = fileNodeKey;
-                dstNodeKey = makePathFileNodeKey(dst); // External file reference
+                auto [includeNodeKey, includeLabel] = resolveIncludeTarget(dst);
+                dstNodeKey = includeNodeKey;
+
+                ensureReferenceNode(dstNodeKey, includeLabel, "file", "treesitter", 0.95);
+                resolution = "include_path";
+                confidence = 0.95;
             } else {
-                // For calls, inherits, etc.: resolve as symbols
                 auto srcIt = qualNameToNodeKey.find(src);
-                auto dstIt = qualNameToNodeKey.find(dst);
-                if (srcIt != qualNameToNodeKey.end())
+                if (srcIt != qualNameToNodeKey.end()) {
                     srcNodeKey = srcIt->second;
-                if (dstIt != qualNameToNodeKey.end())
+                } else {
+                    auto simpleSrcIt = simpleNameToNodeKey.find(src);
+                    if (simpleSrcIt != simpleNameToNodeKey.end()) {
+                        srcNodeKey = simpleSrcIt->second;
+                    }
+                }
+
+                auto dstIt = qualNameToNodeKey.find(dst);
+                if (dstIt != qualNameToNodeKey.end()) {
                     dstNodeKey = dstIt->second;
+                    resolution = "local";
+                } else {
+                    auto simpleDstIt = simpleNameToNodeKey.find(dst);
+                    if (simpleDstIt != simpleNameToNodeKey.end()) {
+                        dstNodeKey = simpleDstIt->second;
+                        resolution = "local";
+                    } else {
+                        auto [resolvedNodeKey, resolvedVia] = tryResolveByAlias(dst);
+                        if (resolvedNodeKey.has_value()) {
+                            dstNodeKey = *resolvedNodeKey;
+                            resolution = resolvedVia;
+                            confidence = std::max(confidence, 0.9);
+                        } else if (isSemanticRelation(kind)) {
+                            dstNodeKey = makeUnresolvedSymbolNodeKey(dst);
+                            ensureReferenceNode(dstNodeKey, dst, "symbol_reference", "treesitter",
+                                                0.35);
+
+                            metadata::KGAlias unresolvedAlias;
+                            unresolvedAlias.alias = dst;
+                            unresolvedAlias.source = std::string("symbol_ref|") + dstNodeKey;
+                            unresolvedAlias.confidence = 0.35f;
+                            batch->aliases.push_back(std::move(unresolvedAlias));
+
+                            resolution = "unresolved_ref";
+                            confidence = 0.35;
+                        }
+                    }
+                }
             }
 
-            // Only add edge if both endpoints can be resolved within this batch
-            // or are context nodes (file, doc) that will be in the batch
-            if (!srcNodeKey.empty() && !dstNodeKey.empty()) {
-                DeferredEdge edge;
-                edge.srcNodeKey = srcNodeKey;
-                edge.dstNodeKey = dstNodeKey;
-                edge.relation = kind;
-                edge.weight = static_cast<float>(rel.weight);
-                nlohmann::json relProps;
-                relProps["source_file"] = batch->sourceFile;
-                if (hasSnapshot)
-                    relProps["snapshot_id"] = job.documentHash;
-                relProps["timestamp"] = now;
-                edge.properties = relProps.dump();
-                batch->deferredEdges.push_back(std::move(edge));
+            if (srcNodeKey.empty() || dstNodeKey.empty()) {
+                continue;
             }
+
+            DeferredEdge edge;
+            edge.srcNodeKey = srcNodeKey;
+            edge.dstNodeKey = dstNodeKey;
+            edge.relation = kind;
+            edge.weight = static_cast<float>(std::clamp(confidence, 0.05, 1.0));
+            nlohmann::json relProps;
+            relProps["source_file"] = batch->sourceFile;
+            relProps["timestamp"] = now;
+            relProps["source"] = "treesitter";
+            relProps["extractor"] = "symbol_extractor_v1";
+            relProps["confidence"] = confidence;
+            relProps["resolution"] = resolution;
+            relProps["provenance"] =
+                nlohmann::json{{"source", "treesitter"}, {"confidence", confidence}};
+            if (hasSnapshot) {
+                relProps["snapshot_id"] = job.documentHash;
+            }
+            if (resolution == "unresolved_ref") {
+                relProps["unresolved_target"] = dst;
+            }
+            edge.properties = relProps.dump();
+            batch->deferredEdges.push_back(std::move(edge));
         }
     }
 

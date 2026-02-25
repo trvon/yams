@@ -1992,7 +1992,10 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                     edge.weight = qc->confidence;
 
                     nlohmann::json edgeProps;
+                    edgeProps["source"] = "gliner";
                     edgeProps["confidence"] = qc->confidence;
+                    edgeProps["provenance"] =
+                        nlohmann::json{{"source", "gliner"}, {"confidence", qc->confidence}};
                     if (!hash.empty()) {
                         edgeProps["snapshot_id"] = hash;
                     }
@@ -2035,6 +2038,9 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
 
                     nlohmann::json edgeProps;
                     edgeProps["source"] = "gliner";
+                    edgeProps["confidence"] = coEdge.weight;
+                    edgeProps["provenance"] =
+                        nlohmann::json{{"source", "gliner"}, {"confidence", coEdge.weight}};
                     if (!hash.empty()) {
                         edgeProps["snapshot_id"] = hash;
                     }

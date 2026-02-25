@@ -51,6 +51,11 @@ DocumentIngestionService::getOrCreateClient(const AddOptions& opts) const {
     const auto cfg =
         makeIngestionClientConfig(opts.socketPath, opts.explicitDataDir, opts.timeoutMs);
     std::lock_guard<std::mutex> lock{clientMutex_};
+    if (client_ && !cachedClientConfig_) {
+        // Caller provided a preconfigured client; preserve it unless we have an explicit
+        // comparable config snapshot to replace against.
+        return client_;
+    }
     if (client_ && cachedClientConfig_ && isSameIngestionClientConfig(*cachedClientConfig_, cfg)) {
         return client_;
     }
@@ -64,6 +69,9 @@ DocumentIngestionService::getOrCreateClient(const DeleteOptions& opts) const {
     const auto cfg =
         makeIngestionClientConfig(opts.socketPath, opts.explicitDataDir, opts.timeoutMs);
     std::lock_guard<std::mutex> lock{clientMutex_};
+    if (client_ && !cachedClientConfig_) {
+        return client_;
+    }
     if (client_ && cachedClientConfig_ && isSameIngestionClientConfig(*cachedClientConfig_, cfg)) {
         return client_;
     }
@@ -77,6 +85,9 @@ DocumentIngestionService::getOrCreateClient(const UpdateOptions& opts) const {
     const auto cfg =
         makeIngestionClientConfig(opts.socketPath, opts.explicitDataDir, opts.timeoutMs);
     std::lock_guard<std::mutex> lock{clientMutex_};
+    if (client_ && !cachedClientConfig_) {
+        return client_;
+    }
     if (client_ && cachedClientConfig_ && isSameIngestionClientConfig(*cachedClientConfig_, cfg)) {
         return client_;
     }

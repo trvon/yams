@@ -1342,6 +1342,71 @@ TEST_F(UiCliExpectationsIT, CliGraphTraversalShowsViaAndPathColumns) {
     EXPECT_NE(output.find("via_path_target.cpp"), std::string::npos);
 }
 
+TEST_F(UiCliExpectationsIT, CliGraphTraversalRanksSemanticEdgesBeforeStructuralPeers) {
+    fs::create_directories(root_ / "ingest" / "graph_order");
+    const auto originPath = root_ / "ingest" / "graph_order" / "origin.cpp";
+    const auto semanticPath = root_ / "ingest" / "graph_order" / "semantic_target.cpp";
+    const auto structuralPath = root_ / "ingest" / "graph_order" / "structural_peer";
+    std::ofstream(originPath) << "int origin() { return 0; }\n";
+    std::ofstream(semanticPath) << "int semantic_target() { return 1; }\n";
+    fs::create_directories(structuralPath);
+
+    auto* sm = serviceManager();
+    ASSERT_NE(sm, nullptr);
+    auto ctx = sm->getAppContext();
+    ASSERT_NE(ctx.kgStore, nullptr);
+
+    yams::metadata::KGNode originNode;
+    originNode.nodeKey = "path:file:" + originPath.string();
+    originNode.type = std::string("file");
+    originNode.label = std::string("origin.cpp");
+    auto originNodeId = ctx.kgStore->upsertNode(originNode);
+    ASSERT_TRUE(originNodeId) << originNodeId.error().message;
+
+    yams::metadata::KGNode semanticNode;
+    semanticNode.nodeKey = "path:file:" + semanticPath.string();
+    semanticNode.type = std::string("file");
+    semanticNode.label = std::string("semantic_target.cpp");
+    auto semanticNodeId = ctx.kgStore->upsertNode(semanticNode);
+    ASSERT_TRUE(semanticNodeId) << semanticNodeId.error().message;
+
+    yams::metadata::KGNode structuralNode;
+    structuralNode.nodeKey = "path:dir:" + structuralPath.string();
+    structuralNode.type = std::string("directory");
+    structuralNode.label = std::string("structural_peer");
+    auto structuralNodeId = ctx.kgStore->upsertNode(structuralNode);
+    ASSERT_TRUE(structuralNodeId) << structuralNodeId.error().message;
+
+    yams::metadata::KGEdge semanticEdge;
+    semanticEdge.srcNodeId = originNodeId.value();
+    semanticEdge.dstNodeId = semanticNodeId.value();
+    semanticEdge.relation = "calls";
+    ASSERT_TRUE(ctx.kgStore->addEdge(semanticEdge));
+
+    yams::metadata::KGEdge structuralEdge;
+    structuralEdge.srcNodeId = originNodeId.value();
+    structuralEdge.dstNodeId = structuralNodeId.value();
+    structuralEdge.relation = "contains";
+    ASSERT_TRUE(ctx.kgStore->addEdge(structuralEdge));
+
+    ScopedEnvVar socketEnv("YAMS_DAEMON_SOCKET", socketPath_.string());
+    ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");
+    CaptureStdout capture;
+    int rc = runCliCommand({"yams", "--data-dir", storageDir_.string(), "graph", "--node-key",
+                            originNode.nodeKey, "--depth", "1", "--limit", "10", "--verbose"});
+    EXPECT_EQ(rc, 0);
+
+    const std::string output = capture.str();
+    EXPECT_NE(output.find("calls(1)"), std::string::npos);
+    EXPECT_NE(output.find("contains(1)"), std::string::npos);
+
+    const auto semanticPos = output.find("semantic_target.cpp");
+    const auto structuralPos = output.find("structural_peer");
+    ASSERT_NE(semanticPos, std::string::npos);
+    ASSERT_NE(structuralPos, std::string::npos);
+    EXPECT_LT(semanticPos, structuralPos);
+}
+
 // 12) Search — explicit hash search normalization
 TEST_F(UiCliExpectationsIT, HashSearchNormalization) {
     // Ingest one file and query by its hash (full and partial)

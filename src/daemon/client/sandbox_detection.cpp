@@ -101,6 +101,10 @@ ClientTransportMode resolve_transport_mode(const ClientConfig& config) {
         return ClientTransportMode::InProcess;
     }
 
+    if (!DaemonClient::isDaemonRunning(socketPath)) {
+        return ClientTransportMode::InProcess;
+    }
+
     return ClientTransportMode::Socket;
 }
 
