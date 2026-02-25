@@ -1825,10 +1825,10 @@ public:
             }
         }
 
-        // Handle tag additions (tags are stored as metadata with "tag:" prefix)
+        // Handle tag additions (store tag name as value for consistent extraction/filtering)
         for (const auto& tag : req.addTags) {
             auto u = ctx_.metadataRepo->setMetadata(target.id, "tag:" + tag,
-                                                    metadata::MetadataValue("true"));
+                                                    metadata::MetadataValue(tag));
             if (!u) {
                 errors.push_back("Failed to add tag: " + tag);
                 if (req.atomic) {

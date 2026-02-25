@@ -10,6 +10,7 @@ else
 endif
 
 integration_smoke_srcs += files(
+  'add_command_sandbox_smoke_test.cpp',
   'daemon_embedded_streaming_smoke_test.cpp',
   'integrity_auto_repair_smoke_test.cpp',
   'smoke_link_test.cpp',

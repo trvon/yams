@@ -426,18 +426,11 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         cfg.maxInflight = 128;
         cfg.autoStart = false; // MCP server should not be responsible for starting the daemon
         daemon_client_config_ = cfg;
-        if (auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg); leaseRes) {
-            daemon_client_lease_ = leaseRes.value();
-            daemon_client_ = &(**daemon_client_lease_);
-            // Initialize service facades sharing the daemon client
-            auto shared_client = std::shared_ptr<yams::daemon::DaemonClient>(
-                daemon_client_, [](yams::daemon::DaemonClient*) {});
-            retrieval_svc_ = std::make_unique<app::services::RetrievalService>(shared_client);
-            ingestion_svc_ =
-                std::make_unique<app::services::DocumentIngestionService>(shared_client);
-        } else {
-            spdlog::warn("Failed to acquire daemon client for MCP: {}", leaseRes.error().message);
-        }
+        daemon_client_shared_ = std::make_shared<yams::daemon::DaemonClient>(cfg);
+        daemon_client_ = daemon_client_shared_.get();
+        retrieval_svc_ = std::make_unique<app::services::RetrievalService>(daemon_client_shared_);
+        ingestion_svc_ =
+            std::make_unique<app::services::DocumentIngestionService>(daemon_client_shared_);
 #endif
     }
     // Legacy pool config removed
@@ -561,29 +554,16 @@ Result<void> MCPServer::ensureDaemonClient() {
             return hookResult;
         }
     }
-    if (daemon_client_)
+    if (daemon_client_ && daemon_client_shared_)
         return Result<void>();
-    auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(daemon_client_config_);
-    if (!leaseRes) {
-        // Augment error with actionable connection details for MCP clients
-        std::string hint = "Failed to establish connection to YAMS daemon";
-        try {
-            hint += std::string(" at '") + daemon_client_config_.socketPath.string() + "'";
-        } catch (...) {
-        }
-        hint +=
-            "; set YAMS_DAEMON_SOCKET to explicit path or ensure XDG_RUNTIME_DIR is set on Linux.";
-        return yams::Error{leaseRes.error().code, hint};
-    }
-    daemon_client_lease_ = leaseRes.value();
-    daemon_client_ = &(**daemon_client_lease_);
+    daemon_client_shared_ = std::make_shared<yams::daemon::DaemonClient>(daemon_client_config_);
+    daemon_client_ = daemon_client_shared_.get();
 
-    // Initialize service facades sharing the daemon client (non-owning shared_ptr)
+    // Initialize service facades sharing the daemon client
     if (!retrieval_svc_) {
-        auto shared_client = std::shared_ptr<yams::daemon::DaemonClient>(
-            daemon_client_, [](yams::daemon::DaemonClient*) {});
-        retrieval_svc_ = std::make_unique<app::services::RetrievalService>(shared_client);
-        ingestion_svc_ = std::make_unique<app::services::DocumentIngestionService>(shared_client);
+        retrieval_svc_ = std::make_unique<app::services::RetrievalService>(daemon_client_shared_);
+        ingestion_svc_ =
+            std::make_unique<app::services::DocumentIngestionService>(daemon_client_shared_);
     }
 
     return Result<void>();
@@ -1055,7 +1035,9 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     dreq.hashQuery = req.hash;
     dreq.searchType = req.type.empty() ? std::string("hybrid") : req.type;
     dreq.verbose = req.verbose;
-    dreq.pathsOnly = req.pathsOnly;
+    // Always request full hits from daemon; MCP can project paths-only reliably.
+    // This avoids transport/result-shape inconsistencies seen with daemon pathsOnly mode.
+    dreq.pathsOnly = false;
     dreq.showLineNumbers = req.lineNumbers;
     dreq.beforeContext = req.beforeContext;
     dreq.afterContext = req.afterContext;
@@ -1078,7 +1060,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     std::string __session;
     if (!req.sessionName.empty()) {
         __session = req.sessionName;
-    } else {
+    } else if (req.useSession) {
         auto __svc = app::services::makeSessionService(nullptr);
         __session = __svc->current().value_or("");
     }
@@ -1144,11 +1126,46 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     out.type = "daemon";
     out.executionTimeMs = r.elapsed.count();
     out.traceId = r.traceId;
+
+    std::optional<yams::daemon::ListResponse> tagListSnapshot;
+    if (!req.tags.empty()) {
+        yams::daemon::ListRequest tagReq;
+        tagReq.tags = req.tags;
+        tagReq.matchAllTags = req.matchAllTags;
+        tagReq.limit = 10000;
+        auto tagRes = co_await daemon_client_->list(tagReq);
+        if (tagRes) {
+            tagListSnapshot = tagRes.value();
+        }
+    }
+    auto tagAllowed = [&](const yams::daemon::SearchResult& item) {
+        if (!tagListSnapshot.has_value()) {
+            return true;
+        }
+        std::string hash = item.metadata.count("hash") ? item.metadata.at("hash") : std::string{};
+        std::string path =
+            !item.path.empty()
+                ? item.path
+                : (item.metadata.count("path") ? item.metadata.at("path") : std::string{});
+        for (const auto& it : tagListSnapshot->items) {
+            if (!hash.empty() && it.hash == hash) {
+                return true;
+            }
+            if (!path.empty() && it.path == path) {
+                return true;
+            }
+        }
+        return false;
+    };
     // When pathsOnly was requested by the MCP client, populate the 'paths' field
     // to mirror CLI behavior and make it easy for clients to consume.
     if (req.pathsOnly) {
+        out.pathsOnly = true;
         out.paths.reserve(r.results.size());
         for (const auto& item : r.results) {
+            if (!tagAllowed(item)) {
+                continue;
+            }
             std::string path =
                 !item.path.empty()
                     ? item.path
@@ -1157,6 +1174,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 path = item.id; // last-resort fallback
             out.paths.push_back(std::move(path));
         }
+        out.total = out.paths.size();
         sendProgress("search", 100.0, "done");
         co_return out;
     }
@@ -1198,6 +1216,9 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     };
 
     for (const auto& item : r.results) {
+        if (!tagAllowed(item)) {
+            continue;
+        }
         MCPSearchResponse::Result m;
         m.id = item.id;
         m.hash = item.metadata.count("hash") ? item.metadata.at("hash") : "";
@@ -1222,6 +1243,9 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         m.snippetTruncated = parseMetaBool(item.metadata, "snippet_truncated") ||
                              parseMetaBool(item.metadata, "truncated");
         out.results.push_back(std::move(m));
+    }
+    if (!req.tags.empty()) {
+        out.total = out.results.size();
     }
     // Optional diff parity: when includeDiff=true and pathPattern is a local file, attach a
     // structured diff to the matching search result.
@@ -1474,7 +1498,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     std::string __session;
     if (!req.sessionName.empty()) {
         __session = req.sessionName;
-    } else {
+    } else if (req.useSession) {
         auto __svc = app::services::makeSessionService(nullptr);
         __session = __svc->current().value_or("");
     }
@@ -2154,58 +2178,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 fn();
         }
     } _decr{[this]() noexcept { addInFlight_.fetch_sub(1, std::memory_order_relaxed); }};
-    // Preflight: require daemon content_store readiness
-    bool modelReadyFlag = true; // track model/embeddings readiness across function
-    try {
-        auto sres = co_await daemon_client_->status();
-        if (!sres)
-            co_return sres.error();
-        const auto& s = sres.value();
-        bool csr = false;
-        if (auto it = s.readinessStates.find("content_store"); it != s.readinessStates.end())
-            csr = it->second;
-        // Detect embedding/model provider readiness; when unavailable, force noEmbeddings
-        try {
-            if (auto it = s.readinessStates.find("model_provider"); it != s.readinessStates.end())
-                modelReadyFlag = it->second;
-            // Some builds report 'embeddings' instead of 'model_provider'
-            if (auto it2 = s.readinessStates.find("embeddings"); it2 != s.readinessStates.end())
-                modelReadyFlag = modelReadyFlag && it2->second;
-        } catch (...) {
-            // default to ready if key missing
-        }
-        if (!csr) {
-            // Graceful bounded wait for content_store readiness to avoid transient I/O failures
-            using namespace std::chrono_literals;
-            const auto ready_timeout = 2s;
-            const auto poll_interval = 150ms;
-            auto exec = co_await boost::asio::this_coro::executor;
-            boost::asio::steady_timer timer{exec};
-            auto start = std::chrono::steady_clock::now();
-            for (;;) {
-                auto s2 = co_await daemon_client_->status();
-                if (s2) {
-                    const auto& ss = s2.value();
-                    auto it2 = ss.readinessStates.find("content_store");
-                    if (it2 == ss.readinessStates.end() || it2->second) {
-                        break; // proceed when ready or key missing
-                    }
-                }
-                if (std::chrono::steady_clock::now() - start >= ready_timeout) {
-                    break; // proceed and rely on retry/backoff below
-                }
-                timer.expires_after(poll_interval);
-                co_await timer.async_wait(boost::asio::use_awaitable);
-            }
-        }
-        // If model provider isn't ready, prefer graceful degradation by disabling embeddings.
-        if (!modelReadyFlag) {
-            spdlog::warn("[MCP] Model provider not ready — forcing noEmbeddings for add");
-        }
-        // We will apply the decision below once daemon_req/aopts are constructed.
-    } catch (...) {
-        co_return Error{ErrorCode::Unknown, "Unable to fetch daemon status for preflight"};
-    }
+    bool modelReadyFlag = true;
     // Convert MCP request → AddOptions, then route through ingestion service
     app::services::AddOptions aopts;
 
@@ -2367,6 +2340,30 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     auto addRes = co_await ingestion_svc_->addViaDaemonAsync(aopts);
     if (!addRes) {
         co_return addRes.error();
+    }
+
+    if (!aopts.recursive) {
+        yams::daemon::GetRequest probe;
+        if (!aopts.name.empty()) {
+            probe.name = aopts.name;
+            probe.byName = true;
+        } else {
+            probe.hash = addRes.value().hash;
+        }
+        probe.metadataOnly = true;
+
+        auto exec = co_await boost::asio::this_coro::executor;
+        boost::asio::steady_timer timer{exec};
+        constexpr int kProbeAttempts = 200;
+        constexpr auto kProbeDelay = std::chrono::milliseconds(25);
+        for (int i = 0; i < kProbeAttempts; ++i) {
+            auto probeRes = co_await daemon_client_->get(probe);
+            if (probeRes) {
+                break;
+            }
+            timer.expires_after(kProbeDelay);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
     }
 
     MCPStoreDocumentResponse out;
@@ -2578,7 +2575,7 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     std::string __session;
     if (!req.sessionName.empty()) {
         __session = req.sessionName;
-    } else {
+    } else if (req.useSession) {
         auto __svc = app::services::makeSessionService(nullptr);
         __session = __svc->current().value_or("");
     }
@@ -3017,6 +3014,38 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
 
 boost::asio::awaitable<Result<MCPUpdateMetadataResponse>>
 MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
+    auto waitForTagVisibility =
+        [this, &req](const std::string& expectedHash) -> boost::asio::awaitable<void> {
+        if (expectedHash.empty() || req.tags.empty()) {
+            co_return;
+        }
+        daemon::ListRequest probe;
+        probe.tags = req.tags;
+        probe.matchAllTags = true;
+        probe.limit = 16;
+        if (!req.name.empty()) {
+            probe.namePattern = req.name;
+        }
+        auto exec = co_await boost::asio::this_coro::executor;
+        boost::asio::steady_timer timer{exec};
+        constexpr int kProbeAttempts = 80;
+        constexpr auto kProbeDelay = std::chrono::milliseconds(25);
+        for (int i = 0; i < kProbeAttempts; ++i) {
+            auto probeRes = co_await daemon_client_->list(probe);
+            if (probeRes) {
+                const auto& lr = probeRes.value();
+                auto it = std::find_if(lr.items.begin(), lr.items.end(),
+                                       [&](const auto& item) { return item.hash == expectedHash; });
+                if (it != lr.items.end()) {
+                    break;
+                }
+            }
+            timer.expires_after(kProbeDelay);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
+        co_return;
+    };
+
     // Fast path: explicit single-hash update goes through daemon (if available)
     if (!req.hash.empty() && req.name.empty() && req.path.empty() && req.pattern.empty() &&
         req.names.empty()) {
@@ -3044,6 +3073,9 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
         out.matched = 1;
         if (!ur.hash.empty())
             out.updatedHashes.push_back(ur.hash);
+        if (out.success) {
+            co_await waitForTagVisibility(ur.hash);
+        }
         out.message = out.success ? "Update successful" : "No changes applied";
         co_return out;
     }
@@ -3203,6 +3235,9 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
             out.matched = 1;
             if (!ur.hash.empty())
                 out.updatedHashes.push_back(ur.hash);
+            if (out.success) {
+                co_await waitForTagVisibility(ur.hash);
+            }
             out.message = out.success ? "Update successful" : "No changes applied";
             co_return out;
         }
@@ -3231,6 +3266,9 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
         out.matched = 1;
         if (!ur.hash.empty())
             out.updatedHashes.push_back(ur.hash);
+        if (out.success) {
+            co_await waitForTagVisibility(ur.hash);
+        }
         out.message = out.success ? "Update successful" : "No changes applied";
         co_return out;
     }

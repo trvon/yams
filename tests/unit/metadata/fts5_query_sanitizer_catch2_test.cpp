@@ -241,8 +241,8 @@ bool isLikelyNaturalLanguageQueryForTest(std::string_view query);
 
 TEST_CASE("FTS5 NL builder - stopwords and phrase", "[unit][metadata][fts5]") {
     using yams::metadata::test::buildNaturalLanguageFts5QueryForTest;
-    CHECK(buildNaturalLanguageFts5QueryForTest("the quick brown", false, true, true) ==
-          "\"quick brown\"");
+    CHECK(buildNaturalLanguageFts5QueryForTest("the quick brown fox", false, true, true) ==
+          "\"quick brown fox\"");
 }
 
 TEST_CASE("FTS5 NL builder - prefix gating", "[unit][metadata][fts5]") {

@@ -327,7 +327,7 @@ std::string buildNaturalLanguageFts5Query(std::string_view query, bool useOrFall
         return "\"\"";
     }
 
-    if (autoPhrase && tokens.size() >= 2 && tokens.size() <= 4) {
+    if (autoPhrase && tokens.size() >= 3 && tokens.size() <= 4) {
         std::string phrase;
         for (size_t i = 0; i < tokens.size(); ++i) {
             if (i > 0)

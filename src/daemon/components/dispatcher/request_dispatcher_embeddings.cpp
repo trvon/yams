@@ -219,10 +219,12 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
     if (!modelProvider || !modelProvider->isAvailable()) {
         result = Error{ErrorCode::NotInitialized, "Model provider not available"};
     } else {
-        std::string modelName;
-        try {
-            modelName = serviceManager_->getEmbeddingModelName();
-        } catch (...) {
+        std::string modelName = req.modelName;
+        if (modelName.empty()) {
+            try {
+                modelName = serviceManager_->getEmbeddingModelName();
+            } catch (...) {
+            }
         }
         if (modelName.empty()) {
             result = Error{ErrorCode::NotInitialized, "No embedding model configured"};

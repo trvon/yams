@@ -13,6 +13,10 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#if !defined(_WIN32)
+#include <pwd.h>
+#include <unistd.h>
+#endif
 
 #include "common/fixture_manager.h"
 #include "common/search_corpus_presets.h"
@@ -341,12 +345,29 @@ TEST(DaemonEmbeddingsRegressionSmoke, GeneratesVectorsForSearchCorpusPresets) {
     cfg.pidFile = root / "daemon.pid";
     cfg.logFile = root / "daemon.log";
     cfg.enableModelProvider = true;
-    bool useMockProvider = true;
+    bool useMockProvider = false;
     if (const char* envMock = std::getenv("YAMS_USE_MOCK_PROVIDER")) {
         useMockProvider = truthy_env(envMock);
     }
     cfg.useMockModelProvider = useMockProvider;
-    cfg.autoLoadPlugins = false;
+    cfg.autoLoadPlugins = true;
+    std::string resolvedModelsRoot;
+    if (const char* modelsRoot = std::getenv("YAMS_MODELS_ROOT"); modelsRoot && *modelsRoot) {
+        resolvedModelsRoot = modelsRoot;
+    } else if (const char* home = std::getenv("HOME"); home && *home) {
+        resolvedModelsRoot = (fs::path(home) / ".local" / "share" / "yams" / "models").string();
+#if !defined(_WIN32)
+    } else if (const passwd* pw = ::getpwuid(::getuid()); pw && pw->pw_dir && *pw->pw_dir) {
+        resolvedModelsRoot =
+            (fs::path(pw->pw_dir) / ".local" / "share" / "yams" / "models").string();
+#endif
+    }
+    if (!resolvedModelsRoot.empty()) {
+        cfg.modelPoolConfig.modelsRoot = resolvedModelsRoot;
+#if !defined(_WIN32)
+        ::setenv("YAMS_MODELS_ROOT", resolvedModelsRoot.c_str(), 1);
+#endif
+    }
     cfg.modelPoolConfig.lazyLoading = false;
     cfg.modelPoolConfig.preloadModels = {"all-MiniLM-L6-v2"};
 
@@ -356,12 +377,21 @@ TEST(DaemonEmbeddingsRegressionSmoke, GeneratesVectorsForSearchCorpusPresets) {
     auto started = daemon.start();
     ASSERT_TRUE(started) << started.error().message;
 
+    // runLoop is required to drive async initialization. Without it the daemon can
+    // remain in initializing state and never become ready.
+    std::thread runLoopThread([&daemon]() { daemon.runLoop(); });
+    std::this_thread::sleep_for(50ms);
+
     struct Guard {
         yams::daemon::YamsDaemon* daemon;
+        std::thread* runLoopThread;
         fs::path root;
         ~Guard() {
             if (daemon) {
                 (void)daemon->stop();
+            }
+            if (runLoopThread && runLoopThread->joinable()) {
+                runLoopThread->join();
             }
             const char* keepEnv = std::getenv("YAMS_KEEP_SMOKE_TEMP");
             const bool keep = truthy_env(keepEnv);
@@ -372,7 +402,7 @@ TEST(DaemonEmbeddingsRegressionSmoke, GeneratesVectorsForSearchCorpusPresets) {
                 fs::remove_all(root, ec);
             }
         }
-    } guard{&daemon, root};
+    } guard{&daemon, &runLoopThread, root};
 
     // Build deterministic search corpus fixtures.
     auto spec = yams::test::defaultSearchCorpusSpec();

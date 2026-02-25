@@ -68,6 +68,41 @@ static bool hasWildcard(const std::string& s) {
     return s.find('*') != std::string::npos || s.find('?') != std::string::npos;
 }
 
+static void appendMacPathAliases(std::vector<std::string>& patterns) {
+#if defined(__APPLE__)
+    if (patterns.empty()) {
+        return;
+    }
+
+    std::unordered_set<std::string> seen(patterns.begin(), patterns.end());
+    std::vector<std::string> aliases;
+    aliases.reserve(patterns.size());
+
+    for (const auto& pattern : patterns) {
+        std::string alias;
+        if (pattern == "/var") {
+            alias = "/private/var";
+        } else if (pattern.rfind("/var/", 0) == 0) {
+            alias = "/private" + pattern;
+        } else if (pattern == "/private/var") {
+            alias = "/var";
+        } else if (pattern.rfind("/private/var/", 0) == 0) {
+            alias = pattern.substr(std::string("/private").size());
+        }
+
+        if (!alias.empty() && seen.insert(alias).second) {
+            aliases.push_back(std::move(alias));
+        }
+    }
+
+    if (!aliases.empty()) {
+        patterns.insert(patterns.end(), aliases.begin(), aliases.end());
+    }
+#else
+    (void)patterns;
+#endif
+}
+
 // Helper function to escape regex special characters
 static std::string escapeRegex(const std::string& text) {
     static const std::string specialChars = "\\^$.|?*+()[]{}";
@@ -687,6 +722,7 @@ public:
         if (normalizedReq.pathPatterns.empty() && !normalizedReq.pathPattern.empty()) {
             normalizedReq.pathPatterns.push_back(normalizedReq.pathPattern);
         }
+        appendMacPathAliases(normalizedReq.pathPatterns);
 
         if (normalizedReq.extension.empty() && !parsed.scope.ext.empty()) {
             normalizedReq.extension = parsed.scope.ext;

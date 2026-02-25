@@ -85,6 +85,7 @@ yams doctor
 | `XDG_CONFIG_HOME` | Config location (`~/.config/yams`) |
 | `YAMS_PLUGIN_DIR` | Plugin search directory |
 | `YAMS_DAEMON_SOCKET` | Daemon socket path override |
+| `YAMS_EMBEDDED` | Daemon transport mode: `1/true` in-process, `0/false` socket, `auto` probe |
 
 ## Common Patterns
 

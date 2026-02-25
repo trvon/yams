@@ -21,6 +21,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 
@@ -107,6 +108,9 @@ protected:
                 runLoopThread_.join();
             }
         }
+        // Ensure global client pools are torn down between tests to avoid FD leaks across
+        // long integration runs.
+        yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
         std::error_code ec;
         fs::remove_all(root_, ec);
     }
