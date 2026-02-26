@@ -38,10 +38,11 @@ static const char* dlerror() {
 #include <fstream>
 #include <regex>
 #include <yams/app/services/services.hpp>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
-#include <yams/daemon/resource/plugin_trust.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host_services.h>
+#include <yams/daemon/resource/plugin_trust.h>
 #include <yams/plugins/abi.h>
 
 namespace yams::daemon {
@@ -437,21 +438,62 @@ void AbiPluginLoader::loadTrust() {
     trusted_.clear();
     if (trustFile_.empty())
         return;
-    std::ifstream in(trustFile_);
-    if (!in)
-        return;
-    spdlog::debug("AbiPluginLoader::loadTrust reading file: {}", trustFile_.string());
 
-    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    auto parsed = plugin_trust::parseTrustList(content);
-    for (const auto& raw : parsed) {
+    auto normalizeForCompare = [](const std::filesystem::path& p) {
         std::error_code ec;
-        auto canon = std::filesystem::weakly_canonical(raw, ec);
+        auto canon = std::filesystem::weakly_canonical(p, ec);
         if (ec) {
-            canon = raw.lexically_normal();
+            canon = p.lexically_normal();
         }
-        trusted_.insert(std::move(canon));
+        return canon;
+    };
+
+    auto loadPath = [this](const std::filesystem::path& path) {
+        std::ifstream in(path);
+        if (!in)
+            return false;
+
+        std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        auto parsed = plugin_trust::parseTrustList(content);
+        for (const auto& raw : parsed) {
+            std::error_code ec;
+            auto canon = std::filesystem::weakly_canonical(raw, ec);
+            if (ec) {
+                canon = raw.lexically_normal();
+            }
+            trusted_.insert(std::move(canon));
+        }
+        return true;
+    };
+
+    std::ifstream in(trustFile_);
+    if (!in) {
+        auto canonicalTrust = yams::config::get_daemon_plugin_trust_file();
+        auto trustNorm = normalizeForCompare(trustFile_);
+        auto canonicalNorm = normalizeForCompare(canonicalTrust);
+        if (trustNorm != canonicalNorm) {
+            return;
+        }
+
+        auto legacyTrust = yams::config::get_legacy_plugin_trust_file();
+        if (!legacyTrust.empty() && normalizeForCompare(legacyTrust) != trustNorm) {
+            std::error_code ec;
+            if (std::filesystem::exists(legacyTrust, ec) && !ec) {
+                if (loadPath(legacyTrust)) {
+                    spdlog::warn("Migrating legacy plugin trust file '{}' -> '{}'",
+                                 legacyTrust.string(), trustFile_.string());
+                    saveTrust();
+                    spdlog::debug("AbiPluginLoader::loadTrust loaded {} entries (from legacy)",
+                                  trusted_.size());
+                    return;
+                }
+            }
+        }
+        return;
     }
+
+    spdlog::debug("AbiPluginLoader::loadTrust reading file: {}", trustFile_.string());
+    (void)loadPath(trustFile_);
     spdlog::debug("AbiPluginLoader::loadTrust loaded {} entries", trusted_.size());
 }
 
@@ -461,28 +503,10 @@ void AbiPluginLoader::saveTrust() const {
         return;
     fs::create_directories(trustFile_.parent_path());
 
-    // Read existing entries from file to merge with our in-memory set
-    // This handles the case where ABI and External hosts share the same trust file
-    std::set<fs::path> merged = trusted_;
-    if (fs::exists(trustFile_)) {
-        std::ifstream infile(trustFile_);
-        std::string content((std::istreambuf_iterator<char>(infile)),
-                            std::istreambuf_iterator<char>());
-        auto parsed = plugin_trust::parseTrustList(content);
-        for (const auto& raw : parsed) {
-            std::error_code ec;
-            auto canon = fs::weakly_canonical(raw, ec);
-            if (ec) {
-                canon = raw.lexically_normal();
-            }
-            merged.insert(std::move(canon));
-        }
-    }
-
     std::ofstream out(trustFile_);
     out << "# YAMS Plugin Trust List\n";
     out << "# One plugin path per line\n";
-    for (const auto& p : merged)
+    for (const auto& p : trusted_)
         out << p.string() << "\n";
 }
 

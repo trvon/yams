@@ -151,6 +151,29 @@ TEST_CASE("ExternalPluginHost - Trust Management", "[external-plugin][host][trus
         }
     }
 
+    SECTION("Trust remove persists") {
+        auto plugin1 = fixture.makeFile("persist_remove_a.py", "# a");
+        auto plugin2 = fixture.makeFile("persist_remove_b.py", "# b");
+
+        {
+            ExternalPluginHost host1(nullptr, fixture.trustFile_, config);
+            REQUIRE(host1.trustAdd(plugin1).has_value());
+            REQUIRE(host1.trustAdd(plugin2).has_value());
+            REQUIRE(host1.trustRemove(plugin1).has_value());
+        }
+
+        {
+            ExternalPluginHost host2(nullptr, fixture.trustFile_, config);
+            auto trustList = host2.trustList();
+            auto c1 = fs::weakly_canonical(plugin1);
+            auto c2 = fs::weakly_canonical(plugin2);
+            bool has1 = std::find(trustList.begin(), trustList.end(), c1) != trustList.end();
+            bool has2 = std::find(trustList.begin(), trustList.end(), c2) != trustList.end();
+            CHECK_FALSE(has1);
+            CHECK(has2);
+        }
+    }
+
     SECTION("Adding already-trusted path is idempotent") {
         auto pluginPath = fixture.makeFile("idempotent_plugin.py", "# test");
 

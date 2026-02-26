@@ -344,6 +344,13 @@ int main(int argc, char* argv[]) {
                 if (daemonSection.find("plugin_name_policy") != daemonSection.end()) {
                     config.pluginNamePolicy = daemonSection.at("plugin_name_policy");
                 }
+                if (daemonSection.find("plugin_dir_strict") != daemonSection.end()) {
+                    std::string v = daemonSection.at("plugin_dir_strict");
+                    for (auto& c : v) {
+                        c = static_cast<char>(std::tolower(c));
+                    }
+                    config.pluginDirStrict = (v == "1" || v == "true" || v == "yes" || v == "on");
+                }
                 if (auto it = daemonSection.find("trusted_paths"); it != daemonSection.end()) {
                     auto paths = yams::config::parse_path_list(it->second);
                     for (auto& p : paths) {

@@ -119,7 +119,9 @@ Result<void> PluginManager::initialize() {
         sharedPluginHost_ = deps_.sharedPluginHost;
         spdlog::info("[PluginManager] Using shared plugin host from ServiceManager");
     } else {
-        std::filesystem::path trustFile = deps_.dataDir / "plugins.trust";
+        std::filesystem::path trustFile = deps_.dataDir.empty()
+                                              ? yams::config::get_daemon_plugin_trust_file()
+                                              : (deps_.dataDir / "plugins.trust");
         // Retry trust verification up to 3 times with exponential backoff
         bool trustOk = false;
         for (int attempt = 0; attempt < 3; ++attempt) {
@@ -149,7 +151,9 @@ Result<void> PluginManager::initialize() {
     bool externalTrustOk = false;
     for (int attempt = 0; attempt < 3; ++attempt) {
         try {
-            std::filesystem::path externalTrustFile = deps_.dataDir / "plugins.trust";
+            std::filesystem::path externalTrustFile =
+                deps_.dataDir.empty() ? yams::config::get_daemon_plugin_trust_file()
+                                      : (deps_.dataDir / "plugins.trust");
             ExternalPluginHostConfig externalConfig;
             externalHost_ =
                 std::make_unique<ExternalPluginHost>(nullptr, externalTrustFile, externalConfig);
@@ -318,45 +322,80 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
 
         // Build list of plugin directories to scan
         std::vector<std::filesystem::path> roots;
+        std::vector<std::filesystem::path> trustedRoots;
+        std::vector<std::filesystem::path> defaultRoots;
 
         // Add trust list paths
         if (getActivePluginHost()) {
-            for (const auto& p : getActivePluginHost()->trustList())
+            for (const auto& p : getActivePluginHost()->trustList()) {
+                trustedRoots.push_back(p);
                 roots.push_back(p);
+            }
         }
 
         // Add platform-specific default directories unless strict plugin-dir mode is enabled.
         // Strict mode is useful for benchmark/test isolation where only explicitly trusted roots
         // should be scanned.
         namespace fs = std::filesystem;
-        const bool strictPluginDirMode =
-            ConfigResolver::envTruthy(std::getenv("YAMS_PLUGIN_DIR_STRICT"));
+        bool strictPluginDirMode = deps_.config ? deps_.config->pluginDirStrict : false;
+        if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
+            strictPluginDirMode = ConfigResolver::envTruthy(envStrict);
+        }
         if (!strictPluginDirMode) {
 #ifdef _WIN32
-            roots.push_back(yams::config::get_data_dir() / "plugins");
+            defaultRoots.push_back(yams::config::get_data_dir() / "plugins");
 #else
             if (const char* home = std::getenv("HOME")) {
-                roots.push_back(fs::path(home) / ".local" / "lib" / "yams" / "plugins");
+                defaultRoots.push_back(fs::path(home) / ".local" / "lib" / "yams" / "plugins");
             }
 #ifdef __APPLE__
             // macOS: Homebrew default install location
-            roots.push_back(fs::path("/opt/homebrew/lib/yams/plugins"));
+            defaultRoots.push_back(fs::path("/opt/homebrew/lib/yams/plugins"));
 #endif
-            roots.push_back(fs::path("/usr/local/lib/yams/plugins"));
-            roots.push_back(fs::path("/usr/lib/yams/plugins"));
+            defaultRoots.push_back(fs::path("/usr/local/lib/yams/plugins"));
+            defaultRoots.push_back(fs::path("/usr/lib/yams/plugins"));
 #endif
 #ifdef YAMS_INSTALL_PREFIX
-            roots.push_back(fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins");
+            defaultRoots.push_back(fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins");
 #endif
         } else {
             spdlog::info("[PluginManager] strict plugin-dir mode enabled; skipping default plugin "
                          "roots");
         }
 
+        roots.insert(roots.end(), defaultRoots.begin(), defaultRoots.end());
+
         // Deduplicate
         std::sort(roots.begin(), roots.end());
         roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
 
+        auto joinPaths = [](const std::vector<std::filesystem::path>& paths) {
+            std::string out;
+            for (const auto& p : paths) {
+                if (!out.empty())
+                    out += ";";
+                out += p.string();
+            }
+            return out;
+        };
+
+        if (!trustedRoots.empty()) {
+            std::sort(trustedRoots.begin(), trustedRoots.end());
+            trustedRoots.erase(std::unique(trustedRoots.begin(), trustedRoots.end()),
+                               trustedRoots.end());
+        }
+        if (!defaultRoots.empty()) {
+            std::sort(defaultRoots.begin(), defaultRoots.end());
+            defaultRoots.erase(std::unique(defaultRoots.begin(), defaultRoots.end()),
+                               defaultRoots.end());
+        }
+
+        spdlog::info("[PluginManager] trust roots ({}): {}", trustedRoots.size(),
+                     joinPaths(trustedRoots));
+        spdlog::info("[PluginManager] default roots (strict={} count={}): {}", strictPluginDirMode,
+                     defaultRoots.size(), joinPaths(defaultRoots));
+
+        spdlog::info("[PluginManager] effective scan roots: {}", joinPaths(roots));
         spdlog::info("[PluginManager] autoload: {} roots to scan", roots.size());
         pluginHostFsm_.dispatch(PluginScanStartedEvent{roots.size()});
 

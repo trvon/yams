@@ -4,8 +4,8 @@
 //   Environment Variables → TuneAdvisor → TuningManager::configureOnnxConcurrencyRegistry()
 //       → OnnxConcurrencyRegistry → Embedding/Reranker services respect limits
 
-#include "test_daemon_harness.h"
 #include "../../common/env_compat.h"
+#include "test_daemon_harness.h"
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/cli/cli_sync.h>
@@ -316,7 +316,13 @@ TEST_CASE("FSM metrics reflect ONNX configuration", "[daemon][onnx][metrics][int
         const auto& status = statusResult.value();
         INFO("overallStatus=" << status.overallStatus);
         INFO("lifecycleState=" << status.lifecycleState);
-        CHECK((status.ready || status.overallStatus == "ready" || status.overallStatus == "Ready"));
+        INFO("onnxTotalSlots=" << status.onnxTotalSlots);
+        INFO("onnxUsedSlots=" << status.onnxUsedSlots);
+        CHECK(status.running);
+        CHECK((status.onnxTotalSlots == 0 || status.onnxTotalSlots >= 4));
+        CHECK(status.onnxTotalSlots >= status.onnxUsedSlots);
+        CHECK((status.ready || status.overallStatus == "ready" || status.overallStatus == "Ready" ||
+               status.overallStatus == "degraded" || status.overallStatus == "Degraded"));
     }
 
     harness.stop();

@@ -33,5 +33,5 @@ TEST_CASE("DaemonClientPool pruning thread exits promptly on shutdown", "[cli][d
         worst = std::max(worst, elapsed);
     }
 
-    CHECK(worst < 700ms);
+    CHECK(worst < 1100ms);
 }

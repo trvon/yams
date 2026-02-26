@@ -410,6 +410,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"plugin_dir", "/usr/local/lib/yams/plugins"}, // System install location
 #endif
               {"plugin_name_policy", "relaxed"},
+              {"plugin_dir_strict", "false"},
               {"use_legacy_tuner", "false"},
               {"auto_repair_batch_size", "16"},
               {"auto_rebuild_on_dim_mismatch", "true"},

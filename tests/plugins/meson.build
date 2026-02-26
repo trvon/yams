@@ -19,6 +19,8 @@ else
 endif
 plugin_path = join_paths(plugin_build_dir, 'plugins/symbol_extractor_treesitter/yams_symbol_extractor' + plugin_ext)
 
+plugin_runtime_deps = get_variable('symbol_extractor_plugin_target', [])
+
 plugin_exe = executable('yams_plugin_tests', plugin_tests,
   include_directories: incs,
   dependencies: [gtest_dep] + test_deps,
@@ -26,7 +28,10 @@ plugin_exe = executable('yams_plugin_tests', plugin_tests,
   install: false,
 )
 
-test('plugins', plugin_exe, env: {'YAMS_AUTO_DOWNLOAD_GRAMMARS':'1','YAMS_SKIP_MODEL_LOADING':'1'})
+test('plugins', plugin_exe,
+  env: {'YAMS_AUTO_DOWNLOAD_GRAMMARS':'1','YAMS_SKIP_MODEL_LOADING':'1'},
+  depends: plugin_runtime_deps,
+)
 
 # zyp (Zig YAMS PDF) plugin tests
 if get_option('plugin-zyp')

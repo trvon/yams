@@ -225,14 +225,19 @@ yams plugin trust remove /path/to/plugin
 export YAMS_PLUGIN_TRUST_ALL=1
 ```
 
-Trust file: `~/.config/yams/plugins_trust.txt`
+Canonical trust file: `<data_dir>/plugins.trust` (default `~/.local/share/yams/plugins.trust`).
+Legacy path `~/.config/yams/plugins_trust.txt` is imported for compatibility.
 
 ### Search Paths
 
-1. `plugin_dirs` from daemon config
-2. `$YAMS_PLUGIN_DIR` environment variable
-3. `~/.local/lib/yams/plugins`
-4. `/usr/local/lib/yams/plugins`
+1. Persisted trusted roots from `<data_dir>/plugins.trust`
+2. Optional `[daemon].plugin_dir` and `[daemon|plugins].trusted_paths`
+3. Built-in defaults (`~/.local/lib/yams/plugins`, `/opt/homebrew/lib/yams/plugins` on macOS,
+   `/usr/local/lib/yams/plugins`, `/usr/lib/yams/plugins`) unless strict mode is enabled
+
+Strict mode controls:
+- Config: `[daemon].plugin_dir_strict = true`
+- Env override: `YAMS_PLUGIN_DIR_STRICT=1`
 
 ### CLI Commands
 

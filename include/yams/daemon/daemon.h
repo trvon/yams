@@ -49,6 +49,7 @@ struct DaemonConfig {
     ModelPoolConfig modelPoolConfig;
     std::filesystem::path pluginDir;
     std::string pluginNamePolicy{"relaxed"};
+    bool pluginDirStrict{false};
     std::vector<std::filesystem::path> trustedPluginPaths;
     // Default to disabled to avoid unintended plugin loading in plain daemon
     // invocations and tests that don't explicitly opt in. Tests that rely on

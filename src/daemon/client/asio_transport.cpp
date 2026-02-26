@@ -340,12 +340,15 @@ AsioTransportAdapter::async_write_all(boost::asio::local::stream_protocol::socke
         use_awaitable);
 
     if (write_result.index() == 1) {
-        co_return Error{ErrorCode::Timeout, "Write timeout"};
+        co_return Error{ErrorCode::Timeout,
+                        formatIpcFailure(IpcFailureKind::Timeout, "Write timeout")};
     }
 
     auto& [ec, bytes_written] = std::get<0>(write_result);
     if (ec) {
-        co_return Error{ErrorCode::NetworkError, yams::format("Write failed: {}", ec.message())};
+        co_return Error{ErrorCode::NetworkError,
+                        formatIpcFailure(IpcFailureKind::Other,
+                                         yams::format("Write failed: {}", ec.message()))};
     }
 
     co_return Result<void>{};
@@ -521,7 +524,8 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
                      elapsed_ms, msg.requestId, static_cast<int>(req_type),
                      opts_.requestTimeout.count());
     }
-    co_return Error{ErrorCode::Timeout, "Request timeout waiting for response"};
+    co_return Error{ErrorCode::Timeout, formatIpcFailure(IpcFailureKind::Timeout,
+                                                         "Request timeout waiting for response")};
 }
 
 boost::asio::awaitable<Result<void>>

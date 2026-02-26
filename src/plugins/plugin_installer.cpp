@@ -3,6 +3,7 @@
  * @brief Implementation of the plugin installer
  */
 
+#include <yams/config/config_helpers.h>
 #include <yams/plugins/plugin_installer.hpp>
 
 #include <chrono>
@@ -609,32 +610,7 @@ fs::path getDefaultPluginInstallDir() {
 }
 
 fs::path getDefaultPluginTrustFile() {
-#ifdef _WIN32
-    wchar_t* localAppData = nullptr;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &localAppData))) {
-        fs::path result = fs::path(localAppData) / "yams" / "config" / "plugins_trust.txt";
-        CoTaskMemFree(localAppData);
-        return result;
-    }
-    return fs::path(std::getenv("LOCALAPPDATA")) / "yams" / "config" / "plugins_trust.txt";
-#else
-    fs::path homeDir;
-    if (const char* home = std::getenv("HOME")) {
-        homeDir = home;
-    } else {
-        struct passwd* pw = getpwuid(getuid());
-        if (pw) {
-            homeDir = pw->pw_dir;
-        } else {
-            homeDir = "/tmp";
-        }
-    }
-    // Try XDG config first
-    if (const char* xdgConfig = std::getenv("XDG_CONFIG_HOME")) {
-        return fs::path(xdgConfig) / "yams" / "plugins_trust.txt";
-    }
-    return homeDir / ".config" / "yams" / "plugins_trust.txt";
-#endif
+    return yams::config::get_daemon_plugin_trust_file();
 }
 
 } // namespace yams::plugins

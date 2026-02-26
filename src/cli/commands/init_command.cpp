@@ -1,5 +1,4 @@
 #include <yams/app/services/services.hpp>
-#include <yams/core/uuid.h>
 #include <yams/app/services/session_service.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/prompt_util.h>
@@ -7,6 +6,7 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
+#include <yams/core/uuid.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/vector/vector_database.h>
 
@@ -1187,11 +1187,10 @@ private:
             fs::create_directories(userPlugins);
             spdlog::info("Plugins directory: {}", userPlugins.string());
 
-            // Write trust file entry so daemon will load from here by default
-            // Trust file aligns with ServiceManager: XDG_CONFIG_HOME or
-            // ~/.config/yams/plugins_trust.txt
+            // Write trust file entry so daemon will load from here by default.
+            // Canonical trust file: <data_dir>/plugins.trust
             fs::path yamsConfigDir = yams::config::get_config_dir();
-            fs::path trustFile = yamsConfigDir / "plugins_trust.txt";
+            fs::path trustFile = yams::config::get_daemon_plugin_trust_file();
             fs::create_directories(trustFile.parent_path());
             // Append only if not already present
             std::vector<std::string> lines;
@@ -1199,14 +1198,16 @@ private:
                 std::ifstream in(trustFile);
                 std::string line;
                 while (in && std::getline(in, line)) {
-                    if (!line.empty())
+                    if (!line.empty() && line[0] != '#')
                         lines.push_back(line);
                 }
             }
             auto canon = fs::weakly_canonical(userPlugins).string();
             bool present = false;
             for (const auto& l : lines) {
-                if (fs::weakly_canonical(l).string() == canon) {
+                std::error_code ec;
+                auto lc = fs::weakly_canonical(l, ec);
+                if (!ec && lc.string() == canon) {
                     present = true;
                     break;
                 }

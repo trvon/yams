@@ -224,6 +224,9 @@ enable = true
 auto_load_plugins = true
 # Optional explicit plugin directory (comment out to use defaults and YAMS_PLUGIN_DIR)
 # plugin_dir = "/usr/local/lib/yams/plugins"
+# Strict plugin root mode: only scan trusted/configured roots, skip built-in defaults.
+# Environment override: YAMS_PLUGIN_DIR_STRICT=1
+plugin_dir_strict = false
 # Enforce plugin naming policy: "relaxed" (accept yams_*_plugin.* or libyams_*_plugin.*)
 # or "spec" (require libyams_*_plugin.*). Environment override: YAMS_PLUGIN_NAME_POLICY.
 plugin_name_policy = "relaxed"
@@ -280,7 +283,8 @@ profile = "balanced"
 #   and plugin auto-load to reduce startup overhead.
 # - You can override plugin discovery with environment variables:
 #   * YAMS_PLUGIN_DIR: an exclusive directory to scan for plugins
-#   * XDG_CONFIG_HOME or HOME: determines plugins_trust.txt location for trust policy
+#   * YAMS_PLUGIN_DIR_STRICT: when truthy, skip built-in default plugin roots
+# - Trust list persistence file is <data_dir>/plugins.trust
 # - To control client/daemon timeouts at runtime, you can set:
 #   * YAMS_REQUEST_TIMEOUT_MS (sets both header/body timeouts in client)
 #   * YAMS_HEADER_TIMEOUT_MS / YAMS_BODY_TIMEOUT_MS (client-specific)
@@ -732,6 +736,8 @@ url = ""
 
 [plugins]
 # Global plugin settings
+# Optional additional trusted plugin roots (array).
+# trusted_paths = ["~/.local/lib/yams/plugins"]
 
 [plugins.symbol_extraction]
 # Enable Tree-sitter based symbol extraction plugins (runtime toggle)

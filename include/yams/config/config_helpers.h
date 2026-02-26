@@ -109,6 +109,14 @@ std::filesystem::path get_cache_dir();
 /// Unix: $XDG_RUNTIME_DIR/yams or /tmp/yams-$UID
 std::filesystem::path get_runtime_dir();
 
+/// Returns the canonical daemon plugin trust file path.
+/// Default: <data_dir>/plugins.trust (or YAMS_PLUGIN_TRUST_FILE override).
+std::filesystem::path get_daemon_plugin_trust_file();
+
+/// Returns the legacy plugin trust file path used by older CLI tooling.
+/// Default: <config_dir>/plugins_trust.txt
+std::filesystem::path get_legacy_plugin_trust_file();
+
 // Daemon-specific config resolution (env → config → defaults)
 std::filesystem::path resolve_socket_path_from_config();
 std::filesystem::path resolve_data_dir_from_config();

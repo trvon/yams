@@ -383,6 +383,8 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 std::filesystem::path trustFile;
                 if (!config_.dataDir.empty()) {
                     trustFile = config_.dataDir / "plugins.trust";
+                } else {
+                    trustFile = yams::config::get_daemon_plugin_trust_file();
                 }
                 abiHost_ = std::make_unique<AbiPluginHost>(this, trustFile);
                 spdlog::debug("ServiceManager: AbiPluginHost initialized (trustFile='{}')",
@@ -467,8 +469,10 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             // Trust system install location unless strict plugin-dir mode is enabled.
 #ifdef YAMS_INSTALL_PREFIX
             namespace fs = std::filesystem;
-            const bool strictPluginDirMode =
-                ConfigResolver::envTruthy(std::getenv("YAMS_PLUGIN_DIR_STRICT"));
+            bool strictPluginDirMode = config_.pluginDirStrict;
+            if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
+                strictPluginDirMode = ConfigResolver::envTruthy(envStrict);
+            }
             if (!strictPluginDirMode) {
                 fs::path system_plugins =
                     fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins";
@@ -638,6 +642,10 @@ yams::Result<void> ServiceManager::initialize() {
     try {
         std::string dirs;
         std::vector<std::filesystem::path> pluginDirs;
+        bool strictPluginDirMode = config_.pluginDirStrict;
+        if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
+            strictPluginDirMode = ConfigResolver::envTruthy(envStrict);
+        }
 #ifdef _WIN32
         // Windows: use LOCALAPPDATA for user plugins
         if (const char* localAppData = std::getenv("LOCALAPPDATA"))
@@ -661,7 +669,9 @@ yams::Result<void> ServiceManager::initialize() {
                 dirs += ";";
             dirs += d.string();
         }
-        spdlog::info("Plugin scan directories: {}", dirs);
+        spdlog::info("Plugin default scan directories (strict={}): {}", strictPluginDirMode, dirs);
+        spdlog::info("Plugin trust file: {}",
+                     yams::config::get_daemon_plugin_trust_file().string());
     } catch (const std::exception& e) {
         spdlog::debug("Failed to log plugin directories: {}", e.what());
     } catch (...) {

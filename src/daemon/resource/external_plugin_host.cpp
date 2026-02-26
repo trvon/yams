@@ -15,6 +15,7 @@
 #include <set>
 #include <unordered_map>
 
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/resource/plugin_trust.h>
 
 using json = nlohmann::json;
@@ -899,21 +900,57 @@ private:
         std::lock_guard<std::mutex> lock(mutex);
         trusted.clear();
 
-        if (!fs::exists(trust_file)) {
+        auto loadPath = [this](const fs::path& path) {
+            std::ifstream file(path);
+            if (!file) {
+                return false;
+            }
+
+            std::string content((std::istreambuf_iterator<char>(file)),
+                                std::istreambuf_iterator<char>());
+            auto parsed = plugin_trust::parseTrustList(content);
+            for (const auto& raw : parsed) {
+                std::error_code ec;
+                auto canon = fs::weakly_canonical(raw, ec);
+                if (ec) {
+                    canon = raw.lexically_normal();
+                }
+                trusted.insert(std::move(canon));
+            }
+            return true;
+        };
+
+        if (fs::exists(trust_file)) {
+            (void)loadPath(trust_file);
             return;
         }
 
-        std::ifstream file(trust_file);
-        std::string content((std::istreambuf_iterator<char>(file)),
-                            std::istreambuf_iterator<char>());
-        auto parsed = plugin_trust::parseTrustList(content);
-        for (const auto& raw : parsed) {
+        auto canonicalTrust = yams::config::get_daemon_plugin_trust_file();
+        auto normalizeForCompare = [](const fs::path& p) {
             std::error_code ec;
-            auto canon = fs::weakly_canonical(raw, ec);
+            auto canon = fs::weakly_canonical(p, ec);
             if (ec) {
-                canon = raw.lexically_normal();
+                canon = p.lexically_normal();
             }
-            trusted.insert(std::move(canon));
+            return canon;
+        };
+
+        auto trustNorm = normalizeForCompare(trust_file);
+        auto canonicalNorm = normalizeForCompare(canonicalTrust);
+        if (trustNorm != canonicalNorm) {
+            return;
+        }
+
+        auto legacyTrust = yams::config::get_legacy_plugin_trust_file();
+        if (!legacyTrust.empty() && normalizeForCompare(legacyTrust) != trustNorm) {
+            std::error_code ec;
+            if (fs::exists(legacyTrust, ec) && !ec) {
+                if (loadPath(legacyTrust)) {
+                    spdlog::warn("Migrating legacy plugin trust file '{}' -> '{}'",
+                                 legacyTrust.string(), trust_file.string());
+                    saveTrust();
+                }
+            }
         }
     }
 
@@ -929,28 +966,10 @@ private:
             fs::create_directories(parent, ec);
         }
 
-        // Read existing entries from file to merge with our in-memory set
-        // This handles the case where ABI and External hosts share the same trust file
-        std::set<fs::path> merged = trusted;
-        if (fs::exists(trust_file)) {
-            std::ifstream infile(trust_file);
-            std::string content((std::istreambuf_iterator<char>(infile)),
-                                std::istreambuf_iterator<char>());
-            auto parsed = plugin_trust::parseTrustList(content);
-            for (const auto& raw : parsed) {
-                std::error_code ec;
-                auto canon = fs::weakly_canonical(raw, ec);
-                if (ec) {
-                    canon = raw.lexically_normal();
-                }
-                merged.insert(std::move(canon));
-            }
-        }
-
         std::ofstream file(trust_file);
         file << "# YAMS Plugin Trust List\n";
         file << "# One plugin path per line\n";
-        for (const auto& path : merged) {
+        for (const auto& path : trusted) {
             file << path.string() << "\n";
         }
     }

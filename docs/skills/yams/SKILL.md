@@ -382,6 +382,6 @@ yams doctor --fix-config-dims
 | Variable | Purpose |
 |----------|---------|
 | `YAMS_DATA_DIR` | Storage directory |
-| `YAMS_SOCKET` | Daemon socket path |
+| `YAMS_DAEMON_SOCKET` | Daemon socket path override |
 | `YAMS_LOG_LEVEL` | Logging verbosity |
 | `YAMS_SESSION_CURRENT` | Default session |

@@ -270,7 +270,14 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
         // With code ratio > 0.7 and doc count < 1000, should be SMALL_CODE
         CHECK(tuner.currentState() == TuningState::SMALL_CODE);
         CHECK(tuner.getRrfK() == 20);
-        CHECK(tuner.getParams().textWeight == Approx(0.45f));
+        // Graph-aware tuning may shift some rank mass from text/vector to KG.
+        if (stats.hasKnowledgeGraph()) {
+            CHECK(tuner.getParams().textWeight < 0.45f);
+            CHECK(tuner.getParams().textWeight > 0.39f);
+            CHECK(tuner.getParams().kgWeight > 0.05f);
+        } else {
+            CHECK(tuner.getParams().textWeight == Approx(0.45f));
+        }
         CHECK(tuner.getParams().pathTreeWeight == Approx(0.15f));
     }
 

@@ -4,6 +4,7 @@
 #include <iostream>
 #include <map>
 #include <optional>
+#include <set>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -13,6 +14,7 @@
 #include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -20,6 +22,20 @@
 #include <yams/plugins/plugin_repo_client.hpp>
 
 namespace yams::cli {
+
+static auto dedupePluginRoots(std::vector<std::filesystem::path> roots)
+    -> std::vector<std::filesystem::path> {
+    std::set<std::string> seen;
+    std::vector<std::filesystem::path> unique;
+    unique.reserve(roots.size());
+    for (const auto& p : roots) {
+        auto key = p.lexically_normal().string();
+        if (seen.insert(key).second) {
+            unique.push_back(p);
+        }
+    }
+    return unique;
+}
 
 class PluginCommand : public ICommand {
 public:
@@ -111,7 +127,7 @@ public:
             unload->add_option("name", unloadName_, "Plugin name")->required();
             unload->callback([this]() { unloadPlugin(unloadName_); });
 
-            // plugin trust (add/list/remove)
+            // plugin trust (add/list/remove/reset/status)
             auto* trust = plugin->add_subcommand("trust", "Manage plugin trust policy");
             trust->require_subcommand(1);
 
@@ -120,14 +136,21 @@ public:
                 ->required();
             trust->get_subcommand("add")->callback([this]() { trustAdd(trustPath_); });
 
-            trust->add_subcommand("list", "List trusted plugin paths")->callback([this]() {
-                trustList();
-            });
+            trust->add_subcommand("list", "List trusted plugin paths")
+                ->add_flag("--details", trustDetails_,
+                           "Show trust file, defaults, strict mode, and effective roots");
+            trust->get_subcommand("list")->callback([this]() { trustList(trustDetails_); });
 
             trust->add_subcommand("remove", "Remove a trusted plugin path")
                 ->add_option("path", untrustPath_, "Path to remove")
                 ->required();
             trust->get_subcommand("remove")->callback([this]() { trustRemove(untrustPath_); });
+
+            trust->add_subcommand("reset", "Remove all persisted trusted plugin paths")
+                ->callback([this]() { trustReset(); });
+
+            trust->add_subcommand("status", "Show trust/discovery defaults and overrides")
+                ->callback([this]() { trustStatus(); });
 
             // plugin install
             auto* install =
@@ -210,9 +233,11 @@ private:
     void scanPlugins(const std::string& dir, const std::string& target);
     void loadPlugin(const std::string& arg, const std::string& cfg, bool dryRun);
     void unloadPlugin(const std::string& name);
-    void trustList();
+    void trustList(bool details = false);
     void trustAdd(const std::string& path);
     void trustRemove(const std::string& path);
+    void trustReset();
+    void trustStatus();
 
     // New install/repo methods
     void installPlugin();
@@ -234,6 +259,7 @@ private:
     std::string unloadName_;
     std::string trustPath_;
     std::string untrustPath_;
+    bool trustDetails_{false};
     std::string installSrc_;
     std::string nameToggle_;
     bool verboseList_{false};
@@ -757,7 +783,7 @@ void PluginCommand::unloadPlugin(const std::string& name) {
     }
 }
 
-void PluginCommand::trustList() {
+void PluginCommand::trustList(bool details) {
     using namespace yams::daemon;
     try {
         ClientConfig cfg;
@@ -789,6 +815,59 @@ void PluginCommand::trustList() {
         std::cout << "Trusted plugin paths (" << r.paths.size() << "):\n";
         for (const auto& p : r.paths)
             std::cout << "  - " << p << "\n";
+
+        if (details) {
+            auto parseBool = [](std::string value, bool fallback) {
+                if (value.empty()) {
+                    return fallback;
+                }
+                std::transform(value.begin(), value.end(), value.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                return value == "1" || value == "true" || value == "yes" || value == "on";
+            };
+
+            std::cout << "\nTrust file: " << yams::config::get_daemon_plugin_trust_file().string()
+                      << "\n";
+            std::cout << "Legacy trust file: "
+                      << yams::config::get_legacy_plugin_trust_file().string() << "\n";
+
+            bool strictMode = false;
+            auto cfgMap = yams::config::parse_simple_toml(yams::config::get_config_path());
+            if (auto it = cfgMap.find("daemon.plugin_dir_strict"); it != cfgMap.end()) {
+                strictMode = parseBool(it->second, strictMode);
+            }
+            if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
+                strictMode = parseBool(envStrict, strictMode);
+            }
+
+            std::vector<std::filesystem::path> defaultRoots;
+            if (!strictMode) {
+#ifdef _WIN32
+                defaultRoots.push_back(yams::config::get_data_dir() / "plugins");
+#else
+                if (const char* home = std::getenv("HOME")) {
+                    defaultRoots.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
+                                           "plugins");
+                }
+#ifdef __APPLE__
+                defaultRoots.push_back(std::filesystem::path("/opt/homebrew/lib/yams/plugins"));
+#endif
+                defaultRoots.push_back(std::filesystem::path("/usr/local/lib/yams/plugins"));
+                defaultRoots.push_back(std::filesystem::path("/usr/lib/yams/plugins"));
+#endif
+#ifdef YAMS_INSTALL_PREFIX
+                defaultRoots.push_back(std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" /
+                                       "plugins");
+#endif
+            }
+            defaultRoots = dedupePluginRoots(std::move(defaultRoots));
+
+            std::cout << "Strict plugin-dir mode: " << (strictMode ? "on" : "off") << "\n";
+            std::cout << "Default plugin roots (" << defaultRoots.size() << "):\n";
+            for (const auto& p : defaultRoots) {
+                std::cout << "  - " << p.string() << "\n";
+            }
+        }
     } catch (const std::exception& e) {
         std::cout << "Error: " << e.what() << "\n";
     }
@@ -862,6 +941,211 @@ void PluginCommand::trustRemove(const std::string& path) {
         std::cout << "Untrusted: " << path << "\n";
     } catch (const std::exception& e) {
         std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::trustReset() {
+    using namespace yams::daemon;
+    try {
+        ClientConfig cfg;
+        if (cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
+        cfg.requestTimeout = std::chrono::milliseconds(15000);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+        if (!leaseRes) {
+            printDaemonAcquireFailure("Plugin trust reset", leaseRes.error());
+            return;
+        }
+
+        auto leaseHandle = std::move(leaseRes.value());
+        auto& client = **leaseHandle;
+
+        PluginTrustListRequest listReq;
+        auto listRes = yams::cli::run_result<PluginTrustListResponse>(
+            client.call(listReq), std::chrono::milliseconds(15000));
+        if (!listRes) {
+            auto statusFetcher = [&]() -> plugin::StatusResult {
+                return yams::cli::run_result<yams::daemon::StatusResponse>(
+                    client.status(), std::chrono::milliseconds(5000));
+            };
+            (void)plugin::handle_plugin_rpc_error(listRes.error(), statusFetcher,
+                                                  "Plugin trust reset");
+            return;
+        }
+
+        const auto& paths = listRes.value().paths;
+        if (paths.empty()) {
+            std::cout << "Trust list is already empty.\n";
+            return;
+        }
+
+        std::size_t removed = 0;
+        std::vector<std::string> failed;
+        for (const auto& path : paths) {
+            PluginTrustRemoveRequest req;
+            req.path = path;
+            auto rmRes = yams::cli::run_result<SuccessResponse>(client.call(req),
+                                                                std::chrono::milliseconds(15000));
+            if (rmRes) {
+                ++removed;
+            } else {
+                failed.push_back(path);
+            }
+        }
+
+        std::cout << "Trust reset complete: removed " << removed << " path(s).\n";
+        if (!failed.empty()) {
+            std::cout << "Failed to remove " << failed.size() << " path(s):\n";
+            for (const auto& p : failed) {
+                std::cout << "  - " << p << "\n";
+            }
+        }
+        std::cout << "Note: default plugin roots may still be scanned unless strict mode is enabled"
+                  << " (YAMS_PLUGIN_DIR_STRICT=1 or daemon.plugin_dir_strict=true).\n";
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << "\n";
+    }
+}
+
+void PluginCommand::trustStatus() {
+    using namespace yams::daemon;
+
+    auto parseBool = [](std::string value, bool fallback) {
+        if (value.empty()) {
+            return fallback;
+        }
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    };
+
+    auto splitEnvPaths = [](const char* raw) {
+        std::vector<std::string> out;
+        if (!raw || !*raw) {
+            return out;
+        }
+        std::string cur;
+        for (char ch : std::string(raw)) {
+            if (ch == ':' || ch == ';') {
+                if (!cur.empty()) {
+                    out.push_back(cur);
+                    cur.clear();
+                }
+                continue;
+            }
+            cur.push_back(ch);
+        }
+        if (!cur.empty()) {
+            out.push_back(cur);
+        }
+        return out;
+    };
+
+    auto cfgMap = yams::config::parse_simple_toml(yams::config::get_config_path());
+    bool strictMode = false;
+    if (auto it = cfgMap.find("daemon.plugin_dir_strict"); it != cfgMap.end()) {
+        strictMode = parseBool(it->second, strictMode);
+    }
+    if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
+        strictMode = parseBool(envStrict, strictMode);
+    }
+
+    std::vector<std::filesystem::path> defaultRoots;
+    if (!strictMode) {
+#ifdef _WIN32
+        defaultRoots.push_back(yams::config::get_data_dir() / "plugins");
+#else
+        if (const char* home = std::getenv("HOME")) {
+            defaultRoots.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
+                                   "plugins");
+        }
+#ifdef __APPLE__
+        defaultRoots.push_back(std::filesystem::path("/opt/homebrew/lib/yams/plugins"));
+#endif
+        defaultRoots.push_back(std::filesystem::path("/usr/local/lib/yams/plugins"));
+        defaultRoots.push_back(std::filesystem::path("/usr/lib/yams/plugins"));
+#endif
+#ifdef YAMS_INSTALL_PREFIX
+        defaultRoots.push_back(std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" /
+                               "plugins");
+#endif
+    }
+    defaultRoots = dedupePluginRoots(std::move(defaultRoots));
+
+    std::set<std::string> effectiveRoots;
+    for (const auto& p : defaultRoots) {
+        effectiveRoots.insert(p.string());
+    }
+
+    std::vector<std::string> trustedPaths;
+    try {
+        ClientConfig cfg;
+        if (cli_->hasExplicitDataDir()) {
+            cfg.dataDir = cli_->getDataPath();
+        }
+        cfg.requestTimeout = std::chrono::milliseconds(15000);
+        auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
+            cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+        if (leaseRes) {
+            auto leaseHandle = std::move(leaseRes.value());
+            auto& client = **leaseHandle;
+            PluginTrustListRequest req;
+            auto res = yams::cli::run_result<PluginTrustListResponse>(
+                client.call(req), std::chrono::milliseconds(15000));
+            if (res) {
+                trustedPaths = res.value().paths;
+            }
+        }
+    } catch (...) {
+    }
+
+    for (const auto& p : trustedPaths) {
+        effectiveRoots.insert(p);
+    }
+
+    auto envPluginDirs = splitEnvPaths(std::getenv("YAMS_PLUGIN_DIR"));
+    for (const auto& p : envPluginDirs) {
+        effectiveRoots.insert(p);
+    }
+
+    std::cout << "Plugin trust/discovery status\n";
+    std::cout << "Trust file: " << yams::config::get_daemon_plugin_trust_file().string() << "\n";
+    std::cout << "Legacy trust file: " << yams::config::get_legacy_plugin_trust_file().string()
+              << "\n";
+    std::cout << "Strict plugin-dir mode: " << (strictMode ? "on" : "off") << "\n";
+
+    std::cout << "\nEnvironment overrides:\n";
+    std::cout << "  YAMS_PLUGIN_DIR="
+              << (std::getenv("YAMS_PLUGIN_DIR") ? std::getenv("YAMS_PLUGIN_DIR") : "(unset)")
+              << "\n";
+    std::cout << "  YAMS_PLUGIN_DIR_STRICT="
+              << (std::getenv("YAMS_PLUGIN_DIR_STRICT") ? std::getenv("YAMS_PLUGIN_DIR_STRICT")
+                                                        : "(unset)")
+              << "\n";
+    std::cout << "  YAMS_DISABLE_ABI_PLUGINS="
+              << (std::getenv("YAMS_DISABLE_ABI_PLUGINS") ? std::getenv("YAMS_DISABLE_ABI_PLUGINS")
+                                                          : "(unset)")
+              << "\n";
+
+    std::cout << "\nDefault plugin roots (" << defaultRoots.size() << "):\n";
+    for (const auto& p : defaultRoots) {
+        std::cout << "  - " << p.string() << "\n";
+    }
+
+    std::cout << "\nPersisted trusted roots (" << trustedPaths.size() << "):\n";
+    for (const auto& p : trustedPaths) {
+        std::cout << "  - " << p << "\n";
+    }
+
+    std::cout << "\nEffective scan roots (" << effectiveRoots.size() << "):\n";
+    for (const auto& p : effectiveRoots) {
+        std::cout << "  - " << p << "\n";
+    }
+
+    if (auto it = cfgMap.find("daemon.plugin_name_policy"); it != cfgMap.end()) {
+        std::cout << "\nplugin_name_policy: " << it->second << "\n";
     }
 }
 

@@ -22,7 +22,7 @@ Content-addressed storage with deduplication and semantic search.
 
 YAMS supports C-ABI plugins loaded from trusted directories.
 
-**Trust file:** `~/.config/yams/plugins_trust.txt`
+**Trust file:** `<data_dir>/plugins.trust` (default: `~/.local/share/yams/plugins.trust`)
 
 **Discovery paths:**
 - `YAMS_PLUGIN_DIR` (exclusive if set)

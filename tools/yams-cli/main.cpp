@@ -10,6 +10,12 @@
 
 int main(int argc, char* argv[]) {
     try {
+#ifndef _WIN32
+        ::setenv("YAMS_CLI_ONE_SHOT", "1", 1);
+#else
+        _putenv_s("YAMS_CLI_ONE_SHOT", "1");
+#endif
+
         // Set up logging with conservative default; YamsCLI::run() adjusts based on flags
         spdlog::set_level(spdlog::level::warn);
         spdlog::set_pattern("[%H:%M:%S] [%l] %v");

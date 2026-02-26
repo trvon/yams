@@ -114,6 +114,22 @@ std::filesystem::path get_runtime_dir() {
     return std::filesystem::temp_directory_path() / "yams-runtime";
 }
 
+std::filesystem::path get_daemon_plugin_trust_file() {
+    if (const char* env = std::getenv("YAMS_PLUGIN_TRUST_FILE"); env && *env) {
+        return std::filesystem::path(env);
+    }
+
+    auto dataDir = resolve_data_dir_from_config();
+    if (dataDir.empty()) {
+        dataDir = get_data_dir();
+    }
+    return dataDir / "plugins.trust";
+}
+
+std::filesystem::path get_legacy_plugin_trust_file() {
+    return get_config_dir() / "plugins_trust.txt";
+}
+
 std::string parse_config_value(const std::filesystem::path& config_path, const std::string& section,
                                const std::string& key) {
     std::ifstream file(config_path);

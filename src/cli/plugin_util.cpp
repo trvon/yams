@@ -1,5 +1,6 @@
 #include <yams/cli/plugin_util.h>
 #include <yams/config/config_helpers.h>
+#include <yams/daemon/resource/plugin_trust.h>
 #include <yams/plugins/model_provider_v1.h>
 
 #include <cstdlib>
@@ -51,33 +52,48 @@ namespace fs = std::filesystem;
 std::set<fs::path> readTrustedRoots() {
     std::set<fs::path> roots;
 
-    fs::path trustFile = yams::config::get_config_dir() / "plugins_trust.txt";
-    std::ifstream in(trustFile);
-    if (!in) {
+    auto loadTrustFile = [&roots](const fs::path& trustFile) {
+        std::ifstream in(trustFile);
+        if (!in) {
+            return false;
+        }
+
+        std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        auto parsed = yams::daemon::plugin_trust::parseTrustList(content);
+        roots.insert(parsed.begin(), parsed.end());
+        return true;
+    };
+
+    const fs::path canonicalTrust = yams::config::get_daemon_plugin_trust_file();
+    if (loadTrustFile(canonicalTrust)) {
         return roots;
     }
 
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty()) {
-            continue;
-        }
-        roots.insert(fs::path(line));
-    }
+    // Fallback for legacy installations that still have ~/.config/yams/plugins_trust.txt
+    (void)loadTrustFile(yams::config::get_legacy_plugin_trust_file());
 
     return roots;
 }
 
 bool isPathTrusted(const fs::path& pluginPath, const std::set<fs::path>& trustedRoots) {
+    if (trustedRoots.empty()) {
+        return false;
+    }
+
     std::error_code ec;
-    auto canonPath = fs::weakly_canonical(pluginPath, ec);
-    std::string canonStr = canonPath.string();
+    auto candidate = fs::weakly_canonical(pluginPath, ec);
+    if (ec) {
+        candidate = pluginPath.lexically_normal();
+    }
 
     for (const auto& root : trustedRoots) {
-        auto canonRoot = fs::weakly_canonical(root, ec);
-        std::string rootStr = canonRoot.string();
+        std::error_code rec;
+        auto canonRoot = fs::weakly_canonical(root, rec);
+        if (rec) {
+            canonRoot = root.lexically_normal();
+        }
 
-        if (!rootStr.empty() && canonStr.rfind(rootStr, 0) == 0) {
+        if (yams::daemon::plugin_trust::isPathWithin(canonRoot, candidate)) {
             return true;
         }
     }

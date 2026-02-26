@@ -66,7 +66,7 @@ struct PluginInstallerFixture {
         tempScope.emplace(yams::test_support::TempDirScope::unique_under("yams-installer-test"));
         testDir = tempScope->path();
         installDir = testDir / "plugins";
-        trustFile = testDir / "config" / "plugins_trust.txt";
+        trustFile = testDir / "data" / "plugins.trust";
 
         // Create test directories
         fs::create_directories(installDir);
@@ -286,8 +286,8 @@ TEST_CASE_METHOD(PluginInstallerFixture, "Trust file location", "[plugins][insta
     auto installer = makePluginInstaller(stubClient, installDir, trustFile);
 
     SECTION("trust file is in config directory") {
-        CHECK(trustFile.parent_path().filename() == "config");
-        CHECK(trustFile.filename() == "plugins_trust.txt");
+        CHECK(trustFile.parent_path().filename() == "data");
+        CHECK(trustFile.filename() == "plugins.trust");
     }
 }
 
@@ -323,7 +323,7 @@ TEST_CASE("Default paths", "[plugins][installer][defaults]") {
 
         CHECK_FALSE(defaultFile.empty());
         CHECK(defaultFile.string().find("yams") != std::string::npos);
-        CHECK(defaultFile.filename().string() == "plugins_trust.txt");
+        CHECK(defaultFile.filename().string() == "plugins.trust");
     }
 }
 

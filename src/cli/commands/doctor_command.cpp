@@ -1050,6 +1050,106 @@ private:
             std::string effectiveSocket =
                 daemon::DaemonClient::resolveSocketPathConfigFirst().string();
 
+            auto printTrustDiagnostics = [this]() {
+                // Plugin trust health (show stale/suspicious trusted roots with cleanup commands)
+                try {
+                    auto trustRootsFromDaemon = fetchTrustedRootsFromDaemon();
+                    bool usedDaemonTrust = trustRootsFromDaemon.has_value();
+
+                    std::vector<std::filesystem::path> trustedRoots;
+                    if (trustRootsFromDaemon) {
+                        trustedRoots = dedupeRoots(*trustRootsFromDaemon);
+                    } else {
+                        auto localTrusted = readTrusted();
+                        trustedRoots.assign(localTrusted.begin(), localTrusted.end());
+                    }
+
+                    bool strictMode = resolveStrictPluginDirMode();
+                    auto defaultRoots = getDefaultPluginRoots(strictMode);
+                    auto checks = assessTrustedRoots(trustedRoots, strictMode, defaultRoots);
+
+                    std::size_t problematic = 0;
+                    for (const auto& check : checks) {
+                        bool hasProblem = std::any_of(
+                            check.issues.begin(), check.issues.end(), [](const std::string& issue) {
+                                return issue == "missing" || issue == "temporary-path" ||
+                                       issue == "build-artifact-path";
+                            });
+                        if (hasProblem) {
+                            ++problematic;
+                        }
+                    }
+
+                    std::cout << "\n" << yams::cli::ui::section_header("Plugin Trust") << "\n\n";
+                    std::vector<yams::cli::ui::Row> trustRows;
+                    trustRows.push_back({"Trust Source",
+                                         usedDaemonTrust ? "daemon" : "local trust file fallback",
+                                         ""});
+                    trustRows.push_back(
+                        {"Trust File", yams::config::get_daemon_plugin_trust_file().string(), ""});
+                    trustRows.push_back({"Strict Mode", strictMode ? "on" : "off", ""});
+
+                    std::string trustSummary = std::to_string(trustedRoots.size()) + " root(s)";
+                    if (problematic > 0) {
+                        trustSummary += " (" + std::to_string(problematic) + " problematic)";
+                    }
+                    trustRows.push_back({"Trusted Roots", trustSummary, ""});
+                    yams::cli::ui::render_rows(std::cout, trustRows);
+
+                    if (!checks.empty()) {
+                        std::cout << "\n";
+                        for (const auto& check : checks) {
+                            const bool hasIssues = !check.issues.empty();
+                            const bool hasProblem =
+                                std::any_of(check.issues.begin(), check.issues.end(),
+                                            [](const std::string& issue) {
+                                                return issue == "missing" ||
+                                                       issue == "temporary-path" ||
+                                                       issue == "build-artifact-path";
+                                            });
+                            const std::string mark =
+                                hasProblem
+                                    ? yams::cli::ui::colorize("⚠", yams::cli::ui::Ansi::YELLOW)
+                                    : (hasIssues
+                                           ? yams::cli::ui::colorize("i", yams::cli::ui::Ansi::CYAN)
+                                           : yams::cli::ui::colorize("✓",
+                                                                     yams::cli::ui::Ansi::GREEN));
+                            std::cout << "  " << mark << " " << check.path.string();
+                            if (hasIssues) {
+                                std::cout << " [";
+                                for (size_t i = 0; i < check.issues.size(); ++i) {
+                                    if (i)
+                                        std::cout << ", ";
+                                    std::cout << check.issues[i];
+                                }
+                                std::cout << "]";
+                            }
+                            std::cout << "\n";
+                        }
+                    }
+
+                    if (problematic > 0) {
+                        std::cout << "\nCleanup commands:\n";
+                        for (const auto& check : checks) {
+                            bool hasProblem = std::any_of(check.issues.begin(), check.issues.end(),
+                                                          [](const std::string& issue) {
+                                                              return issue == "missing" ||
+                                                                     issue == "temporary-path" ||
+                                                                     issue == "build-artifact-path";
+                                                          });
+                            if (!hasProblem) {
+                                continue;
+                            }
+                            std::cout << "  yams plugin trust remove \"" << check.path.string()
+                                      << "\"\n";
+                        }
+                        std::cout << "  yams plugin trust reset\n";
+                        std::cout << "  yams plugin trust status\n";
+                    }
+                } catch (...) {
+                }
+            };
+
             // If we already have a cached status, skip the isDaemonRunning check to avoid
             // race conditions where the daemon might momentarily be unresponsive.
             // The cached status was successfully retrieved, so we know the daemon was running.
@@ -1065,6 +1165,7 @@ private:
                                      "Hint: Start the daemon with 'yams daemon start'",
                                      yams::cli::ui::Ansi::DIM)
                               << "\n";
+                    printTrustDiagnostics();
                     return;
                 }
             }
@@ -1082,6 +1183,7 @@ private:
                     std::cout << "\n" << yams::cli::ui::section_header("Daemon Health") << "\n\n";
                     std::cout << yams::cli::ui::colorize("✗ UNAVAILABLE", yams::cli::ui::Ansi::RED)
                               << " - " << leaseRes.error().message << "\n";
+                    printTrustDiagnostics();
                     return;
                 }
                 auto leaseHandle = std::move(leaseRes.value());
@@ -1094,6 +1196,7 @@ private:
                     std::cout << yams::cli::ui::colorize("✗ Failed to get status",
                                                          yams::cli::ui::Ansi::RED)
                               << " - " << sres.error().message << "\n";
+                    printTrustDiagnostics();
                     return;
                 }
                 cachedStatus = std::move(sres.value());
@@ -1173,6 +1276,7 @@ private:
                 std::cout << yams::cli::ui::colorize("✗ Failed to get status",
                                                      yams::cli::ui::Ansi::RED)
                           << "\n";
+                printTrustDiagnostics();
                 return;
             }
             const auto& st = cachedStatus.value();
@@ -1267,6 +1371,8 @@ private:
             if (!resourceRows.empty()) {
                 yams::cli::ui::render_rows(std::cout, resourceRows);
             }
+
+            printTrustDiagnostics();
         } catch (const std::exception& e) {
             std::cout << "Daemon: ERROR - " << e.what() << "\n";
         }
@@ -1274,6 +1380,143 @@ private:
 
     // Plugin utilities (delegating to extracted plugin_util)
     static std::set<std::filesystem::path> readTrusted() { return plugin::readTrustedRoots(); }
+
+    static bool parseBoolValue(std::string value, bool fallback) {
+        if (value.empty()) {
+            return fallback;
+        }
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }
+
+    static bool resolveStrictPluginDirMode() {
+        bool strictMode = false;
+        try {
+            auto cfg = yams::config::parse_simple_toml(yams::config::get_config_path());
+            if (auto it = cfg.find("daemon.plugin_dir_strict"); it != cfg.end()) {
+                strictMode = parseBoolValue(it->second, strictMode);
+            }
+        } catch (...) {
+        }
+        if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
+            strictMode = parseBoolValue(envStrict, strictMode);
+        }
+        return strictMode;
+    }
+
+    static std::vector<std::filesystem::path>
+    dedupeRoots(const std::vector<std::filesystem::path>& roots) {
+        std::set<std::string> seen;
+        std::vector<std::filesystem::path> unique;
+        unique.reserve(roots.size());
+        for (const auto& p : roots) {
+            auto key = p.lexically_normal().string();
+            if (seen.insert(key).second) {
+                unique.push_back(p);
+            }
+        }
+        return unique;
+    }
+
+    static std::vector<std::filesystem::path> getDefaultPluginRoots(bool strictMode) {
+        if (strictMode) {
+            return {};
+        }
+        return dedupeRoots(plugin::getPluginSearchDirs());
+    }
+
+    std::optional<std::vector<std::filesystem::path>> fetchTrustedRootsFromDaemon() const {
+        using namespace yams::daemon;
+        try {
+            ClientConfig cfg;
+            if (cli_ && cli_->hasExplicitDataDir()) {
+                cfg.dataDir = cli_->getDataPath();
+            }
+            cfg.requestTimeout = std::chrono::milliseconds(5000);
+            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
+            if (!leaseRes) {
+                return std::nullopt;
+            }
+            auto leaseHandle = std::move(leaseRes.value());
+            auto& client = **leaseHandle;
+            PluginTrustListRequest req;
+            auto res = yams::cli::run_result<PluginTrustListResponse>(
+                client.call(req), std::chrono::milliseconds(5000));
+            if (!res) {
+                return std::nullopt;
+            }
+            std::vector<std::filesystem::path> out;
+            out.reserve(res.value().paths.size());
+            for (const auto& p : res.value().paths) {
+                out.emplace_back(p);
+            }
+            return out;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    struct TrustedRootCheck {
+        std::filesystem::path path;
+        std::vector<std::string> issues;
+    };
+
+    static std::vector<TrustedRootCheck>
+    assessTrustedRoots(const std::vector<std::filesystem::path>& trustedRoots, bool strictMode,
+                       const std::vector<std::filesystem::path>& defaultRoots) {
+        namespace fs = std::filesystem;
+        std::vector<TrustedRootCheck> checks;
+        checks.reserve(trustedRoots.size());
+
+        std::set<fs::path> defaultRootSet(defaultRoots.begin(), defaultRoots.end());
+        std::error_code tempEc;
+        fs::path tempRoot = fs::temp_directory_path(tempEc);
+        std::set<fs::path> tempSet;
+        if (!tempEc) {
+            tempSet.insert(tempRoot);
+        }
+
+        for (const auto& root : trustedRoots) {
+            TrustedRootCheck check;
+            check.path = root;
+
+            std::error_code ec;
+            auto canonical = fs::weakly_canonical(root, ec);
+            if (ec) {
+                canonical = root.lexically_normal();
+            }
+
+            if (!fs::exists(root, ec) || ec) {
+                check.issues.push_back("missing");
+            }
+
+            if (!tempSet.empty() && plugin::isPathTrusted(canonical, tempSet)) {
+                check.issues.push_back("temporary-path");
+            }
+
+            {
+                auto normalized = canonical.lexically_normal().string();
+                std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                std::replace(normalized.begin(), normalized.end(), '\\', '/');
+                if (normalized.find("/build/") != std::string::npos ||
+                    normalized.find("/builddir") != std::string::npos ||
+                    normalized.find("/cmake-build") != std::string::npos) {
+                    check.issues.push_back("build-artifact-path");
+                }
+            }
+
+            if (!strictMode && !defaultRootSet.empty() &&
+                plugin::isPathTrusted(canonical, defaultRootSet)) {
+                check.issues.push_back("covered-by-default-root");
+            }
+
+            checks.push_back(std::move(check));
+        }
+
+        return checks;
+    }
 
     static bool isTrustedPath(const std::filesystem::path& p,
                               const std::set<std::filesystem::path>& roots) {
@@ -1552,6 +1795,47 @@ private:
                     pluginsJson.push_back(std::move(pj));
                 }
                 jsonResult["plugins"] = std::move(pluginsJson);
+            }
+
+            // Plugin trust diagnostics
+            try {
+                auto trustRootsFromDaemon = fetchTrustedRootsFromDaemon();
+                bool usedDaemonTrust = trustRootsFromDaemon.has_value();
+
+                std::vector<std::filesystem::path> trustedRoots;
+                if (trustRootsFromDaemon) {
+                    trustedRoots = dedupeRoots(*trustRootsFromDaemon);
+                } else {
+                    auto localTrusted = readTrusted();
+                    trustedRoots.assign(localTrusted.begin(), localTrusted.end());
+                }
+
+                bool strictMode = resolveStrictPluginDirMode();
+                auto defaultRoots = getDefaultPluginRoots(strictMode);
+                auto checks = assessTrustedRoots(trustedRoots, strictMode, defaultRoots);
+
+                nlohmann::json trustJson;
+                trustJson["source"] = usedDaemonTrust ? "daemon" : "local";
+                trustJson["trust_file"] = yams::config::get_daemon_plugin_trust_file().string();
+                trustJson["legacy_trust_file"] =
+                    yams::config::get_legacy_plugin_trust_file().string();
+                trustJson["strict_mode"] = strictMode;
+
+                nlohmann::json rootsJson = nlohmann::json::array();
+                for (const auto& check : checks) {
+                    nlohmann::json root;
+                    root["path"] = check.path.string();
+                    root["issues"] = check.issues;
+                    root["problematic"] = std::any_of(
+                        check.issues.begin(), check.issues.end(), [](const std::string& issue) {
+                            return issue == "missing" || issue == "temporary-path" ||
+                                   issue == "build-artifact-path";
+                        });
+                    rootsJson.push_back(std::move(root));
+                }
+                trustJson["roots"] = std::move(rootsJson);
+                jsonResult["plugin_trust"] = std::move(trustJson);
+            } catch (...) {
             }
 
             // Models (installed)

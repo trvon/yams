@@ -39,7 +39,7 @@ else
   _plugin_std = 'c++23'
 endif
 
-shared_module(
+symbol_extractor_plugin_target = shared_module(
   'yams_symbol_extractor',
   extractor_sources,
   include_directories: [ include_directories('../../include'), include_directories('.') ],
@@ -50,3 +50,5 @@ shared_module(
   install_dir: plugins_dir,
   name_prefix: '',  # Don't add 'lib' prefix
 )
+
+set_variable('symbol_extractor_plugin_target', symbol_extractor_plugin_target)

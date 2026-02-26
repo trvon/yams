@@ -288,6 +288,38 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
         CHECK(after_remove.size() == tl.size() - 1);
     }
 
+    SECTION("Trust remove persists after host reload") {
+        auto dir1 = fixture.tempDir_ / "persist_remove_dir1";
+        auto dir2 = fixture.tempDir_ / "persist_remove_dir2";
+        fs::create_directories(dir1);
+        fs::create_directories(dir2);
+
+        {
+            AbiPluginHost host(nullptr);
+            host.setTrustFile(fixture.trustFile_);
+            REQUIRE(host.trustAdd(dir1));
+            REQUIRE(host.trustAdd(dir2));
+            REQUIRE(host.trustRemove(dir1));
+        }
+
+        {
+            AbiPluginHost reloaded(nullptr);
+            reloaded.setTrustFile(fixture.trustFile_);
+            auto tl = reloaded.trustList();
+            auto c1 = fs::weakly_canonical(dir1);
+            auto c2 = fs::weakly_canonical(dir2);
+            bool hasDir1 = false;
+            bool hasDir2 = false;
+            for (const auto& p : tl) {
+                auto cp = fs::weakly_canonical(p);
+                hasDir1 = hasDir1 || (cp == c1);
+                hasDir2 = hasDir2 || (cp == c2);
+            }
+            CHECK_FALSE(hasDir1);
+            CHECK(hasDir2);
+        }
+    }
+
     SECTION("List loaded plugins when empty") {
         AbiPluginHost host(nullptr);
         host.setTrustFile(fixture.trustFile_);

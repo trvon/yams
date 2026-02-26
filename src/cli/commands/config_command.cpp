@@ -20,6 +20,19 @@ namespace yams::cli {
 
 namespace fs = std::filesystem;
 
+static auto dedupePluginRoots(std::vector<fs::path> roots) -> std::vector<fs::path> {
+    std::set<std::string> seen;
+    std::vector<fs::path> unique;
+    unique.reserve(roots.size());
+    for (const auto& p : roots) {
+        auto key = p.lexically_normal().string();
+        if (seen.insert(key).second) {
+            unique.push_back(p);
+        }
+    }
+    return unique;
+}
+
 class ConfigCommand : public ICommand {
 public:
     std::string getName() const override { return "config"; }
@@ -215,6 +228,15 @@ public:
             tuningCmd->add_subcommand("status", "Show current tuning configuration");
         tuningStatusCmd->callback(
             [this]() { exitOnError(executeTuningStatus(), "Tuning status"); });
+
+        // Plugin discovery/trust status
+        auto* pluginsCmd =
+            cmd->add_subcommand("plugins", "Show daemon plugin discovery and trust settings");
+        pluginsCmd->require_subcommand();
+        auto* pluginsStatusCmd =
+            pluginsCmd->add_subcommand("status", "Show plugin defaults, trust file, and overrides");
+        pluginsStatusCmd->callback(
+            [this]() { exitOnError(executePluginsStatus(), "Plugin config status"); });
 
         // Storage subcommand
         auto* storageCmd = cmd->add_subcommand("storage", "Configure storage settings");
@@ -716,6 +738,105 @@ private:
 
             return Result<void>();
 
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::Unknown, std::string(e.what())};
+        }
+    }
+
+    Result<void> executePluginsStatus() {
+        try {
+            auto configPath = getConfigPath();
+            auto config = parseSimpleToml(configPath);
+
+            auto getValue = [&config](const std::string& key,
+                                      const std::string& fallback) -> std::string {
+                auto it = config.find(key);
+                if (it != config.end() && !it->second.empty())
+                    return it->second;
+                return fallback;
+            };
+
+            auto parseBool = [](std::string value, bool fallback) {
+                if (value.empty())
+                    return fallback;
+                std::ranges::transform(value, value.begin(), [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+                return value == "1" || value == "true" || value == "yes" || value == "on";
+            };
+
+            bool strictMode = parseBool(getValue("daemon.plugin_dir_strict", "false"), false);
+            if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
+                strictMode = parseBool(envStrict, strictMode);
+            }
+
+            std::vector<std::filesystem::path> defaultRoots;
+            if (!strictMode) {
+#ifdef _WIN32
+                defaultRoots.push_back(yams::config::get_data_dir() / "plugins");
+#else
+                if (const char* home = std::getenv("HOME")) {
+                    defaultRoots.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
+                                           "plugins");
+                }
+#ifdef __APPLE__
+                defaultRoots.push_back(std::filesystem::path("/opt/homebrew/lib/yams/plugins"));
+#endif
+                defaultRoots.push_back(std::filesystem::path("/usr/local/lib/yams/plugins"));
+                defaultRoots.push_back(std::filesystem::path("/usr/lib/yams/plugins"));
+#endif
+#ifdef YAMS_INSTALL_PREFIX
+                defaultRoots.push_back(std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" /
+                                       "plugins");
+#endif
+            }
+            defaultRoots = dedupePluginRoots(std::move(defaultRoots));
+
+            std::cout << ui::section_header("Daemon Plugin Configuration") << "\n";
+            std::cout << "Config file: " << configPath << "\n";
+            std::cout << "Trust file: " << yams::config::get_daemon_plugin_trust_file().string()
+                      << "\n";
+            std::cout << "Legacy trust file: "
+                      << yams::config::get_legacy_plugin_trust_file().string() << "\n";
+            std::cout << "auto_load_plugins: " << getValue("daemon.auto_load_plugins", "true")
+                      << "\n";
+            std::cout << "plugin_name_policy: " << getValue("daemon.plugin_name_policy", "relaxed")
+                      << "\n";
+            std::cout << "plugin_dir_strict: " << (strictMode ? "true" : "false") << "\n";
+            std::cout << "plugin_dir: " << getValue("daemon.plugin_dir", "(unset)") << "\n";
+            std::cout << "daemon.trusted_paths: " << getValue("daemon.trusted_paths", "(unset)")
+                      << "\n";
+            std::cout << "plugins.trusted_paths: " << getValue("plugins.trusted_paths", "(unset)")
+                      << "\n";
+
+            std::cout << "\nEnvironment overrides:\n";
+            std::cout << "  YAMS_PLUGIN_DIR="
+                      << (std::getenv("YAMS_PLUGIN_DIR") ? std::getenv("YAMS_PLUGIN_DIR")
+                                                         : "(unset)")
+                      << "\n";
+            std::cout << "  YAMS_PLUGIN_DIR_STRICT="
+                      << (std::getenv("YAMS_PLUGIN_DIR_STRICT")
+                              ? std::getenv("YAMS_PLUGIN_DIR_STRICT")
+                              : "(unset)")
+                      << "\n";
+            std::cout << "  YAMS_DISABLE_ABI_PLUGINS="
+                      << (std::getenv("YAMS_DISABLE_ABI_PLUGINS")
+                              ? std::getenv("YAMS_DISABLE_ABI_PLUGINS")
+                              : "(unset)")
+                      << "\n";
+
+            std::cout << "\nDefault plugin roots (" << defaultRoots.size() << "):\n";
+            for (const auto& p : defaultRoots) {
+                std::cout << "  - " << p.string() << "\n";
+            }
+
+            std::cout << "\nCommands:\n";
+            std::cout << "  yams plugin trust status            # effective runtime trust/roots\n";
+            std::cout << "  yams plugin trust reset             # clear persisted trusted roots\n";
+            std::cout
+                << "  yams config tuning status           # queue/pool tuning profile and knobs\n";
+
+            return Result<void>();
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string(e.what())};
         }

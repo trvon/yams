@@ -34,8 +34,8 @@ Plugin Naming Policy (ABI)
   - Daemon config: `plugin_name_policy: spec|relaxed` (if supported by your deployment)
 
 Security and Trust
-- Plugins are only loaded from trusted paths. The default trust file is
-  `~/.config/yams/plugins_trust.txt` (one absolute path per line). CLI helpers:
+- Plugins are only loaded from trusted paths. The canonical trust file is
+  `<data_dir>/plugins.trust` (default `~/.local/share/yams/plugins.trust`, one absolute path per line). CLI helpers:
   `yams plugin trust add|remove ...`.
 - For development, `YAMS_PLUGIN_TRUST_ALL=1` can be set to trust directories discovered in the
   standard search order; do not use this in production.

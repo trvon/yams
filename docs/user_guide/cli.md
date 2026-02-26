@@ -1130,7 +1130,7 @@ Synopsis:
 - yams plugin health
 - yams plugin load <path|name>
 - yams plugin unload <name>
-- yams plugin trust add <path> | list | remove <path>
+- yams plugin trust add <path> | list [--details] | remove <path> | reset | status
 - yams plugin install <name|url>
 - yams plugin uninstall <name>
 - yams plugin update [name]
@@ -1144,7 +1144,7 @@ Subcommands:
 - health: Show health status of loaded plugins.
 - load: Load a plugin by absolute path or name; respects trust policy.
 - unload: Unload a plugin by name.
-- trust: Manage the trust policy file `~/.config/yams/plugins_trust.txt`.
+- trust: Manage plugin trust and discovery status. Canonical trust file is `<data_dir>/plugins.trust` (default `~/.local/share/yams/plugins.trust`).
 - install: Install plugin from repository or URL.
 - uninstall: Uninstall a plugin.
 - update: Update plugins to latest version.
@@ -1154,7 +1154,7 @@ Subcommands:
 - verify: Verify plugin signature/hash (stub).
 
 Notes:
-- Default discovery order: `YAMS_PLUGIN_DIR` (exclusive if set), `$HOME/.local/lib/yams/plugins`, `/usr/local/lib/yams/plugins`, `/usr/lib/yams/plugins`, and `${CMAKE_INSTALL_PREFIX}/lib/yams/plugins`.
+- Default discovery roots: persisted trusted paths plus built-in defaults (`$HOME/.local/lib/yams/plugins`, `/opt/homebrew/lib/yams/plugins` on macOS, `/usr/local/lib/yams/plugins`, `/usr/lib/yams/plugins`, `${CMAKE_INSTALL_PREFIX}/lib/yams/plugins`). Strict mode (`YAMS_PLUGIN_DIR_STRICT=1` or `daemon.plugin_dir_strict=true`) disables built-in defaults.
 - The daemon prefers host-backed `model_provider_v1` when an ONNX plugin is trusted/loaded; otherwise it falls back to the legacy registry or mock/null provider.
 - Disable plugin subsystem: start the daemon with `--no-plugins`.
 
@@ -1164,6 +1164,8 @@ Examples:
 yams plugin scan
 yams plugin trust add /usr/local/lib/yams/plugins
 yams plugin trust list
+yams plugin trust status
+yams plugin trust reset
 
 # Load ONNX plugin by path (respects trust policy)
 yams plugin load /usr/local/lib/yams/plugins/libyams_onnx_plugin.so
