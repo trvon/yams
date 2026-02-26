@@ -1497,6 +1497,9 @@ jobs:
 
       - name: Build APT repository metadata (stable only, linux .deb present)
         if: steps.meta.outputs.channel == 'stable'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY || '' }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1586,9 +1589,13 @@ jobs:
           } > dists/$DIST/Release
           # Optional GPG signing if secret present
           if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
-            echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --yes --import
-            gpg --batch --yes -abs -o dists/$DIST/Release.gpg dists/$DIST/Release
-            gpg --batch --yes --clearsign -o dists/$DIST/InRelease dists/$DIST/Release
+            GPG_ARGS=(--batch --yes)
+            if [ -n "${GPG_PASSPHRASE:-}" ]; then
+              GPG_ARGS+=(--pinentry-mode loopback --passphrase "$GPG_PASSPHRASE")
+            fi
+            echo "$GPG_PRIVATE_KEY" | base64 -d | gpg "${GPG_ARGS[@]}" --import
+            gpg "${GPG_ARGS[@]}" -abs -o dists/$DIST/Release.gpg dists/$DIST/Release
+            gpg "${GPG_ARGS[@]}" --clearsign -o dists/$DIST/InRelease dists/$DIST/Release
           fi
           popd >/dev/null
           tree "$REPO_ROOT" || find "$REPO_ROOT" -maxdepth 4 -type f -print
@@ -1613,6 +1620,9 @@ jobs:
 
       - name: Build YUM repository metadata (stable only, rpm present)
         if: steps.meta.outputs.channel == 'stable'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY || '' }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1631,8 +1641,12 @@ jobs:
 
           createrepo_c "$YUM_ROOT"
           if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
-            echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --yes --import
-            gpg --batch --yes --detach-sign --armor -o "$YUM_ROOT/repodata/repomd.xml.asc" "$YUM_ROOT/repodata/repomd.xml"
+            GPG_ARGS=(--batch --yes)
+            if [ -n "${GPG_PASSPHRASE:-}" ]; then
+              GPG_ARGS+=(--pinentry-mode loopback --passphrase "$GPG_PASSPHRASE")
+            fi
+            echo "$GPG_PRIVATE_KEY" | base64 -d | gpg "${GPG_ARGS[@]}" --import
+            gpg "${GPG_ARGS[@]}" --detach-sign --armor -o "$YUM_ROOT/repodata/repomd.xml.asc" "$YUM_ROOT/repodata/repomd.xml"
           fi
           printf '%s\n' \
             'Add YUM/DNF repo (unsigned example):' \
@@ -1709,6 +1723,7 @@ jobs:
           CLOUDFLARE_ENDPOINT: ${{ secrets.CLOUDFLARE_ENDPOINT }}
           R2_PREFIX: ${{ secrets.R2_PREFIX }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          GPG_PUBLIC_KEY_B64: ${{ secrets.GPG_PUBLIC_KEY_B64 || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1723,6 +1738,19 @@ jobs:
             exit 0
           fi
           echo "Uploading to R2 bucket: $BUCKET (prefix='${R2_PREFIX:-}')"
+
+          # Publish repository public key as bucket root object "gpg.key" for /gpg.key route.
+          # Prefer secret, then fall back to a local repository file if present.
+          if [ -n "${GPG_PUBLIC_KEY_B64:-}" ]; then
+            echo "$GPG_PUBLIC_KEY_B64" | base64 -d > gpg.key
+          elif [ -f "$GITHUB_WORKSPACE/gpg.key" ]; then
+            cp "$GITHUB_WORKSPACE/gpg.key" gpg.key
+          fi
+          if [ -f gpg.key ]; then
+            wrangler r2 object put "${BUCKET}/gpg.key" --file=gpg.key --content-type application/pgp-keys --remote
+          else
+            echo "No public key found (GPG_PUBLIC_KEY_B64 or ./gpg.key); skipping gpg.key upload" >&2
+          fi
           
           # Upload latest.json manifest with JSON content-type
           if [ -f latest.json ]; then
