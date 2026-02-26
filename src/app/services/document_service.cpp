@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -437,15 +438,31 @@ inline void resetCompressionMetadata(RetrievedDocument& doc) {
 
 inline void applyCompressionMetadata(RetrievedDocument& doc,
                                      const compression::CompressionHeader& header) {
+    const auto* headerBytes = reinterpret_cast<const std::byte*>(&header);
+
+    uint64_t uncompressedSize = 0;
+    uint32_t compressedCrc32 = 0;
+    uint32_t uncompressedCrc32 = 0;
+
+    std::memcpy(&uncompressedSize,
+                headerBytes + offsetof(compression::CompressionHeader, uncompressedSize),
+                sizeof(uncompressedSize));
+    std::memcpy(&compressedCrc32,
+                headerBytes + offsetof(compression::CompressionHeader, compressedCRC32),
+                sizeof(compressedCrc32));
+    std::memcpy(&uncompressedCrc32,
+                headerBytes + offsetof(compression::CompressionHeader, uncompressedCRC32),
+                sizeof(uncompressedCrc32));
+
     doc.compressed = true;
     doc.compressionAlgorithm = header.algorithm;
     doc.compressionLevel = header.level;
-    doc.uncompressedSize = header.uncompressedSize;
-    doc.compressedCrc32 = header.compressedCRC32;
-    doc.uncompressedCrc32 = header.uncompressedCRC32;
-    const auto* bytes = reinterpret_cast<const uint8_t*>(&header);
+    doc.uncompressedSize = uncompressedSize;
+    doc.compressedCrc32 = compressedCrc32;
+    doc.uncompressedCrc32 = uncompressedCrc32;
+    const auto* bytes = reinterpret_cast<const uint8_t*>(headerBytes);
     doc.compressionHeader.assign(bytes, bytes + sizeof(header));
-    doc.size = header.uncompressedSize;
+    doc.size = uncompressedSize;
 }
 
 inline void markUncompressed(RetrievedDocument& doc, uint64_t size) {

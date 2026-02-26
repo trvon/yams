@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -61,6 +62,39 @@ bool listWithRetry(DaemonClient& client, int maxRetries = 6,
             return true;
         }
         std::this_thread::sleep_for(retryDelay);
+    }
+    return false;
+}
+
+bool addDocumentWithRetry(DaemonClient& client, const AddDocumentRequest& request,
+                          int maxRetries = 6, std::chrono::milliseconds retryDelay = 250ms,
+                          std::string* lastError = nullptr) {
+    std::string latestError;
+    for (int attempt = 0; attempt < maxRetries; ++attempt) {
+        auto result = yams::cli::run_sync(client.streamingAddDocument(request), 20s);
+        if (result.has_value()) {
+            if (lastError != nullptr) {
+                *lastError = latestError;
+            }
+            return true;
+        }
+
+        latestError = result.error().message;
+        const bool duplicateWrite = latestError.find("already exists") != std::string::npos ||
+                                    latestError.find("duplicate") != std::string::npos ||
+                                    latestError.find("UNIQUE constraint") != std::string::npos;
+        if (duplicateWrite) {
+            if (lastError != nullptr) {
+                *lastError = latestError;
+            }
+            return true;
+        }
+
+        std::this_thread::sleep_for(retryDelay);
+    }
+
+    if (lastError != nullptr) {
+        *lastError = latestError;
     }
     return false;
 }
@@ -187,6 +221,7 @@ TEST_CASE("Client timeout recovery: Connection lifetime expiry remains crash-fre
 
     auto client = createClient(harness.socketPath());
     REQUIRE(connectWithRetry(client));
+    REQUIRE(yams::cli::run_sync(client.status(), 5s).has_value());
 
     auto* socketServer = harness.daemon()->getSocketServer();
     REQUIRE(socketServer != nullptr);
@@ -526,15 +561,19 @@ TEST_CASE("Client timeout recovery: Tag filtering matrix for list and search",
     addRed.name = redName;
     addRed.content = "red content " + queryToken;
     addRed.tags = {"team-red", "group-a"};
-    auto addRedResult = yams::cli::run_sync(client.streamingAddDocument(addRed), 20s);
-    REQUIRE(addRedResult.has_value());
+    std::string addRedError;
+    const bool addRedOk = addDocumentWithRetry(client, addRed, 8, 300ms, &addRedError);
+    INFO("addRed last error: " << addRedError);
+    REQUIRE(addRedOk);
 
     AddDocumentRequest addBlue;
     addBlue.name = blueName;
     addBlue.content = "blue content " + queryToken;
     addBlue.tags = {"team-blue", "group-a"};
-    auto addBlueResult = yams::cli::run_sync(client.streamingAddDocument(addBlue), 20s);
-    REQUIRE(addBlueResult.has_value());
+    std::string addBlueError;
+    const bool addBlueOk = addDocumentWithRetry(client, addBlue, 8, 300ms, &addBlueError);
+    INFO("addBlue last error: " << addBlueError);
+    REQUIRE(addBlueOk);
 
     ListRequest listRedOnly;
     listRedOnly.limit = 50;

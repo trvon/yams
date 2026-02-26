@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -314,15 +315,31 @@ TEST_F(UiCliExpectationsIT, GetHonorsAcceptCompressedFlag) {
 
     // Validate compressed payload header matches reported metadata
     ASSERT_GE(compressed.content.size(), yams::compression::CompressionHeader::SIZE);
-    yams::compression::CompressionHeader headerFromContent{};
-    std::memcpy(&headerFromContent, compressed.content.data(),
-                yams::compression::CompressionHeader::SIZE);
-    EXPECT_EQ(headerFromContent.magic, yams::compression::CompressionHeader::MAGIC);
-    EXPECT_EQ(headerFromContent.uncompressedSize, expectedUncompressedSize);
-    EXPECT_EQ(static_cast<uint8_t>(headerFromContent.algorithm),
-              compressed.compressionAlgorithm.value());
-    EXPECT_EQ(headerFromContent.level, compressed.compressionLevel.value());
-    EXPECT_EQ(0, std::memcmp(compressed.compressionHeader.data(), &headerFromContent,
+    uint32_t magic = 0;
+    uint64_t uncompressedSize = 0;
+    uint8_t algorithm = 0;
+    uint8_t level = 0;
+
+    std::memcpy(&magic,
+                compressed.content.data() + offsetof(yams::compression::CompressionHeader, magic),
+                sizeof(magic));
+    std::memcpy(&uncompressedSize,
+                compressed.content.data() +
+                    offsetof(yams::compression::CompressionHeader, uncompressedSize),
+                sizeof(uncompressedSize));
+    std::memcpy(&algorithm,
+                compressed.content.data() +
+                    offsetof(yams::compression::CompressionHeader, algorithm),
+                sizeof(algorithm));
+    std::memcpy(&level,
+                compressed.content.data() + offsetof(yams::compression::CompressionHeader, level),
+                sizeof(level));
+
+    EXPECT_EQ(magic, yams::compression::CompressionHeader::MAGIC);
+    EXPECT_EQ(uncompressedSize, expectedUncompressedSize);
+    EXPECT_EQ(algorithm, compressed.compressionAlgorithm.value());
+    EXPECT_EQ(level, compressed.compressionLevel.value());
+    EXPECT_EQ(0, std::memcmp(compressed.compressionHeader.data(), compressed.content.data(),
                              yams::compression::CompressionHeader::SIZE));
 
     // Request explicit uncompressed payloads

@@ -1,3 +1,4 @@
+#include <cstddef>
 #include <filesystem>
 #include <random>
 #include <vector>
@@ -54,10 +55,14 @@ TEST(StorageCompressionSmoke, CompressionEnabledStoresCompressed) {
     auto raw = base->retrieve(key);
     ASSERT_TRUE(raw.has_value());
     ASSERT_GE(raw.value().size(), CompressionHeader::SIZE);
-    CompressionHeader hdr{};
-    std::memcpy(&hdr, raw.value().data(), sizeof(hdr));
-    EXPECT_EQ(hdr.magic, CompressionHeader::MAGIC);
-    EXPECT_EQ(hdr.uncompressedSize, payload.size());
+    uint32_t magic = 0;
+    uint64_t uncompressedSize = 0;
+    std::memcpy(&magic, raw.value().data() + offsetof(CompressionHeader, magic), sizeof(magic));
+    std::memcpy(&uncompressedSize,
+                raw.value().data() + offsetof(CompressionHeader, uncompressedSize),
+                sizeof(uncompressedSize));
+    EXPECT_EQ(magic, CompressionHeader::MAGIC);
+    EXPECT_EQ(uncompressedSize, payload.size());
 
     // Retrieval via wrapper must transparently decompress
     auto roundtrip = comp->retrieve(key);
