@@ -1927,13 +1927,6 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
             // For now, if refs.db tracks no zero-ref entries, trust it and skip the walk.
             sqlite3_close(db);
             result.message = "No orphaned chunks (quick-check: 0 unreferenced blocks)";
-            if (progress) {
-                RepairEvent ev;
-                ev.phase = "completed";
-                ev.operation = "chunks";
-                ev.message = result.message;
-                progress(ev);
-            }
             return result;
         }
 

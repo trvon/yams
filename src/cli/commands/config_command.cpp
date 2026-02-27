@@ -724,12 +724,22 @@ private:
             const auto queueMax = getValue("tuning.post_ingest_queue_max", "(auto)");
             const auto threadsMin = getValue("tuning.post_ingest_threads", "(auto)");
             const auto poolCooldown = getValue("tuning.pool_cooldown_ms", "500");
+            const auto cliPoolThreads = getValue("tuning.cli_pool_threads", "(profile default)");
+            const auto listInflight = getValue("tuning.list_inflight_limit", "(profile default)");
+            const auto listWaitMs = getValue("tuning.list_admission_wait_ms", "(profile default)");
+            const auto grepInflight = getValue("tuning.grep_inflight_limit", "(profile default)");
+            const auto grepWaitMs = getValue("tuning.grep_admission_wait_ms", "(profile default)");
 
             std::cout << ui::section_header("Tuning Configuration") << "\n";
             std::cout << "Profile: " << profile << "\n";
             std::cout << "Post-ingest worker cap: " << threadsMin << "\n";
             std::cout << "Post-ingest queue max: " << queueMax << "\n";
             std::cout << "Pool cooldown (ms): " << poolCooldown << "\n";
+            std::cout << "CLI pool threads: " << cliPoolThreads << "\n";
+            std::cout << "List inflight limit: " << listInflight << "\n";
+            std::cout << "List admission wait (ms): " << listWaitMs << "\n";
+            std::cout << "Grep inflight limit: " << grepInflight << "\n";
+            std::cout << "Grep admission wait (ms): " << grepWaitMs << "\n";
 
             std::cout << "\nCommands:\n";
             std::cout

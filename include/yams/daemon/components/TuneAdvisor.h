@@ -1408,6 +1408,89 @@ public:
         searchConcurrencyOverride_.store(v, std::memory_order_relaxed);
     }
 
+    // Dedicated daemon-side list admission controls.
+    // Defaults are profile-aware and can be overridden via tuning config.
+    static uint32_t listInflightLimit() {
+        uint32_t ov = listInflightLimitOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 4;
+            case Profile::Aggressive:
+                return 16;
+            case Profile::Balanced:
+            default:
+                return 8;
+        }
+    }
+    static void setListInflightLimit(uint32_t v) {
+        listInflightLimitOverride_.store(std::clamp<uint32_t>(v, 1u, 1024u),
+                                         std::memory_order_relaxed);
+    }
+
+    static uint32_t listAdmissionWaitMs() {
+        uint32_t ov = listAdmissionWaitMsOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        return 200;
+    }
+    static void setListAdmissionWaitMs(uint32_t v) {
+        listAdmissionWaitMsOverride_.store(std::clamp<uint32_t>(v, 1u, 120000u),
+                                           std::memory_order_relaxed);
+    }
+
+    // Dedicated daemon-side grep admission controls.
+    // Defaults are profile-aware and can be overridden via tuning config.
+    static uint32_t grepInflightLimit() {
+        uint32_t ov = grepInflightLimitOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 1;
+            case Profile::Aggressive:
+                return 3;
+            case Profile::Balanced:
+            default:
+                return 1;
+        }
+    }
+    static void setGrepInflightLimit(uint32_t v) {
+        grepInflightLimitOverride_.store(std::clamp<uint32_t>(v, 1u, 1024u),
+                                         std::memory_order_relaxed);
+    }
+
+    static uint32_t grepAdmissionWaitMs() {
+        uint32_t ov = grepAdmissionWaitMsOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        return 20000;
+    }
+    static void setGrepAdmissionWaitMs(uint32_t v) {
+        grepAdmissionWaitMsOverride_.store(std::clamp<uint32_t>(v, 1u, 120000u),
+                                           std::memory_order_relaxed);
+    }
+
+    static uint32_t cliRequestPoolThreads() {
+        uint32_t ov = cliRequestPoolThreadsOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        switch (tuningProfile()) {
+            case Profile::Efficient:
+                return 1;
+            case Profile::Aggressive:
+                return 4;
+            case Profile::Balanced:
+            default:
+                return 2;
+        }
+    }
+    static void setCliRequestPoolThreads(uint32_t v) {
+        cliRequestPoolThreadsOverride_.store(std::clamp<uint32_t>(v, 1u, 64u),
+                                             std::memory_order_relaxed);
+    }
+
     // Writer drain ramp thresholds and multipliers
     static uint32_t writerActiveLow1Threshold() { return 2; }
     static uint32_t writerActiveLow2Threshold() { return 4; }
@@ -2603,6 +2686,11 @@ private:
     static inline std::atomic<uint32_t> poolLowWatermarkPctOverride_{0};
     static inline std::atomic<uint32_t> poolHighWatermarkPctOverride_{0};
     static inline std::atomic<uint32_t> searchConcurrencyOverride_{0};
+    static inline std::atomic<uint32_t> listInflightLimitOverride_{0};
+    static inline std::atomic<uint32_t> listAdmissionWaitMsOverride_{0};
+    static inline std::atomic<uint32_t> grepInflightLimitOverride_{0};
+    static inline std::atomic<uint32_t> grepAdmissionWaitMsOverride_{0};
+    static inline std::atomic<uint32_t> cliRequestPoolThreadsOverride_{0};
     static inline std::atomic<unsigned> hwCached_{0};
     static inline std::atomic<uint32_t> postIngestTotalConcurrentOverride_{0};
     static inline std::atomic<uint32_t> postIngestStageActiveMaskOverride_{0x3Fu};

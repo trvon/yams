@@ -108,6 +108,10 @@ size_t readPoolPrewarmTarget(size_t defaultTarget) {
     return defaultTarget;
 }
 
+size_t readCliRequestPoolThreads() {
+    return static_cast<size_t>(yams::daemon::TuneAdvisor::cliRequestPoolThreads());
+}
+
 void prewarmReadPool(const std::shared_ptr<yams::metadata::ConnectionPool>& readPool,
                      size_t targetConnections) {
     if (!readPool || targetConnections == 0) {
@@ -352,8 +356,9 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
     try {
         spdlog::debug("ServiceManager constructor start");
         if (!cliRequestPool_) {
-            cliRequestPool_ = std::make_unique<boost::asio::thread_pool>(2);
-            spdlog::info("[ServiceManager] CLI request pool created with 2 threads");
+            const auto cliThreads = readCliRequestPoolThreads();
+            cliRequestPool_ = std::make_unique<boost::asio::thread_pool>(cliThreads);
+            spdlog::info("[ServiceManager] CLI request pool created with {} thread(s)", cliThreads);
         }
         refreshPluginStatusSnapshot();
 

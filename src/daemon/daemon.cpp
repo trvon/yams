@@ -1097,6 +1097,21 @@ void YamsDaemon::reloadTuningConfig() {
                 return std::nullopt;
             }
         };
+        if (auto v = as_int("cli_pool_threads")) {
+            TuneAdvisor::setCliRequestPoolThreads(static_cast<uint32_t>(*v));
+        }
+        if (auto v = as_int("list_inflight_limit")) {
+            TuneAdvisor::setListInflightLimit(static_cast<uint32_t>(*v));
+        }
+        if (auto v = as_int("list_admission_wait_ms")) {
+            TuneAdvisor::setListAdmissionWaitMs(static_cast<uint32_t>(*v));
+        }
+        if (auto v = as_int("grep_inflight_limit")) {
+            TuneAdvisor::setGrepInflightLimit(static_cast<uint32_t>(*v));
+        }
+        if (auto v = as_int("grep_admission_wait_ms")) {
+            TuneAdvisor::setGrepAdmissionWaitMs(static_cast<uint32_t>(*v));
+        }
         TuningConfig tc = config_.tuning; // start from current
         if (auto v = as_int("target_cpu_percent"))
             tc.targetCpuPercent = static_cast<uint32_t>(*v);

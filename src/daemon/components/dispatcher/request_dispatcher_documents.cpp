@@ -57,10 +57,44 @@ bool query_trace_enabled() {
 }
 
 std::atomic<uint32_t> g_inflightListRequests{0};
+std::atomic<uint32_t> g_inflightGrepRequests{0};
 
 struct ListInflightGuard {
     ~ListInflightGuard() { g_inflightListRequests.fetch_sub(1, std::memory_order_acq_rel); }
 };
+
+struct GrepInflightGuard {
+    ~GrepInflightGuard() { g_inflightGrepRequests.fetch_sub(1, std::memory_order_acq_rel); }
+};
+
+boost::asio::awaitable<bool> acquireInflightSlot(std::atomic<uint32_t>& counter, int limit,
+                                                 int maxWaitMs) {
+    if (limit <= 0) {
+        co_return true;
+    }
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(1, maxWaitMs));
+    auto executor = co_await boost::asio::this_coro::executor;
+    boost::asio::steady_timer timer(executor);
+
+    while (true) {
+        auto current = counter.load(std::memory_order_acquire);
+        while (current < static_cast<uint32_t>(limit)) {
+            if (counter.compare_exchange_weak(current, current + 1, std::memory_order_acq_rel,
+                                              std::memory_order_acquire)) {
+                co_return true;
+            }
+        }
+
+        if (std::chrono::steady_clock::now() >= deadline) {
+            co_return false;
+        }
+
+        timer.expires_after(std::chrono::milliseconds(5));
+        co_await timer.async_wait(boost::asio::use_awaitable);
+    }
+}
 
 int computeEnqueueDelayMs(const AddDocumentRequest& req, int attempt, int baseDelayMs,
                           int maxDelayMs) {
@@ -330,13 +364,13 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGetEndRequest(const Ge
 boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const ListRequest& req) {
     spdlog::debug("[handleListRequest] START limit={}", req.limit);
     try {
-        const int listInflightLimit = envIntOrDefault("YAMS_LIST_INFLIGHT_LIMIT", 8, 0, 1024);
+        const int listInflightLimit = static_cast<int>(TuneAdvisor::listInflightLimit());
+        const int listAdmissionWaitMs = static_cast<int>(TuneAdvisor::listAdmissionWaitMs());
         std::optional<ListInflightGuard> inflightGuard;
         if (listInflightLimit > 0) {
-            const uint32_t priorInflight =
-                g_inflightListRequests.fetch_add(1, std::memory_order_acq_rel);
-            if (priorInflight >= static_cast<uint32_t>(listInflightLimit)) {
-                g_inflightListRequests.fetch_sub(1, std::memory_order_acq_rel);
+            const bool acquired = co_await acquireInflightSlot(
+                g_inflightListRequests, listInflightLimit, listAdmissionWaitMs);
+            if (!acquired) {
                 co_return ErrorResponse{ErrorCode::ResourceExhausted,
                                         "List concurrency limit reached; retry shortly"};
             }
@@ -796,6 +830,19 @@ RequestDispatcher::handleUpdateDocumentRequest(const UpdateDocumentRequest& req)
 boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const GrepRequest& req) {
     co_return co_await yams::daemon::dispatch::guard_await(
         "grep", [this, req]() -> boost::asio::awaitable<Response> {
+            const int grepInflightLimit = static_cast<int>(TuneAdvisor::grepInflightLimit());
+            const int grepAdmissionWaitMs = static_cast<int>(TuneAdvisor::grepAdmissionWaitMs());
+            std::optional<GrepInflightGuard> grepInflightGuard;
+            if (grepInflightLimit > 0) {
+                const bool acquired = co_await acquireInflightSlot(
+                    g_inflightGrepRequests, grepInflightLimit, grepAdmissionWaitMs);
+                if (!acquired) {
+                    co_return ErrorResponse{ErrorCode::ResourceExhausted,
+                                            "Grep concurrency limit reached; retry shortly"};
+                }
+                grepInflightGuard.emplace();
+            }
+
             auto appContext = serviceManager_->getAppContext();
             auto grepService = app::services::makeGrepService(appContext);
             app::services::GrepRequest serviceReq;
@@ -831,7 +878,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
             serviceReq.tags = req.filterTags;
             serviceReq.matchAllTags = req.matchAllTags;
             serviceReq.maxCount = static_cast<int>(req.maxMatches);
-            auto result = grepService->grep(serviceReq);
+            auto result = co_await yams::daemon::dispatch::offload_to_worker(
+                serviceManager_, [grepService, serviceReq = std::move(serviceReq)]() mutable {
+                    return grepService->grep(serviceReq);
+                });
             if (!result) {
                 co_return ErrorResponse{result.error().code, result.error().message};
             }

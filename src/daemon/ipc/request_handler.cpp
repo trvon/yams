@@ -51,10 +51,8 @@ bool is_client_disconnect(const std::string& msg) {
 // even when the worker pool is saturated with heavy operations (e.g., ingestion).
 // Includes: retrieval operations, status/ping/shutdown for daemon health checks.
 bool is_cli_priority_request(const Request& request) {
-    // Retrieval operations
+    // Retrieval operations expected to stay responsive for interactive use.
     if (std::holds_alternative<SearchRequest>(request) ||
-        std::holds_alternative<GrepRequest>(request) ||
-        std::holds_alternative<ListRequest>(request) ||
         std::holds_alternative<GetRequest>(request) ||
         std::holds_alternative<GetInitRequest>(request) ||
         std::holds_alternative<GetChunkRequest>(request) ||
@@ -70,6 +68,11 @@ bool is_cli_priority_request(const Request& request) {
         return true;
     }
     return false;
+}
+
+bool is_heavy_request(const Request& request) {
+    return std::holds_alternative<GrepRequest>(request) ||
+           std::holds_alternative<ListRequest>(request);
 }
 bool stream_trace_enabled_local() {
     static int enabled = [] {
@@ -635,7 +638,8 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                             auto routed_request = std::move(*request_ptr);
                             auto spawn_exec = config_.worker_executor ? config_.worker_executor
                                                                       : sock->get_executor();
-                            if (config_.cli_executor && is_cli_priority_request(routed_request)) {
+                            if (config_.cli_executor && !is_heavy_request(routed_request) &&
+                                is_cli_priority_request(routed_request)) {
                                 spawn_exec = config_.cli_executor;
                                 spdlog::debug("[MUX_SPAWN] req_id={} using CLI executor",
                                               request_id);

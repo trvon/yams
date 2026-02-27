@@ -627,6 +627,21 @@ int main(int argc, char* argv[]) {
                     yams::daemon::TuneAdvisor::setPostIngestThreads(static_cast<uint32_t>(*v));
                 if (auto v = as_int("post_ingest_queue_max"))
                     yams::daemon::TuneAdvisor::setPostIngestQueueMax(static_cast<uint32_t>(*v));
+                if (auto v = as_int("cli_pool_threads")) {
+                    yams::daemon::TuneAdvisor::setCliRequestPoolThreads(static_cast<uint32_t>(*v));
+                }
+                if (auto v = as_int("list_inflight_limit")) {
+                    yams::daemon::TuneAdvisor::setListInflightLimit(static_cast<uint32_t>(*v));
+                }
+                if (auto v = as_int("list_admission_wait_ms")) {
+                    yams::daemon::TuneAdvisor::setListAdmissionWaitMs(static_cast<uint32_t>(*v));
+                }
+                if (auto v = as_int("grep_inflight_limit")) {
+                    yams::daemon::TuneAdvisor::setGrepInflightLimit(static_cast<uint32_t>(*v));
+                }
+                if (auto v = as_int("grep_admission_wait_ms")) {
+                    yams::daemon::TuneAdvisor::setGrepAdmissionWaitMs(static_cast<uint32_t>(*v));
+                }
                 if (auto it = tune.find("aggressive_idle_shrink"); it != tune.end()) {
                     const auto& s = it->second;
                     std::string v = s;
