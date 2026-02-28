@@ -16,6 +16,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
+## [0.10.0](https://github.com/trvon/yams/compare/v0.9.0...v0.10.0) (2026-02-28)
+
+
+### Added
+
+* additional test and ASAN/TSAN fixes ([bf11646](https://github.com/trvon/yams/commit/bf11646952ec1b1cddb1276c6f3925d664271dd9))
+* bumping homebrew module ([3b24ea7](https://github.com/trvon/yams/commit/3b24ea7a9c995935c644182fea4770d5ab018aea))
+* daemon communication optimizations ([c61796b](https://github.com/trvon/yams/commit/c61796bb6fe75a41027bbf1e89b2e16cd846f9fe))
+* fixing sandboxing latency issue and streamlining all cli commands (minus doctor and daemon) with similar logic to detect if in sandbox so this works with codex ([77c0613](https://github.com/trvon/yams/commit/77c0613c289148fd4180b05c7c8c7746c7b1c7d0))
+* large update. Documentation update, config and plugin hardning and improvements related to loading trust. Exposed trust state in the doctor command with hints on improvements. Bug fixes and test improvements to reduce flakiness and TSAN issues ([099bbef](https://github.com/trvon/yams/commit/099bbef70de5fa51319fad5392021bc1037d77d9))
+* lint run and sandbox detection improvements for non sandbox envs ([b72eb95](https://github.com/trvon/yams/commit/b72eb955beb2d2f129b2eb2721d69751eb945b35))
+* mcp and skill file update to reflect code mode ([782d416](https://github.com/trvon/yams/commit/782d416259e779681dcef068a7a15a750b86a538))
+* optimizations based on profile runs in hashing and work coordinator. test updates and correctness fixes ([c49f0ba](https://github.com/trvon/yams/commit/c49f0ba759346521c3d5c210f195a303e8d731cd))
+* post installation fix for homebrew to enable packaged plugins ([8e6c52c](https://github.com/trvon/yams/commit/8e6c52c663baa2ca4d1f042d5125438347fa1c9d))
+* release please update ([dd8b7a4](https://github.com/trvon/yams/commit/dd8b7a4d90f4722238c2a82dc4601a52c1ee7abb))
+* sandbox testing expansion (sandbox relates to how the daemon communicates in sandbox). Graph optimizations for retrieval and UX improvements. Will continue improving graph system ([3b1a300](https://github.com/trvon/yams/commit/3b1a3007ab5903760d981182cf08ff0cbae32a6a))
+* search/grep retrieval based improvements, test expansions and bug fixes ([2e87c3c](https://github.com/trvon/yams/commit/2e87c3c947a18b96bd73e9123f86bcaa95776a2c))
+* updating brew install guide ([5a764ac](https://github.com/trvon/yams/commit/5a764ac2cc76af2aa9d72e0eb74d403ca6683d83))
+* updating homebrew formulas to correctly link nightly builds ([4edc40a](https://github.com/trvon/yams/commit/4edc40a561d12c762590e0ecf0ef225c8a897376))
+* updating release to properly sign packages ([8174f2a](https://github.com/trvon/yams/commit/8174f2afd5263fc0a6f58eecc8aff38939a72952))
+
+
+### Fixed
+
+* fixing daemon inflight request lock and pid regression ([74e9346](https://github.com/trvon/yams/commit/74e93468b98bf8f1edc6ea89b3bfde6c56d692da))
+* improvement of graph node source and retrieval logic and sandbox fixes in add command ([38629de](https://github.com/trvon/yams/commit/38629de1a127eb264dae576dd6f33b48582d4efd))
+* test improvements and CI harning for slower tests ([4245090](https://github.com/trvon/yams/commit/4245090359002fc0089eb15c0ff51ba12ab1b0cb))
+* TSAN fixes and sample updates ([15980aa](https://github.com/trvon/yams/commit/15980aa8fe6df655470704fc18b95c472893c48d))
+* updating other cli commands to work with sandbox detection update ([c4e61e8](https://github.com/trvon/yams/commit/c4e61e8242cfd055bd7f493502c3983884f15032))
+
 ## [0.9.0](https://github.com/trvon/yams/compare/yams-v0.8.2...yams-v0.9.0) (2026-02-24)
 
 
