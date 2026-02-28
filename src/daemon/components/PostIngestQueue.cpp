@@ -596,8 +596,8 @@ void PostIngestQueue::enqueue(Task t) {
         }
         ++waits;
         if ((waits % 20u) == 1u) {
-            spdlog::warn("[PostIngestQueue] enqueue waiting on full channel (hash={}, waits={})",
-                         task.hash, waits);
+            spdlog::debug("[PostIngestQueue] enqueue waiting on full channel (hash={}, waits={})",
+                          task.hash, waits);
         }
     }
 }
@@ -633,7 +633,7 @@ void PostIngestQueue::enqueueBatch(std::vector<Task> tasks) {
         }
         ++waits;
         if ((waits % 20u) == 1u) {
-            spdlog::warn(
+            spdlog::debug(
                 "[PostIngestQueue] enqueueBatch waiting on full channel (remaining={}, waits={})",
                 busTasks.size() - next, waits);
         }

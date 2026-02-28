@@ -18,6 +18,8 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/file.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #endif
 
@@ -169,6 +171,29 @@ std::optional<pid_t> spawnLockHolder(const fs::path& lockFile, const fs::path& f
     return pid;
 }
 
+int connectAndHoldUnixSocket(const fs::path& socketPath) {
+    const auto path = socketPath.string();
+    if (path.empty() || path.size() >= sizeof(sockaddr_un::sun_path)) {
+        return -1;
+    }
+
+    int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path.c_str());
+
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        ::close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
 bool isPidAlive(pid_t pid) {
     if (pid <= 0) {
         return false;
@@ -250,6 +275,71 @@ TEST(DaemonCliStartStatusRegression, StatusWorksAfterListBecomesResponsive) {
     std::error_code ec;
     fs::remove_all(root, ec);
 }
+
+#ifndef _WIN32
+TEST(DaemonCliStartStatusRegression, StopTimeoutPathDoesNotEmitWarnNoise) {
+    auto yamsBinary = findYamsBinary();
+    if (!yamsBinary.has_value()) {
+        GTEST_SKIP() << "Skipping: build yams binary not found via MESON_BUILD_ROOT";
+    }
+
+    const auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const fs::path root = fs::temp_directory_path() / ("yams_cli_stop_timeout_" + unique);
+    const fs::path dataDir = root / "data";
+    const fs::path runtimeDir = root / "runtime";
+    const fs::path socketPath = runtimeDir / "yams-daemon.sock";
+    const fs::path configPath = root / "config.toml";
+
+    fs::create_directories(dataDir);
+    fs::create_directories(runtimeDir);
+    {
+        std::ofstream cfg(configPath);
+        cfg << "[storage]\n";
+        cfg << "path = \"" << dataDir.string() << "\"\n";
+        cfg << "[daemon]\n";
+        cfg << "socket_path = \"" << socketPath.string() << "\"\n";
+    }
+
+    ScopedEnvVar cfgEnv("YAMS_CONFIG", configPath.string());
+    ScopedEnvVar dataEnv("YAMS_DATA_DIR", dataDir.string());
+    ScopedEnvVar runtimeEnv("XDG_RUNTIME_DIR", runtimeDir.string());
+    ScopedEnvVar maxConnEnv("YAMS_MAX_ACTIVE_CONN", "1");
+    ScopedEnvVar reqTimeoutEnv("YAMS_REQUEST_TIMEOUT_MS", "1");
+    ScopedEnvVar headerTimeoutEnv("YAMS_HEADER_TIMEOUT_MS", "1");
+    ScopedEnvVar bodyTimeoutEnv("YAMS_BODY_TIMEOUT_MS", "1");
+
+    const std::string yams = shellQuote(yamsBinary->string());
+
+    (void)runCommandCapture(yams + " daemon stop --force");
+
+    auto startRes = runCommandCapture(yams + " daemon start");
+    ASSERT_EQ(startRes.exitCode, 0) << "daemon start failed:\n" << startRes.output;
+
+    int heldSocketFd = -1;
+    auto holdDeadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < holdDeadline) {
+        heldSocketFd = connectAndHoldUnixSocket(socketPath);
+        if (heldSocketFd >= 0) {
+            break;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    ASSERT_GE(heldSocketFd, 0) << "failed to establish held socket connection to "
+                               << socketPath.string();
+
+    auto stopRes = runCommandCapture(yams + " daemon stop --force");
+
+    ::close(heldSocketFd);
+
+    EXPECT_EQ(stopRes.exitCode, 0) << "daemon stop --force failed:\n" << stopRes.output;
+    EXPECT_EQ(stopRes.output.find("Socket shutdown encountered"), std::string::npos)
+        << "expected shutdown timeout path logging to remain debug-only:\n"
+        << stopRes.output;
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+}
+#endif
 
 #ifndef _WIN32
 TEST(DaemonCliStartStatusRegression, StartRecoversFromStaleDataDirLockHolder) {

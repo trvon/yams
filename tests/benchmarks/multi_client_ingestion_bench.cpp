@@ -54,11 +54,11 @@
 #define getpid _getpid
 #endif
 
+#include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 #include "../common/test_helpers_catch2.h"
 #include "../integration/daemon/test_async_helpers.h"
 #include "../integration/daemon/test_daemon_harness.h"
-#include <nlohmann/json.hpp>
-#include <spdlog/spdlog.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/metric_keys.h>
 #include <yams/mcp/mcp_server.h>
@@ -1812,8 +1812,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     const int kDiscoverHashLimit = envInt("YAMS_BENCH_DISCOVER_HASH_LIMIT", 5000);
     const int kHotspotWindowMs = envInt("YAMS_BENCH_HOTSPOT_WINDOW_MS", 1000);
     const bool useMcpPath = cfg.useMcpPath;
-    const size_t mcpPoolSize = static_cast<size_t>(
-        std::max(1, envInt("YAMS_BENCH_MCP_POOL_SIZE", std::min(kTotalClients, 8))));
+    const size_t mcpPoolSize =
+        static_cast<size_t>(std::max(1, envInt("YAMS_BENCH_MCP_POOL_SIZE", kTotalClients)));
 
     std::cout << "\n=== Large Corpus Read Benchmark (instrumented) ===\n";
     std::cout << "  Data dir:       " << cfg.dataDir->string() << "\n";

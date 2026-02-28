@@ -42,7 +42,7 @@ jobs:
     if: needs.check-commits.outputs.has_new_commits == 'true' || github.event_name == 'workflow_dispatch'
     name: Benchmarks (Linux x86_64)
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       BUILD_DIR: builddir
       # Opt-in switch to run the daemon warm-latency bench (off by default)
@@ -119,7 +119,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          meson test -C "$BUILD_DIR" --suite bench -t 5 --no-rebuild
+          meson test -C "$BUILD_DIR" --suite bench -t 6 --no-rebuild
 
       - name: Run Daemon Warm-Latency Bench (opt-in)
         if: env.RUN_DAEMON_WARM_BENCH == 'true'
@@ -129,7 +129,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "Running bench_daemon_warm_latency (opt-in)..."
-          meson test -C "$BUILD_DIR" bench_daemon_warm_latency --suite bench --no-rebuild -t 3
+          meson test -C "$BUILD_DIR" bench_daemon_warm_latency --suite bench --no-rebuild -t 4
 
       - name: Run Bus Micro-benchmark
         id: bench

@@ -1071,7 +1071,7 @@ private:
             } else {
                 // Treat common peer-closure/transient errors as potentially-successful if the
                 // daemon disappears shortly after the request.
-                spdlog::warn("Socket shutdown encountered: {}", shutdownResult.error().message);
+                spdlog::debug("Socket shutdown encountered: {}", shutdownResult.error().message);
                 for (int i = 0; i < 60; ++i) {
                     if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
                         if (!pidAlive()) {

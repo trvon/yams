@@ -2956,10 +2956,12 @@ if catch2_dep.found()
     timeout: 60
   )
 
+  heavy_submodule_timeout = get_option('enable-tsan') ? 600 : 300
+
   test('compression_submodule', catch2_compression_submodule_exe,
     suite: ['catch2', 'unit', 'compression', 'yams-pmf'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 300
+    timeout: heavy_submodule_timeout
   )
 
   test('mcp_submodule', catch2_mcp_submodule_exe,
@@ -2984,7 +2986,7 @@ if catch2_dep.found()
     test('vector_submodule', catch2_vector_submodule_exe,
       suite: ['catch2', 'unit', 'vector', 'yams-1d4'],
       env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-      timeout: 300
+      timeout: heavy_submodule_timeout
     )
   endif
 

@@ -4,6 +4,8 @@
 // concurrency Covers: queue lifecycle, async processing, bus integration, stress testing, MPMC
 // correctness
 
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -13,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -84,6 +87,33 @@ public:
     }
     EnvGuard(const EnvGuard&) = delete;
     EnvGuard& operator=(const EnvGuard&) = delete;
+};
+
+class SpdlogCaptureGuard {
+public:
+    explicit SpdlogCaptureGuard(spdlog::level::level_enum level)
+        : previousLogger_(spdlog::default_logger()), previousLevel_(spdlog::get_level()) {
+        auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(stream_);
+        logger_ = std::make_shared<spdlog::logger>("daemon_background_capture", sink);
+        logger_->set_level(level);
+        spdlog::set_default_logger(logger_);
+        spdlog::set_level(level);
+    }
+
+    ~SpdlogCaptureGuard() {
+        if (previousLogger_) {
+            spdlog::set_default_logger(previousLogger_);
+        }
+        spdlog::set_level(previousLevel_);
+    }
+
+    std::string str() const { return stream_.str(); }
+
+private:
+    std::ostringstream stream_;
+    std::shared_ptr<spdlog::logger> previousLogger_;
+    std::shared_ptr<spdlog::logger> logger_;
+    spdlog::level::level_enum previousLevel_;
 };
 
 // RAII guard for InternalEventBus configuration
@@ -877,6 +907,34 @@ TEST_CASE("PostIngestQueue: keeps multi-doc batches when extraction concurrency 
     stopAndResetQueue(queue);
     coordinator.stop();
     coordinator.join();
+}
+
+TEST_CASE("PostIngestQueue: full-channel enqueueBatch waits only log at debug",
+          "[daemon][background][queue][logging]") {
+    SpdlogCaptureGuard logs(spdlog::level::info);
+
+    auto store = std::make_shared<StubContentStore>();
+    auto metadataRepo = std::make_shared<StubMetadataRepository>();
+    auto extractor = std::make_shared<StubExtractor>();
+    std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors{extractor};
+
+    auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
+                                                   nullptr, nullptr, nullptr, 1);
+
+    std::vector<PostIngestQueue::Task> tasks;
+    tasks.push_back(PostIngestQueue::Task{
+        "log-test-hash-1", "text/plain", "", {}, PostIngestQueue::Task::Stage::Metadata});
+    tasks.push_back(PostIngestQueue::Task{
+        "log-test-hash-2", "text/plain", "", {}, PostIngestQueue::Task::Stage::Metadata});
+
+    std::thread producer(
+        [&queue, tasks = std::move(tasks)]() mutable { queue->enqueueBatch(std::move(tasks)); });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    queue->stop();
+    producer.join();
+
+    CHECK(logs.str().find("enqueueBatch waiting on full channel") == std::string::npos);
 }
 
 // =============================================================================

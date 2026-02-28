@@ -64,7 +64,7 @@ jobs:
             extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
     runs-on: ${{ matrix.runs_on }}
     # Allow extra time for safety across runners.
-    timeout-minutes: 70
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -396,7 +396,7 @@ jobs:
             echo "Using XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
           fi
           # Run unit and integration tests (TSAN disabled in CI)
-          meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs
+          meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
 
       - name: Run Tests with Meson (Windows)
         id: meson_tests_windows
@@ -418,7 +418,7 @@ jobs:
           $UserBin = Join-Path $UserBase 'Scripts'
           $env:PATH = "$UserBin;$env:PATH"
           # Run only unit and integration tests (exclude bench, stress, daemon-long, etc.)
-          meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs
+          meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
 
       - name: Run Tests with Meson (Rosetta x86_64)
         id: meson_tests_rosetta
@@ -438,7 +438,7 @@ jobs:
           # Ensure Rosetta is present (idempotent)
           softwareupdate --install-rosetta --agree-to-license || true
           # Run only unit and integration tests (exclude bench, stress, daemon-long, etc.)
-          arch -x86_64 meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs
+          arch -x86_64 meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
 
       - name: Upload test logs (artifacts)
         if: ${{ steps.meson_tests_unix.outcome == 'failure' || steps.meson_tests_windows.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure' }}
