@@ -54,8 +54,8 @@ jobs:
           fi
 
           if ! gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_NAME}" >/dev/null 2>&1; then
-            echo "ERROR: Expected release tag '${TAG_NAME}' was not found on remote" >&2
-            exit 1
+            echo "Release tag '${TAG_NAME}' is not present yet (likely untagged draft release); skipping fallback dispatch." >&2
+            exit 0
           fi
 
           release_url=""
