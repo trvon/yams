@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - v0.2.x archive: docs/changelogs/v0.2.md
 - v0.1.x archive: docs/changelogs/v0.1.md
 
+## [0.11.0](https://github.com/trvon/yams/compare/v0.10.0...v0.11.0) (2026-02-28)
+
+
+### Added
+
+* linking fix for onnx plugin for windows builds ([8523b77](https://github.com/trvon/yams/commit/8523b771692781e85a797ac02e9567f5657d3a3a))
+* security fixes for plugin install and adding additional UTF-8 string sanitization ([8f06bd6](https://github.com/trvon/yams/commit/8f06bd615ff833c3b327321b6594a0ae82bfe84f))
+
+
+### Fixed
+
+* **ci:** recover release-please to release handoff ([3e7624c](https://github.com/trvon/yams/commit/3e7624ce7f095a17e8291fb290aec3109675239e))
+* **ci:** tolerate untagged release-please drafts ([a650c25](https://github.com/trvon/yams/commit/a650c25483b6290cd7531a3903f68822ae64a2c8))
+
 ## [0.10.0](https://github.com/trvon/yams/compare/v0.9.0...v0.10.0) (2026-02-28)
 
 
