@@ -5,10 +5,10 @@ class Yams < Formula
   license "GPL-3.0-or-later"
 
   if Hardware::CPU.arm?
-    url "https://github.com/trvon/yams/releases/download/v#{version}/yams-#{version}-macos-arm64.zip"
+    url "https://github.com/trvon/yams/releases/download/v#{version}/__ASSET_ARM64__"
     sha256 "__SHA256_ARM64__"
   else
-    url "https://github.com/trvon/yams/releases/download/v#{version}/yams-#{version}-macos-x86_64.zip"
+    url "https://github.com/trvon/yams/releases/download/v#{version}/__ASSET_X86_64__"
     sha256 "__SHA256_X86_64__"
   end
 

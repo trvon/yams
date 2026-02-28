@@ -13,6 +13,9 @@ YAMS provides multiple installation methods to suit different users and environm
 brew install trvon/yams/yams
 
 # Or get nightly builds for latest features
+brew install trvon/yams/yams-nightly
+
+# Compatibility alias (tap-managed)
 brew install trvon/yams/yams@nightly
 
 # If linking fails due to conflicts, force link

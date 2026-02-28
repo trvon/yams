@@ -1246,9 +1246,40 @@ jobs:
           FORMULA_DIR="homebrew"
           mkdir -p "$FORMULA_DIR"
           
-          # Compute SHA256 from local assets (already downloaded/built)
-          ARM64_FILE="assets/yams-${VERSION}-macos-arm64.zip"
-          X86_64_FILE="assets/yams-${VERSION}-macos-x86_64.zip"
+          # Locate macOS archives from local assets (supports legacy/new naming)
+          ARM64_FILE=""
+          X86_64_FILE=""
+
+          for candidate in \
+            "assets/yams-${VERSION}-macos-arm64.zip" \
+            "assets/yams-v${VERSION}-macos-arm64.zip" \
+            "assets/yams-${TAG}-macos-arm64.zip" \
+            "assets/yams-yams-v${VERSION}-macos-arm64.zip"; do
+            if [ -f "$candidate" ]; then
+              ARM64_FILE="$candidate"
+              break
+            fi
+          done
+          if [ -z "$ARM64_FILE" ]; then
+            ARM64_FILE="$(ls -1 assets/*-macos-arm64.zip 2>/dev/null | head -n 1 || true)"
+          fi
+
+          for candidate in \
+            "assets/yams-${VERSION}-macos-x86_64.zip" \
+            "assets/yams-v${VERSION}-macos-x86_64.zip" \
+            "assets/yams-${TAG}-macos-x86_64.zip" \
+            "assets/yams-yams-v${VERSION}-macos-x86_64.zip"; do
+            if [ -f "$candidate" ]; then
+              X86_64_FILE="$candidate"
+              break
+            fi
+          done
+          if [ -z "$X86_64_FILE" ]; then
+            X86_64_FILE="$(ls -1 assets/*-macos-x86_64.zip 2>/dev/null | head -n 1 || true)"
+          fi
+
+          ASSET_ARM64="$(basename "${ARM64_FILE:-yams-${VERSION}-macos-arm64.zip}")"
+          ASSET_X86_64="$(basename "${X86_64_FILE:-yams-${VERSION}-macos-x86_64.zip}")"
           
           if [ -f "$ARM64_FILE" ]; then
             SHA256_ARM64=$(shasum -a 256 "$ARM64_FILE" | awk '{print $1}')
@@ -1265,6 +1296,16 @@ jobs:
             echo "WARNING: x86_64 zip not found at $X86_64_FILE, formula may be incomplete" >&2
             SHA256_X86_64="PLACEHOLDER_X86_64_SHA256"
           fi
+
+          # Validate generated release URLs before publishing formula
+          for url in \
+            "https://github.com/trvon/yams/releases/download/v${VERSION}/${ASSET_ARM64}" \
+            "https://github.com/trvon/yams/releases/download/v${VERSION}/${ASSET_X86_64}"; do
+            if ! curl -fsIL "$url" >/dev/null; then
+              echo "ERROR: Homebrew asset URL not reachable: $url" >&2
+              exit 1
+            fi
+          done
           
           TEMPLATE_PATH="packaging/homebrew/yams.rb.template"
           if [ ! -f "$TEMPLATE_PATH" ]; then
@@ -1275,6 +1316,8 @@ jobs:
           # Replace template placeholders with release metadata
           sed \
             -e "s|__VERSION__|$VERSION|g" \
+            -e "s|__ASSET_ARM64__|$ASSET_ARM64|g" \
+            -e "s|__ASSET_X86_64__|$ASSET_X86_64|g" \
             -e "s|__SHA256_ARM64__|$SHA256_ARM64|g" \
             -e "s|__SHA256_X86_64__|$SHA256_X86_64|g" \
             "$TEMPLATE_PATH" > "$OUT_FORMULA"
@@ -1392,9 +1435,38 @@ jobs:
           fi
           popd >/dev/null
           
-          # Compute SHA256 from local assets (already downloaded/built)
-          ARM64_FILE="assets/yams-${VERSION}-macos-arm64.zip"
-          X86_64_FILE="assets/yams-${VERSION}-macos-x86_64.zip"
+          # Locate macOS archives from local assets (supports naming changes)
+          ARM64_FILE=""
+          X86_64_FILE=""
+
+          for candidate in \
+            "assets/yams-${VERSION}-macos-arm64.zip" \
+            "assets/yams-${TAG}-macos-arm64.zip" \
+            "assets/yams-nightly-${DATE}-${HASH}-macos-arm64.zip"; do
+            if [ -f "$candidate" ]; then
+              ARM64_FILE="$candidate"
+              break
+            fi
+          done
+          if [ -z "$ARM64_FILE" ]; then
+            ARM64_FILE="$(ls -1 assets/*-macos-arm64.zip 2>/dev/null | head -n 1 || true)"
+          fi
+
+          for candidate in \
+            "assets/yams-${VERSION}-macos-x86_64.zip" \
+            "assets/yams-${TAG}-macos-x86_64.zip" \
+            "assets/yams-nightly-${DATE}-${HASH}-macos-x86_64.zip"; do
+            if [ -f "$candidate" ]; then
+              X86_64_FILE="$candidate"
+              break
+            fi
+          done
+          if [ -z "$X86_64_FILE" ]; then
+            X86_64_FILE="$(ls -1 assets/*-macos-x86_64.zip 2>/dev/null | head -n 1 || true)"
+          fi
+
+          ASSET_ARM64="$(basename "${ARM64_FILE:-yams-${VERSION}-macos-arm64.zip}")"
+          ASSET_X86_64="$(basename "${X86_64_FILE:-yams-${VERSION}-macos-x86_64.zip}")"
           
           if [ -f "$ARM64_FILE" ]; then
             SHA256_ARM64=$(shasum -a 256 "$ARM64_FILE" | awk '{print $1}')
@@ -1411,6 +1483,16 @@ jobs:
             echo "WARNING: x86_64 zip not found at $X86_64_FILE, formula may be incomplete" >&2
             SHA256_X86_64="PLACEHOLDER_X86_64_SHA256"
           fi
+
+          # Validate generated release URLs before publishing formula
+          for url in \
+            "https://github.com/trvon/yams/releases/download/${TAG}/${ASSET_ARM64}" \
+            "https://github.com/trvon/yams/releases/download/${TAG}/${ASSET_X86_64}"; do
+            if ! curl -fsIL "$url" >/dev/null; then
+              echo "ERROR: Nightly Homebrew asset URL not reachable: $url" >&2
+              exit 1
+            fi
+          done
           
           # Update nightly formula (now safe to modify after checkout)
           TEMPLATE_PATH="packaging/homebrew/yams-nightly.rb.template"
@@ -1423,9 +1505,9 @@ jobs:
           mkdir -p "$TAP_PATH/Formula"
           cp "$TEMPLATE_PATH" "$NIGHTLY_FORMULA"
 
-          # Ensure tap alias exists so users can install via yams@nightly
+          # Ensure tap alias exists as symlink for Homebrew alias resolution
           mkdir -p "$TAP_PATH/Aliases"
-          printf '%s\n' "../Formula/yams-nightly.rb" > "$TAP_PATH/Aliases/yams@nightly"
+          ln -sfn ../Formula/yams-nightly.rb "$TAP_PATH/Aliases/yams@nightly"
           
           # Replace placeholders
           sed -i.bak \
@@ -1433,6 +1515,8 @@ jobs:
             -e "s/__TAG__/${TAG}/g" \
             -e "s/__DATE__/${DATE}/g" \
             -e "s/__HASH__/${HASH}/g" \
+            -e "s/__ASSET_ARM64__/${ASSET_ARM64}/g" \
+            -e "s/__ASSET_X86_64__/${ASSET_X86_64}/g" \
             -e "s/__SHA256_ARM64__/${SHA256_ARM64}/g" \
             -e "s/__SHA256_X86_64__/${SHA256_X86_64}/g" \
             "$NIGHTLY_FORMULA"
