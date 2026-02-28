@@ -1505,9 +1505,9 @@ jobs:
           mkdir -p "$TAP_PATH/Formula"
           cp "$TEMPLATE_PATH" "$NIGHTLY_FORMULA"
 
-          # Ensure tap alias exists as symlink for Homebrew alias resolution
+          # Maintain compatibility formula for users still installing yams@nightly
           mkdir -p "$TAP_PATH/Aliases"
-          ln -sfn ../Formula/yams-nightly.rb "$TAP_PATH/Aliases/yams@nightly"
+          rm -f "$TAP_PATH/Aliases/yams@nightly"
           
           # Replace placeholders
           sed -i.bak \
@@ -1521,11 +1521,18 @@ jobs:
             -e "s/__SHA256_X86_64__/${SHA256_X86_64}/g" \
             "$NIGHTLY_FORMULA"
           rm -f "${NIGHTLY_FORMULA}.bak"
+
+          AT_NIGHTLY_FORMULA="$TAP_PATH/Formula/yams@nightly.rb"
+          cp "$NIGHTLY_FORMULA" "$AT_NIGHTLY_FORMULA"
+          sed -i.bak \
+            -e 's/^class YamsNightly < Formula/class YamsATNightly < Formula/' \
+            "$AT_NIGHTLY_FORMULA"
+          rm -f "${AT_NIGHTLY_FORMULA}.bak"
           
           pushd "$TAP_PATH" >/dev/null
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/yams-nightly.rb Aliases/yams@nightly || true
+          git add -A Formula/yams-nightly.rb Formula/yams@nightly.rb Aliases/yams@nightly || true
           if git diff --cached --quiet; then
             echo "Nightly formula unchanged; skipping push" >&2
             popd >/dev/null

@@ -41,7 +41,7 @@ Supported platforms: Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64
 brew install trvon/yams/yams
 
 # Or get nightly builds for latest features
-brew install trvon/yams/yams@nightly
+brew install trvon/yams/yams-nightly
 
 # Verify installation
 yams --version

@@ -88,9 +88,6 @@ class YamsNightly < Formula
       To start the YAMS daemon as a service:
         brew services start yams-nightly
 
-      Or (via tap alias):
-        brew services start trvon/yams/yams@nightly
-
       Documentation: https://yamsmemory.ai
     EOS
   end
