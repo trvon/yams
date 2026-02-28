@@ -2095,3 +2095,105 @@ jobs:
           gh release view "$TAG" --json assets --jq '.assets[].name' || echo "(Could not list assets)"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify-homebrew-rpath:
+    name: Verify Homebrew ONNX plugin RPATH
+    needs: [create-release]
+    runs-on: macos-latest
+    if: ${{ needs.create-release.result == 'success' && github.actor != 'nektos/act' }}
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || '' }}
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - name: Decide whether to run Homebrew verification
+        id: guard
+        shell: bash
+        run: |
+          if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            echo "run_check=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "HOMEBREW_TAP_TOKEN not set; skipping Homebrew RPATH verification" >&2
+            echo "run_check=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine formula to verify
+        if: steps.guard.outputs.run_check == 'true'
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EVENT="${{ github.event_name }}"
+          INPUT_CHANNEL="${{ inputs.channel || '' }}"
+
+          channel=""
+          if [ "$EVENT" = "push" ]; then
+            channel="stable"
+          elif [ "$EVENT" = "workflow_dispatch" ] && [ -n "$INPUT_CHANNEL" ]; then
+            case "$INPUT_CHANNEL" in
+              stable|weekly|nightly) channel="$INPUT_CHANNEL" ;;
+              *) channel="nightly" ;;
+            esac
+          elif [ "$EVENT" = "schedule" ]; then
+            channel="nightly"
+          else
+            channel="stable"
+          fi
+
+          if [ "$channel" = "stable" ]; then
+            formula_name="yams"
+          else
+            formula_name="yams-nightly"
+          fi
+
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "formula_name=$formula_name" >> "$GITHUB_OUTPUT"
+          echo "formula=trvon/yams/$formula_name" >> "$GITHUB_OUTPUT"
+
+      - name: Install formula from tap
+        if: steps.guard.outputs.run_check == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          FORMULA="${{ steps.target.outputs.formula }}"
+          brew untap trvon/yams >/dev/null 2>&1 || true
+          brew tap trvon/yams
+          brew reinstall "$FORMULA" || brew install "$FORMULA"
+
+      - name: Assert ONNX plugin RPATH includes Homebrew lib
+        if: steps.guard.outputs.run_check == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FORMULA_NAME="${{ steps.target.outputs.formula_name }}"
+          FORMULA_PREFIX="$(brew --prefix "$FORMULA_NAME")"
+          BREW_PREFIX="$(brew --prefix)"
+          EXPECTED_RPATH="$BREW_PREFIX/lib"
+          PLUGIN_DIR="$FORMULA_PREFIX/lib/yams/plugins"
+
+          if [ ! -d "$PLUGIN_DIR" ]; then
+            echo "ERROR: Plugin directory missing: $PLUGIN_DIR" >&2
+            exit 1
+          fi
+
+          found_onnx_plugin=0
+          shopt -s nullglob
+          for plugin in "$PLUGIN_DIR"/*.dylib; do
+            if otool -L "$plugin" | grep -q "libonnxruntime"; then
+              found_onnx_plugin=1
+              if ! otool -l "$plugin" | grep -Fq "path $EXPECTED_RPATH"; then
+                echo "ERROR: Missing expected rpath '$EXPECTED_RPATH' in $plugin" >&2
+                otool -l "$plugin" | awk '/LC_RPATH/{show=1;next} show && /path /{print;show=0}' >&2 || true
+                exit 1
+              fi
+            fi
+          done
+
+          if [ "$found_onnx_plugin" -eq 0 ]; then
+            echo "ERROR: No ONNX-linked plugins found under $PLUGIN_DIR" >&2
+            ls -al "$PLUGIN_DIR" >&2 || true
+            exit 1
+          fi
+
+          echo "Verified ONNX plugin rpath(s) include $EXPECTED_RPATH"

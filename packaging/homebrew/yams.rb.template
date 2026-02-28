@@ -64,9 +64,32 @@ class Yams < Formula
   end
 
   def post_install
-    # Fix plugin rpaths to find Homebrew-managed onnxruntime
-    Dir[lib/"yams/plugins/*.dylib"].each do |plugin|
-      MachO::Tools.add_rpath(plugin, HOMEBREW_PREFIX/"lib") rescue nil
+    plugin_dir = lib/"yams/plugins"
+    return unless plugin_dir.exist?
+
+    expected_rpath = (HOMEBREW_PREFIX/"lib").to_s
+
+    Dir[plugin_dir/"*.dylib"].sort.each do |plugin_path|
+      plugin = Pathname(plugin_path)
+
+      begin
+        next unless Utils.safe_popen_read("otool", "-L", plugin.to_s).include?("libonnxruntime")
+
+        mode = plugin.stat.mode & 0o777
+        plugin.chmod(mode | 0o200)
+
+        unless Utils.safe_popen_read("otool", "-l", plugin.to_s).include?(expected_rpath)
+          unless system "install_name_tool", "-add_rpath", expected_rpath, plugin.to_s
+            odie "Failed to add rpath '#{expected_rpath}' to #{plugin}"
+          end
+        end
+
+        unless Utils.safe_popen_read("otool", "-l", plugin.to_s).include?(expected_rpath)
+          odie "RPATH verification failed for #{plugin}; expected '#{expected_rpath}'"
+        end
+      rescue StandardError => e
+        odie "Failed to patch ONNX runtime rpath for #{plugin}: #{e.message}"
+      end
     end
   end
 
