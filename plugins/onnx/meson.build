@@ -166,10 +166,28 @@ elif host_machine.system() == 'darwin'
   message('ONNX CoreML GPU support enabled (macOS platform detection)')
 endif
 
+onnx_plugin_deps = [
+  onnx_dep,
+  spdlog_dep,
+  json_dep,
+  yams_core,
+  yams_vector,
+  yams_onnx_resource,
+  dependency('yams_daemon_client'),
+  boost_dep,
+] + win_extra_deps
+
+# Sandbox/in-process daemon fallback paths inside yams_daemon_client reference symbols
+# implemented by yams_daemon. On Windows/MSVC this can surface as unresolved externals
+# when linking the ONNX plugin unless yams_daemon is linked explicitly.
+if host_machine.system() == 'windows'
+  onnx_plugin_deps += dependency('yams_daemon')
+endif
+
 yams_onnx_plugin = shared_module('yams_onnx_plugin',
   yams_onnx_plugin_srcs,
   include_directories: [ include_directories('../../include') ],
-  dependencies: [onnx_dep, spdlog_dep, json_dep, yams_core, yams_vector, yams_onnx_resource, dependency('yams_daemon_client'), boost_dep] + win_extra_deps,
+  dependencies: onnx_plugin_deps,
   cpp_args: plugin_cppargs,
   install: true,
   install_dir: plugins_dir,
