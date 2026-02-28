@@ -1297,15 +1297,8 @@ jobs:
             SHA256_X86_64="PLACEHOLDER_X86_64_SHA256"
           fi
 
-          # Validate generated release URLs before publishing formula
-          for url in \
-            "https://github.com/trvon/yams/releases/download/v${VERSION}/${ASSET_ARM64}" \
-            "https://github.com/trvon/yams/releases/download/v${VERSION}/${ASSET_X86_64}"; do
-            if ! curl -fsIL "$url" >/dev/null; then
-              echo "ERROR: Homebrew asset URL not reachable: $url" >&2
-              exit 1
-            fi
-          done
+          # Release assets are published later in this job; defer URL checks until post-publish.
+          echo "Deferring Homebrew URL validation until after release publish" >&2
           
           TEMPLATE_PATH="packaging/homebrew/yams.rb.template"
           if [ ! -f "$TEMPLATE_PATH" ]; then
@@ -1484,15 +1477,8 @@ jobs:
             SHA256_X86_64="PLACEHOLDER_X86_64_SHA256"
           fi
 
-          # Validate generated release URLs before publishing formula
-          for url in \
-            "https://github.com/trvon/yams/releases/download/${TAG}/${ASSET_ARM64}" \
-            "https://github.com/trvon/yams/releases/download/${TAG}/${ASSET_X86_64}"; do
-            if ! curl -fsIL "$url" >/dev/null; then
-              echo "ERROR: Nightly Homebrew asset URL not reachable: $url" >&2
-              exit 1
-            fi
-          done
+          # Release assets are published later in this job; defer URL checks until post-publish.
+          echo "Deferring Homebrew URL validation until after release publish" >&2
           
           # Update nightly formula (now safe to modify after checkout)
           TEMPLATE_PATH="packaging/homebrew/yams-nightly.rb.template"
@@ -2080,6 +2066,42 @@ jobs:
           # publish the release after assets are uploaded
           gh release edit "$TAG" --draft=false --title "${{ steps.meta.outputs.release_name }}" --notes-file CHANGELOG.md \
             ${{ steps.meta.outputs.prerelease == 'true' && '--prerelease' || '--latest' }}
+
+      - name: Validate Homebrew asset URLs (post-publish)
+        if: ${{ github.actor != 'nektos/act' && steps.asset_check.outputs.file_count != '0' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.meta.outputs.tag }}"
+          REPO="${{ github.repository }}"
+
+          shopt -s nullglob
+          arm64_candidates=(assets/*-macos-arm64.zip)
+          x86_64_candidates=(assets/*-macos-x86_64.zip)
+
+          if [ ${#arm64_candidates[@]} -eq 0 ]; then
+            echo "ERROR: Missing macOS arm64 archive in assets/ for Homebrew validation" >&2
+            exit 1
+          fi
+
+          if [ ${#x86_64_candidates[@]} -eq 0 ]; then
+            echo "ERROR: Missing macOS x86_64 archive in assets/ for Homebrew validation" >&2
+            exit 1
+          fi
+
+          verify_asset_url() {
+            local asset_name="$1"
+            local url="https://github.com/${REPO}/releases/download/${TAG}/${asset_name}"
+            if ! curl -fsIL "$url" >/dev/null; then
+              echo "ERROR: Homebrew asset URL not reachable after publish: $url" >&2
+              return 1
+            fi
+            echo "Verified Homebrew asset URL: $url"
+          }
+
+          verify_asset_url "$(basename "${arm64_candidates[0]}")"
+          verify_asset_url "$(basename "${x86_64_candidates[0]}")"
 
       - name: List release assets (post-upload)
         if: ${{ github.actor != 'nektos/act' }}

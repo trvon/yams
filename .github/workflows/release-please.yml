@@ -8,6 +8,7 @@ name: Release Please
   workflow_dispatch: {}
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -36,3 +37,49 @@ jobs:
         run: |
           echo "Release ${{ steps.rp.outputs.tag_name }} created."
           echo "The existing release.yml workflow will handle build & packaging."
+
+      - name: Ensure Release workflow run exists
+        if: steps.rp.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.rp.outputs.tag_name }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TAG_NAME:-}" ]; then
+            echo "ERROR: release-please reported release_created=true but tag_name is empty" >&2
+            exit 1
+          fi
+
+          if ! gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_NAME}" >/dev/null 2>&1; then
+            echo "ERROR: Expected release tag '${TAG_NAME}' was not found on remote" >&2
+            exit 1
+          fi
+
+          release_url=""
+          for attempt in 1 2 3 4 5 6; do
+            release_url="$(gh run list \
+              --workflow "Release" \
+              --event push \
+              --limit 100 \
+              --json databaseId,headBranch,url \
+              --jq "[.[] | select(.headBranch == \"${TAG_NAME}\" and .databaseId > ${CURRENT_RUN_ID})][0].url // \"\"")"
+
+            if [ -n "$release_url" ]; then
+              echo "Detected Release workflow run for ${TAG_NAME}: ${release_url}"
+              break
+            fi
+
+            echo "No Release run detected yet for ${TAG_NAME} (attempt ${attempt}/6); waiting 10s..."
+            sleep 10
+          done
+
+          if [ -n "$release_url" ]; then
+            echo "Release workflow already triggered by tag push; fallback dispatch not needed."
+            exit 0
+          fi
+
+          echo "No Release workflow run detected for ${TAG_NAME}; dispatching fallback run."
+          gh workflow run ".github/workflows/release.yml" --ref "${TAG_NAME}" -f channel=stable
