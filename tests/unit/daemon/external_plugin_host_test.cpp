@@ -151,6 +151,20 @@ TEST_CASE("ExternalPluginHost - Trust Management", "[external-plugin][host][trus
         }
     }
 
+#if !defined(_WIN32)
+    SECTION("Trust file permissions are private") {
+        auto pluginPath = fixture.makeFile("private_perms_plugin.py", "# perms");
+        auto addResult = host.trustAdd(pluginPath);
+        REQUIRE(addResult.has_value());
+        REQUIRE(fs::exists(fixture.trustFile_));
+
+        std::error_code ec;
+        auto perms = fs::status(fixture.trustFile_, ec).permissions();
+        REQUIRE_FALSE(ec);
+        CHECK((perms & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+    }
+#endif
+
     SECTION("Trust remove persists") {
         auto plugin1 = fixture.makeFile("persist_remove_a.py", "# a");
         auto plugin2 = fixture.makeFile("persist_remove_b.py", "# b");

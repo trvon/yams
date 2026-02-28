@@ -571,6 +571,70 @@ static bool pingDaemonSync(const std::filesystem::path& socketPath) {
     }
 }
 
+static bool isProxySocketPath(const std::filesystem::path& socketPath) {
+    const auto name = socketPath.filename().string();
+    return name.size() >= 11 && name.rfind(".proxy.sock") == name.size() - 11;
+}
+
+static std::filesystem::path deriveMainSocketFromProxy(const std::filesystem::path& socketPath) {
+    if (!isProxySocketPath(socketPath)) {
+        return {};
+    }
+    auto name = socketPath.filename().string();
+    constexpr std::string_view kProxySuffix = ".proxy.sock";
+    name.erase(name.size() - kProxySuffix.size());
+    name.append(".sock");
+    return socketPath.parent_path() / name;
+}
+
+static bool shouldRetryViaMainSocket(const Error& err) {
+    if (auto kindOpt = parseIpcFailureKind(err.message)) {
+        switch (*kindOpt) {
+            case IpcFailureKind::SocketMissing:
+            case IpcFailureKind::PathNotSocket:
+            case IpcFailureKind::Refused:
+                return true;
+            default:
+                break;
+        }
+    }
+
+    const std::string& msg = err.message;
+    return msg.find("Connection refused") != std::string::npos ||
+           msg.find("socket_missing") != std::string::npos ||
+           msg.find("path_not_socket") != std::string::npos;
+}
+
+static std::filesystem::path
+selectMainSocketWhenProxyUnavailable(const std::filesystem::path& currentSocket) {
+    if (!isProxySocketPath(currentSocket)) {
+        return {};
+    }
+
+    if (pingDaemonSync(currentSocket)) {
+        return {};
+    }
+
+    return deriveMainSocketFromProxy(currentSocket);
+}
+
+static bool maybeDemoteProxySocket(std::filesystem::path& currentSocket, TransportOptions& opts) {
+    if (!isProxySocketPath(opts.socketPath)) {
+        return false;
+    }
+
+    const auto mainSocket = selectMainSocketWhenProxyUnavailable(opts.socketPath);
+    if (mainSocket.empty()) {
+        return false;
+    }
+
+    spdlog::debug("DaemonClient: proxy socket unavailable, falling back to main socket: {}",
+                  mainSocket.string());
+    opts.socketPath = mainSocket;
+    currentSocket = mainSocket;
+    return true;
+}
+
 boost::asio::awaitable<Result<void>> DaemonClient::connect() {
     // Capture shared_ptr to extend Impl lifetime across co_await suspension points
     auto impl = pImpl;
@@ -942,6 +1006,9 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
     }
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;
+    if (maybeDemoteProxySocket(impl->config_.socketPath, opts)) {
+        impl->refresh_transport();
+    }
     auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);
@@ -956,6 +1023,25 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
     }
     AsioTransportAdapter adapter(opts);
     auto r = co_await adapter.send_request(req);
+
+    if (!r && isProxySocketPath(opts.socketPath) && shouldRetryViaMainSocket(r.error())) {
+        const auto fallbackSocket = deriveMainSocketFromProxy(opts.socketPath);
+        if (!fallbackSocket.empty()) {
+            auto retryOpts = opts;
+            retryOpts.socketPath = fallbackSocket;
+            spdlog::debug("DaemonClient: retrying request on main socket {}",
+                          fallbackSocket.string());
+            AsioTransportAdapter retryAdapter(retryOpts);
+            auto retryRes = co_await retryAdapter.send_request(req);
+            if (retryRes) {
+                impl->config_.socketPath = fallbackSocket;
+                impl->refresh_transport();
+                co_return retryRes.value();
+            }
+            r = std::move(retryRes);
+        }
+    }
+
     // After resumption, check if client was destroyed during suspension
     if (impl->isShuttingDown()) {
         co_return Error{ErrorCode::InvalidState, "DaemonClient destroyed during request"};
@@ -993,6 +1079,9 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
     }
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;
+    if (maybeDemoteProxySocket(impl->config_.socketPath, opts)) {
+        impl->refresh_transport();
+    }
     auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);
@@ -1390,6 +1479,9 @@ DaemonClient::sendRequestStreaming(const Request& req,
 
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;
+    if (maybeDemoteProxySocket(impl->config_.socketPath, opts)) {
+        impl->refresh_transport();
+    }
     auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);
@@ -1400,6 +1492,26 @@ DaemonClient::sendRequestStreaming(const Request& req,
     }
     AsioTransportAdapter adapter(opts);
     auto res = co_await adapter.send_request_streaming(req, onHeader, onChunk, onError, onComplete);
+
+    if (!res && isProxySocketPath(opts.socketPath) && shouldRetryViaMainSocket(res.error())) {
+        const auto fallbackSocket = deriveMainSocketFromProxy(opts.socketPath);
+        if (!fallbackSocket.empty()) {
+            auto retryOpts = opts;
+            retryOpts.socketPath = fallbackSocket;
+            spdlog::debug("DaemonClient: retrying streaming request on main socket {}",
+                          fallbackSocket.string());
+            AsioTransportAdapter retryAdapter(retryOpts);
+            auto retryRes = co_await retryAdapter.send_request_streaming(req, onHeader, onChunk,
+                                                                         onError, onComplete);
+            if (retryRes) {
+                impl->config_.socketPath = fallbackSocket;
+                impl->refresh_transport();
+                co_return Result<void>();
+            }
+            res = std::move(retryRes);
+        }
+    }
+
     // After resumption, check if client was destroyed during suspension
     if (impl->isShuttingDown()) {
         co_return Error{ErrorCode::InvalidState, "DaemonClient destroyed during request"};

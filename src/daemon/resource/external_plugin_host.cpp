@@ -964,14 +964,79 @@ private:
         if (!parent.empty()) {
             std::error_code ec;
             fs::create_directories(parent, ec);
+            if (ec) {
+                spdlog::warn("ExternalPluginHost: failed to create trust dir '{}': {}",
+                             parent.string(), ec.message());
+                return;
+            }
         }
 
-        std::ofstream file(trust_file);
+        auto tempPath = trust_file;
+        tempPath += ".tmp";
+
+        std::ofstream file(tempPath, std::ios::trunc);
+        if (!file) {
+            spdlog::warn("ExternalPluginHost: failed to open temp trust file '{}'",
+                         tempPath.string());
+            return;
+        }
+
         file << "# YAMS Plugin Trust List\n";
         file << "# One plugin path per line\n";
         for (const auto& path : trusted) {
             file << path.string() << "\n";
         }
+        file.close();
+        if (!file) {
+            std::error_code cleanupEc;
+            fs::remove(tempPath, cleanupEc);
+            spdlog::warn("ExternalPluginHost: failed while writing trust file '{}'",
+                         tempPath.string());
+            return;
+        }
+
+#if !defined(_WIN32)
+        {
+            std::error_code ec;
+            fs::permissions(tempPath, fs::perms::owner_read | fs::perms::owner_write,
+                            fs::perm_options::replace, ec);
+            if (ec) {
+                spdlog::warn(
+                    "ExternalPluginHost: failed to set temp trust file permissions '{}': {}",
+                    tempPath.string(), ec.message());
+            }
+        }
+#endif
+
+        std::error_code renameEc;
+        fs::rename(tempPath, trust_file, renameEc);
+#if defined(_WIN32)
+        if (renameEc) {
+            std::error_code removeEc;
+            fs::remove(trust_file, removeEc);
+            renameEc.clear();
+            fs::rename(tempPath, trust_file, renameEc);
+        }
+#endif
+        if (renameEc) {
+            std::error_code cleanupEc;
+            fs::remove(tempPath, cleanupEc);
+            spdlog::warn("ExternalPluginHost: failed to atomically replace trust file '{}': {}",
+                         trust_file.string(), renameEc.message());
+            return;
+        }
+
+#if !defined(_WIN32)
+        {
+            std::error_code ec;
+            fs::permissions(trust_file, fs::perms::owner_read | fs::perms::owner_write,
+                            fs::perm_options::replace, ec);
+            if (ec) {
+                spdlog::warn("ExternalPluginHost: failed to set trust file permissions '{}': {}",
+                             trust_file.string(), ec.message());
+            }
+        }
+#endif
     }
 
     bool isTrusted(const std::filesystem::path& path) const {

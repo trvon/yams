@@ -9,6 +9,7 @@
 #include <thread>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <yams/common/utf8_utils.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
 #include <yams/daemon/ipc/proto_serializer.h>
@@ -524,6 +525,27 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         REQUIRE(got != nullptr);
         REQUIRE(got->sessionId == "feature-auth");
         REQUIRE(got->instanceId == "inst-list-012");
+    }
+
+    SECTION("BatchEmbeddingRequest sanitizes invalid UTF-8") {
+        BatchEmbeddingRequest req;
+        req.texts = {"hello", std::string("\xFF\xFE", 2) + "broken"};
+        req.modelName = "all-MiniLM-L6-v2";
+        req.normalize = true;
+        req.batchSize = 8;
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 14));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+        REQUIRE(std::holds_alternative<Request>(dec.value().payload));
+
+        auto* got = std::get_if<BatchEmbeddingRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        REQUIRE(got->texts.size() == req.texts.size());
+        CHECK(got->texts[0] == yams::common::sanitizeUtf8(req.texts[0]));
+        CHECK(got->texts[1] == yams::common::sanitizeUtf8(req.texts[1]));
     }
 }
 

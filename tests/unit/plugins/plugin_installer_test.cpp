@@ -182,6 +182,27 @@ TEST_CASE_METHOD(PluginInstallerFixture, "uninstall behavior", "[plugins][instal
         CHECK_FALSE(result.has_value());
         CHECK(result.error().code == ErrorCode::NotFound);
     }
+
+#if !defined(_WIN32)
+    SECTION("trust file remains private after trust update on uninstall") {
+        fs::create_directories(installDir / "test-plugin");
+        {
+            std::ofstream trustOut(trustFile, std::ios::trunc);
+            trustOut << "# YAMS Plugin Trust List\n";
+            trustOut << fs::weakly_canonical(installDir / "test-plugin").string() << "\n";
+        }
+
+        auto installer = makePluginInstaller(stubClient, installDir, trustFile);
+        auto result = installer->uninstall("test-plugin");
+        REQUIRE(result.has_value());
+        REQUIRE(fs::exists(trustFile));
+
+        std::error_code ec;
+        auto perms = fs::status(trustFile, ec).permissions();
+        REQUIRE_FALSE(ec);
+        CHECK((perms & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+    }
+#endif
 }
 
 // =============================================================================

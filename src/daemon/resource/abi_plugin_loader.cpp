@@ -501,13 +501,77 @@ void AbiPluginLoader::saveTrust() const {
     namespace fs = std::filesystem;
     if (trustFile_.empty())
         return;
-    fs::create_directories(trustFile_.parent_path());
 
-    std::ofstream out(trustFile_);
+    std::error_code ec;
+    auto parent = trustFile_.parent_path();
+    if (!parent.empty()) {
+        fs::create_directories(parent, ec);
+        if (ec) {
+            spdlog::warn("AbiPluginLoader::saveTrust failed to create trust directory '{}': {}",
+                         parent.string(), ec.message());
+            return;
+        }
+    }
+
+    auto tempPath = trustFile_;
+    tempPath += ".tmp";
+
+    std::ofstream out(tempPath, std::ios::trunc);
+    if (!out) {
+        spdlog::warn("AbiPluginLoader::saveTrust failed to create temp trust file '{}'",
+                     tempPath.string());
+        return;
+    }
+
     out << "# YAMS Plugin Trust List\n";
     out << "# One plugin path per line\n";
     for (const auto& p : trusted_)
         out << p.string() << "\n";
+    out.close();
+    if (!out) {
+        std::error_code cleanupEc;
+        fs::remove(tempPath, cleanupEc);
+        spdlog::warn("AbiPluginLoader::saveTrust failed while writing '{}'", tempPath.string());
+        return;
+    }
+
+#if !defined(_WIN32)
+    ec.clear();
+    fs::permissions(tempPath, fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::replace, ec);
+    if (ec) {
+        spdlog::warn("AbiPluginLoader::saveTrust failed to set temp file permissions '{}': {}",
+                     tempPath.string(), ec.message());
+    }
+#endif
+
+    ec.clear();
+    fs::rename(tempPath, trustFile_, ec);
+#if defined(_WIN32)
+    if (ec) {
+        std::error_code removeEc;
+        fs::remove(trustFile_, removeEc);
+        ec.clear();
+        fs::rename(tempPath, trustFile_, ec);
+    }
+#endif
+    if (ec) {
+        std::error_code cleanupEc;
+        fs::remove(tempPath, cleanupEc);
+        spdlog::warn("AbiPluginLoader::saveTrust failed to atomically replace '{}': {}",
+                     trustFile_.string(), ec.message());
+        return;
+    }
+
+#if !defined(_WIN32)
+    ec.clear();
+    fs::permissions(trustFile_, fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::replace, ec);
+    if (ec) {
+        spdlog::warn("AbiPluginLoader::saveTrust failed to set trust file permissions '{}': {}",
+                     trustFile_.string(), ec.message());
+    }
+#endif
 }
 
 bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {

@@ -1709,10 +1709,20 @@ private:
                 // user sees useful progress instead of an opaque error.
                 try {
                     auto rt = daemon::YamsDaemon::getXDGRuntimeDir() / "yams-daemon.status.json";
-                    std::ifstream bf(rt);
-                    if (bf) {
-                        json j;
-                        bf >> j;
+                    json j;
+                    bool haveBootstrap = false;
+
+                    for (int attempt = 0; attempt < 10; ++attempt) {
+                        std::ifstream bf(rt);
+                        if (bf) {
+                            bf >> j;
+                            haveBootstrap = true;
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    }
+
+                    if (haveBootstrap) {
                         std::string overall = j.value("overall", std::string{"initializing"});
                         // Capitalize first letter for display
                         if (!overall.empty())

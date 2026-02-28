@@ -51,7 +51,7 @@ static void set_string_list(const std::vector<std::string>& in,
     out->Clear();
     out->Reserve(static_cast<int>(in.size()));
     for (const auto& s : in)
-        *out->Add() = s;
+        *out->Add() = yams::common::sanitizeUtf8(s);
 }
 
 static std::vector<std::string>

@@ -26,6 +26,7 @@
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -1191,20 +1192,30 @@ private:
             // Canonical trust file: <data_dir>/plugins.trust
             fs::path yamsConfigDir = yams::config::get_config_dir();
             fs::path trustFile = yams::config::get_daemon_plugin_trust_file();
-            fs::create_directories(trustFile.parent_path());
-            // Append only if not already present
-            std::vector<std::string> lines;
+            auto trustParent = trustFile.parent_path();
+            if (!trustParent.empty()) {
+                fs::create_directories(trustParent);
+            }
+
+            std::set<std::string> trusted;
             {
                 std::ifstream in(trustFile);
                 std::string line;
                 while (in && std::getline(in, line)) {
                     if (!line.empty() && line[0] != '#')
-                        lines.push_back(line);
+                        trusted.insert(line);
                 }
             }
-            auto canon = fs::weakly_canonical(userPlugins).string();
+
+            std::error_code canonEc;
+            auto canonPath = fs::weakly_canonical(userPlugins, canonEc);
+            if (canonEc) {
+                canonPath = userPlugins.lexically_normal();
+            }
+            auto canon = canonPath.string();
+
             bool present = false;
-            for (const auto& l : lines) {
+            for (const auto& l : trusted) {
                 std::error_code ec;
                 auto lc = fs::weakly_canonical(l, ec);
                 if (!ec && lc.string() == canon) {
@@ -1212,12 +1223,70 @@ private:
                     break;
                 }
             }
-            if (!present) {
-                std::ofstream out(trustFile, std::ios::app);
-                out << canon << "\n";
-                spdlog::info("Trusted plugin directory added: {}", canon);
+
+            trusted.insert(canon);
+
+            auto tempTrust = trustFile;
+            tempTrust += ".tmp";
+
+            bool trustPersisted = false;
+            std::ofstream out(tempTrust, std::ios::trunc);
+            if (!out) {
+                spdlog::warn("Failed to create temporary trust file: {}", tempTrust.string());
             } else {
+                out << "# YAMS Plugin Trust List\n";
+                out << "# One plugin path per line\n";
+                for (const auto& path : trusted) {
+                    out << path << "\n";
+                }
+                out.close();
+
+#if !defined(_WIN32)
+                std::error_code permEc;
+                fs::permissions(tempTrust, fs::perms::owner_read | fs::perms::owner_write,
+                                fs::perm_options::replace, permEc);
+                if (permEc) {
+                    spdlog::warn("Failed to set private permissions on temp trust file '{}': {}",
+                                 tempTrust.string(), permEc.message());
+                }
+#endif
+
+                std::error_code renameEc;
+                fs::rename(tempTrust, trustFile, renameEc);
+#if defined(_WIN32)
+                if (renameEc) {
+                    std::error_code removeEc;
+                    fs::remove(trustFile, removeEc);
+                    renameEc.clear();
+                    fs::rename(tempTrust, trustFile, renameEc);
+                }
+#endif
+                if (renameEc) {
+                    std::error_code cleanupEc;
+                    fs::remove(tempTrust, cleanupEc);
+                    spdlog::warn("Failed to atomically update trust file '{}': {}",
+                                 trustFile.string(), renameEc.message());
+                } else {
+                    trustPersisted = true;
+                }
+
+#if !defined(_WIN32)
+                std::error_code finalPermEc;
+                fs::permissions(trustFile, fs::perms::owner_read | fs::perms::owner_write,
+                                fs::perm_options::replace, finalPermEc);
+                if (finalPermEc) {
+                    spdlog::warn("Failed to set private permissions on trust file '{}': {}",
+                                 trustFile.string(), finalPermEc.message());
+                }
+#endif
+            }
+
+            if (trustPersisted && !present) {
+                spdlog::info("Trusted plugin directory added: {}", canon);
+            } else if (trustPersisted) {
                 spdlog::debug("Plugin directory already trusted: {}", canon);
+            } else {
+                spdlog::warn("Failed to persist plugin trust file update for: {}", canon);
             }
 
             // Also set [daemon].plugin_dir in config.toml to this path (best-effort)

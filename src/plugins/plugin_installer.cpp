@@ -109,6 +109,101 @@ std::string computeSha256(const fs::path& filepath) {
     return "sha256:" + oss.str();
 }
 
+constexpr fs::perms kTrustFilePerms = fs::perms::owner_read | fs::perms::owner_write;
+
+void enforcePrivateFilePermissions(const fs::path& path) {
+#if !defined(_WIN32)
+    std::error_code ec;
+    fs::permissions(path, kTrustFilePerms, fs::perm_options::replace, ec);
+    if (ec) {
+        spdlog::warn("Failed to set strict permissions on trust file '{}': {}", path.string(),
+                     ec.message());
+    }
+#else
+    (void)path;
+#endif
+}
+
+bool replaceFileAtomic(const fs::path& from, const fs::path& to) {
+    std::error_code ec;
+    fs::rename(from, to, ec);
+#if defined(_WIN32)
+    if (ec) {
+        std::error_code removeEc;
+        fs::remove(to, removeEc);
+        ec.clear();
+        fs::rename(from, to, ec);
+    }
+#endif
+    if (ec) {
+        std::error_code cleanupEc;
+        fs::remove(from, cleanupEc);
+        spdlog::warn("Failed to atomically replace trust file '{}' : {}", to.string(),
+                     ec.message());
+        return false;
+    }
+    return true;
+}
+
+std::set<std::string> readTrustEntries(const fs::path& trustFile) {
+    std::set<std::string> trusted;
+    std::ifstream inFile(trustFile);
+    if (!inFile) {
+        return trusted;
+    }
+
+    std::string line;
+    while (std::getline(inFile, line)) {
+        if (!line.empty() && line[0] != '#') {
+            trusted.insert(line);
+        }
+    }
+    return trusted;
+}
+
+bool writeTrustEntriesAtomic(const fs::path& trustFile, const std::set<std::string>& trusted) {
+    std::error_code ec;
+    auto parent = trustFile.parent_path();
+    if (!parent.empty()) {
+        fs::create_directories(parent, ec);
+        if (ec) {
+            spdlog::warn("Failed to create trust directory '{}': {}", parent.string(),
+                         ec.message());
+            return false;
+        }
+    }
+
+    fs::path tempFile = trustFile;
+    tempFile +=
+        ".tmp." + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+
+    std::ofstream outFile(tempFile, std::ios::trunc);
+    if (!outFile) {
+        spdlog::warn("Failed to create temp trust file: {}", tempFile.string());
+        return false;
+    }
+
+    outFile << "# YAMS Plugin Trust List\n";
+    outFile << "# Plugins at these paths are trusted for automatic loading\n";
+    for (const auto& path : trusted) {
+        outFile << path << "\n";
+    }
+    outFile.close();
+    if (!outFile) {
+        std::error_code cleanupEc;
+        fs::remove(tempFile, cleanupEc);
+        spdlog::warn("Failed while writing trust file: {}", tempFile.string());
+        return false;
+    }
+
+    enforcePrivateFilePermissions(tempFile);
+    if (!replaceFileAtomic(tempFile, trustFile)) {
+        return false;
+    }
+    enforcePrivateFilePermissions(trustFile);
+    return true;
+}
+
 // Extract tar.gz archive
 Result<void> extractArchive(const fs::path& archivePath, const fs::path& destDir) {
     struct archive* a = archive_read_new();
@@ -499,19 +594,7 @@ private:
 
     void addToTrustList(const fs::path& pluginPath) {
         std::error_code ec;
-        fs::create_directories(trustFile_.parent_path(), ec);
-
-        // Read existing trust list
-        std::set<std::string> trusted;
-        std::ifstream inFile(trustFile_);
-        if (inFile) {
-            std::string line;
-            while (std::getline(inFile, line)) {
-                if (!line.empty() && line[0] != '#') {
-                    trusted.insert(line);
-                }
-            }
-        }
+        auto trusted = readTrustEntries(trustFile_);
 
         // Add plugin path (use canonical path if possible)
         std::string pathStr;
@@ -519,23 +602,8 @@ private:
         pathStr = ec ? pluginPath.string() : canonical.string();
         trusted.insert(pathStr);
 
-        // Write updated trust list
-        std::ofstream outFile(trustFile_);
-        if (outFile) {
-            outFile << "# YAMS Plugin Trust List\n";
-            outFile << "# Plugins at these paths are trusted for automatic loading\n";
-            for (const auto& path : trusted) {
-                outFile << path << "\n";
-            }
-        }
-
-        // Enforce strict permissions (Owner R/W only)
-        if (fs::exists(trustFile_)) {
-            fs::permissions(trustFile_, fs::perms::owner_read | fs::perms::owner_write,
-                            fs::perm_options::replace, ec);
-            if (ec) {
-                spdlog::warn("Failed to set strict permissions on trust file: {}", ec.message());
-            }
+        if (!writeTrustEntriesAtomic(trustFile_, trusted)) {
+            spdlog::warn("Failed to persist plugin trust list '{}'.", trustFile_.string());
         }
     }
 
@@ -549,20 +617,13 @@ private:
         auto canonical = fs::weakly_canonical(pluginPath, ec);
         pathStr = ec ? pluginPath.string() : canonical.string();
 
-        std::vector<std::string> lines;
-        std::ifstream inFile(trustFile_);
-        if (inFile) {
-            std::string line;
-            while (std::getline(inFile, line)) {
-                if (line != pathStr && line != pluginPath.string()) {
-                    lines.push_back(line);
-                }
-            }
-        }
+        auto trusted = readTrustEntries(trustFile_);
+        trusted.erase(pathStr);
+        trusted.erase(pluginPath.string());
 
-        std::ofstream outFile(trustFile_);
-        for (const auto& line : lines) {
-            outFile << line << "\n";
+        if (!writeTrustEntriesAtomic(trustFile_, trusted)) {
+            spdlog::warn("Failed to update plugin trust list '{}' during removal.",
+                         trustFile_.string());
         }
     }
 

@@ -288,6 +288,24 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
         CHECK(after_remove.size() == tl.size() - 1);
     }
 
+#if !defined(_WIN32)
+    SECTION("Trust file permissions are private") {
+        AbiPluginHost host(nullptr);
+        host.setTrustFile(fixture.trustFile_);
+
+        auto dir = fixture.tempDir_ / "trusted_perms_dir";
+        fs::create_directories(dir);
+
+        REQUIRE(host.trustAdd(dir));
+        REQUIRE(fs::exists(fixture.trustFile_));
+
+        std::error_code ec;
+        auto perms = fs::status(fixture.trustFile_, ec).permissions();
+        REQUIRE_FALSE(ec);
+        CHECK((perms & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+    }
+#endif
+
     SECTION("Trust remove persists after host reload") {
         auto dir1 = fixture.tempDir_ / "persist_remove_dir1";
         auto dir2 = fixture.tempDir_ / "persist_remove_dir2";
