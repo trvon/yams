@@ -64,7 +64,7 @@ jobs:
             extra_meson_flags: "--buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled"
     runs-on: ${{ matrix.runs_on }}
     # Allow extra time for safety across runners.
-    timeout-minutes: 90
+    timeout-minutes: 100
     steps:
       - name: Checkout
         uses: actions/checkout@v4

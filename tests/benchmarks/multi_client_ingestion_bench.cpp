@@ -1963,6 +1963,10 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 if (payload.contains("items")) {
                     collectHashes(payload["items"]);
                 }
+                // MCP list handler returns "documents" key (not "items")
+                if (itemsInPage == 0 && payload.contains("documents")) {
+                    collectHashes(payload["documents"]);
+                }
                 if (itemsInPage == 0 && payload.contains("results")) {
                     collectHashes(payload["results"]);
                 }
@@ -2047,6 +2051,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 res = sharedMcpPool->queryStepForSlot(0, "list", {{"limit", 50}});
                 if (res && res.value().contains("items") && res.value()["items"].is_array()) {
                     items = static_cast<int>(res.value()["items"].size());
+                } else if (res && res.value().contains("documents") &&
+                           res.value()["documents"].is_array()) {
+                    items = static_cast<int>(res.value()["documents"].size());
                 }
             } else {
                 ListRequest req;
@@ -2312,6 +2319,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                     trace.success = true;
                     if (res.value().contains("items") && res.value()["items"].is_array()) {
                         trace.resultCount = static_cast<int>(res.value()["items"].size());
+                    } else if (res.value().contains("documents") &&
+                               res.value()["documents"].is_array()) {
+                        trace.resultCount = static_cast<int>(res.value()["documents"].size());
                     }
                     listOps.fetch_add(1);
                 } else {
@@ -2544,6 +2554,10 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                             trace.success = true;
                             if (res.value().contains("items") && res.value()["items"].is_array()) {
                                 trace.resultCount = static_cast<int>(res.value()["items"].size());
+                            } else if (res.value().contains("documents") &&
+                                       res.value()["documents"].is_array()) {
+                                trace.resultCount =
+                                    static_cast<int>(res.value()["documents"].size());
                             }
                             listOps.fetch_add(1);
                         } else {

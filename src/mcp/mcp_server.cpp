@@ -1353,12 +1353,6 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                     }
                 }
                 if (idx != static_cast<size_t>(-1)) {
-                    yams::app::services::RetrievalService rsvc;
-                    yams::app::services::RetrievalOptions ropts;
-                    ropts.socketPath = daemon_client_config_.socketPath;
-                    if (auto appc = app::services::makeSessionService(nullptr); appc) {
-                        // no-op placeholder for future per-session retrieval options
-                    }
                     // Prefer using known hash if present
                     std::string hash = out.results[idx].hash;
                     if (hash.empty()) {
@@ -1369,10 +1363,10 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                     // Retrieve indexed content by hash when available
                     std::string indexedContent;
                     if (!hash.empty()) {
-                        yams::app::services::GetOptions greq;
+                        daemon::GetRequest greq;
                         greq.hash = hash;
                         greq.metadataOnly = false;
-                        auto gr = rsvc.get(greq, ropts);
+                        auto gr = co_await daemon_client_->get(greq);
                         if (gr)
                             indexedContent = gr.value().content;
                     }
@@ -1443,7 +1437,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     if (auto ensure = ensureDaemonClient(); !ensure) {
         co_return ensure.error();
     }
-    yams::app::services::GrepOptions dreq;
+    daemon::GrepRequest dreq;
     dreq.pattern = req.pattern;
     dreq.paths = req.paths;
     dreq.caseInsensitive = req.ignoreCase;
@@ -1595,15 +1589,8 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         dreq.useSession = true;
         dreq.sessionName = __session;
     }
-    // Use service facade for grep (daemon-first)
-    yams::app::services::RetrievalService rsvc;
-    yams::app::services::RetrievalOptions ropts;
-    ropts.socketPath = daemon_client_config_.socketPath;
-    ropts.enableStreaming = true;
-    ropts.requestTimeoutMs = 30000;
-    ropts.headerTimeoutMs = 30000;
-    ropts.bodyTimeoutMs = 120000;
-    auto res = rsvc.grep(dreq, ropts);
+    // Use shared daemon client directly — avoids creating a new DaemonClient + sync bridge
+    auto res = co_await daemon_client_->streamingGrep(dreq);
     if (!res)
         co_return res.error();
     const auto& r = res.value();
@@ -2478,7 +2465,7 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
         co_return ensure.error();
     }
     // Convert MCP request to daemon request
-    yams::app::services::GetOptions daemon_req;
+    daemon::GetRequest daemon_req;
     daemon_req.hash = req.hash;
     daemon_req.name = req.name;
     daemon_req.byName = !req.name.empty();
@@ -2488,15 +2475,8 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     daemon_req.metadataOnly = !req.includeContent;
     daemon_req.acceptCompressed = true;
 
-    // Unified path: use RetrievalService name-smart get when name provided, else direct get
-    yams::app::services::RetrievalService rsvc;
-    yams::app::services::RetrievalOptions ropts;
-    ropts.socketPath = daemon_client_config_.socketPath;
-    ropts.requestTimeoutMs = 60000;
-    ropts.headerTimeoutMs = 30000;
-    ropts.bodyTimeoutMs = 120000;
-
-    auto dres = rsvc.get(daemon_req, ropts);
+    // Use shared daemon client directly — avoids creating a new DaemonClient + sync bridge
+    auto dres = co_await daemon_client_->get(daemon_req);
     if (!dres)
         co_return dres.error();
 
@@ -2669,25 +2649,11 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     }
     if (!__session.empty()) {
         spdlog::debug("[MCP] list: using session '{}'", __session);
+        daemon_req.sessionId = __session;
     }
-    // Use service facade for list (daemon-first)
-    yams::app::services::RetrievalService rsvc;
-    yams::app::services::RetrievalOptions ropts;
-    ropts.socketPath = daemon_client_config_.socketPath;
-    ropts.enableStreaming = true;
-    ropts.requestTimeoutMs = 30000;
-    ropts.headerTimeoutMs = 30000;
-    ropts.bodyTimeoutMs = 120000;
-    yams::app::services::ListOptions list_opts;
-    list_opts.limit = daemon_req.limit;
-    list_opts.offset = daemon_req.offset;
-    list_opts.namePattern = daemon_req.namePattern;
-    list_opts.tags = daemon_req.tags;
-    list_opts.matchAllTags = daemon_req.matchAllTags;
-    list_opts.sortBy = daemon_req.sortBy;
-    list_opts.reverse = daemon_req.reverse;
-    list_opts.sessionId = __session;
-    auto dres = rsvc.list(list_opts, ropts);
+    // Use shared daemon client directly — avoids creating a new DaemonClient + sync bridge
+    // per request (was the primary cause of ~70x MCP list slowdown vs daemon IPC).
+    auto dres = co_await daemon_client_->streamingList(daemon_req);
     if (!dres)
         co_return dres.error();
     MCPListDocumentsResponse out;
@@ -2727,11 +2693,11 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
                     if (ifs) {
                         std::string local((std::istreambuf_iterator<char>(ifs)),
                                           std::istreambuf_iterator<char>());
-                        // Get indexed content
-                        yams::app::services::GetOptions greq;
+                        // Get indexed content via shared daemon client (not a throwaway service)
+                        daemon::GetRequest greq;
                         greq.hash = item.hash;
                         greq.metadataOnly = false;
-                        auto gr = rsvc.get(greq, ropts);
+                        auto gr = co_await daemon_client_->get(greq);
                         if (gr) {
                             const auto& resp = gr.value();
                             auto toLines = [](const std::string& s) {
@@ -3184,7 +3150,11 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
             }
         } catch (...) {
         }
-        yams::app::services::RetrievalService rsvc;
+        // Reuse shared daemon client to avoid per-request connection overhead
+        if (auto ensure = ensureDaemonClient(); !ensure) {
+            co_return ensure.error();
+        }
+        auto& rsvc = *retrieval_svc_;
         yams::app::services::RetrievalOptions ropts;
         ropts.socketPath = daemon_client_config_.socketPath;
         ropts.requestTimeoutMs = 60000;
@@ -4917,14 +4887,16 @@ void MCPServer::initializeToolRegistry() {
                             return a.indexed < b.indexed;
                         });
                         const auto pick = req.latest ? matches.back() : matches.front();
-                        // Retrieve content by hash via RetrievalService
-                        yams::app::services::RetrievalService rsvc;
+                        // Retrieve content by hash via shared daemon client
+                        if (auto ensure = ensureDaemonClient(); !ensure) {
+                            co_return ensure.error();
+                        }
                         yams::app::services::RetrievalOptions ropts;
                         ropts.socketPath = daemon_client_config_.socketPath;
                         yams::app::services::GetOptions greq;
                         greq.hash = pick.hash;
                         greq.metadataOnly = false;
-                        auto grres = rsvc.get(greq, ropts);
+                        auto grres = retrieval_svc_->get(greq, ropts);
                         if (!grres)
                             co_return grres.error();
                         auto gr = grres.value();
@@ -4948,13 +4920,16 @@ void MCPServer::initializeToolRegistry() {
                                                 [&](const auto& d) { return d.path == wanted; });
                     const auto chosen = (exactIt != matches.end()) ? *exactIt : matches.front();
 
-                    yams::app::services::RetrievalService rsvc;
+                    // Retrieve content by hash via shared daemon client
+                    if (auto ensure = ensureDaemonClient(); !ensure) {
+                        co_return ensure.error();
+                    }
                     yams::app::services::RetrievalOptions ropts;
                     ropts.socketPath = daemon_client_config_.socketPath;
                     yams::app::services::GetOptions greq;
                     greq.hash = chosen.hash;
                     greq.metadataOnly = false;
-                    auto grres = rsvc.get(greq, ropts);
+                    auto grres = retrieval_svc_->get(greq, ropts);
                     if (!grres)
                         co_return grres.error();
                     auto gr = grres.value();
@@ -4975,7 +4950,11 @@ void MCPServer::initializeToolRegistry() {
             }
 
             // Try smart retrieval first, then fallback to base-name list + fuzzy selection
-            yams::app::services::RetrievalService rsvc;
+            // Reuse shared daemon client to avoid per-request connection overhead
+            if (auto ensure = ensureDaemonClient(); !ensure) {
+                co_return ensure.error();
+            }
+            auto& rsvc = *retrieval_svc_;
             yams::app::services::RetrievalOptions ropts;
             ropts.socketPath = daemon_client_config_.socketPath;
             ropts.requestTimeoutMs = 60000;
@@ -5127,7 +5106,10 @@ void MCPServer::initializeToolRegistry() {
 
         boost::asio::awaitable<yams::Result<yams::mcp::MCPCatDocumentResponse>>
         yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& req) {
-            yams::app::services::RetrievalService rsvc;
+            // Reuse shared daemon client to avoid per-request connection overhead
+            if (auto ensure = ensureDaemonClient(); !ensure) {
+                co_return ensure.error();
+            }
             yams::app::services::RetrievalOptions ropts;
             ropts.socketPath = daemon_client_config_.socketPath;
             ropts.requestTimeoutMs = 60000;
@@ -5144,7 +5126,7 @@ void MCPServer::initializeToolRegistry() {
             dreq.oldest = req.oldest;
             dreq.metadataOnly = false; // cat always needs content
 
-            auto gres = rsvc.get(dreq, ropts);
+            auto gres = retrieval_svc_->get(dreq, ropts);
             if (!gres) {
                 co_return gres.error();
             }
