@@ -951,46 +951,8 @@ public:
                     break;
                 const auto& doc = docs[i];
 
-                if (!pathFilterMatch(doc.filePath, req.paths))
-                    continue;
-                if (!req.includePatterns.empty()) {
-                    bool ok = false;
-                    const std::string docGlobPath = normalizeForGlobMatch(doc.filePath);
-                    for (const auto& pattern : req.includePatterns) {
-                        if (hasWildcard(pattern)) {
-                            if (yams::app::services::utils::matchGlob(
-                                    docGlobPath, normalizeForGlobMatch(pattern))) {
-                                ok = true;
-                                break;
-                            }
-                            // Extra: treat "/dir/**" as a directory prefix include
-                            auto dd = pattern.find("**");
-                            if (!ok && dd != std::string::npos) {
-                                std::string prefix = pattern.substr(0, dd);
-                                auto normPrefix = normalizePathForCompare(prefix);
-                                if (!normPrefix.empty()) {
-                                    if (normPrefix.back() != '/')
-                                        normPrefix.push_back('/');
-                                    auto normDoc = normalizePathForCompare(doc.filePath);
-                                    if (normDoc.size() >= normPrefix.size() &&
-                                        normDoc.compare(0, normPrefix.size(), normPrefix) == 0) {
-                                        ok = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        } else {
-                            const auto normalizedPattern = normalizeForGlobMatch(pattern);
-                            if (!normalizedPattern.empty() &&
-                                string_contains(docGlobPath, normalizedPattern)) {
-                                ok = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!ok)
-                        continue;
-                }
+                // NOTE: path and include-pattern filtering already applied before
+                // docs entered the worker pool (lines ~663-702). No re-check needed.
 
                 bool forceCold = false;
                 auto metadataIt = docMetadata.find(doc.id);
@@ -1162,80 +1124,10 @@ public:
                         continue;
                     }
                 } else {
-                    // Cold path: stream content and scan lines incrementally
-                    struct LineScanBuf : public std::streambuf {
-                        std::string buffer;
-                        std::function<void(const std::string&)> cb;
-                        explicit LineScanBuf(std::function<void(const std::string&)> f)
-                            : cb(std::move(f)) {}
-                        int overflow(int ch) override {
-                            if (ch == traits_type::eof())
-                                return 0;
-                            char c = static_cast<char>(ch);
-                            if (c == '\n') {
-                                cb(buffer);
-                                buffer.clear();
-                            } else if (c != '\r') {
-                                buffer.push_back(c);
-                            }
-                            return ch;
-                        }
-                        std::streamsize xsputn(const char* s, std::streamsize n) override {
-                            // SIMD vectorized newline scanning
-                            const char* p = s;
-                            const char* end = s + n;
-                            while (p < end) {
-                                size_t remaining = static_cast<size_t>(end - p);
-                                size_t nlOffset = SimdNewlineScanner::findNewline(p, remaining);
-
-                                if (nlOffset >= remaining) {
-                                    // No newline found in remaining data
-                                    if (memchr(p, '\r', remaining) != nullptr) {
-                                        // handle CR occurrences by copying segments
-                                        const char* q = p;
-                                        while (q < end) {
-                                            const char* r = static_cast<const char*>(
-                                                memchr(q, '\r', static_cast<size_t>(end - q)));
-                                            if (!r) {
-                                                buffer.append(q, end);
-                                                break;
-                                            }
-                                            buffer.append(q, r);
-                                            q = r + 1; // skip CR
-                                        }
-                                    } else {
-                                        buffer.append(p, end);
-                                    }
-                                    return n;
-                                }
-
-                                const char* nlc = p + nlOffset;
-                                // append up to newline, skipping CRs
-                                if (memchr(p, '\r', static_cast<size_t>(nlc - p)) != nullptr) {
-                                    const char* q = p;
-                                    while (q < nlc) {
-                                        const char* r = static_cast<const char*>(
-                                            memchr(q, '\r', static_cast<size_t>(nlc - q)));
-                                        if (!r) {
-                                            buffer.append(q, nlc);
-                                            break;
-                                        }
-                                        buffer.append(q, r);
-                                        q = r + 1; // skip CR
-                                    }
-                                } else {
-                                    buffer.append(p, nlc);
-                                }
-                                // deliver line
-                                cb(buffer);
-                                buffer.clear();
-                                p = nlc + 1; // skip LF
-                            }
-                            return n;
-                        }
-                    };
-                    LineScanBuf sb(onLine);
-                    std::ostream os(&sb);
+                    // Cold path: retrieve content into memory and scan directly
+                    // (E) retrieveBytes avoids temp file create/write/read/delete per doc
+                    // (F) Direct pointer-walking with SIMD newline scanner avoids
+                    //     streambuf/ostream abstraction overhead entirely
                     if (budget_ms > 0) {
                         auto e3 = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - start_time);
@@ -1244,17 +1136,60 @@ public:
                             break;
                         }
                     }
-                    auto rs = ctx_.store->retrieveStream(doc.sha256Hash, os, nullptr);
-                    if (!rs)
+                    auto bytesResult = ctx_.store->retrieveBytes(doc.sha256Hash);
+                    if (!bytesResult)
                         continue;
-                    // Flush any remaining buffered content as a final line
-                    if (!sb.buffer.empty()) {
-                        std::string tail = std::move(sb.buffer);
-                        sb.buffer.clear();
-                        // Normalize potential Windows CRLF by stripping trailing \r
-                        if (!tail.empty() && tail.back() == '\r')
-                            tail.pop_back();
-                        onLine(tail);
+                    const auto& bytes = bytesResult.value();
+                    const char* data = reinterpret_cast<const char*>(bytes.data());
+                    const size_t dataSize = bytes.size();
+
+                    // Walk the buffer with SIMD newline scanning, calling onLine per line
+                    const char* p = data;
+                    const char* end = data + dataSize;
+                    std::string lineBuffer;
+                    while (p < end) {
+                        if (stop.load(std::memory_order_relaxed))
+                            break;
+                        size_t remaining = static_cast<size_t>(end - p);
+                        size_t nlOffset = SimdNewlineScanner::findNewline(p, remaining);
+
+                        const char* lineEnd = (nlOffset < remaining) ? (p + nlOffset) : end;
+                        size_t lineLen = static_cast<size_t>(lineEnd - p);
+
+                        // Strip trailing CR for CRLF line endings
+                        size_t trimLen = lineLen;
+                        if (trimLen > 0 && p[trimLen - 1] == '\r')
+                            --trimLen;
+
+                        // Check if any CRs remain (bare CRs in middle of line)
+                        if (trimLen > 0 && memchr(p, '\r', trimLen) != nullptr) {
+                            // Rare path: strip embedded CRs
+                            lineBuffer.clear();
+                            const char* q = p;
+                            const char* segEnd = p + trimLen;
+                            while (q < segEnd) {
+                                const char* r = static_cast<const char*>(
+                                    memchr(q, '\r', static_cast<size_t>(segEnd - q)));
+                                if (!r) {
+                                    lineBuffer.append(q, segEnd);
+                                    break;
+                                }
+                                lineBuffer.append(q, r);
+                                q = r + 1;
+                            }
+                            onLine(lineBuffer);
+                        } else {
+                            // Fast path: zero-copy string_view → string for onLine
+                            std::string line(p, trimLen);
+                            onLine(line);
+                        }
+
+                        if (req.maxCount > 0 &&
+                            static_cast<int>(fileResult.matchCount) >= req.maxCount)
+                            break;
+
+                        // Advance past LF (or to end if no newline found)
+                        p = (nlOffset < remaining) ? (p + nlOffset + 1) : end;
                     }
                 }
 
