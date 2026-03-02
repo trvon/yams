@@ -658,8 +658,6 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
             }
             co_return wres.error();
         }
-        spdlog::debug("AsioTransportAdapter::send_request_streaming wrote frame req_id={} type={}",
-                      msg.requestId, static_cast<int>(getMessageType(req)));
 
         conn->in_use.store(false, std::memory_order_release);
 
@@ -688,7 +686,6 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
 
             if (done_future.wait_for(0ms) == std::future_status::ready) {
                 auto result = done_future.get();
-
                 if (ipc_wait_trace_enabled()) {
                     const auto elapsed_ms =
                         std::chrono::duration_cast<std::chrono::milliseconds>(

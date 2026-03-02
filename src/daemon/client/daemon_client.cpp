@@ -1104,6 +1104,12 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
 void DaemonClient::StreamingListHandler::onHeaderReceived(const Response& headerResponse) {
     // Parse header information from response
     if (auto* listRes = std::get_if<ListResponse>(&headerResponse)) {
+        // Clear any stale error from a previous failed attempt (e.g. retry after EOF).
+        // Also reset accumulated data so we don't mix results across attempts.
+        error_.reset();
+        items_.clear();
+        count_ = 0;
+
         // Store total count from header
         totalCount_ = listRes->totalCount;
 
@@ -1141,6 +1147,12 @@ void DaemonClient::StreamingListHandler::onHeaderReceived(const Response& header
 void DaemonClient::StreamingSearchHandler::onHeaderReceived(const Response& headerResponse) {
     // Parse header information from response
     if (auto* searchRes = std::get_if<SearchResponse>(&headerResponse)) {
+        // Clear any stale error from a previous failed attempt (e.g. retry after EOF).
+        // Also reset accumulated data so we don't mix results across attempts.
+        error_.reset();
+        results_.clear();
+        count_ = 0;
+
         spdlog::debug("StreamingSearchHandler: header received (totalCount={}, elapsed={}ms)",
                       searchRes->totalCount, searchRes->elapsed.count());
         // Store total count and elapsed time from header
@@ -1236,8 +1248,9 @@ bool DaemonClient::StreamingSearchHandler::onChunkReceived(const Response& chunk
 void DaemonClient::StreamingListHandler::onError(const Error& error) {
     error_ = error;
 
-    // Log error for immediate feedback
-    spdlog::error("List error: {}", error.message);
+    // Log at debug level since this may be a transient error that gets cleared
+    // on retry (e.g. stale pooled connection EOF followed by successful reconnect).
+    spdlog::debug("StreamingListHandler: error received: {}", error.message);
 }
 
 void DaemonClient::StreamingListHandler::onComplete() {
@@ -1266,8 +1279,9 @@ Result<ListResponse> DaemonClient::StreamingListHandler::getResults() const {
 void DaemonClient::StreamingSearchHandler::onError(const Error& error) {
     error_ = error;
 
-    // Log error for immediate feedback
-    spdlog::error("Search error: {}", error.message);
+    // Log at debug level since this may be a transient error that gets cleared
+    // on retry (e.g. stale pooled connection EOF followed by successful reconnect).
+    spdlog::debug("StreamingSearchHandler: error received: {}", error.message);
 }
 
 void DaemonClient::StreamingSearchHandler::onComplete() {
@@ -1322,6 +1336,12 @@ boost::asio::awaitable<Result<ListResponse>> DaemonClient::streamingList(const L
 // Streaming Grep handler methods
 void DaemonClient::StreamingGrepHandler::onHeaderReceived(const Response& headerResponse) {
     if (auto* grepRes = std::get_if<GrepResponse>(&headerResponse)) {
+        // Clear any stale error from a previous failed attempt (e.g. retry after EOF).
+        // Also reset accumulated data so we don't mix results across attempts.
+        error_.reset();
+        matches_.clear();
+        perFileCount_.clear();
+
         totalMatches_ = grepRes->totalMatches;
         filesSearched_ = grepRes->filesSearched;
 
@@ -1378,7 +1398,9 @@ bool DaemonClient::StreamingGrepHandler::onChunkReceived(const Response& chunkRe
 
 void DaemonClient::StreamingGrepHandler::onError(const Error& error) {
     error_ = error;
-    spdlog::error("Grep error: {}", error.message);
+    // Log at debug level since this may be a transient error that gets cleared
+    // on retry (e.g. stale pooled connection EOF followed by successful reconnect).
+    spdlog::debug("StreamingGrepHandler: error received: {}", error.message);
 }
 
 void DaemonClient::StreamingGrepHandler::onComplete() {
