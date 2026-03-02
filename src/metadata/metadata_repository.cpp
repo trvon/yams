@@ -2713,6 +2713,69 @@ MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& 
         });
 }
 
+Result<std::vector<GrepCandidateProjection>>
+MetadataRepository::queryDocumentsForGrepCandidates(const DocumentQueryOptions& options) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::queryDocumentsForGrepCandidates");
+    return executeReadQuery<std::vector<GrepCandidateProjection>>(
+        [&](Database& db) -> Result<std::vector<GrepCandidateProjection>> {
+            const bool joinFtsForContains = options.containsFragment && options.containsUsesFts &&
+                                            !options.containsFragment->empty() && pathFtsAvailable_;
+
+            // Lightweight 6-column projection: only what grep needs for candidate
+            // discovery and hot/cold classification.
+            std::string sql =
+                "SELECT documents.id, documents.file_path, documents.file_size, "
+                "documents.sha256_hash, documents.mime_type, documents.content_extracted "
+                "FROM documents";
+            if (joinFtsForContains)
+                sql += " JOIN documents_path_fts ON documents.id = documents_path_fts.rowid";
+
+            std::vector<std::string> conditions;
+            std::vector<BindParam> params;
+            appendDocumentQueryFilters(options, joinFtsForContains, hasPathIndexing_, conditions,
+                                       params, false);
+
+            if (!conditions.empty()) {
+                sql += " WHERE ";
+                for (size_t i = 0; i < conditions.size(); ++i) {
+                    if (i > 0)
+                        sql += " AND ";
+                    sql += conditions[i];
+                }
+            }
+
+            if (options.limit > 0) {
+                sql += " LIMIT ?";
+                addIntParam(params, options.limit);
+            }
+            if (options.offset > 0) {
+                sql += " OFFSET ?";
+                addIntParam(params, options.offset);
+            }
+
+            auto execResult = executePreparedVectorQuery<GrepCandidateProjection>(
+                db, sql, params, [&](Statement& stmt) {
+                    GrepCandidateProjection p;
+                    p.id = stmt.getInt64(0);
+                    p.filePath = stmt.getString(1);
+                    p.fileSize = stmt.getInt64(2);
+                    p.sha256Hash = stmt.getString(3);
+                    p.mimeType = stmt.getString(4);
+                    p.contentExtracted = stmt.getInt(5) != 0;
+                    return p;
+                });
+            if (!execResult) {
+                if (joinFtsForContains && options.containsUsesFts) {
+                    auto fallbackOpts = options;
+                    fallbackOpts.containsUsesFts = false;
+                    return queryDocumentsForGrepCandidates(fallbackOpts);
+                }
+                return execResult.error();
+            }
+            return execResult;
+        });
+}
+
 Result<std::unordered_map<std::string, int64_t>>
 MetadataRepository::getDocumentCountsByExtension() {
     return executeReadQuery<std::unordered_map<std::string, int64_t>>(

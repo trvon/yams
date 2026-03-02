@@ -190,6 +190,10 @@ struct DocumentQueryOptions {
     std::optional<int64_t> stalledBefore;
     /// Only return docs whose repair_attempted_at < this epoch-seconds value.
     std::optional<int64_t> repairAttemptedBefore;
+
+    /// Exclude obviously-ungrepable MIME types (image/*, video/*, audio/*, archives, PDF, etc.)
+    /// at the SQL level to reduce candidate set before C++ processing.
+    bool excludeBinaryMimeTypes{false};
 };
 
 struct ListDocumentProjection {
@@ -204,6 +208,20 @@ struct ListDocumentProjection {
     std::chrono::sys_seconds modifiedTime;
     std::chrono::sys_seconds indexedTime;
     ExtractionStatus extractionStatus{ExtractionStatus::Pending};
+};
+
+/// Lightweight projection for grep candidate discovery.
+/// Only the 6 fields grep actually uses — avoids fetching 15 unused columns
+/// (path_prefix, reverse_path, path_hash, parent_hash, path_depth, repair_status,
+/// repair_attempted_at, repair_attempts, extraction_error, file_name, file_extension,
+/// created_time, modified_time, indexed_time, extraction_status) per row.
+struct GrepCandidateProjection {
+    int64_t id{0};
+    std::string filePath;
+    int64_t fileSize{0};
+    std::string sha256Hash;
+    std::string mimeType;
+    bool contentExtracted{false};
 };
 
 struct MetadataValueCount {
@@ -300,6 +318,28 @@ public:
     findDocumentByExactPath(const std::string& path) = 0;
     virtual Result<std::vector<DocumentInfo>>
     queryDocuments(const DocumentQueryOptions& options) = 0;
+    /// Lightweight grep candidate query — returns only the 6 fields grep needs
+    /// (id, file_path, file_size, sha256_hash, mime_type, content_extracted).
+    /// Falls back to queryDocuments() by default for implementations that don't override.
+    virtual Result<std::vector<GrepCandidateProjection>>
+    queryDocumentsForGrepCandidates(const DocumentQueryOptions& options) {
+        auto result = queryDocuments(options);
+        if (!result)
+            return result.error();
+        std::vector<GrepCandidateProjection> out;
+        out.reserve(result.value().size());
+        for (auto& doc : result.value()) {
+            GrepCandidateProjection p;
+            p.id = doc.id;
+            p.filePath = std::move(doc.filePath);
+            p.fileSize = doc.fileSize;
+            p.sha256Hash = std::move(doc.sha256Hash);
+            p.mimeType = std::move(doc.mimeType);
+            p.contentExtracted = doc.contentExtracted;
+            out.push_back(std::move(p));
+        }
+        return out;
+    }
     virtual Result<std::vector<DocumentInfo>>
     findDocumentsByHashPrefix(const std::string& hashPrefix, std::size_t limit = 100) = 0;
     virtual Result<std::vector<DocumentInfo>>
@@ -597,6 +637,8 @@ public:
 
     Result<std::optional<DocumentInfo>> findDocumentByExactPath(const std::string& path) override;
     Result<std::vector<DocumentInfo>> queryDocuments(const DocumentQueryOptions& options) override;
+    Result<std::vector<GrepCandidateProjection>>
+    queryDocumentsForGrepCandidates(const DocumentQueryOptions& options) override;
     Result<std::vector<ListDocumentProjection>>
     queryDocumentsForListProjection(const DocumentQueryOptions& options);
     Result<std::vector<std::string>> getSnapshots() override;

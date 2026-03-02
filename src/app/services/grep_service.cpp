@@ -513,15 +513,33 @@ public:
         auto start_time = std::chrono::steady_clock::now();
 
         // --- Candidate Document Discovery ---
-        std::vector<metadata::DocumentInfo> docs;
+        std::vector<metadata::GrepCandidateProjection> docs;
         std::unordered_set<int64_t> seenDocIds;
 
-        auto addDocs = [&](std::vector<metadata::DocumentInfo>&& newDocs) {
+        auto addDocs = [&](std::vector<metadata::GrepCandidateProjection>&& newDocs) {
             for (auto& d : newDocs) {
                 if (seenDocIds.insert(d.id).second) {
                     docs.push_back(std::move(d));
                 }
             }
+        };
+
+        // Helper to convert DocumentInfo results (from FTS/tags) to GrepCandidateProjection
+        auto convertToGrepCandidates = [](std::vector<metadata::DocumentInfo>&& infos)
+            -> std::vector<metadata::GrepCandidateProjection> {
+            std::vector<metadata::GrepCandidateProjection> out;
+            out.reserve(infos.size());
+            for (auto& d : infos) {
+                metadata::GrepCandidateProjection p;
+                p.id = d.id;
+                p.filePath = std::move(d.filePath);
+                p.fileSize = d.fileSize;
+                p.sha256Hash = std::move(d.sha256Hash);
+                p.mimeType = std::move(d.mimeType);
+                p.contentExtracted = d.contentExtracted;
+                out.push_back(std::move(p));
+            }
+            return out;
         };
 
         bool usedFtsForInitialCandidates = false;
@@ -533,7 +551,7 @@ public:
                 },
                 4, std::chrono::milliseconds(25), &metadataTelemetry);
             if (tRes) {
-                addDocs(std::move(tRes.value()));
+                addDocs(convertToGrepCandidates(std::move(tRes.value())));
             }
         } else if (!req.pattern.empty() && isLikelyFtsPattern(req.pattern) &&
                    !req.filesWithoutMatch) {
@@ -549,15 +567,15 @@ public:
                 for (const auto& r : sRes.value().results) {
                     ftsHits.push_back(r.document);
                 }
-                addDocs(std::move(ftsHits));
+                addDocs(convertToGrepCandidates(std::move(ftsHits)));
                 usedFtsForInitialCandidates = true;
             } else {
                 // FTS5 failed or empty - fall back to document scan
                 if (!req.includePatterns.empty()) {
                     auto patternDocsRes = retryMetadataOp(
                         [&]() {
-                            return metadata::queryDocumentsByGlobPatterns(*ctx_.metadataRepo,
-                                                                          req.includePatterns, 0);
+                            return metadata::queryGrepCandidatesByGlobPatterns(
+                                *ctx_.metadataRepo, req.includePatterns, 0);
                         },
                         4, std::chrono::milliseconds(25), &metadataTelemetry);
                     if (patternDocsRes) {
@@ -567,7 +585,7 @@ public:
                     // Safe FTS-like pattern with no path filter - do full scan as fallback
                     auto allDocsRes = retryMetadataOp(
                         [&]() {
-                            return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%");
+                            return metadata::queryGrepCandidatesByPattern(*ctx_.metadataRepo, "%");
                         },
                         4, std::chrono::milliseconds(25), &metadataTelemetry);
                     if (allDocsRes) {
@@ -580,8 +598,8 @@ public:
             if (!req.includePatterns.empty()) {
                 auto patternDocsRes = retryMetadataOp(
                     [&]() {
-                        return metadata::queryDocumentsByGlobPatterns(*ctx_.metadataRepo,
-                                                                      req.includePatterns, 0);
+                        return metadata::queryGrepCandidatesByGlobPatterns(*ctx_.metadataRepo,
+                                                                           req.includePatterns, 0);
                     },
                     4, std::chrono::milliseconds(25), &metadataTelemetry);
                 if (patternDocsRes) {
@@ -593,8 +611,10 @@ public:
             } else {
                 // No filters at all - scan all documents
                 auto allDocsRes = retryMetadataOp(
-                    [&]() { return metadata::queryDocumentsByPattern(*ctx_.metadataRepo, "%"); }, 4,
-                    std::chrono::milliseconds(25), &metadataTelemetry);
+                    [&]() {
+                        return metadata::queryGrepCandidatesByPattern(*ctx_.metadataRepo, "%");
+                    },
+                    4, std::chrono::milliseconds(25), &metadataTelemetry);
                 if (allDocsRes) {
                     addDocs(std::move(allDocsRes.value()));
                 }
@@ -620,7 +640,7 @@ public:
                         fts_doc_ids.insert(r.document.id);
                     }
 
-                    std::vector<metadata::DocumentInfo> filtered_docs;
+                    std::vector<metadata::GrepCandidateProjection> filtered_docs;
                     filtered_docs.reserve(docs.size());
                     for (const auto& doc : docs) {
                         if (fts_doc_ids.count(doc.id) > 0) {
@@ -641,7 +661,7 @@ public:
         }
 
         if (!req.paths.empty() || !req.includePatterns.empty()) {
-            std::vector<metadata::DocumentInfo> filtered;
+            std::vector<metadata::GrepCandidateProjection> filtered;
             filtered.reserve(docs.size());
 
             for (auto& doc : docs) {
@@ -690,8 +710,8 @@ public:
         }
 
         // Prefer hot docs (extracted/text) then cold; cap both sets
-        std::vector<metadata::DocumentInfo> hotDocs;
-        std::vector<metadata::DocumentInfo> coldDocs;
+        std::vector<metadata::GrepCandidateProjection> hotDocs;
+        std::vector<metadata::GrepCandidateProjection> coldDocs;
         hotDocs.reserve(docs.size());
         coldDocs.reserve(docs.size());
 
@@ -700,7 +720,7 @@ public:
         size_t filesSkippedType = 0;
         size_t filesSkippedSize = 0;
 
-        auto shouldSkipFile = [](const metadata::DocumentInfo& doc) -> bool {
+        auto shouldSkipFile = [](const metadata::GrepCandidateProjection& doc) -> bool {
             std::string ext;
             auto dotPos = doc.filePath.rfind('.');
             if (dotPos != std::string::npos && dotPos < doc.filePath.size() - 1) {
@@ -730,8 +750,8 @@ public:
         // Parallel filtering using C++20 async for large candidate sets
         // For large candidate sets (>100 files), use parallel filtering
         if (docs.size() > 100) {
-            std::vector<std::future<std::pair<std::vector<metadata::DocumentInfo>,
-                                              std::vector<metadata::DocumentInfo>>>>
+            std::vector<std::future<std::pair<std::vector<metadata::GrepCandidateProjection>,
+                                              std::vector<metadata::GrepCandidateProjection>>>>
                 futures;
 
             // Split candidates into chunks for parallel processing
@@ -743,7 +763,7 @@ public:
                 size_t end = std::min(i + chunkSize, docs.size());
 
                 futures.push_back(std::async(std::launch::async, [&, i, end]() {
-                    std::vector<metadata::DocumentInfo> hot, cold;
+                    std::vector<metadata::GrepCandidateProjection> hot, cold;
                     for (size_t j = i; j < end; ++j) {
                         auto& d = docs[j];
 
@@ -1495,9 +1515,9 @@ private:
 
         auto fetchPrefix = [&](const std::string& prefix) {
             if (prefix.empty() || prefix == "/") {
-                auto res =
-                    retryMetadataOp([&]() { return metadata::queryDocumentsByPattern(*repo, "%"); },
-                                    4, std::chrono::milliseconds(25), &telemetry);
+                auto res = retryMetadataOp(
+                    [&]() { return metadata::queryGrepCandidatesByPattern(*repo, "%"); }, 4,
+                    std::chrono::milliseconds(25), &telemetry);
                 if (res)
                     addFn(std::move(res.value()));
                 return;
@@ -1507,8 +1527,9 @@ private:
             opts.prefixIsDirectory = true;
             opts.includeSubdirectories = true;
             opts.orderByNameAsc = true;
-            auto res = retryMetadataOp([&]() { return repo->queryDocuments(opts); }, 4,
-                                       std::chrono::milliseconds(25), &telemetry);
+            auto res =
+                retryMetadataOp([&]() { return repo->queryDocumentsForGrepCandidates(opts); }, 4,
+                                std::chrono::milliseconds(25), &telemetry);
             if (res)
                 addFn(std::move(res.value()));
         };

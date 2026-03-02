@@ -341,6 +341,18 @@ void appendDocumentQueryFilters(const DocumentQueryOptions& options, bool joinFt
         conditions.emplace_back("repair_attempted_at < ?");
         addIntParam(params, *options.repairAttemptedBefore);
     }
+
+    if (options.excludeBinaryMimeTypes) {
+        // Exclude obviously-ungrepable MIME types at the SQL level.
+        // This reduces the candidate set before C++ processing.
+        // Uses indexed mime_type column to skip rows early.
+        conditions.emplace_back(
+            "mime_type NOT LIKE 'image/%' AND mime_type NOT LIKE 'video/%' "
+            "AND mime_type NOT LIKE 'audio/%' AND mime_type != 'application/pdf' "
+            "AND mime_type != 'application/zip' AND mime_type != 'application/x-tar' "
+            "AND mime_type != 'application/x-gzip' AND mime_type != 'application/x-bzip2' "
+            "AND mime_type != 'application/octet-stream'");
+    }
 }
 
 void appendMetadataValueCountDocumentFilters(const DocumentQueryOptions& options,

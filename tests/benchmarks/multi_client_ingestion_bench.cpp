@@ -1925,7 +1925,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
             int itemsInPage = 0;
             if (useMcpPath && !useDirectDiscoveryFallback) {
                 auto listRes = sharedMcpPool->queryStepForSlot(
-                    0, "list", {{"limit", kDiscoverPageSize}, {"offset", offset}});
+                    0, "list",
+                    {{"limit", kDiscoverPageSize}, {"offset", offset}, {"use_session", false}});
                 if (!listRes) {
                     WARN("Discovery list failed at offset " << offset << ": "
                                                             << listRes.error().message);
@@ -2048,7 +2049,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
             yams::Result<nlohmann::json> res;
             int items = 0;
             if (useMcpPath) {
-                res = sharedMcpPool->queryStepForSlot(0, "list", {{"limit", 50}});
+                res = sharedMcpPool->queryStepForSlot(0, "list",
+                                                      {{"limit", 50}, {"use_session", false}});
                 if (res && res.value().contains("items") && res.value()["items"].is_array()) {
                     items = static_cast<int>(res.value()["items"].size());
                 } else if (res && res.value().contains("documents") &&
@@ -2284,8 +2286,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 auto t0 = std::chrono::steady_clock::now();
                 yams::Result<nlohmann::json> res;
                 if (useMcpPath) {
-                    res = sharedMcpPool->queryStepForSlot(static_cast<size_t>(tid), "list",
-                                                          {{"limit", req.limit}});
+                    res = sharedMcpPool->queryStepForSlot(
+                        static_cast<size_t>(tid), "list",
+                        {{"limit", req.limit}, {"use_session", false}});
                 } else {
                     auto direct = yams::cli::run_sync(client->list(req), kOpTimeout);
                     if (direct) {
@@ -2522,8 +2525,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         req.limit = ((i % 2) == 0) ? 10 : 25;
                         yams::Result<nlohmann::json> res;
                         if (useMcpPath) {
-                            res = sharedMcpPool->queryStepForSlot(static_cast<size_t>(tid), "list",
-                                                                  {{"limit", req.limit}});
+                            res = sharedMcpPool->queryStepForSlot(
+                                static_cast<size_t>(tid), "list",
+                                {{"limit", req.limit}, {"use_session", false}});
                         } else {
                             auto direct = yams::cli::run_sync(client->list(req), kOpTimeout);
                             if (direct) {

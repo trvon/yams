@@ -47,4 +47,14 @@ Result<std::vector<DocumentInfo>>
 queryDocumentsByGlobPatterns(IMetadataRepository& repo,
                              const std::vector<std::string>& globPatterns, int limit = 0);
 
+// Lightweight grep candidate variants — return 6-column projection (id, file_path,
+// file_size, sha256_hash, mime_type, content_extracted) to avoid fetching 15 unused columns
+// per row during grep candidate discovery on large corpora.
+Result<std::vector<GrepCandidateProjection>>
+queryGrepCandidatesByPattern(IMetadataRepository& repo, const std::string& likePattern,
+                             int limit = 0);
+Result<std::vector<GrepCandidateProjection>>
+queryGrepCandidatesByGlobPatterns(IMetadataRepository& repo,
+                                  const std::vector<std::string>& globPatterns, int limit = 0);
+
 } // namespace yams::metadata

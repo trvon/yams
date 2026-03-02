@@ -3,6 +3,7 @@
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/metadata/query_helpers.h>
@@ -124,6 +125,10 @@ queryDocumentsByPattern(MetadataRepository& repo, const std::string& likePattern
 
 DocumentQueryOptions buildQueryOptionsForSqlLikePattern(const std::string& pattern) {
     DocumentQueryOptions opts;
+    // "%" means "all documents" — no WHERE clause needed; skip LIKE overhead
+    if (pattern == "%") {
+        return opts;
+    }
     // Only treat '%' as a wildcard; '_' in paths should be literal
     auto has_percent = pattern.find('%') != std::string::npos;
     if (!has_percent) {
@@ -216,6 +221,7 @@ queryDocumentsByGlobPatterns(IMetadataRepository& repo,
     // Build a custom query with OR conditions
     std::vector<DocumentInfo> allResults;
     allResults.reserve(limit > 0 ? limit : 100);
+    std::unordered_set<int64_t> seenIds;
 
     for (const auto& globPattern : globPatterns) {
         std::string sqlPattern = globToSqlLike(globPattern);
@@ -224,17 +230,67 @@ queryDocumentsByGlobPatterns(IMetadataRepository& repo,
             return result.error();
         }
 
-        // Merge results, avoiding duplicates
+        // Merge results, avoiding duplicates (O(1) lookup per doc)
         for (auto& doc : result.value()) {
-            // Check if already in results (by id or path)
-            bool isDuplicate = false;
-            for (const auto& existing : allResults) {
-                if (existing.id == doc.id) {
-                    isDuplicate = true;
-                    break;
+            if (seenIds.insert(doc.id).second) {
+                allResults.push_back(std::move(doc));
+                if (limit > 0 && allResults.size() >= static_cast<size_t>(limit)) {
+                    return allResults;
                 }
             }
-            if (!isDuplicate) {
+        }
+    }
+
+    return allResults;
+}
+
+Result<std::vector<GrepCandidateProjection>>
+queryGrepCandidatesByPattern(IMetadataRepository& repo, const std::string& likePattern, int limit) {
+    auto opts = buildQueryOptionsForSqlLikePattern(likePattern);
+    opts.excludeBinaryMimeTypes = true;
+    if (limit > 0)
+        opts.limit = limit;
+    auto result = repo.queryDocumentsForGrepCandidates(opts);
+    // Fallback: if no results and no '%' wildcard, try as exact path
+    if (result && result.value().empty() && !likePattern.empty() &&
+        likePattern.find('%') == std::string::npos) {
+        DocumentQueryOptions fallback;
+        fallback.excludeBinaryMimeTypes = true;
+        auto derived = computePathDerivedValues(likePattern);
+        fallback.exactPath = derived.normalizedPath;
+        if (limit > 0)
+            fallback.limit = limit;
+        result = repo.queryDocumentsForGrepCandidates(fallback);
+    }
+    return result;
+}
+
+Result<std::vector<GrepCandidateProjection>>
+queryGrepCandidatesByGlobPatterns(IMetadataRepository& repo,
+                                  const std::vector<std::string>& globPatterns, int limit) {
+    if (globPatterns.empty()) {
+        return queryGrepCandidatesByPattern(repo, "%", limit);
+    }
+
+    if (globPatterns.size() == 1) {
+        std::string sqlPattern = globToSqlLike(globPatterns[0]);
+        return queryGrepCandidatesByPattern(repo, sqlPattern, limit);
+    }
+
+    // Multiple patterns — OR them together with O(1) dedup
+    std::vector<GrepCandidateProjection> allResults;
+    allResults.reserve(limit > 0 ? limit : 100);
+    std::unordered_set<int64_t> seenIds;
+
+    for (const auto& globPattern : globPatterns) {
+        std::string sqlPattern = globToSqlLike(globPattern);
+        auto result = queryGrepCandidatesByPattern(repo, sqlPattern, 0);
+        if (!result) {
+            return result.error();
+        }
+
+        for (auto& doc : result.value()) {
+            if (seenIds.insert(doc.id).second) {
                 allResults.push_back(std::move(doc));
                 if (limit > 0 && allResults.size() >= static_cast<size_t>(limit)) {
                     return allResults;
