@@ -1026,6 +1026,42 @@ jobs:
             mv "${{ env.BUILD_DIR }}"/yams-*.rpm ./ || true
           fi
 
+      - name: Smoke-test ONNX plugin load (Linux)
+        if: ${{ runner.os == 'Linux' && inputs.fast_mode != 'true' && github.actor != 'nektos/act' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${STAGE_DIR:?STAGE_DIR not set}"
+
+          PREFIX="${YAMS_INSTALL_PREFIX:-/usr}"
+          YAMS_BIN="$STAGE_DIR$PREFIX/bin/yams"
+          PLUGIN_SO="$STAGE_DIR$PREFIX/lib/yams/plugins/libyams_onnx_plugin.so"
+
+          if [ ! -x "$YAMS_BIN" ]; then
+            echo "ERROR: Missing staged yams binary: $YAMS_BIN" >&2
+            exit 1
+          fi
+          if [ ! -f "$PLUGIN_SO" ]; then
+            echo "ERROR: Missing staged ONNX plugin: $PLUGIN_SO" >&2
+            exit 1
+          fi
+
+          echo "Checking ONNX plugin relocations"
+          if ldd -r "$PLUGIN_SO" 2>&1 | tee /tmp/yams-onnx-ldd.txt | grep -q "undefined symbol"; then
+            echo "ERROR: unresolved symbols detected in ONNX plugin" >&2
+            cat /tmp/yams-onnx-ldd.txt >&2
+            exit 1
+          fi
+
+          tmp_data="$(mktemp -d)"
+          export YAMS_DATA_DIR="$tmp_data"
+          export YAMS_PLUGIN_DIR="$STAGE_DIR$PREFIX/lib/yams/plugins"
+          export LD_LIBRARY_PATH="$STAGE_DIR$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+          echo "Loading ONNX plugin via staged CLI"
+          "$YAMS_BIN" plugin load "$PLUGIN_SO"
+          "$YAMS_BIN" daemon stop >/dev/null 2>&1 || true
+
       # Release notes are sourced directly from CHANGELOG.md during release creation
 
       - name: Publish matrix.json (expected platform count)

@@ -177,17 +177,23 @@ onnx_plugin_deps = [
   boost_dep,
 ] + win_extra_deps
 
-# Sandbox/in-process daemon fallback paths inside yams_daemon_client reference symbols
-# implemented by yams_daemon. On Windows/MSVC this can surface as unresolved externals
-# when linking the ONNX plugin unless yams_daemon is linked explicitly.
-if host_machine.system() == 'windows'
-  onnx_plugin_deps += dependency('yams_daemon')
+# In-process daemon fallback paths inside yams_daemon_client reference symbols
+# implemented by yams_daemon (for example StreamingRequestProcessor). Link
+# yams_daemon explicitly on all platforms so unresolved symbols fail at build
+# time instead of at plugin dlopen time.
+onnx_plugin_deps += dependency('yams_daemon')
+
+onnx_plugin_link_args = []
+if host_machine.system() == 'linux'
+  # Fail link on unresolved symbols to avoid runtime dlopen failures.
+  onnx_plugin_link_args += ['-Wl,-z,defs']
 endif
 
 yams_onnx_plugin = shared_module('yams_onnx_plugin',
   yams_onnx_plugin_srcs,
   include_directories: [ include_directories('../../include') ],
   dependencies: onnx_plugin_deps,
+  link_args: onnx_plugin_link_args,
   cpp_args: plugin_cppargs,
   install: true,
   install_dir: plugins_dir,
