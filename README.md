@@ -99,44 +99,11 @@ yams list --limit 20
 yams get <hash> -o ./output.bin
 ```
 
-### Symbol Extraction
-
-YAMS extracts symbols (functions, classes, methods) from source code using tree-sitter:
-
-```bash
-# Interactive grammar setup
-yams init
-
-# Or auto-download recommended grammars
-yams init --auto
-
-# Manage grammars separately
-yams config grammar list
-yams config grammar download cpp python rust
-```
-
-**Supported:** C, C++, Python, JavaScript, TypeScript, Rust, Go, Java, C#, PHP, Kotlin, Dart, SQL, Solidity
-
-### Snapshots & Diff
-
-```bash
-# Snapshots are created automatically on add
-yams add . --recursive --include="*.cpp,*.h" --snapshot-label "v1.0"
-
-# List snapshots
-yams list --snapshots
-
-# Compare snapshots (Merkle tree diff with rename detection)
-yams diff v1.0 v1.1
-yams diff v1.0 v1.1 --include="*.cpp" --stats
-```
-
 ## MCP Server
 ```bash
 yams serve  # stdio transport (JSON-RPC)
 ```
 
-**Claude Desktop config** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
