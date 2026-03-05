@@ -140,17 +140,19 @@ For installation: https://visualstudio.microsoft.com/downloads/
 }
 
 # Detect MSVC version
-$msvcVersion = '195' # Default fallback
-$vsVersion = '18'    # Default fallback
+$msvcVersion = $null
+$msvcVersionFromEnv = $null
+$msvcVersionFromCl = $null
+$vsVersion = $null
 
 # Try environment variable first (fastest and safest)
 if ($env:VCToolsVersion -match '^(\d+)\.(\d+)') {
     $toolsetMajor = [int]$matches[1]
     # MSVC version is Toolset Version + 5 (e.g. 14.x -> 19.x)
     $msvcMajor = $toolsetMajor + 5
-    $msvcVersion = "$msvcMajor$($matches[2].Substring(0,1))"
-    Write-Host "Detected MSVC Version (from env): $msvcVersion"
-} 
+    $msvcVersionFromEnv = "$msvcMajor$($matches[2].Substring(0,1))"
+    Write-Host "Detected MSVC Version (from env): $msvcVersionFromEnv"
+}
 # Fallback to cl.exe output
 elseif (Get-Command cl.exe -ErrorAction SilentlyContinue) {
     try {
@@ -160,24 +162,43 @@ elseif (Get-Command cl.exe -ErrorAction SilentlyContinue) {
         if ($clOutput -match 'Version (\d+)\.(\d+)') {
             $major = $matches[1]
             $minor = $matches[2]
-            $msvcVersion = "$major$($minor.Substring(0,1))"
-            Write-Host "Detected MSVC Version (from cl.exe): $msvcVersion"
+            $msvcVersionFromCl = "$major$($minor.Substring(0,1))"
+            Write-Host "Detected MSVC Version (from cl.exe): $msvcVersionFromCl"
         }
     } catch {
         Write-Warning "Failed to detect MSVC version from cl.exe, using defaults. Error: $_"
     }
 }
 
+if ($msvcVersionFromEnv -and $msvcVersionFromCl -and $msvcVersionFromEnv -ne $msvcVersionFromCl) {
+    Write-Warning "MSVC version mismatch: env=$msvcVersionFromEnv, cl.exe=$msvcVersionFromCl. Using env toolset version."
+}
+
+if ($msvcVersionFromEnv) {
+    $msvcVersion = $msvcVersionFromEnv
+} elseif ($msvcVersionFromCl) {
+    $msvcVersion = $msvcVersionFromCl
+} else {
+    $msvcVersion = '195' # Default fallback
+}
+
 # Map MSVC version to VS version
-# 193 -> VS 17 (2022)
-# 194 -> VS 17 (2022) updates
-# 195 -> VS 18 (2025)
-if ($msvcVersion -ge 195) {
-    $vsVersion = '18'
-} elseif ($msvcVersion -ge 193) {
-    $vsVersion = '17'
-} elseif ($msvcVersion -ge 192) {
-    $vsVersion = '16'
+# Prefer actual VS installation version when available.
+if ($vsInstallVersion -and $vsInstallVersion -match '^(\d+)\.') {
+    $vsVersion = $matches[1]
+} else {
+    # 193 -> VS 17 (2022)
+    # 194 -> VS 17 (2022) updates
+    # 195 -> VS 18 (2025)
+    if ($msvcVersion -ge 195) {
+        $vsVersion = '18'
+    } elseif ($msvcVersion -ge 193) {
+        $vsVersion = '17'
+    } elseif ($msvcVersion -ge 192) {
+        $vsVersion = '16'
+    } else {
+        $vsVersion = '18'
+    }
 }
 
 # Force VS 2022 toolset (v143/v144) if we are on VS 2025 to fix Boost build
@@ -198,10 +219,43 @@ if (-not $env:YAMS_CPPSTD) {
     $env:YAMS_CPPSTD = '20'
 }
 
+# Enforce minimum C++20
+$cppStdValue = $null
+if ([int]::TryParse($env:YAMS_CPPSTD, [ref]$cppStdValue)) {
+    if ($cppStdValue -lt 20) {
+        Write-Error "YAMS requires C++20 or newer on Windows. Detected YAMS_CPPSTD=$($env:YAMS_CPPSTD)."
+    }
+} else {
+    Write-Warning "Could not parse YAMS_CPPSTD='$($env:YAMS_CPPSTD)'. Proceeding with compiler detection."
+}
+
 # Safety check: C++23 with MSVC + Boost 1.86 is currently problematic on Windows
 if ($env:YAMS_CPPSTD -eq '23' -and $msvcVersion -ge 190) {
     Write-Warning "C++23 with MSVC and Boost is currently unstable. Forcing downgrade to C++20 for this build."
     $env:YAMS_CPPSTD = '20'
+}
+
+# C++20 capability probe (non-modules)
+$cxx20ProbeOk = $false
+$cxx20TestCode = '#include <vector>\nint main(){std::vector<int> v; return (int)v.size(); }'
+$cxx20TestFile = [System.IO.Path]::GetTempFileName() + '.cpp'
+try {
+    $cxx20TestCode | Out-File -FilePath $cxx20TestFile -Encoding ascii
+    $clOutput = & cl.exe /nologo /std:c++20 /EHsc /TP /c $cxx20TestFile /Fo:NUL 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $cxx20ProbeOk = $true
+        Write-Host "C++20 compile probe succeeded"
+    } else {
+        Write-Warning "C++20 compile probe failed. Compiler output: $clOutput"
+    }
+} catch {
+    Write-Warning "C++20 compile probe failed: $_"
+} finally {
+    Remove-Item -Path $cxx20TestFile -ErrorAction SilentlyContinue
+}
+
+if (-not $cxx20ProbeOk) {
+    Write-Error "C++20 support is required but not detected. Ensure MSVC toolset supports /std:c++20."
 }
 
 # C++20 Modules auto-detection
@@ -232,6 +286,8 @@ if (-not $env:YAMS_ENABLE_MODULES) {
         Write-Host "C++20 modules disabled via YAMS_ENABLE_MODULES=false"
     }
 }
+
+Write-Host "Decision trace: VS=$vsVersion (install=$vsInstallVersion), MSVC=$msvcVersion, Toolset=$($env:VCToolsVersion), C++=$($env:YAMS_CPPSTD), Modules=$enableModules"
 
 # Ensure Python tools
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
@@ -292,6 +348,19 @@ $conanArgs = @(
     '-s', "compiler.cppstd=$($env:YAMS_CPPSTD)",
     '--update'
 )
+
+# Prefer Ninja generator on VS 2025 to avoid unsupported VS generator names
+$cmakeGenerator = $env:YAMS_CMAKE_GENERATOR
+$vsVersionNumber = $null
+if (-not $cmakeGenerator -and [int]::TryParse($vsVersion, [ref]$vsVersionNumber)) {
+    if ($vsVersionNumber -ge 18) {
+        $cmakeGenerator = 'Ninja'
+        Write-Host "Using CMake generator: $cmakeGenerator (override with YAMS_CMAKE_GENERATOR)"
+    }
+}
+if ($cmakeGenerator) {
+    $conanArgs += @('-c', "tools.cmake.cmaketoolchain:generator=$cmakeGenerator")
+}
 
 # Configure VS version for bzip2 and other packages that need MSBuild detection
 # VS 2025/2024 is version 18, MSVC compiler version 195
@@ -425,6 +494,65 @@ try {
     Write-Warning "2. Try cleaning the cache: conan remove boost/* -c"
     Write-Warning "3. Vcpkg is often more stable on Windows for bleeding-edge compilers, but this project uses Conan for cross-platform consistency."
     exit 1
+}
+
+# Workaround: libiconv static libs may be missing from Conan package on Windows
+$libiconvPc = Join-Path $buildDir "$conanSubdir/conan/libiconv.pc"
+if (Test-Path $libiconvPc) {
+    $libiconvPrefix = $null
+    $libiconvLibDir = $null
+    try {
+        $libiconvPrefix = (Get-Content $libiconvPc | Where-Object { $_ -match '^prefix=' }) -replace '^prefix=', ''
+        if ($libiconvPrefix) {
+            $libiconvLibDir = Join-Path $libiconvPrefix 'lib'
+        }
+    } catch {
+        $libiconvPrefix = $null
+    }
+
+    if ($libiconvLibDir) {
+        if (-not (Test-Path $libiconvLibDir)) {
+            New-Item -ItemType Directory -Path $libiconvLibDir | Out-Null
+        }
+
+        $iconvLibPath = Join-Path $libiconvLibDir 'iconv.lib'
+        $charsetLibPath = Join-Path $libiconvLibDir 'charset.lib'
+
+        if (-not (Test-Path $iconvLibPath) -or -not (Test-Path $charsetLibPath)) {
+            $conanCacheRoot = Join-Path $env:USERPROFILE '.conan2\p'
+            $iconvNoI18n = $null
+            $iconvDllLib = $null
+            $charsetLib = $null
+            $charsetDllLib = $null
+
+            if (Test-Path $conanCacheRoot) {
+                $iconvNoI18n = Get-ChildItem -Path $conanCacheRoot -Filter 'iconv_no_i18n.lib' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                $iconvDllLib = Get-ChildItem -Path $conanCacheRoot -Filter 'iconv.dll.lib' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                $charsetLib = Get-ChildItem -Path $conanCacheRoot -Filter 'charset.lib' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                $charsetDllLib = Get-ChildItem -Path $conanCacheRoot -Filter 'charset.dll.lib' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            }
+
+            if (-not (Test-Path $iconvLibPath)) {
+                if ($iconvNoI18n) {
+                    Copy-Item -Path $iconvNoI18n.FullName -Destination $iconvLibPath -Force
+                    Write-Host "Patched libiconv: copied iconv_no_i18n.lib to $iconvLibPath"
+                } elseif ($iconvDllLib) {
+                    Copy-Item -Path $iconvDllLib.FullName -Destination $iconvLibPath -Force
+                    Write-Host "Patched libiconv: copied iconv.dll.lib to $iconvLibPath"
+                }
+            }
+
+            if (-not (Test-Path $charsetLibPath)) {
+                if ($charsetLib) {
+                    Copy-Item -Path $charsetLib.FullName -Destination $charsetLibPath -Force
+                    Write-Host "Patched libiconv: copied charset.lib to $charsetLibPath"
+                } elseif ($charsetDllLib) {
+                    Copy-Item -Path $charsetDllLib.FullName -Destination $charsetLibPath -Force
+                    Write-Host "Patched libiconv: copied charset.dll.lib to $charsetLibPath"
+                }
+            }
+        }
+    }
 }
 
 # Meson setup: prefer native file; if cross file is generated, use that instead
