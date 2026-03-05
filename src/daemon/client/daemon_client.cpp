@@ -43,6 +43,7 @@
 #include <string_view>
 #include <thread>
 #include <tuple>
+#include <unordered_map>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -576,6 +577,60 @@ static bool isProxySocketPath(const std::filesystem::path& socketPath) {
     return name.size() >= 11 && name.rfind(".proxy.sock") == name.size() - 11;
 }
 
+struct SocketHealthCacheEntry {
+    bool reachable{false};
+    std::chrono::steady_clock::time_point checkedAt{};
+};
+
+static std::mutex& socketHealthCacheMutex() {
+    static auto* m = new std::mutex();
+    return *m;
+}
+
+static std::unordered_map<std::string, SocketHealthCacheEntry>& socketHealthCache() {
+    static auto* cache = new std::unordered_map<std::string, SocketHealthCacheEntry>();
+    return *cache;
+}
+
+static bool socketPingCached(const std::filesystem::path& socketPath,
+                             std::chrono::steady_clock::duration healthyTtl,
+                             std::chrono::steady_clock::duration unhealthyTtl) {
+    if (socketPath.empty()) {
+        return false;
+    }
+
+    const auto key = socketPath.string();
+    const auto now = std::chrono::steady_clock::now();
+
+    {
+        std::lock_guard<std::mutex> lk(socketHealthCacheMutex());
+        auto& cache = socketHealthCache();
+        if (auto it = cache.find(key); it != cache.end()) {
+            const auto age = now - it->second.checkedAt;
+            const auto ttl = it->second.reachable ? healthyTtl : unhealthyTtl;
+            if (age < ttl) {
+                return it->second.reachable;
+            }
+        }
+    }
+
+    const bool reachable = pingDaemonSync(socketPath);
+
+    {
+        std::lock_guard<std::mutex> lk(socketHealthCacheMutex());
+        auto& cache = socketHealthCache();
+        cache[key] = SocketHealthCacheEntry{reachable, now};
+    }
+
+    return reachable;
+}
+
+static bool proxyLooksReachable(const std::filesystem::path& socketPath) {
+    constexpr auto kHealthyTtl = std::chrono::seconds(10);
+    constexpr auto kUnhealthyTtl = std::chrono::seconds(2);
+    return socketPingCached(socketPath, kHealthyTtl, kUnhealthyTtl);
+}
+
 static std::filesystem::path deriveMainSocketFromProxy(const std::filesystem::path& socketPath) {
     if (!isProxySocketPath(socketPath)) {
         return {};
@@ -611,7 +666,7 @@ selectMainSocketWhenProxyUnavailable(const std::filesystem::path& currentSocket)
         return {};
     }
 
-    if (pingDaemonSync(currentSocket)) {
+    if (proxyLooksReachable(currentSocket)) {
         return {};
     }
 
@@ -821,7 +876,9 @@ bool DaemonClient::isConnected() const {
         return pImpl->embeddedHost_ && pImpl->embeddedHost_->getDispatcher() != nullptr;
     }
     // Treat connectivity as liveness of the daemon (socket + ping), not a persistent socket
-    return pingDaemonSync(pImpl->config_.socketPath);
+    constexpr auto kHealthyTtl = std::chrono::seconds(2);
+    constexpr auto kUnhealthyTtl = std::chrono::seconds(1);
+    return socketPingCached(pImpl->config_.socketPath, kHealthyTtl, kUnhealthyTtl);
 }
 
 boost::asio::awaitable<Result<SearchResponse>> DaemonClient::search(const SearchRequest& req) {
