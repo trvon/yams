@@ -889,6 +889,36 @@ jobs:
           "STAGE_DIR=$stageDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "BUILD_DIR=$buildDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Generate winget manifest (stable, windows only)
+        if: runner.os == 'Windows' && steps.meta.outputs.channel == 'stable' && inputs.fast_mode != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ steps.meta.outputs.version }}"
+          $tag = "${{ steps.meta.outputs.tag }}"
+
+          # Find the Windows MSI produced in this job
+          $msiFile = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Filter "*.msi" | Select-Object -First 1
+          if (-not $msiFile) {
+              Write-Error "No MSI file found in workspace; cannot generate winget manifest"
+              exit 1
+          }
+
+          Write-Host "Generating winget manifest for version $version"
+          Write-Host "MSI file: $($msiFile.FullName)"
+
+          & ./packaging/windows/generate-winget-manifest.ps1 `
+              -Version $version `
+              -Tag $tag `
+              -MsiPath $msiFile.FullName `
+              -GitHubRepo "${{ github.repository }}" `
+              -OutputDir "winget-manifests"
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Winget manifest generation failed"
+              exit 1
+          }
+
       - name: Generate release summary
         shell: bash
         run: |
@@ -1030,6 +1060,7 @@ jobs:
             yams-*.rpm
             yams-*.AppImage
             yams-*.pkg
+            winget-manifests/**
           retention-days: 1
 
       - name: Verify Linux package artifacts
@@ -1532,45 +1563,6 @@ jobs:
             echo "HOMEBREW_TAP_TOKEN not set; manual push required" >&2
           fi
           popd >/dev/null
-
-      - name: Generate winget manifest (stable only)
-        if: steps.meta.outputs.channel == 'stable'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $version = "${{ steps.meta.outputs.version }}"
-          $tag = "${{ steps.meta.outputs.tag }}"
-
-          # Find the Windows MSI in assets
-          $msiFile = Get-ChildItem -Path "assets" -Filter "*.msi" | Select-Object -First 1
-          if (-not $msiFile) {
-              Write-Warning "No MSI file found in assets; skipping winget manifest generation"
-              exit 0
-          }
-
-          Write-Host "Generating winget manifest for version $version"
-          Write-Host "MSI file: $($msiFile.FullName)"
-
-          # Run the winget manifest generator
-          & ./packaging/windows/generate-winget-manifest.ps1 `
-              -Version $version `
-              -Tag $tag `
-              -MsiPath $msiFile.FullName `
-              -GitHubRepo "${{ github.repository }}" `
-              -OutputDir "winget-manifests"
-
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "Winget manifest generation failed"
-              exit 1
-          }
-
-      - name: Upload winget manifest artifact
-        if: steps.meta.outputs.channel == 'stable'
-        uses: actions/upload-artifact@v4
-        with:
-          name: winget-manifest
-          path: winget-manifests/
-          retention-days: 30
 
       - name: Build APT repository metadata (stable only, linux .deb present)
         if: steps.meta.outputs.channel == 'stable'

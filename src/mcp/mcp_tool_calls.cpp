@@ -6,6 +6,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/use_future.hpp>
+
 #include <future>
 #include <string>
 
@@ -77,29 +80,14 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
         return {{"error", {{"code", -32603}, {"message", "Tool registry not initialized"}}}};
     }
 
-    auto task = reg->callTool(name, arguments);
-
     boost::asio::any_io_executor exec;
 #if defined(YAMS_WASI)
     exec = boost::asio::system_executor();
 #else
     exec = yams::daemon::GlobalIOContext::instance().get_io_context().get_executor();
 #endif
-    auto promise = std::make_shared<std::promise<json>>();
-    auto future = promise->get_future();
-
-    boost::asio::co_spawn(
-        exec,
-        [task = std::move(task), promise]() mutable -> boost::asio::awaitable<void> {
-            try {
-                auto result = co_await std::move(task);
-                promise->set_value(result);
-            } catch (...) {
-                promise->set_exception(std::current_exception());
-            }
-            co_return;
-        },
-        boost::asio::detached);
+    auto future =
+        boost::asio::co_spawn(exec, reg->callTool(name, arguments), boost::asio::use_future);
 
     try {
         json result = future.get();
