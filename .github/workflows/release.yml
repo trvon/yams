@@ -1438,13 +1438,12 @@ jobs:
           DATE=$(echo "$VERSION" | sed -E 's/.*-([0-9]{8})-.*/\1/')
           HASH=$(echo "$VERSION" | sed -E 's/.*-([a-f0-9]{7})$/\1/')
           
-          if [ ! -d "$TAP_PATH" ]; then
-            echo "Tap submodule not found at $TAP_PATH; skipping nightly formula update" >&2
-            exit 0
-          fi
-          
-          # Initialize submodule
+          # Initialize submodule before checking path (checkout has submodules disabled by default)
           git submodule update --init homebrew-yams
+          if [ ! -d "$TAP_PATH" ]; then
+            echo "Tap submodule not found at $TAP_PATH after init" >&2
+            exit 1
+          fi
           
           # Checkout main BEFORE modifying any files (avoids checkout conflicts)
           pushd "$TAP_PATH" >/dev/null
@@ -1558,7 +1557,7 @@ jobs:
           git commit -m "chore(homebrew): update nightly formula to ${VERSION}"
           if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
             REMOTE="https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${{ github.repository_owner }}/homebrew-yams.git"
-            git push "$REMOTE" main || echo "Push failed; ensure HOMEBREW_TAP_TOKEN has repo permissions"
+            git push "$REMOTE" main
           else
             echo "HOMEBREW_TAP_TOKEN not set; manual push required" >&2
           fi
@@ -1622,6 +1621,8 @@ jobs:
           fi
           pushd "$REPO_ROOT" >/dev/null
 
+          mkdir -p "dists/$DIST/$COMPONENT"
+
           # Scan pool once, then split package stanzas per architecture.
           dpkg-scanpackages --multiversion pool > dists/$DIST/$COMPONENT/Packages.all
           for ARCH in "${ARCHES[@]}"; do
@@ -1656,20 +1657,21 @@ jobs:
               done
             done
           } > dists/$DIST/Release
-          # Optional GPG signing if secret present
-          if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
-            GPG_ARGS=(--batch --yes)
-            if [ -n "${GPG_PASSPHRASE:-}" ]; then
-              GPG_ARGS+=(--pinentry-mode loopback --passphrase "$GPG_PASSPHRASE")
-            fi
-            echo "$GPG_PRIVATE_KEY" | base64 -d | gpg "${GPG_ARGS[@]}" --import
-            gpg "${GPG_ARGS[@]}" -abs -o dists/$DIST/Release.gpg dists/$DIST/Release
-            gpg "${GPG_ARGS[@]}" --clearsign -o dists/$DIST/InRelease dists/$DIST/Release
+          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "ERROR: Missing GPG_PRIVATE_KEY; refusing to publish unsigned stable APT metadata" >&2
+            exit 1
           fi
+          GPG_ARGS=(--batch --yes --pinentry-mode loopback)
+          if [ -n "${GPG_PASSPHRASE:-}" ]; then
+            GPG_ARGS+=(--passphrase "$GPG_PASSPHRASE")
+          fi
+          echo "$GPG_PRIVATE_KEY" | base64 -d | gpg "${GPG_ARGS[@]}" --import
+          gpg "${GPG_ARGS[@]}" -abs -o dists/$DIST/Release.gpg dists/$DIST/Release
+          gpg "${GPG_ARGS[@]}" --clearsign -o dists/$DIST/InRelease dists/$DIST/Release
           popd >/dev/null
           tree "$REPO_ROOT" || find "$REPO_ROOT" -maxdepth 4 -type f -print
           printf '%s\n' \
-            'Add this APT repo (unsigned example):' \
+            'Add this APT repo (signed):' \
             '  curl -fsSL https://repo.yamsmemory.ai/gpg.key -o /usr/share/keyrings/yams.gpg' \
             '  echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/yams.gpg] https://repo.yamsmemory.ai/aptrepo stable main" | sudo tee /etc/apt/sources.list.d/yams.list' \
             '  sudo apt-get update && sudo apt-get install yams' \

@@ -200,7 +200,7 @@ Installers:
   - Architecture: x64
     InstallerUrl: $MsiUrl
     InstallerSha256: $hash
-        ProductCode: '$productCode'
+    ProductCode: '$productCode'
 ManifestType: installer
 ManifestVersion: $manifestVersion
 "@
