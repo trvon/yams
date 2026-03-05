@@ -1109,9 +1109,13 @@ void DaemonClient::StreamingListHandler::onHeaderReceived(const Response& header
         error_.reset();
         items_.clear();
         count_ = 0;
+        queryInfo_.clear();
+        listStats_.clear();
 
         // Store total count from header
         totalCount_ = listRes->totalCount;
+        queryInfo_ = listRes->queryInfo;
+        listStats_ = listRes->listStats;
 
         // Pre-allocate results vector if we know the size
         if (totalCount_ > 0 && limit_ > 0) {
@@ -1152,12 +1156,16 @@ void DaemonClient::StreamingSearchHandler::onHeaderReceived(const Response& head
         error_.reset();
         results_.clear();
         count_ = 0;
+        queryInfo_.clear();
+        searchStats_.clear();
 
         spdlog::debug("StreamingSearchHandler: header received (totalCount={}, elapsed={}ms)",
                       searchRes->totalCount, searchRes->elapsed.count());
         // Store total count and elapsed time from header
         totalCount_ = searchRes->totalCount;
         elapsed_ = searchRes->elapsed;
+        queryInfo_ = searchRes->queryInfo;
+        searchStats_ = searchRes->searchStats;
 
         // Pre-allocate results vector if we know the size
         if (totalCount_ > 0 && limit_ > 0) {
@@ -1193,6 +1201,12 @@ bool DaemonClient::StreamingListHandler::onChunkReceived(const Response& chunkRe
         if (listRes->totalCount > 0) {
             totalCount_ = listRes->totalCount;
         }
+        if (!listRes->queryInfo.empty()) {
+            queryInfo_ = listRes->queryInfo;
+        }
+        if (!listRes->listStats.empty()) {
+            listStats_.insert(listRes->listStats.begin(), listRes->listStats.end());
+        }
 
         // Process items in this chunk
         for (const auto& item : listRes->items) {
@@ -1225,6 +1239,12 @@ bool DaemonClient::StreamingSearchHandler::onChunkReceived(const Response& chunk
         // Update totals if they changed
         if (searchRes->totalCount > 0) {
             totalCount_ = searchRes->totalCount;
+        }
+        if (!searchRes->queryInfo.empty()) {
+            queryInfo_ = searchRes->queryInfo;
+        }
+        if (!searchRes->searchStats.empty()) {
+            searchStats_.insert(searchRes->searchStats.begin(), searchRes->searchStats.end());
         }
 
         // Process results in this chunk
@@ -1272,6 +1292,8 @@ Result<ListResponse> DaemonClient::StreamingListHandler::getResults() const {
     ListResponse response;
     response.items = items_;
     response.totalCount = totalCount_;
+    response.queryInfo = queryInfo_;
+    response.listStats = listStats_;
 
     return response;
 }
@@ -1304,6 +1326,8 @@ Result<SearchResponse> DaemonClient::StreamingSearchHandler::getResults() const 
     response.results = results_;
     response.totalCount = totalCount_;
     response.elapsed = elapsed_;
+    response.queryInfo = queryInfo_;
+    response.searchStats = searchStats_;
 
     return response;
 }
@@ -1341,9 +1365,25 @@ void DaemonClient::StreamingGrepHandler::onHeaderReceived(const Response& header
         error_.reset();
         matches_.clear();
         perFileCount_.clear();
+        searchStats_.clear();
+        filesWith_.clear();
+        filesWithout_.clear();
+        pathsOnlyResults_.clear();
 
         totalMatches_ = grepRes->totalMatches;
         filesSearched_ = grepRes->filesSearched;
+        regexMatches_ = grepRes->regexMatches;
+        semanticMatches_ = grepRes->semanticMatches;
+        executionTimeMs_ = grepRes->executionTimeMs;
+        queryInfo_ = grepRes->queryInfo;
+        if (!grepRes->searchStats.empty()) {
+            searchStats_ = grepRes->searchStats;
+        }
+        filesWith_.insert(filesWith_.end(), grepRes->filesWith.begin(), grepRes->filesWith.end());
+        filesWithout_.insert(filesWithout_.end(), grepRes->filesWithout.begin(),
+                             grepRes->filesWithout.end());
+        pathsOnlyResults_.insert(pathsOnlyResults_.end(), grepRes->pathsOnly.begin(),
+                                 grepRes->pathsOnly.end());
 
         // Process any matches included in the header
         for (const auto& m : grepRes->matches) {
@@ -1374,6 +1414,33 @@ bool DaemonClient::StreamingGrepHandler::onChunkReceived(const Response& chunkRe
         }
         if (grepRes->filesSearched > 0) {
             filesSearched_ = grepRes->filesSearched;
+        }
+        if (grepRes->regexMatches > 0) {
+            regexMatches_ = grepRes->regexMatches;
+        }
+        if (grepRes->semanticMatches > 0) {
+            semanticMatches_ = grepRes->semanticMatches;
+        }
+        if (grepRes->executionTimeMs > 0) {
+            executionTimeMs_ = grepRes->executionTimeMs;
+        }
+        if (!grepRes->queryInfo.empty()) {
+            queryInfo_ = grepRes->queryInfo;
+        }
+        if (!grepRes->searchStats.empty()) {
+            searchStats_.insert(grepRes->searchStats.begin(), grepRes->searchStats.end());
+        }
+        if (!grepRes->filesWith.empty()) {
+            filesWith_.insert(filesWith_.end(), grepRes->filesWith.begin(),
+                              grepRes->filesWith.end());
+        }
+        if (!grepRes->filesWithout.empty()) {
+            filesWithout_.insert(filesWithout_.end(), grepRes->filesWithout.begin(),
+                                 grepRes->filesWithout.end());
+        }
+        if (!grepRes->pathsOnly.empty()) {
+            pathsOnlyResults_.insert(pathsOnlyResults_.end(), grepRes->pathsOnly.begin(),
+                                     grepRes->pathsOnly.end());
         }
 
         for (const auto& m : grepRes->matches) {
@@ -1420,6 +1487,14 @@ Result<GrepResponse> DaemonClient::StreamingGrepHandler::getResults() const {
     r.matches = matches_;
     r.totalMatches = totalMatches_;
     r.filesSearched = filesSearched_;
+    r.regexMatches = regexMatches_;
+    r.semanticMatches = semanticMatches_;
+    r.executionTimeMs = executionTimeMs_;
+    r.queryInfo = queryInfo_;
+    r.searchStats = searchStats_;
+    r.filesWith = filesWith_;
+    r.filesWithout = filesWithout_;
+    r.pathsOnly = pathsOnlyResults_;
     return r;
 }
 

@@ -162,6 +162,7 @@ void IndexingPipeline::workerThread() {
 
             task = std::move(taskQueue_.front());
             taskQueue_.pop();
+            YAMS_PLOT("ingest::queue_depth", static_cast<int64_t>(taskQueue_.size()));
         }
 
         // Process task
@@ -171,8 +172,11 @@ void IndexingPipeline::workerThread() {
         if (result.isSuccess()) {
             documentsProcessed_++;
             totalChunks_ += result.chunksCreated;
+            YAMS_PLOT("ingest::documents_processed",
+                      static_cast<int64_t>(documentsProcessed_.load()));
         } else {
             documentsFailed_++;
+            YAMS_PLOT("ingest::documents_failed", static_cast<int64_t>(documentsFailed_.load()));
         }
 
         // Call progress callback
@@ -201,27 +205,48 @@ IndexingResult IndexingPipeline::processTask(IndexingTask& task) {
     try {
         // Stage 1: Extract document
         task.stage = PipelineStage::Extracting;
+        [[maybe_unused]] const auto extractStart = std::chrono::steady_clock::now();
         if (!extractDocument(task)) {
+            YAMS_PLOT("ingest::extract_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                std::chrono::steady_clock::now() - extractStart)
+                                                .count());
             result.status = IndexingStatus::Failed;
             result.error = "Text extraction failed";
             return result;
         }
+        YAMS_PLOT("ingest::extract_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::steady_clock::now() - extractStart)
+                                            .count());
 
         // Stage 2: Process content
         task.stage = PipelineStage::Processing;
+        [[maybe_unused]] const auto processStart = std::chrono::steady_clock::now();
         if (!processContent(task)) {
+            YAMS_PLOT("ingest::process_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                std::chrono::steady_clock::now() - processStart)
+                                                .count());
             result.status = IndexingStatus::Failed;
             result.error = "Content processing failed";
             return result;
         }
+        YAMS_PLOT("ingest::process_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::steady_clock::now() - processStart)
+                                            .count());
 
         // Stage 3: Index content
         task.stage = PipelineStage::Indexing;
+        [[maybe_unused]] const auto indexStart = std::chrono::steady_clock::now();
         if (!indexContent(task)) {
+            YAMS_PLOT("ingest::index_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now() - indexStart)
+                                              .count());
             result.status = IndexingStatus::Failed;
             result.error = "Content indexing failed";
             return result;
         }
+        YAMS_PLOT("ingest::index_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - indexStart)
+                                          .count());
 
         // Best-effort: delegate entity/symbol extraction to daemon service
         try {
@@ -257,6 +282,8 @@ IndexingResult IndexingPipeline::processTask(IndexingTask& task) {
 
     auto endTime = std::chrono::steady_clock::now();
     result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+    YAMS_PLOT("ingest::task_duration_ms", static_cast<int64_t>(result.duration.count()));
+    YAMS_PLOT("ingest::task_status", static_cast<int64_t>(result.status));
 
     return result;
 }

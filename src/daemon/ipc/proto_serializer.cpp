@@ -1029,6 +1029,8 @@ template <> struct ProtoBinding<SearchResponse> {
         o->set_total_count(static_cast<uint64_t>(r.totalCount));
         o->set_elapsed_ms(static_cast<int64_t>(r.elapsed.count()));
         o->set_trace_id(yams::common::sanitizeUtf8(r.traceId));
+        o->set_query_info(yams::common::sanitizeUtf8(r.queryInfo));
+        to_kv_pairs(r.searchStats, o->mutable_search_stats());
         for (const auto& s : r.results) {
             auto* pr = o->add_results();
             pr->set_id(yams::common::sanitizeUtf8(s.id));
@@ -1045,6 +1047,8 @@ template <> struct ProtoBinding<SearchResponse> {
         r.totalCount = i.total_count();
         r.elapsed = std::chrono::milliseconds{i.elapsed_ms()};
         r.traceId = i.trace_id();
+        r.queryInfo = i.query_info();
+        r.searchStats = from_kv_pairs(i.search_stats());
         r.results.reserve(i.results_size());
         for (const auto& pr : i.results()) {
             SearchResult sr{};
@@ -1120,6 +1124,8 @@ template <> struct ProtoBinding<ListResponse> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kListResponse;
     static void set(Envelope& env, const ListResponse& r) {
         auto* o = env.mutable_list_response();
+        o->set_query_info(yams::common::sanitizeUtf8(r.queryInfo));
+        to_kv_pairs(r.listStats, o->mutable_list_stats());
         for (const auto& e : r.items) {
             auto* le = o->add_items();
             le->set_hash(e.hash);
@@ -1150,6 +1156,8 @@ template <> struct ProtoBinding<ListResponse> {
         const auto& i = env.list_response();
         ListResponse r{};
         r.totalCount = i.total_count();
+        r.queryInfo = i.query_info();
+        r.listStats = from_kv_pairs(i.list_stats());
         r.items.reserve(i.items_size());
         for (const auto& le : i.items()) {
             ListEntry e{};

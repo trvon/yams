@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdlib>
+#include <regex>
 #include <sstream>
 #include <unordered_set>
 
@@ -229,7 +230,40 @@ bool hasAdvancedFts5Operators(const std::string& query) {
     return sawOperatorToken && sawNonOperatorToken;
 }
 
+// Strip XML-style tags that leak from LLM output into search queries.
+// Handles:
+//   - Matched pairs:   <tag>content</tag>  → stripped entirely (tag + content)
+//   - Orphaned open:   <tag>trailing text  → strip tag markup only (keep text)
+//   - Orphaned close:  </tag>              → strip tag markup only
+//   - Generic:         <foo_bar>           → strip tag markup only
+// Preserves mathematical comparisons like "x < 5" (requires letter after <).
+static std::string stripXmlTags(const std::string& input) {
+    // Phase 1: strip matched pairs (tag + content between them)
+    static const std::regex matchedPair("<([a-zA-Z_][a-zA-Z0-9_-]*)>[\\s\\S]*?</\\1>",
+                                        std::regex::ECMAScript);
+    std::string result = std::regex_replace(input, matchedPair, " ");
+
+    // Phase 2: strip remaining orphaned opening/closing tags (markup only, keep surrounding text)
+    static const std::regex orphanedTag("</?[a-zA-Z_][a-zA-Z0-9_-]*>", std::regex::ECMAScript);
+    result = std::regex_replace(result, orphanedTag, " ");
+
+    return result;
+}
+
 std::string sanitizeFts5UserQuery(std::string query, bool allowPrefixWildcard) {
+    query.erase(0, query.find_first_not_of(" \t\n\r"));
+    if (!query.empty()) {
+        auto lastNonWs = query.find_last_not_of(" \t\n\r");
+        if (lastNonWs != std::string::npos) {
+            query.erase(lastNonWs + 1);
+        }
+    }
+
+    // Strip XML-style tags that can leak from LLM output into queries.
+    // Must happen before operator detection since tags can masquerade as operators.
+    query = stripXmlTags(query);
+
+    // Re-trim after tag stripping (removal may leave leading/trailing whitespace).
     query.erase(0, query.find_first_not_of(" \t\n\r"));
     if (!query.empty()) {
         auto lastNonWs = query.find_last_not_of(" \t\n\r");

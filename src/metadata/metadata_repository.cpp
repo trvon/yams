@@ -1136,6 +1136,9 @@ Result<size_t> MetadataRepository::updateDocumentsMimeBatch(
 
 // Content operations
 Result<void> MetadataRepository::insertContent(const DocumentContent& content) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::insertContent");
+    YAMS_PLOT("metadata_repo::insert_content_bytes",
+              static_cast<int64_t>(content.contentText.size()));
     return executeQuery<void>([&](Database& db) -> Result<void> {
         DocumentContent sanitized = content;
         sanitized.contentText = common::sanitizeUtf8(content.contentText);
@@ -1147,14 +1150,23 @@ Result<void> MetadataRepository::insertContent(const DocumentContent& content) {
 }
 
 Result<std::optional<DocumentContent>> MetadataRepository::getContent(int64_t documentId) {
-    return executeReadQuery<std::optional<DocumentContent>>(
+    YAMS_ZONE_SCOPED_N("MetadataRepo::getContent");
+    auto result = executeReadQuery<std::optional<DocumentContent>>(
         [&](Database& db) -> Result<std::optional<DocumentContent>> {
             repository::CrudOps<DocumentContent> ops;
             return ops.getById(db, documentId);
         });
+    if (result && result.value().has_value()) {
+        YAMS_PLOT("metadata_repo::get_content_bytes",
+                  static_cast<int64_t>(result.value()->contentText.size()));
+    }
+    return result;
 }
 
 Result<void> MetadataRepository::updateContent(const DocumentContent& content) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::updateContent");
+    YAMS_PLOT("metadata_repo::update_content_bytes",
+              static_cast<int64_t>(content.contentText.size()));
     return executeQuery<void>([&](Database& db) -> Result<void> {
         DocumentContent sanitized = content;
         sanitized.contentText = common::sanitizeUtf8(content.contentText);
@@ -1166,6 +1178,7 @@ Result<void> MetadataRepository::updateContent(const DocumentContent& content) {
 }
 
 Result<void> MetadataRepository::deleteContent(int64_t documentId) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::deleteContent");
     return executeQuery<void>([&](Database& db) -> Result<void> {
         repository::CrudOps<DocumentContent> ops;
         return ops.deleteById(db, documentId);
@@ -1174,6 +1187,8 @@ Result<void> MetadataRepository::deleteContent(int64_t documentId) {
 
 Result<void>
 MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEntry>& entries) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::batchInsertContentAndIndex");
+    YAMS_PLOT("metadata_repo::batch_content_entries", static_cast<int64_t>(entries.size()));
     if (entries.empty()) {
         return Result<void>();
     }
@@ -1411,6 +1426,9 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         if (newlyIndexed > 0) {
             cachedIndexedCount_.fetch_add(newlyIndexed, std::memory_order_relaxed);
         }
+        YAMS_PLOT("metadata_repo::batch_content_newly_extracted",
+                  static_cast<int64_t>(newlyExtracted));
+        YAMS_PLOT("metadata_repo::batch_content_newly_indexed", static_cast<int64_t>(newlyIndexed));
     }
     return result;
 }
@@ -1562,10 +1580,12 @@ MetadataRepository::getAllMetadata(int64_t documentId) {
 
 Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>
 MetadataRepository::getMetadataForDocuments(std::span<const int64_t> documentIds) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::getMetadataForDocuments");
+    YAMS_PLOT("metadata_repo::metadata_batch_requested", static_cast<int64_t>(documentIds.size()));
     if (documentIds.empty())
         return std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>{};
 
-    return executeReadQuery<
+    auto result = executeReadQuery<
         std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>>(
         [&](Database& db)
             -> Result<std::unordered_map<int64_t, std::unordered_map<std::string, MetadataValue>>> {
@@ -1605,6 +1625,11 @@ MetadataRepository::getMetadataForDocuments(std::span<const int64_t> documentIds
 
             return result;
         });
+    if (result) {
+        YAMS_PLOT("metadata_repo::metadata_batch_docs",
+                  static_cast<int64_t>(result.value().size()));
+    }
+    return result;
 }
 
 std::string
@@ -2657,7 +2682,9 @@ MetadataRepository::batchGetDocumentsByHash(const std::vector<std::string>& hash
 Result<std::vector<ListDocumentProjection>>
 MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& options) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::queryDocumentsForListProjection");
-    return executeReadQuery<std::vector<ListDocumentProjection>>(
+    YAMS_PLOT("metadata_repo::list_limit", static_cast<int64_t>(options.limit));
+    YAMS_PLOT("metadata_repo::list_offset", static_cast<int64_t>(options.offset));
+    auto result = executeReadQuery<std::vector<ListDocumentProjection>>(
         [&](Database& db) -> Result<std::vector<ListDocumentProjection>> {
             const bool joinFtsForContains = options.containsFragment && options.containsUsesFts &&
                                             !options.containsFragment->empty() && pathFtsAvailable_;
@@ -2711,12 +2738,19 @@ MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& 
             }
             return execResult;
         });
+    if (result) {
+        YAMS_PLOT("metadata_repo::list_projection_results",
+                  static_cast<int64_t>(result.value().size()));
+    }
+    return result;
 }
 
 Result<std::vector<GrepCandidateProjection>>
 MetadataRepository::queryDocumentsForGrepCandidates(const DocumentQueryOptions& options) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::queryDocumentsForGrepCandidates");
-    return executeReadQuery<std::vector<GrepCandidateProjection>>(
+    YAMS_PLOT("metadata_repo::grep_candidates_limit", static_cast<int64_t>(options.limit));
+    YAMS_PLOT("metadata_repo::grep_candidates_offset", static_cast<int64_t>(options.offset));
+    auto result = executeReadQuery<std::vector<GrepCandidateProjection>>(
         [&](Database& db) -> Result<std::vector<GrepCandidateProjection>> {
             const bool joinFtsForContains = options.containsFragment && options.containsUsesFts &&
                                             !options.containsFragment->empty() && pathFtsAvailable_;
@@ -2774,6 +2808,11 @@ MetadataRepository::queryDocumentsForGrepCandidates(const DocumentQueryOptions& 
             }
             return execResult;
         });
+    if (result) {
+        YAMS_PLOT("metadata_repo::grep_candidates_results",
+                  static_cast<int64_t>(result.value().size()));
+    }
+    return result;
 }
 
 Result<std::unordered_map<std::string, int64_t>>
@@ -5512,11 +5551,13 @@ Result<int64_t> MetadataRepository::deleteDocumentsBySessionId(const std::string
 
 Result<std::vector<DocumentInfo>>
 MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bool matchAll) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::findDocumentsByTags");
+    YAMS_PLOT("metadata_repo::find_by_tags_count", static_cast<int64_t>(tags.size()));
     if (tags.empty()) {
         return std::vector<DocumentInfo>();
     }
 
-    return executeReadQuery<std::vector<DocumentInfo>>(
+    auto result = executeReadQuery<std::vector<DocumentInfo>>(
         [&](Database& db) -> Result<std::vector<DocumentInfo>> {
             // Support both legacy tag storage (key="tag", value="<name>")
             // and normalized storage (key="tag:<name>").
@@ -5605,6 +5646,11 @@ MetadataRepository::findDocumentsByTags(const std::vector<std::string>& tags, bo
 
             return documents;
         });
+    if (result) {
+        YAMS_PLOT("metadata_repo::find_by_tags_results",
+                  static_cast<int64_t>(result.value().size()));
+    }
+    return result;
 }
 
 Result<std::vector<std::string>> MetadataRepository::getDocumentTags(int64_t documentId) {

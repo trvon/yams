@@ -232,6 +232,174 @@ TEST_CASE("FTS5 sanitize - execute against real FTS5", "[unit][metadata][fts5][b
     std::filesystem::remove_all(tempDir, ec);
 }
 
+// Regression tests for LLM output leaking XML-style tags into search queries.
+// Root cause: Pi extensions' buildRetrievalQuery can leak <think>, <system-reminder>,
+// and other wrapper tags into YAMS search queries. The FTS5 sanitizer must handle these
+// gracefully — producing valid FTS5 MATCH expressions that don't cause SQL logic errors.
+TEST_CASE("FTS5 sanitize - XML-style tags from LLM output", "[unit][metadata][fts5]") {
+    using yams::metadata::sanitizeFTS5Query;
+
+    SECTION("Query starting with <think> tag") {
+        // Actual failure case from daemon logs
+        auto result = sanitizeFTS5Query("<think>Let me start by reviewing the existing expe");
+        INFO("Sanitized: " << result);
+        CHECK(!result.empty());
+        // Must not produce raw angle brackets that could break FTS5
+        // Angle brackets should be stripped as punctuation or the term should be quoted
+    }
+
+    SECTION("Query with matched <think>...</think> pair") {
+        auto result = sanitizeFTS5Query("<think>internal thought</think>visible search text");
+        INFO("Sanitized: " << result);
+        CHECK(!result.empty());
+    }
+
+    SECTION("Query with </think> closing tag only") {
+        auto result = sanitizeFTS5Query("search terms here</think>");
+        INFO("Sanitized: " << result);
+        CHECK(!result.empty());
+        CHECK(result.find("search") != std::string::npos);
+    }
+
+    SECTION("Query with <system-reminder> tag") {
+        auto result =
+            sanitizeFTS5Query("fix the bug <system-reminder>check types</system-reminder>");
+        INFO("Sanitized: " << result);
+        CHECK(!result.empty());
+        CHECK(result.find("fix") != std::string::npos);
+    }
+
+    SECTION("Query with orphaned <system-reminder> tag") {
+        auto result = sanitizeFTS5Query("<system-reminder>Always validate inputs carefully");
+        INFO("Sanitized: " << result);
+        CHECK(!result.empty());
+    }
+
+    SECTION("Query with <antThinking> tag") {
+        auto result = sanitizeFTS5Query("<antThinking>reasoning process</antThinking>actual query");
+        INFO("Sanitized: " << result);
+        CHECK(!result.empty());
+    }
+
+    SECTION("Query that is ONLY a tag") {
+        auto result = sanitizeFTS5Query("<think>");
+        INFO("Sanitized: " << result);
+        // Should produce a valid (possibly empty) FTS5 expression
+        CHECK(!result.empty()); // buildSimpleFts5Query returns '""' for empty
+    }
+
+    SECTION("Query with multiple angle bracket patterns") {
+        auto result = sanitizeFTS5Query(
+            "<think>Let me</think> <system-reminder>check</system-reminder> actual query terms");
+        INFO("Sanitized: " << result);
+        CHECK(!result.empty());
+    }
+
+    SECTION("Query with nested/malformed tags") {
+        auto result = sanitizeFTS5Query("<<think>>double brackets<<think>>");
+        INFO("Sanitized: " << result);
+        CHECK(!result.empty());
+    }
+
+    SECTION("Balanced quotes must be even in sanitized output") {
+        std::vector<std::string> tagQueries = {
+            "<think>Let me start by reviewing the existing expe",
+            "<think>internal thought</think>visible text",
+            "</think>orphaned close",
+            "<system-reminder>Always validate",
+            "<antThinking>reasoning</antThinking>query",
+            "<think>",
+            "hello <world> test",
+            "<<nested>>",
+        };
+
+        for (const auto& query : tagQueries) {
+            auto result = sanitizeFTS5Query(query);
+            INFO("Original: " << query);
+            INFO("Sanitized: " << result);
+
+            int quoteCount = 0;
+            for (char c : result) {
+                if (c == '"')
+                    quoteCount++;
+            }
+            CHECK((quoteCount % 2) == 0);
+        }
+    }
+}
+
+// Execute XML-tag queries against real FTS5 to catch SQL errors at runtime
+TEST_CASE("FTS5 sanitize - XML tag queries execute against real FTS5",
+          "[unit][metadata][fts5][benchmark]") {
+    using yams::metadata::sanitizeFTS5Query;
+    using namespace yams::metadata;
+
+    // Create temp database
+    auto tempDir = std::filesystem::temp_directory_path() / "yams_fts5_xml_tag_test";
+    std::filesystem::create_directories(tempDir);
+    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+    auto dbPath = tempDir / ("fts5_xml_test_" + std::to_string(ts) + ".db");
+
+    Database db;
+    auto openResult = db.open(dbPath.string(), ConnectionMode::Create);
+    REQUIRE(openResult.has_value());
+
+    auto hasFts5 = db.hasFTS5();
+    if (!hasFts5.has_value() || !hasFts5.value()) {
+        std::filesystem::remove_all(tempDir);
+        SKIP("FTS5 not available");
+    }
+
+    // Create FTS5 table
+    auto createResult = db.execute("CREATE VIRTUAL TABLE test_fts USING fts5("
+                                   "content, tokenize='porter unicode61')");
+    REQUIRE(createResult.has_value());
+
+    // Insert test content that could match
+    auto ins = db.prepare("INSERT INTO test_fts(rowid, content) VALUES (?, ?)");
+    REQUIRE(ins.has_value());
+    ins.value().bind(1, 1);
+    ins.value().bind(2, "Let me start by reviewing the existing extension architecture. "
+                        "The system uses event-based hooks for lifecycle management. "
+                        "Always validate inputs carefully and check edge cases.");
+    REQUIRE(ins.value().execute().has_value());
+
+    // These are actual queries that could come from LLM output leaking into search
+    std::vector<std::string> xmlTagQueries = {
+        "<think>Let me start by reviewing the existing expe",
+        "<think>internal thought</think>visible search text",
+        "</think>search terms here",
+        "<system-reminder>Always validate inputs carefully",
+        "fix the bug <system-reminder>check types</system-reminder>",
+        "<antThinking>reasoning process</antThinking>actual query",
+        "<think>",
+        "hello <world> test",
+        "<<nested>> brackets",
+        "<think>Let me</think> <system-reminder>check</system-reminder> actual query",
+    };
+
+    for (const auto& query : xmlTagQueries) {
+        auto sanitized = sanitizeFTS5Query(query);
+        INFO("Original: " << query);
+        INFO("Sanitized: " << sanitized);
+
+        // Prepare and execute - should NOT cause SQL error
+        auto stmt = db.prepare("SELECT rowid FROM test_fts WHERE test_fts MATCH ?");
+        REQUIRE(stmt.has_value());
+
+        auto bindResult = stmt.value().bind(1, sanitized);
+        REQUIRE(bindResult.has_value());
+
+        // Execute - this is where SQL errors would occur
+        auto stepResult = stmt.value().step();
+        REQUIRE(stepResult.has_value()); // Should not be an error
+    }
+
+    // Cleanup
+    std::error_code ec;
+    std::filesystem::remove_all(tempDir, ec);
+}
+
 #if defined(YAMS_TESTING)
 namespace yams::metadata::test {
 std::string buildNaturalLanguageFts5QueryForTest(std::string_view query, bool useOr,

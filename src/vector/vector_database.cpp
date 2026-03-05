@@ -898,11 +898,13 @@ size_t VectorDatabase::getVectorCount() const {
 
 bool VectorDatabase::insertVector(const VectorRecord& record) {
     YAMS_ZONE_SCOPED_N("VectorDB::insertVector");
+    YAMS_PLOT("vector_db::insert_embedding_dim", static_cast<int64_t>(record.embedding.size()));
     return pImpl->insertVector(record);
 }
 
 bool VectorDatabase::insertVectorsBatch(const std::vector<VectorRecord>& records) {
     YAMS_ZONE_SCOPED_N("VectorDB::insertVectorsBatch");
+    YAMS_PLOT("vector_db::insert_batch_size", static_cast<int64_t>(records.size()));
     return pImpl->insertVectorsBatch(records);
 }
 
@@ -921,7 +923,11 @@ bool VectorDatabase::deleteVectorsByDocument(const std::string& document_hash) {
 std::vector<VectorRecord> VectorDatabase::searchSimilar(const std::vector<float>& query_embedding,
                                                         const VectorSearchParams& params) const {
     YAMS_ZONE_SCOPED_N("VectorDB::searchSimilar");
-    return pImpl->searchSimilar(query_embedding, params);
+    YAMS_PLOT("vector_db::search_query_dim", static_cast<int64_t>(query_embedding.size()));
+    YAMS_PLOT("vector_db::search_k", static_cast<int64_t>(params.k));
+    auto results = pImpl->searchSimilar(query_embedding, params);
+    YAMS_PLOT("vector_db::search_results", static_cast<int64_t>(results.size()));
+    return results;
 }
 
 std::vector<VectorRecord>
@@ -946,32 +952,52 @@ VectorDatabase::searchSimilarToDocument(const std::string& document_hash,
 std::vector<VectorRecord> VectorDatabase::search(const std::vector<float>& query_embedding,
                                                  const VectorSearchParams& params) const {
     YAMS_ZONE_SCOPED_N("VectorDB::search");
+    YAMS_PLOT("vector_db::search_dispatch_query_dim", static_cast<int64_t>(query_embedding.size()));
+    YAMS_PLOT("vector_db::search_dispatch_k", static_cast<int64_t>(params.k));
 
     // All search uses HNSW - O(log n) approximate nearest neighbor
     // HNSW achieves 100% recall vs brute-force in benchmarks (see bench_results/hnsw_*.json)
-    return searchSimilar(query_embedding, params);
+    auto results = searchSimilar(query_embedding, params);
+    YAMS_PLOT("vector_db::search_dispatch_results", static_cast<int64_t>(results.size()));
+    return results;
 }
 
 std::optional<VectorRecord> VectorDatabase::getVector(const std::string& chunk_id) const {
-    return pImpl->getVector(chunk_id);
+    YAMS_ZONE_SCOPED_N("VectorDB::getVector");
+    auto result = pImpl->getVector(chunk_id);
+    YAMS_PLOT("vector_db::get_vector_found", result.has_value() ? 1 : 0);
+    return result;
 }
 
 std::map<std::string, VectorRecord>
 VectorDatabase::getVectorsBatch(const std::vector<std::string>& chunk_ids) const {
-    return pImpl->getVectorsBatch(chunk_ids);
+    YAMS_ZONE_SCOPED_N("VectorDB::getVectorsBatch");
+    YAMS_PLOT("vector_db::get_vectors_batch_requested", static_cast<int64_t>(chunk_ids.size()));
+    auto result = pImpl->getVectorsBatch(chunk_ids);
+    YAMS_PLOT("vector_db::get_vectors_batch_found", static_cast<int64_t>(result.size()));
+    return result;
 }
 
 std::vector<VectorRecord>
 VectorDatabase::getVectorsByDocument(const std::string& document_hash) const {
-    return pImpl->getVectorsByDocument(document_hash);
+    YAMS_ZONE_SCOPED_N("VectorDB::getVectorsByDocument");
+    auto result = pImpl->getVectorsByDocument(document_hash);
+    YAMS_PLOT("vector_db::get_vectors_by_document_count", static_cast<int64_t>(result.size()));
+    return result;
 }
 
 bool VectorDatabase::hasEmbedding(const std::string& document_hash) const {
-    return pImpl->hasEmbedding(document_hash);
+    YAMS_ZONE_SCOPED_N("VectorDB::hasEmbedding");
+    auto has = pImpl->hasEmbedding(document_hash);
+    YAMS_PLOT("vector_db::has_embedding", has ? 1 : 0);
+    return has;
 }
 
 std::unordered_set<std::string> VectorDatabase::getEmbeddedDocumentHashes() const {
-    return pImpl->getEmbeddedDocumentHashes();
+    YAMS_ZONE_SCOPED_N("VectorDB::getEmbeddedDocumentHashes");
+    auto hashes = pImpl->getEmbeddedDocumentHashes();
+    YAMS_PLOT("vector_db::embedded_document_hashes", static_cast<int64_t>(hashes.size()));
+    return hashes;
 }
 
 Result<VectorDatabase::OrphanCleanupStats> VectorDatabase::cleanupOrphanRows() {
@@ -1059,11 +1085,16 @@ Result<size_t> VectorDatabase::purgeDeleted(std::chrono::hours /*age_threshold*/
 // =========================================================================
 
 Result<void> VectorDatabase::insertEntityVector(const EntityVectorRecord& record) {
+    YAMS_ZONE_SCOPED_N("VectorDB::insertEntityVector");
+    YAMS_PLOT("vector_db::entity_insert_embedding_dim",
+              static_cast<int64_t>(record.embedding.size()));
     return pImpl->insertEntityVector(record);
 }
 
 Result<void>
 VectorDatabase::insertEntityVectorsBatch(const std::vector<EntityVectorRecord>& records) {
+    YAMS_ZONE_SCOPED_N("VectorDB::insertEntityVectorsBatch");
+    YAMS_PLOT("vector_db::entity_insert_batch_size", static_cast<int64_t>(records.size()));
     return pImpl->insertEntityVectorsBatch(records);
 }
 
@@ -1084,17 +1115,28 @@ Result<void> VectorDatabase::deleteEntityVectorsByDocument(const std::string& do
 std::vector<EntityVectorRecord>
 VectorDatabase::searchEntities(const std::vector<float>& query_embedding,
                                const EntitySearchParams& params) const {
-    return pImpl->searchEntities(query_embedding, params);
+    YAMS_ZONE_SCOPED_N("VectorDB::searchEntities");
+    YAMS_PLOT("vector_db::entity_search_query_dim", static_cast<int64_t>(query_embedding.size()));
+    YAMS_PLOT("vector_db::entity_search_k", static_cast<int64_t>(params.k));
+    auto results = pImpl->searchEntities(query_embedding, params);
+    YAMS_PLOT("vector_db::entity_search_results", static_cast<int64_t>(results.size()));
+    return results;
 }
 
 std::vector<EntityVectorRecord>
 VectorDatabase::getEntityVectorsByNode(const std::string& node_key) const {
-    return pImpl->getEntityVectorsByNode(node_key);
+    YAMS_ZONE_SCOPED_N("VectorDB::getEntityVectorsByNode");
+    auto results = pImpl->getEntityVectorsByNode(node_key);
+    YAMS_PLOT("vector_db::entity_vectors_by_node", static_cast<int64_t>(results.size()));
+    return results;
 }
 
 std::vector<EntityVectorRecord>
 VectorDatabase::getEntityVectorsByDocument(const std::string& document_hash) const {
-    return pImpl->getEntityVectorsByDocument(document_hash);
+    YAMS_ZONE_SCOPED_N("VectorDB::getEntityVectorsByDocument");
+    auto results = pImpl->getEntityVectorsByDocument(document_hash);
+    YAMS_PLOT("vector_db::entity_vectors_by_document", static_cast<int64_t>(results.size()));
+    return results;
 }
 
 bool VectorDatabase::hasEntityEmbedding(const std::string& node_key) const {

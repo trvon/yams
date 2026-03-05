@@ -4,6 +4,7 @@
 #include <yams/chunking/chunker.h>
 #include <yams/crypto/hasher.h>
 #include <yams/manifest/manifest_manager.h>
+#include <yams/profiling.h>
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
 
@@ -502,6 +503,7 @@ public:
 
     // Memory-based retrieve operation
     Result<std::vector<std::byte>> retrieveBytes(const std::string& hash) override {
+        YAMS_ZONE_SCOPED_N("content_store::retrieve_bytes");
         // First try to retrieve manifest (chunked content)
         auto manifestHash = hash + ".manifest";
         auto manifestResult = storage_->retrieve(manifestHash);

@@ -55,6 +55,7 @@ public:
 
             // Check file size
             auto fileSize = std::filesystem::file_size(path);
+            YAMS_PLOT("ingest::document_file_size", static_cast<int64_t>(fileSize));
             if (fileSize > config.maxDocumentSize) {
                 result.status = IndexingStatus::Skipped;
                 result.error = "File too large: " + std::to_string(fileSize) + " bytes";
@@ -143,6 +144,8 @@ public:
                 extractedText = extraction.text;
                 metadata = extraction.metadata;
             }
+            YAMS_PLOT("ingest::extracted_text_bytes", static_cast<int64_t>(extractedText.size()));
+            YAMS_PLOT("ingest::metadata_items", static_cast<int64_t>(metadata.size()));
 
             // Create or update document info
             metadata::DocumentInfo docInfo;
@@ -382,8 +385,10 @@ public:
 
                 result.chunksCreated = chunks.size();
                 chunksCreated_ += chunks.size();
+                YAMS_PLOT("ingest::chunks_created", static_cast<int64_t>(chunks.size()));
             } else {
                 result.chunksCreated = 0; // No new chunks for metadata-only update
+                YAMS_PLOT("ingest::chunks_created", 0);
             }
             result.status = IndexingStatus::Completed;
 
@@ -400,6 +405,9 @@ public:
         auto endTime = std::chrono::steady_clock::now();
         result.duration =
             std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+        YAMS_PLOT("ingest::index_document_duration_ms",
+                  static_cast<int64_t>(result.duration.count()));
+        YAMS_PLOT("ingest::index_document_status", static_cast<int64_t>(result.status));
 
         return result;
     }

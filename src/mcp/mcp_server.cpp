@@ -475,7 +475,7 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
                      std::optional<boost::asio::any_io_executor> executor)
     : transport_(std::move(transport)), externalShutdown_(externalShutdown), exitRequested_{false},
       shutdownRequested_{false}, eagerReadyEnabled_(false), autoReadyEnabled_(false),
-      strictProtocol_(false), limitToolResultDup_(false),
+      strictProtocol_(false), limitToolResultDup_(true),
       daemonSocketOverride_(std::move(overrideSocket)) {
     (void)executor; // Reserved for future use
     // Generate unique instance ID for this MCP server connection
@@ -1214,6 +1214,8 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     out.type = "daemon";
     out.executionTimeMs = r.elapsed.count();
     out.traceId = r.traceId;
+    out.queryInfo = r.queryInfo;
+    out.searchStats = r.searchStats;
 
     std::optional<yams::daemon::ListResponse> tagListSnapshot;
     if (!req.tags.empty()) {
@@ -1596,6 +1598,11 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     const auto& r = res.value();
     out.matchCount = r.totalMatches;
     out.fileCount = r.filesSearched;
+    out.regexMatches = r.regexMatches;
+    out.semanticMatches = r.semanticMatches;
+    out.executionTimeMs = r.executionTimeMs;
+    out.queryInfo = r.queryInfo;
+    out.searchStats = r.searchStats;
     std::unordered_map<std::string, size_t> fileMatchCounts;
     for (const auto& m : r.matches) {
         if (!m.file.empty()) {
@@ -2659,6 +2666,8 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
     MCPListDocumentsResponse out;
     const auto& lr = dres.value();
     out.total = lr.totalCount;
+    out.queryInfo = lr.queryInfo;
+    out.listStats = lr.listStats;
     for (const auto& item : lr.items) {
         json docJson;
         docJson["hash"] = item.hash;

@@ -148,6 +148,14 @@ MCPSearchResponse MCPSearchResponse::fromJson(const json& j) {
     resp.type = j.value("type", std::string{});
     resp.executionTimeMs = j.value("execution_time_ms", uint64_t{0});
     resp.traceId = j.value("trace_id", std::string{});
+    resp.queryInfo = j.value("query_info", std::string{});
+    if (j.contains("search_stats") && j["search_stats"].is_object()) {
+        for (auto it = j["search_stats"].begin(); it != j["search_stats"].end(); ++it) {
+            if (it.value().is_string()) {
+                resp.searchStats[it.key()] = it.value().get<std::string>();
+            }
+        }
+    }
     resp.pathsOnly = j.contains("paths");
 
     detail::readStringArray(j, "paths", resp.paths);
@@ -212,6 +220,10 @@ json MCPSearchResponse::toJson() const {
     j["execution_time_ms"] = executionTimeMs;
     if (!traceId.empty())
         j["trace_id"] = traceId;
+    if (!queryInfo.empty())
+        j["query_info"] = queryInfo;
+    if (!searchStats.empty())
+        j["search_stats"] = searchStats;
 
     if (pathsOnly || !paths.empty()) {
         j["paths"] = paths;
@@ -342,6 +354,17 @@ MCPGrepResponse MCPGrepResponse::fromJson(const json& j) {
     resp.output = j.value("output", std::string{});
     resp.matchCount = j.value("match_count", size_t{0});
     resp.fileCount = j.value("file_count", size_t{0});
+    resp.regexMatches = j.value("regex_matches", size_t{0});
+    resp.semanticMatches = j.value("semantic_matches", size_t{0});
+    resp.executionTimeMs = j.value("execution_time_ms", int64_t{0});
+    resp.queryInfo = j.value("query_info", std::string{});
+    if (j.contains("search_stats") && j["search_stats"].is_object()) {
+        for (auto it = j["search_stats"].begin(); it != j["search_stats"].end(); ++it) {
+            if (it.value().is_string()) {
+                resp.searchStats[it.key()] = it.value().get<std::string>();
+            }
+        }
+    }
     resp.outputTruncated = j.value("output_truncated", false);
     resp.outputMaxBytes = j.value("output_max_bytes", size_t{0});
     if (j.contains("matches") && j["matches"].is_array()) {
@@ -363,7 +386,16 @@ MCPGrepResponse MCPGrepResponse::fromJson(const json& j) {
 }
 
 json MCPGrepResponse::toJson() const {
-    json j{{"output", output}, {"match_count", matchCount}, {"file_count", fileCount}};
+    json j{{"output", output},
+           {"match_count", matchCount},
+           {"file_count", fileCount},
+           {"regex_matches", regexMatches},
+           {"semantic_matches", semanticMatches},
+           {"execution_time_ms", executionTimeMs}};
+    if (!queryInfo.empty())
+        j["query_info"] = queryInfo;
+    if (!searchStats.empty())
+        j["search_stats"] = searchStats;
     if (outputTruncated)
         j["output_truncated"] = true;
     if (outputMaxBytes > 0)
@@ -772,11 +804,24 @@ MCPListDocumentsResponse MCPListDocumentsResponse::fromJson(const json& j) {
         resp.documents = j["documents"];
     }
     resp.total = j.value("total", size_t{0});
+    resp.queryInfo = j.value("query_info", std::string{});
+    if (j.contains("list_stats") && j["list_stats"].is_object()) {
+        for (auto it = j["list_stats"].begin(); it != j["list_stats"].end(); ++it) {
+            if (it.value().is_string()) {
+                resp.listStats[it.key()] = it.value().get<std::string>();
+            }
+        }
+    }
     return resp;
 }
 
 json MCPListDocumentsResponse::toJson() const {
-    return json{{"documents", documents}, {"total", total}};
+    json j{{"documents", documents}, {"total", total}};
+    if (!queryInfo.empty())
+        j["query_info"] = queryInfo;
+    if (!listStats.empty())
+        j["list_stats"] = listStats;
+    return j;
 }
 
 // MCPStatsRequest implementation

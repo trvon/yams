@@ -59,7 +59,9 @@ json normalizeToolResultOrError(const std::string& name, const json& arguments, 
 } // namespace
 
 json MCPServer::callTool(const std::string& name, const json& arguments) {
-    spdlog::info("MCP callTool invoked: name='{}', arguments={}", name, arguments.dump());
+    if (spdlog::should_log(spdlog::level::debug)) {
+        spdlog::debug("MCP callTool invoked: name='{}', arguments={}", name, arguments.dump());
+    }
 
     // Resolve registry: try public toolRegistry_ first (composite tools: query/execute/session),
     // then fall back to internalRegistry_ (individual tools used for internal dispatch).
@@ -102,7 +104,9 @@ json MCPServer::callTool(const std::string& name, const json& arguments) {
     try {
         json result = future.get();
 
-        spdlog::debug("MCP tool '{}' returned: {}", name, result.dump());
+        if (spdlog::should_log(spdlog::level::debug)) {
+            spdlog::debug("MCP tool '{}' returned: {}", name, result.dump());
+        }
 
         return normalizeToolResultOrError(name, arguments, std::move(result));
 

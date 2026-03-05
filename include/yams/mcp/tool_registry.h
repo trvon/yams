@@ -80,13 +80,14 @@ void readStringArray(const json& j, std::string_view key, Container& out) {
 
 // MCP 2024-11-05: Enhanced tool result with structured content
 // This supports both legacy content array and new structuredContent field
-[[maybe_unused]] inline nlohmann::json wrapToolResultStructured(
-    const nlohmann::json& content_items, // Array of content items (text, image, etc.)
-    const std::optional<nlohmann::json>& structured_content = std::nullopt, bool is_error = false) {
+[[maybe_unused]] inline nlohmann::json
+wrapToolResultStructured(nlohmann::json content_items, // Array of content items (text, image, etc.)
+                         std::optional<nlohmann::json> structured_content = std::nullopt,
+                         bool is_error = false) {
     nlohmann::json result;
-    result["content"] = content_items;
+    result["content"] = std::move(content_items);
     if (structured_content.has_value()) {
-        result["structuredContent"] = structured_content.value();
+        result["structuredContent"] = std::move(*structured_content);
     }
     if (is_error) {
         result["isError"] = true;
@@ -266,6 +267,8 @@ struct MCPSearchResponse {
     std::string type;
     uint64_t executionTimeMs = 0;
     std::string traceId;
+    std::string queryInfo;
+    std::map<std::string, std::string> searchStats;
     bool pathsOnly = false;
     std::vector<std::string> paths;
 
@@ -349,6 +352,11 @@ struct MCPGrepResponse {
     std::string output;
     size_t matchCount = 0;
     size_t fileCount = 0;
+    size_t regexMatches = 0;
+    size_t semanticMatches = 0;
+    int64_t executionTimeMs = 0;
+    std::string queryInfo;
+    std::map<std::string, std::string> searchStats;
     bool outputTruncated = false;
     size_t outputMaxBytes = 0;
     std::vector<Match> matches;
@@ -521,6 +529,8 @@ struct MCPListDocumentsResponse {
 
     std::vector<json> documents;
     size_t total = 0;
+    std::string queryInfo;
+    std::map<std::string, std::string> listStats;
 
     static MCPListDocumentsResponse fromJson(const json& j);
     json toJson() const;

@@ -1,4 +1,5 @@
 #include <yams/crypto/hasher.h>
+#include <yams/profiling.h>
 #include <yams/storage/object_storage_plugin_loader.h>
 #include <yams/storage/storage_backend.h>
 
@@ -297,6 +298,7 @@ Result<void> FilesystemBackend::store(std::string_view key, std::span<const std:
 }
 
 Result<std::vector<std::byte>> FilesystemBackend::retrieve(std::string_view key) const {
+    YAMS_ZONE_SCOPED_N("storage_backend::filesystem_retrieve");
     auto objectPath = getObjectPath(key);
 
     if (!std::filesystem::exists(objectPath)) {

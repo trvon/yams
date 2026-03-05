@@ -462,6 +462,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
         const auto serviceMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - serviceStart)
                                    .count();
+        const auto serviceUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - serviceStart)
+                                   .count();
         if (!result) {
             co_return ErrorResponse{result.error().code, result.error().message};
         }
@@ -476,9 +479,25 @@ boost::asio::awaitable<Response> RequestDispatcher::handleListRequest(const List
         const auto mapMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                std::chrono::steady_clock::now() - mapStart)
                                .count();
+        const auto mapUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - mapStart)
+                               .count();
         const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                  std::chrono::steady_clock::now() - requestStart)
                                  .count();
+        const auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - requestStart)
+                                 .count();
+
+        response.queryInfo = serviceResp.queryInfo;
+        response.listStats["service_execution_time_ms"] =
+            std::to_string(serviceResp.executionTimeMs);
+        response.listStats["phase_dispatch_service_ms"] = std::to_string(serviceMs);
+        response.listStats["phase_dispatch_service_us"] = std::to_string(serviceUs);
+        response.listStats["phase_dispatch_map_ms"] = std::to_string(mapMs);
+        response.listStats["phase_dispatch_map_us"] = std::to_string(mapUs);
+        response.listStats["phase_dispatch_total_ms"] = std::to_string(totalMs);
+        response.listStats["phase_dispatch_total_us"] = std::to_string(totalUs);
         if (query_trace_enabled()) {
             spdlog::info(
                 "[query-trace] op=list total_ms={} service_ms={} map_ms={} items={} total_count={} "
@@ -828,6 +847,7 @@ RequestDispatcher::handleUpdateDocumentRequest(const UpdateDocumentRequest& req)
 }
 
 boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const GrepRequest& req) {
+    YAMS_ZONE_SCOPED_N("request_dispatcher::handle_grep");
     co_return co_await yams::daemon::dispatch::guard_await(
         "grep", [this, req]() -> boost::asio::awaitable<Response> {
             const int grepInflightLimit = static_cast<int>(TuneAdvisor::grepInflightLimit());
@@ -878,6 +898,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
             serviceReq.tags = req.filterTags;
             serviceReq.matchAllTags = req.matchAllTags;
             serviceReq.maxCount = static_cast<int>(req.maxMatches);
+            serviceReq.useSession = req.useSession;
+            serviceReq.sessionName = req.sessionName;
             auto result = co_await yams::daemon::dispatch::offload_to_worker(
                 serviceManager_, [grepService, serviceReq = std::move(serviceReq)]() mutable {
                     return grepService->grep(serviceReq);
@@ -893,6 +915,15 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
             if (serviceReq.pathsOnly) {
                 GrepResponse response;
                 response.filesSearched = serviceResp.filesSearched;
+                response.regexMatches = static_cast<uint64_t>(serviceResp.regexMatches);
+                response.semanticMatches = static_cast<uint64_t>(serviceResp.semanticMatches);
+                response.executionTimeMs = serviceResp.executionTimeMs;
+                response.queryInfo = serviceResp.queryInfo;
+                response.searchStats.insert(serviceResp.searchStats.begin(),
+                                            serviceResp.searchStats.end());
+                response.filesWith = serviceResp.filesWith;
+                response.filesWithout = serviceResp.filesWithout;
+                response.pathsOnly = serviceResp.pathsOnly;
                 for (const auto& path : serviceResp.filesWith) {
                     GrepMatch dm;
                     dm.file = path;
@@ -933,6 +964,15 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
                     break;
             }
             response.totalMatches = applyDefaultCap ? emitted : serviceResp.totalMatches;
+            response.regexMatches = static_cast<uint64_t>(serviceResp.regexMatches);
+            response.semanticMatches = static_cast<uint64_t>(serviceResp.semanticMatches);
+            response.executionTimeMs = serviceResp.executionTimeMs;
+            response.queryInfo = serviceResp.queryInfo;
+            response.searchStats.insert(serviceResp.searchStats.begin(),
+                                        serviceResp.searchStats.end());
+            response.filesWith = serviceResp.filesWith;
+            response.filesWithout = serviceResp.filesWithout;
+            response.pathsOnly = serviceResp.pathsOnly;
             co_return response;
         });
 }

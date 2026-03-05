@@ -449,6 +449,14 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
                     grep_->matches = std::move(g->matches);
                     grep_->totalMatches = g->totalMatches;
                     grep_->filesSearched = g->filesSearched;
+                    grep_->regexMatches = g->regexMatches;
+                    grep_->semanticMatches = g->semanticMatches;
+                    grep_->executionTimeMs = g->executionTimeMs;
+                    grep_->queryInfo = std::move(g->queryInfo);
+                    grep_->searchStats = std::move(g->searchStats);
+                    grep_->filesWith = std::move(g->filesWith);
+                    grep_->filesWithout = std::move(g->filesWithout);
+                    grep_->pathsOnly = std::move(g->pathsOnly);
                     grep_->pos = 0;
                 } else {
                     reset_state();
@@ -531,6 +539,14 @@ boost::asio::awaitable<RequestProcessor::ResponseChunk> StreamingRequestProcesso
             GrepResponse chunk;
             chunk.totalMatches = st.totalMatches;
             chunk.filesSearched = st.filesSearched;
+            chunk.regexMatches = st.regexMatches;
+            chunk.semanticMatches = st.semanticMatches;
+            chunk.executionTimeMs = st.executionTimeMs;
+            chunk.queryInfo = st.queryInfo;
+            chunk.searchStats = st.searchStats;
+            chunk.filesWith = st.filesWith;
+            chunk.filesWithout = st.filesWithout;
+            chunk.pathsOnly = st.pathsOnly;
             chunk.matches.reserve(end - start);
             for (std::size_t i = start; i < end; ++i) {
                 chunk.matches.push_back(std::move(st.matches[i]));

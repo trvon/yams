@@ -854,6 +854,8 @@ struct ListEntry {
 struct ListResponse {
     std::vector<ListEntry> items;
     uint64_t totalCount = 0;
+    std::string queryInfo;
+    std::map<std::string, std::string> listStats;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -861,7 +863,7 @@ struct ListResponse {
         ser << static_cast<uint32_t>(items.size());
         for (const auto& it : items)
             it.serialize(ser);
-        ser << static_cast<uint64_t>(totalCount);
+        ser << static_cast<uint64_t>(totalCount) << queryInfo << listStats;
     }
 
     template <typename Deserializer>
@@ -882,6 +884,10 @@ struct ListResponse {
         if (!tot)
             return tot.error();
         r.totalCount = tot.value();
+        if (auto qi = deser.readString(); qi)
+            r.queryInfo = std::move(qi.value());
+        if (auto ls = deser.readStringMap(); ls)
+            r.listStats = std::move(ls.value());
         return r;
     }
 };
@@ -3397,6 +3403,8 @@ struct SearchResponse {
     size_t totalCount = 0;
     std::chrono::milliseconds elapsed{0};
     std::string traceId;
+    std::string queryInfo;
+    std::map<std::string, std::string> searchStats;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -3405,7 +3413,7 @@ struct SearchResponse {
         for (const auto& result : results) {
             result.serialize(ser);
         }
-        ser << static_cast<uint64_t>(totalCount) << elapsed << traceId;
+        ser << static_cast<uint64_t>(totalCount) << elapsed << traceId << queryInfo << searchStats;
     }
 
     template <typename Deserializer>
@@ -3439,6 +3447,11 @@ struct SearchResponse {
         if (!traceIdResult)
             return traceIdResult.error();
         res.traceId = std::move(traceIdResult.value());
+
+        if (auto queryInfoResult = deser.readString(); queryInfoResult)
+            res.queryInfo = std::move(queryInfoResult.value());
+        if (auto searchStatsResult = deser.readStringMap(); searchStatsResult)
+            res.searchStats = std::move(searchStatsResult.value());
 
         return res;
     }

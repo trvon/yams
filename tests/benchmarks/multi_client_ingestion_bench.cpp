@@ -647,11 +647,71 @@ bool waitForDrain(DaemonClient& client, std::chrono::seconds timeout) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void emitJsonl(const fs::path& outputPath, const json& record) {
+    json enriched = record;
+    enriched["schema_version"] = "multi_client_record_v2";
+    if (const auto* v = std::getenv("YAMS_BENCH_RUN_ID"); v && *v) {
+        enriched["run_id"] = v;
+    }
+    if (const auto* v = std::getenv("YAMS_BENCH_PHASE"); v && *v) {
+        enriched["run_phase"] = v;
+    }
+    if (const auto* v = std::getenv("YAMS_BENCH_CASE"); v && *v) {
+        enriched["run_case"] = v;
+    }
+    if (const auto* v = std::getenv("YAMS_BENCH_TRANSPORT"); v && *v) {
+        enriched["run_transport"] = v;
+    }
+    if (const auto* v = std::getenv("YAMS_BENCH_GIT_SHA"); v && *v) {
+        enriched["git_sha"] = v;
+    }
+
     fs::create_directories(outputPath.parent_path());
     std::ofstream out(outputPath, std::ios::app);
     if (out) {
-        out << record.dump() << '\n';
+        out << enriched.dump() << '\n';
     }
+}
+
+std::optional<int64_t> jsonToInt64(const nlohmann::json& value) {
+    try {
+        if (value.is_number_integer()) {
+            return value.get<int64_t>();
+        }
+        if (value.is_number_unsigned()) {
+            return static_cast<int64_t>(value.get<uint64_t>());
+        }
+        if (value.is_number_float()) {
+            return static_cast<int64_t>(value.get<double>());
+        }
+        if (value.is_string()) {
+            const auto& s = value.get_ref<const std::string&>();
+            if (!s.empty()) {
+                return std::stoll(s);
+            }
+        }
+    } catch (...) {
+    }
+    return std::nullopt;
+}
+
+std::optional<int64_t> jsonGetInt64AnyKey(const nlohmann::json& object,
+                                          std::initializer_list<const char*> keys) {
+    if (!object.is_object()) {
+        return std::nullopt;
+    }
+    for (const auto* key : keys) {
+        if (!key) {
+            continue;
+        }
+        auto it = object.find(key);
+        if (it == object.end()) {
+            continue;
+        }
+        if (auto parsed = jsonToInt64(*it); parsed.has_value()) {
+            return parsed;
+        }
+    }
+    return std::nullopt;
 }
 
 void printPercentiles(const std::string& label, const PercentileStats& stats) {
@@ -2140,6 +2200,130 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     std::atomic<int> listInFlight{0};
     const int totalExpected = kTotalClients * kOpsPerClient;
 
+    // Grep server-side telemetry sampled from grep responses
+    std::mutex grepServerStatsMutex;
+    std::vector<int64_t> grepExecMsSamples;
+    std::vector<int64_t> grepDocsScannedSamples;
+    std::vector<int64_t> grepLinesScannedSamples;
+    std::vector<int64_t> grepBytesScannedSamples;
+    std::vector<int64_t> grepContentRetrievalMsSamples;
+    std::vector<int64_t> grepWorkerScanMsSamples;
+    std::vector<int64_t> grepRegexSearchCallsSamples;
+    std::vector<int64_t> grepBmhPrefilterSkipsSamples;
+    std::vector<int64_t> grepCandidateDiscoveryMsSamples;
+    std::vector<int64_t> grepPathFilteringMsSamples;
+    std::vector<int64_t> grepCandidateClassificationMsSamples;
+    std::vector<int64_t> grepMetadataBatchFetchMsSamples;
+    std::vector<int64_t> grepMetadataEnumerationMsSamples;
+    std::vector<int64_t> grepRegexScanMsSamples;
+    std::vector<int64_t> grepContentDecodeEstimateMsSamples;
+    std::vector<int64_t> grepWorkerCriticalTotalMsSamples;
+    std::vector<int64_t> grepWorkerCriticalRetrievalMsSamples;
+    std::vector<int64_t> grepWorkerCriticalRegexMsSamples;
+    std::vector<int64_t> grepWorkerCriticalOtherMsSamples;
+
+    // Search/list server-side telemetry sampled from responses
+    std::vector<int64_t> searchExecMsSamples;
+    std::vector<int64_t> searchDispatchServiceMsSamples;
+    std::vector<int64_t> searchDispatchServiceUsSamples;
+    std::vector<int64_t> searchDispatchMapSortMsSamples;
+    std::vector<int64_t> searchDispatchMapSortUsSamples;
+    std::vector<int64_t> searchDispatchFeedbackMsSamples;
+    std::vector<int64_t> searchDispatchFeedbackUsSamples;
+    std::vector<int64_t> searchDispatchResponseMsSamples;
+    std::vector<int64_t> searchDispatchResponseUsSamples;
+    std::vector<int64_t> searchDispatchTotalMsSamples;
+    std::vector<int64_t> searchDispatchTotalUsSamples;
+    std::vector<int64_t> listServiceExecMsSamples;
+    std::vector<int64_t> listDispatchServiceMsSamples;
+    std::vector<int64_t> listDispatchServiceUsSamples;
+    std::vector<int64_t> listDispatchMapMsSamples;
+    std::vector<int64_t> listDispatchMapUsSamples;
+    std::vector<int64_t> listDispatchTotalMsSamples;
+    std::vector<int64_t> listDispatchTotalUsSamples;
+
+    auto collectSearchServerTelemetry = [&](const nlohmann::json& payload) {
+        const auto searchStats = [&]() -> nlohmann::json {
+            if (payload.contains("search_stats")) {
+                return payload["search_stats"];
+            }
+            if (payload.contains("searchStats")) {
+                return payload["searchStats"];
+            }
+            return nlohmann::json::object();
+        }();
+
+        std::lock_guard<std::mutex> lk(grepServerStatsMutex);
+        if (auto v = jsonGetInt64AnyKey(payload, {"execution_time_ms", "executionTimeMs"})) {
+            searchExecMsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_dispatch_service_ms"})) {
+            searchDispatchServiceMsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_dispatch_service_us"})) {
+            searchDispatchServiceUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_dispatch_map_sort_ms"})) {
+            searchDispatchMapSortMsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_dispatch_map_sort_us"})) {
+            searchDispatchMapSortUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_dispatch_feedback_ms"})) {
+            searchDispatchFeedbackMsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_dispatch_feedback_us"})) {
+            searchDispatchFeedbackUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_dispatch_response_ms"})) {
+            searchDispatchResponseMsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_dispatch_response_us"})) {
+            searchDispatchResponseUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_dispatch_total_ms"})) {
+            searchDispatchTotalMsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_dispatch_total_us"})) {
+            searchDispatchTotalUsSamples.push_back(*v);
+        }
+    };
+
+    auto collectListServerTelemetry = [&](const nlohmann::json& payload) {
+        const auto listStats = [&]() -> nlohmann::json {
+            if (payload.contains("list_stats")) {
+                return payload["list_stats"];
+            }
+            if (payload.contains("listStats")) {
+                return payload["listStats"];
+            }
+            return nlohmann::json::object();
+        }();
+
+        std::lock_guard<std::mutex> lk(grepServerStatsMutex);
+        if (auto v = jsonGetInt64AnyKey(listStats, {"service_execution_time_ms"})) {
+            listServiceExecMsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(listStats, {"phase_dispatch_service_ms"})) {
+            listDispatchServiceMsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(listStats, {"phase_dispatch_service_us"})) {
+            listDispatchServiceUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(listStats, {"phase_dispatch_map_ms"})) {
+            listDispatchMapMsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(listStats, {"phase_dispatch_map_us"})) {
+            listDispatchMapUsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(listStats, {"phase_dispatch_total_ms"})) {
+            listDispatchTotalMsSamples.push_back(*v);
+        }
+        if (auto v = jsonGetInt64AnyKey(listStats, {"phase_dispatch_total_us"})) {
+            listDispatchTotalUsSamples.push_back(*v);
+        }
+    };
+
     // Live progress reporter
     std::atomic<bool> progressStop{false};
     auto progressStart = std::chrono::steady_clock::now();
@@ -2219,6 +2403,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         for (const auto& r : direct.value().results) {
                             j["results"].push_back({{"id", r.id}});
                         }
+                        j["execution_time_ms"] = direct.value().elapsed.count();
+                        j["query_info"] = direct.value().queryInfo;
+                        j["search_stats"] = direct.value().searchStats;
                         res = j;
                     } else {
                         res = yams::Error{direct.error()};
@@ -2237,9 +2424,11 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 trace.wallClockMs = wallMs;
                 if (res) {
                     trace.success = true;
-                    if (res.value().contains("results") && res.value()["results"].is_array()) {
-                        trace.resultCount = static_cast<int>(res.value()["results"].size());
+                    const auto& payload = res.value();
+                    if (payload.contains("results") && payload["results"].is_array()) {
+                        trace.resultCount = static_cast<int>(payload["results"].size());
                     }
+                    collectSearchServerTelemetry(payload);
                     searchOps.fetch_add(1);
                 } else {
                     trace.success = false;
@@ -2297,6 +2486,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         for (const auto& it : direct.value().items) {
                             j["items"].push_back({{"hash", it.hash}});
                         }
+                        j["query_info"] = direct.value().queryInfo;
+                        j["list_stats"] = direct.value().listStats;
                         res = j;
                     } else {
                         res = yams::Error{direct.error()};
@@ -2319,13 +2510,14 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 trace.latencyUs = latUs;
                 trace.wallClockMs = wallMs;
                 if (res) {
+                    const auto& payload = res.value();
                     trace.success = true;
-                    if (res.value().contains("items") && res.value()["items"].is_array()) {
-                        trace.resultCount = static_cast<int>(res.value()["items"].size());
-                    } else if (res.value().contains("documents") &&
-                               res.value()["documents"].is_array()) {
-                        trace.resultCount = static_cast<int>(res.value()["documents"].size());
+                    if (payload.contains("items") && payload["items"].is_array()) {
+                        trace.resultCount = static_cast<int>(payload["items"].size());
+                    } else if (payload.contains("documents") && payload["documents"].is_array()) {
+                        trace.resultCount = static_cast<int>(payload["documents"].size());
                     }
+                    collectListServerTelemetry(payload);
                     listOps.fetch_add(1);
                 } else {
                     trace.success = false;
@@ -2372,6 +2564,11 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         nlohmann::json j;
                         j["match_count"] = direct.value().totalMatches;
                         j["file_count"] = direct.value().filesSearched;
+                        j["regex_matches"] = direct.value().regexMatches;
+                        j["semantic_matches"] = direct.value().semanticMatches;
+                        j["execution_time_ms"] = direct.value().executionTimeMs;
+                        j["query_info"] = direct.value().queryInfo;
+                        j["search_stats"] = direct.value().searchStats;
                         res = j;
                     } else {
                         res = yams::Error{direct.error()};
@@ -2389,10 +2586,113 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 trace.latencyUs = latUs;
                 trace.wallClockMs = wallMs;
                 if (res) {
+                    const auto& payload = res.value();
                     trace.success = true;
-                    if (res.value().contains("match_count") &&
-                        res.value()["match_count"].is_number_integer()) {
-                        trace.resultCount = res.value()["match_count"].get<int>();
+                    if (payload.contains("match_count") &&
+                        payload["match_count"].is_number_integer()) {
+                        trace.resultCount = payload["match_count"].get<int>();
+                    }
+
+                    const auto searchStats = [&]() -> nlohmann::json {
+                        if (payload.contains("search_stats")) {
+                            return payload["search_stats"];
+                        }
+                        if (payload.contains("searchStats")) {
+                            return payload["searchStats"];
+                        }
+                        return nlohmann::json::object();
+                    }();
+
+                    std::lock_guard<std::mutex> lk(grepServerStatsMutex);
+                    if (auto v =
+                            jsonGetInt64AnyKey(payload, {"execution_time_ms", "executionTimeMs"})) {
+                        grepExecMsSamples.push_back(*v);
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats, {"docs_scanned"})) {
+                        grepDocsScannedSamples.push_back(*v);
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats, {"lines_scanned"})) {
+                        grepLinesScannedSamples.push_back(*v);
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats, {"bytes_scanned"})) {
+                        grepBytesScannedSamples.push_back(*v);
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats, {"content_retrieval_ms"})) {
+                        grepContentRetrievalMsSamples.push_back(*v);
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_worker_scan_ms"})) {
+                        grepWorkerScanMsSamples.push_back(*v);
+                    }
+                    if (auto v =
+                            jsonGetInt64AnyKey(searchStats, {"phase_candidate_discovery_ms"})) {
+                        grepCandidateDiscoveryMsSamples.push_back(*v);
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_path_filtering_ms"})) {
+                        grepPathFilteringMsSamples.push_back(*v);
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats,
+                                                    {"phase_candidate_classification_ms"})) {
+                        grepCandidateClassificationMsSamples.push_back(*v);
+                    }
+                    if (auto v =
+                            jsonGetInt64AnyKey(searchStats, {"phase_metadata_batch_fetch_ms"})) {
+                        grepMetadataBatchFetchMsSamples.push_back(*v);
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats, {"regex_scan_ms"})) {
+                        grepRegexScanMsSamples.push_back(*v);
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats, {"content_decode_ms_estimate"})) {
+                        grepContentDecodeEstimateMsSamples.push_back(*v);
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats, {"worker_critical_total_ms"})) {
+                        grepWorkerCriticalTotalMsSamples.push_back(*v);
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats,
+                                                    {"worker_critical_content_retrieval_ms"})) {
+                        grepWorkerCriticalRetrievalMsSamples.push_back(*v);
+                    }
+                    if (auto v =
+                            jsonGetInt64AnyKey(searchStats, {"worker_critical_regex_scan_ms"})) {
+                        grepWorkerCriticalRegexMsSamples.push_back(*v);
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats, {"worker_critical_other_ms"})) {
+                        grepWorkerCriticalOtherMsSamples.push_back(*v);
+                    }
+                    {
+                        int64_t metadataEnumerationMs = 0;
+                        bool hasMetadataEnumeration = false;
+                        if (auto v =
+                                jsonGetInt64AnyKey(searchStats, {"phase_candidate_discovery_ms"})) {
+                            metadataEnumerationMs += *v;
+                            hasMetadataEnumeration = true;
+                        }
+                        if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_path_filtering_ms"})) {
+                            metadataEnumerationMs += *v;
+                            hasMetadataEnumeration = true;
+                        }
+                        if (auto v = jsonGetInt64AnyKey(searchStats,
+                                                        {"phase_candidate_classification_ms"})) {
+                            metadataEnumerationMs += *v;
+                            hasMetadataEnumeration = true;
+                        }
+                        if (auto v = jsonGetInt64AnyKey(searchStats,
+                                                        {"phase_metadata_batch_fetch_ms"})) {
+                            metadataEnumerationMs += *v;
+                            hasMetadataEnumeration = true;
+                        }
+                        if (auto v = jsonGetInt64AnyKey(searchStats, {"metadata_enumeration_ms"})) {
+                            metadataEnumerationMs = *v;
+                            hasMetadataEnumeration = true;
+                        }
+                        if (hasMetadataEnumeration) {
+                            grepMetadataEnumerationMsSamples.push_back(metadataEnumerationMs);
+                        }
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats, {"regex_search_calls"})) {
+                        grepRegexSearchCallsSamples.push_back(*v);
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats, {"bmh_prefilter_skips"})) {
+                        grepBmhPrefilterSkipsSamples.push_back(*v);
                     }
                     grepOps.fetch_add(1);
                 } else {
@@ -2485,6 +2785,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                                 for (const auto& r : direct.value().results) {
                                     j["results"].push_back({{"id", r.id}});
                                 }
+                                j["execution_time_ms"] = direct.value().elapsed.count();
+                                j["query_info"] = direct.value().queryInfo;
+                                j["search_stats"] = direct.value().searchStats;
                                 res = j;
                             } else {
                                 res = yams::Error{direct.error()};
@@ -2504,11 +2807,12 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         trace.latencyUs = latUs;
                         trace.wallClockMs = wallMs;
                         if (res) {
+                            const auto& payload = res.value();
                             trace.success = true;
-                            if (res.value().contains("results") &&
-                                res.value()["results"].is_array()) {
-                                trace.resultCount = static_cast<int>(res.value()["results"].size());
+                            if (payload.contains("results") && payload["results"].is_array()) {
+                                trace.resultCount = static_cast<int>(payload["results"].size());
                             }
+                            collectSearchServerTelemetry(payload);
                             searchOps.fetch_add(1);
                         } else {
                             trace.success = false;
@@ -2536,6 +2840,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                                 for (const auto& it : direct.value().items) {
                                     j["items"].push_back({{"hash", it.hash}});
                                 }
+                                j["query_info"] = direct.value().queryInfo;
+                                j["list_stats"] = direct.value().listStats;
                                 res = j;
                             } else {
                                 res = yams::Error{direct.error()};
@@ -2555,14 +2861,15 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         trace.latencyUs = latUs;
                         trace.wallClockMs = wallMs;
                         if (res) {
+                            const auto& payload = res.value();
                             trace.success = true;
-                            if (res.value().contains("items") && res.value()["items"].is_array()) {
-                                trace.resultCount = static_cast<int>(res.value()["items"].size());
-                            } else if (res.value().contains("documents") &&
-                                       res.value()["documents"].is_array()) {
-                                trace.resultCount =
-                                    static_cast<int>(res.value()["documents"].size());
+                            if (payload.contains("items") && payload["items"].is_array()) {
+                                trace.resultCount = static_cast<int>(payload["items"].size());
+                            } else if (payload.contains("documents") &&
+                                       payload["documents"].is_array()) {
+                                trace.resultCount = static_cast<int>(payload["documents"].size());
                             }
+                            collectListServerTelemetry(payload);
                             listOps.fetch_add(1);
                         } else {
                             trace.success = false;
@@ -2818,6 +3125,79 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     auto getStats = PercentileStats::compute(allGetLat);
     auto catStats = PercentileStats::compute(allCatLat);
 
+    auto summarizeSamples = [](const std::vector<int64_t>& values) {
+        json summary{{"count", values.size()},
+                     {"min", 0},
+                     {"p50", 0},
+                     {"p90", 0},
+                     {"p95", 0},
+                     {"p99", 0},
+                     {"max", 0},
+                     {"mean", 0.0}};
+        if (values.empty()) {
+            return summary;
+        }
+        auto sortedValues = values;
+        std::sort(sortedValues.begin(), sortedValues.end());
+        const auto atPct = [&](double pct) {
+            const auto idx =
+                std::min(sortedValues.size() - 1,
+                         static_cast<size_t>(pct * static_cast<double>(sortedValues.size())));
+            return sortedValues[idx];
+        };
+        const auto mean =
+            std::accumulate(sortedValues.begin(), sortedValues.end(), 0.0) / sortedValues.size();
+        summary["min"] = sortedValues.front();
+        summary["p50"] = atPct(0.50);
+        summary["p90"] = atPct(0.90);
+        summary["p95"] = atPct(0.95);
+        summary["p99"] = atPct(0.99);
+        summary["max"] = sortedValues.back();
+        summary["mean"] = mean;
+        return summary;
+    };
+
+    const json grepExecStats = summarizeSamples(grepExecMsSamples);
+    const json grepDocsScannedStats = summarizeSamples(grepDocsScannedSamples);
+    const json grepLinesScannedStats = summarizeSamples(grepLinesScannedSamples);
+    const json grepBytesScannedStats = summarizeSamples(grepBytesScannedSamples);
+    const json grepContentRetrievalStats = summarizeSamples(grepContentRetrievalMsSamples);
+    const json grepWorkerScanStats = summarizeSamples(grepWorkerScanMsSamples);
+    const json grepCandidateDiscoveryStats = summarizeSamples(grepCandidateDiscoveryMsSamples);
+    const json grepPathFilteringStats = summarizeSamples(grepPathFilteringMsSamples);
+    const json grepCandidateClassificationStats =
+        summarizeSamples(grepCandidateClassificationMsSamples);
+    const json grepMetadataBatchFetchStats = summarizeSamples(grepMetadataBatchFetchMsSamples);
+    const json grepMetadataEnumerationStats = summarizeSamples(grepMetadataEnumerationMsSamples);
+    const json grepRegexScanStats = summarizeSamples(grepRegexScanMsSamples);
+    const json grepContentDecodeEstimateStats =
+        summarizeSamples(grepContentDecodeEstimateMsSamples);
+    const json grepWorkerCriticalTotalStats = summarizeSamples(grepWorkerCriticalTotalMsSamples);
+    const json grepWorkerCriticalRetrievalStats =
+        summarizeSamples(grepWorkerCriticalRetrievalMsSamples);
+    const json grepWorkerCriticalRegexStats = summarizeSamples(grepWorkerCriticalRegexMsSamples);
+    const json grepWorkerCriticalOtherStats = summarizeSamples(grepWorkerCriticalOtherMsSamples);
+    const json grepRegexSearchCallsStats = summarizeSamples(grepRegexSearchCallsSamples);
+    const json grepBmhPrefilterSkipsStats = summarizeSamples(grepBmhPrefilterSkipsSamples);
+    const json searchExecStats = summarizeSamples(searchExecMsSamples);
+    const json searchDispatchServiceStats = summarizeSamples(searchDispatchServiceMsSamples);
+    const json searchDispatchServiceUsStats = summarizeSamples(searchDispatchServiceUsSamples);
+    const json searchDispatchMapSortStats = summarizeSamples(searchDispatchMapSortMsSamples);
+    const json searchDispatchMapSortUsStats = summarizeSamples(searchDispatchMapSortUsSamples);
+    const json searchDispatchFeedbackStats = summarizeSamples(searchDispatchFeedbackMsSamples);
+    const json searchDispatchFeedbackUsStats = summarizeSamples(searchDispatchFeedbackUsSamples);
+    const json searchDispatchResponseStats = summarizeSamples(searchDispatchResponseMsSamples);
+    const json searchDispatchResponseUsStats = summarizeSamples(searchDispatchResponseUsSamples);
+    const json searchDispatchTotalStats = summarizeSamples(searchDispatchTotalMsSamples);
+    const json searchDispatchTotalUsStats = summarizeSamples(searchDispatchTotalUsSamples);
+    const json listServiceExecStats = summarizeSamples(listServiceExecMsSamples);
+    const json listDispatchServiceStats = summarizeSamples(listDispatchServiceMsSamples);
+    const json listDispatchServiceUsStats = summarizeSamples(listDispatchServiceUsSamples);
+    const json listDispatchMapStats = summarizeSamples(listDispatchMapMsSamples);
+    const json listDispatchMapUsStats = summarizeSamples(listDispatchMapUsSamples);
+    const json listDispatchTotalStats = summarizeSamples(listDispatchTotalMsSamples);
+    const json listDispatchTotalUsStats = summarizeSamples(listDispatchTotalUsSamples);
+
     int totalOps = searchOps.load() + listOps.load() + grepOps.load() + statusOps.load() +
                    getOps.load() + catOps.load();
     int totalFails = searchFails.load() + listFails.load() + grepFails.load() + statusFails.load() +
@@ -2859,6 +3239,69 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     printPercentiles("Status latency", statusStats);
     printPercentiles("Get latency   ", getStats);
     printPercentiles("Cat latency   ", catStats);
+
+    if (grepExecStats.value("count", 0) > 0 || grepWorkerScanStats.value("count", 0) > 0) {
+        std::cout << "\n  Grep server telemetry:\n";
+        std::cout << "    execution_ms: mean=" << grepExecStats.value("mean", 0.0)
+                  << " p95=" << grepExecStats.value("p95", 0)
+                  << " max=" << grepExecStats.value("max", 0) << "\n";
+        std::cout << "    metadata_enumeration_ms: mean="
+                  << grepMetadataEnumerationStats.value("mean", 0.0)
+                  << " p95=" << grepMetadataEnumerationStats.value("p95", 0)
+                  << " max=" << grepMetadataEnumerationStats.value("max", 0) << "\n";
+        std::cout << "      candidate_discovery_ms: mean="
+                  << grepCandidateDiscoveryStats.value("mean", 0.0)
+                  << " p95=" << grepCandidateDiscoveryStats.value("p95", 0) << "\n";
+        std::cout << "      path_filtering_ms: mean=" << grepPathFilteringStats.value("mean", 0.0)
+                  << " p95=" << grepPathFilteringStats.value("p95", 0) << "\n";
+        std::cout << "      candidate_classification_ms: mean="
+                  << grepCandidateClassificationStats.value("mean", 0.0)
+                  << " p95=" << grepCandidateClassificationStats.value("p95", 0) << "\n";
+        std::cout << "      metadata_batch_fetch_ms: mean="
+                  << grepMetadataBatchFetchStats.value("mean", 0.0)
+                  << " p95=" << grepMetadataBatchFetchStats.value("p95", 0) << "\n";
+        std::cout << "    worker_scan_ms: mean=" << grepWorkerScanStats.value("mean", 0.0)
+                  << " p95=" << grepWorkerScanStats.value("p95", 0)
+                  << " max=" << grepWorkerScanStats.value("max", 0) << "\n";
+        std::cout << "    content_retrieval_ms: mean="
+                  << grepContentRetrievalStats.value("mean", 0.0)
+                  << " p95=" << grepContentRetrievalStats.value("p95", 0)
+                  << " max=" << grepContentRetrievalStats.value("max", 0) << "\n";
+        std::cout << "    content_decode_ms_estimate: mean="
+                  << grepContentDecodeEstimateStats.value("mean", 0.0)
+                  << " p95=" << grepContentDecodeEstimateStats.value("p95", 0)
+                  << " max=" << grepContentDecodeEstimateStats.value("max", 0) << "\n";
+        std::cout << "    regex_scan_ms: mean=" << grepRegexScanStats.value("mean", 0.0)
+                  << " p95=" << grepRegexScanStats.value("p95", 0)
+                  << " max=" << grepRegexScanStats.value("max", 0) << "\n";
+        std::cout << "    worker_critical_total_ms: mean="
+                  << grepWorkerCriticalTotalStats.value("mean", 0.0)
+                  << " p95=" << grepWorkerCriticalTotalStats.value("p95", 0)
+                  << " max=" << grepWorkerCriticalTotalStats.value("max", 0) << "\n";
+        std::cout << "      worker_critical_content_retrieval_ms: mean="
+                  << grepWorkerCriticalRetrievalStats.value("mean", 0.0)
+                  << " p95=" << grepWorkerCriticalRetrievalStats.value("p95", 0)
+                  << " max=" << grepWorkerCriticalRetrievalStats.value("max", 0) << "\n";
+        std::cout << "      worker_critical_regex_scan_ms: mean="
+                  << grepWorkerCriticalRegexStats.value("mean", 0.0)
+                  << " p95=" << grepWorkerCriticalRegexStats.value("p95", 0)
+                  << " max=" << grepWorkerCriticalRegexStats.value("max", 0) << "\n";
+        std::cout << "      worker_critical_other_ms: mean="
+                  << grepWorkerCriticalOtherStats.value("mean", 0.0)
+                  << " p95=" << grepWorkerCriticalOtherStats.value("p95", 0)
+                  << " max=" << grepWorkerCriticalOtherStats.value("max", 0) << "\n";
+    }
+
+    if (searchDispatchTotalStats.value("count", 0) > 0 ||
+        listDispatchTotalStats.value("count", 0) > 0) {
+        std::cout << "\n  Search/list server telemetry:\n";
+        std::cout << "    search_total_ms: mean=" << searchDispatchTotalStats.value("mean", 0.0)
+                  << " p95=" << searchDispatchTotalStats.value("p95", 0)
+                  << " max=" << searchDispatchTotalStats.value("max", 0) << "\n";
+        std::cout << "    list_total_ms:   mean=" << listDispatchTotalStats.value("mean", 0.0)
+                  << " p95=" << listDispatchTotalStats.value("p95", 0)
+                  << " max=" << listDispatchTotalStats.value("max", 0) << "\n";
+    }
 
     std::cout << "\n  Memory:\n";
     std::cout << "    Initial: " << std::setprecision(0) << initSnap.memoryUsageMb << " MB\n";
@@ -3101,6 +3544,44 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
          json{{"ops", getOps.load()}, {"fails", getFails.load()}, {"latency", getStats.toJson()}}},
         {"cat",
          json{{"ops", catOps.load()}, {"fails", catFails.load()}, {"latency", catStats.toJson()}}},
+        {"grep_server",
+         json{{"execution_time_ms", grepExecStats},
+              {"metadata_enumeration_ms", grepMetadataEnumerationStats},
+              {"phase_candidate_discovery_ms", grepCandidateDiscoveryStats},
+              {"phase_path_filtering_ms", grepPathFilteringStats},
+              {"phase_candidate_classification_ms", grepCandidateClassificationStats},
+              {"phase_metadata_batch_fetch_ms", grepMetadataBatchFetchStats},
+              {"docs_scanned", grepDocsScannedStats},
+              {"lines_scanned", grepLinesScannedStats},
+              {"bytes_scanned", grepBytesScannedStats},
+              {"content_retrieval_ms", grepContentRetrievalStats},
+              {"content_decode_ms_estimate", grepContentDecodeEstimateStats},
+              {"phase_worker_scan_ms", grepWorkerScanStats},
+              {"regex_scan_ms", grepRegexScanStats},
+              {"worker_critical_total_ms", grepWorkerCriticalTotalStats},
+              {"worker_critical_content_retrieval_ms", grepWorkerCriticalRetrievalStats},
+              {"worker_critical_regex_scan_ms", grepWorkerCriticalRegexStats},
+              {"worker_critical_other_ms", grepWorkerCriticalOtherStats},
+              {"regex_search_calls", grepRegexSearchCallsStats},
+              {"bmh_prefilter_skips", grepBmhPrefilterSkipsStats}}},
+        {"search_server", json{{"execution_time_ms", searchExecStats},
+                               {"phase_dispatch_service_ms", searchDispatchServiceStats},
+                               {"phase_dispatch_service_us", searchDispatchServiceUsStats},
+                               {"phase_dispatch_map_sort_ms", searchDispatchMapSortStats},
+                               {"phase_dispatch_map_sort_us", searchDispatchMapSortUsStats},
+                               {"phase_dispatch_feedback_ms", searchDispatchFeedbackStats},
+                               {"phase_dispatch_feedback_us", searchDispatchFeedbackUsStats},
+                               {"phase_dispatch_response_ms", searchDispatchResponseStats},
+                               {"phase_dispatch_response_us", searchDispatchResponseUsStats},
+                               {"phase_dispatch_total_ms", searchDispatchTotalStats},
+                               {"phase_dispatch_total_us", searchDispatchTotalUsStats}}},
+        {"list_server", json{{"service_execution_time_ms", listServiceExecStats},
+                             {"phase_dispatch_service_ms", listDispatchServiceStats},
+                             {"phase_dispatch_service_us", listDispatchServiceUsStats},
+                             {"phase_dispatch_map_ms", listDispatchMapStats},
+                             {"phase_dispatch_map_us", listDispatchMapUsStats},
+                             {"phase_dispatch_total_ms", listDispatchTotalStats},
+                             {"phase_dispatch_total_us", listDispatchTotalUsStats}}},
         {"memory", json{{"initial_mb", initSnap.memoryUsageMb},
                         {"peak_mb", peakRss},
                         {"min_mb", minRss},

@@ -1888,6 +1888,7 @@ public:
 
     std::vector<float> generateEmbedding(const std::string& text) {
         YAMS_ZONE_SCOPED_N("EmbeddingGenerator::generateEmbedding");
+        YAMS_PLOT("embedding::input_chars", static_cast<int64_t>(text.size()));
         ConcurrencyGuard _gate; // limit concurrent embedding jobs
 
         // Lock-free check for initialization
@@ -1904,6 +1905,7 @@ public:
             }
 
             has_error_.store(false);
+            YAMS_PLOT("embedding::output_dim", static_cast<int64_t>(result.value().size()));
             return result.value();
 
         } catch (const std::exception& e) {
@@ -1914,6 +1916,7 @@ public:
 
     std::vector<std::vector<float>> generateEmbeddings(const std::vector<std::string>& texts) {
         YAMS_EMBEDDING_ZONE_BATCH(texts.size());
+        YAMS_PLOT("embedding::batch_size", static_cast<int64_t>(texts.size()));
         ConcurrencyGuard _gate; // limit concurrent embedding jobs
 
         if (texts.empty()) {
@@ -1937,6 +1940,11 @@ public:
             }
 
             has_error_.store(false);
+            YAMS_PLOT("embedding::batch_outputs", static_cast<int64_t>(result.value().size()));
+            if (!result.value().empty()) {
+                YAMS_PLOT("embedding::batch_output_dim",
+                          static_cast<int64_t>(result.value().front().size()));
+            }
             return result.value();
 
         } catch (const std::exception& e) {

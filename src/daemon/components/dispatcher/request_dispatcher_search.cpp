@@ -120,6 +120,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         const auto serviceMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - serviceStart)
                                    .count();
+        const auto serviceUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - serviceStart)
+                                   .count();
         if (!result) {
             co_return ErrorResponse{result.error().code, result.error().message};
         }
@@ -136,8 +139,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         const auto mapSortMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - mapSortStart)
                                    .count();
+        const auto mapSortUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - mapSortStart)
+                                   .count();
 
         int64_t feedbackMs = 0;
+        int64_t feedbackUs = 0;
 
         if (appContext.metadataRepo) {
             const auto feedbackStart = std::chrono::steady_clock::now();
@@ -188,6 +195,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
             feedbackMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - feedbackStart)
                              .count();
+            feedbackUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - feedbackStart)
+                             .count();
         }
 
         const auto responseStart = std::chrono::steady_clock::now();
@@ -198,9 +208,28 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         const auto responseMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                     std::chrono::steady_clock::now() - responseStart)
                                     .count();
+        const auto responseUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - responseStart)
+                                    .count();
         const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                  std::chrono::steady_clock::now() - requestStart)
                                  .count();
+        const auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - requestStart)
+                                 .count();
+
+        response.queryInfo = serviceResp.queryInfo;
+        response.searchStats.insert(serviceResp.searchStats.begin(), serviceResp.searchStats.end());
+        response.searchStats["phase_dispatch_service_ms"] = std::to_string(serviceMs);
+        response.searchStats["phase_dispatch_service_us"] = std::to_string(serviceUs);
+        response.searchStats["phase_dispatch_map_sort_ms"] = std::to_string(mapSortMs);
+        response.searchStats["phase_dispatch_map_sort_us"] = std::to_string(mapSortUs);
+        response.searchStats["phase_dispatch_feedback_ms"] = std::to_string(feedbackMs);
+        response.searchStats["phase_dispatch_feedback_us"] = std::to_string(feedbackUs);
+        response.searchStats["phase_dispatch_response_ms"] = std::to_string(responseMs);
+        response.searchStats["phase_dispatch_response_us"] = std::to_string(responseUs);
+        response.searchStats["phase_dispatch_total_ms"] = std::to_string(totalMs);
+        response.searchStats["phase_dispatch_total_us"] = std::to_string(totalUs);
         if (query_trace_enabled()) {
             spdlog::info(
                 "[query-trace] op=search trace_id={} total_ms={} service_ms={} map_sort_ms={} "

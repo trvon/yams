@@ -10,6 +10,7 @@
 #include <yams/daemon/ipc/response_of.hpp>
 
 #include <chrono>
+#include <map>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -305,6 +306,8 @@ public:
         std::optional<Error> error_;
         std::chrono::milliseconds elapsed_{0};
         size_t totalCount_ = 0;
+        std::string queryInfo_;
+        std::map<std::string, std::string> searchStats_;
     };
 
     // Streaming response handlers for list command
@@ -327,6 +330,8 @@ public:
         std::vector<ListEntry> items_;
         std::optional<Error> error_;
         uint64_t totalCount_ = 0;
+        std::string queryInfo_;
+        std::map<std::string, std::string> listStats_;
     };
 
     // Streaming response handler for grep
@@ -349,6 +354,14 @@ public:
         std::optional<Error> error_;
         size_t totalMatches_ = 0;
         size_t filesSearched_ = 0;
+        size_t regexMatches_ = 0;
+        size_t semanticMatches_ = 0;
+        int64_t executionTimeMs_ = 0;
+        std::string queryInfo_;
+        std::map<std::string, std::string> searchStats_;
+        std::vector<std::string> filesWith_;
+        std::vector<std::string> filesWithout_;
+        std::vector<std::string> pathsOnlyResults_;
         // Track counts per file to enforce perFileMax_
         std::unordered_map<std::string, size_t> perFileCount_;
     };

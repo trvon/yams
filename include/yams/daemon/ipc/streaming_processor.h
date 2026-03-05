@@ -70,6 +70,14 @@ private:
         std::vector<GrepMatch> matches;
         std::size_t totalMatches{0};
         std::size_t filesSearched{0};
+        std::size_t regexMatches{0};
+        std::size_t semanticMatches{0};
+        std::int64_t executionTimeMs{0};
+        std::string queryInfo;
+        std::map<std::string, std::string> searchStats;
+        std::vector<std::string> filesWith;
+        std::vector<std::string> filesWithout;
+        std::vector<std::string> pathsOnly;
         std::size_t pos{0};
     };
 
