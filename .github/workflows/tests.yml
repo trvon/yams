@@ -95,11 +95,24 @@ jobs:
       - name: Initialize required submodules
         shell: bash
         run: |
+          retry_cmd() {
+            local attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge "$attempts" ]; then
+                return 1
+              fi
+              echo "Command failed (attempt ${attempt}/${attempts}): $*" >&2
+              sleep $((attempt * 5))
+              attempt=$((attempt + 1))
+            done
+          }
           # Force HTTPS for GitHub to handle SSH submodule URLs in CI
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           # Only init submodules required for the build
-          git submodule update --init --depth 1 third_party/sqlite-vec-cpp
-          git submodule update --init --depth 1 third_party/symspell
+          retry_cmd 4 git submodule update --init --depth 1 third_party/sqlite-vec-cpp
+          retry_cmd 4 git submodule update --init --depth 1 third_party/symspell
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -135,7 +148,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          brew update
+          for attempt in 1 2 3; do
+            if brew update; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "brew update failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
           # Align with release workflow to ensure Meson builds have required toolchain bits.
           # Install google-benchmark for benchmark tests, zig for zyp PDF plugin
           brew install pkg-config cmake ninja meson ccache boost google-benchmark zig || true

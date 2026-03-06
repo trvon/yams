@@ -169,12 +169,25 @@ jobs:
       - name: Initialize required submodules
         shell: bash
         run: |
+          retry_cmd() {
+            local attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge "$attempts" ]; then
+                return 1
+              fi
+              echo "Command failed (attempt ${attempt}/${attempts}): $*" >&2
+              sleep $((attempt * 5))
+              attempt=$((attempt + 1))
+            done
+          }
           # Force HTTPS for GitHub to handle SSH submodule URLs in CI
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           # Init submodules required for the build
           # Skip other submodules that use SSH URLs requiring authentication
-          git submodule update --init --depth 1 third_party/sqlite-vec-cpp
-          git submodule update --init --depth 1 third_party/symspell
+          retry_cmd 4 git submodule update --init --depth 1 third_party/sqlite-vec-cpp
+          retry_cmd 4 git submodule update --init --depth 1 third_party/symspell
       - name: Skip non-linux entries under act (build)
         if: github.actor == 'nektos/act' && !startsWith(matrix.os, 'linux-hosted')
         shell: bash
@@ -430,7 +443,16 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$RUNNER_OS" = "macOS" ]; then
-            brew update
+            for attempt in 1 2 3; do
+              if brew update; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "brew update failed after ${attempt} attempts" >&2
+                exit 1
+              fi
+              sleep $((attempt * 10))
+            done
             brew install pipx || true
             python3 -m pipx ensurepath || true
           elif [ "$RUNNER_OS" = "Linux" ]; then
@@ -574,7 +596,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          brew update
+          for attempt in 1 2 3; do
+            if brew update; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "brew update failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
           brew install pkg-config cmake ninja meson ccache boost zig || true
           # Ensure Meson/Ninja are present even if Homebrew failed to link binaries.
           command -v meson >/dev/null 2>&1 || python3 -m pip install --user --upgrade meson
@@ -1058,6 +1089,7 @@ jobs:
           export YAMS_PLUGIN_DIR="$STAGE_DIR$PREFIX/lib/yams/plugins"
           export LD_LIBRARY_PATH="$STAGE_DIR$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+          echo "Using LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
           echo "Loading ONNX plugin via staged CLI"
           "$YAMS_BIN" plugin load "$PLUGIN_SO"
           "$YAMS_BIN" daemon stop >/dev/null 2>&1 || true
@@ -1453,7 +1485,16 @@ jobs:
           fi
           git commit -m "chore(homebrew): update formula to v${VERSION}"
           if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
-            git push tap-origin main || echo "Push failed; ensure HOMEBREW_TAP_TOKEN has repo permissions"
+            for attempt in 1 2 3; do
+              if git push tap-origin main; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "Failed to push updated Homebrew formula after ${attempt} attempts" >&2
+                exit 1
+              fi
+              sleep $((attempt * 10))
+            done
           else
             echo "HOMEBREW_TAP_TOKEN not set; manual push required" >&2
           fi
@@ -1593,7 +1634,16 @@ jobs:
           git commit -m "chore(homebrew): update nightly formula to ${VERSION}"
           if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
             REMOTE="https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${{ github.repository_owner }}/homebrew-yams.git"
-            git push "$REMOTE" main
+            for attempt in 1 2 3; do
+              if git push "$REMOTE" main; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "Failed to push updated nightly Homebrew formula after ${attempt} attempts" >&2
+                exit 1
+              fi
+              sleep $((attempt * 10))
+            done
           else
             echo "HOMEBREW_TAP_TOKEN not set; manual push required" >&2
           fi

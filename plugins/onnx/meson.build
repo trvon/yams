@@ -189,6 +189,13 @@ if host_machine.system() == 'linux'
   onnx_plugin_link_args += ['-Wl,-z,defs']
 endif
 
+onnx_plugin_install_rpath = ''
+if host_machine.system() == 'darwin'
+  onnx_plugin_install_rpath = '@loader_path/../..'
+elif host_machine.system() == 'linux'
+  onnx_plugin_install_rpath = '$ORIGIN/../..'
+endif
+
 yams_onnx_plugin = shared_module('yams_onnx_plugin',
   yams_onnx_plugin_srcs,
   include_directories: [ include_directories('../../include') ],
@@ -197,6 +204,7 @@ yams_onnx_plugin = shared_module('yams_onnx_plugin',
   cpp_args: plugin_cppargs,
   install: true,
   install_dir: plugins_dir,
+  install_rpath: onnx_plugin_install_rpath,
 )
 
 # --- Windows: Copy runtime DLLs next to the ONNX plugin ---

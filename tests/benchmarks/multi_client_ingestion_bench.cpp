@@ -24,6 +24,8 @@
 //   YAMS_BENCH_PLUGIN_DIR         - Directory containing plugin .dylib/.so files
 //   YAMS_BENCH_TRUSTED_PLUGIN_PATHS - Colon-separated trusted plugin search paths
 //   YAMS_BENCH_REAL_MODEL_PROVIDER  - Use real ONNX model provider: 1/true/yes
+//   YAMS_BENCH_MCP_SESSION_CHURN_EVERY_N - MCP only: every Nth request uses a fresh
+//                                          MCP session (default: 0; profile may override)
 
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch_session.hpp>
@@ -1832,7 +1834,11 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     //   YAMS_BENCH_CAT_EVERY_N           - cat cadence among non-status status/get ops
     //                                      (default: 3)
     //   YAMS_BENCH_LIST_INFLIGHT_CAP     - max concurrent list ops (0 = unlimited, default: 0)
-    //   YAMS_BENCH_USAGE_PROFILE         - mixed|extension_direct (default: mixed)
+    //   YAMS_BENCH_USAGE_PROFILE         - mixed|extension_direct|external_agent_churn
+    //                                      (default: mixed)
+    //   YAMS_BENCH_MCP_SESSION_CHURN_EVERY_N - MCP only; every Nth request uses a
+    //                                      transient MCP session (default: 6 for
+    //                                      external_agent_churn, otherwise 0)
     auto cfg = BenchConfig::fromEnv();
     if (!cfg.dataDir) {
         SKIP("Set YAMS_BENCH_DATA_DIR to an existing YAMS corpus to run this benchmark");
@@ -1840,6 +1846,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
 
     const bool extensionLikeProfile =
         (cfg.usageProfile == "extension_direct" || cfg.usageProfile == "vscode_blackboard");
+    const bool externalAgentChurnProfile =
+        (cfg.usageProfile == "external_agent_churn" || cfg.usageProfile == "agent_churn");
 
     // --- Configurable layout ---
     auto envInt = [](const char* name, int def) {
@@ -1847,14 +1855,17 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
             return std::max(1, std::atoi(v));
         return def;
     };
-    const int defaultSearchClients = extensionLikeProfile ? 6 : 4;
-    const int defaultListClients = extensionLikeProfile ? 6 : 4;
-    const int defaultGrepClients = extensionLikeProfile ? 1 : 2;
-    const int defaultStatusGetClients = extensionLikeProfile ? 10 : 4;
-    const int defaultOpsPerClient = extensionLikeProfile ? 80 : 50;
-    const int defaultStatusEveryN = extensionLikeProfile ? 8 : 4;
-    const int defaultCatEveryN = extensionLikeProfile ? 10 : 3;
-    const int defaultListInflightCap = extensionLikeProfile ? 2 : 0;
+    const int defaultSearchClients = externalAgentChurnProfile ? 4 : (extensionLikeProfile ? 6 : 4);
+    const int defaultListClients = externalAgentChurnProfile ? 4 : (extensionLikeProfile ? 6 : 4);
+    const int defaultGrepClients = externalAgentChurnProfile ? 1 : (extensionLikeProfile ? 1 : 2);
+    const int defaultStatusGetClients =
+        externalAgentChurnProfile ? 12 : (extensionLikeProfile ? 10 : 4);
+    const int defaultOpsPerClient =
+        externalAgentChurnProfile ? 90 : (extensionLikeProfile ? 80 : 50);
+    const int defaultStatusEveryN = externalAgentChurnProfile ? 2 : (extensionLikeProfile ? 8 : 4);
+    const int defaultCatEveryN = externalAgentChurnProfile ? 14 : (extensionLikeProfile ? 10 : 3);
+    const int defaultListInflightCap =
+        externalAgentChurnProfile ? 1 : (extensionLikeProfile ? 2 : 0);
 
     const int kSearchClients = envInt("YAMS_BENCH_SEARCH_CLIENTS", defaultSearchClients);
     const int kListClients = envInt("YAMS_BENCH_LIST_CLIENTS", defaultListClients);
@@ -1872,6 +1883,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     const int kDiscoverHashLimit = envInt("YAMS_BENCH_DISCOVER_HASH_LIMIT", 5000);
     const int kHotspotWindowMs = envInt("YAMS_BENCH_HOTSPOT_WINDOW_MS", 1000);
     const bool useMcpPath = cfg.useMcpPath;
+    const int defaultMcpSessionChurnEveryN = (externalAgentChurnProfile && useMcpPath) ? 6 : 0;
+    const int kMcpSessionChurnEveryN =
+        std::max(0, envInt("YAMS_BENCH_MCP_SESSION_CHURN_EVERY_N", defaultMcpSessionChurnEveryN));
     const size_t mcpPoolSize =
         static_cast<size_t>(std::max(1, envInt("YAMS_BENCH_MCP_POOL_SIZE", kTotalClients)));
 
@@ -1896,6 +1910,10 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
               << "\n";
     if (useMcpPath) {
         std::cout << "  MCP pool size:  " << mcpPoolSize << "\n";
+        std::cout << "  MCP churn:      every "
+                  << (kMcpSessionChurnEveryN > 0 ? std::to_string(kMcpSessionChurnEveryN)
+                                                 : std::string("disabled"))
+                  << " request(s) uses a fresh MCP session\n";
     }
 
     // --- Server-side timeout configuration ---
@@ -1954,6 +1972,35 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         sharedMcpPool = std::make_shared<MCPPipelineClientPool>(harness.socketPath(), mcpPoolSize);
     }
 
+    std::atomic<uint64_t> mcpQueryCalls{0};
+    std::atomic<uint64_t> mcpTransientSessionCalls{0};
+    auto queryMcpStepForSlot = [&](size_t slot, const std::string& op,
+                                   const nlohmann::json& params) -> yams::Result<nlohmann::json> {
+        if (!sharedMcpPool) {
+            return yams::Error{yams::ErrorCode::InvalidState,
+                               "MCP pool is not initialized for MCP benchmark path"};
+        }
+        const auto callNumber =
+            mcpQueryCalls.fetch_add(1, std::memory_order_relaxed) + static_cast<uint64_t>(1);
+        if (kMcpSessionChurnEveryN <= 0) {
+            return sharedMcpPool->queryStepForSlot(slot, op, params);
+        }
+
+        const bool useTransient = (callNumber % static_cast<uint64_t>(kMcpSessionChurnEveryN) == 0);
+        if (!useTransient) {
+            return sharedMcpPool->queryStepForSlot(slot, op, params);
+        }
+
+        mcpTransientSessionCalls.fetch_add(1, std::memory_order_relaxed);
+        try {
+            MCPPipelineClient transientClient(harness.socketPath());
+            return transientClient.queryStep(op, params);
+        } catch (const std::exception& e) {
+            return yams::Error{yams::ErrorCode::InvalidState,
+                               std::string("Transient MCP session failed: ") + e.what()};
+        }
+    };
+
     std::vector<std::string> knownHashes;
     {
         auto discoverDirectPage = [&](int offset, int& itemsInPage) -> bool {
@@ -1984,7 +2031,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
              offset += kDiscoverPageSize) {
             int itemsInPage = 0;
             if (useMcpPath && !useDirectDiscoveryFallback) {
-                auto listRes = sharedMcpPool->queryStepForSlot(
+                auto listRes = queryMcpStepForSlot(
                     0, "list",
                     {{"limit", kDiscoverPageSize}, {"offset", offset}, {"use_session", false}});
                 if (!listRes) {
@@ -2079,8 +2126,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
             auto t0 = std::chrono::steady_clock::now();
             yams::Result<nlohmann::json> res;
             if (useMcpPath) {
-                res = sharedMcpPool->queryStepForSlot(
-                    0, "search", {{"query", "architecture design"}, {"limit", 10}});
+                res = queryMcpStepForSlot(0, "search",
+                                          {{"query", "architecture design"}, {"limit", 10}});
             } else {
                 SearchRequest req;
                 req.query = "architecture design";
@@ -2109,8 +2156,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
             yams::Result<nlohmann::json> res;
             int items = 0;
             if (useMcpPath) {
-                res = sharedMcpPool->queryStepForSlot(0, "list",
-                                                      {{"limit", 50}, {"use_session", false}});
+                res = queryMcpStepForSlot(0, "list", {{"limit", 50}, {"use_session", false}});
                 if (res && res.value().contains("items") && res.value()["items"].is_array()) {
                     items = static_cast<int>(res.value()["items"].size());
                 } else if (res && res.value().contains("documents") &&
@@ -2145,7 +2191,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 auto t0 = std::chrono::steady_clock::now();
                 yams::Result<nlohmann::json> res;
                 if (useMcpPath) {
-                    res = sharedMcpPool->queryStepForSlot(
+                    res = queryMcpStepForSlot(
                         0, "get", {{"hash", knownHashes[i]}, {"include_content", false}});
                 } else {
                     auto direct = yams::cli::run_sync(warmClient.get(req), kOpTimeout);
@@ -2392,9 +2438,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 auto t0 = std::chrono::steady_clock::now();
                 yams::Result<nlohmann::json> res;
                 if (useMcpPath) {
-                    res = sharedMcpPool->queryStepForSlot(
-                        static_cast<size_t>(tid), "search",
-                        {{"query", req.query}, {"limit", req.limit}});
+                    res = queryMcpStepForSlot(static_cast<size_t>(tid), "search",
+                                              {{"query", req.query}, {"limit", req.limit}});
                 } else {
                     auto direct = yams::cli::run_sync(client->search(req), kOpTimeout);
                     if (direct) {
@@ -2475,9 +2520,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 auto t0 = std::chrono::steady_clock::now();
                 yams::Result<nlohmann::json> res;
                 if (useMcpPath) {
-                    res = sharedMcpPool->queryStepForSlot(
-                        static_cast<size_t>(tid), "list",
-                        {{"limit", req.limit}, {"use_session", false}});
+                    res = queryMcpStepForSlot(static_cast<size_t>(tid), "list",
+                                              {{"limit", req.limit}, {"use_session", false}});
                 } else {
                     auto direct = yams::cli::run_sync(client->list(req), kOpTimeout);
                     if (direct) {
@@ -2548,11 +2592,11 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 auto t0 = std::chrono::steady_clock::now();
                 yams::Result<nlohmann::json> res;
                 if (useMcpPath) {
-                    res = sharedMcpPool->queryStepForSlot(static_cast<size_t>(tid), "grep",
-                                                          {{"pattern", pattern},
-                                                           {"max_count", (i % 2 == 0) ? 25 : 50},
-                                                           {"ignore_case", (i % 3 == 0)},
-                                                           {"context", i % 2}});
+                    res = queryMcpStepForSlot(static_cast<size_t>(tid), "grep",
+                                              {{"pattern", pattern},
+                                               {"max_count", (i % 2 == 0) ? 25 : 50},
+                                               {"ignore_case", (i % 3 == 0)},
+                                               {"context", i % 2}});
                 } else {
                     GrepRequest req;
                     req.pattern = pattern;
@@ -2732,8 +2776,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                     if (doStatus) {
                         yams::Result<nlohmann::json> res;
                         if (useMcpPath) {
-                            res = sharedMcpPool->queryStepForSlot(
-                                static_cast<size_t>(tid), "status", nlohmann::json::object());
+                            res = queryMcpStepForSlot(static_cast<size_t>(tid), "status",
+                                                      nlohmann::json::object());
                         } else {
                             auto direct = yams::cli::run_sync(client->status(), kOpTimeout);
                             if (direct) {
@@ -2774,9 +2818,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         req.limit = 5;
                         yams::Result<nlohmann::json> res;
                         if (useMcpPath) {
-                            res = sharedMcpPool->queryStepForSlot(
-                                static_cast<size_t>(tid), "search",
-                                {{"query", req.query}, {"limit", req.limit}});
+                            res = queryMcpStepForSlot(static_cast<size_t>(tid), "search",
+                                                      {{"query", req.query}, {"limit", req.limit}});
                         } else {
                             auto direct = yams::cli::run_sync(client->search(req), kOpTimeout);
                             if (direct) {
@@ -2829,9 +2872,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         req.limit = ((i % 2) == 0) ? 10 : 25;
                         yams::Result<nlohmann::json> res;
                         if (useMcpPath) {
-                            res = sharedMcpPool->queryStepForSlot(
-                                static_cast<size_t>(tid), "list",
-                                {{"limit", req.limit}, {"use_session", false}});
+                            res =
+                                queryMcpStepForSlot(static_cast<size_t>(tid), "list",
+                                                    {{"limit", req.limit}, {"use_session", false}});
                         } else {
                             auto direct = yams::cli::run_sync(client->list(req), kOpTimeout);
                             if (direct) {
@@ -2886,9 +2929,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                     yams::Result<nlohmann::json> res;
                     if (doCat) {
                         if (useMcpPath) {
-                            res = sharedMcpPool->queryStepForSlot(
-                                static_cast<size_t>(tid), "get",
-                                {{"hash", hash}, {"include_content", true}});
+                            res = queryMcpStepForSlot(static_cast<size_t>(tid), "get",
+                                                      {{"hash", hash}, {"include_content", true}});
                         } else {
                             CatRequest req;
                             req.hash = hash;
@@ -2904,9 +2946,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         }
                     } else {
                         if (useMcpPath) {
-                            res = sharedMcpPool->queryStepForSlot(
-                                static_cast<size_t>(tid), "get",
-                                {{"hash", hash}, {"include_content", false}});
+                            res = queryMcpStepForSlot(static_cast<size_t>(tid), "get",
+                                                      {{"hash", hash}, {"include_content", false}});
                         } else {
                             GetRequest req;
                             req.hash = hash;
@@ -2963,8 +3004,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                 if (isStatus) {
                     yams::Result<nlohmann::json> res;
                     if (useMcpPath) {
-                        res = sharedMcpPool->queryStepForSlot(static_cast<size_t>(tid), "status",
-                                                              nlohmann::json::object());
+                        res = queryMcpStepForSlot(static_cast<size_t>(tid), "status",
+                                                  nlohmann::json::object());
                     } else {
                         auto direct = yams::cli::run_sync(client->status(), kOpTimeout);
                         if (direct) {
@@ -3002,9 +3043,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                     yams::Result<nlohmann::json> res;
                     if (doCat) {
                         if (useMcpPath) {
-                            res = sharedMcpPool->queryStepForSlot(
-                                static_cast<size_t>(tid), "get",
-                                {{"hash", hash}, {"include_content", true}});
+                            res = queryMcpStepForSlot(static_cast<size_t>(tid), "get",
+                                                      {{"hash", hash}, {"include_content", true}});
                         } else {
                             CatRequest req;
                             req.hash = hash;
@@ -3020,9 +3060,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         }
                     } else {
                         if (useMcpPath) {
-                            res = sharedMcpPool->queryStepForSlot(
-                                static_cast<size_t>(tid), "get",
-                                {{"hash", hash}, {"include_content", false}});
+                            res = queryMcpStepForSlot(static_cast<size_t>(tid), "get",
+                                                      {{"hash", hash}, {"include_content", false}});
                         } else {
                             GetRequest req;
                             req.hash = hash;
@@ -3508,9 +3547,16 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                                           {"fail", hw.fails}});
     }
 
+    const std::string recordTestName =
+        externalAgentChurnProfile ? "large_corpus_reads_churn" : "large_corpus_reads";
+    const double mcpTransientRatio = (mcpQueryCalls.load() > 0)
+                                         ? static_cast<double>(mcpTransientSessionCalls.load()) /
+                                               static_cast<double>(mcpQueryCalls.load())
+                                         : 0.0;
+
     json record{
         {"timestamp", isoTimestamp()},
-        {"test", "large_corpus_reads"},
+        {"test", recordTestName},
         {"request_path", useMcpPath ? "mcp_query" : "daemon_ipc"},
         {"data_dir", cfg.dataDir->string()},
         {"corpus_docs", finalSnap.documentsTotal},
@@ -3523,11 +3569,15 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         {"status_every_n", kStatusEveryN},
                         {"cat_every_n", kCatEveryN},
                         {"list_inflight_cap", kListInflightCap},
+                        {"mcp_session_churn_every_n", kMcpSessionChurnEveryN},
                         {"usage_profile", cfg.usageProfile}}},
         {"total_ops", totalOps},
         {"total_failures", totalFails},
         {"elapsed_seconds", globalElapsed},
         {"ops_per_sec", opsPerSec},
+        {"mcp", json{{"query_calls", mcpQueryCalls.load()},
+                     {"transient_session_calls", mcpTransientSessionCalls.load()},
+                     {"transient_session_ratio", mcpTransientRatio}}},
         {"search", json{{"ops", searchOps.load()},
                         {"fails", searchFails.load()},
                         {"latency", searchStats.toJson()}}},
