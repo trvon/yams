@@ -30,8 +30,29 @@ Build Notes
 - Target name: yams_object_storage_s3
 
 Testing
-- Optional smoke test: enable CMake option `YAMS_TEST_S3_PLUGIN_INTEGRATION` and run `ctest`.
-- The smoke test requires the environment variables above to be set and performs a PUT/HEAD/DELETE round‑trip.
+- Unit coverage: `meson test -C builddir storage_submodule --print-errorlogs` (includes signer and storage submodule tests).
+- Optional network smoke test: `meson test -C builddir s3_plugin_smoke --print-errorlogs`.
+- The smoke test requires the environment variables above and performs a PUT/GET/HEAD/LIST/DELETE round-trip.
+- Helper script: `scripts/dev/run_s3_plugin_smoke.sh [builddir]`.
+
+Example (R2)
+```bash
+export AWS_ACCESS_KEY_ID="<r2-access-key>"
+export AWS_SECRET_ACCESS_KEY="<r2-secret-key>"
+export AWS_REGION="auto"
+export S3_TEST_BUCKET="<bucket>"
+export S3_TEST_ENDPOINT="<accountid>.r2.cloudflarestorage.com"
+export S3_TEST_USE_PATH_STYLE=0
+meson test -C builddir s3_plugin_smoke --print-errorlogs
+```
+
+Note: set `S3_TEST_ENDPOINT` to host only. Do not include `https://` or `/<bucket>`.
+Note: Cloudflare API bearer tokens are not S3 credentials; use an R2 S3 Access Key ID + Secret
+Access Key pair from `R2 -> Manage R2 API tokens`.
+
+If you only have a Cloudflare API token, create temporary S3 credentials via
+`POST /accounts/{account_id}/r2/temp-access-credentials` and export returned
+`accessKeyId`, `secretAccessKey`, and `sessionToken` as AWS env vars.
 
 Security
 - Credentials are taken from config and/or standard AWS environment variables.

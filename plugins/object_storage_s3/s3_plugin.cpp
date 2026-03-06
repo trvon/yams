@@ -512,8 +512,8 @@ Result<std::string> S3Backend::uploadPart(std::string_view key, const std::strin
                                           int partNumber, std::span<const std::byte> data,
                                           const std::string& /*checksum*/) {
     // PUT ?partNumber=&uploadId=
-    std::string url =
-        buildObjectUrl(key) + "?partNumber=" + std::to_string(partNumber) + "&uploadId=" + uploadId;
+    std::string url = buildObjectUrl(key) + "?partNumber=" + std::to_string(partNumber) +
+                      "&uploadId=" + percentEncodeRfc3986(uploadId, false);
     CURL* curl = curl_easy_init();
     if (!curl)
         return Error{ErrorCode::Unknown, "curl init failed"};
@@ -581,7 +581,7 @@ S3Backend::completeMultipartUpload(std::string_view key, const std::string& uplo
     xml << "</CompleteMultipartUpload>";
     std::string body = xml.str();
 
-    std::string url = buildObjectUrl(key) + "?uploadId=" + uploadId;
+    std::string url = buildObjectUrl(key) + "?uploadId=" + percentEncodeRfc3986(uploadId, false);
     CURL* curl = curl_easy_init();
     if (!curl)
         return Error{ErrorCode::Unknown, "curl init failed"};
@@ -616,7 +616,7 @@ S3Backend::completeMultipartUpload(std::string_view key, const std::string& uplo
 }
 
 Result<void> S3Backend::abortMultipartUpload(std::string_view key, const std::string& uploadId) {
-    std::string url = buildObjectUrl(key) + "?uploadId=" + uploadId;
+    std::string url = buildObjectUrl(key) + "?uploadId=" + percentEncodeRfc3986(uploadId, false);
     CURL* curl = curl_easy_init();
     if (!curl)
         return Error{ErrorCode::Unknown, "curl init failed"};

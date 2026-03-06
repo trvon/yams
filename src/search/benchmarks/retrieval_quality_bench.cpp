@@ -64,6 +64,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <random>
 #include <set>
 #include <sstream>
@@ -555,6 +556,230 @@ static void debugLogWriteJsonLine(const DebugLogEntry& e) {
 // Store final metrics globally for summary after teardown
 static RetrievalMetrics g_final_metrics;
 static RetrievalMetrics g_keyword_metrics; // FTS5-only metrics for component isolation
+
+struct EnvSetting {
+    std::string key;
+    std::optional<std::string> value;
+};
+
+class ScopedEnvOverrides {
+public:
+    explicit ScopedEnvOverrides(const std::vector<EnvSetting>& overrides) {
+        previous_.reserve(overrides.size());
+        for (const auto& setting : overrides) {
+            PreviousValue pv;
+            pv.key = setting.key;
+            if (const char* existing = std::getenv(setting.key.c_str())) {
+                pv.value = std::string(existing);
+            }
+            previous_.push_back(pv);
+
+            if (setting.value.has_value()) {
+                (void)setenv(setting.key.c_str(), setting.value->c_str(), 1);
+            } else {
+                (void)unsetenv(setting.key.c_str());
+            }
+        }
+    }
+
+    ~ScopedEnvOverrides() {
+        for (const auto& previous : previous_) {
+            if (previous.value.has_value()) {
+                (void)setenv(previous.key.c_str(), previous.value->c_str(), 1);
+            } else {
+                (void)unsetenv(previous.key.c_str());
+            }
+        }
+    }
+
+private:
+    struct PreviousValue {
+        std::string key;
+        std::optional<std::string> value;
+    };
+
+    std::vector<PreviousValue> previous_;
+};
+
+struct OptimizationCandidate {
+    std::string name;
+    std::string description;
+    std::vector<EnvSetting> envOverrides;
+};
+
+struct OptimizationRunResult {
+    OptimizationCandidate candidate;
+    RetrievalMetrics hybridMetrics;
+    RetrievalMetrics keywordMetrics;
+    std::string tuningState;
+    std::string tuningReason;
+    double objectiveScore = 0.0;
+    double hybridEvalMs = 0.0;
+    double keywordEvalMs = 0.0;
+    bool success = false;
+    std::string errorMessage;
+};
+
+static bool envTruthy(const char* value) {
+    if (!value) {
+        return false;
+    }
+    std::string normalized(value);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
+        return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    });
+    return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+}
+
+static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
+    return {
+        {"auto_baseline",
+         "Auto tuner baseline with graph rerank enabled",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", std::nullopt},
+             {"YAMS_CANDIDATE_MULTIPLIER", std::nullopt},
+             {"YAMS_FUSION_STRATEGY", std::nullopt},
+         }},
+        {"mixed_default",
+         "Code/mixed tuned state with benchmark defaults",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+         }},
+        {"small_code_precision",
+         "Code-heavy state with stronger lexical/entity bias",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "SMALL_CODE"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         }},
+        {"mixed_recall_push",
+         "MIXED state with larger candidate pool and no vector skip",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "2.0"},
+         }},
+        {"mixed_weighted_rrf",
+         "MIXED state with weighted reciprocal fusion",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_FUSION_STRATEGY", "WEIGHTED_RECIPROCAL"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         }},
+        {"mixed_graph_off",
+         "MIXED state with graph rerank disabled",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "0"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         }},
+    };
+}
+
+static std::set<std::string> parseCandidateFilter(const char* raw) {
+    std::set<std::string> selected;
+    if (!raw || !*raw) {
+        return selected;
+    }
+
+    std::string value(raw);
+    std::stringstream ss(value);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        auto trim = [](std::string& s) {
+            const auto first = s.find_first_not_of(" \t\n\r");
+            if (first == std::string::npos) {
+                s.clear();
+                return;
+            }
+            const auto last = s.find_last_not_of(" \t\n\r");
+            s = s.substr(first, last - first + 1);
+        };
+        trim(token);
+        if (!token.empty()) {
+            selected.insert(token);
+        }
+    }
+    return selected;
+}
+
+static double computeOptimizationObjective(const RetrievalMetrics& hybrid,
+                                           const RetrievalMetrics& keyword,
+                                           double avgHybridQueryMs) {
+    // Accuracy-first with a mild latency penalty and explicit hybrid-vs-keyword gain signal.
+    const double quality =
+        0.40 * hybrid.mrr + 0.30 * hybrid.ndcgAtK + 0.20 * hybrid.recallAtK + 0.10 * hybrid.map;
+    const double hybridGain = std::max(0.0, hybrid.mrr - keyword.mrr);
+    const double latencyPenalty = std::min(0.10, std::max(0.0, avgHybridQueryMs) / 8000.0);
+    return quality + 0.10 * hybridGain - latencyPenalty;
+}
+
+static void appendOptimizationResultJson(const fs::path& outputFile,
+                                         const OptimizationRunResult& result) {
+    std::ofstream out(outputFile, std::ios::out | std::ios::app);
+    if (!out.is_open()) {
+        spdlog::warn("[OptLoop] Failed to open results file: {}", outputFile.string());
+        return;
+    }
+
+    json j;
+    j["candidate"] = result.candidate.name;
+    j["description"] = result.candidate.description;
+    j["success"] = result.success;
+    j["objective"] = result.objectiveScore;
+    j["hybrid_eval_ms"] = result.hybridEvalMs;
+    j["keyword_eval_ms"] = result.keywordEvalMs;
+    j["tuning_state"] = result.tuningState;
+    j["tuning_reason"] = result.tuningReason;
+    j["error"] = result.errorMessage;
+
+    j["hybrid"] = {
+        {"mrr", result.hybridMetrics.mrr},
+        {"recall_at_k", result.hybridMetrics.recallAtK},
+        {"precision_at_k", result.hybridMetrics.precisionAtK},
+        {"ndcg_at_k", result.hybridMetrics.ndcgAtK},
+        {"map", result.hybridMetrics.map},
+        {"num_queries", result.hybridMetrics.numQueries},
+    };
+
+    j["keyword"] = {
+        {"mrr", result.keywordMetrics.mrr},
+        {"recall_at_k", result.keywordMetrics.recallAtK},
+        {"precision_at_k", result.keywordMetrics.precisionAtK},
+        {"ndcg_at_k", result.keywordMetrics.ndcgAtK},
+        {"map", result.keywordMetrics.map},
+        {"num_queries", result.keywordMetrics.numQueries},
+    };
+
+    json env = json::object();
+    for (const auto& setting : result.candidate.envOverrides) {
+        if (setting.value.has_value()) {
+            env[setting.key] = *setting.value;
+        } else {
+            env[setting.key] = nullptr;
+        }
+    }
+    j["env_overrides"] = env;
+
+    out << j.dump() << "\n";
+}
 
 double computeDCG(const std::vector<int>& grades, int k) {
     double dcg = 0.0;
@@ -2129,6 +2354,203 @@ void CleanupFixture() {
     }
 }
 
+static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidate& candidate,
+                                                      const std::optional<fs::path>& outputFile) {
+    OptimizationRunResult result;
+    result.candidate = candidate;
+
+    ScopedEnvOverrides scopedEnv(candidate.envOverrides);
+    CleanupFixture();
+
+    try {
+        SetupFixture();
+        if (!g_fixture || !g_fixture->client) {
+            throw std::runtime_error("Benchmark fixture did not initialize a daemon client");
+        }
+
+        auto status = yams::cli::run_sync(g_fixture->client->status(), 5s);
+        if (status) {
+            result.tuningState = status.value().searchTuningState;
+            result.tuningReason = status.value().searchTuningReason;
+        }
+
+        const auto hybridStart = std::chrono::steady_clock::now();
+        result.hybridMetrics = evaluateQueries(*g_fixture->client, g_fixture->benchCorpusDir,
+                                               g_fixture->queries, g_fixture->topK, "hybrid");
+        const auto hybridEnd = std::chrono::steady_clock::now();
+        result.hybridEvalMs =
+            std::chrono::duration<double, std::milli>(hybridEnd - hybridStart).count();
+
+        const auto keywordStart = std::chrono::steady_clock::now();
+        result.keywordMetrics = evaluateQueries(*g_fixture->client, g_fixture->benchCorpusDir,
+                                                g_fixture->queries, g_fixture->topK, "keyword");
+        const auto keywordEnd = std::chrono::steady_clock::now();
+        result.keywordEvalMs =
+            std::chrono::duration<double, std::milli>(keywordEnd - keywordStart).count();
+
+        if (result.hybridMetrics.numQueries <= 0) {
+            throw std::runtime_error("No benchmark queries generated for optimization candidate");
+        }
+
+        const double avgHybridQueryMs =
+            result.hybridEvalMs / std::max(1, result.hybridMetrics.numQueries);
+        result.objectiveScore = computeOptimizationObjective(
+            result.hybridMetrics, result.keywordMetrics, avgHybridQueryMs);
+        result.success = true;
+    } catch (const std::exception& e) {
+        result.success = false;
+        result.errorMessage = e.what();
+    }
+
+    CleanupFixture();
+
+    if (outputFile.has_value()) {
+        appendOptimizationResultJson(*outputFile, result);
+    }
+
+    return result;
+}
+
+static int runOptimizationLoop() {
+    std::vector<OptimizationCandidate> candidates = defaultOptimizationCandidates();
+
+    const auto selectedCandidates = parseCandidateFilter(std::getenv("YAMS_BENCH_OPT_CANDIDATE"));
+    if (!selectedCandidates.empty()) {
+        std::vector<OptimizationCandidate> filtered;
+        filtered.reserve(candidates.size());
+        for (const auto& candidate : candidates) {
+            if (selectedCandidates.count(candidate.name) > 0) {
+                filtered.push_back(candidate);
+            }
+        }
+        candidates = std::move(filtered);
+        if (candidates.empty()) {
+            std::cerr << "No optimization candidates matched YAMS_BENCH_OPT_CANDIDATE='"
+                      << std::getenv("YAMS_BENCH_OPT_CANDIDATE") << "'\n";
+            return 2;
+        }
+    }
+
+    if (const char* maxCandidatesEnv = std::getenv("YAMS_BENCH_OPT_MAX_CANDIDATES")) {
+        try {
+            const auto parsed = std::max(1, std::stoi(maxCandidatesEnv));
+            if (static_cast<std::size_t>(parsed) < candidates.size()) {
+                candidates.resize(static_cast<std::size_t>(parsed));
+            }
+        } catch (...) {
+            spdlog::warn("[OptLoop] Invalid YAMS_BENCH_OPT_MAX_CANDIDATES='{}', using default {}",
+                         maxCandidatesEnv, candidates.size());
+        }
+    }
+
+    std::optional<fs::path> outputFile;
+    if (const char* outputEnv = std::getenv("YAMS_BENCH_OPT_RESULTS_FILE");
+        outputEnv && std::strlen(outputEnv) > 0) {
+        outputFile = fs::path(outputEnv);
+        const bool appendMode = envTruthy(std::getenv("YAMS_BENCH_OPT_APPEND_RESULTS"));
+        std::ofstream probe(*outputFile, appendMode ? (std::ios::out | std::ios::app)
+                                                    : (std::ios::out | std::ios::trunc));
+        if (!probe.is_open()) {
+            spdlog::warn("[OptLoop] Could not create optimization results file: {}",
+                         outputFile->string());
+            outputFile.reset();
+        } else {
+            spdlog::info("[OptLoop] Writing optimization results to {} ({})", outputFile->string(),
+                         appendMode ? "append" : "truncate");
+        }
+    }
+
+    std::cout << "\n" << std::string(78, '=') << "\n";
+    std::cout << "            RETRIEVAL OPTIMIZATION LOOP (code/mixed first)\n";
+    std::cout << std::string(78, '=') << "\n";
+
+    std::vector<OptimizationRunResult> allResults;
+    allResults.reserve(candidates.size());
+
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        const auto& candidate = candidates[i];
+        spdlog::info("[OptLoop] Candidate {}/{}: {} - {}", i + 1, candidates.size(), candidate.name,
+                     candidate.description);
+
+        auto result = runOptimizationCandidate(candidate, outputFile);
+        allResults.push_back(result);
+
+        if (!result.success) {
+            std::cout << "\n  [" << (i + 1) << "/" << candidates.size() << "] " << candidate.name
+                      << " -> FAILED: " << result.errorMessage << "\n";
+            continue;
+        }
+
+        const double avgMs = result.hybridEvalMs / std::max(1, result.hybridMetrics.numQueries);
+        std::cout << "\n  [" << (i + 1) << "/" << candidates.size() << "] " << candidate.name
+                  << "\n";
+        std::cout << "    objective=" << std::fixed << std::setprecision(4) << result.objectiveScore
+                  << "  hybrid_mrr=" << result.hybridMetrics.mrr
+                  << "  keyword_mrr=" << result.keywordMetrics.mrr
+                  << "  avg_hybrid_ms=" << std::setprecision(1) << avgMs << "\n";
+        std::cout << "    tuning_state="
+                  << (result.tuningState.empty() ? "<unknown>" : result.tuningState) << "\n";
+    }
+
+    std::vector<OptimizationRunResult> successful;
+    for (const auto& result : allResults) {
+        if (result.success) {
+            successful.push_back(result);
+        }
+    }
+
+    if (successful.empty()) {
+        std::cout << "\nNo successful optimization candidates completed.\n";
+        return 2;
+    }
+
+    std::sort(successful.begin(), successful.end(),
+              [](const OptimizationRunResult& a, const OptimizationRunResult& b) {
+                  return a.objectiveScore > b.objectiveScore;
+              });
+
+    const auto& best = successful.front();
+    g_final_metrics = best.hybridMetrics;
+    g_keyword_metrics = best.keywordMetrics;
+
+    std::cout << "\n" << std::string(78, '-') << "\n";
+    std::cout << "Top candidates by objective\n";
+    std::cout << std::string(78, '-') << "\n";
+    for (std::size_t i = 0; i < successful.size(); ++i) {
+        const auto& result = successful[i];
+        const double avgMs = result.hybridEvalMs / std::max(1, result.hybridMetrics.numQueries);
+        std::cout << "  " << (i + 1) << ". " << result.candidate.name
+                  << "  objective=" << std::fixed << std::setprecision(4) << result.objectiveScore
+                  << "  mrr=" << result.hybridMetrics.mrr
+                  << "  ndcg=" << result.hybridMetrics.ndcgAtK
+                  << "  avg_ms=" << std::setprecision(1) << avgMs << "\n";
+    }
+
+    std::cout << "\nBest candidate: " << best.candidate.name << "\n";
+    std::cout << "  " << best.candidate.description << "\n";
+
+    std::ostringstream envLine;
+    for (const auto& setting : best.candidate.envOverrides) {
+        if (setting.value.has_value()) {
+            envLine << setting.key << "=" << *setting.value << " ";
+        }
+    }
+    std::cout << "  Recommended env overrides: " << envLine.str() << "\n";
+
+    if (outputFile.has_value()) {
+        std::cout << "  Saved per-run JSONL to: " << outputFile->string() << "\n";
+    }
+
+    const char* datasetEnv = std::getenv("YAMS_BENCH_DATASET");
+    if (!(datasetEnv && std::strlen(datasetEnv) > 0)) {
+        std::cout << "  Next: validate this winner on a BEIR dataset, e.g. "
+                  << "YAMS_BENCH_DATASET=scifact YAMS_BENCH_OPT_LOOP=1 ...\n";
+    }
+
+    std::cout << std::string(78, '=') << "\n";
+    return 0;
+}
+
 void BM_RetrievalQuality(benchmark::State& state) {
     SetupFixture();
     auto& fixture = *g_fixture;
@@ -2163,6 +2585,10 @@ void BM_RetrievalQuality(benchmark::State& state) {
 BENCHMARK(BM_RetrievalQuality)->Iterations(1);
 
 int main(int argc, char** argv) {
+    if (envTruthy(std::getenv("YAMS_BENCH_OPT_LOOP"))) {
+        return runOptimizationLoop();
+    }
+
     benchmark::Initialize(&argc, argv);
     if (benchmark::ReportUnrecognizedArguments(argc, argv))
         return 1;

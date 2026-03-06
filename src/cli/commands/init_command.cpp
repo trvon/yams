@@ -498,20 +498,38 @@ public:
                     prompt_yes_no("\nConfigure S3 as the storage backend? (default: local) [y/N]: ",
                                   YesNoOptions{.defaultYes = false});
                 if (useS3) {
-                    std::cout << "Enter S3 URL (e.g., s3://my-bucket/my-prefix): ";
+                    std::cout << "Enter S3 URL (bucket + optional prefix, e.g., "
+                                 "s3://my-bucket/my-prefix): ";
                     std::getline(std::cin, s3Url);
                     std::cout << "Enter S3 region [us-east-1]: ";
                     std::getline(std::cin, s3Region);
                     if (s3Region.empty())
                         s3Region = "us-east-1";
-                    std::cout << "Enter S3 endpoint (optional, for R2/MinIO): ";
+                    std::cout << "Enter S3 endpoint host (optional, for R2/MinIO). "
+                                 "Example: <accountid>.r2.cloudflarestorage.com\n"
+                                 "(Do not include scheme or /bucket path): ";
                     std::getline(std::cin, s3Endpoint);
-                    std::cout << "Enter S3 Access Key ID (optional, uses env var if blank): ";
+                    auto normalizedEndpoint = normalizeS3EndpointInput(s3Endpoint);
+                    if (!s3Endpoint.empty() && normalizedEndpoint != s3Endpoint) {
+                        spdlog::info("Normalized S3 endpoint to host-only value: {}",
+                                     normalizedEndpoint);
+                    }
+                    s3Endpoint = normalizedEndpoint;
+                    if (!s3Endpoint.empty() && looksLikeR2Endpoint(s3Endpoint) &&
+                        s3Region == "us-east-1") {
+                        s3Region = "auto";
+                        spdlog::info("Detected Cloudflare R2 endpoint; using region 'auto'.");
+                    }
+                    std::cout << "Enter S3 Access Key ID (optional, uses env var if blank). "
+                                 "For Cloudflare R2, use R2 S3 credentials (not API bearer "
+                                 "token): ";
                     std::getline(std::cin, s3AccessKey);
                     std::cout << "Enter S3 Secret Access Key (optional, uses env var if blank): ";
                     std::getline(std::cin, s3SecretKey);
-                    s3UsePathStyle = prompt_yes_no("Use path-style addressing? (for MinIO) [y/N]: ",
-                                                   YesNoOptions{.defaultYes = false});
+                    s3UsePathStyle =
+                        prompt_yes_no("Use path-style addressing? (R2 usually: No, MinIO often: "
+                                      "Yes) [y/N]: ",
+                                      YesNoOptions{.defaultYes = false});
                 }
             }
 
@@ -670,6 +688,46 @@ private:
         std::string masked = key.substr(0, VISIBLE_PREFIX);
         masked.append(key.size() - VISIBLE_PREFIX, '*');
         return masked;
+    }
+
+    static std::string trimWhitespace(std::string value) {
+        const auto first = value.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) {
+            return {};
+        }
+        const auto last = value.find_last_not_of(" \t\r\n");
+        return value.substr(first, last - first + 1);
+    }
+
+    static std::string normalizeS3EndpointInput(std::string endpoint) {
+        endpoint = trimWhitespace(std::move(endpoint));
+        if (endpoint.empty()) {
+            return endpoint;
+        }
+
+        if (endpoint.rfind("https://", 0) == 0) {
+            endpoint.erase(0, 8);
+        } else if (endpoint.rfind("http://", 0) == 0) {
+            endpoint.erase(0, 7);
+        }
+
+        while (!endpoint.empty() && endpoint.back() == '/') {
+            endpoint.pop_back();
+        }
+
+        const auto slashPos = endpoint.find('/');
+        if (slashPos != std::string::npos) {
+            endpoint = endpoint.substr(0, slashPos);
+        }
+
+        return endpoint;
+    }
+
+    static bool looksLikeR2Endpoint(std::string_view endpoint) {
+        std::string lower(endpoint);
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return lower.find(".r2.cloudflarestorage.com") != std::string::npos;
     }
 
     static void createDirectoryIfMissing(const fs::path& p) {

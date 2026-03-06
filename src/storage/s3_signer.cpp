@@ -25,6 +25,15 @@ std::string toLower(std::string s) {
     return s;
 }
 
+std::string trimWhitespace(std::string s) {
+    const auto first = s.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return {};
+    }
+    const auto last = s.find_last_not_of(" \t\r\n");
+    return s.substr(first, last - first + 1);
+}
+
 std::string hexEncode(const unsigned char* data, std::size_t len) {
     static const char* hex = "0123456789abcdef";
     std::string out;
@@ -85,6 +94,16 @@ ParsedUrl parseUrl(const std::string& url) {
 }
 
 std::string formatAmzDate(std::string* outShortDate) {
+    if (const char* fixed = std::getenv("YAMS_S3_SIGNER_FIXED_AMZ_DATE")) {
+        std::string ts = trimWhitespace(fixed);
+        if (ts.size() >= 8) {
+            if (outShortDate) {
+                *outShortDate = ts.substr(0, 8);
+            }
+            return ts;
+        }
+    }
+
     using namespace std::chrono;
     auto now = system_clock::now();
     auto t = system_clock::to_time_t(now);
@@ -161,12 +180,19 @@ S3Signer::signRequest(CURL* curl, const BackendConfig& config, const std::string
             sessionToken = st;
     }
 
+    accessKey = trimWhitespace(std::move(accessKey));
+    secretKey = trimWhitespace(std::move(secretKey));
+    sessionToken = trimWhitespace(std::move(sessionToken));
+
     if (accessKey.empty() || secretKey.empty()) {
         return Result<curl_slist*>(Error{ErrorCode::PermissionDenied, "Missing S3 credentials"});
     }
 
     // Determine region and service
-    std::string region = config.region.empty() ? std::string("us-east-1") : config.region;
+    std::string region = trimWhitespace(config.region);
+    if (region.empty()) {
+        region = "us-east-1";
+    }
     ParsedUrl pu = parseUrl(url);
     if (region == "auto" && pu.host.find("r2.cloudflarestorage.com") == std::string::npos) {
         region = "us-east-1"; // fallback
@@ -231,7 +257,8 @@ S3Signer::signRequest(CURL* curl, const BackendConfig& config, const std::string
     cr << method << "\n"
        << canonicalURI << "\n"
        << canonicalQuery << "\n"
-       << canonicalHeaders.str() << signedHeaders.str() << "\n"
+       << canonicalHeaders.str() << "\n"
+       << signedHeaders.str() << "\n"
        << payloadHex;
     std::string canonicalRequest = cr.str();
 

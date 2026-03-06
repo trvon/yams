@@ -1,6 +1,7 @@
-// Minimal runtime smoke test for the S3 object storage plugin.
+// Runtime smoke test for the S3 object storage plugin.
 // Skips when env is not configured.
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <random>
@@ -58,6 +59,17 @@ int main() {
         return 2;
     }
 
+    auto fetched = backend->retrieve(key);
+    if (!fetched) {
+        std::cerr << "GET failed: " << fetched.error().message << "\n";
+        return 6;
+    }
+    if (fetched.value().size() != bytes.size() ||
+        !std::equal(fetched.value().begin(), fetched.value().end(), bytes.begin())) {
+        std::cerr << "GET payload mismatch after PUT\n";
+        return 7;
+    }
+
     auto exists = backend->exists(key);
     if (!exists) {
         std::cerr << "HEAD failed: " << exists.error().message << "\n";
@@ -66,6 +78,16 @@ int main() {
     if (!exists.value()) {
         std::cerr << "Object not found after PUT\n";
         return 4;
+    }
+
+    auto listed = backend->list("hello-");
+    if (!listed) {
+        std::cerr << "LIST failed: " << listed.error().message << "\n";
+        return 8;
+    }
+    if (std::find(listed.value().begin(), listed.value().end(), key) == listed.value().end()) {
+        std::cerr << "LIST missing uploaded key\n";
+        return 9;
     }
 
     if (auto del = backend->remove(key); !del) {
