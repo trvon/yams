@@ -33,6 +33,26 @@ test('plugins', plugin_exe,
   depends: plugin_runtime_deps,
 )
 
+# S3 object storage plugin smoke test (networked; skips when env is unset)
+if get_option('build-plugins') and get_option('plugin-s3')
+  s3_plugin_dir = join_paths(plugin_build_dir, 'plugins/object_storage_s3')
+  s3_smoke_exe = executable('yams_s3_plugin_smoke',
+    files('s3/s3_plugin_smoke_test.cpp'),
+    include_directories: incs,
+    dependencies: test_deps,
+    install: false,
+  )
+
+  test('s3_plugin_smoke', s3_smoke_exe,
+    env: {
+      'YAMS_SKIP_MODEL_LOADING': '1',
+      'YAMS_PLUGIN_DIR': s3_plugin_dir,
+    },
+    depends: [yams_object_storage_s3],
+    timeout: 180,
+  )
+endif
+
 # zyp (Zig YAMS PDF) plugin tests
 if get_option('plugin-zyp')
   zyp_plugin_path = join_paths(plugin_build_dir, 'plugins/zyp/yams_zyp' + plugin_ext)
