@@ -163,14 +163,14 @@ public:
             [this]() { exitOnError(executeRerankerModelStatus(), "Reranker status"); });
 
         // Migration subcommand
-        auto* migrateCmd = cmd->add_subcommand("migrate", "Migrate configuration to v2");
+        auto* migrateCmd = cmd->add_subcommand("migrate", "Migrate configuration to v3");
         migrateCmd->add_option("--config-path", configPath_, "Path to config file");
         migrateCmd->add_flag("--no-backup", noBackup_, "Skip creating backup");
         migrateCmd->callback([this]() { exitOnError(executeMigrate(), "Config migration"); });
 
-        // Update subcommand (add new v2 keys additively)
+        // Update subcommand (add new schema keys additively)
         auto* updateCmd = cmd->add_subcommand(
-            "update", "Add newly introduced v2 keys without overwriting existing values");
+            "update", "Add newly introduced v3 keys without overwriting existing values");
         updateCmd->add_option("--config-path", configPath_, "Path to config file");
         updateCmd->add_flag("--no-backup", noBackup_, "Skip creating backup");
         updateCmd->add_flag("--dry-run", dryRun_, "Show changes without writing");
@@ -248,6 +248,14 @@ public:
         storageCmd->add_option("--s3-secret-key", s3SecretKey_, "S3 secret key");
         storageCmd->add_flag("--s3-use-path-style", s3UsePathStyle_,
                              "Enable S3 path style addressing");
+        storageCmd
+            ->add_option("--s3-fallback-policy", s3FallbackPolicy_,
+                         "S3 startup fallback policy (strict or fallback_local_if_configured)")
+            ->check(CLI::IsMember({"strict", "fallback_local_if_configured"}));
+        storageCmd->add_option("--s3-fallback-local-data-dir", s3FallbackLocalDataDir_,
+                               "Local data dir used when S3 startup fallback is enabled");
+        storageCmd->add_flag("--s3-clear-fallback-local-data-dir", clearS3FallbackLocalDataDir_,
+                             "Clear configured S3 fallback local data dir");
         storageCmd->callback([this]() { exitOnError(executeStorage(), "Config storage"); });
     }
 
@@ -278,7 +286,10 @@ private:
     std::string s3Endpoint_;
     std::string s3AccessKey_;
     std::string s3SecretKey_;
+    std::string s3FallbackPolicy_;
+    std::string s3FallbackLocalDataDir_;
     bool s3UsePathStyle_ = false;
+    bool clearS3FallbackLocalDataDir_ = false;
 
     // Template helper for setting single config value with validation
     template <typename Validator = std::nullptr_t>
@@ -1345,9 +1356,9 @@ private:
             }
 
             if (!needsResult.value()) {
-                std::cout << ui::status_ok("Configuration is already at version 2") << "\n";
-                // Still perform additive update of any newly introduced v2 keys
-                auto added = migrator.updateV2SchemaAdditive(configPath, !noBackup_, false);
+                std::cout << ui::status_ok("Configuration is already at version 3") << "\n";
+                // Still perform additive update of any newly introduced schema keys
+                auto added = migrator.updateLatestSchemaAdditive(configPath, !noBackup_, false);
                 if (!added) {
                     return Error{added.error()};
                 }
@@ -1370,15 +1381,15 @@ private:
                 std::cout << "Current config version: 1.0.0 (assumed)\n";
             }
 
-            std::cout << "Migrating to version 2...\n";
+            std::cout << "Migrating to version 3...\n";
 
             // Perform migration
-            auto migrateResult = migrator.migrateToV2(configPath, !noBackup_);
+            auto migrateResult = migrator.migrateToLatest(configPath, !noBackup_);
             if (!migrateResult) {
                 return Error{migrateResult.error()};
             }
 
-            std::cout << ui::status_ok("Successfully migrated configuration to v2") << "\n";
+            std::cout << ui::status_ok("Successfully migrated configuration to v3") << "\n";
             std::cout << "  Config file: " << configPath << "\n";
 
             if (!noBackup_) {
@@ -1386,7 +1397,7 @@ private:
             }
 
             // Validate new config
-            auto validateResult = migrator.validateV2Config(configPath);
+            auto validateResult = migrator.validateLatestConfig(configPath);
             if (!validateResult) {
                 std::cout << ui::status_warning("Config validation failed: ")
                           << validateResult.error().message << "\n";
@@ -1394,7 +1405,7 @@ private:
                 std::cout << ui::status_ok("Configuration validated successfully") << "\n";
             }
 
-            std::cout << "\nNew features available in v2:\n";
+            std::cout << "\nNew features available in v3:\n";
             std::cout << "  • Vector database configuration\n";
             std::cout << "  • Embedding service settings\n";
             std::cout << "  • MCP server configuration\n";
@@ -1419,22 +1430,22 @@ private:
                 std::cout << ui::status_error("No configuration file found at: " +
                                               configPath.string())
                           << "\n";
-                std::cout << "  Run 'yams config migrate' to create a v2 config\n";
+                std::cout << "  Run 'yams config migrate' to create a v3 config\n";
                 return Error{ErrorCode::FileNotFound, "Config file not found"};
             }
 
             auto versionResult = migrator.getConfigVersion(configPath);
             if (!versionResult) {
                 std::cout << ui::status_warning("Cannot determine config version; attempting "
-                                                "additive update for v2 keys")
+                                                "additive update for v3 keys")
                           << "\n";
-            } else if (versionResult.value().major < 2) {
-                std::cout << ui::status_warning("Config is v1; run 'yams config migrate' first")
+            } else if (versionResult.value().major < 3) {
+                std::cout << ui::status_warning("Config is not v3; run 'yams config migrate' first")
                           << "\n";
-                return Error{ErrorCode::InvalidData, "Config is not v2"};
+                return Error{ErrorCode::InvalidData, "Config is not v3"};
             }
 
-            auto added = migrator.updateV2SchemaAdditive(configPath, !noBackup_, dryRun_);
+            auto added = migrator.updateLatestSchemaAdditive(configPath, !noBackup_, dryRun_);
             if (!added) {
                 return Error{added.error()};
             }
@@ -1443,7 +1454,7 @@ private:
                 if (dryRun_) {
                     std::cout << "No changes (up-to-date)\n";
                 } else {
-                    std::cout << ui::status_ok("Configuration already has all known v2 keys")
+                    std::cout << ui::status_ok("Configuration already has all known v3 keys")
                               << "\n";
                 }
             } else {
@@ -1478,7 +1489,7 @@ private:
                 std::cout << ui::status_error("No configuration file found at: " +
                                               configPath.string())
                           << "\n";
-                std::cout << "  Run 'yams config migrate' to create a v2 config\n";
+                std::cout << "  Run 'yams config migrate' to create a v3 config\n";
                 return Result<void>();
             }
 
@@ -1487,13 +1498,13 @@ private:
             if (!versionResult) {
                 std::cout << ui::status_warning("Cannot determine config version") << "\n";
                 std::cout << "  Assuming v1 configuration\n";
-                std::cout << "  Run 'yams config migrate' to upgrade to v2\n";
+                std::cout << "  Run 'yams config migrate' to upgrade to v3\n";
                 return Result<void>();
             }
 
             auto version = versionResult.value();
             std::cout << "Configuration version: " << version.toString() << "\n";
-            std::cout << "Latest version: 2.0.0\n";
+            std::cout << "Latest version: 3.0.0\n";
 
             // Check if migration is needed
             auto needsResult = migrator.needsMigration(configPath);
@@ -1504,8 +1515,8 @@ private:
             if (needsResult.value()) {
                 std::cout << "\n" << ui::status_warning("Migration needed!") << "\n";
                 std::cout << "  Your configuration is at version " << version.toString() << "\n";
-                std::cout << "  Run 'yams config migrate' to upgrade to v2\n";
-                std::cout << "\nVersion 2 adds support for:\n";
+                std::cout << "  Run 'yams config migrate' to upgrade to v3\n";
+                std::cout << "\nVersion 3 includes support for:\n";
                 std::cout << "  • Vector embeddings and semantic search\n";
                 std::cout << "  • MCP server integration\n";
                 std::cout << "  • Advanced performance tuning\n";
@@ -1515,7 +1526,7 @@ private:
                 std::cout << "\n" << ui::status_ok("Configuration is up to date") << "\n";
 
                 // Validate current config
-                auto validateResult = migrator.validateV2Config(configPath);
+                auto validateResult = migrator.validateLatestConfig(configPath);
                 if (!validateResult) {
                     std::cout << ui::status_warning("Config validation issues found:") << "\n";
                     std::cout << "  " << validateResult.error().message << "\n";
@@ -1533,6 +1544,63 @@ private:
 
     Result<void> executeStorage() {
         try {
+            const bool hasUpdates =
+                !storageEngine_.empty() || !s3Url_.empty() || !s3Region_.empty() ||
+                !s3Endpoint_.empty() || !s3AccessKey_.empty() || !s3SecretKey_.empty() ||
+                s3UsePathStyle_ || !s3FallbackPolicy_.empty() || !s3FallbackLocalDataDir_.empty() ||
+                clearS3FallbackLocalDataDir_;
+
+            if (!hasUpdates) {
+                auto configPath = getConfigPath();
+                auto cfg = parseSimpleToml(configPath);
+                auto getValue = [&cfg](const std::string& key,
+                                       const std::string& fallback = "") -> std::string {
+                    auto it = cfg.find(key);
+                    if (it == cfg.end() || it->second.empty()) {
+                        return fallback;
+                    }
+                    return it->second;
+                };
+                auto maskSecret = [](const std::string& value) {
+                    if (value.empty()) {
+                        return std::string("(unset)");
+                    }
+                    if (value.size() <= 4) {
+                        return std::string(value.size(), '*');
+                    }
+                    return value.substr(0, 4) + std::string(value.size() - 4, '*');
+                };
+
+                std::cout << "Storage Configuration\n";
+                std::cout << "=====================\n\n";
+                std::cout << "engine: " << getValue("storage.engine", "local") << "\n";
+                std::cout << "s3.url: " << getValue("storage.s3.url", "(unset)") << "\n";
+                std::cout << "s3.region: " << getValue("storage.s3.region", "us-east-1") << "\n";
+                std::cout << "s3.endpoint: " << getValue("storage.s3.endpoint", "(unset)") << "\n";
+                std::cout << "s3.access_key: " << maskSecret(getValue("storage.s3.access_key", ""))
+                          << "\n";
+                std::cout << "s3.secret_key: " << maskSecret(getValue("storage.s3.secret_key", ""))
+                          << "\n";
+                std::cout << "s3.use_path_style: " << getValue("storage.s3.use_path_style", "false")
+                          << "\n";
+                std::cout << "s3.fallback_policy: "
+                          << getValue("storage.s3.fallback_policy", "strict") << "\n";
+                std::cout << "s3.fallback_local_data_dir: "
+                          << getValue("storage.s3.fallback_local_data_dir", "(unset)") << "\n";
+                return Result<void>();
+            }
+
+            if (!storageEngine_.empty()) {
+                std::string normalized = storageEngine_;
+                std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (normalized != "local" && normalized != "s3") {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "--engine must be either 'local' or 's3'"};
+                }
+                storageEngine_ = normalized;
+            }
+
             if (!storageEngine_.empty()) {
                 auto r = writeConfigValue("storage.engine", storageEngine_);
                 if (!r)
@@ -1565,6 +1633,22 @@ private:
             }
             if (s3UsePathStyle_) {
                 auto r = writeConfigValue("storage.s3.use_path_style", "true");
+                if (!r)
+                    return r;
+            }
+            if (!s3FallbackPolicy_.empty()) {
+                auto r = writeConfigValue("storage.s3.fallback_policy", s3FallbackPolicy_);
+                if (!r)
+                    return r;
+            }
+            if (!s3FallbackLocalDataDir_.empty()) {
+                auto r =
+                    writeConfigValue("storage.s3.fallback_local_data_dir", s3FallbackLocalDataDir_);
+                if (!r)
+                    return r;
+            }
+            if (clearS3FallbackLocalDataDir_) {
+                auto r = writeConfigValue("storage.s3.fallback_local_data_dir", "");
                 if (!r)
                     return r;
             }

@@ -11,6 +11,27 @@ namespace yams::config {
 
 namespace fs = std::filesystem;
 
+namespace {
+constexpr int kLatestConfigVersion = 3;
+
+using ConfigMap = std::map<std::string, std::map<std::string, std::string>>;
+
+void mergeMissingValues(ConfigMap& target, const ConfigMap& source,
+                        std::vector<std::string>* addedKeys = nullptr) {
+    for (const auto& [section, kv] : source) {
+        auto& destination = target[section];
+        for (const auto& [key, value] : kv) {
+            if (destination.find(key) == destination.end()) {
+                destination[key] = value;
+                if (addedKeys) {
+                    addedKeys->push_back(section + "." + key);
+                }
+            }
+        }
+    }
+}
+} // namespace
+
 Result<bool> ConfigMigrator::needsMigration(const fs::path& configPath) {
     if (!fs::exists(configPath)) {
         // No config exists, do not migrate (fresh install should show welcome/init)
@@ -23,8 +44,8 @@ Result<bool> ConfigMigrator::needsMigration(const fs::path& configPath) {
         return true;
     }
 
-    // Check if current version is less than v2
-    return versionResult.value().major < 2;
+    // Check if current version is less than latest supported schema
+    return versionResult.value().major < kLatestConfigVersion;
 }
 
 Result<ConfigVersion> ConfigMigrator::getConfigVersion(const fs::path& configPath) {
@@ -57,8 +78,20 @@ Result<ConfigVersion> ConfigMigrator::getConfigVersion(const fs::path& configPat
     return v1;
 }
 
-Result<void> ConfigMigrator::migrateToV2(const fs::path& configPath, bool createBackup) {
-    spdlog::info("Starting config migration to v2");
+Result<void> ConfigMigrator::migrateToLatest(const fs::path& configPath, bool createBackup) {
+    spdlog::info("Starting config migration to v{}", kLatestConfigVersion);
+
+    int sourceVersion = 1;
+    if (fs::exists(configPath)) {
+        auto versionResult = getConfigVersion(configPath);
+        if (versionResult) {
+            sourceVersion = versionResult.value().major;
+            if (sourceVersion >= kLatestConfigVersion) {
+                spdlog::info("Configuration already at latest version {}", sourceVersion);
+                return Result<void>();
+            }
+        }
+    }
 
     // Create backup if requested
     fs::path backupPath;
@@ -81,19 +114,34 @@ Result<void> ConfigMigrator::migrateToV2(const fs::path& configPath, bool create
         oldConfig = parseResult.value();
     }
 
-    // Get v2 defaults
-    auto v2Defaults = getV2ConfigDefaults();
+    std::map<std::string, std::map<std::string, std::string>> mergedConfig;
+    if (sourceVersion <= 1) {
+        // v1 -> latest: apply legacy key mappings onto latest defaults.
+        auto latestDefaults = getLatestConfigDefaults();
+        mergedConfig = mergeConfigs(oldConfig, latestDefaults);
+    } else {
+        // v2 -> latest: keep user values and fill missing latest defaults.
+        mergedConfig = oldConfig;
+        mergeMissingValues(mergedConfig, getLatestConfigDefaults());
+        mergeMissingValues(mergedConfig, getLatestAdditiveDefaults());
+    }
 
-    // Merge old config into new structure
-    auto mergedConfig = mergeConfigs(oldConfig, v2Defaults);
+    // Update version metadata to latest
+    auto now = std::chrono::system_clock::now();
+    auto t = std::chrono::system_clock::to_time_t(now);
+    std::stringstream ss;
+    ss << std::put_time(std::localtime(&t), "%Y-%m-%d");
+    mergedConfig["version"]["config_version"] = std::to_string(kLatestConfigVersion);
+    mergedConfig["version"]["migration_date"] = ss.str();
+    mergedConfig["version"]["migrated_from"] = std::to_string(sourceVersion);
 
     // Write new config
-    ConfigVersion v2;
-    v2.major = 2;
-    v2.minor = 0;
-    v2.patch = 0;
+    ConfigVersion latest;
+    latest.major = kLatestConfigVersion;
+    latest.minor = 0;
+    latest.patch = 0;
 
-    auto writeResult = writeTomlConfig(configPath, mergedConfig, v2);
+    auto writeResult = writeTomlConfig(configPath, mergedConfig, latest);
     if (!writeResult) {
         // Restore backup if write failed
         if (!backupPath.empty() && fs::exists(backupPath)) {
@@ -103,97 +151,38 @@ Result<void> ConfigMigrator::migrateToV2(const fs::path& configPath, bool create
         return writeResult;
     }
 
-    spdlog::info("Successfully migrated config to v2");
-    logMigration("migrate", "Successfully migrated from v1 to v2");
+    spdlog::info("Successfully migrated config to v{}", kLatestConfigVersion);
+    logMigration("migrate", "Successfully migrated from v" + std::to_string(sourceVersion) +
+                                " to v" + std::to_string(kLatestConfigVersion));
 
     return Result<void>();
 }
 
-Result<void> ConfigMigrator::createDefaultV2Config(const fs::path& configPath) {
-    spdlog::info("Creating default v2 config at: {}", configPath.string());
+Result<void> ConfigMigrator::createDefaultLatestConfig(const fs::path& configPath) {
+    spdlog::info("Creating default v{} config at: {}", kLatestConfigVersion, configPath.string());
 
     // Ensure parent directory exists
     fs::create_directories(configPath.parent_path());
 
-    // Get v2 defaults
-    auto v2Defaults = getV2ConfigDefaults();
+    // Get latest defaults
+    auto latestDefaults = getLatestConfigDefaults();
 
     // Write config
-    ConfigVersion v2;
-    v2.major = 2;
-    v2.minor = 0;
-    v2.patch = 0;
+    ConfigVersion latest;
+    latest.major = kLatestConfigVersion;
+    latest.minor = 0;
+    latest.patch = 0;
 
-    return writeTomlConfig(configPath, v2Defaults, v2);
+    return writeTomlConfig(configPath, latestDefaults, latest);
 }
 
-std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2AdditiveDefaults() {
-    // Additive keys introduced post-initial v2 rollout. These will be merged non-destructively.
-    return {{"embeddings", {{"auto_on_add", "false"}}},
-            {"embeddings.selection",
-             {{"mode", "budgeted"},
-              {"strategy", "ranked"},
-              {"max_chunks_per_doc", "8"},
-              {"max_chars_per_doc", "24000"},
-              {"heading_boost", "1.25"},
-              {"intro_boost", "0.75"}}},
-            {"plugins.symbol_extraction", {{"enable", "true"}, {"auto_download_grammars", "true"}}},
-            {"tuning",
-             {{"profile", "balanced"},
-              {"backpressure_read_pause_ms", "10"},
-              {"worker_poll_ms", "150"},
-              {"idle_cpu_pct", "10.0"},
-              {"idle_mux_low_bytes", "4194304"},
-              {"idle_shrink_hold_ms", "5000"},
-              {"aggressive_idle_shrink", "false"},
-              {"pool_cooldown_ms", "500"},
-              {"pool_scale_step", "1"},
-              {"pool_ipc_min", "1"},
-              {"pool_ipc_max", "32"},
-              {"pool_io_min", "1"},
-              {"pool_io_max", "32"},
-              {"io_conn_per_thread", "8"},
-              {"post_ingest_threads", "0"},
-              {"post_ingest_queue_max", "1000"},
-              {"cli_pool_threads", "2"},
-              {"list_inflight_limit", "8"},
-              {"list_admission_wait_ms", "200"},
-              {"grep_inflight_limit", "1"},
-              {"grep_admission_wait_ms", "20000"}}},
-            {"cli.streaming",
-             {{"enable", "true"},
-              {"payload_threshold_bytes", "262144"},
-              {"ttfb_threshold_ms", "150"},
-              {"chunk_size_bytes", "65536"},
-              {"max_inflight_chunks", "4"}}},
-            {"cli.pool",
-             {
-                 {"max_clients", "8"},
-                 {"min_clients", "1"},
-                 {"acquire_timeout_ms", "5000"},
-                 {"max_waiters", "0"},
-                 {"fair_queue", "true"},
-                 {"health_check_interval_ms", "30000"},
-                 {"health_check_timeout_ms", "500"},
-                 {"reconnect_backoff_base_ms", "100"},
-                 {"reconnect_backoff_max_ms", "5000"},
-                 {"reconnect_backoff_jitter_pct", "0.2"},
-             }},
-            {"daemon.graph_prune",
-             {{"enabled", "false"},
-              {"keep_latest", "3"},
-              {"interval_minutes", "60"},
-              {"initial_delay_minutes", "10"}}},
-            {"search.path_tree", {{"enable", "false"}, {"mode", "fallback"}}},
-            {"search", {{"reranker_model", ""}}},
-            {"repair",
-             {{"enable_online_repair", "false"},
-              {"max_repair_concurrency", "1"},
-              {"repair_backoff_ms", "250"},
-              {"max_retries", "3"}}}};
+std::map<std::string, std::map<std::string, std::string>>
+ConfigMigrator::getLatestAdditiveDefaults() {
+    // No post-v3 additive keys yet; keep this hook for future additive migrations.
+    return {};
 }
 
-std::vector<MigrationEntry> ConfigMigrator::getV1ToV2MigrationMap() {
+std::vector<MigrationEntry> ConfigMigrator::getV1ToLatestMigrationMap() {
     return {
         // Core mappings
         {"core.data_dir", "core.data_dir", "~/.yams/data", "Data storage directory", true},
@@ -258,18 +247,20 @@ std::vector<MigrationEntry> ConfigMigrator::getV1ToV2MigrationMap() {
     };
 }
 
-std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2ConfigDefaults() {
+std::map<std::string, std::map<std::string, std::string>>
+ConfigMigrator::getLatestConfigDefaults() {
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
     std::stringstream ss;
     ss << std::put_time(std::localtime(&time_t), "%Y-%m-%d");
 
     return {{"version",
-             {{"config_version", "2"}, {"migrated_from", "1"}, {"migration_date", ss.str()}}},
+             {{"config_version", std::to_string(kLatestConfigVersion)},
+              {"migrated_from", "0"},
+              {"migration_date", ss.str()}}},
 
             {"core",
              {{"data_dir", "~/.yams/data"},
-              {"storage_engine", "local"},
               {"enable_wal", "true"},
               {"enable_telemetry", "false"},
               {"log_level", "info"}}},
@@ -294,6 +285,16 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"enable_chunking", "true"},
               {"objects_dir", "objects"},
               {"staging_dir", "staging"}}},
+
+            {"storage.s3",
+             {{"url", ""},
+              {"region", "us-east-1"},
+              {"endpoint", ""},
+              {"access_key", ""},
+              {"secret_key", ""},
+              {"use_path_style", "false"},
+              {"fallback_policy", "strict"},
+              {"fallback_local_data_dir", ""}}},
 
             {"chunking",
              {{"window_size", "48"},
@@ -408,7 +409,9 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
             // Daemon service defaults: enable model provider + plugin autoload by default
             {"daemon",
              {{"enable", "true"},
+              {"auto_start", "true"},
               {"auto_load_plugins", "true"},
+              {"auto_repair", "true"},
 #ifdef __APPLE__
               {"plugin_dir", "/opt/homebrew/lib/yams/plugins"}, // macOS Homebrew install location
 #else
@@ -419,14 +422,35 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"use_legacy_tuner", "false"},
               {"auto_repair_batch_size", "16"},
               {"auto_rebuild_on_dim_mismatch", "true"},
+              {"socket_path", "/tmp/yams-daemon.sock"},
+              {"pid_file", "/tmp/yams-daemon.pid"},
               {"worker_threads", "0"},
               {"max_memory_gb", "0"},
+              {"connect_timeout_ms", "1000"},
+              {"request_timeout_ms", "5000"},
               {"log_level", "info"}}},
 
             {"tuning",
              {{"profile", "balanced"},
+              {"backpressure_read_pause_ms", "10"},
+              {"worker_poll_ms", "150"},
+              {"idle_cpu_pct", "10.0"},
+              {"idle_mux_low_bytes", "4194304"},
+              {"idle_shrink_hold_ms", "5000"},
+              {"aggressive_idle_shrink", "false"},
+              {"pool_scale_step", "1"},
+              {"pool_ipc_min", "1"},
+              {"pool_ipc_max", "32"},
+              {"pool_io_min", "1"},
+              {"pool_io_max", "32"},
+              {"io_conn_per_thread", "8"},
               {"post_ingest_threads", "0"},
               {"post_ingest_queue_max", "1000"},
+              {"cli_pool_threads", "2"},
+              {"list_inflight_limit", "8"},
+              {"list_admission_wait_ms", "200"},
+              {"grep_inflight_limit", "1"},
+              {"grep_admission_wait_ms", "20000"},
               {"pool_cooldown_ms", "500"}}},
 
             {"search.hybrid",
@@ -491,7 +515,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
 
             {"experimental", {{"enable", "false"}}},
 
-            {"plugins.symbol_extraction", {{"enable", "true"}}},
+            {"plugins.symbol_extraction", {{"enable", "true"}, {"auto_download_grammars", "true"}}},
             {"experimental.bert_ner",
              {{"enable", "false"},
               {"model_path", ""},
@@ -518,37 +542,6 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"preserve_code_blocks", "true"},
               {"preserve_markdown_sections", "true"}}},
 
-            {"daemon",
-             {{"enable", "true"},
-              {"auto_start", "true"},
-              {"socket_path", "/tmp/yams-daemon.sock"},
-              {"pid_file", "/tmp/yams-daemon.pid"},
-              {"worker_threads", "4"},
-              {"max_memory_gb", "4"},
-              {"log_level", "info"},
-              {"connect_timeout_ms", "1000"},
-              {"request_timeout_ms", "5000"}}},
-
-            {"tuning", {{"profile", "balanced"}}},
-
-            {"tuning",
-             {{"profile", "balanced"},
-              {"backpressure_read_pause_ms", "10"},
-              {"worker_poll_ms", "150"},
-              {"idle_cpu_pct", "10.0"},
-              {"idle_mux_low_bytes", "4194304"},
-              {"idle_shrink_hold_ms", "5000"},
-              {"aggressive_idle_shrink", "false"},
-              {"pool_cooldown_ms", "500"},
-              {"pool_scale_step", "1"},
-              {"pool_ipc_min", "1"},
-              {"pool_ipc_max", "32"},
-              {"pool_io_min", "1"},
-              {"pool_io_max", "32"},
-              {"io_conn_per_thread", "8"},
-              {"post_ingest_threads", "0"},
-              {"post_ingest_queue_max", "1000"}}},
-
             {"daemon.models",
              {{"max_loaded_models", "4"},
               {"hot_pool_size", "2"},
@@ -570,6 +563,31 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::getV2C
               {"fallback_to_local", "true"},
               {"max_retries", "3"},
               {"batch_size", "32"}}},
+
+            {"daemon.graph_prune",
+             {{"enabled", "false"},
+              {"keep_latest", "3"},
+              {"interval_minutes", "60"},
+              {"initial_delay_minutes", "10"}}},
+
+            {"cli.streaming",
+             {{"enable", "true"},
+              {"payload_threshold_bytes", "262144"},
+              {"ttfb_threshold_ms", "150"},
+              {"chunk_size_bytes", "65536"},
+              {"max_inflight_chunks", "4"}}},
+
+            {"cli.pool",
+             {{"max_clients", "8"},
+              {"min_clients", "1"},
+              {"acquire_timeout_ms", "5000"},
+              {"max_waiters", "0"},
+              {"fair_queue", "true"},
+              {"health_check_interval_ms", "30000"},
+              {"health_check_timeout_ms", "500"},
+              {"reconnect_backoff_base_ms", "100"},
+              {"reconnect_backoff_max_ms", "5000"},
+              {"reconnect_backoff_jitter_pct", "0.2"}}},
 
             {"repair",
              {{"enable_online_repair", "false"},
@@ -684,7 +702,7 @@ ConfigMigrator::parseTomlConfig(const fs::path& path) {
             }
 
             // Handle arrays
-            if (value[0] == '[') {
+            if (!value.empty() && value[0] == '[') {
                 // Keep as-is for now
             }
 
@@ -716,6 +734,7 @@ Result<void> ConfigMigrator::writeTomlConfig(
                                              "auth",
                                              "performance",
                                              "storage",
+                                             "storage.s3",
                                              "chunking",
                                              "compression",
                                              "wal",
@@ -737,6 +756,10 @@ Result<void> ConfigMigrator::writeTomlConfig(
                                              "daemon.models",
                                              "daemon.resource_pool",
                                              "daemon.client",
+                                             "daemon.graph_prune",
+                                             "cli.streaming",
+                                             "cli.pool",
+                                             "plugins.symbol_extraction",
                                              "experimental",
                                              "experimental.bert_ner",
                                              "experimental.auto_tagging",
@@ -825,7 +848,7 @@ std::map<std::string, std::map<std::string, std::string>> ConfigMigrator::mergeC
     const std::map<std::string, std::map<std::string, std::string>>& oldConfig,
     const std::map<std::string, std::map<std::string, std::string>>& newDefaults) {
     auto merged = newDefaults;
-    auto migrationMap = getV1ToV2MigrationMap();
+    auto migrationMap = getV1ToLatestMigrationMap();
 
     // Apply migration mappings
     for (const auto& entry : migrationMap) {
@@ -872,7 +895,7 @@ void ConfigMigrator::logMigration(const std::string& action, const std::string& 
     spdlog::debug("[CONFIG_MIGRATION] {}: {}", action, details);
 }
 
-Result<void> ConfigMigrator::validateV2Config(const fs::path& configPath) {
+Result<void> ConfigMigrator::validateLatestConfig(const fs::path& configPath) {
     auto parseResult = parseTomlConfig(configPath);
     if (!parseResult) {
         return Error{parseResult.error()};
@@ -893,7 +916,7 @@ Result<void> ConfigMigrator::validateV2Config(const fs::path& configPath) {
     if (config.find("version") != config.end()) {
         const auto& version = config.at("version");
         if (version.find("config_version") == version.end() ||
-            version.at("config_version") != "2") {
+            version.at("config_version") != std::to_string(kLatestConfigVersion)) {
             return Error{ErrorCode::InvalidData, "Invalid config version"};
         }
     }
@@ -927,7 +950,8 @@ Result<void> ConfigMigrator::validateV2Config(const fs::path& configPath) {
 }
 
 Result<std::vector<std::string>>
-ConfigMigrator::updateV2SchemaAdditive(const fs::path& configPath, bool makeBackup, bool dryRun) {
+ConfigMigrator::updateLatestSchemaAdditive(const fs::path& configPath, bool makeBackup,
+                                           bool dryRun) {
     if (!fs::exists(configPath)) {
         return Error{ErrorCode::FileNotFound, "Config file not found: " + configPath.string()};
     }
@@ -938,11 +962,13 @@ ConfigMigrator::updateV2SchemaAdditive(const fs::path& configPath, bool makeBack
     }
     auto config = parseResult.value();
 
-    auto additives = getV2AdditiveDefaults();
+    auto defaults = getLatestConfigDefaults();
+    auto additives = getLatestAdditiveDefaults();
+    mergeMissingValues(defaults, additives);
     std::vector<std::string> addedKeys;
 
     // Determine missing keys
-    for (const auto& [section, kv] : additives) {
+    for (const auto& [section, kv] : defaults) {
         auto& destSection = config[section]; // creates if missing (used later only if we add)
         bool sectionExists = (parseResult.value().find(section) != parseResult.value().end());
         for (const auto& [k, v] : kv) {
@@ -981,18 +1007,20 @@ ConfigMigrator::updateV2SchemaAdditive(const fs::path& configPath, bool makeBack
     auto t = std::chrono::system_clock::to_time_t(now);
     std::stringstream ss;
     ss << std::put_time(std::localtime(&t), "%Y-%m-%d");
-    config["version"]["config_version"] = "2"; // ensure v2
-    config["version"]["migration_date"] = ss.str();
-    if (config["version"].find("migrated_from") == config["version"].end()) {
-        config["version"]["migrated_from"] = "2";
+    std::string migratedFrom = config["version"]["config_version"];
+    if (migratedFrom.empty()) {
+        migratedFrom = std::to_string(kLatestConfigVersion);
     }
+    config["version"]["config_version"] = std::to_string(kLatestConfigVersion);
+    config["version"]["migration_date"] = ss.str();
+    config["version"]["migrated_from"] = migratedFrom;
 
     // Write updated config
-    ConfigVersion v2;
-    v2.major = 2;
-    v2.minor = 0;
-    v2.patch = 0;
-    auto writeResult = writeTomlConfig(configPath, config, v2);
+    ConfigVersion latest;
+    latest.major = kLatestConfigVersion;
+    latest.minor = 0;
+    latest.patch = 0;
+    auto writeResult = writeTomlConfig(configPath, config, latest);
     if (!writeResult) {
         return Error{writeResult.error()};
     }

@@ -89,6 +89,7 @@
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/search/reranker_adapter.h>
 #include <yams/search/search_engine_builder.h>
+#include <yams/storage/storage_runtime_resolver.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
@@ -1505,6 +1506,31 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         fs::create_directories(dataDir, ec);
         resolvedDataDir_ = dataDir;
     }
+
+    auto storageDecision =
+        yams::storage::resolveStorageBootstrapDecision(config_.configFilePath, dataDir);
+    if (!storageDecision) {
+        co_return Error{storageDecision.error().code,
+                        std::string("Storage bootstrap resolution failed: ") +
+                            storageDecision.error().message};
+    }
+
+    if (storageDecision.value().activeDataDir != dataDir) {
+        dataDir = storageDecision.value().activeDataDir;
+        std::error_code ec;
+        fs::create_directories(dataDir, ec);
+        resolvedDataDir_ = dataDir;
+    }
+
+    if (storageDecision.value().fallbackTriggered) {
+        spdlog::warn("[ServiceManager] Storage fallback activated (policy={}): {}. "
+                     "Using local data dir: {}",
+                     yams::storage::toString(storageDecision.value().fallbackPolicy),
+                     storageDecision.value().fallbackReason, dataDir.string());
+    } else if (storageDecision.value().activeEngine == "s3") {
+        spdlog::info("[ServiceManager] Storage engine active: s3");
+    }
+
     spdlog::info("[ServiceManager] Phase: Data Dir Resolved.");
     spdlog::info("ServiceManager[co]: using data directory: {}", dataDir.string());
 
@@ -1516,6 +1542,15 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         auto storeRes = init::record_duration(
             std::string(readiness::kContentStore),
             [&]() -> yams::Result<T> {
+                if (storageDecision.value().storageEngineOverride) {
+                    yams::api::ContentStoreBuilder builder;
+                    builder.withStoragePath(storeRoot)
+                        .withStorageEngine(storageDecision.value().storageEngineOverride)
+                        .withCompression(false)
+                        .withDeduplication(true)
+                        .withIntegrityChecks(true);
+                    return builder.build();
+                }
                 return yams::api::ContentStoreBuilder::createDefault(storeRoot);
             },
             state_.initDurationsMs);

@@ -1327,10 +1327,12 @@ if catch2_dep.found()
     files(
       'unit/storage/compressed_storage_engine_catch2_test.cpp',
       'unit/storage/compressed_storage_stats_catch2_test.cpp',
+      'unit/storage/storage_backend_engine_adapter_catch2_test.cpp',
       'unit/storage/object_storage_adapter_catch2_test.cpp',
       'unit/storage/reference_counter_catch2_test.cpp',
       'unit/storage/reference_counter_stress_catch2_test.cpp',
       'unit/storage/s3_signer_catch2_test.cpp',
+      'unit/storage/storage_runtime_resolver_catch2_test.cpp',
       'unit/storage/storage_engine_catch2_test.cpp',
     ),
     include_directories: incs,

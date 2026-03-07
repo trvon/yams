@@ -1085,7 +1085,7 @@ int main(int argc, char* argv[]) {
 
     clear_session_index_on_start();
 
-    // Best-effort: notify about config v2 migration before daemonizing (visible to user)
+    // Best-effort: notify about config v3 migration before daemonizing (visible to user)
     try {
         namespace fs = std::filesystem;
         fs::path defaultConfigPath = yams::config::get_config_path();
@@ -1093,7 +1093,7 @@ int main(int argc, char* argv[]) {
             yams::config::ConfigMigrator migrator;
             auto need = migrator.needsMigration(defaultConfigPath);
             if (need && need.value()) {
-                spdlog::warn("Configuration migration to v2 is required. Run: yams config migrate");
+                spdlog::warn("Configuration migration to v3 is required. Run: yams config migrate");
             }
         }
     } catch (const std::exception& e) {

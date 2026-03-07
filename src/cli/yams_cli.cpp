@@ -15,6 +15,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/search_engine_builder.h>
+#include <yams/storage/storage_runtime_resolver.h>
 #include <yams/vector/dim_resolver.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/embedding_service.h>
@@ -629,6 +630,24 @@ Result<void> YamsCLI::initializeStorage() {
                              "...' - please set YAMS_DATA_DIR or use --data-dir"};
         }
 
+        auto storageDecision =
+            yams::storage::resolveStorageBootstrapDecision(getConfigPath(), dataPath_);
+        if (!storageDecision) {
+            return storageDecision.error();
+        }
+
+        if (storageDecision.value().activeDataDir != dataPath_) {
+            dataPath_ = storageDecision.value().activeDataDir;
+        }
+
+        if (storageDecision.value().fallbackTriggered) {
+            spdlog::warn("Storage fallback activated (policy={}): {}. Using local data dir: {}",
+                         yams::storage::toString(storageDecision.value().fallbackPolicy),
+                         storageDecision.value().fallbackReason, dataPath_.string());
+        } else if (storageDecision.value().activeEngine == "s3") {
+            spdlog::info("Storage engine active: s3");
+        }
+
         // Create data directory if it doesn't exist
         if (!std::filesystem::exists(dataPath_)) {
             std::filesystem::create_directories(dataPath_);
@@ -699,13 +718,20 @@ Result<void> YamsCLI::initializeStorage() {
         api::ContentStoreBuilder builder;
         builder.withStoragePath(dataPath_ / "storage").withChunkSize(DEFAULT_CHUNK_SIZE);
 
-        // Load compression settings from config
-        auto compressionConfig = loadCompressionConfig();
-        builder.withCompression(compressionConfig.enable)
-            .withCompressionType(compressionConfig.algorithm)
-            .withCompressionLevel(compressionConfig.level)
-            .withDeduplication(true)
-            .withIntegrityChecks(true);
+        if (storageDecision.value().storageEngineOverride) {
+            builder.withStorageEngine(storageDecision.value().storageEngineOverride)
+                .withCompression(false)
+                .withDeduplication(true)
+                .withIntegrityChecks(true);
+        } else {
+            // Load compression settings from config
+            auto compressionConfig = loadCompressionConfig();
+            builder.withCompression(compressionConfig.enable)
+                .withCompressionType(compressionConfig.algorithm)
+                .withCompressionLevel(compressionConfig.level)
+                .withDeduplication(true)
+                .withIntegrityChecks(true);
+        }
 
         auto storeResult = builder.build();
         if (!storeResult) {
@@ -1260,7 +1286,7 @@ void YamsCLI::checkConfigMigration() {
 
             if (!autoMigrate) {
                 std::cout << "\nConfiguration Migration Required\n";
-                std::cout << "YAMS needs to update your configuration to version 2.\n";
+                std::cout << "YAMS needs to update your configuration to version 3.\n";
                 std::cout << "This will add new features and improve performance.\n\n";
                 std::cout << "Proceed with migration? [Y/n]: ";
                 std::cout.flush();
@@ -1273,9 +1299,9 @@ void YamsCLI::checkConfigMigration() {
             }
 
             if (autoMigrate) {
-                auto migrateResult = migrator.migrateToV2(configPath, true);
+                auto migrateResult = migrator.migrateToLatest(configPath, true);
                 if (migrateResult) {
-                    std::cout << "✅ Configuration successfully migrated to v2\n\n";
+                    std::cout << "✅ Configuration successfully migrated to v3\n\n";
                 } else {
                     std::cout << "❌ Migration failed: " << migrateResult.error().message << "\n\n";
                 }

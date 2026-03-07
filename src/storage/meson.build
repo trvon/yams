@@ -22,6 +22,8 @@ yams_storage_engine = static_library('yams_storage_engine',
     'storage_engine.cpp',
     'compressed_storage_engine.cpp',
     'storage_backend_factory.cpp',
+    'storage_backend_engine_adapter.cpp',
+    'storage_runtime_resolver.cpp',
     'url_backend.cpp',
     's3_signer.cpp',
     'object_storage_plugin_loader.cpp',
@@ -65,4 +67,3 @@ yams_reference_counter_dep = declare_dependency(
   include_directories: include_directories('../../include'),
 )
 meson.override_dependency('yams_reference_counter', yams_reference_counter_dep)
-

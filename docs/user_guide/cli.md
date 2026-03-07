@@ -962,9 +962,9 @@ Subcommands:
 - storage
   - Configure storage settings.
 - migrate
-  - Migrate configuration to v2.
+  - Migrate configuration to v3.
 - update
-  - Add newly introduced v2 keys without overwriting existing values.
+  - Add newly introduced v3 keys without overwriting existing values.
 - check
   - Check if config needs migration.
 

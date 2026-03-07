@@ -9,7 +9,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -43,7 +45,9 @@ struct ConfigCommandFixture {
 
     ConfigCommandFixture() {
         // A unique directory for all test artifacts
-        testHome = fs::temp_directory_path() / ("yams_config_test_" + std::to_string(::getpid()));
+        const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+        testHome = fs::temp_directory_path() /
+                   ("yams_config_test_" + std::to_string(::getpid()) + "_" + std::to_string(now));
         fs::create_directories(testHome);
 
         testDataHome = testHome / "data";
@@ -66,6 +70,13 @@ struct ConfigCommandFixture {
         // Also set XDG vars for Unix compatibility
         xdgDataEnv.emplace("XDG_DATA_HOME", testDataHome.string());
         xdgConfigEnv.emplace("XDG_CONFIG_HOME", testConfigHome.string());
+
+        // Pre-seed a v3 config so command tests are not coupled to migration behavior.
+        const fs::path configPath = testConfigHome / "config.toml";
+        std::ofstream configFile(configPath, std::ios::trunc);
+        configFile << "[version]\n";
+        configFile << "config_version = 3\n";
+        configFile.close();
     }
 
     ~ConfigCommandFixture() {
@@ -87,6 +98,11 @@ struct ConfigCommandFixture {
         fs::path modelDir = modelsRoot / modelName;
         fs::create_directories(modelDir);
         std::ofstream(modelDir / "model.onnx").close();
+    }
+
+    void overwriteConfig(const std::string& content) {
+        std::ofstream out(testConfigHome / "config.toml", std::ios::trunc);
+        out << content;
     }
 
     int runCommand(const std::vector<std::string>& args) {
@@ -138,4 +154,74 @@ TEST_CASE("ConfigCommand - config command parses without crash", "[cli][config][
     // Return code may vary based on setup
     (void)fixture.runCommand({"yams", "config", "--help"});
     SUCCEED();
+}
+
+TEST_CASE("ConfigCommand - storage command writes S3 fallback settings",
+          "[cli][config][storage][catch2]") {
+    ConfigCommandFixture fixture;
+    const fs::path fallbackDir = fixture.testDataHome / "s3-fallback";
+
+    const int rc = fixture.runCommand({"yams", "config", "storage", "--engine", "s3", "--s3-url",
+                                       "s3://example-bucket/prefix", "--s3-region", "us-west-2",
+                                       "--s3-fallback-policy", "fallback_local_if_configured",
+                                       "--s3-fallback-local-data-dir", fallbackDir.string()});
+    REQUIRE(rc == 0);
+
+    const auto cfg = yams::config::parse_simple_toml(fixture.testConfigHome / "config.toml");
+    REQUIRE(cfg.count("storage.engine") == 1);
+    CHECK(cfg.at("storage.engine") == "s3");
+    REQUIRE(cfg.count("storage.s3.url") == 1);
+    CHECK(cfg.at("storage.s3.url") == "s3://example-bucket/prefix");
+    REQUIRE(cfg.count("storage.s3.region") == 1);
+    CHECK(cfg.at("storage.s3.region") == "us-west-2");
+    REQUIRE(cfg.count("storage.s3.fallback_policy") == 1);
+    CHECK(cfg.at("storage.s3.fallback_policy") == "fallback_local_if_configured");
+    REQUIRE(cfg.count("storage.s3.fallback_local_data_dir") == 1);
+    CHECK(cfg.at("storage.s3.fallback_local_data_dir") == fallbackDir.string());
+}
+
+TEST_CASE("ConfigCommand - storage clear fallback local data dir",
+          "[cli][config][storage][catch2]") {
+    ConfigCommandFixture fixture;
+    const fs::path fallbackDir = fixture.testDataHome / "to-clear";
+
+    const int setRc = fixture.runCommand(
+        {"yams", "config", "storage", "--s3-fallback-local-data-dir", fallbackDir.string()});
+    REQUIRE(setRc == 0);
+
+    const int clearRc =
+        fixture.runCommand({"yams", "config", "storage", "--s3-clear-fallback-local-data-dir"});
+    REQUIRE(clearRc == 0);
+
+    const auto cfg = yams::config::parse_simple_toml(fixture.testConfigHome / "config.toml");
+    REQUIRE(cfg.count("storage.s3.fallback_local_data_dir") == 1);
+    CHECK(cfg.at("storage.s3.fallback_local_data_dir").empty());
+}
+
+TEST_CASE("ConfigCommand - auto-migrates v2 to v3 and preserves storage settings",
+          "[cli][config][storage][migration][catch2]") {
+    ConfigCommandFixture fixture;
+    fixture.overwriteConfig("[version]\n"
+                            "config_version = 2\n"
+                            "migrated_from = 1\n"
+                            "[storage]\n"
+                            "engine = \"s3\"\n"
+                            "[storage.s3]\n"
+                            "url = \"s3://bucket/prefix\"\n"
+                            "region = \"us-east-1\"\n");
+
+    const int rc = fixture.runCommand({"yams", "config", "list"});
+    REQUIRE(rc == 0);
+
+    const auto cfg = yams::config::parse_simple_toml(fixture.testConfigHome / "config.toml");
+    REQUIRE(cfg.count("version.config_version") == 1);
+    CHECK(cfg.at("version.config_version") == "3");
+    REQUIRE(cfg.count("storage.engine") == 1);
+    CHECK(cfg.at("storage.engine") == "s3");
+    REQUIRE(cfg.count("storage.s3.url") == 1);
+    CHECK(cfg.at("storage.s3.url") == "s3://bucket/prefix");
+    REQUIRE(cfg.count("storage.s3.region") == 1);
+    CHECK(cfg.at("storage.s3.region") == "us-east-1");
+    REQUIRE(cfg.count("storage.s3.fallback_policy") == 1);
+    CHECK(cfg.at("storage.s3.fallback_policy") == "strict");
 }

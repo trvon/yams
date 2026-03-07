@@ -492,6 +492,8 @@ public:
             // 6a) S3 Storage Setup
             bool useS3 = false;
             std::string s3Url, s3Region, s3Endpoint, s3AccessKey, s3SecretKey;
+            std::string s3FallbackPolicy = "strict";
+            std::string s3FallbackLocalDataDir;
             bool s3UsePathStyle = false;
             if (!nonInteractive_) {
                 useS3 =
@@ -530,6 +532,24 @@ public:
                         prompt_yes_no("Use path-style addressing? (R2 usually: No, MinIO often: "
                                       "Yes) [y/N]: ",
                                       YesNoOptions{.defaultYes = false});
+
+                    const bool enableFallback =
+                        prompt_yes_no("If S3 fails during startup, fall back to local storage? "
+                                      "[y/N]: ",
+                                      YesNoOptions{.defaultYes = false});
+                    if (enableFallback) {
+                        s3FallbackPolicy = "fallback_local_if_configured";
+                        std::cout << "Fallback local data directory [" << dataPath.string()
+                                  << "]: ";
+                        std::string fallbackInput;
+                        std::getline(std::cin, fallbackInput);
+                        fallbackInput = trimWhitespace(std::move(fallbackInput));
+                        if (fallbackInput.empty()) {
+                            s3FallbackLocalDataDir = dataPath.string();
+                        } else {
+                            s3FallbackLocalDataDir = fallbackInput;
+                        }
+                    }
                 }
             }
 
@@ -544,24 +564,24 @@ public:
             // 7) Generate an initial API key
             std::string apiKeyHex = generateApiKey(DEFAULT_API_KEY_BYTES);
 
-            // 8) Write config.toml (v2 format)
+            // 8) Write config.toml (v3 format)
             auto migrator = std::make_unique<config::ConfigMigrator>();
-            auto createResult = migrator->createDefaultV2Config(configPath);
+            auto createResult = migrator->createDefaultLatestConfig(configPath);
             if (!createResult) {
                 return createResult;
             }
 
-            // Update the v2 config with user choices
-            auto updateResult =
-                updateV2Config(configPath, dataPath, privateKeyPath, publicKeyPath, apiKeyHex,
-                               enableVectorDB, selectedModel, useS3, s3Url, s3Region, s3Endpoint,
-                               s3AccessKey, s3SecretKey, s3UsePathStyle, tuningProfile_);
+            // Update the v3 config with user choices
+            auto updateResult = updateV2Config(
+                configPath, dataPath, privateKeyPath, publicKeyPath, apiKeyHex, enableVectorDB,
+                selectedModel, useS3, s3Url, s3Region, s3Endpoint, s3AccessKey, s3SecretKey,
+                s3UsePathStyle, s3FallbackPolicy, s3FallbackLocalDataDir, tuningProfile_);
             if (!updateResult) {
                 return updateResult;
             }
 
             if (printConfig_) {
-                // Print the v2 config (with secrets masked)
+                // Print the v3 config (with secrets masked)
                 std::ifstream configFile(configPath);
                 if (configFile) {
                     std::string line;
@@ -856,9 +876,10 @@ private:
         const fs::path& publicKeyPath, const std::string& apiKey, bool enableVectorDB,
         const std::string& selectedModel, bool useS3, const std::string& s3Url,
         const std::string& s3Region, const std::string& s3Endpoint, const std::string& s3AccessKey,
-        const std::string& s3SecretKey, bool s3UsePathStyle, const std::string& tuningProfile) {
+        const std::string& s3SecretKey, bool s3UsePathStyle, const std::string& s3FallbackPolicy,
+        const std::string& s3FallbackLocalDataDir, const std::string& tuningProfile) {
         try {
-            // Read the existing v2 config
+            // Read the existing v3 config
             std::ifstream in(configPath);
             if (!in) {
                 return Error{ErrorCode::InvalidState, "Failed to read config file"};
@@ -975,66 +996,14 @@ private:
             }
 
             if (useS3) {
-                pos = content.find("engine = ");
+                pos = content.find("[storage]");
                 if (pos != std::string::npos) {
-                    size_t endPos = content.find("\n", pos);
-                    if (endPos != std::string::npos) {
-                        content.replace(pos, endPos - pos, "engine = \"s3\"");
-                    }
-                }
-
-                pos = content.find("url = ");
-                if (pos != std::string::npos) {
-                    size_t endPos = content.find("\n", pos);
-                    if (endPos != std::string::npos) {
-                        content.replace(pos, endPos - pos,
-                                        "url = \"" + escapeTomlString(s3Url) + "\"");
-                    }
-                }
-
-                pos = content.find("region = ");
-                if (pos != std::string::npos) {
-                    size_t endPos = content.find("\n", pos);
-                    if (endPos != std::string::npos) {
-                        content.replace(pos, endPos - pos,
-                                        "region = \"" + escapeTomlString(s3Region) + "\"");
-                    }
-                }
-
-                pos = content.find("endpoint = ");
-                if (pos != std::string::npos) {
-                    size_t endPos = content.find("\n", pos);
-                    if (endPos != std::string::npos) {
-                        content.replace(pos, endPos - pos,
-                                        "endpoint = \"" + escapeTomlString(s3Endpoint) + "\"");
-                    }
-                }
-
-                pos = content.find("access_key = ");
-                if (pos != std::string::npos) {
-                    size_t endPos = content.find("\n", pos);
-                    if (endPos != std::string::npos) {
-                        content.replace(pos, endPos - pos,
-                                        "access_key = \"" + escapeTomlString(s3AccessKey) + "\"");
-                    }
-                }
-
-                pos = content.find("secret_key = ");
-                if (pos != std::string::npos) {
-                    size_t endPos = content.find("\n", pos);
-                    if (endPos != std::string::npos) {
-                        content.replace(pos, endPos - pos,
-                                        "secret_key = \"" + escapeTomlString(s3SecretKey) + "\"");
-                    }
-                }
-
-                pos = content.find("use_path_style = ");
-                if (pos != std::string::npos) {
-                    size_t endPos = content.find("\n", pos);
-                    if (endPos != std::string::npos) {
-                        content.replace(pos, endPos - pos,
-                                        std::string("use_path_style = ") +
-                                            (s3UsePathStyle ? "true" : "false"));
+                    size_t enginePos = content.find("engine = ", pos);
+                    if (enginePos != std::string::npos) {
+                        size_t endPos = content.find("\n", enginePos);
+                        if (endPos != std::string::npos) {
+                            content.replace(enginePos, endPos - enginePos, "engine = \"s3\"");
+                        }
                     }
                 }
             }
@@ -1092,6 +1061,24 @@ private:
             }
             out << content;
             out.close();
+
+            if (useS3) {
+                std::map<std::string, std::string> s3Values;
+                s3Values["storage.engine"] = "s3";
+                s3Values["storage.s3.url"] = s3Url;
+                s3Values["storage.s3.region"] = s3Region;
+                s3Values["storage.s3.endpoint"] = s3Endpoint;
+                s3Values["storage.s3.access_key"] = s3AccessKey;
+                s3Values["storage.s3.secret_key"] = s3SecretKey;
+                s3Values["storage.s3.use_path_style"] = s3UsePathStyle ? "true" : "false";
+                s3Values["storage.s3.fallback_policy"] =
+                    s3FallbackPolicy.empty() ? "strict" : s3FallbackPolicy;
+                s3Values["storage.s3.fallback_local_data_dir"] = s3FallbackLocalDataDir;
+                if (!config::write_config_values(configPath, s3Values)) {
+                    return Error{ErrorCode::WriteError,
+                                 "Failed to persist S3 storage configuration values"};
+                }
+            }
 
             return Result<void>();
         } catch (const std::exception& e) {

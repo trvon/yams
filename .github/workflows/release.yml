@@ -1164,6 +1164,10 @@ jobs:
     permissions:
       contents: write
       actions: read
+    outputs:
+      channel: ${{ steps.meta.outputs.channel }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -1474,29 +1478,52 @@ jobs:
           mkdir -p "$TAP_PATH/Formula"
           cp homebrew/yams.rb "$TAP_PATH/Formula/yams.rb"
           pushd "$TAP_PATH" >/dev/null
-          
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/yams.rb || true
-          if git diff --cached --quiet; then
-            echo "Tap formula unchanged; skipping push" >&2
-            popd >/dev/null
-            exit 0
+          if ! grep -Fq "version \"${VERSION}\"" Formula/yams.rb; then
+            echo "ERROR: Generated stable formula does not contain expected version ${VERSION}" >&2
+            exit 1
           fi
-          git commit -m "chore(homebrew): update formula to v${VERSION}"
+          if grep -Eq '__[A-Z0-9_]+__' Formula/yams.rb; then
+            echo "ERROR: Generated stable formula still contains unresolved placeholders" >&2
+            exit 1
+          fi
+
+          git add -A Formula/yams.rb
+          if git diff --cached --quiet; then
+            echo "Tap formula already at expected version ${VERSION}; skipping commit" >&2
+          else
+            git commit -m "chore(homebrew): update formula to v${VERSION}"
+            if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
+              for attempt in 1 2 3; do
+                if git push tap-origin main; then
+                  break
+                fi
+                if [ "$attempt" -eq 3 ]; then
+                  echo "Failed to push updated Homebrew formula after ${attempt} attempts" >&2
+                  exit 1
+                fi
+                sleep $((attempt * 10))
+              done
+            else
+              echo "HOMEBREW_TAP_TOKEN not set; manual push required" >&2
+            fi
+          fi
+
           if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
-            for attempt in 1 2 3; do
-              if git push tap-origin main; then
+            for attempt in 1 2 3 4 5; do
+              remote_formula="$(curl -fsSL "https://raw.githubusercontent.com/${{ github.repository_owner }}/homebrew-yams/main/Formula/yams.rb" || true)"
+              if [ -n "$remote_formula" ] && printf '%s\n' "$remote_formula" | grep -Fq "version \"${VERSION}\""; then
+                echo "Confirmed remote stable formula is version ${VERSION}" >&2
                 break
               fi
-              if [ "$attempt" -eq 3 ]; then
-                echo "Failed to push updated Homebrew formula after ${attempt} attempts" >&2
+              if [ "$attempt" -eq 5 ]; then
+                echo "ERROR: Remote stable formula did not update to version ${VERSION}" >&2
                 exit 1
               fi
               sleep $((attempt * 10))
             done
-          else
-            echo "HOMEBREW_TAP_TOKEN not set; manual push required" >&2
           fi
           popd >/dev/null
 
@@ -1625,27 +1652,60 @@ jobs:
           pushd "$TAP_PATH" >/dev/null
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A Formula/yams-nightly.rb Formula/yams@nightly.rb Aliases/yams@nightly || true
-          if git diff --cached --quiet; then
-            echo "Nightly formula unchanged; skipping push" >&2
-            popd >/dev/null
-            exit 0
+          if ! grep -Fq "version \"${VERSION}\"" Formula/yams-nightly.rb; then
+            echo "ERROR: Generated nightly formula does not contain expected version ${VERSION}" >&2
+            exit 1
           fi
-          git commit -m "chore(homebrew): update nightly formula to ${VERSION}"
+          if ! grep -Fq "/releases/download/${TAG}/" Formula/yams-nightly.rb; then
+            echo "ERROR: Generated nightly formula does not reference expected tag ${TAG}" >&2
+            exit 1
+          fi
+          if grep -Eq '__[A-Z0-9_]+__' Formula/yams-nightly.rb; then
+            echo "ERROR: Generated nightly formula still contains unresolved placeholders" >&2
+            exit 1
+          fi
+
+          git add -A Formula
+          if [ -d Aliases ]; then
+            git add -A Aliases
+          fi
+
+          if git diff --cached --quiet; then
+            echo "Nightly formulas already at expected version ${VERSION}; skipping commit" >&2
+          else
+            git commit -m "chore(homebrew): update nightly formula to ${VERSION}"
+            if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
+              REMOTE="https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${{ github.repository_owner }}/homebrew-yams.git"
+              for attempt in 1 2 3; do
+                if git push "$REMOTE" main; then
+                  break
+                fi
+                if [ "$attempt" -eq 3 ]; then
+                  echo "Failed to push updated nightly Homebrew formula after ${attempt} attempts" >&2
+                  exit 1
+                fi
+                sleep $((attempt * 10))
+              done
+            else
+              echo "HOMEBREW_TAP_TOKEN not set; manual push required" >&2
+            fi
+          fi
+
           if [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
-            REMOTE="https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${{ github.repository_owner }}/homebrew-yams.git"
-            for attempt in 1 2 3; do
-              if git push "$REMOTE" main; then
+            for attempt in 1 2 3 4 5; do
+              remote_formula="$(curl -fsSL "https://raw.githubusercontent.com/${{ github.repository_owner }}/homebrew-yams/main/Formula/yams-nightly.rb" || true)"
+              if [ -n "$remote_formula" ] &&
+                 printf '%s\n' "$remote_formula" | grep -Fq "version \"${VERSION}\"" &&
+                 printf '%s\n' "$remote_formula" | grep -Fq "/releases/download/${TAG}/"; then
+                echo "Confirmed remote nightly formula references ${VERSION} (${TAG})" >&2
                 break
               fi
-              if [ "$attempt" -eq 3 ]; then
-                echo "Failed to push updated nightly Homebrew formula after ${attempt} attempts" >&2
+              if [ "$attempt" -eq 5 ]; then
+                echo "ERROR: Remote nightly formula did not update to ${VERSION} (${TAG})" >&2
                 exit 1
               fi
               sleep $((attempt * 10))
             done
-          else
-            echo "HOMEBREW_TAP_TOKEN not set; manual push required" >&2
           fi
           popd >/dev/null
 
@@ -2248,19 +2308,75 @@ jobs:
             formula_name="yams-nightly"
           fi
 
+          EXPECTED_VERSION="${{ needs.create-release.outputs.version }}"
+          EXPECTED_TAG="${{ needs.create-release.outputs.tag }}"
+          if [ -z "$EXPECTED_VERSION" ] || [ -z "$EXPECTED_TAG" ]; then
+            echo "ERROR: Missing expected release metadata from create-release outputs" >&2
+            exit 1
+          fi
+
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "formula_name=$formula_name" >> "$GITHUB_OUTPUT"
           echo "formula=trvon/yams/$formula_name" >> "$GITHUB_OUTPUT"
+          echo "formula_file=$formula_name.rb" >> "$GITHUB_OUTPUT"
+          echo "expected_version=$EXPECTED_VERSION" >> "$GITHUB_OUTPUT"
+          echo "expected_tag=$EXPECTED_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Install formula from tap
         if: steps.guard.outputs.run_check == 'true'
         shell: bash
         run: |
           set -euo pipefail
+
           FORMULA="${{ steps.target.outputs.formula }}"
-          brew untap trvon/yams >/dev/null 2>&1 || true
-          brew tap trvon/yams
+          FORMULA_NAME="${{ steps.target.outputs.formula_name }}"
+          FORMULA_FILE="${{ steps.target.outputs.formula_file }}"
+          CHANNEL="${{ steps.target.outputs.channel }}"
+          EXPECTED_VERSION="${{ steps.target.outputs.expected_version }}"
+          EXPECTED_TAG="${{ steps.target.outputs.expected_tag }}"
+
+          for attempt in 1 2 3 4 5; do
+            brew untap trvon/yams >/dev/null 2>&1 || true
+            brew tap trvon/yams
+
+            TAP_REPO="$(brew --repository trvon/yams)"
+            TAP_FORMULA="$TAP_REPO/Formula/$FORMULA_FILE"
+            if [ ! -f "$TAP_FORMULA" ]; then
+              echo "ERROR: Expected tap formula missing: $TAP_FORMULA" >&2
+              exit 1
+            fi
+
+            metadata_ok=1
+            if ! grep -Fq "version \"$EXPECTED_VERSION\"" "$TAP_FORMULA"; then
+              metadata_ok=0
+            fi
+            if [ "$CHANNEL" != "stable" ] && ! grep -Fq "/releases/download/$EXPECTED_TAG/" "$TAP_FORMULA"; then
+              metadata_ok=0
+            fi
+
+            if [ "$metadata_ok" -eq 1 ]; then
+              echo "Tap formula metadata matches expected release: version=$EXPECTED_VERSION tag=$EXPECTED_TAG"
+              break
+            fi
+
+            if [ "$attempt" -eq 5 ]; then
+              echo "ERROR: Tap formula metadata mismatch after retries" >&2
+              grep -E 'version\s+"|url\s+"' "$TAP_FORMULA" >&2 || true
+              exit 1
+            fi
+
+            sleep $((attempt * 10))
+          done
+
           brew reinstall "$FORMULA" || brew install "$FORMULA"
+
+      - name: Run Homebrew post_install hooks
+        if: steps.guard.outputs.run_check == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          FORMULA_NAME="${{ steps.target.outputs.formula_name }}"
+          brew postinstall "$FORMULA_NAME"
 
       - name: Assert ONNX plugin RPATH includes Homebrew lib
         if: steps.guard.outputs.run_check == 'true'
@@ -2284,8 +2400,10 @@ jobs:
           for plugin in "$PLUGIN_DIR"/*.dylib; do
             if otool -L "$plugin" | grep -q "libonnxruntime"; then
               found_onnx_plugin=1
+              echo "Inspecting ONNX-linked plugin: $plugin"
               if ! otool -l "$plugin" | grep -Fq "path $EXPECTED_RPATH"; then
                 echo "ERROR: Missing expected rpath '$EXPECTED_RPATH' in $plugin" >&2
+                otool -L "$plugin" >&2 || true
                 otool -l "$plugin" | awk '/LC_RPATH/{show=1;next} show && /path /{print;show=0}' >&2 || true
                 exit 1
               fi

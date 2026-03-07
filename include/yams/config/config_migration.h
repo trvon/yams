@@ -13,7 +13,7 @@ namespace yams::config {
  * @brief Configuration version information
  */
 struct ConfigVersion {
-    int major = 2;
+    int major = 3;
     int minor = 0;
     int patch = 0;
     std::string toString() const {
@@ -46,9 +46,9 @@ public:
     Result<bool> needsMigration(const std::filesystem::path& configPath);
 
     /**
-     * @brief Migrate config from v1 to v2
+     * @brief Migrate config from older versions to latest schema (v3)
      */
-    Result<void> migrateToV2(const std::filesystem::path& configPath, bool createBackup = true);
+    Result<void> migrateToLatest(const std::filesystem::path& configPath, bool createBackup = true);
 
     /**
      * @brief Get current config version
@@ -56,41 +56,72 @@ public:
     Result<ConfigVersion> getConfigVersion(const std::filesystem::path& configPath);
 
     /**
-     * @brief Create default v2 config
+     * @brief Create default latest config (v3)
      */
-    Result<void> createDefaultV2Config(const std::filesystem::path& configPath);
+    Result<void> createDefaultLatestConfig(const std::filesystem::path& configPath);
 
     /**
-     * @brief Validate v2 config structure
+     * @brief Validate latest config structure (v3)
      */
-    Result<void> validateV2Config(const std::filesystem::path& configPath);
+    Result<void> validateLatestConfig(const std::filesystem::path& configPath);
 
     /**
-     * @brief Get migration map from v1 to v2
+     * @brief Get migration map from v1 to latest schema
      */
-    static std::vector<MigrationEntry> getV1ToV2MigrationMap();
+    static std::vector<MigrationEntry> getV1ToLatestMigrationMap();
 
     /**
-     * @brief Get all v2 config sections with defaults
+     * @brief Get all latest config sections with defaults
      */
-    static std::map<std::string, std::map<std::string, std::string>> getV2ConfigDefaults();
+    static std::map<std::string, std::map<std::string, std::string>> getLatestConfigDefaults();
 
     /**
-     * @brief Additional v2 keys introduced after initial v2 rollout (additive only)
-     * These are merged non-destructively into existing v2 configs during update.
+     * @brief Additional schema keys introduced after initial rollout (additive only)
+     * These are merged non-destructively into existing configs during update.
      */
-    static std::map<std::string, std::map<std::string, std::string>> getV2AdditiveDefaults();
+    static std::map<std::string, std::map<std::string, std::string>> getLatestAdditiveDefaults();
 
     /**
-     * @brief Update existing v2 config by adding any missing keys from additive defaults.
+     * @brief Update existing config by adding any missing keys from additive defaults.
      * - Does not overwrite existing values
      * - Optionally creates a timestamped backup
      * - When dryRun=true, no file is written; returns the list of keys that would be added
      * @return list of dot-keys (section.key) added or to be added
      */
+    Result<std::vector<std::string>>
+    updateLatestSchemaAdditive(const std::filesystem::path& configPath, bool makeBackup = true,
+                               bool dryRun = false);
+
+    // Compatibility wrappers for pre-v3 naming.
+    Result<void> migrateToV2(const std::filesystem::path& configPath, bool createBackup = true) {
+        return migrateToLatest(configPath, createBackup);
+    }
+
+    Result<void> createDefaultV2Config(const std::filesystem::path& configPath) {
+        return createDefaultLatestConfig(configPath);
+    }
+
+    Result<void> validateV2Config(const std::filesystem::path& configPath) {
+        return validateLatestConfig(configPath);
+    }
+
+    static std::vector<MigrationEntry> getV1ToV2MigrationMap() {
+        return getV1ToLatestMigrationMap();
+    }
+
+    static std::map<std::string, std::map<std::string, std::string>> getV2ConfigDefaults() {
+        return getLatestConfigDefaults();
+    }
+
+    static std::map<std::string, std::map<std::string, std::string>> getV2AdditiveDefaults() {
+        return getLatestAdditiveDefaults();
+    }
+
     Result<std::vector<std::string>> updateV2SchemaAdditive(const std::filesystem::path& configPath,
                                                             bool makeBackup = true,
-                                                            bool dryRun = false);
+                                                            bool dryRun = false) {
+        return updateLatestSchemaAdditive(configPath, makeBackup, dryRun);
+    }
 
     /**
      * @brief Parse TOML config file
@@ -126,12 +157,12 @@ private:
 };
 
 /**
- * @brief V2 Configuration structure (complete)
+ * @brief Latest configuration structure
  */
-struct ConfigV2 {
+struct ConfigLatest {
     // Version info
     struct Version {
-        int config_version = 2;
+        int config_version = 3;
         int migrated_from = 0;
         std::string migration_date;
     } version;
@@ -433,7 +464,7 @@ struct ConfigV2 {
     } migrations;
 
     // Load from file
-    static Result<ConfigV2> load(const std::filesystem::path& path);
+    static Result<ConfigLatest> load(const std::filesystem::path& path);
 
     // Save to file
     Result<void> save(const std::filesystem::path& path) const;
@@ -441,5 +472,7 @@ struct ConfigV2 {
     // Validate configuration
     Result<void> validate() const;
 };
+
+using ConfigV2 = ConfigLatest;
 
 } // namespace yams::config
