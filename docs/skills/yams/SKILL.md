@@ -36,7 +36,6 @@ yams graph --search "pattern"  # Search nodes by label
 # Agent storage
 yams list --format json        # Scriptable list output
 yams list --show-metadata      # Include metadata for PBI tracking
-yams list --metadata-fields task,pbi,phase,owner,source  # Task columns in table output
 yams list --metadata-values pbi  # Unique PBI values with counts
 ```
 
@@ -385,3 +384,4 @@ yams doctor --fix-config-dims
 | `YAMS_DAEMON_SOCKET` | Daemon socket path override |
 | `YAMS_LOG_LEVEL` | Logging verbosity |
 | `YAMS_SESSION_CURRENT` | Default session |
+docs/skills/yams/SKILL.md

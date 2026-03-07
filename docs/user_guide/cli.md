@@ -490,8 +490,9 @@ Options:
   - Disable content previews
 
 Description:
-- Displays documents with comprehensive metadata including names, types, sizes, content snippets, tags, and timestamps.
-- Rich table format shows NAME, TYPE, SIZE, SNIPPET, TAGS, and WHEN columns.
+- Displays documents with names, types, sizes, content snippets, and timestamps.
+- Rich table format shows stable NAME, TYPE, SIZE, SNIPPET, and WHEN columns.
+- Tags and metadata are shown as clean detail lines under each row when enabled.
 - The --recent flag filters to the N most recent documents before applying other sorting options.
 - Content snippets provide quick previews of document contents.
 - Multiple output formats support different use cases from human-readable to machine processing.
