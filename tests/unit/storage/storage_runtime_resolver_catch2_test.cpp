@@ -150,7 +150,7 @@ TEST_CASE("Storage runtime resolver detects Cloudflare token-shaped access key i
     CHECK(decision.error().message.find("bearer token") != std::string::npos);
 }
 
-TEST_CASE("Storage runtime resolver validates temp credential mode before network calls",
+TEST_CASE("Storage runtime resolver validates temp credential mode requires R2 endpoint",
           "[storage][runtime][resolver][r2][catch2]") {
     TempDir td;
     const auto configPath = td.path() / "config.toml";
@@ -169,7 +169,7 @@ TEST_CASE("Storage runtime resolver validates temp credential mode before networ
         out << "engine = \"s3\"\n";
         out << "[storage.s3]\n";
         out << "url = \"s3://yams-s3-smoke-personal/prefix\"\n";
-        out << "endpoint = \"377dc8ebb0de866fdec6be62f070405d.r2.cloudflarestorage.com\"\n";
+        out << "endpoint = \"s3.us-east-1.amazonaws.com\"\n";
         out << "[storage.s3.r2]\n";
         out << "auth_mode = \"temp_credentials\"\n";
     }
@@ -177,7 +177,7 @@ TEST_CASE("Storage runtime resolver validates temp credential mode before networ
     auto decision =
         yams::storage::resolveStorageBootstrapDecision(configPath, td.path() / "primary-data");
     REQUIRE_FALSE(decision.has_value());
-    CHECK(decision.error().message.find("API token") != std::string::npos);
+    CHECK(decision.error().message.find("R2 endpoint") != std::string::npos);
 }
 
 TEST_CASE("Storage runtime resolver auto-resolves parent access key id in temp mode",
@@ -235,4 +235,27 @@ TEST_CASE("Storage runtime resolver helper identifies Cloudflare endpoint and to
     CHECK(yams::storage::looksLikeCloudflareApiBearerToken(
         "6Xa-c7KrOd5f6Ze5KGXCxjJOPbhvHP1PgmVCLTA1"));
     CHECK_FALSE(yams::storage::looksLikeCloudflareApiBearerToken("AKIAIOSFODNN7EXAMPLE"));
+}
+
+TEST_CASE("Storage runtime resolver keychain helper is platform-aware",
+          "[storage][runtime][resolver][r2][keychain][catch2]") {
+#if defined(__APPLE__)
+    // Use a deterministic account id that should not exist in normal environments.
+    auto token =
+        yams::storage::loadCloudflareApiTokenFromKeychain("ffffffffffffffffffffffffffffffff");
+    REQUIRE_FALSE(token.has_value());
+    CHECK((token.error().code == yams::ErrorCode::NotFound ||
+           token.error().code == yams::ErrorCode::PermissionDenied ||
+           token.error().code == yams::ErrorCode::InvalidData));
+#else
+    auto token =
+        yams::storage::loadCloudflareApiTokenFromKeychain("377dc8ebb0de866fdec6be62f070405d");
+    REQUIRE_FALSE(token.has_value());
+    CHECK(token.error().code == yams::ErrorCode::NotSupported);
+
+    auto store = yams::storage::storeCloudflareApiTokenInKeychain(
+        "377dc8ebb0de866fdec6be62f070405d", "dummy-token");
+    REQUIRE_FALSE(store.has_value());
+    CHECK(store.error().code == yams::ErrorCode::NotSupported);
+#endif
 }

@@ -22,6 +22,7 @@
 #include <yams/metadata/query_helpers.h>
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/search/internal_benchmark.h>
+#include <yams/storage/storage_runtime_resolver.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
@@ -449,6 +450,72 @@ private:
 
     static bool writeOrReplaceConfigDims(const std::filesystem::path& cfg, size_t dim) {
         return yams::config::write_dimension_config(cfg, dim);
+    }
+
+    struct R2KeychainStatus {
+        bool enabled{false};
+        std::string authMode{"direct"};
+        std::string accountId;
+        bool tokenPresent{false};
+        bool keychainSupported{true};
+        std::string detail;
+    };
+
+    static R2KeychainStatus evaluateR2KeychainStatus() {
+        R2KeychainStatus status;
+        auto cfg = yams::config::parse_simple_toml(resolveConfigPath());
+        auto getValue = [&cfg](const std::string& key,
+                               const std::string& fallback = "") -> std::string {
+            auto it = cfg.find(key);
+            if (it == cfg.end() || it->second.empty()) {
+                return fallback;
+            }
+            return it->second;
+        };
+
+        std::string engine = getValue("storage.engine", "local");
+        std::transform(engine.begin(), engine.end(), engine.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (engine != "s3") {
+            status.detail = "storage.engine != s3";
+            return status;
+        }
+
+        std::string authMode = getValue("storage.s3.r2.auth_mode", "direct");
+        std::transform(authMode.begin(), authMode.end(), authMode.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        status.authMode = authMode;
+        if (authMode != "temp_credentials") {
+            status.detail = "storage.s3.r2.auth_mode != temp_credentials";
+            return status;
+        }
+
+        status.enabled = true;
+        status.accountId = getValue("storage.s3.r2.account_id", "");
+        if (status.accountId.empty()) {
+            status.accountId =
+                yams::storage::extractCloudflareR2AccountId(getValue("storage.s3.endpoint", ""));
+        }
+        if (status.accountId.empty()) {
+            status.detail = "account id is not configured";
+            return status;
+        }
+
+        auto token = yams::storage::loadCloudflareApiTokenFromKeychain(status.accountId);
+        if (token) {
+            status.tokenPresent = true;
+            status.detail = "keychain token found";
+            return status;
+        }
+
+        if (token.error().code == ErrorCode::NotSupported) {
+            status.keychainSupported = false;
+            status.detail = token.error().message;
+            return status;
+        }
+
+        status.detail = token.error().message;
+        return status;
     }
     // Run a blocking function with a console spinner and timeout.
     // Returns optional result; nullopt indicates timeout.
@@ -1867,6 +1934,20 @@ private:
             jsonResult["vector_db"]["path"] = vecDbPath.string();
             jsonResult["vector_db"]["exists"] = !vecDbPath.empty() && fs::exists(vecDbPath, ec);
 
+            // R2 keychain token readiness for temp-credentials mode
+            try {
+                auto r2Status = evaluateR2KeychainStatus();
+                jsonResult["storage"]["r2"]["enabled"] = r2Status.enabled;
+                jsonResult["storage"]["r2"]["auth_mode"] = r2Status.authMode;
+                jsonResult["storage"]["r2"]["account_id"] = r2Status.accountId;
+                jsonResult["storage"]["r2"]["keychain_supported"] = r2Status.keychainSupported;
+                jsonResult["storage"]["r2"]["keychain_token_present"] = r2Status.tokenPresent;
+                if (!r2Status.detail.empty()) {
+                    jsonResult["storage"]["r2"]["detail"] = r2Status.detail;
+                }
+            } catch (...) {
+            }
+
             // Knowledge graph stats (if db available)
             try {
                 auto db = cli_->getDatabase();
@@ -1916,6 +1997,38 @@ private:
         checkInstalledModels(cli_);
         checkVec0Module(); // Check vec0 module availability and schema
         checkEmbeddingDimMismatch(cachedStatus);
+        try {
+            auto r2Status = evaluateR2KeychainStatus();
+            if (r2Status.enabled) {
+                std::cout << "\n" << yams::cli::ui::section_header("R2 Credentials") << "\n\n";
+                std::vector<yams::cli::ui::Row> rows;
+                rows.push_back({"Auth Mode", r2Status.authMode, ""});
+                rows.push_back({"Account ID",
+                                r2Status.accountId.empty() ? "(unset)" : r2Status.accountId, ""});
+
+                std::string keychainState;
+                if (!r2Status.keychainSupported) {
+                    keychainState =
+                        yams::cli::ui::colorize("not supported", yams::cli::ui::Ansi::DIM);
+                } else if (r2Status.tokenPresent) {
+                    keychainState = yams::cli::ui::colorize("present", yams::cli::ui::Ansi::GREEN);
+                } else {
+                    keychainState = yams::cli::ui::colorize("missing", yams::cli::ui::Ansi::YELLOW);
+                }
+                rows.push_back({"Keychain Token", keychainState, ""});
+                if (!r2Status.detail.empty()) {
+                    rows.push_back({"Detail", r2Status.detail, ""});
+                }
+                yams::cli::ui::render_rows(std::cout, rows);
+
+                if (r2Status.keychainSupported && !r2Status.tokenPresent) {
+                    recs.warning("DOCTOR_R2_KEYCHAIN_MISSING",
+                                 "R2 temp-credentials mode is configured but keychain token is "
+                                 "missing; set --s3-r2-api-token-keychain or env token.");
+                }
+            }
+        } catch (...) {
+        }
         // Show embedding runtime from daemon status (best-effort, use cached data)
         try {
             if (cachedStatus) {
