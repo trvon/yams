@@ -92,6 +92,8 @@ struct BenchConfig {
     // Point at an existing YAMS data directory (e.g. /Volumes/picaso/yams)
     // When set, the daemon serves this corpus instead of creating an empty temp db.
     std::optional<fs::path> dataDir;
+    // Optional explicit config path used for daemon startup/config lookup.
+    std::optional<fs::path> configPath;
 
     // --- Plugin / embedding config ---
     // Enable real plugin loading (ONNX embeddings, PDF extraction, etc.)
@@ -104,6 +106,8 @@ struct BenchConfig {
     bool useRealModelProvider{false};
     bool useMcpPath{false};
     std::string usageProfile{"mixed"};
+    std::string backend{"unknown"};
+    std::string authMode{""};
 
     static BenchConfig fromEnv() {
         BenchConfig cfg;
@@ -130,6 +134,8 @@ struct BenchConfig {
         // Storage path override: point at an existing corpus
         if (auto* v = std::getenv("YAMS_BENCH_DATA_DIR"))
             cfg.dataDir = fs::path(v);
+        if (auto* v = std::getenv("YAMS_BENCH_CONFIG"))
+            cfg.configPath = fs::path(v);
 
         // Plugin / embedding configuration
         if (auto* v = std::getenv("YAMS_BENCH_ENABLE_PLUGINS")) {
@@ -159,6 +165,12 @@ struct BenchConfig {
         }
         if (auto* v = std::getenv("YAMS_BENCH_USAGE_PROFILE")) {
             cfg.usageProfile = v;
+        }
+        if (auto* v = std::getenv("YAMS_BENCH_BACKEND")) {
+            cfg.backend = v;
+        }
+        if (auto* v = std::getenv("YAMS_BENCH_AUTH_MODE")) {
+            cfg.authMode = v;
         }
 
         return cfg;
@@ -666,6 +678,12 @@ void emitJsonl(const fs::path& outputPath, const json& record) {
     if (const auto* v = std::getenv("YAMS_BENCH_GIT_SHA"); v && *v) {
         enriched["git_sha"] = v;
     }
+    if (const auto* v = std::getenv("YAMS_BENCH_BACKEND"); v && *v) {
+        enriched["run_backend"] = v;
+    }
+    if (const auto* v = std::getenv("YAMS_BENCH_AUTH_MODE"); v && *v) {
+        enriched["run_auth_mode"] = v;
+    }
 
     fs::create_directories(outputPath.parent_path());
     std::ofstream out(outputPath, std::ios::app);
@@ -747,6 +765,7 @@ DaemonHarnessOptions benchHarnessOptions(const BenchConfig& cfg) {
         .enableAutoRepair = true,
         .pluginDir = cfg.pluginDir,
         .dataDir = cfg.dataDir,
+        .configPath = cfg.configPath,
         .trustedPluginPaths = cfg.trustedPluginPaths,
     };
     return opts;
@@ -3558,7 +3577,10 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         {"timestamp", isoTimestamp()},
         {"test", recordTestName},
         {"request_path", useMcpPath ? "mcp_query" : "daemon_ipc"},
+        {"backend", cfg.backend},
+        {"auth_mode", cfg.authMode},
         {"data_dir", cfg.dataDir->string()},
+        {"num_clients", kTotalClients},
         {"corpus_docs", finalSnap.documentsTotal},
         {"layout", json{{"search_clients", kSearchClients},
                         {"list_clients", kListClients},

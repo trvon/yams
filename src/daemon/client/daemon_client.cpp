@@ -126,6 +126,43 @@ std::chrono::milliseconds getTimeoutForCategory(TimeoutCategory cat) {
     }
 }
 
+Error makeNotReadyErrorFromStatus(const StatusResponse& status, std::string_view operation) {
+    std::string statusText = status.overallStatus;
+    if (statusText.empty()) {
+        statusText = status.ready ? "ready" : "initializing";
+    }
+
+    std::string message = std::string("Daemon not ready yet for ") + std::string(operation) +
+                          " (status=" + statusText + ")";
+
+    if (status.retryAfterMs > 0) {
+        message += ", retry in " + std::to_string(status.retryAfterMs) + "ms";
+    } else {
+        message += ", try again shortly";
+    }
+
+    return Error{ErrorCode::InvalidState, message};
+}
+
+std::optional<Error> rewriteListTransportError(const Error& err) {
+    auto kindOpt = yams::daemon::parseIpcFailureKind(err.message);
+    if (!kindOpt) {
+        return std::nullopt;
+    }
+
+    using yams::daemon::IpcFailureKind;
+    switch (*kindOpt) {
+        case IpcFailureKind::Eof:
+        case IpcFailureKind::ResetOrBrokenPipe:
+        case IpcFailureKind::Timeout:
+            return Error{ErrorCode::InvalidState,
+                         "Daemon is still processing startup/background work for list; try again "
+                         "shortly"};
+        default:
+            return std::nullopt;
+    }
+}
+
 } // namespace
 
 // Implementation class
@@ -1201,6 +1238,8 @@ void DaemonClient::StreamingListHandler::onHeaderReceived(const Response& header
     } else if (auto* errRes = std::get_if<ErrorResponse>(&headerResponse)) {
         // Store error
         error_ = Error{errRes->code, errRes->message};
+    } else if (auto* statusRes = std::get_if<StatusResponse>(&headerResponse)) {
+        error_ = makeNotReadyErrorFromStatus(*statusRes, "list");
     }
 }
 
@@ -1282,6 +1321,9 @@ bool DaemonClient::StreamingListHandler::onChunkReceived(const Response& chunkRe
     } else if (auto* errRes = std::get_if<ErrorResponse>(&chunkResponse)) {
         // Store error
         error_ = Error{errRes->code, errRes->message};
+        return false; // Stop processing on error
+    } else if (auto* statusRes = std::get_if<StatusResponse>(&chunkResponse)) {
+        error_ = makeNotReadyErrorFromStatus(*statusRes, "list");
         return false; // Stop processing on error
     }
 
@@ -1408,10 +1450,21 @@ boost::asio::awaitable<Result<ListResponse>> DaemonClient::streamingList(const L
 
     auto result = co_await sendRequestStreaming(req, handler);
     if (!result) {
+        if (auto rewritten = rewriteListTransportError(result.error())) {
+            co_return *rewritten;
+        }
         co_return result.error();
     }
 
-    co_return handler->getResults();
+    auto finalResult = handler->getResults();
+    if (!finalResult) {
+        if (auto rewritten = rewriteListTransportError(finalResult.error())) {
+            co_return *rewritten;
+        }
+        co_return finalResult.error();
+    }
+
+    co_return finalResult.value();
 }
 
 // Streaming Grep handler methods

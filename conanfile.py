@@ -6,9 +6,10 @@ from conan.tools.build import check_min_cppstd
 
 # type: ignore[assignment,attr-defined,import-error]
 
+
 class YamsConan(ConanFile):
     name = "yams"
-    version = "0.9.0"
+    version = "0.10.0"  # x-release-please-version
     license = "GPL-3.0-or-later"
     author = "YAMS Contributors"
     url = "https://github.com/trvon/yams"
@@ -89,7 +90,7 @@ class YamsConan(ConanFile):
                 self.requires("onetbb/2021.12.0")
             except Exception:
                 pass
-        
+
         self.requires("xz_utils/5.4.5")
         if self.options.enable_pdf:  # type: ignore
             # qpdf removed - PDF plugin will be updated in separate PBI
@@ -100,7 +101,7 @@ class YamsConan(ConanFile):
         self.tool_requires("pkgconf/2.1.0")
         self.tool_requires("meson/[>=1.2.2 <2]")
         self.tool_requires("ninja/[>=1.10.2 <2]")
-        
+
         if self.options.build_tests:  # type: ignore
             self.requires("gtest/1.15.0")
             # Add Catch2 for modern test framework migration (PBI-050)
@@ -126,7 +127,9 @@ class YamsConan(ConanFile):
         self.options["libcurl"].shared = False
         self.options["openssl"].shared = False
         self.options["libarchive"].shared = False
-        self.options["libarchive"].with_acl = False  # Avoid libacl link issues on Linux CI
+        self.options[
+            "libarchive"
+        ].with_acl = False  # Avoid libacl link issues on Linux CI
         self.options["taglib"].shared = False
         self.options["spdlog"].header_only = False
 
@@ -155,7 +158,10 @@ class YamsConan(ConanFile):
 
             VirtualBuildEnv(self).generate()
             tc = MesonToolchain(self)
-            if self.settings.os == "Linux" and self.settings.compiler.libcxx == "libstdc++11":  # type: ignore
+            if (
+                self.settings.os == "Linux"
+                and self.settings.compiler.libcxx == "libstdc++11"
+            ):  # type: ignore
                 tc.preprocessor_definitions["_GLIBCXX_USE_CXX11_ABI"] = "1"
             tc.generate()
 

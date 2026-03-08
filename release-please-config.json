@@ -29,6 +29,10 @@
         },
         {
           "type": "generic",
+          "path": "conanfile.py"
+        },
+        {
+          "type": "generic",
           "path": "CITATION.cff"
         }
       ]

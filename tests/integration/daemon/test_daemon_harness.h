@@ -52,6 +52,9 @@ struct DaemonHarnessOptions {
     // When set, the harness uses this existing path (e.g. a real corpus)
     // and skips cleanup of the data dir on destruction.
     std::optional<std::filesystem::path> dataDir = std::nullopt;
+    // Optional explicit config.toml path for daemon startup.
+    // When set, the harness points daemon config resolution at this file.
+    std::optional<std::filesystem::path> configPath = std::nullopt;
     // Additional trusted plugin search paths (appended to DaemonConfig::trustedPluginPaths)
     std::vector<std::filesystem::path> trustedPluginPaths = {};
 };
@@ -120,6 +123,13 @@ public:
         }
 
         yams::daemon::DaemonConfig cfg;
+        if (options_.configPath) {
+            previousYamsConfig_ = std::getenv("YAMS_CONFIG") ? std::getenv("YAMS_CONFIG") : "";
+            hadYamsConfig_ = std::getenv("YAMS_CONFIG") != nullptr;
+            setenv("YAMS_CONFIG", options_.configPath->string().c_str(), 1);
+            configEnvOwned_ = true;
+            cfg.configFilePath = *options_.configPath;
+        }
         cfg.dataDir = data_;
         cfg.socketPath = sock_;
         cfg.pidFile = pid_;
@@ -310,6 +320,17 @@ public:
                 isolateStateActive_ = false;
             }
 
+            if (configEnvOwned_) {
+                if (hadYamsConfig_) {
+                    setenv("YAMS_CONFIG", previousYamsConfig_.c_str(), 1);
+                } else {
+                    unsetenv("YAMS_CONFIG");
+                }
+                configEnvOwned_ = false;
+                hadYamsConfig_ = false;
+                previousYamsConfig_.clear();
+            }
+
             // Reset daemon so it can be recreated on next start()
             daemon_.reset();
 
@@ -415,8 +436,11 @@ private:
     std::filesystem::path root_, data_, sock_, pid_, log_;
     std::filesystem::path originalCwd_;
     std::string originalXdgState_;
+    std::string previousYamsConfig_;
     bool isolateStateActive_ = false;
     bool externalDataDir_ = false;
+    bool configEnvOwned_ = false;
+    bool hadYamsConfig_ = false;
     Options options_;
 };
 

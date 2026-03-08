@@ -6,7 +6,7 @@ This section centralizes public benchmark guidance and latest reported results.
 
 - [Performance Report](performance_report.md) - canonical performance tables and release baselines.
 - [Storage Backends (Local vs S3-compatible)](storage_backends.md) - benchmark runner for
-  local storage compared with S3-compatible providers.
+  local storage compared with S3-compatible providers, including multi-client local-vs-R2 tracks.
 
 ## Validation status policy
 

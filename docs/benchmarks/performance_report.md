@@ -17,6 +17,7 @@
   - [Latest Release Runs (2026-01-25)](#latest-release-runs-2026-01-25)
   - [Retrieval Result (SciFact benchmark, 2026-02-12)](#retrieval-result-scifact-benchmark-2026-02-12)
   - [Storage Backend CLI CRUD (Local vs R2, 2026-03-08)](#storage-backend-cli-crud-local-vs-r2-2026-03-08)
+  - [Storage Backend Multi-Client Matrix (Local vs R2)](#storage-backend-multi-client-matrix-local-vs-r2)
   - [Cryptographic Operations (SHA-256)](#1-cryptographic-operations-sha-256)
   - [Content Chunking (Rabin Fingerprinting)](#2-content-chunking-rabin-fingerprinting)
   - [Compression Performance (Zstandard)](#3-compression-performance-zstandard)
@@ -149,8 +150,6 @@ Skipped in this run (release benchmarks focused on ingestion, metadata, and IPC 
 
 This benchmark captures end-to-end CLI workflow latency (`add/get/search/delete`) for local storage vs Cloudflare R2.
 
-- Harness: `tests/benchmarks/run_local_vs_r2_benchmark.py`
-- Artifact set: `bench_results/storage_backends/20260308T011745Z/`
 - Parameters: `iterations=1`, `files=60`, `file_size_kb=8`, `retrieve_count=20`
 - R2 mode: `temp_credentials` bootstrap (bearer token + account id)
 
@@ -164,6 +163,27 @@ Validation checks from this run:
 - R2 path stayed remote-only (`local_object_files_after_add=0`, `local_object_files_end=0`).
 - CRUD gate passed for both backends before timed operations.
 - List output contained duplicate rows (`120` rows for `60` unique docs); harness normalizes to unique paths for timing.
+
+### Storage Backend Multi-Client Matrix (Local vs R2)
+
+This benchmark track compares agent-like read-heavy multi-client behavior across local and R2 storage backends.
+
+- Multi-client binary: `tests/benchmarks/multi_client_ingestion_bench.cpp`
+- Matrix scope: profiles `mixed,external_agent_churn`, transports `daemon_ipc,mcp`, total clients `4,8`
+- R2 mode: `temp_credentials` bootstrap (bearer token + account id)
+- Parameters: `iterations=1`, `files=120`, `file_size_kb=8`, `ops_per_client=12`
+
+| Backend | Clients | Ops/s range | Fail rate range | Search p95 range (ms) |
+|---|---:|---:|---:|---:|
+| local | 4 | 23.80-23.83 | 0.0000-0.0000 | 5.67-7.56 |
+| local | 8 | 47.52-47.63 | 0.0000-0.0000 | 5.69-7.41 |
+| r2 | 4 | 19.32-20.87 | 0.1429-0.2308 | 5.70-7.30 |
+| r2 | 8 | 34.19-38.75 | 0.2308-0.3913 | 5.70-7.34 |
+
+Notes:
+
+- This track is intentionally narrower than the optimization loop so backend effects are easier to compare.
+- The benchmark run enforces remote fallback guards for R2 and writes backend-tagged JSONL records.
 
 ### 1. Cryptographic Operations (SHA-256)
 

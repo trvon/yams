@@ -250,6 +250,8 @@ public:
             dreq.recent = (recentCount_ > 0) || (limit_ <= 100); // backward compatibility
 
             // Format and display options
+            const bool includeCompactMetadataSummary =
+                !showMetadata_ && format_ == "table" && !cli_->getJsonOutput() && !pathsOnly_;
             dreq.format = format_;
             dreq.sortBy = sortBy_;
             dreq.reverse = reverse_;
@@ -257,7 +259,7 @@ public:
             dreq.pathsOnly = pathsOnly_;
             dreq.showSnippets = showSnippets_ && !noSnippets_;
             dreq.snippetLength = snippetLength_;
-            dreq.showMetadata = showMetadata_;
+            dreq.showMetadata = showMetadata_ || includeCompactMetadataSummary;
             dreq.showTags = showTags_;
             dreq.groupBySession = groupBySession_;
             dreq.noSnippets = noSnippets_;
@@ -904,10 +906,12 @@ private:
             }
 
             // Display options
+            const bool includeCompactMetadataSummary =
+                !showMetadata_ && format_ == "table" && !cli_->getJsonOutput() && !pathsOnly_;
             serviceReq.format = format_;
             serviceReq.showSnippets = showSnippets_ && !noSnippets_;
             serviceReq.snippetLength = snippetLength_;
-            serviceReq.showMetadata = showMetadata_;
+            serviceReq.showMetadata = showMetadata_ || includeCompactMetadataSummary;
             serviceReq.showTags = showTags_;
             serviceReq.groupBySession = groupBySession_;
             serviceReq.verbose = verbose_ || cli_->getVerbose();
@@ -1402,7 +1406,16 @@ private:
         std::cout << "\n";
 
         // Rows
-        auto printMetadata = [&](const EnhancedDocumentInfo& doc) {
+        auto getMetadataValue = [&](const EnhancedDocumentInfo& doc,
+                                    std::string_view key) -> std::optional<std::string> {
+            auto it = doc.metadata.find(std::string(key));
+            if (it == doc.metadata.end() || it->second.value.empty()) {
+                return std::nullopt;
+            }
+            return it->second.value;
+        };
+
+        auto printFullMetadata = [&](const EnhancedDocumentInfo& doc) {
             if (!showMetadata_ || doc.metadata.empty()) {
                 return false;
             }
@@ -1417,6 +1430,23 @@ private:
                     printed = true;
                 }
                 std::cout << "      " << key << ": " << value.value << "\n";
+            }
+            return printed;
+        };
+
+        auto printMetadataSummary = [&](const EnhancedDocumentInfo& doc) {
+            if (showMetadata_) {
+                return false;
+            }
+
+            bool printed = false;
+            if (auto owner = getMetadataValue(doc, "owner")) {
+                std::cout << "    Owner: " << *owner << "\n";
+                printed = true;
+            }
+            if (auto source = getMetadataValue(doc, "source")) {
+                std::cout << "    Source: " << *source << "\n";
+                printed = true;
             }
             return printed;
         };
@@ -1477,16 +1507,19 @@ private:
                     std::cout << "    Tags: " << doc.getTags() << "\n";
                 }
 
-                (void)printMetadata(doc);
+                bool printedMetadata = printFullMetadata(doc) || printMetadataSummary(doc);
 
-                std::cout << "\n";
+                if (showTags_ || printedMetadata) {
+                    std::cout << "\n";
+                }
             } else {
                 bool printedDetails = false;
                 if (showTags_ && !doc.tags.empty()) {
                     std::cout << "    Tags: " << doc.getTags() << "\n";
                     printedDetails = true;
                 }
-                printedDetails = printMetadata(doc) || printedDetails;
+                printedDetails = printFullMetadata(doc) || printedDetails;
+                printedDetails = printMetadataSummary(doc) || printedDetails;
                 if (printedDetails) {
                     std::cout << "\n";
                 }
