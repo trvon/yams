@@ -192,6 +192,19 @@ typedef struct content_extractor_v1 {
 | `graph_adapter_v1` | Graph storage backend |
 | `search_provider_v1` | Search backend |
 
+## Object Storage Provider Compatibility
+
+YAMS object storage uses an S3-compatible path. Current provider status:
+
+- Cloudflare R2: tested in this repository.
+- AWS S3: supported by the same interface/path, but not currently validated by
+  automated tests in this repository.
+
+See:
+
+- `plugins/object_storage_s3/README.md` for practical setup examples.
+- `docs/api/storage_plugin_v1.md` for capability-level API expectations.
+
 ### Error Codes
 
 ```c

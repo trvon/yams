@@ -292,9 +292,18 @@ ConfigMigrator::getLatestConfigDefaults() {
               {"endpoint", ""},
               {"access_key", ""},
               {"secret_key", ""},
+              {"session_token", ""},
               {"use_path_style", "false"},
               {"fallback_policy", "strict"},
               {"fallback_local_data_dir", ""}}},
+
+            {"storage.s3.r2",
+             {{"auth_mode", "direct"},
+              {"api_token", ""},
+              {"account_id", ""},
+              {"parent_access_key_id", ""},
+              {"permission", "object-read-write"},
+              {"ttl_seconds", "3600"}}},
 
             {"chunking",
              {{"window_size", "48"},

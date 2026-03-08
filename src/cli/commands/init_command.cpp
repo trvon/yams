@@ -8,6 +8,7 @@
 #include <yams/config/config_migration.h>
 #include <yams/core/uuid.h>
 #include <yams/downloader/downloader.hpp>
+#include <yams/storage/storage_runtime_resolver.h>
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
@@ -1074,6 +1075,15 @@ private:
                 s3Values["storage.s3.fallback_policy"] =
                     s3FallbackPolicy.empty() ? "strict" : s3FallbackPolicy;
                 s3Values["storage.s3.fallback_local_data_dir"] = s3FallbackLocalDataDir;
+                if (yams::storage::isCloudflareR2EndpointHost(s3Endpoint) &&
+                    yams::storage::looksLikeCloudflareApiBearerToken(s3AccessKey)) {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "S3 Access Key appears to be a Cloudflare API bearer token. "
+                                 "For R2, keep storage.s3.access_key/secret_key for S3 SigV4 "
+                                 "credentials, or enable explicit temp-credential mode with "
+                                 "storage.s3.r2.auth_mode='temp_credentials' and "
+                                 "storage.s3.r2.api_token."};
+                }
                 if (!config::write_config_values(configPath, s3Values)) {
                     return Error{ErrorCode::WriteError,
                                  "Failed to persist S3 storage configuration values"};

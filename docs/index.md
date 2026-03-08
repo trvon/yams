@@ -77,6 +77,7 @@ Config example:
 | [Architecture](architecture/daemon_architecture.md) | System design, daemon, search internals |
 | [API](api/README.md) | MCP tools, REST endpoints |
 | [Developer](developer/setup.md) | Building, testing, contributing |
+| [Benchmarks](benchmarks/README.md) | Public benchmark runbooks and baseline reports |
 
 ## Links
 

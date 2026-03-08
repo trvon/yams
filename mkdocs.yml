@@ -13,6 +13,10 @@ exclude_docs: |
   pbi/**
   testing/CATCH2_PATTERNS.md
   testing/embedding_dimension_robustness.md
+  hosting/p0-object-storage-s3-validation.md
+  design/monolith_refactor_program_codex_yams.md
+  benchmarks/retrieval_precision_optimization.md
+  benchmarks/multi_client_optimization_loop.md
 
 nav:
   - Home: index.md
@@ -42,6 +46,10 @@ nav:
           - Contact: services/contact.md
       - Admin:
           - Operations: admin/operations.md
+      - Benchmarks:
+          - Overview: benchmarks/README.md
+          - Performance Report: benchmarks/performance_report.md
+          - Storage Backends: benchmarks/storage_backends.md
       - Roadmap: roadmap.md
       - Architecture:
           - Daemon and Services: architecture/daemon_architecture.md
@@ -57,7 +65,6 @@ nav:
           - Plugins: PLUGINS.md
           - Testing:
               - Coverage Report: testing/coverage_report.md
-          - Benchmarks: benchmarks/performance_report.md
 
 theme:
   name: material

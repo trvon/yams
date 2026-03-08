@@ -10,14 +10,17 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <future>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
 
+#include <nlohmann/json.hpp>
 #include <boost/asio/post.hpp>
 
 #include "yams/profiling.h"
@@ -53,6 +56,8 @@ template <typename Map> inline void reserve_if_needed(Map& m, size_t n) {
 } // namespace compat
 
 namespace {
+
+using json = nlohmann::json;
 
 template <typename Work>
 auto postWork(Work work, const std::optional<boost::asio::any_io_executor>& executor)
@@ -105,6 +110,221 @@ std::string truncateSnippet(const std::string& content, size_t maxLen) {
     }
     std::string out = content.substr(0, maxLen);
     out.append("...");
+    return out;
+}
+
+bool envFlagEnabled(const char* name) {
+    if (const char* env = std::getenv(name)) {
+        std::string value(env);
+        std::transform(value.begin(), value.end(), value.begin(), [](char c) {
+            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }
+    return false;
+}
+
+std::string deriveDocIdFromPath(const std::string& path) {
+    if (path.empty()) {
+        return {};
+    }
+
+    const auto slashPos = path.find_last_of("/\\");
+    std::string fileName =
+        (slashPos == std::string::npos) ? path : path.substr(static_cast<size_t>(slashPos + 1));
+
+    constexpr std::string_view kTxtSuffix = ".txt";
+    if (fileName.size() > kTxtSuffix.size() &&
+        fileName.compare(fileName.size() - kTxtSuffix.size(), kTxtSuffix.size(), kTxtSuffix) == 0) {
+        fileName.resize(fileName.size() - kTxtSuffix.size());
+    }
+    return fileName;
+}
+
+std::string documentIdForTrace(const std::string& filePath, const std::string& documentHash) {
+    std::string docId = deriveDocIdFromPath(filePath);
+    if (!docId.empty()) {
+        return docId;
+    }
+    return documentHash;
+}
+
+std::vector<std::string>
+collectUniqueComponentDocIds(const std::vector<ComponentResult>& componentResults) {
+    std::unordered_set<std::string> uniqueIds;
+    uniqueIds.reserve(componentResults.size());
+
+    for (const auto& comp : componentResults) {
+        const std::string docId = documentIdForTrace(comp.filePath, comp.documentHash);
+        if (!docId.empty()) {
+            uniqueIds.insert(docId);
+        }
+    }
+
+    std::vector<std::string> out;
+    out.reserve(uniqueIds.size());
+    for (const auto& id : uniqueIds) {
+        out.push_back(id);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::vector<std::string>
+collectRankedResultDocIds(const std::vector<SearchResult>& results,
+                          size_t maxCount = std::numeric_limits<size_t>::max()) {
+    const size_t count = std::min(results.size(), maxCount);
+    std::vector<std::string> out;
+    out.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        out.push_back(
+            documentIdForTrace(results[i].document.filePath, results[i].document.sha256Hash));
+    }
+    return out;
+}
+
+std::vector<std::string> setDifferenceIds(const std::vector<std::string>& lhs,
+                                          const std::vector<std::string>& rhs) {
+    std::unordered_set<std::string> rhsSet;
+    rhsSet.reserve(rhs.size());
+    for (const auto& id : rhs) {
+        rhsSet.insert(id);
+    }
+
+    std::vector<std::string> out;
+    out.reserve(lhs.size());
+    for (const auto& id : lhs) {
+        if (rhsSet.find(id) == rhsSet.end()) {
+            out.push_back(id);
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+std::string joinWithTab(const std::vector<std::string>& values) {
+    if (values.empty()) {
+        return {};
+    }
+    std::string out;
+    size_t totalChars = 0;
+    for (const auto& value : values) {
+        totalChars += value.size();
+    }
+    out.reserve(totalChars + values.size());
+
+    bool first = true;
+    for (const auto& value : values) {
+        if (!first) {
+            out.push_back('\t');
+        }
+        out += value;
+        first = false;
+    }
+    return out;
+}
+
+struct PreFusionDocSignal {
+    bool hasAnchoring = false;
+    bool hasVector = false;
+    double maxVectorRaw = 0.0;
+    std::unordered_set<ComponentResult::Source> sources;
+};
+
+using PreFusionSignalMap = std::unordered_map<std::string, PreFusionDocSignal>;
+
+PreFusionSignalMap buildPreFusionSignalMap(const std::vector<ComponentResult>& componentResults) {
+    PreFusionSignalMap signals;
+    signals.reserve(componentResults.size());
+
+    for (const auto& comp : componentResults) {
+        const std::string docId = documentIdForTrace(comp.filePath, comp.documentHash);
+        if (docId.empty()) {
+            continue;
+        }
+
+        auto& signal = signals[docId];
+        signal.sources.insert(comp.source);
+        if (isVectorComponent(comp.source)) {
+            signal.hasVector = true;
+            signal.maxVectorRaw = std::max(signal.maxVectorRaw,
+                                           std::clamp(static_cast<double>(comp.score), 0.0, 1.0));
+        }
+        if (isTextAnchoringComponent(comp.source)) {
+            signal.hasAnchoring = true;
+        }
+    }
+
+    return signals;
+}
+
+json buildComponentHitSummaryJson(const std::vector<ComponentResult>& componentResults,
+                                  size_t topPerComponent) {
+    std::unordered_map<ComponentResult::Source, std::vector<std::pair<size_t, std::string>>>
+        grouped;
+    grouped.reserve(8);
+
+    for (const auto& comp : componentResults) {
+        const std::string docId = documentIdForTrace(comp.filePath, comp.documentHash);
+        if (docId.empty()) {
+            continue;
+        }
+        grouped[comp.source].emplace_back(comp.rank, docId);
+    }
+
+    json out = json::object();
+    for (auto& [source, docs] : grouped) {
+        std::sort(docs.begin(), docs.end(), [](const auto& a, const auto& b) {
+            if (a.first != b.first) {
+                return a.first < b.first;
+            }
+            return a.second < b.second;
+        });
+
+        std::vector<std::string> topDocIds;
+        topDocIds.reserve(std::min(topPerComponent, docs.size()));
+        std::unordered_set<std::string> seen;
+        seen.reserve(docs.size());
+        for (const auto& [rank, docId] : docs) {
+            (void)rank;
+            if (!seen.insert(docId).second) {
+                continue;
+            }
+            topDocIds.push_back(docId);
+            if (topDocIds.size() >= topPerComponent) {
+                break;
+            }
+        }
+
+        out[componentSourceToString(source)] = {
+            {"raw_hits", docs.size()},
+            {"unique_top_doc_ids", topDocIds},
+        };
+    }
+
+    return out;
+}
+
+json buildFusionTopSummaryJson(const std::vector<SearchResult>& results, size_t maxDocs) {
+    json out = json::array();
+    const size_t count = std::min(results.size(), maxDocs);
+    for (size_t i = 0; i < count; ++i) {
+        const auto& res = results[i];
+        out.push_back({
+            {"rank", i + 1},
+            {"doc_id", documentIdForTrace(res.document.filePath, res.document.sha256Hash)},
+            {"path", res.document.filePath},
+            {"score", res.score},
+            {"keyword_score", res.keywordScore.value_or(0.0)},
+            {"vector_score", res.vectorScore.value_or(0.0)},
+            {"kg_score", res.kgScore.value_or(0.0)},
+            {"path_score", res.pathScore.value_or(0.0)},
+            {"tag_score", res.tagScore.value_or(0.0)},
+            {"symbol_score", res.symbolScore.value_or(0.0)},
+            {"reranker_score", res.rerankerScore.value_or(0.0)},
+        });
+    }
     return out;
 }
 
@@ -691,6 +911,13 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::vector<std::string> contributing;
     std::vector<std::string> skipped;
     std::map<std::string, int64_t> componentTiming;
+    const bool stageTraceEnabled = envFlagEnabled("YAMS_SEARCH_STAGE_TRACE");
+    std::vector<std::string> preFusionDocIds;
+    PreFusionSignalMap preFusionSignals;
+    std::vector<SearchResult> postFusionSnapshot;
+    std::vector<SearchResult> postGraphSnapshot;
+    bool graphRerankApplied = false;
+    bool crossRerankApplied = false;
 
     // Embedding generation may be launched eagerly or lazily depending on tiering strategy.
     std::optional<std::vector<float>> queryEmbedding;
@@ -749,6 +976,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     const size_t userLimit =
         params.limit > 0 ? static_cast<size_t>(params.limit) : config_.maxResults;
+    const size_t fusionCandidateLimit =
+        std::max(userLimit, std::max(config_.rerankTopK, config_.graphRerankTopN));
     const size_t componentCap = std::max(userLimit * 3, static_cast<size_t>(50));
 
     SearchEngineConfig workingConfig = config_;
@@ -759,7 +988,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     workingConfig.entityVectorMaxResults = std::min(config_.entityVectorMaxResults, componentCap);
     workingConfig.tagMaxResults = std::min(config_.tagMaxResults, componentCap);
     workingConfig.metadataMaxResults = std::min(config_.metadataMaxResults, componentCap);
-    workingConfig.maxResults = userLimit;
+    workingConfig.maxResults = fusionCandidateLimit;
 
     spdlog::debug("Search limit optimization: userLimit={}, componentCap={}", userLimit,
                   componentCap);
@@ -1174,10 +1403,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     }
 
+    if (stageTraceEnabled) {
+        preFusionDocIds = collectUniqueComponentDocIds(allComponentResults);
+        preFusionSignals = buildPreFusionSignalMap(allComponentResults);
+    }
+
     ResultFusion fusion(workingConfig);
     {
         YAMS_ZONE_SCOPED_N("fusion::results");
         response.results = fusion.fuse(allComponentResults);
+    }
+    if (stageTraceEnabled) {
+        postFusionSnapshot = response.results;
     }
 
     if (config_.enableGraphRerank && kgScorer_ && !response.results.empty()) {
@@ -1273,6 +1510,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                               [](const SearchResult& a, const SearchResult& b) {
                                   return a.score > b.score;
                               });
+                    graphRerankApplied = true;
                     contributing.push_back("graph_rerank");
                 } else {
                     skipped.push_back("graph_rerank");
@@ -1288,6 +1526,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         componentTiming["graph_rerank"] =
             std::chrono::duration_cast<std::chrono::microseconds>(graphRerankEnd - graphRerankStart)
                 .count();
+    }
+
+    if (stageTraceEnabled) {
+        postGraphSnapshot = response.results;
     }
 
     std::vector<QueryConcept> concepts;
@@ -1314,10 +1556,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     // Cross-encoder reranking: second-stage ranking for improved relevance
     const bool rerankAvailable = reranker_ && reranker_->isReady();
-    if (!config_.enableReranking && rerankAvailable) {
-        spdlog::debug("[reranker] Auto-enabled (model detected)");
+    if (!config_.enableReranking && rerankAvailable && !response.results.empty()) {
+        skipped.push_back("reranker");
     }
-    if (rerankAvailable && !response.results.empty()) {
+    if (config_.enableReranking && rerankAvailable && !response.results.empty()) {
         YAMS_ZONE_SCOPED_N("reranking");
         const size_t rerankWindow = std::min(config_.rerankTopK, response.results.size());
 
@@ -1394,6 +1636,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                   return a.score > b.score;
                               });
 
+                    crossRerankApplied = true;
                     contributing.push_back("reranker");
                 } else {
                     if (isRerankerCooldownError(rerankResult.error().code)) {
@@ -1530,6 +1773,15 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     }
 
+    // Enforce user-visible limit after all post-fusion stages have had a chance to reorder/boost.
+    if (response.results.size() > userLimit) {
+        std::partial_sort(
+            response.results.begin(), response.results.begin() + static_cast<ptrdiff_t>(userLimit),
+            response.results.end(),
+            [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+        response.results.resize(userLimit);
+    }
+
     if (!response.results.empty()) {
         std::unordered_map<std::string_view, size_t> extCounts;
         for (const auto& r : response.results) {
@@ -1572,6 +1824,135 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
     response.isDegraded =
         !response.timedOutComponents.empty() || !response.failedComponents.empty();
+
+    if (stageTraceEnabled) {
+        const size_t traceTopCount =
+            std::max(userLimit, std::max(config_.rerankTopK, config_.graphRerankTopN));
+        const size_t componentTopCount = std::min<size_t>(traceTopCount, 25);
+
+        const std::vector<std::string> postFusionAllDocIds =
+            collectRankedResultDocIds(postFusionSnapshot);
+        const std::vector<std::string> postGraphAllDocIds = collectRankedResultDocIds(
+            postGraphSnapshot.empty() ? postFusionSnapshot : postGraphSnapshot);
+        const std::vector<std::string> finalAllDocIds = collectRankedResultDocIds(response.results);
+
+        const std::vector<std::string> fusionDroppedDocIds =
+            setDifferenceIds(preFusionDocIds, postFusionAllDocIds);
+
+        size_t vectorOnlyDocs = 0;
+        size_t vectorOnlyBelowThreshold = 0;
+        size_t vectorOnlyAboveThreshold = 0;
+        size_t vectorOnlyNearMissEligible = 0;
+        size_t anchorAndVectorDocs = 0;
+        size_t anchorOnlyDocs = 0;
+        std::vector<std::pair<std::string, double>> vectorOnlyBelowDocs;
+        std::vector<std::pair<std::string, double>> vectorOnlyAboveDocs;
+
+        const double nearMissSlack =
+            std::clamp(static_cast<double>(config_.vectorOnlyNearMissSlack), 0.0, 1.0);
+        const bool nearMissReserveEnabled = config_.vectorOnlyNearMissReserve > 0;
+
+        for (const auto& [docId, signal] : preFusionSignals) {
+            if (signal.hasAnchoring && signal.hasVector) {
+                anchorAndVectorDocs++;
+            } else if (signal.hasAnchoring && !signal.hasVector) {
+                anchorOnlyDocs++;
+            }
+
+            if (signal.hasVector && !signal.hasAnchoring) {
+                vectorOnlyDocs++;
+                if (signal.maxVectorRaw < static_cast<double>(config_.vectorOnlyThreshold)) {
+                    vectorOnlyBelowThreshold++;
+                    vectorOnlyBelowDocs.emplace_back(docId, signal.maxVectorRaw);
+                    if (nearMissReserveEnabled &&
+                        signal.maxVectorRaw + nearMissSlack >=
+                            static_cast<double>(config_.vectorOnlyThreshold)) {
+                        vectorOnlyNearMissEligible++;
+                    }
+                } else {
+                    vectorOnlyAboveThreshold++;
+                    vectorOnlyAboveDocs.emplace_back(docId, signal.maxVectorRaw);
+                }
+            }
+        }
+
+        auto byScoreDesc = [](const auto& a, const auto& b) {
+            if (a.second != b.second) {
+                return a.second > b.second;
+            }
+            return a.first < b.first;
+        };
+        std::sort(vectorOnlyBelowDocs.begin(), vectorOnlyBelowDocs.end(), byScoreDesc);
+        std::sort(vectorOnlyAboveDocs.begin(), vectorOnlyAboveDocs.end(), byScoreDesc);
+
+        std::vector<std::string> vectorOnlyBelowTop;
+        std::vector<std::string> vectorOnlyAboveTop;
+        vectorOnlyBelowTop.reserve(std::min(componentTopCount, vectorOnlyBelowDocs.size()));
+        vectorOnlyAboveTop.reserve(std::min(componentTopCount, vectorOnlyAboveDocs.size()));
+        for (size_t i = 0; i < std::min(componentTopCount, vectorOnlyBelowDocs.size()); ++i) {
+            vectorOnlyBelowTop.push_back(vectorOnlyBelowDocs[i].first);
+        }
+        for (size_t i = 0; i < std::min(componentTopCount, vectorOnlyAboveDocs.size()); ++i) {
+            vectorOnlyAboveTop.push_back(vectorOnlyAboveDocs[i].first);
+        }
+
+        const json componentSummary =
+            buildComponentHitSummaryJson(allComponentResults, componentTopCount);
+        const json fusionTopSummary = buildFusionTopSummaryJson(postFusionSnapshot, traceTopCount);
+        const json graphTopSummary = buildFusionTopSummaryJson(
+            postGraphSnapshot.empty() ? postFusionSnapshot : postGraphSnapshot, traceTopCount);
+        const json finalTopSummary = buildFusionTopSummaryJson(response.results, traceTopCount);
+        const json preFusionSignalSummary = {
+            {"vector_only_docs", vectorOnlyDocs},
+            {"vector_only_below_threshold", vectorOnlyBelowThreshold},
+            {"vector_only_above_threshold", vectorOnlyAboveThreshold},
+            {"vector_only_near_miss_eligible", vectorOnlyNearMissEligible},
+            {"anchor_and_vector_docs", anchorAndVectorDocs},
+            {"anchor_only_docs", anchorOnlyDocs},
+            {"vector_only_threshold", config_.vectorOnlyThreshold},
+            {"vector_only_penalty", config_.vectorOnlyPenalty},
+            {"vector_only_near_miss_reserve", config_.vectorOnlyNearMissReserve},
+            {"vector_only_near_miss_slack", config_.vectorOnlyNearMissSlack},
+            {"vector_only_near_miss_penalty", config_.vectorOnlyNearMissPenalty},
+            {"vector_only_below_top_doc_ids", vectorOnlyBelowTop},
+            {"vector_only_above_top_doc_ids", vectorOnlyAboveTop},
+        };
+
+        response.debugStats["trace_enabled"] = "1";
+        response.debugStats["trace_query_intent"] = queryIntentToString(intent);
+        response.debugStats["trace_user_limit"] = std::to_string(userLimit);
+        response.debugStats["trace_fusion_candidate_limit"] = std::to_string(fusionCandidateLimit);
+        response.debugStats["trace_top_window"] = std::to_string(traceTopCount);
+        response.debugStats["trace_graph_rerank_applied"] = graphRerankApplied ? "1" : "0";
+        response.debugStats["trace_cross_rerank_applied"] = crossRerankApplied ? "1" : "0";
+
+        response.debugStats["trace_pre_fusion_unique_count"] =
+            std::to_string(preFusionDocIds.size());
+        response.debugStats["trace_post_fusion_count"] = std::to_string(postFusionAllDocIds.size());
+        response.debugStats["trace_post_graph_count"] = std::to_string(postGraphAllDocIds.size());
+        response.debugStats["trace_final_count"] = std::to_string(finalAllDocIds.size());
+        response.debugStats["trace_fusion_dropped_count"] =
+            std::to_string(fusionDroppedDocIds.size());
+
+        response.debugStats["trace_pre_fusion_doc_ids"] = joinWithTab(preFusionDocIds);
+        response.debugStats["trace_post_fusion_doc_ids"] = joinWithTab(postFusionAllDocIds);
+        response.debugStats["trace_post_graph_doc_ids"] = joinWithTab(postGraphAllDocIds);
+        response.debugStats["trace_final_doc_ids"] = joinWithTab(finalAllDocIds);
+        response.debugStats["trace_fusion_dropped_doc_ids"] = joinWithTab(fusionDroppedDocIds);
+
+        response.debugStats["trace_post_fusion_top_doc_ids"] =
+            joinWithTab(collectRankedResultDocIds(postFusionSnapshot, traceTopCount));
+        response.debugStats["trace_post_graph_top_doc_ids"] = joinWithTab(collectRankedResultDocIds(
+            postGraphSnapshot.empty() ? postFusionSnapshot : postGraphSnapshot, traceTopCount));
+        response.debugStats["trace_final_top_doc_ids"] =
+            joinWithTab(collectRankedResultDocIds(response.results, traceTopCount));
+
+        response.debugStats["trace_component_hits_json"] = componentSummary.dump();
+        response.debugStats["trace_prefusion_signal_summary_json"] = preFusionSignalSummary.dump();
+        response.debugStats["trace_fusion_top_json"] = fusionTopSummary.dump();
+        response.debugStats["trace_post_graph_top_json"] = graphTopSummary.dump();
+        response.debugStats["trace_final_top_json"] = finalTopSummary.dump();
+    }
 
     auto endTime = std::chrono::steady_clock::now();
     response.executionTimeMs =
@@ -1668,6 +2049,25 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFullText(const std
     }
 
     try {
+        const QueryIntent queryIntent = detectQueryIntent(query);
+        float nonCodeFileMultiplier = 1.0f;
+        if (config_.enableIntentAdaptiveWeighting) {
+            switch (queryIntent) {
+                case QueryIntent::Code:
+                    nonCodeFileMultiplier = 0.5f;
+                    break;
+                case QueryIntent::Path:
+                    nonCodeFileMultiplier = 0.65f;
+                    break;
+                case QueryIntent::Prose:
+                    nonCodeFileMultiplier = 1.0f;
+                    break;
+                case QueryIntent::Mixed:
+                    nonCodeFileMultiplier = 0.80f;
+                    break;
+            }
+        }
+
         auto appendResults = [&](const yams::metadata::SearchResults& searchResults,
                                  float scorePenalty, bool dedupe,
                                  std::unordered_set<std::string>* seenHashes) {
@@ -1701,7 +2101,7 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryFullText(const std
                 bool isCodeFile = pruneCategory == magic::PruneCategory::BuildObject ||
                                   pruneCategory == magic::PruneCategory::None;
 
-                float scoreMultiplier = isCodeFile ? 1.0f : 0.5f;
+                float scoreMultiplier = isCodeFile ? 1.0f : nonCodeFileMultiplier;
                 scoreMultiplier *= filenamePathBoost(query, filePath, fileName);
                 scoreMultiplier *= scorePenalty;
 

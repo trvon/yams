@@ -168,6 +168,40 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine vectorWeight overridden to {:.2f} via env",
                          cfg.vectorWeight);
         }
+        if (auto rrfK = getEnvFloat("YAMS_SEARCH_RRF_K")) {
+            cfg.rrfK = std::clamp(*rrfK, 1.0f, 200.0f);
+            spdlog::info("SearchEngine rrfK overridden to {:.2f} via env", cfg.rrfK);
+        }
+        if (auto vectorOnlyThreshold = getEnvFloat("YAMS_SEARCH_VECTOR_ONLY_THRESHOLD")) {
+            cfg.vectorOnlyThreshold = std::clamp(*vectorOnlyThreshold, 0.0f, 1.0f);
+            spdlog::info("SearchEngine vectorOnlyThreshold overridden to {:.3f} via env",
+                         cfg.vectorOnlyThreshold);
+        }
+        if (auto vectorOnlyPenalty = getEnvFloat("YAMS_SEARCH_VECTOR_ONLY_PENALTY")) {
+            cfg.vectorOnlyPenalty = std::clamp(*vectorOnlyPenalty, 0.0f, 1.0f);
+            spdlog::info("SearchEngine vectorOnlyPenalty overridden to {:.3f} via env",
+                         cfg.vectorOnlyPenalty);
+        }
+        if (auto nearMissReserve = getEnvInt("YAMS_SEARCH_VECTOR_ONLY_NEAR_MISS_RESERVE")) {
+            cfg.vectorOnlyNearMissReserve = static_cast<size_t>(std::max(0, *nearMissReserve));
+            spdlog::info("SearchEngine vectorOnlyNearMissReserve overridden to {} via env",
+                         cfg.vectorOnlyNearMissReserve);
+        }
+        if (auto nearMissSlack = getEnvFloat("YAMS_SEARCH_VECTOR_ONLY_NEAR_MISS_SLACK")) {
+            cfg.vectorOnlyNearMissSlack = std::clamp(*nearMissSlack, 0.0f, 1.0f);
+            spdlog::info("SearchEngine vectorOnlyNearMissSlack overridden to {:.3f} via env",
+                         cfg.vectorOnlyNearMissSlack);
+        }
+        if (auto nearMissPenalty = getEnvFloat("YAMS_SEARCH_VECTOR_ONLY_NEAR_MISS_PENALTY")) {
+            cfg.vectorOnlyNearMissPenalty = std::clamp(*nearMissPenalty, 0.0f, 1.0f);
+            spdlog::info("SearchEngine vectorOnlyNearMissPenalty overridden to {:.3f} via env",
+                         cfg.vectorOnlyNearMissPenalty);
+        }
+        if (auto conceptBoostWeight = getEnvFloat("YAMS_SEARCH_CONCEPT_BOOST_WEIGHT")) {
+            cfg.conceptBoostWeight = std::clamp(*conceptBoostWeight, 0.0f, 1.0f);
+            spdlog::info("SearchEngine conceptBoostWeight overridden to {:.3f} via env",
+                         cfg.conceptBoostWeight);
+        }
     }
 
     // Allow fusion strategy override for benchmarking
@@ -323,6 +357,24 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.graphHopDecay = std::clamp(*graphHopDecay, 0.0f, 1.0f);
             spdlog::info("SearchEngine graphHopDecay overridden to {:.3f} via env",
                          cfg.graphHopDecay);
+        }
+
+        if (auto tieredExecution = getEnvBool("YAMS_SEARCH_ENABLE_TIERED_EXECUTION")) {
+            cfg.enableTieredExecution = *tieredExecution;
+            spdlog::info("SearchEngine enableTieredExecution overridden to {} via env",
+                         cfg.enableTieredExecution);
+        }
+
+        if (auto tieredNarrow = getEnvBool("YAMS_SEARCH_TIERED_NARROW_VECTOR_SEARCH")) {
+            cfg.tieredNarrowVectorSearch = *tieredNarrow;
+            spdlog::info("SearchEngine tieredNarrowVectorSearch overridden to {} via env",
+                         cfg.tieredNarrowVectorSearch);
+        }
+
+        if (auto tieredMinCandidates = getEnvInt("YAMS_SEARCH_TIERED_MIN_CANDIDATES")) {
+            cfg.tieredMinCandidates = static_cast<size_t>(std::max(0, *tieredMinCandidates));
+            spdlog::info("SearchEngine tieredMinCandidates overridden to {} via env",
+                         cfg.tieredMinCandidates);
         }
 
         if (auto adaptiveFallback = getEnvBool("YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK")) {

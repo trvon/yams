@@ -225,3 +225,30 @@ TEST_CASE("ConfigCommand - auto-migrates v2 to v3 and preserves storage settings
     REQUIRE(cfg.count("storage.s3.fallback_policy") == 1);
     CHECK(cfg.at("storage.s3.fallback_policy") == "strict");
 }
+
+TEST_CASE("ConfigCommand - storage command writes explicit R2 temp credential settings",
+          "[cli][config][storage][r2][catch2]") {
+    ConfigCommandFixture fixture;
+
+    const int rc = fixture.runCommand(
+        {"yams", "config", "storage", "--s3-r2-auth-mode", "temp_credentials", "--s3-r2-api-token",
+         "cf-demo-token-value-1234567890-abcdef", "--s3-r2-account-id",
+         "377dc8ebb0de866fdec6be62f070405d", "--s3-r2-parent-access-key-id",
+         "d859a2a5af1ae68886821ad8a5582488", "--s3-r2-permission", "object-read-only",
+         "--s3-r2-ttl-seconds", "1800"});
+    REQUIRE(rc == 0);
+
+    const auto cfg = yams::config::parse_simple_toml(fixture.testConfigHome / "config.toml");
+    REQUIRE(cfg.count("storage.s3.r2.auth_mode") == 1);
+    CHECK(cfg.at("storage.s3.r2.auth_mode") == "temp_credentials");
+    REQUIRE(cfg.count("storage.s3.r2.api_token") == 1);
+    CHECK(cfg.at("storage.s3.r2.api_token") == "cf-demo-token-value-1234567890-abcdef");
+    REQUIRE(cfg.count("storage.s3.r2.account_id") == 1);
+    CHECK(cfg.at("storage.s3.r2.account_id") == "377dc8ebb0de866fdec6be62f070405d");
+    REQUIRE(cfg.count("storage.s3.r2.parent_access_key_id") == 1);
+    CHECK(cfg.at("storage.s3.r2.parent_access_key_id") == "d859a2a5af1ae68886821ad8a5582488");
+    REQUIRE(cfg.count("storage.s3.r2.permission") == 1);
+    CHECK(cfg.at("storage.s3.r2.permission") == "object-read-only");
+    REQUIRE(cfg.count("storage.s3.r2.ttl_seconds") == 1);
+    CHECK(cfg.at("storage.s3.r2.ttl_seconds") == "1800");
+}

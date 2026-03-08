@@ -8,6 +8,7 @@ Content-addressed storage with deduplication and semantic search.
 - [CLI Reference](user_guide/cli.md)
 - [MCP Server](user_guide/mcp.md)
 - [Admin: Operations](admin/operations.md)
+- [Benchmarks](benchmarks/README.md)
 
 ## Documentation Structure
 

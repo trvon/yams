@@ -225,8 +225,8 @@ private:
             fs::path cfgPath = resolveConfigPath();
             ConfigMigrator migrator;
             if (!fs::exists(cfgPath)) {
-                // Create default v2 config
-                auto mk = migrator.createDefaultV2Config(cfgPath);
+                // Create default v3 config
+                auto mk = migrator.createDefaultLatestConfig(cfgPath);
                 if (!mk)
                     return Error{mk.error()};
             }

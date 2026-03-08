@@ -4,7 +4,8 @@ status: draft
 ---
 
 Overview
-- Provider‑agnostic plugin API for object storage used by DR and hosting. Backends expose capabilities; core negotiates behavior.
+- Provider‑agnostic plugin API for object storage used by DR and hosting. Backends expose
+  capabilities; core negotiates behavior. The current production path is S3-compatible.
 
 Key Interfaces
 - C ABI: include/yams/plugins/object_storage_v1.h (stable loader surface)
@@ -32,6 +33,11 @@ Capability Matrix (initial)
 - Feature: dr‑presence — S3: yes (HEAD in DR bucket), R2: yes (presence only)
 - Feature: dr‑replication‑lag — S3: yes (RTC metrics when enabled), R2: unknown (fallback to presence)
 
+Provider validation status
+- Cloudflare R2: tested in this repository.
+- AWS S3: supported via the same S3-compatible API path, but not currently part of
+  automated validation in this repository.
+
 Behavior Notes
 - End‑to‑end verification prefers crc32c; fall back to sha256 where crc32c is not available.
 - DR readiness:
@@ -51,4 +57,3 @@ Tests
 - Unit: checksums, header formation, error typing, idempotency.
 - Integration: MinIO (S3‑compatible) for multipart, resume, versioning; AWS S3 for SSE‑KMS and RTC.
 - Negative: induced 5xx/429 with retries, checksum mismatch aborts.
-

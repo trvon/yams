@@ -1,0 +1,123 @@
+{
+  "record_count": 6,
+  "large_corpus_reads": {
+    "daemon_ipc": {
+      "ops_per_sec": {
+        "count": 2,
+        "unit": "ops/s",
+        "mean": 6.2576758260644,
+        "p95": 6.410467649389869,
+        "min": 6.10488400273893,
+        "max": 6.410467649389869
+      },
+      "fail_rate": {
+        "count": 2,
+        "unit": "ratio",
+        "mean": 0.0,
+        "p95": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "connection_drop_rate": {
+        "count": 2,
+        "unit": "ratio",
+        "mean": 0.0,
+        "p95": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "search_p95_ms": {
+        "count": 2,
+        "unit": "ms",
+        "mean": 15.9305,
+        "p95": 21.189,
+        "min": 10.672,
+        "max": 21.189
+      },
+      "list_p95_ms": {
+        "count": 2,
+        "unit": "ms",
+        "mean": 11.254000000000001,
+        "p95": 11.268,
+        "min": 11.24,
+        "max": 11.268
+      }
+    },
+    "mcp_query": {
+      "ops_per_sec": {
+        "count": 2,
+        "unit": "ops/s",
+        "mean": 6.401786928928708,
+        "p95": 6.409699189789426,
+        "min": 6.3938746680679905,
+        "max": 6.409699189789426
+      },
+      "fail_rate": {
+        "count": 2,
+        "unit": "ratio",
+        "mean": 0.0,
+        "p95": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "connection_drop_rate": {
+        "count": 2,
+        "unit": "ratio",
+        "mean": 0.0,
+        "p95": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "search_p95_ms": {
+        "count": 2,
+        "unit": "ms",
+        "mean": 26.2755,
+        "p95": 30.918,
+        "min": 21.633,
+        "max": 30.918
+      },
+      "list_p95_ms": {
+        "count": 2,
+        "unit": "ms",
+        "mean": 23.716500000000003,
+        "p95": 24.67,
+        "min": 22.763,
+        "max": 24.67
+      }
+    }
+  },
+  "connection_contention": {
+    "throughput_ops_per_sec": {
+      "count": 2,
+      "unit": "ops/s",
+      "mean": 1389.638720323551,
+      "p95": 1400.5893417339516,
+      "min": 1378.6880989131505,
+      "max": 1400.5893417339516
+    },
+    "fail_rate": {
+      "count": 2,
+      "unit": "ratio",
+      "mean": 0.0,
+      "p95": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    "retry_after_rate": {
+      "count": 2,
+      "unit": "ratio",
+      "mean": 0.0,
+      "p95": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    "latency_p95_ms": {
+      "count": 2,
+      "unit": "ms",
+      "mean": 11.7075,
+      "p95": 11.932,
+      "min": 11.483,
+      "max": 11.932
+    }
+  }
+}

@@ -1014,11 +1014,16 @@ void ServiceManager::shutdown() {
         try {
             constexpr auto kShutdownTimeout = std::chrono::seconds(5);
             if (!workCoordinator_->joinWithTimeout(kShutdownTimeout)) {
-                spdlog::warn("[ServiceManager] Phase 5: WorkCoordinator timed out after 5s, "
-                             "force-stopping remaining workers");
-            } else {
-                spdlog::info("[ServiceManager] Phase 5: WorkCoordinator threads joined");
+                spdlog::warn("[ServiceManager] Phase 5: WorkCoordinator timed out after 5s; "
+                             "retrying with extended timeout to avoid unsafe teardown races");
+                constexpr auto kExtendedShutdownTimeout = std::chrono::seconds(30);
+                if (!workCoordinator_->joinWithTimeout(kExtendedShutdownTimeout)) {
+                    spdlog::warn("[ServiceManager] Phase 5: Extended timeout expired; "
+                                 "falling back to blocking join() to ensure clean teardown");
+                    workCoordinator_->join();
+                }
             }
+            spdlog::info("[ServiceManager] Phase 5: WorkCoordinator threads joined");
         } catch (const std::exception& e) {
             spdlog::warn("[ServiceManager] Phase 5: WorkCoordinator join failed: {}", e.what());
         }

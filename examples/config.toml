@@ -67,7 +67,18 @@ region = "us-east-1"
 endpoint = ""
 access_key = ""
 secret_key = ""
+session_token = ""
 use_path_style = false
+
+[storage.s3.r2]
+# Explicit Cloudflare R2 temporary-credential bootstrap mode.
+# Keep auth_mode="direct" for normal S3 key/secret usage.
+auth_mode = "direct"
+api_token = ""
+account_id = ""
+parent_access_key_id = ""
+permission = "object-read-write"
+ttl_seconds = 3600
 
 [chunking]
 # Rolling hash window size

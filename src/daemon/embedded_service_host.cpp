@@ -102,6 +102,7 @@ public:
         }
 
         config_.dataDir = options_.dataDir;
+        config_.configFilePath = yams::config::get_config_path();
         config_.enableAutoRepair = options_.enableAutoRepair;
         config_.autoLoadPlugins = options_.autoLoadPlugins;
         config_.enableModelProvider = options_.enableModelProvider;

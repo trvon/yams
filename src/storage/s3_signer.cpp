@@ -1,4 +1,5 @@
 #include <yams/storage/s3_signer.h>
+#include <yams/storage/storage_runtime_resolver.h>
 
 #include <yams/crypto/hasher.h>
 
@@ -184,6 +185,16 @@ S3Signer::signRequest(CURL* curl, const BackendConfig& config, const std::string
     secretKey = trimWhitespace(std::move(secretKey));
     sessionToken = trimWhitespace(std::move(sessionToken));
 
+    ParsedUrl pu = parseUrl(url);
+
+    if (isCloudflareR2EndpointHost(pu.host) && looksLikeCloudflareApiBearerToken(accessKey)) {
+        return Result<curl_slist*>(
+            Error{ErrorCode::InvalidArgument,
+                  "S3 access key appears to be a Cloudflare API bearer token. Use R2 S3 "
+                  "access key/secret credentials, or configure storage.s3.r2.auth_mode='"
+                  "temp_credentials' with storage.s3.r2.api_token."});
+    }
+
     if (accessKey.empty() || secretKey.empty()) {
         return Result<curl_slist*>(Error{ErrorCode::PermissionDenied, "Missing S3 credentials"});
     }
@@ -193,7 +204,6 @@ S3Signer::signRequest(CURL* curl, const BackendConfig& config, const std::string
     if (region.empty()) {
         region = "us-east-1";
     }
-    ParsedUrl pu = parseUrl(url);
     if (region == "auto" && pu.host.find("r2.cloudflarestorage.com") == std::string::npos) {
         region = "us-east-1"; // fallback
     }

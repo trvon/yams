@@ -1741,6 +1741,9 @@ private:
         resp.componentTimingMicros = engineResponse.componentTimingMicros;
         resp.usedEarlyTermination = engineResponse.usedEarlyTermination;
         resp.facets = engineResponse.facets;
+        for (const auto& [key, value] : engineResponse.debugStats) {
+            resp.searchStats[key] = value;
+        }
 
         if (resp.isDegraded) {
             spdlog::info(

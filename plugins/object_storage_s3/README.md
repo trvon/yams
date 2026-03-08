@@ -11,6 +11,11 @@ Status
 - Multipart: first-cut implementation with optional checksum and SSE‑KMS headers.
 - list(): implements ListObjectsV2 with prefix and delimiter parsing; bounded pagination.
 
+Provider validation status
+- Cloudflare R2: tested in this repository (smoke + storage benchmark path).
+- AWS S3: supported by the same S3-compatible plugin/configuration path, but not currently
+  validated by automated tests in this repository.
+
 Configuration
 - BackendConfig.type: "s3"
 - BackendConfig.url: "s3://<bucket>/<prefix>"
@@ -42,6 +47,17 @@ export AWS_SECRET_ACCESS_KEY="<r2-secret-key>"
 export AWS_REGION="auto"
 export S3_TEST_BUCKET="<bucket>"
 export S3_TEST_ENDPOINT="<accountid>.r2.cloudflarestorage.com"
+export S3_TEST_USE_PATH_STYLE=0
+meson test -C builddir s3_plugin_smoke --print-errorlogs
+```
+
+Example (AWS S3, supported path)
+```bash
+export AWS_ACCESS_KEY_ID="<aws-access-key-id>"
+export AWS_SECRET_ACCESS_KEY="<aws-secret-access-key>"
+export AWS_REGION="us-east-1"
+export S3_TEST_BUCKET="<bucket>"
+export S3_TEST_ENDPOINT="s3.us-east-1.amazonaws.com"
 export S3_TEST_USE_PATH_STYLE=0
 meson test -C builddir s3_plugin_smoke --print-errorlogs
 ```

@@ -354,10 +354,9 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
 
     if (!completed) {
         try {
-            spdlog::error(
-                "[WorkCoordinator] CRITICAL: Timeout expired with {} workers still active. "
-                "Attempting to join remaining threads...",
-                activeWorkers_.load());
+            spdlog::error("[WorkCoordinator] Timeout expired with {} workers still active; "
+                          "workers remain joinable for a later retry",
+                          activeWorkers_.load());
             for (const auto& snap : workersStillRunning) {
                 spdlog::error("[WorkCoordinator] timeout worker detail: worker={} tid_hash={} "
                               "exited={} run={}ms",
@@ -366,18 +365,7 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
         } catch (...) {
         }
         lock.unlock();
-        for (auto& worker : workers_) {
-            if (worker.joinable()) {
-                try {
-                    spdlog::error(
-                        "[WorkCoordinator] Detaching worker as last resort after join timeout");
-                    worker.detach();
-                } catch (...) {
-                    spdlog::error("[WorkCoordinator] Exception while joining worker thread");
-                    worker.detach();
-                }
-            }
-        }
+        return false;
     } else {
         lock.unlock();
         // Join all workers that have exited

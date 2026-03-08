@@ -109,9 +109,14 @@ struct SearchEngineConfig {
     float vectorWeight = 0.30f;        // Vector similarity weight (increased for hybrid value)
     float vectorOnlyPenalty = 0.8f;    // Penalty for vector-only results (no text match)
     float vectorOnlyThreshold = 0.90f; // Minimum confidence for vector-only inclusion
-    float vectorBoostFactor = 0.10f;   // Boost factor for vector re-ranking
-    float entityVectorWeight = 0.05f;  // Entity (symbol) vector similarity weight
-    float tagWeight = 0.05f;           // Tag-based search weight (modifier, not standalone)
+    size_t vectorOnlyNearMissReserve =
+        0; // Keep up to N near-threshold vector-only docs (0 disables reserve)
+    float vectorOnlyNearMissSlack = 0.05f; // Near-miss band below threshold eligible for reserve
+    float vectorOnlyNearMissPenalty =
+        0.60f;                        // Additional penalty factor for reserved near-miss docs
+    float vectorBoostFactor = 0.10f;  // Boost factor for vector re-ranking
+    float entityVectorWeight = 0.05f; // Entity (symbol) vector similarity weight
+    float tagWeight = 0.05f;          // Tag-based search weight (modifier, not standalone)
     float metadataWeight = 0.05f; // Metadata attribute matching weight (modifier, not standalone)
 
     // Concept-based boosts (GLiNER query concepts)
@@ -425,7 +430,8 @@ struct SearchResponse {
     std::vector<std::string> failedComponents;
     std::vector<std::string> contributingComponents;
     std::vector<std::string> skippedComponents; // Components skipped due to early termination
-    std::map<std::string, int64_t> componentTimingMicros; // Per-component execution time
+    std::map<std::string, int64_t> componentTimingMicros;    // Per-component execution time
+    std::unordered_map<std::string, std::string> debugStats; // Opt-in diagnostics and traces
     int64_t executionTimeMs = 0;
     bool isDegraded = false;
     bool usedEarlyTermination = false; // True if later tiers were skipped
@@ -545,16 +551,42 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
     // Extract results from map
     std::vector<SearchResult> fusedResults;
     fusedResults.reserve(resultMap.size());
+    std::vector<std::pair<double, SearchResult>> nearMissReserve;
+    nearMissReserve.reserve(std::min(config_.vectorOnlyNearMissReserve, resultMap.size()));
+
+    const double vectorOnlyThreshold =
+        std::clamp(static_cast<double>(config_.vectorOnlyThreshold), 0.0, 1.0);
+    const double vectorOnlyPenalty =
+        std::clamp(static_cast<double>(config_.vectorOnlyPenalty), 0.0, 1.0);
+    const double nearMissSlack =
+        std::clamp(static_cast<double>(config_.vectorOnlyNearMissSlack), 0.0, 1.0);
+    const double nearMissPenalty =
+        std::clamp(static_cast<double>(config_.vectorOnlyNearMissPenalty), 0.0, 1.0);
+
     for (auto& [hash, r] : resultMap) {
         const bool hasAnchoring = anchoredDocs.contains(hash);
         const auto vecIt = maxVectorRawScore.find(hash);
         const bool hasVector = vecIt != maxVectorRawScore.end();
 
         if (hasVector && !hasAnchoring) {
-            if (vecIt->second < static_cast<double>(config_.vectorOnlyThreshold)) {
+            const double rawVector = vecIt->second;
+            if (rawVector < vectorOnlyThreshold) {
+                const bool reserveEnabled = config_.vectorOnlyNearMissReserve > 0;
+                const bool isNearMiss = reserveEnabled && vectorOnlyThreshold > 0.0 &&
+                                        rawVector + nearMissSlack >= vectorOnlyThreshold;
+                if (!isNearMiss) {
+                    continue;
+                }
+
+                const double thresholdRatio =
+                    vectorOnlyThreshold > 0.0
+                        ? std::clamp(rawVector / vectorOnlyThreshold, 0.0, 1.0)
+                        : std::clamp(rawVector, 0.0, 1.0);
+                r.score *= (vectorOnlyPenalty * nearMissPenalty * thresholdRatio);
+                nearMissReserve.emplace_back(rawVector, std::move(r));
                 continue;
             }
-            r.score *= static_cast<double>(config_.vectorOnlyPenalty);
+            r.score *= vectorOnlyPenalty;
         }
 
         if (hasVector && hasAnchoring && config_.vectorBoostFactor > 0.0f) {
@@ -573,6 +605,21 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
         }
 
         fusedResults.emplace_back(std::move(r));
+    }
+
+    if (!nearMissReserve.empty() && config_.vectorOnlyNearMissReserve > 0) {
+        std::sort(nearMissReserve.begin(), nearMissReserve.end(), [](const auto& a, const auto& b) {
+            if (a.first != b.first) {
+                return a.first > b.first;
+            }
+            return a.second.score > b.second.score;
+        });
+
+        const size_t reserveTake =
+            std::min(config_.vectorOnlyNearMissReserve, nearMissReserve.size());
+        for (size_t i = 0; i < reserveTake; ++i) {
+            fusedResults.emplace_back(std::move(nearMissReserve[i].second));
+        }
     }
 
     // Single sort at the end

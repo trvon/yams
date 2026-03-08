@@ -1,20 +1,20 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <future>
 #include <memory>
-#include <chrono>
-#include <cctype>
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include <boost/asio/post.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/services.hpp>
-#include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/DocumentRequestMapper.h>
+#include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -153,8 +153,8 @@ void IngestService::stop() {
     stop_.store(true);
     spdlog::info("[IngestService] Stop requested");
 
-    constexpr auto kWaitStep = std::chrono::milliseconds(1);
-    constexpr auto kWaitBudget = std::chrono::milliseconds(2000);
+    constexpr auto kWaitStep = std::chrono::milliseconds(5);
+    constexpr auto kWaitBudget = std::chrono::milliseconds(15000);
     auto waited = std::chrono::milliseconds(0);
     while (running_.load(std::memory_order_acquire) && waited < kWaitBudget) {
         std::this_thread::sleep_for(kWaitStep);
@@ -162,7 +162,9 @@ void IngestService::stop() {
     }
 
     if (running_.load(std::memory_order_acquire)) {
-        spdlog::warn("[IngestService] Stop timed out waiting for channel poller to exit");
+        spdlog::warn("[IngestService] Stop timed out after {}ms waiting for channel poller to "
+                     "exit",
+                     waited.count());
     }
 }
 

@@ -15,6 +15,7 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
+#include <yams/storage/storage_runtime_resolver.h>
 
 namespace yams::cli {
 
@@ -246,6 +247,8 @@ public:
         storageCmd->add_option("--s3-endpoint", s3Endpoint_, "S3 custom endpoint");
         storageCmd->add_option("--s3-access-key", s3AccessKey_, "S3 access key");
         storageCmd->add_option("--s3-secret-key", s3SecretKey_, "S3 secret key");
+        storageCmd->add_option("--s3-session-token", s3SessionToken_,
+                               "S3 session token (for temporary credentials)");
         storageCmd->add_flag("--s3-use-path-style", s3UsePathStyle_,
                              "Enable S3 path style addressing");
         storageCmd
@@ -256,6 +259,26 @@ public:
                                "Local data dir used when S3 startup fallback is enabled");
         storageCmd->add_flag("--s3-clear-fallback-local-data-dir", clearS3FallbackLocalDataDir_,
                              "Clear configured S3 fallback local data dir");
+        storageCmd
+            ->add_option("--s3-r2-auth-mode", s3R2AuthMode_,
+                         "Cloudflare R2 auth mode (direct or temp_credentials)")
+            ->check(CLI::IsMember({"direct", "temp_credentials"}));
+        storageCmd->add_option("--s3-r2-api-token", s3R2ApiToken_,
+                               "Cloudflare API token (used only when --s3-r2-auth-mode "
+                               "temp_credentials)");
+        storageCmd->add_option("--s3-r2-api-token-keychain", s3R2ApiTokenKeychain_,
+                               "Store Cloudflare API token in macOS keychain for this account");
+        storageCmd->add_option("--s3-r2-account-id", s3R2AccountId_,
+                               "Cloudflare account id for temp credentials API");
+        storageCmd->add_option("--s3-r2-parent-access-key-id", s3R2ParentAccessKeyId_,
+                               "Parent R2 access key id (optional; auto-resolved if omitted)");
+        storageCmd
+            ->add_option("--s3-r2-permission", s3R2Permission_,
+                         "Permission for temporary R2 credentials (object-read-write or "
+                         "object-read-only)")
+            ->check(CLI::IsMember({"object-read-write", "object-read-only"}));
+        storageCmd->add_option("--s3-r2-ttl-seconds", s3R2TtlSeconds_,
+                               "TTL seconds for temporary R2 credentials (> 0)");
         storageCmd->callback([this]() { exitOnError(executeStorage(), "Config storage"); });
     }
 
@@ -286,10 +309,18 @@ private:
     std::string s3Endpoint_;
     std::string s3AccessKey_;
     std::string s3SecretKey_;
+    std::string s3SessionToken_;
     std::string s3FallbackPolicy_;
     std::string s3FallbackLocalDataDir_;
+    std::string s3R2AuthMode_;
+    std::string s3R2ApiToken_;
+    std::string s3R2ApiTokenKeychain_;
+    std::string s3R2AccountId_;
+    std::string s3R2ParentAccessKeyId_;
+    std::string s3R2Permission_;
     bool s3UsePathStyle_ = false;
     bool clearS3FallbackLocalDataDir_ = false;
+    int s3R2TtlSeconds_ = 0;
 
     // Template helper for setting single config value with validation
     template <typename Validator = std::nullptr_t>
@@ -1547,8 +1578,11 @@ private:
             const bool hasUpdates =
                 !storageEngine_.empty() || !s3Url_.empty() || !s3Region_.empty() ||
                 !s3Endpoint_.empty() || !s3AccessKey_.empty() || !s3SecretKey_.empty() ||
-                s3UsePathStyle_ || !s3FallbackPolicy_.empty() || !s3FallbackLocalDataDir_.empty() ||
-                clearS3FallbackLocalDataDir_;
+                !s3SessionToken_.empty() || s3UsePathStyle_ || !s3FallbackPolicy_.empty() ||
+                !s3FallbackLocalDataDir_.empty() || clearS3FallbackLocalDataDir_ ||
+                !s3R2AuthMode_.empty() || !s3R2ApiToken_.empty() ||
+                !s3R2ApiTokenKeychain_.empty() || !s3R2AccountId_.empty() ||
+                !s3R2ParentAccessKeyId_.empty() || !s3R2Permission_.empty() || s3R2TtlSeconds_ > 0;
 
             if (!hasUpdates) {
                 auto configPath = getConfigPath();
@@ -1581,13 +1615,49 @@ private:
                           << "\n";
                 std::cout << "s3.secret_key: " << maskSecret(getValue("storage.s3.secret_key", ""))
                           << "\n";
+                std::cout << "s3.session_token: "
+                          << maskSecret(getValue("storage.s3.session_token", "")) << "\n";
                 std::cout << "s3.use_path_style: " << getValue("storage.s3.use_path_style", "false")
                           << "\n";
                 std::cout << "s3.fallback_policy: "
                           << getValue("storage.s3.fallback_policy", "strict") << "\n";
                 std::cout << "s3.fallback_local_data_dir: "
                           << getValue("storage.s3.fallback_local_data_dir", "(unset)") << "\n";
+                std::cout << "s3.r2.auth_mode: " << getValue("storage.s3.r2.auth_mode", "direct")
+                          << "\n";
+                std::cout << "s3.r2.api_token: "
+                          << maskSecret(getValue("storage.s3.r2.api_token", "")) << "\n";
+                std::cout << "s3.r2.account_id: " << getValue("storage.s3.r2.account_id", "(unset)")
+                          << "\n";
+                std::cout << "s3.r2.parent_access_key_id: "
+                          << maskSecret(getValue("storage.s3.r2.parent_access_key_id", "")) << "\n";
+                std::cout << "s3.r2.permission: "
+                          << getValue("storage.s3.r2.permission", "object-read-write") << "\n";
+                std::cout << "s3.r2.ttl_seconds: " << getValue("storage.s3.r2.ttl_seconds", "3600")
+                          << "\n";
                 return Result<void>();
+            }
+
+            auto cfg = parseSimpleToml(getConfigPath());
+            auto getValue = [&cfg](const std::string& key,
+                                   const std::string& fallback = "") -> std::string {
+                auto it = cfg.find(key);
+                if (it == cfg.end() || it->second.empty()) {
+                    return fallback;
+                }
+                return it->second;
+            };
+
+            const std::string effectiveEndpoint =
+                !s3Endpoint_.empty() ? s3Endpoint_ : getValue("storage.s3.endpoint", "");
+            if (!s3AccessKey_.empty() &&
+                yams::storage::isCloudflareR2EndpointHost(effectiveEndpoint) &&
+                yams::storage::looksLikeCloudflareApiBearerToken(s3AccessKey_)) {
+                return Error{ErrorCode::InvalidArgument,
+                             "--s3-access-key appears to be a Cloudflare API bearer token. "
+                             "Do not place bearer tokens in S3 access key fields. Use "
+                             "--s3-r2-auth-mode temp_credentials with --s3-r2-api-token "
+                             "instead."};
             }
 
             if (!storageEngine_.empty()) {
@@ -1631,6 +1701,11 @@ private:
                 if (!r)
                     return r;
             }
+            if (!s3SessionToken_.empty()) {
+                auto r = writeConfigValue("storage.s3.session_token", s3SessionToken_);
+                if (!r)
+                    return r;
+            }
             if (s3UsePathStyle_) {
                 auto r = writeConfigValue("storage.s3.use_path_style", "true");
                 if (!r)
@@ -1649,6 +1724,71 @@ private:
             }
             if (clearS3FallbackLocalDataDir_) {
                 auto r = writeConfigValue("storage.s3.fallback_local_data_dir", "");
+                if (!r)
+                    return r;
+            }
+            if (!s3R2AuthMode_.empty()) {
+                auto r = writeConfigValue("storage.s3.r2.auth_mode", s3R2AuthMode_);
+                if (!r)
+                    return r;
+            }
+            if (!s3R2ApiToken_.empty()) {
+                auto r = writeConfigValue("storage.s3.r2.api_token", s3R2ApiToken_);
+                if (!r)
+                    return r;
+            }
+            if (!s3R2ApiTokenKeychain_.empty()) {
+                if (!s3R2ApiToken_.empty()) {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "Specify only one of --s3-r2-api-token and "
+                                 "--s3-r2-api-token-keychain"};
+                }
+
+                std::string accountId = s3R2AccountId_;
+                if (accountId.empty()) {
+                    accountId = getValue("storage.s3.r2.account_id", "");
+                }
+                if (accountId.empty()) {
+                    accountId = yams::storage::extractCloudflareR2AccountId(effectiveEndpoint);
+                }
+                if (accountId.empty()) {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "--s3-r2-api-token-keychain requires account id via "
+                                 "--s3-r2-account-id or a canonical --s3-endpoint"};
+                }
+
+                auto storeToken = yams::storage::storeCloudflareApiTokenInKeychain(
+                    accountId, s3R2ApiTokenKeychain_);
+                if (!storeToken) {
+                    return Error{storeToken.error().code,
+                                 "Failed to store R2 API token in keychain: " +
+                                     storeToken.error().message};
+                }
+
+                auto clearPlainToken = writeConfigValue("storage.s3.r2.api_token", "");
+                if (!clearPlainToken) {
+                    return clearPlainToken;
+                }
+            }
+            if (!s3R2AccountId_.empty()) {
+                auto r = writeConfigValue("storage.s3.r2.account_id", s3R2AccountId_);
+                if (!r)
+                    return r;
+            }
+            if (!s3R2ParentAccessKeyId_.empty()) {
+                auto r =
+                    writeConfigValue("storage.s3.r2.parent_access_key_id", s3R2ParentAccessKeyId_);
+                if (!r)
+                    return r;
+            }
+            if (!s3R2Permission_.empty()) {
+                auto r = writeConfigValue("storage.s3.r2.permission", s3R2Permission_);
+                if (!r)
+                    return r;
+            }
+            if (s3R2TtlSeconds_ > 0) {
+                auto r =
+                    writeConfigValue("storage.s3.r2.ttl_seconds", std::to_string(s3R2TtlSeconds_));
                 if (!r)
                     return r;
             }

@@ -93,6 +93,9 @@ static std::vector<fs::path> defaultPluginDirs() { // unchanged
     if (const char* home = std::getenv("HOME")) {
         dirs.emplace_back(fs::path(home) / ".local" / "lib" / "yams" / "plugins");
     }
+#if defined(__APPLE__)
+    dirs.emplace_back("/opt/homebrew/lib/yams/plugins");
+#endif
     dirs.emplace_back("/usr/local/lib/yams/plugins");
     dirs.emplace_back("/usr/lib/yams/plugins");
     return dirs;
@@ -105,18 +108,35 @@ static fs::path resolveS3PluginPath() {
 #else
     std::vector<std::string> candidates{"yams_object_storage_s3." + libExtension()};
 #endif
+
     for (const auto& name : candidates) {
+        // Prefer repo-local build artifacts first to avoid loading an older globally-installed
+        // plugin when running from a development checkout.
+        fs::path local = fs::path("plugins") / "object_storage_s3" / name;
+        if (fs::exists(local))
+            return local;
+
+        fs::path buildPlugin = fs::path("build") / "plugins" / "object_storage_s3" / name;
+        if (fs::exists(buildPlugin))
+            return buildPlugin;
+
+        fs::path builddirPlugin = fs::path("builddir") / "plugins" / "object_storage_s3" / name;
+        if (fs::exists(builddirPlugin))
+            return builddirPlugin;
+
+        fs::path buildFlat = fs::path("build") / name;
+        if (fs::exists(buildFlat))
+            return buildFlat;
+
+        fs::path builddirFlat = fs::path("builddir") / name;
+        if (fs::exists(builddirFlat))
+            return builddirFlat;
+
         for (const auto& dir : defaultPluginDirs()) {
             fs::path p = dir / name;
             if (fs::exists(p))
                 return p;
         }
-        fs::path local = fs::path("plugins") / "object_storage_s3" / name;
-        if (fs::exists(local))
-            return local;
-        fs::path build1 = fs::path("build") / name;
-        if (fs::exists(build1))
-            return build1;
     }
     return {};
 }

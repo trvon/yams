@@ -8,6 +8,10 @@ yams_compression = dependency('yams_compression', required: false)
 
 cc = meson.get_compiler('cpp')
 dl_dep = cc.find_library('dl', required: host_machine.system() == 'linux')
+apple_security_deps = []
+if host_machine.system() == 'darwin'
+  apple_security_deps += dependency('appleframeworks', modules: ['Security', 'CoreFoundation'])
+endif
 
 # Platform sources
 platform_src = []
@@ -30,7 +34,7 @@ yams_storage_engine = static_library('yams_storage_engine',
     '../storage/object_storage_adapter.cpp',
   ] + platform_src,
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, threads_dep, curl_dep, yams_core, yams_crypto, yams_compression, dl_dep],
+  dependencies: [spdlog_dep, threads_dep, curl_dep, yams_core, yams_crypto, yams_compression, dl_dep] + apple_security_deps,
   install: true,
 )
 

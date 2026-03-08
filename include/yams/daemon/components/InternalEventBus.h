@@ -205,8 +205,10 @@ private:
 class InternalEventBus {
 public:
     static InternalEventBus& instance() {
-        static InternalEventBus b;
-        return b;
+        // Intentionally leaked singleton: avoids shutdown-order races where background
+        // daemon worker threads can still touch bus channels during process teardown.
+        static InternalEventBus* b = new InternalEventBus();
+        return *b;
     }
 
     template <typename T>

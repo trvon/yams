@@ -97,6 +97,7 @@ Located in `build/release/tests/benchmarks/` (when the Release build is configur
 - [API Benchmarks](#api-benchmarks)
 - [IPC Streaming Benchmarks](#ipc-streaming-benchmarks)
 - [Retrieval Quality Benchmark](#retrieval-quality-benchmark)
+- [Storage Backends Benchmark (Local vs S3-compatible)](storage_backends.md)
 
 #### Run Commands
 ```bash

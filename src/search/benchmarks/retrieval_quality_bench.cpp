@@ -509,6 +509,7 @@ struct RetrievalMetrics {
 
 struct DebugLogEntry {
     std::string query;
+    std::string searchType;
     std::vector<std::string> relevantDocIds;
     std::vector<std::string> relevantFiles;
     std::vector<std::string> returnedPaths;
@@ -522,6 +523,7 @@ struct DebugLogEntry {
     bool usedLiteralFlag = false;
     bool usedFuzzyRetry = false;
     bool usedLiteralTextRetry = false;
+    std::map<std::string, std::string> searchStats;
 };
 
 static std::ostream* g_debugOut = nullptr;
@@ -534,6 +536,7 @@ static void debugLogWriteJsonLine(const DebugLogEntry& e) {
 
     json j;
     j["query"] = e.query;
+    j["search_type"] = e.searchType;
     j["relevant_doc_ids"] = e.relevantDocIds;
     j["relevant_files"] = e.relevantFiles;
     j["returned_paths"] = e.returnedPaths;
@@ -546,6 +549,7 @@ static void debugLogWriteJsonLine(const DebugLogEntry& e) {
     j["used_literal_flag"] = e.usedLiteralFlag;
     j["used_fuzzy_retry"] = e.usedFuzzyRetry;
     j["used_literal_retry"] = e.usedLiteralTextRetry;
+    j["search_stats"] = e.searchStats;
     j["diag"] = e.diagnostics;
 
     std::lock_guard<std::mutex> lock(g_debugMutex);
@@ -680,6 +684,202 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
              {"YAMS_FUSION_STRATEGY", "WEIGHTED_RECIPROCAL"},
              {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         }},
+        {"mixed_precision_guardrails",
+         "MIXED + weighted reciprocal with vector-only precision guardrails",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_FUSION_STRATEGY", "WEIGHTED_RECIPROCAL"},
+             {"YAMS_SEARCH_RRF_K", "10"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.93"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.70"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.07"},
+         }},
+        {"mixed_precision_mrr_recovery_rrf",
+         "MIXED weighted reciprocal with softer vector-only guardrails",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_FUSION_STRATEGY", "WEIGHTED_RECIPROCAL"},
+             {"YAMS_SEARCH_RRF_K", "16"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.91"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.82"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.05"},
+             {"YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "0.12"},
+         }},
+        {"mixed_precision_rrf_neighbor_t92_p80_k14",
+         "MIXED weighted reciprocal near-neighbor: stricter threshold, lower RRF k",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_FUSION_STRATEGY", "WEIGHTED_RECIPROCAL"},
+             {"YAMS_SEARCH_RRF_K", "14"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.80"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.05"},
+             {"YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "0.12"},
+         }},
+        {"mixed_precision_rrf_neighbor_t92_p78_k16",
+         "MIXED weighted reciprocal near-neighbor: stricter threshold and penalty",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_FUSION_STRATEGY", "WEIGHTED_RECIPROCAL"},
+             {"YAMS_SEARCH_RRF_K", "16"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.78"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.05"},
+             {"YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "0.12"},
+         }},
+        {"mixed_precision_rrf_neighbor_t90_p84_k18",
+         "MIXED weighted reciprocal near-neighbor: looser threshold, higher RRF k",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_FUSION_STRATEGY", "WEIGHTED_RECIPROCAL"},
+             {"YAMS_SEARCH_RRF_K", "18"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.90"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.84"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.05"},
+             {"YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "0.12"},
+         }},
+        {"mixed_precision_rrf_rerank10",
+         "MIXED weighted reciprocal with broader rerank window",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_FUSION_STRATEGY", "WEIGHTED_RECIPROCAL"},
+             {"YAMS_SEARCH_RRF_K", "16"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.91"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.82"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.05"},
+             {"YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "0.12"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "10"},
+         }},
+        {"mixed_ablation_disable_vector_gate",
+         "Ablation: disable vector-only threshold/penalty",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_FUSION_STRATEGY", "WEIGHTED_RECIPROCAL"},
+             {"YAMS_SEARCH_RRF_K", "16"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.00"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "1.00"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.05"},
+             {"YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "0.12"},
+         }},
+        {"mixed_ablation_disable_intent_adaptive",
+         "Ablation: disable query intent weighting",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_FUSION_STRATEGY", "WEIGHTED_RECIPROCAL"},
+             {"YAMS_SEARCH_RRF_K", "16"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.91"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.82"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.05"},
+             {"YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "0.12"},
+             {"YAMS_SEARCH_ENABLE_INTENT_ADAPTIVE", "0"},
+         }},
+        {"mixed_ablation_disable_tiered_execution",
+         "Ablation: disable tiered execution, run flat fanout",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_FUSION_STRATEGY", "WEIGHTED_RECIPROCAL"},
+             {"YAMS_SEARCH_RRF_K", "16"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.91"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.82"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.05"},
+             {"YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "0.12"},
+             {"YAMS_SEARCH_ENABLE_TIERED_EXECUTION", "0"},
+         }},
+        {"mixed_ablation_disable_graph_rerank",
+         "Ablation: disable graph reranking",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "0"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_FUSION_STRATEGY", "WEIGHTED_RECIPROCAL"},
+             {"YAMS_SEARCH_RRF_K", "16"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.91"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.82"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.05"},
+             {"YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "0.12"},
+         }},
+        {"mixed_ablation_disable_reranker",
+         "Ablation: disable cross-encoder reranking stage",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_FUSION_STRATEGY", "WEIGHTED_RECIPROCAL"},
+             {"YAMS_SEARCH_RRF_K", "16"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.91"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.82"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.05"},
+             {"YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "0.12"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "0"},
+         }},
+        {"mixed_precision_mrr_recovery_mnz",
+         "MIXED CombMNZ with moderate vector-only precision guardrails",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_FUSION_STRATEGY", "COMB_MNZ"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.78"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.06"},
+             {"YAMS_SEARCH_GRAPH_RERANK_WEIGHT", "0.12"},
+         }},
+        {"scientific_precision_guardrails",
+         "SCIENTIFIC state with strict vector-only thresholding",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "SCIENTIFIC"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "0"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_RRF_K", "10"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.94"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.68"},
+             {"YAMS_SEARCH_CONCEPT_BOOST_WEIGHT", "0.08"},
          }},
         {"mixed_graph_off",
          "MIXED state with graph rerank disabled",
@@ -888,12 +1088,14 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
 
         DebugLogEntry debugEntry;
         debugEntry.query = tq.query;
+        debugEntry.searchType = searchType;
         debugEntry.attempts = run.value().attempts;
         debugEntry.usedStreaming = run.value().usedStreaming;
         debugEntry.usedFuzzyFlag = false;
         debugEntry.usedLiteralFlag = false;
         debugEntry.usedFuzzyRetry = run.value().usedFuzzyRetry;
         debugEntry.usedLiteralTextRetry = run.value().usedLiteralTextRetry;
+        debugEntry.searchStats = run.value().response.searchStats;
         debugEntry.relevantDocIds.assign(tq.relevantDocIds.begin(), tq.relevantDocIds.end());
         debugEntry.relevantFiles.assign(tq.relevantFiles.begin(), tq.relevantFiles.end());
 
@@ -1013,6 +1215,7 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
 
                 DebugLogEntry shadowEntry;
                 shadowEntry.query = "__diag_shadow_query__";
+                shadowEntry.searchType = searchType;
                 shadowEntry.relevantDocIds.assign(tq.relevantDocIds.begin(),
                                                   tq.relevantDocIds.end());
                 shadowEntry.diagnostics.push_back("original_query=" + tq.query);
