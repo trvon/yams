@@ -125,6 +125,11 @@ struct MetricsSnapshot {
     std::size_t embedQueued{0};
     std::size_t embedDropped{0};
     std::size_t embedInFlight{0};
+    std::uint64_t embedPreparedDocsQueued{0};
+    std::uint64_t embedPreparedChunksQueued{0};
+    std::uint64_t embedHashOnlyDocsQueued{0};
+    double embedPreparedAvgChunksPerDoc{0.0};
+    double vectorRowsPerEmbeddedDoc{0.0};
     // Title extraction metrics
     std::size_t titleQueueDepth{0}; // Current channel queue depth
     std::size_t titleInFlight{0};
@@ -412,6 +417,7 @@ private:
     mutable std::uint64_t cachedDocumentsTotal_{0};
     mutable std::uint64_t cachedDocumentsIndexed_{0};
     mutable std::uint64_t cachedDocumentsExtracted_{0};
+    mutable std::uint64_t cachedDocumentsEmbedded_{0};
     mutable std::uint64_t cachedVectorRows_{0};
     uint32_t docCountsTtlMs_{5000}; // 5s TTL for document counts
 

@@ -10,6 +10,7 @@ yams_cli_sources = [
   'vector_db_util.cpp',
   'plugin_util.cpp',
   'doctor_checks.cpp',
+  'init_assets.cpp',
   'commands/add_command.cpp',
   'commands/get_command.cpp',
   'commands/restore_command.cpp',

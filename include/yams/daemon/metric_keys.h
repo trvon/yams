@@ -93,7 +93,8 @@ constexpr std::string_view kFts5Consumed = "fts5_consumed";
 constexpr std::string_view kDocumentsTotal = "documents_total";
 constexpr std::string_view kDocumentsIndexed = "documents_indexed"; // FTS5 indexed docs
 constexpr std::string_view kDocumentsContentExtracted = "documents_content_extracted";
-constexpr std::string_view kDocumentsEmbedded = "documents_embedded"; // Docs with vector embeddings
+constexpr std::string_view kDocumentsEmbedded =
+    "documents_embedded"; // Docs with has_embedding=1 status
 constexpr std::string_view kVectorCount = "vector_count";
 
 // Search metrics

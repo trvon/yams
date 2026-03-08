@@ -472,7 +472,8 @@ public:
                             std::cout << "\n" << section_header("Storage & Embeddings") << "\n\n";
                             std::vector<Row> storageRows;
                             try {
-                                uint64_t docs = 0, logical = 0, physical = 0, indexed = 0;
+                                uint64_t docs = 0, logical = 0, physical = 0, indexed = 0,
+                                         embedded = 0, vectorCount = 0;
                                 auto itDocsTotal = s.requestCounts.find("documents_total");
                                 if (itDocsTotal != s.requestCounts.end()) {
                                     docs = itDocsTotal->second;
@@ -484,6 +485,12 @@ public:
                                 auto itIndexed = s.requestCounts.find("documents_indexed");
                                 if (itIndexed != s.requestCounts.end())
                                     indexed = itIndexed->second;
+                                auto itEmbedded = s.requestCounts.find("documents_embedded");
+                                if (itEmbedded != s.requestCounts.end())
+                                    embedded = itEmbedded->second;
+                                auto itVectors = s.requestCounts.find("vector_count");
+                                if (itVectors != s.requestCounts.end())
+                                    vectorCount = itVectors->second;
                                 auto itLogical = s.requestCounts.find("storage_logical_bytes");
                                 if (itLogical != s.requestCounts.end())
                                     logical = itLogical->second;
@@ -495,6 +502,8 @@ public:
                                 docVal << docs << " documents";
                                 if (indexed > 0)
                                     docVal << " · " << indexed << " indexed";
+                                if (embedded > 0)
+                                    docVal << " · " << embedded << " embedded";
                                 storageRows.push_back({"Documents", docVal.str(), ""});
 
                                 std::ostringstream sizeVal;
@@ -503,13 +512,18 @@ public:
                                     sizeVal << " · physical " << format_bytes(physical);
                                 storageRows.push_back({"Size", sizeVal.str(), ""});
 
-                                // Embedding coverage progress bar
-                                if (docs > 0 && indexed > 0) {
+                                // Embedding coverage progress bar (doc-level)
+                                if (docs > 0 && embedded > 0) {
                                     double embFrac =
-                                        static_cast<double>(indexed) / static_cast<double>(docs);
+                                        static_cast<double>(embedded) / static_cast<double>(docs);
                                     std::string embBar =
-                                        progress_with_stats(embFrac, 10, {{indexed, docs}});
+                                        progress_with_stats(embFrac, 10, {{embedded, docs}});
                                     storageRows.push_back({"Embeddings", embBar, ""});
+                                }
+
+                                if (vectorCount > 0) {
+                                    storageRows.push_back(
+                                        {"Vectors", std::to_string(vectorCount) + " rows", ""});
                                 }
                             } catch (...) {
                                 storageRows.push_back({"Storage", "Error reading stats", ""});

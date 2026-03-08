@@ -670,8 +670,9 @@ public:
 
     // Statistics
     Result<int64_t> getDocumentCount() override;
-    Result<int64_t> getIndexedDocumentCount() override;          // Embeddings-based
+    Result<int64_t> getIndexedDocumentCount() override;          // FTS5 indexed docs
     Result<int64_t> getContentExtractedDocumentCount() override; // New
+    Result<int64_t> getEmbeddedDocumentCount();
     Result<std::unordered_map<std::string, int64_t>> getDocumentCountsByExtension() override;
     Result<int64_t> getDocumentCountByExtractionStatus(ExtractionStatus status) override;
     Result<storage::CorpusStats> getCorpusStats() override;
@@ -686,6 +687,9 @@ public:
     }
     uint64_t getCachedExtractedCount() const noexcept {
         return cachedExtractedCount_.load(std::memory_order_relaxed);
+    }
+    uint64_t getCachedEmbeddedCount() const noexcept {
+        return cachedEmbeddedCount_.load(std::memory_order_relaxed);
     }
     void initializeCounters(); // Called once during startup to sync with DB
 
@@ -802,6 +806,7 @@ private:
     mutable std::atomic<uint64_t> cachedDocumentCount_{0};
     mutable std::atomic<uint64_t> cachedIndexedCount_{0};
     mutable std::atomic<uint64_t> cachedExtractedCount_{0};
+    mutable std::atomic<uint64_t> cachedEmbeddedCount_{0};
     mutable std::atomic<bool> countersInitialized_{false};
 
     // Legacy makeSelect removed; callers now use sql::QuerySpec to build SELECTs

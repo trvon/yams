@@ -135,6 +135,15 @@ static std::uint64_t readRssKb() {
 #endif
 }
 
+template <typename NumeratorT, typename DenominatorT>
+double safeRatio(NumeratorT numerator, DenominatorT denominator) {
+    const auto denom = static_cast<double>(denominator);
+    if (denom <= 0.0) {
+        return 0.0;
+    }
+    return static_cast<double>(numerator) / denom;
+}
+
 // Read CPU usage percent for the current process using /proc deltas.
 // Percent is relative to total system capacity (all CPUs). A single fully utilized
 // core on a 4-core system will be ~25%.
@@ -398,13 +407,14 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                     auto mr = services_ ? services_->getMetadataRepo() : nullptr;
                     auto vdb = services_ ? services_->getVectorDatabase() : nullptr;
 
-                    uint64_t total = 0, indexed = 0, extracted = 0, vectorRows = 0;
+                    uint64_t total = 0, indexed = 0, extracted = 0, embedded = 0, vectorRows = 0;
 
                     // Read from component-owned metrics (no DB queries!)
                     if (mr) {
                         total = mr->getCachedDocumentCount();
                         indexed = mr->getCachedIndexedCount();
                         extracted = mr->getCachedExtractedCount();
+                        embedded = mr->getCachedEmbeddedCount();
                     }
 
                     if (vdb && vdb->isInitialized()) {
@@ -415,6 +425,7 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                     cachedDocumentsTotal_ = total;
                     cachedDocumentsIndexed_ = indexed;
                     cachedDocumentsExtracted_ = extracted;
+                    cachedDocumentsEmbedded_ = embedded;
                     cachedVectorRows_ = vectorRows;
                     lastDocCountsAt_ = now;
                 } catch (const std::exception& e) {
@@ -1016,6 +1027,12 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
     // InternalEventBus metrics (title extraction, FTS5, symbol)
     try {
         auto& bus = InternalEventBus::instance();
+        // Embedding preparation fanout (doc-level observability)
+        out.embedPreparedDocsQueued = bus.embedPreparedDocsQueued();
+        out.embedPreparedChunksQueued = bus.embedPreparedChunksQueued();
+        out.embedHashOnlyDocsQueued = bus.embedHashOnlyDocsQueued();
+        out.embedPreparedAvgChunksPerDoc =
+            safeRatio(out.embedPreparedChunksQueued, out.embedPreparedDocsQueued);
         // Title extraction
         out.titleQueued = bus.titleQueued();
         out.titleDropped = bus.titleDropped();
@@ -1193,7 +1210,9 @@ std::shared_ptr<const MetricsSnapshot> DaemonMetrics::getSnapshot(bool detailed)
                 out.documentsTotal = cachedDocumentsTotal_;
                 out.documentsIndexed = cachedDocumentsIndexed_;
                 out.documentsContentExtracted = cachedDocumentsExtracted_;
-                out.documentsEmbedded = cachedVectorRows_; // Vector count = embedded docs
+                out.documentsEmbedded = cachedDocumentsEmbedded_;
+                out.vectorRowsPerEmbeddedDoc =
+                    safeRatio(cachedVectorRows_, cachedDocumentsEmbedded_);
             }
             // FTS5 orphan scan metrics from InternalEventBus
             try {

@@ -923,13 +923,17 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
         // Query document flags before deletion to update counters
         bool wasExtracted = false;
         bool wasIndexed = false;
+        bool wasEmbedded = false;
         {
             // Use prepareCached for better performance on repeated deletes
-            // Note: wasIndexed now checks extraction_status (FTS5 indexed) not embedding status
+            // Note: wasIndexed checks extraction_status (FTS5 indexed) while wasEmbedded uses
+            // document_embeddings_status.has_embedding.
             auto checkStmt = db.prepareCached(R"(
                 SELECT d.content_extracted,
-                       CASE WHEN d.extraction_status = 'Success' THEN 1 ELSE 0 END
+                       CASE WHEN d.extraction_status = 'Success' THEN 1 ELSE 0 END,
+                       COALESCE(des.has_embedding, 0)
                 FROM documents d
+                LEFT JOIN document_embeddings_status des ON des.document_id = d.id
                 WHERE d.id = ?
             )");
             if (checkStmt) {
@@ -938,6 +942,7 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
                 if (auto stepRes = stmt.step(); stepRes && stepRes.value()) {
                     wasExtracted = stmt.getInt(0) != 0;
                     wasIndexed = stmt.getInt(1) != 0;
+                    wasEmbedded = stmt.getInt(2) != 0;
                 }
             }
         }
@@ -966,6 +971,9 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
             if (wasIndexed) {
                 core::saturating_sub(cachedIndexedCount_, uint64_t{1});
             }
+            if (wasEmbedded) {
+                core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
+            }
         }
 
         return Result<void>();
@@ -992,12 +1000,15 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
 
         size_t deletedCount = 0;
 
-        // Prepare statement for checking document flags
-        // Note: wasIndexed now checks extraction_status (FTS5 indexed) not embedding status
+        // Prepare statement for checking document flags.
+        // wasIndexed checks extraction_status (FTS5 indexed);
+        // wasEmbedded checks document_embeddings_status.has_embedding.
         auto checkStmtResult = db.prepareCached(R"(
             SELECT d.id, d.content_extracted,
-                   CASE WHEN d.extraction_status = 'Success' THEN 1 ELSE 0 END
+                   CASE WHEN d.extraction_status = 'Success' THEN 1 ELSE 0 END,
+                   COALESCE(des.has_embedding, 0)
             FROM documents d
+            LEFT JOIN document_embeddings_status des ON des.document_id = d.id
             WHERE d.id = ?
         )");
         if (!checkStmtResult) {
@@ -1019,6 +1030,7 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             // Check flags before deletion
             bool wasExtracted = false;
             bool wasIndexed = false;
+            bool wasEmbedded = false;
 
             if (auto r = checkStmt.reset(); !r) {
                 db.execute("ROLLBACK");
@@ -1031,6 +1043,7 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             if (auto stepRes = checkStmt.step(); stepRes && stepRes.value()) {
                 wasExtracted = checkStmt.getInt(1) != 0;
                 wasIndexed = checkStmt.getInt(2) != 0;
+                wasEmbedded = checkStmt.getInt(3) != 0;
             }
 
             // Delete document
@@ -1056,6 +1069,9 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                 }
                 if (wasIndexed) {
                     core::saturating_sub(cachedIndexedCount_, uint64_t{1});
+                }
+                if (wasEmbedded) {
+                    core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
                 }
             }
         }
@@ -2562,6 +2578,20 @@ Result<int64_t> MetadataRepository::getContentExtractedDocumentCount() {
     });
 }
 
+Result<int64_t> MetadataRepository::getEmbeddedDocumentCount() {
+    return executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+        auto stmtResult =
+            db.prepare("SELECT COUNT(*) FROM document_embeddings_status WHERE has_embedding = 1");
+        if (!stmtResult)
+            return stmtResult.error();
+        auto& stmt = stmtResult.value();
+        auto stepResult = stmt.step();
+        if (!stepResult)
+            return stepResult.error();
+        return stepResult.value() ? stmt.getInt64(0) : int64_t{0};
+    });
+}
+
 Result<int64_t> MetadataRepository::getDocumentCountByExtractionStatus(ExtractionStatus status) {
     return executeReadQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         repository::CrudOps<DocumentInfo> ops;
@@ -2588,9 +2618,15 @@ void MetadataRepository::initializeCounters() {
             cachedExtractedCount_.store(static_cast<uint64_t>(extractedResult.value()),
                                         std::memory_order_release);
         }
+        if (auto embeddedResult = getEmbeddedDocumentCount(); embeddedResult) {
+            cachedEmbeddedCount_.store(static_cast<uint64_t>(embeddedResult.value()),
+                                       std::memory_order_release);
+        }
         spdlog::info(
-            "MetadataRepository: initialized counters - total={}, indexed={}, extracted={}",
-            cachedDocumentCount_.load(), cachedIndexedCount_.load(), cachedExtractedCount_.load());
+            "MetadataRepository: initialized counters - total={}, indexed={}, extracted={}, "
+            "embedded={}",
+            cachedDocumentCount_.load(), cachedIndexedCount_.load(), cachedExtractedCount_.load(),
+            cachedEmbeddedCount_.load());
     } catch (const std::exception& e) {
         spdlog::warn("MetadataRepository: failed to initialize counters: {}", e.what());
     }
@@ -3408,8 +3444,12 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatus(int64_t documentI
         // 'Success') NOT embedding status. Embedding status is tracked separately via
         // VectorDatabase::getVectorCount()
 
-        // Signal corpus stats stale if embedding status changed (affects embeddingCoverage)
-        if (hadEmbedding != hasEmbedding) {
+        // Update component-owned embedded-doc counter only on state transition.
+        if (!hadEmbedding && hasEmbedding) {
+            cachedEmbeddedCount_.fetch_add(1, std::memory_order_relaxed);
+            signalCorpusStatsStale();
+        } else if (hadEmbedding && !hasEmbedding) {
+            core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
             signalCorpusStatsStale();
         }
 
@@ -3421,8 +3461,13 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatusByHash(const std::
                                                                      bool hasEmbedding,
                                                                      const std::string& modelId) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
-        // First, get the document ID from the hash
-        auto getIdStmt = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
+        // Get document ID and previous embedding status in one query.
+        auto getIdStmt = db.prepare(R"(
+            SELECT d.id, COALESCE(des.has_embedding, 0)
+            FROM documents d
+            LEFT JOIN document_embeddings_status des ON d.id = des.document_id
+            WHERE d.sha256_hash = ?
+        )");
         if (!getIdStmt)
             return getIdStmt.error();
 
@@ -3438,6 +3483,7 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatusByHash(const std::
         }
 
         int64_t documentId = stmt.getInt64(0);
+        bool hadEmbedding = stmt.getInt(1) != 0;
 
         // Ensure model_id exists in vector_models (FK constraint)
         if (!modelId.empty()) {
@@ -3477,8 +3523,14 @@ Result<void> MetadataRepository::updateDocumentEmbeddingStatusByHash(const std::
         if (!execResult)
             return execResult.error();
 
-        // Signal corpus stats stale (affects embeddingCoverage)
-        signalCorpusStatsStale();
+        // Update component-owned embedded-doc counter only on state transition.
+        if (!hadEmbedding && hasEmbedding) {
+            cachedEmbeddedCount_.fetch_add(1, std::memory_order_relaxed);
+            signalCorpusStatsStale();
+        } else if (hadEmbedding && !hasEmbedding) {
+            core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
+            signalCorpusStatsStale();
+        }
 
         return Result<void>();
     });
@@ -3519,7 +3571,12 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
                 }
             }
 
-            auto lookupStmt = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
+            auto lookupStmt = db.prepare(R"(
+                SELECT d.id, COALESCE(des.has_embedding, 0)
+                FROM documents d
+                LEFT JOIN document_embeddings_status des ON d.id = des.document_id
+                WHERE d.sha256_hash = ?
+            )");
             if (!lookupStmt) {
                 db.execute("ROLLBACK");
                 return lookupStmt.error();
@@ -3540,6 +3597,7 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
 
             auto& lstmt = lookupStmt.value();
             auto& ustmt = updateStmt.value();
+            int64_t embeddedDelta = 0;
 
             for (const auto& hash : hashes) {
                 lstmt.reset();
@@ -3557,6 +3615,7 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
                     continue;
 
                 int64_t documentId = lstmt.getInt64(0);
+                bool hadEmbedding = lstmt.getInt(1) != 0;
 
                 ustmt.reset();
                 if (auto r = ustmt.bind(1, documentId); !r) {
@@ -3577,11 +3636,24 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
                     db.execute("ROLLBACK");
                     return execResult.error();
                 }
+
+                if (!hadEmbedding && hasEmbedding) {
+                    ++embeddedDelta;
+                } else if (hadEmbedding && !hasEmbedding) {
+                    --embeddedDelta;
+                }
             }
 
             auto commitResult = db.execute("COMMIT");
             if (!commitResult)
                 return commitResult.error();
+
+            if (embeddedDelta > 0) {
+                cachedEmbeddedCount_.fetch_add(static_cast<uint64_t>(embeddedDelta),
+                                               std::memory_order_relaxed);
+            } else if (embeddedDelta < 0) {
+                core::saturating_sub(cachedEmbeddedCount_, static_cast<uint64_t>(-embeddedDelta));
+            }
 
             signalCorpusStatsStale();
             return Result<void>();

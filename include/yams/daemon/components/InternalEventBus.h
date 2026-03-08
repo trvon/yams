@@ -408,6 +408,10 @@ public:
     void incEmbedPreparedChunksQueued(std::uint64_t n = 1) {
         embedPreparedChunksQueued_.fetch_add(n, std::memory_order_relaxed);
     }
+    void incEmbedPreparedQueued(std::uint64_t docs, std::uint64_t chunks) {
+        incEmbedPreparedDocsQueued(docs);
+        incEmbedPreparedChunksQueued(chunks);
+    }
     void incEmbedHashOnlyDocsQueued(std::uint64_t n = 1) {
         embedHashOnlyDocsQueued_.fetch_add(n, std::memory_order_relaxed);
     }

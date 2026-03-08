@@ -1,6 +1,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/cli/command.h>
+#include <yams/cli/init_assets.hpp>
 #include <yams/cli/prompt_util.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
@@ -45,287 +46,10 @@ namespace fs = std::filesystem;
 // static constexpr std::string_view DEFAULT_STORAGE_ENGINE = "local";  // Currently unused
 static constexpr size_t DEFAULT_API_KEY_BYTES = 32;
 
-// Available models for vector database
-struct EmbeddingModel {
-    std::string name;
-    std::string url;
-    std::string description;
-    size_t size_mb;
-    int dimensions;
-};
-
-static const std::vector<EmbeddingModel> EMBEDDING_MODELS = {
-    {"mxbai-edge-colbert-v0-17m",
-     "https://huggingface.co/ryandono/mxbai-edge-colbert-v0-17m-onnx-int8/resolve/main/onnx/"
-     "model_quantized.onnx",
-     "Lightweight ColBERT (token-level, MaxSim) optimized for edge use", 17, 48},
-    {"all-MiniLM-L6-v2",
-     "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
-     "Lightweight model for semantic search", 90, 384},
-    {"multi-qa-MiniLM-L6-cos-v1",
-     "https://huggingface.co/sentence-transformers/multi-qa-MiniLM-L6-cos-v1/resolve/main/onnx/"
-     "model.onnx",
-     "Optimized for semantic search on QA pairs (215M training samples)", 90, 384}};
-
-// Available GLiNER models for named entity recognition (NER)
-struct GlinerModel {
-    std::string name;
-    std::string repo;       // HuggingFace repo (e.g., "onnx-community/gliner_small-v2.1")
-    std::string model_file; // Model filename (e.g., "model_quantized.onnx" or "model.onnx")
-    std::string description;
-    size_t size_mb; // Approximate total size (model + tokenizer)
-};
-
-static const std::vector<GlinerModel> GLINER_MODELS = {
-    {"gliner_small-v2.1-quantized", "onnx-community/gliner_small-v2.1", "model_quantized.onnx",
-     "Small GLiNER quantized (fast, recommended)", 175},
-    {"gliner_small-v2.1", "onnx-community/gliner_small-v2.1", "model.onnx",
-     "Small GLiNER full precision (~580MB)", 580},
-    {"gliner_medium-v2.1-quantized", "onnx-community/gliner_medium-v2.1", "model_quantized.onnx",
-     "Medium GLiNER quantized (balanced)", 220},
-    {"gliner_medium-v2.1", "onnx-community/gliner_medium-v2.1", "model.onnx",
-     "Medium GLiNER full precision (~745MB)", 745}};
-
-// Files required for GLiNER model (tokenizer files at repo root)
-static const std::vector<std::string> GLINER_TOKENIZER_FILES = {"tokenizer.json", "config.json",
-                                                                "gliner_config.json"};
-
-// Available reranker models for hybrid search two-stage retrieval
-struct RerankerModel {
-    std::string name;
-    std::string repo;       // HuggingFace repo (e.g., "BAAI/bge-reranker-base")
-    std::string model_file; // Model filename (e.g., "onnx/model.onnx")
-    std::string description;
-    size_t size_mb;
-    int max_tokens; // Maximum input length
-};
-
-static const std::vector<RerankerModel> RERANKER_MODELS = {
-    {"bge-reranker-base", "BAAI/bge-reranker-base", "onnx/model.onnx",
-     "Cross-encoder reranker for hybrid search (recommended)", 278, 512},
-    {"bge-reranker-large", "BAAI/bge-reranker-large", "onnx/model.onnx",
-     "High-quality cross-encoder reranker (larger, more accurate)", 560, 512}};
-
-// Files required for reranker model
-static const std::vector<std::string> RERANKER_TOKENIZER_FILES = {"tokenizer.json", "config.json",
-                                                                  "tokenizer_config.json"};
-
-// Available tree-sitter grammars for symbol extraction
-struct GrammarInfo {
-    std::string_view language;
-    std::string_view repo;
-    std::string_view description;
-    bool recommended; // Show in default selection
-};
-
-// Embedded YAMS skill file for AI agents (Claude Code, OpenCode)
-static constexpr std::string_view YAMS_SKILL_CONTENT = R"skill(---
-name: yams
-description: Code indexing, semantic search, and knowledge graph for project memory
-license: GPL-3.0
-compatibility: claude-code, opencode
-metadata:
-  tools: cli, mcp
-  categories: search, indexing, memory, knowledge-graph
----
-
-# YAMS Skill
-
-## Quick Reference
-
-```bash
-# Status & Health
-yams status                    # Check daemon and index status
-yams daemon start              # Start background daemon
-yams doctor                    # Diagnose issues
-
-# Indexing
-yams add <file>                # Index single file
-yams add . -r --include "*.py" # Index directory recursively
-yams watch                     # Auto-index on file changes
-
-# Search (use grep first, search for semantic)
-yams grep "pattern"            # Code pattern search (fast, exact)
-yams search "query"            # Semantic/hybrid search
-
-# Graph
-yams graph --name <file>       # Show file relationships
-yams graph --list-type symbol  # List symbols
-yams graph --relations         # List relation types with counts
-yams graph --search "pattern"  # Search nodes by label pattern
-```
-
-## Code Indexing
-
-### Index Project Files
-
-```bash
-# Index specific file types
-yams add . -r --include "*.ts,*.tsx,*.js"
-
-# Index with exclusions
-yams add . -r --include "*.py" --exclude "venv/**,__pycache__/**"
-
-# Index with metadata for tracking
-yams add src/ -r --metadata "task=feature-auth"
-```
-
-### Auto-Index with Watch
-
-```bash
-yams watch                     # Start watching current directory
-yams watch --interval 2000     # Custom interval (ms)
-yams watch --stop              # Stop watching
-```
-
-## Search Patterns
-
-### Decision Tree
-
-1. **Code patterns** -> `yams grep` (fast, regex)
-2. **Semantic/concept** -> `yams search` (embeddings)
-3. **No results from grep** -> Try `yams search`
-
-### grep (Code Search)
-
-```bash
-# Exact pattern
-yams grep "function authenticate"
-
-# Regex pattern
-yams grep "async.*await.*fetch"
-
-# Fuzzy matching
-yams grep "authentcation" --fuzzy
-
-# With context lines
-yams grep "TODO" -A 2 -B 2
-
-# Filter by extension
-yams grep "import" --ext py
-```
-
-### search (Semantic Search)
-
-```bash
-# Concept search
-yams search "error handling patterns"
-
-# Hybrid search (default)
-yams search "authentication flow" --type hybrid
-
-# Limit results
-yams search "database connection" --limit 5
-```
-
-## Knowledge Management
-
-### Store Research
-
-```bash
-# Index documentation
-curl -s "https://docs.example.com/api" | yams add - --name "api-docs.md"
-
-# Store with metadata
-yams add notes.md --metadata "source=research,topic=auth"
-```
-
-## Session Management
-
-```bash
-# Start named session
-yams session start --name "feature-auth"
-
-# List sessions
-yams session ls
-
-# Switch session
-yams session use "feature-auth"
-
-# Warm session cache (faster searches)
-yams session warm --limit 100
-```
-
-## Graph Queries
-
-```bash
-# Show file dependencies
-yams graph --name src/auth/login.ts --depth 2
-
-# List all symbols of type
-yams graph --list-type function --limit 50
-
-# Find isolated nodes (potential dead code)
-yams graph --list-type symbol --isolated
-
-# Explore graph structure
-yams graph --relations              # List all relation types with counts
-yams graph --search "Request*"      # Find nodes matching pattern (wildcards: *, ?)
-yams graph --search "*Controller"   # Find all controller nodes
-```
-
-## MCP Integration
-
-YAMS exposes tools via Model Context Protocol for programmatic access.
-
-```bash
-yams serve                     # Start MCP server (quiet mode)
-```
-
-### MCP Configuration
-
-```json
-{
-  "mcpServers": {
-    "yams": {
-      "command": "yams",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-## Troubleshooting
-
-```bash
-yams daemon status -d          # Check daemon status
-yams daemon log -n 50          # View daemon logs
-yams doctor                    # Full diagnostic
-yams doctor repair --all       # Repair index
-```
-
-## Environment Variables
-
-| Variable | Purpose |
-|----------|---------|
-| `YAMS_DATA_DIR` | Storage directory |
-| `YAMS_SOCKET` | Daemon socket path |
-| `YAMS_LOG_LEVEL` | Logging verbosity |
-| `YAMS_SESSION_CURRENT` | Default session |
-)skill";
-
-// Must match grammar_loader.h kGrammarRepos
-static constexpr GrammarInfo SUPPORTED_GRAMMARS[] = {
-    {"c", "tree-sitter/tree-sitter-c", "C language", true},
-    {"cpp", "tree-sitter/tree-sitter-cpp", "C++ language", true},
-    {"python", "tree-sitter/tree-sitter-python", "Python language", true},
-    {"javascript", "tree-sitter/tree-sitter-javascript", "JavaScript/JSX", true},
-    {"typescript", "tree-sitter/tree-sitter-typescript", "TypeScript/TSX", true},
-    {"rust", "tree-sitter/tree-sitter-rust", "Rust language", true},
-    {"go", "tree-sitter/tree-sitter-go", "Go language", true},
-    {"swift", "alex-pinkus/tree-sitter-swift", "Swift language", true},
-    {"java", "tree-sitter/tree-sitter-java", "Java language", false},
-    {"csharp", "tree-sitter/tree-sitter-c-sharp", "C# language", false},
-    {"php", "tree-sitter/tree-sitter-php", "PHP language", false},
-    {"kotlin", "fwcd/tree-sitter-kotlin", "Kotlin language", false},
-    {"perl", "tree-sitter-perl/tree-sitter-perl", "Perl language", false},
-    {"r", "r-lib/tree-sitter-r", "R language", false},
-    {"dart", "UserNobody14/tree-sitter-dart", "Dart/Flutter", false},
-    {"sql", "DerekStride/tree-sitter-sql", "SQL queries", false},
-    {"solidity", "JoranHonig/tree-sitter-solidity", "Solidity (Ethereum)", false},
-    {"p4", "prona-p4-learning-platform/tree-sitter-p4", "P4 network language", false},
-    {"zig", "maxxnino/tree-sitter-zig", "Zig language", false},
-};
+using init_assets::EmbeddingModel;
+using init_assets::GlinerModel;
+using init_assets::GrammarInfo;
+using init_assets::RerankerModel;
 
 class InitCommand : public ICommand {
 public:
@@ -477,7 +201,7 @@ public:
             bool colbertSelected = false;
             if (autoInit_) {
                 // Use the default model (first in the list) for auto-init
-                selectedModel = EMBEDDING_MODELS[0].name;
+                selectedModel = init_assets::embeddingModels().front().name;
                 spdlog::info("Using default embedding model: {}", selectedModel);
                 colbertSelected = isColbertModelName(selectedModel);
             } else if (!nonInteractive_) {
@@ -501,17 +225,18 @@ public:
                     prompt_yes_no("\nConfigure S3 as the storage backend? (default: local) [y/N]: ",
                                   YesNoOptions{.defaultYes = false});
                 if (useS3) {
-                    std::cout << "Enter S3 URL (bucket + optional prefix, e.g., "
-                                 "s3://my-bucket/my-prefix): ";
-                    std::getline(std::cin, s3Url);
-                    std::cout << "Enter S3 region [us-east-1]: ";
-                    std::getline(std::cin, s3Region);
-                    if (s3Region.empty())
-                        s3Region = "us-east-1";
-                    std::cout << "Enter S3 endpoint host (optional, for R2/MinIO). "
-                                 "Example: <accountid>.r2.cloudflarestorage.com\n"
-                                 "(Do not include scheme or /bucket path): ";
-                    std::getline(std::cin, s3Endpoint);
+                    s3Url = prompt_input(
+                        "Enter S3 URL (bucket + optional prefix, e.g., s3://my-bucket/my-prefix): ",
+                        InputOptions{.allowEmpty = false, .retryOnInvalid = true});
+                    s3Region = prompt_input("Enter S3 region [us-east-1]: ",
+                                            InputOptions{.defaultValue = "us-east-1",
+                                                         .allowEmpty = true,
+                                                         .retryOnInvalid = true});
+                    s3Endpoint =
+                        prompt_input("Enter S3 endpoint host (optional, for R2/MinIO). Example: "
+                                     "<accountid>.r2.cloudflarestorage.com\n"
+                                     "(Do not include scheme or /bucket path): ",
+                                     InputOptions{.allowEmpty = true, .retryOnInvalid = true});
                     auto normalizedEndpoint = normalizeS3EndpointInput(s3Endpoint);
                     if (!s3Endpoint.empty() && normalizedEndpoint != s3Endpoint) {
                         spdlog::info("Normalized S3 endpoint to host-only value: {}",
@@ -523,12 +248,13 @@ public:
                         s3Region = "auto";
                         spdlog::info("Detected Cloudflare R2 endpoint; using region 'auto'.");
                     }
-                    std::cout << "Enter S3 Access Key ID (optional, uses env var if blank). "
-                                 "For Cloudflare R2, use R2 S3 credentials (not API bearer "
-                                 "token): ";
-                    std::getline(std::cin, s3AccessKey);
-                    std::cout << "Enter S3 Secret Access Key (optional, uses env var if blank): ";
-                    std::getline(std::cin, s3SecretKey);
+                    s3AccessKey = prompt_input(
+                        "Enter S3 Access Key ID (optional, uses env var if blank). For Cloudflare "
+                        "R2, use R2 S3 credentials (not API bearer token): ",
+                        InputOptions{.allowEmpty = true, .retryOnInvalid = true});
+                    s3SecretKey = prompt_input(
+                        "Enter S3 Secret Access Key (optional, uses env var if blank): ",
+                        InputOptions{.allowEmpty = true, .retryOnInvalid = true});
                     s3UsePathStyle =
                         prompt_yes_no("Use path-style addressing? (R2 usually: No, MinIO often: "
                                       "Yes) [y/N]: ",
@@ -540,16 +266,11 @@ public:
                                       YesNoOptions{.defaultYes = false});
                     if (enableFallback) {
                         s3FallbackPolicy = "fallback_local_if_configured";
-                        std::cout << "Fallback local data directory [" << dataPath.string()
-                                  << "]: ";
-                        std::string fallbackInput;
-                        std::getline(std::cin, fallbackInput);
-                        fallbackInput = trimWhitespace(std::move(fallbackInput));
-                        if (fallbackInput.empty()) {
-                            s3FallbackLocalDataDir = dataPath.string();
-                        } else {
-                            s3FallbackLocalDataDir = fallbackInput;
-                        }
+                        s3FallbackLocalDataDir = prompt_input(
+                            "Fallback local data directory [" + dataPath.string() + "]: ",
+                            InputOptions{.defaultValue = dataPath.string(),
+                                         .allowEmpty = true,
+                                         .retryOnInvalid = true});
                     }
                 }
             }
@@ -607,7 +328,7 @@ public:
                 vdbConfig.database_path = (dataPath / "vectors.db").string();
 
                 // Set embedding dimension based on selected model
-                for (const auto& model : EMBEDDING_MODELS) {
+                for (const auto& model : init_assets::embeddingModels()) {
                     if (model.name == selectedModel) {
                         vdbConfig.embedding_dim = model.dimensions;
                         break;
@@ -631,40 +352,10 @@ public:
             // Seed plugins directory and trust list if requested
             if (setupPlugins) {
                 setupUserPluginsDirAndTrust();
-                // Also set plugin_name_policy to "spec" to enforce canonical naming on this machine
-                try {
-                    std::ifstream in(configPath);
-                    std::stringstream buf;
-                    buf << in.rdbuf();
-                    in.close();
-                    std::string content = buf.str();
-                    // Ensure [daemon] section exists; if not, append one
-                    if (content.find("[daemon]") == std::string::npos) {
-                        content.append("\n[daemon]\n");
-                    }
-                    // Insert or replace plugin_name_policy
-                    auto secPos = content.find("[daemon]");
-                    if (secPos != std::string::npos) {
-                        auto nextSec = content.find("[", secPos + 1);
-                        auto rangeEnd = (nextSec == std::string::npos) ? content.size() : nextSec;
-                        auto keyPos = content.find("plugin_name_policy", secPos);
-                        if (keyPos == std::string::npos || keyPos > rangeEnd) {
-                            content.insert(rangeEnd,
-                                           std::string("plugin_name_policy = \"spec\"\n"));
-                        } else {
-                            auto lineEnd = content.find("\n", keyPos);
-                            if (lineEnd == std::string::npos)
-                                lineEnd = content.size();
-                            content.replace(keyPos, lineEnd - keyPos,
-                                            "plugin_name_policy = \"spec\"");
-                        }
-                        std::ofstream outCfg(configPath, std::ios::trunc);
-                        outCfg << content;
-                        outCfg.close();
-                        spdlog::info("Configured [daemon].plugin_name_policy = spec");
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::debug("Skipping plugin_name_policy write: {}", e.what());
+                if (config::write_config_value(configPath, "daemon.plugin_name_policy", "spec")) {
+                    spdlog::info("Configured [daemon].plugin_name_policy = spec");
+                } else {
+                    spdlog::warn("Failed to set daemon.plugin_name_policy in config");
                 }
 
                 // 7a) GLiNER Model Setup (for NER in Glint plugin)
@@ -860,14 +551,11 @@ private:
     }
 
     fs::path promptForDataDir(const fs::path& current) {
-        std::cout << "Storage directory [" << current.string() << "]: ";
-        std::string line;
-        std::getline(std::cin, line);
-        if (line.empty())
-            return current;
-
-        fs::path chosen = fs::path(line);
-        return chosen;
+        auto selected = prompt_input("Storage directory [" + current.string() + "]: ",
+                                     InputOptions{.defaultValue = current.string(),
+                                                  .allowEmpty = true,
+                                                  .retryOnInvalid = true});
+        return fs::path(selected);
     }
 
     // Removed legacy promptYesNo (replaced by prompt_yes_no in prompt_util.h)
@@ -1562,8 +1250,9 @@ private:
     std::string promptForModel(const fs::path& dataPath) {
         // Build choice items
         std::vector<ChoiceItem> items;
-        items.reserve(EMBEDDING_MODELS.size());
-        for (const auto& m : EMBEDDING_MODELS) {
+        const auto& embeddingModels = init_assets::embeddingModels();
+        items.reserve(embeddingModels.size());
+        for (const auto& m : embeddingModels) {
             ChoiceItem ci;
             ci.value = m.name;
             ci.label = m.name + " (" + std::to_string(m.size_mb) +
@@ -1574,8 +1263,8 @@ private:
 
         size_t defaultIndex = 0; // first model default
         // Prefer a nomic* model as default if present (future friendly heuristic)
-        for (size_t i = 0; i < EMBEDDING_MODELS.size(); ++i) {
-            if (EMBEDDING_MODELS[i].name.find("nomic-embed-text") != std::string::npos) {
+        for (size_t i = 0; i < embeddingModels.size(); ++i) {
+            if (embeddingModels[i].name.find("nomic-embed-text") != std::string::npos) {
                 defaultIndex = i;
                 break;
             }
@@ -1586,7 +1275,7 @@ private:
                                                        .allowEmpty = true,
                                                        .retryOnInvalid = true});
 
-        const auto& selectedModel = EMBEDDING_MODELS[chosenIdx];
+        const auto& selectedModel = embeddingModels[chosenIdx];
 
         // Check if model already exists
         fs::path modelDir = dataPath / "models" / selectedModel.name;
@@ -1733,7 +1422,7 @@ private:
         }
 
         // Download tokenizer files (from repo root)
-        for (const auto& filename : GLINER_TOKENIZER_FILES) {
+        for (const auto& filename : init_assets::glinerTokenizerFiles()) {
             std::string url = baseUrl + "/" + filename;
             fs::path outPath = outputDir / filename;
 
@@ -1756,7 +1445,8 @@ private:
     std::string promptForGlinerModel(const fs::path& dataPath) {
         // Build choice items
         std::vector<ChoiceItem> items;
-        items.reserve(GLINER_MODELS.size() + 1);
+        const auto& glinerModels = init_assets::glinerModels();
+        items.reserve(glinerModels.size() + 1);
 
         // Add "skip" option first
         ChoiceItem skipItem;
@@ -1765,7 +1455,7 @@ private:
         skipItem.description = "You can download a model later with: yams model download --gliner";
         items.push_back(std::move(skipItem));
 
-        for (const auto& m : GLINER_MODELS) {
+        for (const auto& m : glinerModels) {
             ChoiceItem ci;
             ci.value = m.name;
             ci.label = m.name + " (~" + std::to_string(m.size_mb) + " MB)";
@@ -1784,7 +1474,7 @@ private:
             return "";
         }
 
-        const auto& selectedModel = GLINER_MODELS[chosenIdx - 1];
+        const auto& selectedModel = glinerModels[chosenIdx - 1];
 
         // Check if model already exists
         fs::path modelDir = dataPath / "models" / "gliner" / selectedModel.name;
@@ -1825,10 +1515,11 @@ private:
 
         if (autoInit_) {
             // Auto mode: download the small model by default
-            selectedGlinerModel = GLINER_MODELS[0].name;
+            selectedGlinerModel = init_assets::glinerModels().front().name;
             spdlog::info("Using default GLiNER model: {}", selectedGlinerModel);
             fs::path glinerModelDir = dataPath / "models" / "gliner" / selectedGlinerModel;
-            auto result = downloadGlinerModelFiles(GLINER_MODELS[0], glinerModelDir);
+            auto result =
+                downloadGlinerModelFiles(init_assets::glinerModels().front(), glinerModelDir);
             if (!result) {
                 spdlog::warn("GLiNER model download failed: {}", result.error().message);
                 spdlog::warn("You can download the model later with: yams model download --gliner");
@@ -2024,7 +1715,7 @@ private:
         }
 
         // Download tokenizer files (required for reranker)
-        for (const auto& filename : RERANKER_TOKENIZER_FILES) {
+        for (const auto& filename : init_assets::rerankerTokenizerFiles()) {
             std::string url = baseUrl + filename;
             auto r = downloadFile(url, outputDir / filename, filename);
             // tokenizer.json is required, others are optional
@@ -2048,8 +1739,9 @@ private:
     std::string promptForRerankerModel(const fs::path& dataPath) {
         // Build choice items
         std::vector<ChoiceItem> items;
-        items.reserve(RERANKER_MODELS.size());
-        for (const auto& m : RERANKER_MODELS) {
+        const auto& rerankerModels = init_assets::rerankerModels();
+        items.reserve(rerankerModels.size());
+        for (const auto& m : rerankerModels) {
             ChoiceItem ci;
             ci.value = m.name;
             ci.label = m.name + " (" + std::to_string(m.size_mb) + " MB)";
@@ -2064,7 +1756,7 @@ private:
                                                        .allowEmpty = true,
                                                        .retryOnInvalid = true});
 
-        const auto& selectedModel = RERANKER_MODELS[chosenIdx];
+        const auto& selectedModel = rerankerModels[chosenIdx];
 
         // Check if model already exists
         fs::path modelDir = dataPath / "models" / "reranker" / selectedModel.name;
@@ -2105,10 +1797,11 @@ private:
 
         if (autoInit_) {
             // Auto mode: download the base model by default
-            selectedRerankerModel = RERANKER_MODELS[0].name;
+            selectedRerankerModel = init_assets::rerankerModels().front().name;
             spdlog::info("Using default reranker model: {}", selectedRerankerModel);
             fs::path rerankerModelDir = dataPath / "models" / "reranker" / selectedRerankerModel;
-            auto result = downloadRerankerModelFiles(RERANKER_MODELS[0], rerankerModelDir);
+            auto result =
+                downloadRerankerModelFiles(init_assets::rerankerModels().front(), rerankerModelDir);
             if (!result) {
                 spdlog::warn("Reranker model download failed: {}", result.error().message);
                 spdlog::warn(
@@ -2292,12 +1985,13 @@ private:
         // Determine grammar output directory (platform-aware via config helper)
         fs::path grammarDir = yams::config::get_data_dir() / "grammars";
         fs::create_directories(grammarDir);
+        const auto& supportedGrammars = init_assets::supportedGrammars();
 
         std::vector<std::string> selectedLanguages;
 
         if (useDefaults) {
             // Auto mode: download all recommended grammars
-            for (const auto& g : SUPPORTED_GRAMMARS) {
+            for (const auto& g : supportedGrammars) {
                 if (g.recommended) {
                     selectedLanguages.emplace_back(g.language);
                 }
@@ -2312,40 +2006,38 @@ private:
         } else {
             // Interactive mode: show menu
             std::cout << "\n" << cli::ui::section_header("Tree-sitter Grammars") << "\n";
-            std::cout << cli::ui::numbered_item(
-                             "Recommended (C, C++, Python, JS, TS, Rust, Go, Swift)", 1, 2)
-                      << "\n";
-            std::cout << cli::ui::numbered_item("All supported grammars", 2, 2) << "\n";
-            std::cout << cli::ui::numbered_item("Select specific languages", 3, 2) << "\n";
-            std::cout << cli::ui::numbered_item("Skip grammar download", 4, 2) << "\n";
-            std::cout << "  Choice [1]: ";
+            std::vector<ChoiceItem> grammarChoices = {
+                {"recommended", "Recommended (C, C++, Python, JS, TS, Rust, Go, Swift)", ""},
+                {"all", "All supported grammars", ""},
+                {"custom", "Select specific languages", ""},
+                {"skip", "Skip grammar download", ""},
+            };
+            const size_t choiceIdx = prompt_choice("", grammarChoices,
+                                                   ChoiceOptions{.defaultIndex = 0,
+                                                                 .allowEmpty = true,
+                                                                 .retryOnInvalid = true,
+                                                                 .showNumericHint = true});
 
-            std::string choice;
-            std::getline(std::cin, choice);
-            if (choice.empty())
-                choice = "1";
-
-            if (choice == "1") {
-                for (const auto& g : SUPPORTED_GRAMMARS) {
+            if (choiceIdx == 0) {
+                for (const auto& g : supportedGrammars) {
                     if (g.recommended) {
                         selectedLanguages.emplace_back(g.language);
                     }
                 }
-            } else if (choice == "2") {
-                for (const auto& g : SUPPORTED_GRAMMARS) {
+            } else if (choiceIdx == 1) {
+                for (const auto& g : supportedGrammars) {
                     selectedLanguages.emplace_back(g.language);
                 }
-            } else if (choice == "3") {
+            } else if (choiceIdx == 2) {
                 std::cout << "\nEnter language names separated by commas (e.g., c,cpp,python):\n";
                 std::cout << "Available: ";
-                for (size_t i = 0; i < std::size(SUPPORTED_GRAMMARS); ++i) {
-                    std::cout << SUPPORTED_GRAMMARS[i].language;
-                    if (i + 1 < std::size(SUPPORTED_GRAMMARS))
+                for (size_t i = 0; i < supportedGrammars.size(); ++i) {
+                    std::cout << supportedGrammars[i].language;
+                    if (i + 1 < supportedGrammars.size())
                         std::cout << ", ";
                 }
-                std::cout << "\nLanguages: ";
-                std::string langs;
-                std::getline(std::cin, langs);
+                std::string langs = prompt_input(
+                    "\nLanguages: ", InputOptions{.allowEmpty = true, .retryOnInvalid = true});
 
                 // Parse comma-separated list
                 std::istringstream iss(langs);
@@ -2467,7 +2159,7 @@ private:
                                                 const fs::path& outputDir) {
         // Find the grammar repo
         const GrammarInfo* grammarInfo = nullptr;
-        for (const auto& g : SUPPORTED_GRAMMARS) {
+        for (const auto& g : init_assets::supportedGrammars()) {
             if (g.language == language) {
                 grammarInfo = &g;
                 break;
@@ -2796,18 +2488,19 @@ private:
             if (installSkill) {
                 // Ask which agents to install for
                 std::cout << "\n" << cli::ui::section_header("AI Agent Skill Installation") << "\n";
-                std::cout << cli::ui::numbered_item("Claude Code only", 1, 2) << "\n";
-                std::cout << cli::ui::numbered_item("OpenCode only", 2, 2) << "\n";
-                std::cout << cli::ui::numbered_item("Both (recommended)", 3, 2) << "\n";
-                std::cout << "  Choice [3]: ";
+                std::vector<ChoiceItem> installChoices = {
+                    {"claude", "Claude Code only", ""},
+                    {"opencode", "OpenCode only", ""},
+                    {"both", "Both (recommended)", ""},
+                };
+                const size_t choiceIdx = prompt_choice("", installChoices,
+                                                       ChoiceOptions{.defaultIndex = 2,
+                                                                     .allowEmpty = true,
+                                                                     .retryOnInvalid = true,
+                                                                     .showNumericHint = true});
 
-                std::string choice;
-                std::getline(std::cin, choice);
-                if (choice.empty())
-                    choice = "3";
-
-                bool installClaude = (choice == "1" || choice == "3");
-                bool installOpenCode = (choice == "2" || choice == "3");
+                const bool installClaude = (choiceIdx == 0 || choiceIdx == 2);
+                const bool installOpenCode = (choiceIdx == 1 || choiceIdx == 2);
                 installAgentSkill(installClaude, installOpenCode);
             }
         }
@@ -2864,7 +2557,7 @@ private:
                     spdlog::warn("Failed to write {} skill to {}", name, skillPath.string());
                     continue;
                 }
-                out << YAMS_SKILL_CONTENT;
+                out << init_assets::yamsSkillContent();
                 out.close();
 
                 spdlog::info("{} skill installed: {}", name, skillPath.string());

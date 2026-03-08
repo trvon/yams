@@ -2435,8 +2435,8 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
             if (embedQ->push_wait(job, kEnqueueTimeout)) {
                 InternalEventBus::instance().incEmbedQueued(job.batchSize);
                 if (preparedDocsCount > 0) {
-                    InternalEventBus::instance().incEmbedPreparedDocsQueued(preparedDocsCount);
-                    InternalEventBus::instance().incEmbedPreparedChunksQueued(preparedChunksCount);
+                    InternalEventBus::instance().incEmbedPreparedQueued(preparedDocsCount,
+                                                                        preparedChunksCount);
                 }
                 if (hashOnlyDocsCount > 0) {
                     InternalEventBus::instance().incEmbedHashOnlyDocsQueued(hashOnlyDocsCount);

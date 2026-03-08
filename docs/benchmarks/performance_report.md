@@ -1,6 +1,7 @@
 # YAMS Performance Benchmark Report
 
 **Generated**: 2026-02-12
+**Last Updated**: 2026-03-08
 **YAMS Version**: 0.9.0-dev (`11ba59f4`)
 **Test Environment**: macOS 26.2 (Apple Silicon M3 Max, 16 cores, 48GB RAM)
 **Build Configuration**: Release build
@@ -15,6 +16,7 @@
 - [Performance Benchmarks](#performance-benchmarks)
   - [Latest Release Runs (2026-01-25)](#latest-release-runs-2026-01-25)
   - [Retrieval Result (SciFact benchmark, 2026-02-12)](#retrieval-result-scifact-benchmark-2026-02-12)
+  - [Storage Backend CLI CRUD (Local vs R2, 2026-03-08)](#storage-backend-cli-crud-local-vs-r2-2026-03-08)
   - [Cryptographic Operations (SHA-256)](#1-cryptographic-operations-sha-256)
   - [Content Chunking (Rabin Fingerprinting)](#2-content-chunking-rabin-fingerprinting)
   - [Compression Performance (Zstandard)](#3-compression-performance-zstandard)
@@ -142,6 +144,26 @@ Search benchmarks are intentionally not included in the “improvements” summa
 #### Retrieval Quality Benchmark
 
 Skipped in this run (release benchmarks focused on ingestion, metadata, and IPC framing).
+
+### Storage Backend CLI CRUD (Local vs R2, 2026-03-08)
+
+This benchmark captures end-to-end CLI workflow latency (`add/get/search/delete`) for local storage vs Cloudflare R2.
+
+- Harness: `tests/benchmarks/run_local_vs_r2_benchmark.py`
+- Artifact set: `bench_results/storage_backends/20260308T011745Z/`
+- Parameters: `iterations=1`, `files=60`, `file_size_kb=8`, `retrieve_count=20`
+- R2 mode: `temp_credentials` bootstrap (bearer token + account id)
+
+| Backend | Store (files/s) | Retrieve mean (ms) | Retrieve ops/s | Search mean (ms) | Search qps | Delete mean (ms) | Delete ops/s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| local | 40.34 | 1675.76 | 0.60 | 1519.15 | 0.66 | 1500.77 | 0.67 |
+| r2 | 1.14 | 5126.69 | 0.20 | 4398.37 | 0.23 | 4190.88 | 0.24 |
+
+Validation checks from this run:
+
+- R2 path stayed remote-only (`local_object_files_after_add=0`, `local_object_files_end=0`).
+- CRUD gate passed for both backends before timed operations.
+- List output contained duplicate rows (`120` rows for `60` unique docs); harness normalizes to unique paths for timing.
 
 ### 1. Cryptographic Operations (SHA-256)
 
