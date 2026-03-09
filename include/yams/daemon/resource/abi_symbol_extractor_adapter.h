@@ -11,7 +11,9 @@ namespace yams::daemon {
 
 class AbiSymbolExtractorAdapter {
 public:
-    explicit AbiSymbolExtractorAdapter(yams_symbol_extractor_v1* table) : table_(table) {}
+    explicit AbiSymbolExtractorAdapter(yams_symbol_extractor_v1* table,
+                                       std::shared_ptr<void> pluginKeepalive = {})
+        : table_(table), pluginKeepalive_(std::move(pluginKeepalive)) {}
 
     bool supportsLanguage(const std::string& lang) const {
         return table_ && table_->supports_language &&
@@ -39,6 +41,7 @@ public:
 
 private:
     yams_symbol_extractor_v1* table_{};
+    std::shared_ptr<void> pluginKeepalive_{};
 };
 
 } // namespace yams::daemon

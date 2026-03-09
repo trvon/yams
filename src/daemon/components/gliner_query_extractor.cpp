@@ -8,6 +8,9 @@
 #include <yams/plugins/entity_extractor_v2.h>
 
 #include <algorithm>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -126,10 +129,10 @@ bool isLikelyNoiseEntity(std::string_view text) {
 search::EntityExtractionFunc
 createGlinerExtractionFunc(std::vector<std::shared_ptr<AbiEntityExtractorAdapter>> extractors) {
     // Find the first extractor that supports text/plain
-    AbiEntityExtractorAdapter* textExtractor = nullptr;
+    std::shared_ptr<AbiEntityExtractorAdapter> textExtractor;
     for (const auto& ext : extractors) {
         if (ext && ext->supportsContentType("text/plain")) {
-            textExtractor = ext.get();
+            textExtractor = ext;
             break;
         }
     }
@@ -141,10 +144,15 @@ createGlinerExtractionFunc(std::vector<std::shared_ptr<AbiEntityExtractorAdapter
 
     spdlog::info("createGlinerExtractionFunc: GLiNER entity extractor available");
 
-    // Capture extractors by value to extend lifetime
-    return [extractors = std::move(extractors), textExtractor](
+    auto extractorMutex = std::make_shared<std::mutex>();
+
+    // Capture extractors by value to extend plugin lifetime while search callbacks are active.
+    return [extractors = std::move(extractors), textExtractor = std::move(textExtractor),
+            extractorMutex = std::move(extractorMutex)](
                const std::string& content,
                const std::vector<std::string>& entityTypes) -> Result<search::QueryConceptResult> {
+        (void)extractors;
+
         search::QueryConceptResult result;
         result.usedGliner = false;
 
@@ -153,6 +161,7 @@ createGlinerExtractionFunc(std::vector<std::shared_ptr<AbiEntityExtractorAdapter
         }
 
         auto startTime = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> extractorLock(*extractorMutex);
 
         // Build entity types array for extraction
         std::vector<const char*> types;
@@ -179,6 +188,15 @@ createGlinerExtractionFunc(std::vector<std::shared_ptr<AbiEntityExtractorAdapter
             spdlog::warn("GLiNER extraction returned null");
             return result;
         }
+
+        const auto extractionResultGuard =
+            std::unique_ptr<yams_entity_extraction_result_v2,
+                            std::function<void(yams_entity_extraction_result_v2*)>>(
+                extractionResult, [textExtractor](yams_entity_extraction_result_v2* toFree) {
+                    if (toFree) {
+                        textExtractor->freeResult(toFree);
+                    }
+                });
 
         result.usedGliner = true;
 
@@ -228,9 +246,6 @@ createGlinerExtractionFunc(std::vector<std::shared_ptr<AbiEntityExtractorAdapter
                       }
                       return a.text < b.text;
                   });
-
-        // Free the extraction result
-        textExtractor->freeResult(extractionResult);
 
         auto endTime = std::chrono::steady_clock::now();
         result.extractionTimeMs =

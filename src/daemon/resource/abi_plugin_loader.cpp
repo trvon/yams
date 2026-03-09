@@ -78,6 +78,24 @@ static std::vector<std::string> parseInterfacesFromManifest(const std::string& m
     return out;
 }
 
+AbiPluginLoader::HandleInfo::~HandleInfo() {
+    if (handle) {
+        auto shutdown = reinterpret_cast<void (*)()>(dlsym(handle, "yams_plugin_shutdown"));
+        if (shutdown) {
+            try {
+                shutdown();
+            } catch (...) {
+            }
+        }
+        dlclose(handle);
+        handle = nullptr;
+    }
+    if (host_context) {
+        yams_free_host_context(host_context);
+        host_context = nullptr;
+    }
+}
+
 std::vector<std::filesystem::path> AbiPluginLoader::trustList() const {
     // If a trust file has been set and is empty, treat the trust set as empty for callers
     // to ensure a clean start in unit tests.
@@ -300,10 +318,10 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
         }
     }
 
-    HandleInfo hi;
-    hi.handle = handle;
-    hi.host_context = host_ctx;
-    hi.info = scan.value();
+    auto hi = std::make_shared<HandleInfo>();
+    hi->handle = handle;
+    hi->host_context = host_ctx;
+    hi->info = scan.value();
 
     // Attempt to fetch manifest JSON and derive metadata
     try {
@@ -315,20 +333,20 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
         if (!dlerr && get_manifest) {
             const char* mj = get_manifest();
             if (mj) {
-                hi.info.manifestJson = mj;
+                hi->info.manifestJson = mj;
                 // Interfaces
-                hi.info.interfaces = parseInterfacesFromManifest(hi.info.manifestJson);
+                hi->info.interfaces = parseInterfacesFromManifest(hi->info.manifestJson);
                 // Name/version from manifest when present
                 try {
                     std::regex nameRe("\\\"name\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
                     std::regex verRe("\\\"version\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
                     std::smatch m;
                     if (namePolicy_ == NamePolicy::Spec &&
-                        std::regex_search(hi.info.manifestJson, m, nameRe)) {
-                        hi.info.name = m[1].str();
+                        std::regex_search(hi->info.manifestJson, m, nameRe)) {
+                        hi->info.name = m[1].str();
                     }
-                    if (std::regex_search(hi.info.manifestJson, m, verRe)) {
-                        hi.info.version = m[1].str();
+                    if (std::regex_search(hi->info.manifestJson, m, verRe)) {
+                        hi->info.version = m[1].str();
                     }
                 } catch (...) {
                 }
@@ -340,77 +358,66 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
     // yams_foo_plugin). Prefer non-'lib' prefix for user-facing identity.
 #if !defined(_WIN32)
     try {
-        std::string canonical = hi.info.name;
+        std::string canonical = hi->info.name;
         if (canonical.rfind("libyams_", 0) == 0) {
             canonical = canonical.substr(3);
         }
         // If manifest provided a spec-compliant name, keep it; otherwise apply canonical.
         if (namePolicy_ != NamePolicy::Spec) {
-            hi.info.name = canonical;
+            hi->info.name = canonical;
         }
         // Dedupe if an entry already exists for the canonical name
-        auto itExisting = loaded_.find(hi.info.name);
+        auto itExisting = loaded_.find(hi->info.name);
         if (itExisting != loaded_.end()) {
             // Prefer existing if it came from a non-lib path; else replace
             auto preferExisting = [](const std::filesystem::path& p) {
                 auto fn = p.filename().string();
                 return fn.rfind("lib", 0) != 0; // true if not starting with 'lib'
             };
-            bool keepExisting = preferExisting(itExisting->second.info.path);
+            bool keepExisting = preferExisting(itExisting->second->info.path);
             if (keepExisting) {
                 // Close newly opened handle and return existing
                 if (host_ctx)
                     yams_free_host_context(host_ctx);
                 dlclose(handle);
-                return Result<ScanResult>(itExisting->second.info);
+                return Result<ScanResult>(itExisting->second->info);
             } else {
                 // Replace existing lib-prefixed variant with this one
-                (void)unload(itExisting->second.info.name);
+                (void)unload(itExisting->second->info.name);
             }
         }
     } catch (...) {
     }
 #endif
 
-    loaded_[hi.info.name] = hi;
-    return Result<ScanResult>(hi.info);
+    loaded_[hi->info.name] = hi;
+    return Result<ScanResult>(hi->info);
 }
 
 Result<void> AbiPluginLoader::unload(const std::string& name) {
     auto it = loaded_.find(name);
     if (it == loaded_.end())
         return Result<void>();
-    if (it->second.handle) {
-        auto shutdown =
-            reinterpret_cast<void (*)()>(dlsym(it->second.handle, "yams_plugin_shutdown"));
-        if (shutdown) {
-            try {
-                shutdown();
-            } catch (...) {
-            }
-        }
-        dlclose(it->second.handle);
-    }
-    if (it->second.host_context) {
-        yams_free_host_context(it->second.host_context);
-    }
     loaded_.erase(it);
     return Result<void>();
 }
 
 std::vector<AbiPluginLoader::ScanResult> AbiPluginLoader::loaded() const {
     std::vector<ScanResult> v;
-    for (const auto& [name, hi] : loaded_)
-        v.push_back(hi.info);
+    for (const auto& [name, hi] : loaded_) {
+        if (hi) {
+            v.push_back(hi->info);
+        }
+    }
     return v;
 }
 
 Result<std::string> AbiPluginLoader::health(const std::string& name) const {
     auto it = loaded_.find(name);
-    if (it == loaded_.end() || !it->second.handle) {
+    if (it == loaded_.end() || !it->second || !it->second->handle) {
         return Error{ErrorCode::NotFound, "Plugin not loaded: " + name};
     }
-    void* handle = it->second.handle;
+    void* handle = it->second->handle;
     using HealthFn = int (*)(char**);
     dlerror();
     auto get_health = reinterpret_cast<HealthFn>(dlsym(handle, "yams_plugin_get_health_json"));
@@ -677,10 +684,10 @@ namespace yams::daemon {
 Result<void*> AbiPluginLoader::getInterface(const std::string& name, const std::string& ifaceId,
                                             uint32_t version) const {
     auto it = loaded_.find(name);
-    if (it == loaded_.end() || !it->second.handle) {
+    if (it == loaded_.end() || !it->second || !it->second->handle) {
         return Error{ErrorCode::NotFound, "Plugin not loaded: " + name};
     }
-    void* handle = it->second.handle;
+    void* handle = it->second->handle;
     using GetIfaceFn = int (*)(const char*, uint32_t, void**);
     dlerror();
     auto get_iface = reinterpret_cast<GetIfaceFn>(dlsym(handle, "yams_plugin_get_interface"));
@@ -694,6 +701,14 @@ Result<void*> AbiPluginLoader::getInterface(const std::string& name, const std::
         return Error{ErrorCode::NotFound, "Interface not available: " + ifaceId};
     }
     return Result<void*>(out);
+}
+
+Result<std::shared_ptr<void>> AbiPluginLoader::acquireKeepAlive(const std::string& name) const {
+    auto it = loaded_.find(name);
+    if (it == loaded_.end() || !it->second) {
+        return Error{ErrorCode::NotFound, "Plugin not loaded: " + name};
+    }
+    return Result<std::shared_ptr<void>>(std::static_pointer_cast<void>(it->second));
 }
 
 } // namespace yams::daemon

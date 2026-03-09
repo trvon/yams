@@ -515,6 +515,8 @@ private:
     }
 
     size_t getEmbeddingDimension() const;
+    void wireSearchEngineRuntimeAdapters(const std::shared_ptr<search::SearchEngine>& engine,
+                                         const char* contextLabel);
 
     boost::asio::awaitable<yams::Result<void>>
     co_initContentStore(boost::asio::any_io_executor exec,
@@ -608,7 +610,7 @@ private:
     std::shared_ptr<yams::wal::WALManager> walManager_;
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::shared_ptr<PostIngestQueue> postIngest_;
-    std::unique_ptr<EmbeddingService> embeddingService_;
+    std::shared_ptr<EmbeddingService> embeddingService_;
     std::unique_ptr<KGWriteQueue> kgWriteQueue_;
     std::shared_ptr<RepairService> repairService_;
     mutable std::mutex repairServiceMutex_;
@@ -647,8 +649,7 @@ private:
     std::unique_ptr<VectorSystemManager> vectorSystemManager_;
     std::unique_ptr<DatabaseManager> databaseManager_;
 
-    // Cached GLiNER query concept extraction function (initialized once when plugins ready)
-    mutable std::once_flag queryConceptExtractorOnce_;
+    // Cached GLiNER query concept extraction function.
     mutable search::EntityExtractionFunc cachedQueryConceptExtractor_;
 
     mutable std::shared_mutex pluginStatusMutex_;

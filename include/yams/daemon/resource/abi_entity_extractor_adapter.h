@@ -17,7 +17,9 @@ namespace yams::daemon {
  */
 class AbiEntityExtractorAdapter {
 public:
-    explicit AbiEntityExtractorAdapter(yams_entity_extractor_v2* table) : table_(table) {}
+    explicit AbiEntityExtractorAdapter(yams_entity_extractor_v2* table,
+                                       std::shared_ptr<void> pluginKeepalive = {})
+        : table_(table), pluginKeepalive_(std::move(pluginKeepalive)) {}
 
     /**
      * @brief Check if the extractor supports a given content type.
@@ -105,6 +107,7 @@ public:
 
 private:
     yams_entity_extractor_v2* table_{};
+    std::shared_ptr<void> pluginKeepalive_{};
 };
 
 } // namespace yams::daemon

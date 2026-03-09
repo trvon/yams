@@ -412,6 +412,46 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
         CHECK(loaded_after.empty());
     }
 
+    SECTION("Plugin keepalive defers physical unload until adapters release") {
+        AbiPluginHost host(nullptr);
+        host.setTrustFile(fixture.trustFile_);
+
+        fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
+        auto dir = pluginPath.parent_path();
+        REQUIRE(host.trustAdd(dir));
+
+        auto lr = host.load(pluginPath, "{}");
+        REQUIRE(lr);
+        const auto pluginName = lr.value().name;
+
+        auto keepalive = host.acquireKeepAlive(pluginName);
+        REQUIRE(keepalive);
+        REQUIRE(keepalive.value() != nullptr);
+
+        auto ifaceRes = host.getInterface(pluginName, "model_provider_v1", 1);
+        REQUIRE(ifaceRes);
+        auto* table = reinterpret_cast<yams_model_provider_v1*>(ifaceRes.value());
+        REQUIRE(table != nullptr);
+
+        REQUIRE(host.unload(pluginName));
+        CHECK(host.listLoaded().empty());
+
+        // Interface remains callable while keepalive token is held.
+        bool loaded = false;
+        CHECK(table->load_model(table->self, "test_model", nullptr, nullptr) == 0);
+        CHECK(table->is_model_loaded(table->self, "test_model", &loaded) == 0);
+        CHECK(loaded);
+        CHECK(table->unload_model(table->self, "test_model") == 0);
+
+        keepalive.value().reset();
+
+        // After releasing keepalive, plugin can be loaded again normally.
+        auto lr2 = host.load(pluginPath, "{}");
+        REQUIRE(lr2);
+        CHECK(lr2.value().name == pluginName);
+        CHECK(host.unload(pluginName));
+    }
+
     SECTION("Plugin health check - healthy plugin") {
         AbiPluginHost host(nullptr);
         host.setTrustFile(fixture.trustFile_);

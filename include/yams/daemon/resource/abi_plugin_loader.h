@@ -38,6 +38,7 @@ public:
     Result<ScanResult> load(const std::filesystem::path& file, const std::string& configJson = "");
     Result<void> unload(const std::string& name);
     std::vector<ScanResult> loaded() const;
+    Result<std::shared_ptr<void>> acquireKeepAlive(const std::string& name) const;
 
     // Query plugin health JSON via ABI, if the plugin exposes it
     Result<std::string> health(const std::string& name) const;
@@ -62,9 +63,10 @@ private:
         void* handle{nullptr};
         void* host_context{nullptr};
         ScanResult info;
+        ~HandleInfo();
     };
 
-    mutable std::map<std::string, HandleInfo> loaded_;
+    mutable std::map<std::string, std::shared_ptr<HandleInfo>> loaded_;
     std::filesystem::path trustFile_;
     std::set<std::filesystem::path> trusted_;
     NamePolicy namePolicy_{NamePolicy::Relaxed};

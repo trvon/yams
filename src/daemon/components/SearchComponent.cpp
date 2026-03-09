@@ -159,15 +159,10 @@ bool SearchComponent::forceRebuild() {
         // IMPORTANT: Use shared_from_this() for ServiceManager to ensure proper lifetime.
         // ServiceManager inherits from std::enable_shared_from_this<ServiceManager>.
         auto smPtr = serviceManager_.shared_from_this();
-        auto* sc = this;
-
         boost::asio::co_spawn(
             executor,
-            [smPtr, sc]() -> boost::asio::awaitable<void> {
+            [smPtr]() -> boost::asio::awaitable<void> {
                 co_await smPtr->co_enableEmbeddingsAndRebuild();
-                // Record the build after completion
-                uint64_t docCount = sc->getCurrentDocCount();
-                sc->recordSuccessfulBuild(docCount);
             },
             boost::asio::detached);
 

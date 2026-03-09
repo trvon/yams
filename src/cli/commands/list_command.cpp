@@ -1439,16 +1439,35 @@ private:
                 return false;
             }
 
-            bool printed = false;
+            std::vector<std::string> summaryParts;
+            if (showTags_ && !doc.tags.empty()) {
+                summaryParts.push_back("Tags: " + doc.getTags());
+            }
             if (auto owner = getMetadataValue(doc, "owner")) {
-                std::cout << "    Owner: " << *owner << "\n";
-                printed = true;
+                summaryParts.push_back("Owner: " + *owner);
             }
             if (auto source = getMetadataValue(doc, "source")) {
-                std::cout << "    Source: " << *source << "\n";
-                printed = true;
+                summaryParts.push_back("Source: " + *source);
             }
-            return printed;
+
+            if (summaryParts.empty()) {
+                return false;
+            }
+
+            std::string line;
+            for (size_t i = 0; i < summaryParts.size(); ++i) {
+                if (i > 0) {
+                    line += " | ";
+                }
+                line += summaryParts[i];
+            }
+
+            const int termWidth = ui::terminal_width();
+            if (termWidth > 8) {
+                line = ui::truncate_to_width(line, static_cast<size_t>(termWidth - 4));
+            }
+            std::cout << "    " << line << "\n";
+            return true;
         };
 
         for (const auto& doc : documents) {
@@ -1503,24 +1522,16 @@ private:
                     }
                 }
 
-                if (showTags_ && !doc.tags.empty()) {
-                    std::cout << "    Tags: " << doc.getTags() << "\n";
-                }
-
                 bool printedMetadata = printFullMetadata(doc) || printMetadataSummary(doc);
 
-                if (showTags_ || printedMetadata) {
+                if (printedMetadata) {
                     std::cout << "\n";
                 }
             } else {
                 bool printedDetails = false;
-                if (showTags_ && !doc.tags.empty()) {
-                    std::cout << "    Tags: " << doc.getTags() << "\n";
-                    printedDetails = true;
-                }
                 printedDetails = printFullMetadata(doc) || printedDetails;
                 printedDetails = printMetadataSummary(doc) || printedDetails;
-                if (printedDetails) {
+                if (printedDetails && showMetadata_) {
                     std::cout << "\n";
                 }
             }

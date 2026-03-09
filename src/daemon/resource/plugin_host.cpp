@@ -122,6 +122,10 @@ Result<void*> AbiPluginHost::getInterface(const std::string& name,    // plugin 
     return pImpl->loader.getInterface(name, ifaceId, version);
 }
 
+Result<std::shared_ptr<void>> AbiPluginHost::acquireKeepAlive(const std::string& name) const {
+    return pImpl->loader.acquireKeepAlive(name);
+}
+
 std::vector<std::pair<std::filesystem::path, std::string>> AbiPluginHost::getLastScanSkips() const {
     std::vector<std::pair<std::filesystem::path, std::string>> out;
     try {

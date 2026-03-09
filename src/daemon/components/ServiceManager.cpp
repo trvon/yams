@@ -968,9 +968,11 @@ void ServiceManager::shutdown() {
     // Embedding jobs run on WorkCoordinator executors; stopping/joining workers first can leave
     // in-flight embed tasks stranded and trigger shutdown detaches/timeouts.
     spdlog::info("[ServiceManager] Phase 3.7: Quiescing embedding service");
-    if (embeddingService_) {
+    auto embeddingService =
+        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embeddingService) {
         try {
-            embeddingService_->shutdown();
+            embeddingService->shutdown();
             spdlog::info("[ServiceManager] Phase 3.7: Embedding service quiesced");
         } catch (const std::exception& e) {
             spdlog::warn("[ServiceManager] Phase 3.7: Embedding service quiesce failed: {}",
@@ -1073,8 +1075,10 @@ void ServiceManager::shutdown() {
     }
 
     spdlog::info("[ServiceManager] Phase 6.3.5: Resetting embedding service");
-    if (embeddingService_) {
-        embeddingService_.reset();
+    auto embeddingServiceHold = std::atomic_exchange_explicit(
+        &embeddingService_, std::shared_ptr<EmbeddingService>{}, std::memory_order_acq_rel);
+    if (embeddingServiceHold) {
+        embeddingServiceHold.reset();
         spdlog::info("[ServiceManager] Phase 6.3.5: Embedding service reset complete");
     } else {
         spdlog::info("[ServiceManager] Phase 6.3.5: No embedding service to reset");
@@ -1124,8 +1128,10 @@ void ServiceManager::shutdown() {
 
     // Shutdown search engine
     spdlog::info("[ServiceManager] Phase 6.7: Resetting search engine");
-    if (searchEngine_) {
-        searchEngine_.reset();
+    auto currentEngine = std::atomic_load_explicit(&searchEngine_, std::memory_order_acquire);
+    if (currentEngine) {
+        std::atomic_store_explicit(&searchEngine_, std::shared_ptr<search::SearchEngine>{},
+                                   std::memory_order_release);
         spdlog::info("[ServiceManager] Phase 6.7: Search engine reset");
     } else {
         spdlog::info("[ServiceManager] Phase 6.7: No search engine to reset");
@@ -1928,26 +1934,31 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         } catch (...) {
         }
         (void)taThreads; // Retrieved for future use in embedding service configuration
-        embeddingService_ = std::make_unique<EmbeddingService>(contentStore_, metadataRepo_,
-                                                               workCoordinator_.get());
+        auto embeddingService = std::make_shared<EmbeddingService>(contentStore_, metadataRepo_,
+                                                                   workCoordinator_.get());
 
-        auto initRes = embeddingService_->initialize();
+        auto initRes = embeddingService->initialize();
         if (initRes) {
-            embeddingService_->setProviders([this]() { return this->loadModelProvider(); },
-                                            [this]() { return this->resolvePreferredModel(); },
-                                            [this]() { return this->vectorDatabase_; });
-            embeddingService_->start();
+            embeddingService->setProviders([this]() { return this->loadModelProvider(); },
+                                           [this]() { return this->resolvePreferredModel(); },
+                                           [this]() { return this->vectorDatabase_; });
+            embeddingService->start();
+            std::atomic_store_explicit(&embeddingService_, std::move(embeddingService),
+                                       std::memory_order_release);
             spdlog::info("EmbeddingService initialized");
         } else {
             spdlog::warn("EmbeddingService initialization failed: {}", initRes.error().message);
-            embeddingService_.reset();
+            std::atomic_store_explicit(&embeddingService_, std::shared_ptr<EmbeddingService>{},
+                                       std::memory_order_release);
         }
     } catch (const std::exception& e) {
         spdlog::warn("EmbeddingService init failed: {}", e.what());
-        embeddingService_.reset();
+        std::atomic_store_explicit(&embeddingService_, std::shared_ptr<EmbeddingService>{},
+                                   std::memory_order_release);
     } catch (...) {
         spdlog::warn("EmbeddingService init failed (unknown)");
-        embeddingService_.reset();
+        std::atomic_store_explicit(&embeddingService_, std::shared_ptr<EmbeddingService>{},
+                                   std::memory_order_release);
     }
     spdlog::info("[ServiceManager] Phase: EmbeddingService Initialized.");
 
@@ -2195,22 +2206,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             const auto& built = buildResult.value();
             {
                 std::unique_lock lk(searchEngineMutex_); // Exclusive write
-                searchEngine_ = built;
+                std::atomic_store_explicit(&searchEngine_, built, std::memory_order_release);
             }
-
-            std::call_once(queryConceptExtractorOnce_, [this]() {
-                cachedQueryConceptExtractor_ = createGlinerExtractionFunc(getEntityExtractors());
-            });
-            if (cachedQueryConceptExtractor_) {
-                built->setConceptExtractor(cachedQueryConceptExtractor_);
-                spdlog::info("[SearchBuild] GLiNER concept extractor wired to search engine");
-            }
-
-            // Wire cross-encoder reranker if available
-            if (rerankerAdapter_ && rerankerAdapter_->isReady()) {
-                built->setReranker(rerankerAdapter_);
-                spdlog::info("[SearchBuild] Cross-encoder reranker wired to search engine");
-            }
+            wireSearchEngineRuntimeAdapters(built, "SearchBuild");
 
             // Update readiness indicators after successful rebuild
             state_.readiness.searchEngineReady = true;
@@ -2610,6 +2608,10 @@ Result<size_t> ServiceManager::adoptEntityExtractorsFromHosts() {
                              "entity extractors",
                              pluginManager_->getEntityExtractors().size());
             }
+
+            if (auto engine = getSearchEngineSnapshot()) {
+                wireSearchEngineRuntimeAdapters(engine, "ServiceManager");
+            }
         }
         return result;
     }
@@ -2628,6 +2630,26 @@ boost::asio::any_io_executor ServiceManager::getCliExecutor() const {
         return cliRequestPool_->get_executor();
     }
     return getWorkerExecutor();
+}
+
+void ServiceManager::wireSearchEngineRuntimeAdapters(
+    const std::shared_ptr<search::SearchEngine>& engine, const char* contextLabel) {
+    if (!engine) {
+        return;
+    }
+
+    cachedQueryConceptExtractor_ = createGlinerExtractionFunc(getEntityExtractors());
+    engine->setConceptExtractor(cachedQueryConceptExtractor_);
+    if (cachedQueryConceptExtractor_) {
+        spdlog::info("[{}] GLiNER concept extractor wired to search engine", contextLabel);
+    } else {
+        spdlog::debug("[{}] GLiNER concept extractor unavailable", contextLabel);
+    }
+
+    if (rerankerAdapter_ && rerankerAdapter_->isReady()) {
+        engine->setReranker(rerankerAdapter_);
+        spdlog::debug("[{}] Cross-encoder reranker wired to search engine", contextLabel);
+    }
 }
 
 bool ServiceManager::resizeWorkerPool(std::size_t target) {
@@ -2717,14 +2739,9 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
             const auto& rebuilt = rebuildResult.value();
             {
                 std::unique_lock lk(searchEngineMutex_);
-                searchEngine_ = rebuilt;
+                std::atomic_store_explicit(&searchEngine_, rebuilt, std::memory_order_release);
             }
-
-            // Wire cross-encoder reranker if available
-            if (rerankerAdapter_ && rerankerAdapter_->isReady()) {
-                rebuilt->setReranker(rerankerAdapter_);
-                spdlog::debug("[Rebuild] Cross-encoder reranker wired to search engine");
-            }
+            wireSearchEngineRuntimeAdapters(rebuilt, "Rebuild");
 
             // Update readiness indicators
             state_.readiness.searchEngineReady = true;
@@ -2809,14 +2826,9 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                 const auto& rebuilt = rebuildResult.value();
                 {
                     std::unique_lock lk(searchEngineMutex_); // Exclusive write
-                    searchEngine_ = rebuilt;
+                    std::atomic_store_explicit(&searchEngine_, rebuilt, std::memory_order_release);
                 }
-
-                // Wire cross-encoder reranker if available
-                if (rerankerAdapter_ && rerankerAdapter_->isReady()) {
-                    rebuilt->setReranker(rerankerAdapter_);
-                    spdlog::debug("[Rebuild] Cross-encoder reranker wired to search engine");
-                }
+                wireSearchEngineRuntimeAdapters(rebuilt, "Rebuild");
 
                 // Update readiness indicators after successful rebuild
                 state_.readiness.searchEngineReady = true;
@@ -2868,9 +2880,9 @@ std::shared_ptr<search::SearchEngine> ServiceManager::getSearchEngineSnapshot() 
     if (!lock.owns_lock()) {
         spdlog::debug(
             "getSearchEngineSnapshot: mutex busy (rebuild in progress?), returning cached");
-        return std::atomic_load(&searchEngine_);
+        return std::atomic_load_explicit(&searchEngine_, std::memory_order_acquire);
     }
-    return searchEngine_;
+    return std::atomic_load_explicit(&searchEngine_, std::memory_order_acquire);
 }
 
 yams::app::services::AppContext ServiceManager::getAppContext() const {
@@ -2995,64 +3007,82 @@ size_t ServiceManager::getEmbeddingDimension() const {
 }
 
 std::size_t ServiceManager::getEmbeddingInFlightJobs() const {
-    if (embeddingService_) {
-        return embeddingService_->inFlightJobs();
+    auto embeddingService =
+        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embeddingService) {
+        return embeddingService->inFlightJobs();
     }
     return 0;
 }
 
 std::size_t ServiceManager::getEmbeddingQueuedJobs() const {
-    if (embeddingService_) {
-        return embeddingService_->queuedJobs();
+    auto embeddingService =
+        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embeddingService) {
+        return embeddingService->queuedJobs();
     }
     return 0;
 }
 
 std::size_t ServiceManager::getEmbeddingActiveInferSubBatches() const {
-    if (embeddingService_) {
-        return embeddingService_->activeInferSubBatches();
+    auto embeddingService =
+        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embeddingService) {
+        return embeddingService->activeInferSubBatches();
     }
     return 0;
 }
 
 uint64_t ServiceManager::getEmbeddingInferOldestMs() const {
-    if (embeddingService_) {
-        return embeddingService_->inferOldestActiveMs();
+    auto embeddingService =
+        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embeddingService) {
+        return embeddingService->inferOldestActiveMs();
     }
     return 0;
 }
 
 uint64_t ServiceManager::getEmbeddingInferStartedCount() const {
-    if (embeddingService_) {
-        return embeddingService_->inferSubBatchStartedCount();
+    auto embeddingService =
+        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embeddingService) {
+        return embeddingService->inferSubBatchStartedCount();
     }
     return 0;
 }
 
 uint64_t ServiceManager::getEmbeddingInferCompletedCount() const {
-    if (embeddingService_) {
-        return embeddingService_->inferSubBatchCompletedCount();
+    auto embeddingService =
+        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embeddingService) {
+        return embeddingService->inferSubBatchCompletedCount();
     }
     return 0;
 }
 
 uint64_t ServiceManager::getEmbeddingInferLastMs() const {
-    if (embeddingService_) {
-        return embeddingService_->inferSubBatchLastDurationMs();
+    auto embeddingService =
+        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embeddingService) {
+        return embeddingService->inferSubBatchLastDurationMs();
     }
     return 0;
 }
 
 uint64_t ServiceManager::getEmbeddingInferMaxMs() const {
-    if (embeddingService_) {
-        return embeddingService_->inferSubBatchMaxDurationMs();
+    auto embeddingService =
+        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embeddingService) {
+        return embeddingService->inferSubBatchMaxDurationMs();
     }
     return 0;
 }
 
 uint64_t ServiceManager::getEmbeddingInferWarnCount() const {
-    if (embeddingService_) {
-        return embeddingService_->inferSubBatchWarnCount();
+    auto embeddingService =
+        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embeddingService) {
+        return embeddingService->inferSubBatchWarnCount();
     }
     return 0;
 }
@@ -3228,7 +3258,7 @@ ServiceManager::co_initSearchEngine(boost::asio::any_io_executor exec,
                 Error{ErrorCode::InternalError, "Failed to build search engine"});
         }
 
-        searchEngine_ = engine;
+        std::atomic_store_explicit(&searchEngine_, engine, std::memory_order_release);
 
         // Mark readiness
         state_.readiness.searchEngineReady.store(true);

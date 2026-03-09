@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -11,7 +12,8 @@ namespace yams::daemon {
 
 class AbiModelProviderAdapter : public IModelProvider {
 public:
-    explicit AbiModelProviderAdapter(yams_model_provider_v1* table);
+    explicit AbiModelProviderAdapter(yams_model_provider_v1* table,
+                                     std::shared_ptr<void> pluginKeepalive = {});
     ~AbiModelProviderAdapter() override = default;
 
     void setProgressCallback(std::function<void(const ModelLoadEvent&)> cb) override;
@@ -53,6 +55,7 @@ public:
 
 private:
     yams_model_provider_v1* table_{};
+    std::shared_ptr<void> pluginKeepalive_{};
     uint32_t abiVersion_{0}; // Stored for version-gated features (v4+ has evict_under_pressure)
     std::function<void(const ModelLoadEvent&)> progress_{};
 

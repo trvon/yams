@@ -77,17 +77,11 @@ public:
         // Convenience: default-initialize to tuned conservative config
         static BuildOptions makeDefault() {
             BuildOptions o{};
-            // Conservative weight distribution preserving existing relevance behavior
-            // These weights match a balanced MIXED corpus profile
-            o.config.textWeight = 0.45f; // Unified FTS5+symbol text search
-            o.config.pathTreeWeight = 0.10f;
-            o.config.kgWeight = 0.05f;
-            o.config.vectorWeight = 0.30f;
-            o.config.tagWeight = 0.03f;
-            o.config.metadataWeight = 0.02f;
-
-            o.config.corpusProfile = SearchEngineConfig::CorpusProfile::MIXED;
-            o.config.fusionStrategy = SearchEngineConfig::FusionStrategy::RECIPROCAL_RANK;
+            // Use the mixed-precision tuned profile as the non-auto-tune fallback.
+            // Auto-tune remains enabled and will still specialize per corpus stats.
+            const auto params = getTunedParams(TuningState::MIXED_PRECISION);
+            params.applyTo(o.config);
+            o.config.corpusProfile = SearchEngineConfig::CorpusProfile::CUSTOM;
             o.config.enableParallelExecution = true;
             o.config.includeDebugInfo = true;
             o.config.maxResults = 100;

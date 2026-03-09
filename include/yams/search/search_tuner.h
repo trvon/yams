@@ -15,13 +15,14 @@ namespace yams::search {
  * optimal search parameters (RRF k, component weights, etc.).
  */
 enum class TuningState {
-    SMALL_CODE,  // < 1K docs, mostly code (.cpp, .py, .rs, etc.)
-    LARGE_CODE,  // >= 1K docs, mostly code
-    SMALL_PROSE, // < 1K docs, mostly prose (.md, .txt, etc.)
-    LARGE_PROSE, // >= 1K docs, mostly prose
-    SCIENTIFIC,  // Prose with no path/tag structure (benchmark-like corpora)
-    MIXED,       // Balanced content types
-    MINIMAL      // < 100 docs, any type (very small corpus)
+    SMALL_CODE,      // < 1K docs, mostly code (.cpp, .py, .rs, etc.)
+    LARGE_CODE,      // >= 1K docs, mostly code
+    SMALL_PROSE,     // < 1K docs, mostly prose (.md, .txt, etc.)
+    LARGE_PROSE,     // >= 1K docs, mostly prose
+    SCIENTIFIC,      // Prose with no path/tag structure (benchmark-like corpora)
+    MIXED,           // Balanced content types
+    MIXED_PRECISION, // MIXED tuned for lexical precision guardrails
+    MINIMAL          // < 100 docs, any type (very small corpus)
 };
 
 /**
@@ -41,6 +42,8 @@ enum class TuningState {
             return "SCIENTIFIC";
         case TuningState::MIXED:
             return "MIXED";
+        case TuningState::MIXED_PRECISION:
+            return "MIXED_PRECISION";
         case TuningState::MINIMAL:
             return "MINIMAL";
     }
@@ -80,6 +83,27 @@ struct TunedParams {
     SearchEngineConfig::FusionStrategy fusionStrategy =
         SearchEngineConfig::FusionStrategy::COMB_MNZ;
 
+    // Hybrid precision guardrails (default to SearchEngineConfig defaults)
+    float vectorOnlyThreshold = 0.90f;
+    float vectorOnlyPenalty = 0.80f;
+    size_t vectorOnlyNearMissReserve = 0;
+    float vectorOnlyNearMissSlack = 0.05f;
+    float vectorOnlyNearMissPenalty = 0.60f;
+    bool enablePathDedupInFusion = false;
+    size_t lexicalFloorTopN = 0;
+    float lexicalFloorBoost = 0.0f;
+    bool enableLexicalTieBreak = false;
+    float lexicalTieBreakEpsilon = 0.0f;
+    size_t semanticRescueSlots = 0;
+    float semanticRescueMinVectorScore = 0.0f;
+
+    // Adaptive semantic skip behavior
+    bool enableAdaptiveVectorFallback = false;
+    size_t adaptiveVectorSkipMinTier1Hits = 0;
+    bool adaptiveVectorSkipRequireTextSignal = true;
+    size_t adaptiveVectorSkipMinTextHits = 3;
+    float adaptiveVectorSkipMinTopTextScore = 0.30f;
+
     // Graph reranking controls (dynamically adapted by SearchTuner)
     bool enableGraphRerank = false;
     size_t graphRerankTopN = 25;
@@ -107,27 +131,62 @@ struct TunedParams {
         config.graphRerankWeight = graphRerankWeight;
         config.graphRerankMaxBoost = graphRerankMaxBoost;
         config.graphRerankMinSignal = graphRerankMinSignal;
+        config.vectorOnlyThreshold = vectorOnlyThreshold;
+        config.vectorOnlyPenalty = vectorOnlyPenalty;
+        config.vectorOnlyNearMissReserve = vectorOnlyNearMissReserve;
+        config.vectorOnlyNearMissSlack = vectorOnlyNearMissSlack;
+        config.vectorOnlyNearMissPenalty = vectorOnlyNearMissPenalty;
+        config.enablePathDedupInFusion = enablePathDedupInFusion;
+        config.lexicalFloorTopN = lexicalFloorTopN;
+        config.lexicalFloorBoost = lexicalFloorBoost;
+        config.enableLexicalTieBreak = enableLexicalTieBreak;
+        config.lexicalTieBreakEpsilon = lexicalTieBreakEpsilon;
+        config.semanticRescueSlots = semanticRescueSlots;
+        config.semanticRescueMinVectorScore = semanticRescueMinVectorScore;
+        config.enableAdaptiveVectorFallback = enableAdaptiveVectorFallback;
+        config.adaptiveVectorSkipMinTier1Hits = adaptiveVectorSkipMinTier1Hits;
+        config.adaptiveVectorSkipRequireTextSignal = adaptiveVectorSkipRequireTextSignal;
+        config.adaptiveVectorSkipMinTextHits = adaptiveVectorSkipMinTextHits;
+        config.adaptiveVectorSkipMinTopTextScore = adaptiveVectorSkipMinTopTextScore;
     }
 
     /**
      * @brief Serialize to JSON.
      */
     [[nodiscard]] nlohmann::json toJson() const {
-        return nlohmann::json{{"rrf_k", rrfK},
-                              {"text_weight", textWeight},
-                              {"vector_weight", vectorWeight},
-                              {"entity_vector_weight", entityVectorWeight},
-                              {"path_tree_weight", pathTreeWeight},
-                              {"kg_weight", kgWeight},
-                              {"tag_weight", tagWeight},
-                              {"metadata_weight", metadataWeight},
-                              {"similarity_threshold", similarityThreshold},
-                              {"vector_boost_factor", vectorBoostFactor},
-                              {"enable_graph_rerank", enableGraphRerank},
-                              {"graph_rerank_topn", graphRerankTopN},
-                              {"graph_rerank_weight", graphRerankWeight},
-                              {"graph_rerank_max_boost", graphRerankMaxBoost},
-                              {"graph_rerank_min_signal", graphRerankMinSignal}};
+        return nlohmann::json{
+            {"rrf_k", rrfK},
+            {"text_weight", textWeight},
+            {"vector_weight", vectorWeight},
+            {"entity_vector_weight", entityVectorWeight},
+            {"path_tree_weight", pathTreeWeight},
+            {"kg_weight", kgWeight},
+            {"tag_weight", tagWeight},
+            {"metadata_weight", metadataWeight},
+            {"similarity_threshold", similarityThreshold},
+            {"vector_boost_factor", vectorBoostFactor},
+            {"enable_graph_rerank", enableGraphRerank},
+            {"graph_rerank_topn", graphRerankTopN},
+            {"graph_rerank_weight", graphRerankWeight},
+            {"graph_rerank_max_boost", graphRerankMaxBoost},
+            {"graph_rerank_min_signal", graphRerankMinSignal},
+            {"vector_only_threshold", vectorOnlyThreshold},
+            {"vector_only_penalty", vectorOnlyPenalty},
+            {"vector_only_near_miss_reserve", vectorOnlyNearMissReserve},
+            {"vector_only_near_miss_slack", vectorOnlyNearMissSlack},
+            {"vector_only_near_miss_penalty", vectorOnlyNearMissPenalty},
+            {"enable_path_dedup_in_fusion", enablePathDedupInFusion},
+            {"lexical_floor_topn", lexicalFloorTopN},
+            {"lexical_floor_boost", lexicalFloorBoost},
+            {"enable_lexical_tie_break", enableLexicalTieBreak},
+            {"lexical_tie_break_epsilon", lexicalTieBreakEpsilon},
+            {"semantic_rescue_slots", semanticRescueSlots},
+            {"semantic_rescue_min_vector_score", semanticRescueMinVectorScore},
+            {"enable_adaptive_vector_fallback", enableAdaptiveVectorFallback},
+            {"adaptive_vector_skip_min_tier1_hits", adaptiveVectorSkipMinTier1Hits},
+            {"adaptive_vector_skip_require_text_signal", adaptiveVectorSkipRequireTextSignal},
+            {"adaptive_vector_skip_min_text_hits", adaptiveVectorSkipMinTextHits},
+            {"adaptive_vector_skip_min_top_text_score", adaptiveVectorSkipMinTopTextScore}};
     }
 };
 
@@ -208,6 +267,34 @@ struct TunedParams {
             params.kgWeight = 0.05f;
             params.tagWeight = 0.05f;
             params.metadataWeight = 0.05f;
+            break;
+
+        case TuningState::MIXED_PRECISION:
+            params.rrfK = 45;
+            params.textWeight = 0.40f;
+            params.vectorWeight = 0.25f;
+            params.entityVectorWeight = 0.10f;
+            params.pathTreeWeight = 0.10f;
+            params.kgWeight = 0.05f;
+            params.tagWeight = 0.05f;
+            params.metadataWeight = 0.05f;
+            params.vectorOnlyThreshold = 0.94f;
+            params.vectorOnlyPenalty = 0.70f;
+            params.vectorOnlyNearMissReserve = 2;
+            params.vectorOnlyNearMissSlack = 0.04f;
+            params.vectorOnlyNearMissPenalty = 0.55f;
+            params.enablePathDedupInFusion = true;
+            params.lexicalFloorTopN = 12;
+            params.lexicalFloorBoost = 0.20f;
+            params.enableLexicalTieBreak = true;
+            params.lexicalTieBreakEpsilon = 0.010f;
+            params.semanticRescueSlots = 1;
+            params.semanticRescueMinVectorScore = 0.0f;
+            params.enableAdaptiveVectorFallback = true;
+            params.adaptiveVectorSkipMinTier1Hits = 80;
+            params.adaptiveVectorSkipRequireTextSignal = true;
+            params.adaptiveVectorSkipMinTextHits = 5;
+            params.adaptiveVectorSkipMinTopTextScore = 0.45f;
             break;
 
         case TuningState::MINIMAL:

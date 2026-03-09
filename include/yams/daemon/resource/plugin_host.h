@@ -60,6 +60,9 @@ public:
                                const std::string& ifaceId, // interface ID
                                uint32_t version);
 
+    // Acquire a lifetime token that keeps a loaded plugin resident until released.
+    Result<std::shared_ptr<void>> acquireKeepAlive(const std::string& name) const;
+
     // Diagnostics for last scan
     std::vector<std::pair<std::filesystem::path, std::string>> getLastScanSkips() const;
 

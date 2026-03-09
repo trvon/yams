@@ -17,6 +17,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <yams/search/search_engine_builder.h>
 #include <yams/search/search_tuner.h>
 #include <yams/storage/corpus_stats.h>
 
@@ -35,6 +36,7 @@ TEST_CASE("TuningState: string conversion", "[unit][search_tuner]") {
     CHECK(std::string(tuningStateToString(TuningState::LARGE_PROSE)) == "LARGE_PROSE");
     CHECK(std::string(tuningStateToString(TuningState::SCIENTIFIC)) == "SCIENTIFIC");
     CHECK(std::string(tuningStateToString(TuningState::MIXED)) == "MIXED");
+    CHECK(std::string(tuningStateToString(TuningState::MIXED_PRECISION)) == "MIXED_PRECISION");
     CHECK(std::string(tuningStateToString(TuningState::MINIMAL)) == "MINIMAL");
 }
 
@@ -118,6 +120,29 @@ TEST_CASE("TunedParams: MIXED parameters", "[unit][search_tuner][params]") {
     CHECK(params.kgWeight == Approx(0.05f));
     CHECK(params.tagWeight == Approx(0.05f));
     CHECK(params.metadataWeight == Approx(0.05f));
+}
+
+TEST_CASE("TunedParams: MIXED_PRECISION parameters", "[unit][search_tuner][params]") {
+    auto params = getTunedParams(TuningState::MIXED_PRECISION);
+
+    CHECK(params.rrfK == 45);
+    CHECK(params.textWeight == Approx(0.40f));
+    CHECK(params.vectorWeight == Approx(0.25f));
+    CHECK(params.entityVectorWeight == Approx(0.10f));
+    CHECK(params.pathTreeWeight == Approx(0.10f));
+    CHECK(params.kgWeight == Approx(0.05f));
+    CHECK(params.tagWeight == Approx(0.05f));
+    CHECK(params.metadataWeight == Approx(0.05f));
+    CHECK(params.vectorOnlyThreshold == Approx(0.94f));
+    CHECK(params.vectorOnlyPenalty == Approx(0.70f));
+    CHECK(params.vectorOnlyNearMissReserve == 2);
+    CHECK(params.enablePathDedupInFusion);
+    CHECK(params.lexicalFloorTopN == 12);
+    CHECK(params.lexicalFloorBoost == Approx(0.20f));
+    CHECK(params.enableLexicalTieBreak);
+    CHECK(params.lexicalTieBreakEpsilon == Approx(0.010f));
+    CHECK(params.semanticRescueSlots == 1);
+    CHECK(params.semanticRescueMinVectorScore == Approx(0.0f));
 }
 
 TEST_CASE("TunedParams: MINIMAL parameters", "[unit][search_tuner][params]") {
@@ -264,6 +289,21 @@ TEST_CASE("SearchTuner: MIXED state for balanced corpus", "[unit][search_tuner][
     CHECK(state == TuningState::MIXED);
 }
 
+TEST_CASE("SearchTuner: MIXED_PRECISION state when mixed corpus has embeddings",
+          "[unit][search_tuner][fsm]") {
+    CorpusStats stats;
+    stats.docCount = 1000;
+    stats.codeRatio = 0.4f;
+    stats.proseRatio = 0.4f;
+    stats.binaryRatio = 0.2f;
+    stats.embeddingCoverage = 0.65f;
+
+    std::string reason;
+    auto state = SearchTuner::computeState(stats, reason);
+    CHECK(state == TuningState::MIXED_PRECISION);
+    CHECK(reason.find("mixed_precision") != std::string::npos);
+}
+
 TEST_CASE("SearchTuner: MIXED state boundary (code at 0.7)", "[unit][search_tuner][fsm]") {
     CorpusStats stats;
     stats.docCount = 1000;
@@ -356,7 +396,7 @@ TEST_CASE("SearchTuner: toJson serialization", "[unit][search_tuner]") {
     SearchTuner tuner(stats);
     auto json = tuner.toJson();
 
-    CHECK(json["state"] == "MIXED");
+    CHECK(json["state"] == "MIXED_PRECISION");
     CHECK_FALSE(json["reason"].get<std::string>().empty());
     CHECK(json["rrf_k"] == 45);
     // When KG is present, graph-aware adjustments shift weights toward KG.
@@ -454,10 +494,10 @@ TEST_CASE("SearchTuner: size threshold boundary (1000 docs)", "[unit][search_tun
 // =============================================================================
 
 TEST_CASE("TunedParams: weights sum to approximately 1.0", "[unit][search_tuner][validation]") {
-    std::vector<TuningState> states = {TuningState::SMALL_CODE,  TuningState::LARGE_CODE,
-                                       TuningState::SMALL_PROSE, TuningState::LARGE_PROSE,
-                                       TuningState::SCIENTIFIC,  TuningState::MIXED,
-                                       TuningState::MINIMAL};
+    std::vector<TuningState> states = {TuningState::SMALL_CODE,      TuningState::LARGE_CODE,
+                                       TuningState::SMALL_PROSE,     TuningState::LARGE_PROSE,
+                                       TuningState::SCIENTIFIC,      TuningState::MIXED,
+                                       TuningState::MIXED_PRECISION, TuningState::MINIMAL};
 
     for (auto state : states) {
         auto params = getTunedParams(state);
@@ -468,4 +508,36 @@ TEST_CASE("TunedParams: weights sum to approximately 1.0", "[unit][search_tuner]
         INFO("State: " << tuningStateToString(state));
         CHECK(sum == Approx(1.0f).margin(0.01f));
     }
+}
+
+TEST_CASE("SearchEngineBuilder: default options align with MIXED_PRECISION fallback",
+          "[unit][search_tuner][builder]") {
+    auto opts = SearchEngineBuilder::BuildOptions::makeDefault();
+    auto expectedParams = getTunedParams(TuningState::MIXED_PRECISION);
+    SearchEngineConfig expectedConfig;
+    expectedParams.applyTo(expectedConfig);
+
+    CHECK(opts.autoTune);
+    CHECK(opts.config.enableParallelExecution);
+    CHECK(opts.config.includeDebugInfo);
+    CHECK(opts.config.maxResults == 100);
+    CHECK(opts.config.corpusProfile == SearchEngineConfig::CorpusProfile::CUSTOM);
+
+    CHECK(opts.config.textWeight == Approx(expectedConfig.textWeight));
+    CHECK(opts.config.vectorWeight == Approx(expectedConfig.vectorWeight));
+    CHECK(opts.config.entityVectorWeight == Approx(expectedConfig.entityVectorWeight));
+    CHECK(opts.config.pathTreeWeight == Approx(expectedConfig.pathTreeWeight));
+    CHECK(opts.config.kgWeight == Approx(expectedConfig.kgWeight));
+    CHECK(opts.config.tagWeight == Approx(expectedConfig.tagWeight));
+    CHECK(opts.config.metadataWeight == Approx(expectedConfig.metadataWeight));
+    CHECK(opts.config.rrfK == Approx(expectedConfig.rrfK));
+    CHECK(opts.config.fusionStrategy == expectedConfig.fusionStrategy);
+    CHECK(opts.config.vectorOnlyThreshold == Approx(expectedConfig.vectorOnlyThreshold));
+    CHECK(opts.config.vectorOnlyPenalty == Approx(expectedConfig.vectorOnlyPenalty));
+    CHECK(opts.config.enablePathDedupInFusion == expectedConfig.enablePathDedupInFusion);
+    CHECK(opts.config.lexicalFloorTopN == expectedConfig.lexicalFloorTopN);
+    CHECK(opts.config.lexicalFloorBoost == Approx(expectedConfig.lexicalFloorBoost));
+    CHECK(opts.config.enableLexicalTieBreak == expectedConfig.enableLexicalTieBreak);
+    CHECK(opts.config.lexicalTieBreakEpsilon == Approx(expectedConfig.lexicalTieBreakEpsilon));
+    CHECK(opts.config.semanticRescueSlots == expectedConfig.semanticRescueSlots);
 }

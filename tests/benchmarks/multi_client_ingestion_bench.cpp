@@ -49,6 +49,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #ifdef _WIN32
@@ -595,6 +596,14 @@ std::string classifyFailureMessage(const std::string& errorMsg) {
 
     const std::string lower = toLowerCopy(errorMsg);
 
+    if (containsInsensitive(lower, "document content not found")) {
+        return "content_not_found";
+    }
+    if (containsInsensitive(lower, "document not found") ||
+        containsInsensitive(lower, "no documents found matching hash prefix")) {
+        return "document_not_found";
+    }
+
     if (containsInsensitive(lower, "timed out") || containsInsensitive(lower, "timeout")) {
         return "timeout";
     }
@@ -626,6 +635,16 @@ std::string classifyFailureMessage(const std::string& errorMsg) {
     }
 
     return "other";
+}
+
+bool isDocumentMissingFailure(const std::string& errorMsg) {
+    if (errorMsg.empty()) {
+        return false;
+    }
+    const std::string lower = toLowerCopy(errorMsg);
+    return containsInsensitive(lower, "document not found") ||
+           containsInsensitive(lower, "document content not found") ||
+           containsInsensitive(lower, "no documents found matching hash prefix");
 }
 
 bool isHotspotWindowEligible(int ops, int totalClients) {
@@ -2264,6 +2283,36 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     std::atomic<int> totalCompleted{0};
     std::atomic<int> listInFlight{0};
     const int totalExpected = kTotalClients * kOpsPerClient;
+    std::mutex invalidHashMutex;
+    std::unordered_set<std::string> invalidHashes;
+
+    auto markHashInvalid = [&](const std::string& hash) {
+        if (hash.empty()) {
+            return;
+        }
+        std::lock_guard<std::mutex> lk(invalidHashMutex);
+        invalidHashes.insert(hash);
+    };
+
+    auto sampleKnownHash = [&](std::mt19937& rng) -> std::optional<std::string> {
+        if (knownHashes.empty()) {
+            return std::nullopt;
+        }
+        std::uniform_int_distribution<std::size_t> dist(0, knownHashes.size() - 1);
+        constexpr int kPickAttempts = 8;
+        for (int attempt = 0; attempt < kPickAttempts; ++attempt) {
+            std::string candidate = knownHashes[dist(rng)];
+            bool isInvalid = false;
+            {
+                std::lock_guard<std::mutex> lk(invalidHashMutex);
+                isInvalid = invalidHashes.find(candidate) != invalidHashes.end();
+            }
+            if (!isInvalid) {
+                return candidate;
+            }
+        }
+        return std::nullopt;
+    };
 
     // Grep server-side telemetry sampled from grep responses
     std::mutex grepServerStatsMutex;
@@ -2943,14 +2992,14 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                         continue;
                     }
 
-                    std::uniform_int_distribution<std::size_t> dist(0, knownHashes.size() - 1);
-                    std::string hash = knownHashes[dist(rng)];
-                    yams::Result<nlohmann::json> res;
-                    if (doCat) {
-                        if (useMcpPath) {
-                            res = queryMcpStepForSlot(static_cast<size_t>(tid), "get",
-                                                      {{"hash", hash}, {"include_content", true}});
-                        } else {
+                    auto runGetOrCat = [&](const std::string& hash,
+                                           bool requestContent) -> yams::Result<nlohmann::json> {
+                        if (requestContent) {
+                            if (useMcpPath) {
+                                return queryMcpStepForSlot(
+                                    static_cast<size_t>(tid), "get",
+                                    {{"hash", hash}, {"include_content", true}});
+                            }
                             CatRequest req;
                             req.hash = hash;
                             auto direct = yams::cli::run_sync(client->cat(req), kOpTimeout);
@@ -2958,26 +3007,45 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                                 nlohmann::json j;
                                 j["has_content"] = direct.value().hasContent;
                                 j["size"] = direct.value().size;
-                                res = j;
-                            } else {
-                                res = yams::Error{direct.error()};
+                                return j;
                             }
+                            return yams::Error{direct.error()};
                         }
-                    } else {
+
                         if (useMcpPath) {
-                            res = queryMcpStepForSlot(static_cast<size_t>(tid), "get",
-                                                      {{"hash", hash}, {"include_content", false}});
-                        } else {
-                            GetRequest req;
-                            req.hash = hash;
-                            req.metadataOnly = true;
-                            auto direct = yams::cli::run_sync(client->get(req), kOpTimeout);
-                            if (direct) {
-                                res = nlohmann::json::object();
-                            } else {
-                                res = yams::Error{direct.error()};
-                            }
+                            return queryMcpStepForSlot(
+                                static_cast<size_t>(tid), "get",
+                                {{"hash", hash}, {"include_content", false}});
                         }
+                        GetRequest req;
+                        req.hash = hash;
+                        req.metadataOnly = true;
+                        auto direct = yams::cli::run_sync(client->get(req), kOpTimeout);
+                        if (direct) {
+                            return nlohmann::json::object();
+                        }
+                        return yams::Error{direct.error()};
+                    };
+
+                    const bool requestContent = doCat;
+                    yams::Result<nlohmann::json> res =
+                        yams::Error{yams::ErrorCode::NotFound, "No hash candidates available"};
+                    constexpr int kHashRetryAttempts = 2;
+                    for (int attempt = 0; attempt < kHashRetryAttempts; ++attempt) {
+                        auto hashOpt = sampleKnownHash(rng);
+                        if (!hashOpt.has_value()) {
+                            break;
+                        }
+                        const auto& hash = *hashOpt;
+                        res = runGetOrCat(hash, requestContent);
+                        if (res) {
+                            break;
+                        }
+                        if (isDocumentMissingFailure(res.error().message)) {
+                            markHashInvalid(hash);
+                            continue;
+                        }
+                        break;
                     }
 
                     auto t1 = std::chrono::steady_clock::now();
@@ -3056,15 +3124,15 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                     }
                     perThreadTraces[tid].push_back(std::move(trace));
                 } else {
-                    std::uniform_int_distribution<std::size_t> dist(0, knownHashes.size() - 1);
-                    std::string hash = knownHashes[dist(rng)];
                     bool doCat = (i % kCatEveryN == 0);
-                    yams::Result<nlohmann::json> res;
-                    if (doCat) {
-                        if (useMcpPath) {
-                            res = queryMcpStepForSlot(static_cast<size_t>(tid), "get",
-                                                      {{"hash", hash}, {"include_content", true}});
-                        } else {
+                    auto runGetOrCat = [&](const std::string& hash,
+                                           bool requestContent) -> yams::Result<nlohmann::json> {
+                        if (requestContent) {
+                            if (useMcpPath) {
+                                return queryMcpStepForSlot(
+                                    static_cast<size_t>(tid), "get",
+                                    {{"hash", hash}, {"include_content", true}});
+                            }
                             CatRequest req;
                             req.hash = hash;
                             auto direct = yams::cli::run_sync(client->cat(req), kOpTimeout);
@@ -3072,26 +3140,45 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                                 nlohmann::json j;
                                 j["has_content"] = direct.value().hasContent;
                                 j["size"] = direct.value().size;
-                                res = j;
-                            } else {
-                                res = yams::Error{direct.error()};
+                                return j;
                             }
+                            return yams::Error{direct.error()};
                         }
-                    } else {
+
                         if (useMcpPath) {
-                            res = queryMcpStepForSlot(static_cast<size_t>(tid), "get",
-                                                      {{"hash", hash}, {"include_content", false}});
-                        } else {
-                            GetRequest req;
-                            req.hash = hash;
-                            req.metadataOnly = true;
-                            auto direct = yams::cli::run_sync(client->get(req), kOpTimeout);
-                            if (direct) {
-                                res = nlohmann::json::object();
-                            } else {
-                                res = yams::Error{direct.error()};
-                            }
+                            return queryMcpStepForSlot(
+                                static_cast<size_t>(tid), "get",
+                                {{"hash", hash}, {"include_content", false}});
                         }
+                        GetRequest req;
+                        req.hash = hash;
+                        req.metadataOnly = true;
+                        auto direct = yams::cli::run_sync(client->get(req), kOpTimeout);
+                        if (direct) {
+                            return nlohmann::json::object();
+                        }
+                        return yams::Error{direct.error()};
+                    };
+
+                    const bool requestContent = doCat;
+                    yams::Result<nlohmann::json> res =
+                        yams::Error{yams::ErrorCode::NotFound, "No hash candidates available"};
+                    constexpr int kHashRetryAttempts = 2;
+                    for (int attempt = 0; attempt < kHashRetryAttempts; ++attempt) {
+                        auto hashOpt = sampleKnownHash(rng);
+                        if (!hashOpt.has_value()) {
+                            break;
+                        }
+                        const auto& hash = *hashOpt;
+                        res = runGetOrCat(hash, requestContent);
+                        if (res) {
+                            break;
+                        }
+                        if (isDocumentMissingFailure(res.error().message)) {
+                            markHashInvalid(hash);
+                            continue;
+                        }
+                        break;
                     }
                     auto t1 = std::chrono::steady_clock::now();
                     auto latUs =
@@ -3261,6 +3348,11 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     int totalFails = searchFails.load() + listFails.load() + grepFails.load() + statusFails.load() +
                      getFails.load() + catFails.load();
     double opsPerSec = totalOps > 0 ? totalOps / globalElapsed : 0.0;
+    size_t invalidHashCount = 0;
+    {
+        std::lock_guard<std::mutex> lk(invalidHashMutex);
+        invalidHashCount = invalidHashes.size();
+    }
 
     // Memory watermarks from time series
     auto samples = sampler.getSamples();
@@ -3282,6 +3374,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     std::cout << "  Total ops:      " << totalOps << " (" << std::setprecision(1) << opsPerSec
               << " ops/s)\n";
     std::cout << "  Total failures: " << totalFails << "\n\n";
+    if (invalidHashCount > 0) {
+        std::cout << "  Invalid hash candidates quarantined: " << invalidHashCount << "\n\n";
+    }
 
     std::cout << "  Op breakdown:\n";
     std::cout << "    Search: " << searchOps.load() << " ok, " << searchFails.load() << " fail\n";
@@ -3600,6 +3695,8 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
         {"mcp", json{{"query_calls", mcpQueryCalls.load()},
                      {"transient_session_calls", mcpTransientSessionCalls.load()},
                      {"transient_session_ratio", mcpTransientRatio}}},
+        {"hash_pool",
+         json{{"known_hashes", knownHashes.size()}, {"invalid_quarantined", invalidHashCount}}},
         {"search", json{{"ops", searchOps.load()},
                         {"fails", searchFails.load()},
                         {"latency", searchStats.toJson()}}},

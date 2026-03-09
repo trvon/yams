@@ -3,8 +3,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <sstream>
 #include <span>
+#include <sstream>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/vector/embedding_generator.h>
@@ -72,8 +72,10 @@ private:
     vector::GenerationStats stats_;
 };
 
-AbiModelProviderAdapter::AbiModelProviderAdapter(yams_model_provider_v1* table)
-    : table_(table), abiVersion_(table ? table->abi_version : 0) {}
+AbiModelProviderAdapter::AbiModelProviderAdapter(yams_model_provider_v1* table,
+                                                 std::shared_ptr<void> pluginKeepalive)
+    : table_(table), pluginKeepalive_(std::move(pluginKeepalive)),
+      abiVersion_(table ? table->abi_version : 0) {}
 
 void AbiModelProviderAdapter::setProgressCallback(std::function<void(const ModelLoadEvent&)> cb) {
     progress_ = std::move(cb);

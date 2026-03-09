@@ -106,6 +106,8 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                 envOverride = TuningState::LARGE_PROSE;
             } else if (*val == "MIXED") {
                 envOverride = TuningState::MIXED;
+            } else if (*val == "MIXED_PRECISION") {
+                envOverride = TuningState::MIXED_PRECISION;
             } else if (*val == "MINIMAL") {
                 envOverride = TuningState::MINIMAL;
             } else {
@@ -129,10 +131,15 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         cfg.enableParallelExecution = options.config.enableParallelExecution;
         cfg.includeDebugInfo = options.config.includeDebugInfo;
 
-        spdlog::info(
-            "SearchEngine using override state={} (k={}, text={:.2f}, vector={:.2f}, fusion={})",
-            tuningStateToString(overrideState), params.rrfK, cfg.textWeight, cfg.vectorWeight,
-            SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy));
+        spdlog::info("SearchEngine using override state={} (k={}, text={:.2f}, vector={:.2f}, "
+                     "fusion={}, vector_gate={:.2f}/{:.2f}, lexical_floor={}@{:.3f}, "
+                     "path_dedup={}, lexical_tiebreak={}, semantic_rescue={}@{:.4f})",
+                     tuningStateToString(overrideState), params.rrfK, cfg.textWeight,
+                     cfg.vectorWeight,
+                     SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
+                     cfg.vectorOnlyThreshold, cfg.vectorOnlyPenalty, cfg.lexicalFloorTopN,
+                     cfg.lexicalFloorBoost, cfg.enablePathDedupInFusion, cfg.enableLexicalTieBreak,
+                     cfg.semanticRescueSlots, cfg.semanticRescueMinVectorScore);
     } else if (options.autoTune && metadataRepo_) {
         // Get corpus statistics from metadata repository
         auto statsResult = metadataRepo_->getCorpusStats();
@@ -146,10 +153,12 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.enableParallelExecution = options.config.enableParallelExecution;
             cfg.includeDebugInfo = options.config.includeDebugInfo;
 
-            spdlog::info(
-                "SearchEngine auto-tuned to state={} (k={}, text={:.2f}, vector={:.2f}, fusion={})",
-                tuningStateToString(tuner.currentState()), tuner.getRrfK(), cfg.textWeight,
-                cfg.vectorWeight, SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy));
+            spdlog::info("SearchEngine auto-tuned to state={} (k={}, text={:.2f}, vector={:.2f}, "
+                         "fusion={}, semantic_rescue={}@{:.4f})",
+                         tuningStateToString(tuner.currentState()), tuner.getRrfK(), cfg.textWeight,
+                         cfg.vectorWeight,
+                         SearchEngineConfig::fusionStrategyToString(cfg.fusionStrategy),
+                         cfg.semanticRescueSlots, cfg.semanticRescueMinVectorScore);
         } else {
             spdlog::warn("SearchTuner: failed to get corpus stats ({}), using default config",
                          statsResult.error().message);
@@ -201,6 +210,11 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.conceptBoostWeight = std::clamp(*conceptBoostWeight, 0.0f, 1.0f);
             spdlog::info("SearchEngine conceptBoostWeight overridden to {:.3f} via env",
                          cfg.conceptBoostWeight);
+        }
+        if (auto waitForConcepts = getEnvBool("YAMS_SEARCH_WAIT_FOR_CONCEPTS")) {
+            cfg.waitForConceptExtraction = *waitForConcepts;
+            spdlog::info("SearchEngine waitForConceptExtraction overridden to {} via env",
+                         cfg.waitForConceptExtraction);
         }
     }
 
@@ -282,6 +296,49 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.lexicalExpansionScorePenalty = std::clamp(*lexicalPenalty, 0.1f, 1.0f);
             spdlog::info("SearchEngine lexicalExpansionScorePenalty overridden to {:.2f} via env",
                          cfg.lexicalExpansionScorePenalty);
+        }
+
+        if (auto dedupByPath = getEnvBool("YAMS_SEARCH_ENABLE_PATH_DEDUP")) {
+            cfg.enablePathDedupInFusion = *dedupByPath;
+            spdlog::info("SearchEngine enablePathDedupInFusion overridden to {} via env",
+                         cfg.enablePathDedupInFusion);
+        }
+
+        if (auto lexicalFloorTopN = getEnvInt("YAMS_SEARCH_LEXICAL_FLOOR_TOPN")) {
+            cfg.lexicalFloorTopN = static_cast<size_t>(std::max(0, *lexicalFloorTopN));
+            spdlog::info("SearchEngine lexicalFloorTopN overridden to {} via env",
+                         cfg.lexicalFloorTopN);
+        }
+
+        if (auto lexicalFloorBoost = getEnvFloat("YAMS_SEARCH_LEXICAL_FLOOR_BOOST")) {
+            cfg.lexicalFloorBoost = std::clamp(*lexicalFloorBoost, 0.0f, 1.0f);
+            spdlog::info("SearchEngine lexicalFloorBoost overridden to {:.3f} via env",
+                         cfg.lexicalFloorBoost);
+        }
+
+        if (auto lexicalTieBreak = getEnvBool("YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK")) {
+            cfg.enableLexicalTieBreak = *lexicalTieBreak;
+            spdlog::info("SearchEngine enableLexicalTieBreak overridden to {} via env",
+                         cfg.enableLexicalTieBreak);
+        }
+
+        if (auto lexicalTieBreakEps = getEnvFloat("YAMS_SEARCH_LEXICAL_TIEBREAK_EPS")) {
+            cfg.lexicalTieBreakEpsilon = std::max(0.0f, *lexicalTieBreakEps);
+            spdlog::info("SearchEngine lexicalTieBreakEpsilon overridden to {:.4f} via env",
+                         cfg.lexicalTieBreakEpsilon);
+        }
+
+        if (auto semanticRescueSlots = getEnvInt("YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS")) {
+            cfg.semanticRescueSlots = static_cast<size_t>(std::max(0, *semanticRescueSlots));
+            spdlog::info("SearchEngine semanticRescueSlots overridden to {} via env",
+                         cfg.semanticRescueSlots);
+        }
+
+        if (auto semanticRescueMinVector =
+                getEnvFloat("YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE")) {
+            cfg.semanticRescueMinVectorScore = std::max(0.0f, *semanticRescueMinVector);
+            spdlog::info("SearchEngine semanticRescueMinVectorScore overridden to {:.4f} via env",
+                         cfg.semanticRescueMinVectorScore);
         }
 
         if (auto rerankingEnabled = getEnvBool("YAMS_SEARCH_ENABLE_RERANKING")) {
@@ -387,6 +444,27 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.adaptiveVectorSkipMinTier1Hits = static_cast<size_t>(std::max(0, *adaptiveMinHits));
             spdlog::info("SearchEngine adaptiveVectorSkipMinTier1Hits overridden to {} via env",
                          cfg.adaptiveVectorSkipMinTier1Hits);
+        }
+
+        if (auto adaptiveRequireText = getEnvBool("YAMS_SEARCH_ADAPTIVE_REQUIRE_TEXT_SIGNAL")) {
+            cfg.adaptiveVectorSkipRequireTextSignal = *adaptiveRequireText;
+            spdlog::info(
+                "SearchEngine adaptiveVectorSkipRequireTextSignal overridden to {} via env",
+                cfg.adaptiveVectorSkipRequireTextSignal);
+        }
+
+        if (auto adaptiveMinTextHits = getEnvInt("YAMS_SEARCH_ADAPTIVE_MIN_TEXT_HITS")) {
+            cfg.adaptiveVectorSkipMinTextHits =
+                static_cast<size_t>(std::max(0, *adaptiveMinTextHits));
+            spdlog::info("SearchEngine adaptiveVectorSkipMinTextHits overridden to {} via env",
+                         cfg.adaptiveVectorSkipMinTextHits);
+        }
+
+        if (auto adaptiveMinTopText = getEnvFloat("YAMS_SEARCH_ADAPTIVE_MIN_TOP_TEXT_SCORE")) {
+            cfg.adaptiveVectorSkipMinTopTextScore = std::clamp(*adaptiveMinTopText, 0.0f, 1.0f);
+            spdlog::info(
+                "SearchEngine adaptiveVectorSkipMinTopTextScore overridden to {:.3f} via env",
+                cfg.adaptiveVectorSkipMinTopTextScore);
         }
     }
 

@@ -32,6 +32,8 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <type_traits>
+#include <unordered_set>
 
 namespace yams::daemon {
 
@@ -90,7 +92,19 @@ adoptPluginInterfaceImpl(AbiPluginHost* host, const std::string& interfaceName,
             continue;
 
         try {
-            auto adapter = std::make_shared<AdapterType>(table);
+            std::shared_ptr<void> keepalive;
+            auto keepaliveRes = host->acquireKeepAlive(descriptor.name);
+            if (keepaliveRes) {
+                keepalive = std::move(keepaliveRes.value());
+            }
+
+            std::shared_ptr<AdapterType> adapter;
+            if constexpr (std::is_constructible_v<AdapterType, AbiTableType*,
+                                                  std::shared_ptr<void>>) {
+                adapter = std::make_shared<AdapterType>(table, std::move(keepalive));
+            } else {
+                adapter = std::make_shared<AdapterType>(table);
+            }
             targetContainer.push_back(std::move(adapter));
             ++adopted;
             spdlog::info("Adopted {} from plugin: {}", interfaceName, descriptor.name);
@@ -401,6 +415,7 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
 
         // Collect load tasks
         std::vector<boost::asio::awaitable<Result<PluginDescriptor>>> loadTasks;
+        std::unordered_set<std::string> scheduledPluginNames;
 
         for (const auto& root : roots) {
             spdlog::info("[PluginManager] scanning: {}", root.string());
@@ -437,6 +452,14 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
                 }
                 auto path = desc.path;
                 auto pluginName = desc.name;
+
+                if (!scheduledPluginNames.insert(pluginName).second) {
+                    spdlog::info(
+                        "[PluginManager] skipping duplicate plugin candidate '{}' from '{}'"
+                        " (already scheduled)",
+                        pluginName, path.string());
+                    continue;
+                }
 
                 // Look up plugin-specific config from DaemonConfig
                 // Try multiple name variants: the config may use a short name (e.g., "glint")
@@ -682,7 +705,13 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                              pluginName, table->abi_version, YAMS_IFACE_MODEL_PROVIDER_V1_VERSION);
             }
 
-            modelProvider_ = std::make_shared<AbiModelProviderAdapter>(table);
+            std::shared_ptr<void> keepalive;
+            auto keepaliveRes = getActivePluginHost()->acquireKeepAlive(pluginName);
+            if (keepaliveRes) {
+                keepalive = std::move(keepaliveRes.value());
+            }
+
+            modelProvider_ = std::make_shared<AbiModelProviderAdapter>(table, std::move(keepalive));
             adoptedProviderPluginName_ = pluginName;
 
             if (deps_.state) {

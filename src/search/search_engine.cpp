@@ -707,6 +707,13 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
     struct Accumulator {
         double score = 0.0;
         size_t componentCount = 0;
+        size_t bestTextRank = std::numeric_limits<size_t>::max();
+        double keywordScore = 0.0;
+        double pathScore = 0.0;
+        double tagScore = 0.0;
+        double symbolScore = 0.0;
+        double vectorScore = 0.0;
+        std::string documentHash;
         std::string filePath;
         std::string snippet;
     };
@@ -714,15 +721,35 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
     accumMap.reserve(results.size());
 
     const float k = config_.rrfK;
+    const auto dedupKeyForComponent = [this](const ComponentResult& comp) {
+        if (config_.enablePathDedupInFusion && !comp.filePath.empty()) {
+            return std::string("path:") + comp.filePath;
+        }
+        if (!comp.documentHash.empty()) {
+            return std::string("hash:") + comp.documentHash;
+        }
+        if (!comp.filePath.empty()) {
+            return std::string("path:") + comp.filePath;
+        }
+        return std::string("unknown:");
+    };
 
     for (const auto& comp : results) {
-        auto& acc = accumMap[comp.documentHash];
+        const std::string dedupKey = dedupKeyForComponent(comp);
+        auto& acc = accumMap[dedupKey];
 
         if (acc.componentCount == 0) {
+            acc.documentHash = comp.documentHash;
             acc.filePath = comp.filePath;
             if (comp.snippet.has_value()) {
                 acc.snippet = comp.snippet.value();
             }
+        } else if (acc.filePath.empty() && !comp.filePath.empty()) {
+            acc.filePath = comp.filePath;
+        }
+
+        if (comp.source == ComponentResult::Source::Text) {
+            acc.bestTextRank = std::min(acc.bestTextRank, comp.rank);
         }
 
         float weight = getComponentWeight(comp.source);
@@ -732,6 +759,29 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
 
         acc.score += contribution;
         acc.componentCount++;
+
+        switch (comp.source) {
+            case ComponentResult::Source::Text:
+                acc.keywordScore += contribution;
+                break;
+            case ComponentResult::Source::PathTree:
+                acc.pathScore += contribution;
+                break;
+            case ComponentResult::Source::Tag:
+            case ComponentResult::Source::Metadata:
+                acc.tagScore += contribution;
+                break;
+            case ComponentResult::Source::Symbol:
+                acc.symbolScore += contribution;
+                break;
+            case ComponentResult::Source::Vector:
+            case ComponentResult::Source::EntityVector:
+                acc.vectorScore += contribution;
+                break;
+            case ComponentResult::Source::KnowledgeGraph:
+            case ComponentResult::Source::Unknown:
+                break;
+        }
     }
 
     std::vector<SearchResult> fusedResults;
@@ -739,22 +789,143 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
 
     for (auto& entry : accumMap) {
         SearchResult r;
-        r.document.sha256Hash = entry.first;
+        r.document.sha256Hash = std::move(entry.second.documentHash);
         r.document.filePath = std::move(entry.second.filePath);
         r.score = static_cast<float>(entry.second.score * entry.second.componentCount);
+        if (entry.second.keywordScore > 0.0) {
+            r.keywordScore = entry.second.keywordScore;
+        }
+        if (entry.second.pathScore > 0.0) {
+            r.pathScore = entry.second.pathScore;
+        }
+        if (entry.second.tagScore > 0.0) {
+            r.tagScore = entry.second.tagScore;
+        }
+        if (entry.second.symbolScore > 0.0) {
+            r.symbolScore = entry.second.symbolScore;
+        }
+        if (entry.second.vectorScore > 0.0) {
+            r.vectorScore = entry.second.vectorScore;
+        }
+
+        if (config_.lexicalFloorBoost > 0.0f &&
+            entry.second.bestTextRank != std::numeric_limits<size_t>::max()) {
+            const bool floorEnabledForRank = (config_.lexicalFloorTopN == 0) ||
+                                             (entry.second.bestTextRank < config_.lexicalFloorTopN);
+            if (floorEnabledForRank) {
+                const double floorBoost =
+                    std::clamp(static_cast<double>(config_.lexicalFloorBoost), 0.0, 1.0) /
+                    (1.0 + static_cast<double>(entry.second.bestTextRank));
+                r.score += floorBoost;
+            }
+        }
+
         r.snippet = std::move(entry.second.snippet);
         fusedResults.push_back(std::move(r));
     }
 
+    const auto lexicalAnchorScore = [](const SearchResult& r) {
+        return r.keywordScore.value_or(0.0) + r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0) +
+               r.symbolScore.value_or(0.0);
+    };
+
+    const auto isVectorOnlyRescueCandidate = [this,
+                                              &lexicalAnchorScore](const SearchResult& r) -> bool {
+        const double lexical = lexicalAnchorScore(r);
+        const double vector = r.vectorScore.value_or(0.0);
+        return lexical <= 0.0 &&
+               vector >= std::max(0.0, static_cast<double>(config_.semanticRescueMinVectorScore));
+    };
+
+    const auto lexicalAwareLess = [this, &lexicalAnchorScore](const SearchResult& a,
+                                                              const SearchResult& b) {
+        const double scoreDiff = a.score - b.score;
+        const double tieEpsilon =
+            std::max(0.0, static_cast<double>(config_.lexicalTieBreakEpsilon));
+
+        if (!config_.enableLexicalTieBreak || std::abs(scoreDiff) > tieEpsilon) {
+            if (a.score != b.score) {
+                return a.score > b.score;
+            }
+        } else {
+            const double lexicalA = lexicalAnchorScore(a);
+            const double lexicalB = lexicalAnchorScore(b);
+            if (lexicalA != lexicalB) {
+                return lexicalA > lexicalB;
+            }
+
+            const double keywordA = a.keywordScore.value_or(0.0);
+            const double keywordB = b.keywordScore.value_or(0.0);
+            if (keywordA != keywordB) {
+                return keywordA > keywordB;
+            }
+
+            const double vectorA = a.vectorScore.value_or(0.0);
+            const double vectorB = b.vectorScore.value_or(0.0);
+            if (vectorA != vectorB) {
+                return vectorA < vectorB;
+            }
+        }
+
+        if (a.document.filePath != b.document.filePath) {
+            return a.document.filePath < b.document.filePath;
+        }
+        return a.document.sha256Hash < b.document.sha256Hash;
+    };
+
     if (fusedResults.size() > config_.maxResults) {
-        std::partial_sort(
-            fusedResults.begin(), fusedResults.begin() + static_cast<ptrdiff_t>(config_.maxResults),
-            fusedResults.end(),
-            [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+        std::partial_sort(fusedResults.begin(),
+                          fusedResults.begin() + static_cast<ptrdiff_t>(config_.maxResults),
+                          fusedResults.end(), lexicalAwareLess);
+
+        if (config_.semanticRescueSlots > 0) {
+            const size_t topK = config_.maxResults;
+            const size_t rescueTarget = std::min(config_.semanticRescueSlots, topK);
+            size_t rescuePresent = 0;
+            for (size_t i = 0; i < topK; ++i) {
+                if (isVectorOnlyRescueCandidate(fusedResults[i])) {
+                    rescuePresent++;
+                }
+            }
+
+            while (rescuePresent < rescueTarget) {
+                size_t bestTailIndex = fusedResults.size();
+                for (size_t i = topK; i < fusedResults.size(); ++i) {
+                    if (!isVectorOnlyRescueCandidate(fusedResults[i])) {
+                        continue;
+                    }
+                    if (bestTailIndex >= fusedResults.size() ||
+                        lexicalAwareLess(fusedResults[i], fusedResults[bestTailIndex])) {
+                        bestTailIndex = i;
+                    }
+                }
+                if (bestTailIndex >= fusedResults.size()) {
+                    break;
+                }
+
+                size_t victimIndex = topK;
+                for (size_t i = topK; i > 0; --i) {
+                    const size_t idx = i - 1;
+                    if (!isVectorOnlyRescueCandidate(fusedResults[idx])) {
+                        victimIndex = idx;
+                        break;
+                    }
+                }
+                if (victimIndex >= topK) {
+                    break;
+                }
+
+                std::swap(fusedResults[victimIndex], fusedResults[bestTailIndex]);
+                rescuePresent++;
+            }
+
+            std::sort(fusedResults.begin(), fusedResults.begin() + static_cast<ptrdiff_t>(topK),
+                      lexicalAwareLess);
+        }
+
         fusedResults.resize(config_.maxResults);
     } else {
-        std::sort(fusedResults.begin(), fusedResults.end(),
-                  [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+        std::sort(fusedResults.begin(), fusedResults.end(), lexicalAwareLess);
     }
 
     return fusedResults;
@@ -1174,16 +1345,44 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 (config_.adaptiveVectorSkipMinTier1Hits > 0)
                     ? config_.adaptiveVectorSkipMinTier1Hits
                     : std::max<size_t>(workingConfig.maxResults * 2, static_cast<size_t>(50));
+
+            size_t tier1TextHits = 0;
+            float tier1TopTextScore = 0.0f;
+            for (const auto& componentResult : allComponentResults) {
+                if (componentResult.source == ComponentResult::Source::Text) {
+                    tier1TextHits++;
+                    tier1TopTextScore = std::max(tier1TopTextScore, componentResult.score);
+                }
+            }
+
+            bool hasStrongTextSignal = true;
+            if (config_.adaptiveVectorSkipRequireTextSignal) {
+                hasStrongTextSignal =
+                    tier1TextHits >= config_.adaptiveVectorSkipMinTextHits &&
+                    tier1TopTextScore >= config_.adaptiveVectorSkipMinTopTextScore;
+            }
+
             const bool shouldSkipSemantic = config_.enableAdaptiveVectorFallback &&
-                                            (tier1CandidateCount >= adaptiveSkipMinHits);
+                                            (tier1CandidateCount >= adaptiveSkipMinHits) &&
+                                            hasStrongTextSignal;
 
             if (shouldSkipSemantic) {
                 skipped.push_back("vector");
                 skipped.push_back("entity_vector");
                 spdlog::debug("Tiered search: skipping embedding/vector tier (tier1 candidates={} "
-                              ">= threshold={})",
-                              tier1CandidateCount, adaptiveSkipMinHits);
+                              ">= threshold={}, text_hits={}, top_text_score={:.3f})",
+                              tier1CandidateCount, adaptiveSkipMinHits, tier1TextHits,
+                              tier1TopTextScore);
             } else {
+                if (config_.enableAdaptiveVectorFallback &&
+                    tier1CandidateCount >= adaptiveSkipMinHits && !hasStrongTextSignal) {
+                    spdlog::debug("Tiered search: retaining semantic tier due to weak text signal "
+                                  "(tier1 candidates={}, text_hits={}, top_text_score={:.3f}, "
+                                  "min_text_hits={}, min_top_text_score={:.3f})",
+                                  tier1CandidateCount, tier1TextHits, tier1TopTextScore,
+                                  config_.adaptiveVectorSkipMinTextHits,
+                                  config_.adaptiveVectorSkipMinTopTextScore);
+                }
                 // Await embedding result (eager or lazily started depending on config).
                 awaitEmbedding();
             }
@@ -1533,8 +1732,21 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
 
     std::vector<QueryConcept> concepts;
-    if (conceptFuture.valid() &&
-        conceptFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+    std::future_status conceptStatus = std::future_status::deferred;
+    if (conceptFuture.valid()) {
+        if (workingConfig.waitForConceptExtraction) {
+            if (workingConfig.componentTimeout.count() > 0) {
+                conceptStatus = conceptFuture.wait_for(workingConfig.componentTimeout);
+            } else {
+                conceptFuture.wait();
+                conceptStatus = std::future_status::ready;
+            }
+        } else {
+            conceptStatus = conceptFuture.wait_for(std::chrono::seconds(0));
+        }
+    }
+
+    if (conceptFuture.valid() && conceptStatus == std::future_status::ready) {
         auto conceptEnd = std::chrono::steady_clock::now();
         componentTiming["concepts"] =
             std::chrono::duration_cast<std::chrono::microseconds>(conceptEnd - conceptStart)
@@ -1552,6 +1764,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 concepts.resize(workingConfig.conceptMaxCount);
             }
         }
+    } else if (conceptFuture.valid() && workingConfig.waitForConceptExtraction &&
+               conceptStatus == std::future_status::timeout) {
+        timedOut.push_back("concepts");
     }
 
     // Cross-encoder reranking: second-stage ranking for improved relevance
@@ -1782,6 +1997,41 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.results.resize(userLimit);
     }
 
+    const auto lexicalAnchorScore = [](const SearchResult& r) {
+        return r.keywordScore.value_or(0.0) + r.pathScore.value_or(0.0) + r.tagScore.value_or(0.0) +
+               r.symbolScore.value_or(0.0);
+    };
+
+    size_t semanticRescueFinalCount = 0;
+    if (config_.semanticRescueSlots > 0 && !response.results.empty()) {
+        const double minVectorScore =
+            std::max(0.0, static_cast<double>(config_.semanticRescueMinVectorScore));
+        for (const auto& result : response.results) {
+            if (lexicalAnchorScore(result) <= 0.0 &&
+                result.vectorScore.value_or(0.0) >= minVectorScore) {
+                semanticRescueFinalCount++;
+            }
+        }
+    }
+    const size_t semanticRescueTarget =
+        std::min(config_.semanticRescueSlots, response.results.size());
+    const double semanticRescueRate = semanticRescueTarget > 0
+                                          ? static_cast<double>(semanticRescueFinalCount) /
+                                                static_cast<double>(semanticRescueTarget)
+                                          : 0.0;
+
+    response.debugStats["semantic_rescue_enabled"] = config_.semanticRescueSlots > 0 ? "1" : "0";
+    response.debugStats["semantic_rescue_slots"] = std::to_string(config_.semanticRescueSlots);
+    response.debugStats["semantic_rescue_target"] = std::to_string(semanticRescueTarget);
+    response.debugStats["semantic_rescue_final_count"] = std::to_string(semanticRescueFinalCount);
+    response.debugStats["semantic_rescue_rate"] = fmt::format("{:.3f}", semanticRescueRate);
+    if (config_.semanticRescueSlots > 0 && !response.results.empty()) {
+        spdlog::debug(
+            "[semantic_rescue] final_count={} target={} rate={:.3f} min_vector_score={:.4f}",
+            semanticRescueFinalCount, semanticRescueTarget, semanticRescueRate,
+            config_.semanticRescueMinVectorScore);
+    }
+
     if (!response.results.empty()) {
         std::unordered_map<std::string_view, size_t> extCounts;
         for (const auto& r : response.results) {
@@ -1914,6 +2164,17 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             {"vector_only_near_miss_reserve", config_.vectorOnlyNearMissReserve},
             {"vector_only_near_miss_slack", config_.vectorOnlyNearMissSlack},
             {"vector_only_near_miss_penalty", config_.vectorOnlyNearMissPenalty},
+            {"semantic_rescue_slots", config_.semanticRescueSlots},
+            {"semantic_rescue_min_vector_score", config_.semanticRescueMinVectorScore},
+            {"semantic_rescue_target", semanticRescueTarget},
+            {"semantic_rescue_final_count", semanticRescueFinalCount},
+            {"semantic_rescue_rate", semanticRescueRate},
+            {"adaptive_vector_fallback", config_.enableAdaptiveVectorFallback},
+            {"adaptive_vector_skip_min_tier1_hits", config_.adaptiveVectorSkipMinTier1Hits},
+            {"adaptive_vector_skip_require_text_signal",
+             config_.adaptiveVectorSkipRequireTextSignal},
+            {"adaptive_vector_skip_min_text_hits", config_.adaptiveVectorSkipMinTextHits},
+            {"adaptive_vector_skip_min_top_text_score", config_.adaptiveVectorSkipMinTopTextScore},
             {"vector_only_below_top_doc_ids", vectorOnlyBelowTop},
             {"vector_only_above_top_doc_ids", vectorOnlyAboveTop},
         };

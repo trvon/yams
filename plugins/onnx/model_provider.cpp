@@ -64,6 +64,8 @@ static bool isColbertModelName(const std::string& name) {
 
 struct ProviderCtx;
 
+extern "C" yams_model_provider_v1* yams_onnx_get_model_provider();
+
 static bool envTruthy(const char* value) {
     if (!value || !*value) {
         return false;
@@ -665,6 +667,27 @@ static bool shutdownInProgress(const ProviderCtx* c) {
     return envTruthy(std::getenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS"));
 }
 
+static ProviderCtx* refreshCtxIfStaleShutdown(ProviderCtx* c) {
+    if (!c) {
+        return nullptr;
+    }
+
+    const bool marker = envTruthy(std::getenv("YAMS_ONNX_SHUTDOWN_IN_PROGRESS"));
+    if (marker || !c->shutdownRequested.load(std::memory_order_acquire)) {
+        return c;
+    }
+
+    // Stale in-process lifecycle: provider self pointer still references a shutdown context
+    // from a prior daemon instance. Force provider revival via canonical accessor.
+    auto* provider = yams_onnx_get_model_provider();
+    if (provider && provider->self) {
+        spdlog::info("[ONNX Plugin] Revived stale provider context after prior shutdown");
+        return static_cast<ProviderCtx*>(provider->self);
+    }
+
+    return c;
+}
+
 // Helpers for progress emission
 static void emit_progress(ProviderCtx* ctx, const char* model, int phase, const char* msg,
                           uint64_t cur = 0, uint64_t tot = 0) {
@@ -682,9 +705,30 @@ struct ProviderSingleton {
 
     std::atomic<bool> shutdownCalled{false};
     std::atomic<bool> explicitShutdownCalled{false}; // Set by yams_onnx_shutdown_provider()
+    std::mutex lifecycleMu;
+
+    void ensureActive() {
+        std::lock_guard<std::mutex> lk(lifecycleMu);
+        if (!shutdownCalled.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        spdlog::info("[ONNX Plugin] Reviving provider after explicit shutdown");
+
+        try {
+            ctx.~ProviderCtx();
+        } catch (...) {
+        }
+        new (&ctx) ProviderCtx();
+        vtable.self = &ctx;
+
+        shutdownCalled.store(false, std::memory_order_release);
+        explicitShutdownCalled.store(false, std::memory_order_release);
+    }
 
     void shutdown(bool isExplicit = false) noexcept {
-        if (shutdownCalled.exchange(true)) {
+        std::lock_guard<std::mutex> lk(lifecycleMu);
+        if (shutdownCalled.exchange(true, std::memory_order_acq_rel)) {
             return;
         }
 
@@ -956,7 +1000,7 @@ struct ProviderSingleton {
             // boundary. On Windows, ONNX Runtime can throw std::system_error("resource deadlock
             // would occur") when thread pool resources are exhausted (PBI-1c1).
             try {
-                auto* c = static_cast<ProviderCtx*>(self);
+                auto* c = refreshCtxIfStaleShutdown(static_cast<ProviderCtx*>(self));
                 if (c->disabled) {
                     spdlog::warn("[ONNX Plugin] generate_embedding: plugin disabled");
                     return YAMS_ERR_UNSUPPORTED;
@@ -1097,11 +1141,12 @@ struct ProviderSingleton {
                 return YAMS_ERR_INVALID_ARG;
             }
 
-            auto* c = static_cast<ProviderCtx*>(self);
+            auto* c = refreshCtxIfStaleShutdown(static_cast<ProviderCtx*>(self));
             int retries = shutdownInProgress(c) ? 1 : 3;
             while (retries > 0) {
                 retries--;
                 try {
+                    c = refreshCtxIfStaleShutdown(c);
                     const bool timingDebug = []() {
                         if (const char* s = std::getenv("YAMS_ONNX_DEBUG_BATCH_TIMINGS")) {
                             return std::string{s} == "1" || std::string{s} == "true" ||
@@ -1800,7 +1845,9 @@ extern "C" void yams_onnx_shutdown_provider() {
 }
 
 extern "C" yams_model_provider_v1* yams_onnx_get_model_provider() {
-    return &singleton().vtable;
+    auto& s = singleton();
+    s.ensureActive();
+    return &s.vtable;
 }
 
 // Provide a small JSON health snapshot for the ABI host

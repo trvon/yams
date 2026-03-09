@@ -50,6 +50,7 @@
 #include "tests/integration/daemon/test_async_helpers.h"
 #include "tests/integration/daemon/test_daemon_harness.h"
 #include <yams/cli/search_runner.h>
+#include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
 
 #include <algorithm>
@@ -70,6 +71,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 #include <yams/compat/unistd.h>
 
@@ -504,6 +506,7 @@ struct BEIRCorpusLoader {
 
 struct RetrievalMetrics {
     double mrr = 0.0, recallAtK = 0.0, precisionAtK = 0.0, ndcgAtK = 0.0, map = 0.0;
+    double duplicateRateAtK = 0.0;
     int numQueries = 0;
 };
 
@@ -643,10 +646,19 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
              {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
              {"YAMS_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_DISABLE_SEARCH_REBUILDS", "0"},
              {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
              {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", std::nullopt},
              {"YAMS_CANDIDATE_MULTIPLIER", std::nullopt},
              {"YAMS_FUSION_STRATEGY", std::nullopt},
+         }},
+        {"mixed_precision_profile",
+         "MIXED precision preset with lexical and vector guardrails",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
          }},
         {"mixed_default",
          "Code/mixed tuned state with benchmark defaults",
@@ -655,6 +667,107 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
              {"YAMS_TUNING_OVERRIDE", "MIXED"},
              {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+         }},
+        {"mixed_precision_lexical_floor",
+         "MIXED defaults + lexical floor to preserve top text hits",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "8"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.12"},
+         }},
+        {"mixed_precision_path_dedup",
+         "MIXED defaults + path-based fusion dedup",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_PATH_DEDUP", "1"},
+         }},
+        {"mixed_precision_lexical_floor_path_dedup",
+         "MIXED defaults + lexical floor + path dedup",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_PATH_DEDUP", "1"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "8"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.12"},
+         }},
+        {"mixed_precision_lexical_floor_strong",
+         "MIXED defaults + stronger lexical floor",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "12"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.20"},
+         }},
+        {"mixed_precision_lexical_floor_path_dedup_strong",
+         "MIXED defaults + strong lexical floor + path dedup",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_PATH_DEDUP", "1"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "12"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.20"},
+         }},
+        {"mixed_precision_lexical_floor_path_dedup_aggressive",
+         "MIXED defaults + aggressive lexical floor + path dedup",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_PATH_DEDUP", "1"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "20"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.30"},
+         }},
+        {"mixed_precision_lexical_floor_path_dedup_vector_dampen",
+         "MIXED defaults + lexical floor + path dedup + lower vector influence",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_PATH_DEDUP", "1"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "12"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.20"},
+             {"YAMS_SEARCH_VECTOR_WEIGHT", "0.18"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.94"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.70"},
+         }},
+        {"mixed_precision_lexical_floor_strong_tiebreak",
+         "MIXED stronger lexical floor with lexical tie-break",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "12"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.20"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+         }},
+        {"mixed_precision_lexical_floor_path_dedup_strong_tiebreak",
+         "MIXED strong lexical floor + path dedup + lexical tie-break",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_ENABLE_PATH_DEDUP", "1"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "12"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.20"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
          }},
         {"small_code_precision",
          "Code-heavy state with stronger lexical/entity bias",
@@ -920,6 +1033,16 @@ static std::set<std::string> parseCandidateFilter(const char* raw) {
     return selected;
 }
 
+static double computeHybridRegressionPenalty(const RetrievalMetrics& hybrid,
+                                             const RetrievalMetrics& keyword) {
+    const double hybridMrrLoss = std::max(0.0, keyword.mrr - hybrid.mrr);
+    return std::min(0.12, hybridMrrLoss * 2.0);
+}
+
+static double computeDuplicatePenalty(const RetrievalMetrics& hybrid) {
+    return std::min(0.08, std::max(0.0, hybrid.duplicateRateAtK) * 0.30);
+}
+
 static double computeOptimizationObjective(const RetrievalMetrics& hybrid,
                                            const RetrievalMetrics& keyword,
                                            double avgHybridQueryMs) {
@@ -927,8 +1050,10 @@ static double computeOptimizationObjective(const RetrievalMetrics& hybrid,
     const double quality =
         0.40 * hybrid.mrr + 0.30 * hybrid.ndcgAtK + 0.20 * hybrid.recallAtK + 0.10 * hybrid.map;
     const double hybridGain = std::max(0.0, hybrid.mrr - keyword.mrr);
+    const double regressionPenalty = computeHybridRegressionPenalty(hybrid, keyword);
+    const double duplicatePenalty = computeDuplicatePenalty(hybrid);
     const double latencyPenalty = std::min(0.10, std::max(0.0, avgHybridQueryMs) / 8000.0);
-    return quality + 0.10 * hybridGain - latencyPenalty;
+    return quality + 0.10 * hybridGain - regressionPenalty - duplicatePenalty - latencyPenalty;
 }
 
 static void appendOptimizationResultJson(const fs::path& outputFile,
@@ -949,6 +1074,15 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
     j["tuning_state"] = result.tuningState;
     j["tuning_reason"] = result.tuningReason;
     j["error"] = result.errorMessage;
+    j["hybrid_keyword_mrr_delta"] = result.hybridMetrics.mrr - result.keywordMetrics.mrr;
+
+    const double objectiveRegressionPenalty =
+        computeHybridRegressionPenalty(result.hybridMetrics, result.keywordMetrics);
+    const double objectiveDuplicatePenalty = computeDuplicatePenalty(result.hybridMetrics);
+    j["objective_penalties"] = {
+        {"hybrid_regression", objectiveRegressionPenalty},
+        {"duplicate_rate", objectiveDuplicatePenalty},
+    };
 
     j["hybrid"] = {
         {"mrr", result.hybridMetrics.mrr},
@@ -956,6 +1090,7 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
         {"precision_at_k", result.hybridMetrics.precisionAtK},
         {"ndcg_at_k", result.hybridMetrics.ndcgAtK},
         {"map", result.hybridMetrics.map},
+        {"duplicate_rate_at_k", result.hybridMetrics.duplicateRateAtK},
         {"num_queries", result.hybridMetrics.numQueries},
     };
 
@@ -965,6 +1100,7 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
         {"precision_at_k", result.keywordMetrics.precisionAtK},
         {"ndcg_at_k", result.keywordMetrics.ndcgAtK},
         {"map", result.keywordMetrics.map},
+        {"duplicate_rate_at_k", result.keywordMetrics.duplicateRateAtK},
         {"num_queries", result.keywordMetrics.numQueries},
     };
 
@@ -1005,6 +1141,8 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
     std::uint64_t streamingCount = 0;
     std::uint64_t fuzzyRetryCount = 0;
     std::uint64_t literalRetryCount = 0;
+    std::uint64_t duplicateTopKCount = 0;
+    std::uint64_t totalTopKCount = 0;
 
     for (const auto& tq : queries) {
         yams::cli::search_runner::DaemonSearchOptions opts;
@@ -1113,6 +1251,8 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         int firstRelevantRank = -1, numRelevantInTopK = 0, numRelevantSeen = 0;
         std::vector<int> retrievedGrades;
         double avgPrecision = 0.0;
+        std::unordered_set<std::string> seenTopKDocIds;
+        seenTopKDocIds.reserve(std::min((size_t)k, results.size()));
 
         for (size_t i = 0; i < std::min((size_t)k, results.size()); ++i) {
             debugEntry.returnedPaths.push_back(results[i].path);
@@ -1136,7 +1276,14 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
                 isRelevant = tq.relevantFiles.count(filename) > 0;
             }
 
-            if (isRelevant) {
+            totalTopKCount++;
+            const bool isDuplicate = !seenTopKDocIds.insert(key).second;
+            if (isDuplicate) {
+                duplicateTopKCount++;
+                debugEntry.diagnostics.push_back("duplicate_topk_doc=" + key);
+            }
+
+            if (isRelevant && !isDuplicate) {
                 numRelevantInTopK++;
                 if (firstRelevantRank < 0)
                     firstRelevantRank = i + 1;
@@ -1144,7 +1291,8 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
                 avgPrecision += (double)numRelevantSeen / (i + 1);
             }
             auto gradeIt = tq.relevanceGrades.find(key);
-            auto grade = (gradeIt != tq.relevanceGrades.end()) ? gradeIt->second : 0;
+            auto grade =
+                (!isDuplicate && gradeIt != tq.relevanceGrades.end()) ? gradeIt->second : 0;
             retrievedGrades.push_back(grade);
             debugEntry.returnedGrades.push_back(grade);
         }
@@ -1277,12 +1425,16 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         metrics.precisionAtK = totalPrecision / metrics.numQueries;
         metrics.ndcgAtK = totalNDCG / metrics.numQueries;
         metrics.map = totalMAP / metrics.numQueries;
+        if (totalTopKCount > 0) {
+            metrics.duplicateRateAtK =
+                static_cast<double>(duplicateTopKCount) / static_cast<double>(totalTopKCount);
+        }
 
         spdlog::info("Search execution stats: queries={} total_attempts={} avg_attempts={:.2f} "
-                     "streaming={} fuzzy_retries={} literal_retries={}",
+                     "streaming={} fuzzy_retries={} literal_retries={} duplicate_rate@k={:.4f}",
                      metrics.numQueries, totalAttempts,
                      static_cast<double>(totalAttempts) / metrics.numQueries, streamingCount,
-                     fuzzyRetryCount, literalRetryCount);
+                     fuzzyRetryCount, literalRetryCount, metrics.duplicateRateAtK);
     }
     return metrics;
 }
@@ -1400,6 +1552,22 @@ struct BenchFixture {
                    normalized == "on";
         };
 
+        auto ensureEnvDefault = [](const char* key, const char* value) {
+            const char* current = std::getenv(key);
+            if (!(current && std::strlen(current) > 0)) {
+                setenv(key, value, 0);
+            }
+        };
+
+        // Benchmark determinism defaults (can still be overridden by explicit env values).
+        ensureEnvDefault("YAMS_DISABLE_SEARCH_REBUILDS", "1");
+        ensureEnvDefault("YAMS_SEARCH_WAIT_FOR_CONCEPTS", "1");
+        ensureEnvDefault("YAMS_HNSW_RANDOM_SEED", "42");
+        ensureEnvDefault("YAMS_HNSW_PARALLEL_BUILD_THRESHOLD", "0");
+        ensureEnvDefault("YAMS_POST_EMBED_CONCURRENT", "1");
+        ensureEnvDefault("YAMS_POST_EXTRACTION_CONCURRENT", "1");
+        ensureEnvDefault("YAMS_POST_KG_CONCURRENT", "1");
+
         // Benchmark default: graph rerank is ON unless explicitly overridden.
         // Canonical env key used by SearchEngineBuilder is YAMS_SEARCH_ENABLE_GRAPH_RERANK.
         const char* graphRerankCanonical = std::getenv("YAMS_SEARCH_ENABLE_GRAPH_RERANK");
@@ -1414,6 +1582,28 @@ struct BenchFixture {
 
         spdlog::info("[Bench] Effective graph rerank env: YAMS_SEARCH_ENABLE_GRAPH_RERANK={}",
                      graphRerankCanonical ? graphRerankCanonical : "<unset>");
+        spdlog::info(
+            "[Bench] Determinism envs: YAMS_DISABLE_SEARCH_REBUILDS={} "
+            "YAMS_SEARCH_WAIT_FOR_CONCEPTS={} YAMS_HNSW_RANDOM_SEED={} "
+            "YAMS_HNSW_PARALLEL_BUILD_THRESHOLD={} YAMS_POST_EMBED_CONCURRENT={} "
+            "YAMS_POST_EXTRACTION_CONCURRENT={} YAMS_POST_KG_CONCURRENT={}",
+            std::getenv("YAMS_DISABLE_SEARCH_REBUILDS")
+                ? std::getenv("YAMS_DISABLE_SEARCH_REBUILDS")
+                : "<unset>",
+            std::getenv("YAMS_SEARCH_WAIT_FOR_CONCEPTS")
+                ? std::getenv("YAMS_SEARCH_WAIT_FOR_CONCEPTS")
+                : "<unset>",
+            std::getenv("YAMS_HNSW_RANDOM_SEED") ? std::getenv("YAMS_HNSW_RANDOM_SEED") : "<unset>",
+            std::getenv("YAMS_HNSW_PARALLEL_BUILD_THRESHOLD")
+                ? std::getenv("YAMS_HNSW_PARALLEL_BUILD_THRESHOLD")
+                : "<unset>",
+            std::getenv("YAMS_POST_EMBED_CONCURRENT") ? std::getenv("YAMS_POST_EMBED_CONCURRENT")
+                                                      : "<unset>",
+            std::getenv("YAMS_POST_EXTRACTION_CONCURRENT")
+                ? std::getenv("YAMS_POST_EXTRACTION_CONCURRENT")
+                : "<unset>",
+            std::getenv("YAMS_POST_KG_CONCURRENT") ? std::getenv("YAMS_POST_KG_CONCURRENT")
+                                                   : "<unset>");
 
         DaemonHarness::Options harnessOptions;
         harnessOptions.isolateState = true;
@@ -1427,7 +1617,32 @@ struct BenchFixture {
             if (envPluginDir) {
                 harnessOptions.pluginDir = fs::path(envPluginDir);
             } else {
-                harnessOptions.pluginDir = fs::current_path() / "builddir" / "plugins";
+                const fs::path cwd = fs::current_path();
+                const fs::path localPluginDir = cwd / "plugins";
+                const fs::path localOnnxPlugin =
+                    localPluginDir / "onnx" / "libyams_onnx_plugin.dylib";
+
+                const fs::path root = cwd.parent_path();
+                const fs::path nosanPluginDir = root / "builddir-nosan" / "plugins";
+                const fs::path nosanOnnxPlugin =
+                    nosanPluginDir / "onnx" / "libyams_onnx_plugin.dylib";
+                const fs::path defaultPluginDir = root / "builddir" / "plugins";
+                const fs::path defaultOnnxPlugin =
+                    defaultPluginDir / "onnx" / "libyams_onnx_plugin.dylib";
+
+                if (fs::exists(localOnnxPlugin)) {
+                    harnessOptions.pluginDir = localOnnxPlugin.parent_path();
+                } else if (fs::exists(nosanOnnxPlugin)) {
+                    harnessOptions.pluginDir = nosanOnnxPlugin.parent_path();
+                } else if (fs::exists(defaultOnnxPlugin)) {
+                    harnessOptions.pluginDir = defaultOnnxPlugin.parent_path();
+                } else if (fs::exists(localPluginDir)) {
+                    harnessOptions.pluginDir = localPluginDir;
+                } else if (fs::exists(nosanPluginDir)) {
+                    harnessOptions.pluginDir = nosanPluginDir;
+                } else {
+                    harnessOptions.pluginDir = defaultPluginDir;
+                }
             }
             // Use system config for model settings - no hardcoded overrides
             // The benchmark will use whatever preferred_model is set in ~/.config/yams/config.toml
@@ -1570,11 +1785,67 @@ struct BenchFixture {
         clientCfg.connectTimeout = 5s;
         clientCfg.requestTimeout = 300s; // 5 minutes for bulk ingestion
         clientCfg.autoStart = false;
-        client = std::make_unique<yams::daemon::DaemonClient>(clientCfg);
 
-        auto connectResult = yams::cli::run_sync(client->connect(), 5s);
-        if (!connectResult)
-            throw std::runtime_error("Failed to connect: " + connectResult.error().message);
+        auto isEofLikeError = [](const yams::Error& error) {
+            return error.message.find("[ipc:eof]") != std::string::npos ||
+                   error.message.find("End of file") != std::string::npos ||
+                   error.message.find("Connection closed") != std::string::npos;
+        };
+
+        auto connectClientWithProbe = [&](const char* reason) {
+            if (reason && *reason) {
+                spdlog::info("[Bench] Reconnecting benchmark client ({})", reason);
+            }
+
+            client = std::make_unique<yams::daemon::DaemonClient>(clientCfg);
+            auto connectResult = yams::cli::run_sync(client->connect(), 5s);
+            if (!connectResult) {
+                throw std::runtime_error("Failed to connect: " + connectResult.error().message);
+            }
+
+            // Probe the exact selected socket path before ingesting to catch startup races.
+            constexpr int kStatusProbeAttempts = 8;
+            for (int attempt = 1; attempt <= kStatusProbeAttempts; ++attempt) {
+                auto statusProbe = yams::cli::run_sync(client->status(), 5s);
+                if (statusProbe) {
+                    if (attempt > 1) {
+                        spdlog::info("[Bench] Client status probe succeeded after {} attempts",
+                                     attempt);
+                    }
+                    return;
+                }
+
+                if (attempt == kStatusProbeAttempts) {
+                    throw std::runtime_error("Client status probe failed: " +
+                                             statusProbe.error().message);
+                }
+
+                const bool eofLike = isEofLikeError(statusProbe.error());
+                const auto backoff = std::chrono::milliseconds(125 * attempt);
+                spdlog::warn("[Bench] Client status probe attempt {}/{} failed ({}{}), retrying in "
+                             "{}ms",
+                             attempt, kStatusProbeAttempts, statusProbe.error().message,
+                             eofLike ? ", eof-like" : "", backoff.count());
+
+                if (eofLike) {
+                    // Drop any potentially stale pooled transport before retrying.
+                    client.reset();
+                    yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(250));
+                    auto reconnectWait = std::chrono::milliseconds(80);
+                    std::this_thread::sleep_for(reconnectWait);
+                    client = std::make_unique<yams::daemon::DaemonClient>(clientCfg);
+                    auto reconnectResult = yams::cli::run_sync(client->connect(), 5s);
+                    if (!reconnectResult) {
+                        throw std::runtime_error("Failed to reconnect after probe EOF: " +
+                                                 reconnectResult.error().message);
+                    }
+                }
+
+                std::this_thread::sleep_for(backoff);
+            }
+        };
+
+        connectClientWithProbe("initial setup");
 
         // Use directory ingestion for faster bulk add via IndexingService
         fs::path corpusDir = useBEIR ? beirCorpus->corpusDir : corpus->corpusDir;
@@ -1586,7 +1857,29 @@ struct BenchFixture {
         addReq.noEmbeddings = false;
         addReq.includePatterns = {"*.txt"};
 
-        auto addResult = yams::cli::run_sync(client->streamingAddDocument(addReq), 120s);
+        Result<yams::daemon::AddDocumentResponse> addResult =
+            Error{ErrorCode::Unknown, "ingest not attempted"};
+        constexpr int kIngestAttempts = 2;
+        for (int ingestAttempt = 1; ingestAttempt <= kIngestAttempts; ++ingestAttempt) {
+            addResult = yams::cli::run_sync(client->streamingAddDocument(addReq), 120s);
+            if (addResult) {
+                break;
+            }
+
+            const bool eofLike = isEofLikeError(addResult.error());
+            if (!(eofLike && ingestAttempt < kIngestAttempts)) {
+                break;
+            }
+
+            spdlog::warn("[Bench] Directory ingest attempt {}/{} failed with eof-like transport "
+                         "error ({}). Retrying once with a fresh client.",
+                         ingestAttempt, kIngestAttempts, addResult.error().message);
+            client.reset();
+            yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(250));
+            std::this_thread::sleep_for(std::chrono::milliseconds(120));
+            connectClientWithProbe("ingest retry after eof");
+        }
+
         if (!addResult) {
             throw std::runtime_error("Failed to ingest directory: " + addResult.error().message);
         }
@@ -2023,8 +2316,7 @@ struct BenchFixture {
                         preparedDocsQueued != lastPreparedDocsCount ||
                         preparedChunksQueued != lastPreparedChunksCount ||
                         embedQueued != lastEmbedQueuedObserved ||
-                        embedInFlight != lastEmbedInFlightObserved ||
-                        embedDropped != lastEmbedDroppedObserved) {
+                        embedInFlight != lastEmbedInFlightObserved) {
                         metricsChanged = true;
                     }
 
@@ -2128,6 +2420,25 @@ struct BenchFixture {
                         }
                         embeddingDrainSatisfied = true;
                         break;
+                    }
+
+                    if (haveQueueMetrics && stableCount >= 40 && queueDrained &&
+                        docsEmbedded == 0) {
+                        throw std::runtime_error("Embedding failed before benchmark queries (queue "
+                                                 "drained, no documents "
+                                                 "embedded, dropped=" +
+                                                 std::to_string(embedDropped) +
+                                                 "). Check embedding provider/model availability.");
+                    }
+
+                    if (haveQueueMetrics && queueDrained && docsEmbedded == 0 &&
+                        elapsed > std::chrono::seconds(60)) {
+                        throw std::runtime_error(
+                            "Embedding appears unavailable for this candidate (queue drained, no "
+                            "documents embedded after " +
+                            std::to_string(elapsed.count()) +
+                            "s, dropped=" + std::to_string(embedDropped) +
+                            "). Aborting candidate to keep optimization loop progressing.");
                     }
 
                     // If stable but queue NOT drained, warn about potential issues
@@ -2273,8 +2584,14 @@ struct BenchFixture {
 
             const auto kgDeadline =
                 std::chrono::steady_clock::now() + std::chrono::seconds(kgReadyTimeoutSec);
+            int stickyInflightGraceSec = 20;
+            if (const char* env = std::getenv("YAMS_BENCH_KG_STICKY_INFLIGHT_GRACE_SEC")) {
+                stickyInflightGraceSec = std::max(0, std::stoi(env));
+            }
+            const auto stickyInflightGrace = std::chrono::seconds(stickyInflightGraceSec);
             int stableReadyChecks = 0;
             bool kgReady = false;
+            bool acceptedStickyInflight = false;
             bool lastHasKg = false;
             uint32_t lastQueueDepth = 0;
             uint64_t lastPostQueued = 0;
@@ -2284,8 +2601,12 @@ struct BenchFixture {
             uint64_t lastSymbolInflight = 0;
             uint64_t lastEntityInflight = 0;
             uint64_t lastExtractionInflight = 0;
+            bool stickyInflightActive = false;
+            uint64_t stickyInflightValue = 0;
+            auto stickyInflightSince = std::chrono::steady_clock::time_point{};
 
             while (std::chrono::steady_clock::now() < kgDeadline) {
+                const auto now = std::chrono::steady_clock::now();
                 auto statusCheck = yams::cli::run_sync(client->status(), 5s);
                 auto statsCheck =
                     yams::cli::run_sync(client->getStats(yams::daemon::GetStatsRequest{}), 10s);
@@ -2332,12 +2653,35 @@ struct BenchFixture {
                 lastHasKg = hasKg;
                 const bool kgSignalReady = hasKg || (lastKgConsumed > 0);
 
+                const bool queueIdle = (lastQueueDepth == 0 && lastPostQueued == 0);
+                const bool stageInflightIdle =
+                    (lastExtractionInflight == 0 && lastKgInflight == 0 &&
+                     lastSymbolInflight == 0 && lastEntityInflight == 0);
+
+                bool stickyInflightReady = false;
+                if (kgSignalReady && queueIdle && stageInflightIdle && lastPostInflight > 0) {
+                    if (!stickyInflightActive || stickyInflightValue != lastPostInflight) {
+                        stickyInflightActive = true;
+                        stickyInflightValue = lastPostInflight;
+                        stickyInflightSince = now;
+                    } else if (now - stickyInflightSince >= stickyInflightGrace) {
+                        stickyInflightReady = true;
+                    }
+                } else {
+                    stickyInflightActive = false;
+                    stickyInflightValue = 0;
+                }
+
                 if (queuesDrained && kgSignalReady) {
                     stableReadyChecks++;
                     if (stableReadyChecks >= 4) {
                         kgReady = true;
                         break;
                     }
+                } else if (stickyInflightReady) {
+                    kgReady = true;
+                    acceptedStickyInflight = true;
+                    break;
                 } else {
                     stableReadyChecks = 0;
                 }
@@ -2365,6 +2709,11 @@ struct BenchFixture {
                     "KG readiness satisfied via kg_consumed={}, but corpus_stats.has_kg=false "
                     "(low symbol_density). Graph signals may still be weak.",
                     lastKgConsumed);
+            } else if (acceptedStickyInflight) {
+                spdlog::warn(
+                    "KG readiness accepted with sticky post_ingest_inflight={} after {}s grace "
+                    "(queues drained + stage inflight idle + corpus_stats.has_kg=true).",
+                    lastPostInflight, stickyInflightGraceSec);
             } else {
                 spdlog::info("KG readiness satisfied (queues drained + corpus_stats.has_kg=true)");
             }
@@ -2721,6 +3070,33 @@ static int runOptimizationLoop() {
         }
     }
 
+    bool pruneKnownBadCandidates = true;
+    if (const char* pruneEnv = std::getenv("YAMS_BENCH_OPT_PRUNE_KNOWN_BAD"); pruneEnv) {
+        pruneKnownBadCandidates = envTruthy(pruneEnv);
+    }
+
+    if (pruneKnownBadCandidates && selectedCandidates.empty()) {
+        static const std::unordered_set<std::string> kKnownBadCandidates = {
+            "mixed_precision_rrf_neighbor_t92_p80_k14", "mixed_precision_rrf_neighbor_t92_p78_k16",
+            "mixed_precision_rrf_neighbor_t90_p84_k18", "mixed_ablation_disable_tiered_execution",
+            "mixed_ablation_disable_graph_rerank",
+        };
+
+        const auto beforeCount = candidates.size();
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+                                        [](const OptimizationCandidate& candidate) {
+                                            return kKnownBadCandidates.count(candidate.name) > 0;
+                                        }),
+                         candidates.end());
+
+        const auto removed = beforeCount - candidates.size();
+        if (removed > 0) {
+            spdlog::info("[OptLoop] Pruned {} known low-value candidates (set "
+                         "YAMS_BENCH_OPT_PRUNE_KNOWN_BAD=0 to disable)",
+                         removed);
+        }
+    }
+
     if (const char* maxCandidatesEnv = std::getenv("YAMS_BENCH_OPT_MAX_CANDIDATES")) {
         try {
             const auto parsed = std::max(1, std::stoi(maxCandidatesEnv));
@@ -2772,11 +3148,14 @@ static int runOptimizationLoop() {
         }
 
         const double avgMs = result.hybridEvalMs / std::max(1, result.hybridMetrics.numQueries);
+        const double mrrDelta = result.hybridMetrics.mrr - result.keywordMetrics.mrr;
         std::cout << "\n  [" << (i + 1) << "/" << candidates.size() << "] " << candidate.name
                   << "\n";
         std::cout << "    objective=" << std::fixed << std::setprecision(4) << result.objectiveScore
                   << "  hybrid_mrr=" << result.hybridMetrics.mrr
-                  << "  keyword_mrr=" << result.keywordMetrics.mrr
+                  << "  keyword_mrr=" << result.keywordMetrics.mrr << "  mrr_delta=" << std::showpos
+                  << std::setprecision(4) << mrrDelta << std::noshowpos
+                  << "  dup@k=" << std::setprecision(4) << result.hybridMetrics.duplicateRateAtK
                   << "  avg_hybrid_ms=" << std::setprecision(1) << avgMs << "\n";
         std::cout << "    tuning_state="
                   << (result.tuningState.empty() ? "<unknown>" : result.tuningState) << "\n";
@@ -2809,10 +3188,13 @@ static int runOptimizationLoop() {
     for (std::size_t i = 0; i < successful.size(); ++i) {
         const auto& result = successful[i];
         const double avgMs = result.hybridEvalMs / std::max(1, result.hybridMetrics.numQueries);
+        const double mrrDelta = result.hybridMetrics.mrr - result.keywordMetrics.mrr;
         std::cout << "  " << (i + 1) << ". " << result.candidate.name
                   << "  objective=" << std::fixed << std::setprecision(4) << result.objectiveScore
                   << "  mrr=" << result.hybridMetrics.mrr
-                  << "  ndcg=" << result.hybridMetrics.ndcgAtK
+                  << "  ndcg=" << result.hybridMetrics.ndcgAtK << "  mrr_delta=" << std::showpos
+                  << std::setprecision(4) << mrrDelta << std::noshowpos
+                  << "  dup@k=" << std::setprecision(4) << result.hybridMetrics.duplicateRateAtK
                   << "  avg_ms=" << std::setprecision(1) << avgMs << "\n";
     }
 

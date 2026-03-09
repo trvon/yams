@@ -106,7 +106,9 @@ def summarize(records: list[dict[str, Any]], input_paths: list[Path]) -> dict[st
         "success_rate": [],
     }
 
-    case_buckets: dict[tuple[str, str, str, str, str], dict[str, list[float]]] = {}
+    case_buckets: dict[
+        tuple[str, str, str, str, str, str, int], dict[str, list[float]]
+    ] = {}
 
     def get_large_bucket(
         target: dict[str, dict[str, list[float]]], request_path: str
@@ -116,6 +118,9 @@ def summarize(records: list[dict[str, Any]], input_paths: list[Path]) -> dict[st
                 "ops_per_sec": [],
                 "fail_rate": [],
                 "connection_drop_rate": [],
+                "document_not_found_rate": [],
+                "content_not_found_rate": [],
+                "invalid_hash_quarantined": [],
                 "search_p95_ms": [],
                 "list_p95_ms": [],
                 "grep_p95_ms": [],
@@ -166,7 +171,9 @@ def summarize(records: list[dict[str, Any]], input_paths: list[Path]) -> dict[st
             }
         return target[request_path]
 
-    def get_case_bucket(key: tuple[str, str, str, str, str]) -> dict[str, list[float]]:
+    def get_case_bucket(
+        key: tuple[str, str, str, str, str, str, int],
+    ) -> dict[str, list[float]]:
         if key not in case_buckets:
             case_buckets[key] = {
                 "ops_per_sec": [],
@@ -182,6 +189,22 @@ def summarize(records: list[dict[str, Any]], input_paths: list[Path]) -> dict[st
             row.get("run_transport", row.get("request_path", "unknown"))
         )
         usage_profile = str(row.get("layout", {}).get("usage_profile", "unknown"))
+        backend = str(row.get("run_backend", row.get("backend", "unknown")))
+        layout = (
+            row.get("layout", {}) if isinstance(row.get("layout", {}), dict) else {}
+        )
+        num_clients = int(
+            _safe_float(
+                row.get(
+                    "num_clients",
+                    _safe_float(layout.get("search_clients", 0.0))
+                    + _safe_float(layout.get("list_clients", 0.0))
+                    + _safe_float(layout.get("grep_clients", 0.0))
+                    + _safe_float(layout.get("status_get_clients", 0.0)),
+                ),
+                0.0,
+            )
+        )
 
         if test_name in {"large_corpus_reads", "large_corpus_reads_churn"}:
             is_churn = test_name == "large_corpus_reads_churn"
@@ -195,10 +218,24 @@ def summarize(records: list[dict[str, Any]], input_paths: list[Path]) -> dict[st
             total_failures = _safe_float(row.get("total_failures", 0.0))
             error_categories = row.get("error_categories", {})
             connection_drop = _safe_float(error_categories.get("connection_drop", 0.0))
+            document_not_found = _safe_float(
+                error_categories.get("document_not_found", 0.0)
+            )
+            content_not_found = _safe_float(
+                error_categories.get("content_not_found", 0.0)
+            )
+            hash_pool = row.get("hash_pool", {})
 
             bucket["ops_per_sec"].append(_safe_float(row.get("ops_per_sec", 0.0)))
             bucket["fail_rate"].append(_rate(total_failures, total_ops))
             bucket["connection_drop_rate"].append(_rate(connection_drop, total_ops))
+            bucket["document_not_found_rate"].append(
+                _rate(document_not_found, total_ops)
+            )
+            bucket["content_not_found_rate"].append(_rate(content_not_found, total_ops))
+            bucket["invalid_hash_quarantined"].append(
+                _safe_float(hash_pool.get("invalid_quarantined", 0.0))
+            )
 
             for op in ("search", "list", "grep", "status", "get", "cat"):
                 op_obj = row.get(op, {})
@@ -361,6 +398,8 @@ def summarize(records: list[dict[str, Any]], input_paths: list[Path]) -> dict[st
                 request_path,
                 run_transport,
                 usage_profile,
+                backend,
+                num_clients,
             )
             c_bucket = get_case_bucket(case_key)
             c_bucket["ops_per_sec"].append(_safe_float(row.get("ops_per_sec", 0.0)))
@@ -390,7 +429,15 @@ def summarize(records: list[dict[str, Any]], input_paths: list[Path]) -> dict[st
             contention_metrics["latency_p95_ms"].append(latency_p95_ms)
             contention_metrics["success_rate"].append(success_rate)
 
-            case_key = (run_phase, test_name, "n/a", run_transport, usage_profile)
+            case_key = (
+                run_phase,
+                test_name,
+                "n/a",
+                run_transport,
+                usage_profile,
+                backend,
+                num_clients,
+            )
             c_bucket = get_case_bucket(case_key)
             c_bucket["ops_per_sec"].append(throughput)
             c_bucket["fail_rate"].append(fail_rate)
@@ -408,6 +455,12 @@ def summarize(records: list[dict[str, Any]], input_paths: list[Path]) -> dict[st
                 "connection_drop_rate": _to_summary(
                     metrics["connection_drop_rate"], "ratio"
                 ),
+                "document_not_found_rate": _to_summary(
+                    metrics["document_not_found_rate"], "ratio"
+                ),
+                "content_not_found_rate": _to_summary(
+                    metrics["content_not_found_rate"], "ratio"
+                ),
                 "search_p95_ms": _to_summary(metrics["search_p95_ms"], "ms"),
                 "list_p95_ms": _to_summary(metrics["list_p95_ms"], "ms"),
             }
@@ -424,6 +477,15 @@ def summarize(records: list[dict[str, Any]], input_paths: list[Path]) -> dict[st
                 "fail_rate": _to_summary(metrics["fail_rate"], "ratio"),
                 "connection_drop_rate": _to_summary(
                     metrics["connection_drop_rate"], "ratio"
+                ),
+                "document_not_found_rate": _to_summary(
+                    metrics["document_not_found_rate"], "ratio"
+                ),
+                "content_not_found_rate": _to_summary(
+                    metrics["content_not_found_rate"], "ratio"
+                ),
+                "invalid_hash_quarantined": _to_summary(
+                    metrics["invalid_hash_quarantined"], "count"
                 ),
                 "usage_profiles": dict(sorted(usage_profiles[request_path].items())),
                 "search": {
@@ -576,7 +638,15 @@ def summarize(records: list[dict[str, Any]], input_paths: list[Path]) -> dict[st
 
     case_breakdown: list[dict[str, Any]] = []
     for key in sorted(case_buckets.keys()):
-        run_phase, test_name, request_path, run_transport, usage_profile = key
+        (
+            run_phase,
+            test_name,
+            request_path,
+            run_transport,
+            usage_profile,
+            backend,
+            num_clients,
+        ) = key
         metrics = case_buckets[key]
         case_breakdown.append(
             {
@@ -585,6 +655,8 @@ def summarize(records: list[dict[str, Any]], input_paths: list[Path]) -> dict[st
                 "request_path": request_path,
                 "transport": run_transport,
                 "usage_profile": usage_profile,
+                "backend": backend,
+                "num_clients": num_clients,
                 "ops_per_sec": _to_summary(metrics["ops_per_sec"], "ops/s"),
                 "fail_rate": _to_summary(metrics["fail_rate"], "ratio"),
                 "latency_p95_ms": _to_summary(metrics["latency_p95_ms"], "ms"),

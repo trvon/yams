@@ -798,6 +798,44 @@ TEST_CASE("HybridSearch - Concept boost respects scan cap", "[search][hybrid][co
     CHECK(resp.results[0].path.find("search_notes.md") != std::string::npos);
 }
 
+TEST_CASE("HybridSearch - Delayed concept extraction remains deterministic",
+          "[search][hybrid][concept]") {
+    SKIP_HYBRID_ON_WINDOWS();
+    SearchServiceFixture fixture;
+
+    auto engine = fixture.searchEngine();
+    if (!engine) {
+        SUCCEED("SearchEngine not available; skipping delayed concept extraction test.");
+        return;
+    }
+
+    auto cfg = engine->getConfig();
+    cfg.conceptBoostWeight = 0.8f;
+    cfg.conceptMaxBoost = 0.8f;
+    cfg.conceptMinConfidence = 0.0f;
+    cfg.conceptMaxScanResults = 2;
+    engine->setConfig(cfg);
+    engine->setConceptExtractor(
+        [](const std::string& /*query*/, const std::vector<std::string>& /*types*/) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            QueryConceptResult result;
+            result.concepts.push_back(QueryConcept{"pipeline", "concept", 0.9f, 0, 8});
+            return Result<QueryConceptResult>(result);
+        });
+
+    fixture.createDocument("pipeline_notes.md", "pipeline boosttoken summary");
+    fixture.createDocument("search_notes.md", "boosttoken boosttoken boosttoken");
+
+    app::services::SearchRequest req;
+    req.query = "boosttoken";
+    req.type = "hybrid";
+    req.limit = 5;
+
+    auto resp = fixture.executeSearch(req);
+    REQUIRE(resp.results.size() > 0);
+    CHECK(resp.results[0].path.find("pipeline_notes.md") != std::string::npos);
+}
+
 TEST_CASE("KeywordSearch - Stemming reverse", "[search][keyword][stemming]") {
     SKIP_HYBRID_ON_WINDOWS();
     SearchServiceFixture fixture;

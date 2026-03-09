@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <shared_mutex>
 #include <span>
 #include <thread>
@@ -59,6 +61,21 @@ inline bool isFiniteEmbedding(const std::vector<float>& embedding) {
 
 inline bool updateOnDuplicateEnabled() {
     return true; // default: update on duplicate for accuracy
+}
+
+inline size_t hnswParallelBuildThreshold() {
+    constexpr size_t kDefaultThreshold = 100;
+    if (const char* env = std::getenv("YAMS_HNSW_PARALLEL_BUILD_THRESHOLD")) {
+        try {
+            const auto parsed = static_cast<long long>(std::stoll(env));
+            if (parsed <= 0) {
+                return std::numeric_limits<size_t>::max();
+            }
+            return static_cast<size_t>(parsed);
+        } catch (...) {
+        }
+    }
+    return kDefaultThreshold;
 }
 
 // ============================================================================
@@ -716,7 +733,7 @@ public:
         uint64_t bc = batch_counter.fetch_add(1);
 
         // Threshold for using parallel build (sequential is faster for small batches)
-        constexpr size_t kParallelBuildThreshold = 100;
+        const size_t parallelBuildThreshold = hnswParallelBuildThreshold();
 
         for (size_t idx : remove_only_indices) {
             if (old_rowids[idx] && old_dims[idx]) {
@@ -732,7 +749,7 @@ public:
             if (auto* hnsw = getOrCreateHnswForDim(dim)) {
                 size_t before_size = hnsw->size();
 
-                if (indices.size() >= kParallelBuildThreshold) {
+                if (indices.size() >= parallelBuildThreshold) {
                     // Use parallel build for large batches
                     std::vector<size_t> ids;
                     std::vector<std::span<const float>> vectors;

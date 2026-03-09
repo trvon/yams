@@ -187,10 +187,17 @@ TuningState SearchTuner::computeState(const storage::CorpusStats& stats, std::st
         reason << "prose_dominant (" << static_cast<int>(stats.proseRatio * 100) << "%), large ("
                << stats.docCount << " docs)";
     } else {
-        // Mixed corpus: balanced weights
-        state = TuningState::MIXED;
-        reason << "mixed (code=" << static_cast<int>(stats.codeRatio * 100)
-               << "%, prose=" << static_cast<int>(stats.proseRatio * 100) << "%)";
+        // Mixed corpus: choose precision-guarded profile when embeddings are available.
+        if (hasEmbeddings) {
+            state = TuningState::MIXED_PRECISION;
+            reason << "mixed_precision (code=" << static_cast<int>(stats.codeRatio * 100)
+                   << "%, prose=" << static_cast<int>(stats.proseRatio * 100)
+                   << "%, embeddings=" << static_cast<int>(stats.embeddingCoverage * 100) << "%)";
+        } else {
+            state = TuningState::MIXED;
+            reason << "mixed (code=" << static_cast<int>(stats.codeRatio * 100)
+                   << "%, prose=" << static_cast<int>(stats.proseRatio * 100) << "%)";
+        }
     }
 
     // Add feature availability notes
