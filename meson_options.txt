@@ -58,5 +58,7 @@ option('enable-tsan', type: 'boolean', value: false, description: 'Enable Thread
 # Address sanitizer (for detecting memory errors in debug builds)
 option('enable-asan', type: 'boolean', value: false, description: 'Enable AddressSanitizer for memory error detection (debug builds only, significant performance impact)')
 
+option('enable-re2', type: 'feature', value: 'auto', description: 'Use Google RE2 regex engine for grep (10-50x faster than std::regex; auto-detect)')
+
 # C++20 Modules (experimental)
 option('enable-modules', type: 'boolean', value: false, description: 'Enable C++20 module compilation (experimental, requires GCC 13+/Clang 16+/MSVC 17.4+)')

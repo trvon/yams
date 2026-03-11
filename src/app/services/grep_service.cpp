@@ -1,5 +1,6 @@
 #include "../../cli/hot_cold_utils.h"
 #include <yams/app/services/grep_mode_tls.h>
+#include <yams/app/services/grep_regex.hpp>
 #include <yams/app/services/literal_extractor.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/simd_newline_scanner.hpp>
@@ -30,7 +31,6 @@
 #include <unistd.h>
 #endif
 #include <map>
-#include <regex>
 #include <set>
 #include <sstream>
 #include <string>
@@ -483,22 +483,25 @@ public:
         recordPhaseMetric(phaseTimings, "phase_pattern_prep_ms", "grep::phase::pattern_prep_ms",
                           patternPrepStart);
 
-        std::regex_constants::syntax_option_type flags = std::regex::ECMAScript;
-        if (req.ignoreCase)
-            flags |= std::regex::icase;
-
-        std::regex re;
+        std::optional<GrepRegex> grepRe;
         const auto regexCompileStart = GrepClock::now();
         {
             YAMS_ZONE_SCOPED_N("grep_service::regex_compile");
-            try {
-                re = std::regex(regexPattern, flags);
-            } catch (const std::regex_error& e) {
-                return Error{ErrorCode::InvalidArgument, std::string("Invalid regex: ") + e.what()};
+            grepRe = GrepRegex::compile(regexPattern, req.ignoreCase);
+            if (!grepRe) {
+                return Error{ErrorCode::InvalidArgument,
+                             std::string("Invalid regex: ") + regexPattern};
+            }
+            if (!grepRe->fallbackReason().empty()) {
+                spdlog::debug("[GrepService] RE2 fallback for '{}': {}", regexPattern,
+                              grepRe->fallbackReason());
             }
         }
         recordPhaseMetric(phaseTimings, "phase_regex_compile_ms", "grep::phase::regex_compile_ms",
                           regexCompileStart);
+
+        // Alias for the compiled regex (used by worker lambdas).
+        const auto& re = *grepRe;
 
         // Resolve context windows
         int beforeContext = req.context > 0 ? req.context : req.beforeContext;
@@ -1066,20 +1069,18 @@ public:
 
                     // Regex path: full pattern matching (after literal pre-filter if
                     // applicable)
-                    std::cmatch cm;
-                    const char* start = line.c_str();
-                    const char* end = start + line.size();
+                    const char* lineData = line.c_str();
+                    const size_t lineLen = line.size();
+                    size_t searchOffset = 0;
                     const auto regexScanStart = GrepClock::now();
-                    while (true) {
+                    while (searchOffset <= lineLen) {
                         ++localRegexSearchCalls;
-                        if (!std::regex_search(start, end, cm, re)) {
+                        auto m = re.findNext(lineData, lineLen, searchOffset);
+                        if (!m)
                             break;
-                        }
-                        auto pos = static_cast<size_t>(cm.position(0) + (start - line.c_str()));
-                        auto len = static_cast<size_t>(cm.length(0));
-                        if (boundaryOk(line, pos, len))
+                        if (boundaryOk(line, m->position, m->length))
                             ++count;
-                        start = cm.suffix().first;
+                        searchOffset = m->position + std::max<size_t>(m->length, 1);
                     }
                     localRegexScanNs += static_cast<std::uint64_t>(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(GrepClock::now() -
@@ -1145,12 +1146,12 @@ public:
                         gm.lineNumber = ln_counter;
                     gm.line = yams::common::sanitizeUtf8(line);
                     if (!req.invert && !req.literalText) {
-                        std::smatch sm;
                         const auto regexScanStart = GrepClock::now();
                         ++localRegexSearchCalls;
-                        if (std::regex_search(line, sm, re)) {
-                            gm.columnStart = static_cast<size_t>(sm.position()) + 1;
-                            gm.columnEnd = gm.columnStart + static_cast<size_t>(sm.length());
+                        auto firstMatch = re.findFirst(line);
+                        if (firstMatch) {
+                            gm.columnStart = firstMatch->position + 1;
+                            gm.columnEnd = gm.columnStart + firstMatch->length;
                         }
                         localRegexScanNs += static_cast<std::uint64_t>(
                             std::chrono::duration_cast<std::chrono::nanoseconds>(GrepClock::now() -

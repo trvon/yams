@@ -2,6 +2,7 @@
 #include <cctype>
 #include <cstring>
 #include <yams/app/services/literal_extractor.hpp>
+#include <yams/app/services/simd_memmem.hpp>
 
 namespace yams {
 namespace app {
@@ -148,33 +149,14 @@ size_t BMHSearcher::findFast(std::string_view text, size_t startPos) const {
         return std::string::npos;
     }
 
+    // Delegate to SIMD-accelerated memmem (handles scalar fallback internally).
+    size_t result;
     if (ignoreCase_) {
-        std::string textStr(text);
-        std::transform(textStr.begin(), textStr.end(), textStr.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
-        return textStr.find(pattern_, startPos);
+        result = simdMemmemCI(text.data() + startPos, n - startPos, pattern_.data(), m);
+    } else {
+        result = simdMemmem(text.data() + startPos, n - startPos, pattern_.data(), m);
     }
-
-    const char* base = text.data();
-    const char* scan = base + startPos;
-    size_t remaining = n - startPos;
-    const char first = pattern_.front();
-
-    while (remaining >= m) {
-        const void* found = std::memchr(scan, first, remaining - m + 1);
-        if (!found) {
-            return std::string::npos;
-        }
-        const char* candidate = static_cast<const char*>(found);
-        if (std::memcmp(candidate, pattern_.data(), m) == 0) {
-            return static_cast<size_t>(candidate - base);
-        }
-        const size_t consumed = static_cast<size_t>(candidate - scan) + 1;
-        scan = candidate + 1;
-        remaining -= consumed;
-    }
-
-    return std::string::npos;
+    return (result == kMemmemNpos) ? std::string::npos : startPos + result;
 }
 
 size_t BMHSearcher::findBMH(std::string_view text, size_t startPos) const {
@@ -185,36 +167,15 @@ size_t BMHSearcher::findBMH(std::string_view text, size_t startPos) const {
         return std::string::npos;
     }
 
-    size_t pos = startPos;
-
-    while (pos <= n - m) {
-        size_t j = m - 1;
-        while (j != static_cast<size_t>(-1)) {
-            unsigned char textChar = static_cast<unsigned char>(text[pos + j]);
-            unsigned char patternChar = static_cast<unsigned char>(pattern_[j]);
-
-            if (ignoreCase_) {
-                textChar = toLower(textChar);
-            }
-
-            if (textChar != patternChar) {
-                break;
-            }
-            --j;
-        }
-
-        if (j == static_cast<size_t>(-1)) {
-            return pos;
-        }
-
-        unsigned char badChar = static_cast<unsigned char>(text[pos + m - 1]);
-        if (ignoreCase_) {
-            badChar = toLower(badChar);
-        }
-        pos += shift_[badChar];
+    // Delegate to SIMD-accelerated memmem — the two-byte Lemire technique is
+    // faster than scalar BMH for all practical pattern lengths.
+    size_t result;
+    if (ignoreCase_) {
+        result = simdMemmemCI(text.data() + startPos, n - startPos, pattern_.data(), m);
+    } else {
+        result = simdMemmem(text.data() + startPos, n - startPos, pattern_.data(), m);
     }
-
-    return std::string::npos;
+    return (result == kMemmemNpos) ? std::string::npos : startPos + result;
 }
 
 std::vector<size_t> BMHSearcher::findAll(std::string_view text) const {

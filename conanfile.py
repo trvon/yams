@@ -29,6 +29,7 @@ class YamsConan(ConanFile):
         # (wasmtime-cpp integration)
         "enable_symbol_extraction": [True, False],  # Gate symbol extraction
         # features and deps
+        "enable_re2": [True, False],  # Gate RE2 regex engine for grep
     }
     default_options = {
         "build_cli": True,
@@ -39,6 +40,7 @@ class YamsConan(ConanFile):
         "enable_onnx": True,  # ONNX enabled by default; can be disabled to drop Boost
         "enable_wasmtime": True,  # WASM host enabled by default (bring your own wasmtime-cpp)
         "enable_symbol_extraction": True,  # Enabled by default; disable to drop extractors
+        "enable_re2": True,  # RE2 regex engine for grep (10-50x faster than std::regex)
     }
 
     generators = ("MesonToolchain", "PkgConfigDeps", "CMakeDeps")
@@ -92,6 +94,11 @@ class YamsConan(ConanFile):
                 pass
 
         self.requires("xz_utils/5.4.5")
+
+        # RE2 regex engine for high-performance grep (optional)
+        if self.options.enable_re2:  # type: ignore
+            self.requires("re2/20251105")
+
         if self.options.enable_pdf:  # type: ignore
             # qpdf removed - PDF plugin will be updated in separate PBI
             # self.requires("qpdf/11.9.0")  # Custom recipe in conan/qpdf/

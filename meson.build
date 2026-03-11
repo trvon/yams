@@ -351,6 +351,17 @@ endif
 boost_dep = dependency('boost', modules: ['system', 'thread'], method: 'cmake', required: true)
 meson.override_dependency('boost', boost_dep)
 
+# --- RE2 regex engine (optional, for high-performance grep) ---
+re2_opt = get_option('enable-re2')
+re2_dep = dependency('re2', required: re2_opt)
+if re2_dep.found()
+  add_project_arguments('-DYAMS_HAS_RE2=1', language: 'cpp')
+  message('RE2 regex engine enabled (grep will use RE2 with std::regex fallback)')
+else
+  add_project_arguments('-DYAMS_HAS_RE2=0', language: 'cpp')
+  message('RE2 not found; grep will use std::regex only')
+endif
+
 # --- Version header generation ---
 _override_version = get_option('yams-version')
 

@@ -1,5 +1,14 @@
 tl_expected_dep = dependency('tl-expected', required: true)
 
+# RE2 is resolved at the project root; pick it up here for grep_service.
+re2_dep = dependency('re2', required: false)
+
+# Collect optional deps so they're added consistently to both lib and dep.
+_optional_deps = []
+if re2_dep.found()
+  _optional_deps += [re2_dep]
+endif
+
 yams_app_services_lib = static_library('yams_app_services',
   [
     'document_service.cpp',
@@ -9,8 +18,10 @@ yams_app_services_lib = static_library('yams_app_services',
     'search_service.cpp',
     'enhanced_search_executor.cpp',
     'grep_service.cpp',
+    'grep_regex.cpp',
     'literal_extractor.cpp',
     'simd_newline_scanner.cpp',
+    'simd_memmem.cpp',
     'grep_mode_tls.cpp',
     'download_service.cpp',
     'indexing_service.cpp',
@@ -31,7 +42,7 @@ yams_app_services_lib = static_library('yams_app_services',
     dependency('nlohmann_json'),
     dependency('spdlog'),
     tl_expected_dep,
-  ],
+  ] + _optional_deps,
   include_directories: include_directories('../../../include'),
   install: true,
 )
@@ -50,7 +61,7 @@ yams_app_services_dep = declare_dependency(
     dependency('nlohmann_json'),
     dependency('spdlog'),
     tl_expected_dep,
-  ],
+  ] + _optional_deps,
 )
 
 meson.override_dependency('yams_app_services', yams_app_services_dep)

@@ -24,6 +24,7 @@
 #include <boost/asio/post.hpp>
 
 #include "yams/profiling.h"
+#include <yams/app/services/simd_memmem.hpp>
 
 #if YAMS_HAS_FLAT_MAP
 #include <flat_map>
@@ -347,41 +348,20 @@ std::string_view::size_type ci_find(std::string_view haystack, std::string_view 
         return std::string_view::npos;
     }
 
-    for (std::string_view::size_type i = 0; i <= haystack.size() - needle.size(); ++i) {
-        bool match = true;
-        for (std::string_view::size_type j = 0; j < needle.size(); ++j) {
-            unsigned char c1 = static_cast<unsigned char>(haystack[i + j]);
-            unsigned char c2 = static_cast<unsigned char>(needle[j]);
-            if (std::tolower(c1) != std::tolower(c2)) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            return i;
-        }
-    }
-    return std::string_view::npos;
+    // Pre-lowercase the needle once, then use SIMD-accelerated CI memmem.
+    std::string needleLower(needle);
+    std::transform(needleLower.begin(), needleLower.end(), needleLower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    size_t pos = yams::app::services::simdMemmemCI(haystack.data(), haystack.size(),
+                                                   needleLower.data(), needleLower.size());
+    return (pos == yams::app::services::kMemmemNpos) ? std::string_view::npos : pos;
 }
 
 constexpr auto kRerankerErrorCooldown = std::chrono::seconds(60);
 
 bool isRerankerCooldownError(ErrorCode code) {
     return code == ErrorCode::NotImplemented || code == ErrorCode::InvalidState;
-}
-
-bool cpuSupportsSimdSearch() {
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-#if defined(__clang__) || defined(__GNUC__)
-    return __builtin_cpu_supports("avx2") || __builtin_cpu_supports("sse2");
-#else
-    return false;
-#endif
-#elif defined(__aarch64__) || defined(__ARM_NEON)
-    return true;
-#else
-    return false;
-#endif
 }
 
 bool containsFast(std::string_view haystack, std::string_view needle) {
@@ -391,31 +371,7 @@ bool containsFast(std::string_view haystack, std::string_view needle) {
     if (needle.size() > haystack.size()) {
         return false;
     }
-    static const bool useSimd = cpuSupportsSimdSearch();
-    if (!useSimd) {
-        return haystack.find(needle) != std::string_view::npos;
-    }
-    const char* data = haystack.data();
-    const size_t haySize = haystack.size();
-    const size_t needleSize = needle.size();
-    const char first = needle.front();
-
-    const char* scan = data;
-    size_t remaining = haySize;
-    while (remaining >= needleSize) {
-        const void* found = std::memchr(scan, first, remaining - needleSize + 1);
-        if (!found) {
-            return false;
-        }
-        const char* candidate = static_cast<const char*>(found);
-        if (std::memcmp(candidate, needle.data(), needleSize) == 0) {
-            return true;
-        }
-        const size_t consumed = static_cast<size_t>(candidate - scan) + 1;
-        scan = candidate + 1;
-        remaining -= consumed;
-    }
-    return false;
+    return yams::app::services::simdMemmem(haystack, needle) != yams::app::services::kMemmemNpos;
 }
 
 float normalizedBm25Score(double rawScore, float divisor, double minScore, double maxScore) {
