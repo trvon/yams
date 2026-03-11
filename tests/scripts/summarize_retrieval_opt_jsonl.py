@@ -109,9 +109,47 @@ def _metric_triplet(values: list[float]) -> dict[str, float]:
     }
 
 
+def _nested(data: dict[str, Any], path: list[str], default: Any = None) -> Any:
+    cur: Any = data
+    for key in path:
+        if not isinstance(cur, dict):
+            return default
+        if key not in cur:
+            return default
+        cur = cur[key]
+    return cur
+
+
 def summarize(records: list[RunRecord], inputs: list[Path]) -> dict[str, Any]:
     latest_success_by_candidate: dict[str, RunRecord] = {}
     objective_by_candidate: dict[str, list[float]] = {}
+    debug_metric_by_candidate: dict[str, dict[str, list[float]]] = {}
+
+    debug_metric_paths: dict[str, list[str]] = {
+        "hybrid_keyword_mrr_delta": ["hybrid_keyword_mrr_delta"],
+        "hybrid_duplicate_rate_at_k": ["hybrid", "duplicate_rate_at_k"],
+        "objective_penalty_hybrid_regression": [
+            "objective_penalties",
+            "hybrid_regression",
+        ],
+        "objective_penalty_duplicate_rate": ["objective_penalties", "duplicate_rate"],
+        "trace_coverage": ["hybrid_debug_summary", "trace_coverage"],
+        "graph_rerank_apply_rate": ["hybrid_debug_summary", "graph_rerank_apply_rate"],
+        "semantic_rescue_rate_mean": [
+            "hybrid_debug_summary",
+            "semantic_rescue_rate",
+            "mean",
+        ],
+        "vector_only_below_threshold_mean": [
+            "hybrid_debug_summary",
+            "vector_only_below_threshold",
+            "mean",
+        ],
+        "query_without_relevant_hit_rate": [
+            "hybrid_debug_summary",
+            "query_without_relevant_hit_rate",
+        ],
+    }
 
     for record in records:
         if record.success:
@@ -119,6 +157,10 @@ def summarize(records: list[RunRecord], inputs: list[Path]) -> dict[str, Any]:
             objective_by_candidate.setdefault(record.candidate, []).append(
                 record.objective
             )
+            metric_store = debug_metric_by_candidate.setdefault(record.candidate, {})
+            for metric_name, path in debug_metric_paths.items():
+                value = _nested(record.raw, path, 0.0)
+                metric_store.setdefault(metric_name, []).append(_safe_float(value, 0.0))
 
     latest_rows: list[dict[str, Any]] = []
     for candidate, record in latest_success_by_candidate.items():
@@ -130,8 +172,17 @@ def summarize(records: list[RunRecord], inputs: list[Path]) -> dict[str, Any]:
             "env_overrides": record.raw.get("env_overrides", {}),
             "hybrid": record.raw.get("hybrid", {}),
             "keyword": record.raw.get("keyword", {}),
+            "hybrid_debug_summary": record.raw.get("hybrid_debug_summary", {}),
+            "keyword_debug_summary": record.raw.get("keyword_debug_summary", {}),
             "tuning_state": record.raw.get("tuning_state", ""),
             "tuning_reason": record.raw.get("tuning_reason", ""),
+            "run_id": record.raw.get("run_id", ""),
+            "debug_file": record.raw.get("debug_file", ""),
+            "trace_top_n": int(record.raw.get("trace_top_n", 0) or 0),
+            "trace_component_top_n": int(
+                record.raw.get("trace_component_top_n", 0) or 0
+            ),
+            "stage_trace_enabled": bool(record.raw.get("stage_trace_enabled", False)),
         }
         latest_rows.append(row)
 
@@ -140,7 +191,14 @@ def summarize(records: list[RunRecord], inputs: list[Path]) -> dict[str, Any]:
     aggregates: list[dict[str, Any]] = []
     for candidate, values in objective_by_candidate.items():
         stats = _metric_triplet(values)
-        aggregates.append({"candidate": candidate, **stats})
+        debug_metrics: dict[str, Any] = {}
+        for metric_name, metric_values in debug_metric_by_candidate.get(
+            candidate, {}
+        ).items():
+            debug_metrics[metric_name] = _metric_triplet(metric_values)
+        aggregates.append(
+            {"candidate": candidate, **stats, "debug_metrics": debug_metrics}
+        )
     aggregates.sort(key=lambda row: row["mean"], reverse=True)
 
     winner_latest = latest_rows[0] if latest_rows else None

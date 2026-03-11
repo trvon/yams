@@ -65,12 +65,14 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <random>
 #include <set>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <yams/compat/unistd.h>
@@ -510,8 +512,29 @@ struct RetrievalMetrics {
     int numQueries = 0;
 };
 
+struct QueryDiagnosticsSummary {
+    std::uint64_t queryCount = 0;
+    std::uint64_t queryWithResultsCount = 0;
+    std::uint64_t queryWithoutResultsCount = 0;
+    std::uint64_t queryWithoutRelevantHitCount = 0;
+    std::uint64_t queryWithTopKDuplicateCount = 0;
+    std::uint64_t degradedQueryCount = 0;
+    std::uint64_t traceEnabledQueryCount = 0;
+    std::uint64_t graphRerankAppliedQueryCount = 0;
+    std::uint64_t semanticRescueNonZeroQueryCount = 0;
+    std::vector<double> semanticRescueRateSamples;
+    std::vector<double> semanticRescueFinalCountSamples;
+    std::vector<double> semanticRescueTargetSamples;
+    std::vector<double> fusionDroppedCountSamples;
+    std::vector<double> vectorOnlyDocsSamples;
+    std::vector<double> vectorOnlyBelowThresholdSamples;
+    std::vector<double> vectorOnlyAboveThresholdSamples;
+    std::vector<double> vectorOnlyNearMissEligibleSamples;
+};
+
 struct DebugLogEntry {
     std::string query;
+    int queryIndex = -1;
     std::string searchType;
     std::vector<std::string> relevantDocIds;
     std::vector<std::string> relevantFiles;
@@ -527,11 +550,208 @@ struct DebugLogEntry {
     bool usedFuzzyRetry = false;
     bool usedLiteralTextRetry = false;
     std::map<std::string, std::string> searchStats;
+    json extraFields;
+};
+
+struct DebugRunContext {
+    std::string runId;
+    std::string candidate;
+    std::string dataset;
+    int corpusSize = 0;
+    int numQueries = 0;
+    int topK = 0;
+    int traceTopN = 0;
+    int traceComponentTopN = 0;
+    bool stageTraceEnabled = false;
+    std::string debugFile;
 };
 
 static std::ostream* g_debugOut = nullptr;
 static std::unique_ptr<std::ofstream> g_debugFile;
 static std::mutex g_debugMutex;
+static std::optional<DebugRunContext> g_debugRunContext;
+
+static std::optional<double> parseDoubleLoose(const std::string& value) {
+    try {
+        return std::stod(value);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+static std::optional<double> parseDoubleStat(const std::map<std::string, std::string>& stats,
+                                             const std::string& key) {
+    if (auto it = stats.find(key); it != stats.end()) {
+        return parseDoubleLoose(it->second);
+    }
+    return std::nullopt;
+}
+
+static std::optional<bool> parseBoolStat(const std::map<std::string, std::string>& stats,
+                                         const std::string& key) {
+    if (auto it = stats.find(key); it != stats.end()) {
+        std::string normalized = it->second;
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
+            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        });
+        return normalized == "1" || normalized == "true" || normalized == "yes" ||
+               normalized == "on";
+    }
+    return std::nullopt;
+}
+
+static double computePercentile(std::vector<double> samples, double percentile) {
+    if (samples.empty()) {
+        return 0.0;
+    }
+
+    percentile = std::clamp(percentile, 0.0, 1.0);
+    std::sort(samples.begin(), samples.end());
+    const double idx = percentile * static_cast<double>(samples.size() - 1);
+    const auto lo = static_cast<std::size_t>(std::floor(idx));
+    const auto hi = static_cast<std::size_t>(std::ceil(idx));
+    if (lo == hi) {
+        return samples[lo];
+    }
+    const double t = idx - static_cast<double>(lo);
+    return samples[lo] * (1.0 - t) + samples[hi] * t;
+}
+
+static json summarizeSamples(const std::vector<double>& samples) {
+    json out = {
+        {"count", samples.size()},
+        {"mean", 0.0},
+        {"min", 0.0},
+        {"p50", 0.0},
+        {"p95", 0.0},
+        {"max", 0.0},
+    };
+
+    if (samples.empty()) {
+        return out;
+    }
+
+    const double sum = std::accumulate(samples.begin(), samples.end(), 0.0);
+    out["mean"] = sum / static_cast<double>(samples.size());
+    out["min"] = *std::min_element(samples.begin(), samples.end());
+    out["p50"] = computePercentile(samples, 0.50);
+    out["p95"] = computePercentile(samples, 0.95);
+    out["max"] = *std::max_element(samples.begin(), samples.end());
+    return out;
+}
+
+static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
+                                   const std::map<std::string, std::string>& searchStats,
+                                   bool degraded, bool hadResults, bool hadTopKDuplicate,
+                                   int firstRelevantRank) {
+    summary.queryCount++;
+    if (hadResults) {
+        summary.queryWithResultsCount++;
+    } else {
+        summary.queryWithoutResultsCount++;
+    }
+    if (firstRelevantRank < 0) {
+        summary.queryWithoutRelevantHitCount++;
+    }
+    if (hadTopKDuplicate) {
+        summary.queryWithTopKDuplicateCount++;
+    }
+    if (degraded) {
+        summary.degradedQueryCount++;
+    }
+
+    if (parseBoolStat(searchStats, "trace_enabled").value_or(false)) {
+        summary.traceEnabledQueryCount++;
+    }
+    if (parseBoolStat(searchStats, "trace_graph_rerank_applied").value_or(false)) {
+        summary.graphRerankAppliedQueryCount++;
+    }
+
+    if (auto v = parseDoubleStat(searchStats, "semantic_rescue_rate")) {
+        summary.semanticRescueRateSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "semantic_rescue_final_count")) {
+        summary.semanticRescueFinalCountSamples.push_back(*v);
+        if (*v > 0.0) {
+            summary.semanticRescueNonZeroQueryCount++;
+        }
+    }
+    if (auto v = parseDoubleStat(searchStats, "semantic_rescue_target")) {
+        summary.semanticRescueTargetSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "trace_fusion_dropped_count")) {
+        summary.fusionDroppedCountSamples.push_back(*v);
+    }
+
+    auto prefusion = searchStats.find("trace_prefusion_signal_summary_json");
+    if (prefusion != searchStats.end()) {
+        try {
+            auto parsed = json::parse(prefusion->second);
+            if (parsed.is_object()) {
+                if (auto it = parsed.find("vector_only_docs"); it != parsed.end()) {
+                    if (it->is_number()) {
+                        summary.vectorOnlyDocsSamples.push_back(it->get<double>());
+                    }
+                }
+                if (auto it = parsed.find("vector_only_below_threshold"); it != parsed.end()) {
+                    if (it->is_number()) {
+                        summary.vectorOnlyBelowThresholdSamples.push_back(it->get<double>());
+                    }
+                }
+                if (auto it = parsed.find("vector_only_above_threshold"); it != parsed.end()) {
+                    if (it->is_number()) {
+                        summary.vectorOnlyAboveThresholdSamples.push_back(it->get<double>());
+                    }
+                }
+                if (auto it = parsed.find("vector_only_near_miss_eligible"); it != parsed.end()) {
+                    if (it->is_number()) {
+                        summary.vectorOnlyNearMissEligibleSamples.push_back(it->get<double>());
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
+}
+
+static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
+    const double queryCount = static_cast<double>(std::max<std::uint64_t>(summary.queryCount, 1));
+
+    json out = {
+        {"query_count", summary.queryCount},
+        {"query_with_results_count", summary.queryWithResultsCount},
+        {"query_without_results_count", summary.queryWithoutResultsCount},
+        {"query_without_relevant_hit_count", summary.queryWithoutRelevantHitCount},
+        {"query_with_topk_duplicate_count", summary.queryWithTopKDuplicateCount},
+        {"degraded_query_count", summary.degradedQueryCount},
+        {"trace_enabled_query_count", summary.traceEnabledQueryCount},
+        {"graph_rerank_applied_query_count", summary.graphRerankAppliedQueryCount},
+        {"semantic_rescue_nonzero_query_count", summary.semanticRescueNonZeroQueryCount},
+        {"query_with_results_rate",
+         static_cast<double>(summary.queryWithResultsCount) / queryCount},
+        {"query_without_relevant_hit_rate",
+         static_cast<double>(summary.queryWithoutRelevantHitCount) / queryCount},
+        {"query_with_topk_duplicate_rate",
+         static_cast<double>(summary.queryWithTopKDuplicateCount) / queryCount},
+        {"degraded_query_rate", static_cast<double>(summary.degradedQueryCount) / queryCount},
+        {"trace_coverage", static_cast<double>(summary.traceEnabledQueryCount) / queryCount},
+        {"graph_rerank_apply_rate",
+         static_cast<double>(summary.graphRerankAppliedQueryCount) / queryCount},
+        {"semantic_rescue_nonzero_rate",
+         static_cast<double>(summary.semanticRescueNonZeroQueryCount) / queryCount},
+        {"semantic_rescue_rate", summarizeSamples(summary.semanticRescueRateSamples)},
+        {"semantic_rescue_final_count", summarizeSamples(summary.semanticRescueFinalCountSamples)},
+        {"semantic_rescue_target", summarizeSamples(summary.semanticRescueTargetSamples)},
+        {"fusion_dropped_count", summarizeSamples(summary.fusionDroppedCountSamples)},
+        {"vector_only_docs", summarizeSamples(summary.vectorOnlyDocsSamples)},
+        {"vector_only_below_threshold", summarizeSamples(summary.vectorOnlyBelowThresholdSamples)},
+        {"vector_only_above_threshold", summarizeSamples(summary.vectorOnlyAboveThresholdSamples)},
+        {"vector_only_near_miss_eligible",
+         summarizeSamples(summary.vectorOnlyNearMissEligibleSamples)},
+    };
+
+    return out;
+}
 
 static void debugLogWriteJsonLine(const DebugLogEntry& e) {
     if (!g_debugOut)
@@ -539,6 +759,9 @@ static void debugLogWriteJsonLine(const DebugLogEntry& e) {
 
     json j;
     j["query"] = e.query;
+    if (e.queryIndex >= 0) {
+        j["query_index"] = e.queryIndex;
+    }
     j["search_type"] = e.searchType;
     j["relevant_doc_ids"] = e.relevantDocIds;
     j["relevant_files"] = e.relevantFiles;
@@ -554,6 +777,27 @@ static void debugLogWriteJsonLine(const DebugLogEntry& e) {
     j["used_literal_retry"] = e.usedLiteralTextRetry;
     j["search_stats"] = e.searchStats;
     j["diag"] = e.diagnostics;
+
+    if (g_debugRunContext.has_value()) {
+        j["run_id"] = g_debugRunContext->runId;
+        j["candidate"] = g_debugRunContext->candidate;
+        j["dataset"] = g_debugRunContext->dataset;
+        j["corpus_size"] = g_debugRunContext->corpusSize;
+        j["num_queries"] = g_debugRunContext->numQueries;
+        j["top_k"] = g_debugRunContext->topK;
+        j["trace_top_n"] = g_debugRunContext->traceTopN;
+        j["trace_component_top_n"] = g_debugRunContext->traceComponentTopN;
+        j["stage_trace_enabled"] = g_debugRunContext->stageTraceEnabled;
+        if (!g_debugRunContext->debugFile.empty()) {
+            j["debug_file"] = g_debugRunContext->debugFile;
+        }
+    }
+
+    if (e.extraFields.is_object()) {
+        for (const auto& [k, v] : e.extraFields.items()) {
+            j[k] = v;
+        }
+    }
 
     std::lock_guard<std::mutex> lock(g_debugMutex);
     (*g_debugOut) << j.dump() << "\n";
@@ -618,8 +862,15 @@ struct OptimizationRunResult {
     OptimizationCandidate candidate;
     RetrievalMetrics hybridMetrics;
     RetrievalMetrics keywordMetrics;
+    QueryDiagnosticsSummary hybridDiagnostics;
+    QueryDiagnosticsSummary keywordDiagnostics;
     std::string tuningState;
     std::string tuningReason;
+    std::string runId;
+    std::string debugFile;
+    int traceTopN = 0;
+    int traceComponentTopN = 0;
+    bool stageTraceEnabled = false;
     double objectiveScore = 0.0;
     double hybridEvalMs = 0.0;
     double keywordEvalMs = 0.0;
@@ -636,6 +887,56 @@ static bool envTruthy(const char* value) {
         return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     });
     return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+}
+
+static int parseIntEnvOrDefault(const char* key, int defaultValue, int minValue, int maxValue) {
+    const int clampedDefault = std::clamp(defaultValue, minValue, maxValue);
+    const char* raw = std::getenv(key);
+    if (!(raw && *raw)) {
+        return clampedDefault;
+    }
+    try {
+        return std::clamp(std::stoi(raw), minValue, maxValue);
+    } catch (...) {
+        return clampedDefault;
+    }
+}
+
+static std::string sanitizeLabelForFilename(const std::string& value) {
+    std::string out;
+    out.reserve(value.size());
+    for (char c : value) {
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_') {
+            out.push_back(c);
+        } else {
+            out.push_back('_');
+        }
+    }
+    return out;
+}
+
+static std::string makeRunId(const std::string& candidate) {
+    (void)candidate;
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+    return std::to_string(us);
+}
+
+static fs::path makeCandidateDebugPath(const fs::path& base, const std::string& candidate,
+                                       const std::string& runId) {
+    const auto safeCandidate = sanitizeLabelForFilename(candidate);
+    const auto stem = base.stem().string();
+    const auto ext = base.extension().string();
+    const auto suffix = "_" + safeCandidate + "_" + runId;
+    if (!stem.empty()) {
+        return base.parent_path() / (stem + suffix + ext);
+    }
+    return base.parent_path() / (base.filename().string() + suffix);
+}
+
+static bool hasOverrideKey(const std::vector<EnvSetting>& settings, const std::string& key) {
+    return std::any_of(settings.begin(), settings.end(),
+                       [&](const EnvSetting& setting) { return setting.key == key; });
 }
 
 static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
@@ -659,6 +960,36 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
              {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
              {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+         }},
+        {"mixed_precision_semantic_recall_v1",
+         "MIXED_PRECISION + looser vector gate + extra semantic rescue",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+         }},
+        {"mixed_precision_semantic_recall_lexical14_v1",
+         "Semantic recall v1 + stronger lexical floor/tiebreak guardrails",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
          }},
         {"mixed_default",
          "Code/mixed tuned state with benchmark defaults",
@@ -1074,6 +1405,11 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
     j["tuning_state"] = result.tuningState;
     j["tuning_reason"] = result.tuningReason;
     j["error"] = result.errorMessage;
+    j["run_id"] = result.runId;
+    j["debug_file"] = result.debugFile;
+    j["trace_top_n"] = result.traceTopN;
+    j["trace_component_top_n"] = result.traceComponentTopN;
+    j["stage_trace_enabled"] = result.stageTraceEnabled;
     j["hybrid_keyword_mrr_delta"] = result.hybridMetrics.mrr - result.keywordMetrics.mrr;
 
     const double objectiveRegressionPenalty =
@@ -1104,6 +1440,9 @@ static void appendOptimizationResultJson(const fs::path& outputFile,
         {"num_queries", result.keywordMetrics.numQueries},
     };
 
+    j["hybrid_debug_summary"] = queryDiagnosticsToJson(result.hybridDiagnostics);
+    j["keyword_debug_summary"] = queryDiagnosticsToJson(result.keywordDiagnostics);
+
     json env = json::object();
     for (const auto& setting : result.candidate.envOverrides) {
         if (setting.value.has_value()) {
@@ -1132,7 +1471,8 @@ double computeIDCG(std::vector<int> grades, int k) {
 
 RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::path& corpusDir,
                                  const std::vector<TestQuery>& queries, int k,
-                                 const std::string& searchType = "hybrid") {
+                                 const std::string& searchType = "hybrid",
+                                 QueryDiagnosticsSummary* diagnostics = nullptr) {
     RetrievalMetrics metrics;
     metrics.numQueries = static_cast<int>(queries.size());
     double totalMRR = 0.0, totalRecall = 0.0, totalPrecision = 0.0, totalNDCG = 0.0, totalMAP = 0.0;
@@ -1144,7 +1484,8 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
     std::uint64_t duplicateTopKCount = 0;
     std::uint64_t totalTopKCount = 0;
 
-    for (const auto& tq : queries) {
+    for (std::size_t queryIndex = 0; queryIndex < queries.size(); ++queryIndex) {
+        const auto& tq = queries[queryIndex];
         yams::cli::search_runner::DaemonSearchOptions opts;
         opts.query = tq.query;
         opts.searchType = searchType;
@@ -1226,6 +1567,7 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
 
         DebugLogEntry debugEntry;
         debugEntry.query = tq.query;
+        debugEntry.queryIndex = static_cast<int>(queryIndex);
         debugEntry.searchType = searchType;
         debugEntry.attempts = run.value().attempts;
         debugEntry.usedStreaming = run.value().usedStreaming;
@@ -1251,6 +1593,7 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         int firstRelevantRank = -1, numRelevantInTopK = 0, numRelevantSeen = 0;
         std::vector<int> retrievedGrades;
         double avgPrecision = 0.0;
+        bool hadTopKDuplicate = false;
         std::unordered_set<std::string> seenTopKDocIds;
         seenTopKDocIds.reserve(std::min((size_t)k, results.size()));
 
@@ -1279,6 +1622,7 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
             totalTopKCount++;
             const bool isDuplicate = !seenTopKDocIds.insert(key).second;
             if (isDuplicate) {
+                hadTopKDuplicate = true;
                 duplicateTopKCount++;
                 debugEntry.diagnostics.push_back("duplicate_topk_doc=" + key);
             }
@@ -1363,6 +1707,7 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
 
                 DebugLogEntry shadowEntry;
                 shadowEntry.query = "__diag_shadow_query__";
+                shadowEntry.queryIndex = static_cast<int>(queryIndex);
                 shadowEntry.searchType = searchType;
                 shadowEntry.relevantDocIds.assign(tq.relevantDocIds.begin(),
                                                   tq.relevantDocIds.end());
@@ -1396,6 +1741,11 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         }
 
         debugLogWriteJsonLine(debugEntry);
+
+        if (diagnostics) {
+            ingestQueryDiagnostics(*diagnostics, run.value().response.searchStats, false,
+                                   !results.empty(), hadTopKDuplicate, firstRelevantRank);
+        }
 
         if (firstRelevantRank > 0)
             totalMRR += 1.0 / firstRelevantRank;
@@ -1564,9 +1914,17 @@ struct BenchFixture {
         ensureEnvDefault("YAMS_SEARCH_WAIT_FOR_CONCEPTS", "1");
         ensureEnvDefault("YAMS_HNSW_RANDOM_SEED", "42");
         ensureEnvDefault("YAMS_HNSW_PARALLEL_BUILD_THRESHOLD", "0");
-        ensureEnvDefault("YAMS_POST_EMBED_CONCURRENT", "1");
-        ensureEnvDefault("YAMS_POST_EXTRACTION_CONCURRENT", "1");
+        // Use higher concurrency for embedding/extraction to reduce ingestion time.
+        // HNSW seed + wait-for-concepts provide sufficient determinism for ranking;
+        // single-threaded embedding only added wall-clock cost without improving reproducibility.
+        ensureEnvDefault("YAMS_POST_EMBED_CONCURRENT", "4");
+        ensureEnvDefault("YAMS_POST_EXTRACTION_CONCURRENT", "4");
         ensureEnvDefault("YAMS_POST_KG_CONCURRENT", "1");
+
+        // Adaptive sub-batch tuning: the default 15s warning threshold causes premature
+        // batch-cap collapse (8→4→1) on machines where ONNX inference is legitimately slow.
+        // Raise to 60s so the adaptive logic only shrinks on true stalls, not normal latency.
+        ensureEnvDefault("YAMS_EMBED_SUBBATCH_WARN_MS", "60000");
 
         // Benchmark default: graph rerank is ON unless explicitly overridden.
         // Canonical env key used by SearchEngineBuilder is YAMS_SEARCH_ENABLE_GRAPH_RERANK.
@@ -2872,32 +3230,18 @@ struct BenchFixture {
                 statsEntry.returnedPaths.push_back("vectorIndexSize=" +
                                                    std::to_string(st.vectorIndexSize));
 
-                std::lock_guard<std::mutex> lock(g_debugMutex);
-                if (g_debugOut) {
-                    json j;
-                    j["query"] = statsEntry.query;
-                    j["relevant_doc_ids"] = json::array();
-                    j["relevant_files"] = json::array();
-                    j["returned_paths"] = statsEntry.returnedPaths;
-                    j["returned_doc_ids"] = json::array();
-                    j["returned_scores"] = json::array();
-                    j["returned_grades"] = json::array();
-                    j["attempts"] = 0;
-                    j["used_streaming"] = false;
-                    j["used_fuzzy_retry"] = false;
-                    j["used_literal_retry"] = false;
-                    j["additional_stats"] = st.additionalStats;
-                    j["total_documents"] = st.totalDocuments;
-                    j["indexed_documents"] = st.indexedDocuments;
-                    j["vector_index_size"] = st.vectorIndexSize;
+                statsEntry.extraFields = {
+                    {"additional_stats", st.additionalStats},
+                    {"total_documents", st.totalDocuments},
+                    {"indexed_documents", st.indexedDocuments},
+                    {"vector_index_size", st.vectorIndexSize},
+                };
 
-                    for (const auto& [k, v] : st.additionalStats) {
-                        statsEntry.returnedPaths.push_back(k + "=" + v);
-                    }
-                    j["returned_paths"] = statsEntry.returnedPaths;
-                    (*g_debugOut) << j.dump() << "\n";
-                    g_debugOut->flush();
+                for (const auto& [k, v] : st.additionalStats) {
+                    statsEntry.returnedPaths.push_back(k + "=" + v);
                 }
+
+                debugLogWriteJsonLine(statsEntry);
             } else {
                 spdlog::warn("GetStats failed: {}", statsRes.error().message);
             }
@@ -2974,6 +3318,7 @@ struct BenchFixture {
         harness.reset();
         corpus.reset();
 
+        g_debugRunContext.reset();
         g_debugOut = nullptr;
         g_debugFile.reset();
     }
@@ -2997,8 +3342,63 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
                                                       const std::optional<fs::path>& outputFile) {
     OptimizationRunResult result;
     result.candidate = candidate;
+    result.runId = makeRunId(candidate.name);
 
-    ScopedEnvOverrides scopedEnv(candidate.envOverrides);
+    std::vector<EnvSetting> candidateOverrides = candidate.envOverrides;
+    const char* debugBaseEnv = std::getenv("YAMS_BENCH_DEBUG_FILE");
+    if (debugBaseEnv && std::strlen(debugBaseEnv) > 0) {
+        const fs::path basePath(debugBaseEnv);
+        const fs::path candidateDebugPath =
+            makeCandidateDebugPath(basePath, candidate.name, result.runId);
+        result.debugFile = candidateDebugPath.string();
+        candidateOverrides.push_back({"YAMS_BENCH_DEBUG_FILE", result.debugFile});
+
+        const bool hasExplicitTrace = hasOverrideKey(candidateOverrides, "YAMS_SEARCH_STAGE_TRACE");
+        if (!hasExplicitTrace && std::getenv("YAMS_SEARCH_STAGE_TRACE") == nullptr) {
+            candidateOverrides.push_back({"YAMS_SEARCH_STAGE_TRACE", "1"});
+            result.stageTraceEnabled = true;
+        } else {
+            result.stageTraceEnabled = envTruthy(std::getenv("YAMS_SEARCH_STAGE_TRACE"));
+        }
+
+        const int traceTopNDefault = parseIntEnvOrDefault("YAMS_BENCH_TRACE_TOP_N", 50, 1, 10000);
+        const int traceComponentDefault = parseIntEnvOrDefault(
+            "YAMS_BENCH_TRACE_COMPONENT_TOP_N", std::min(traceTopNDefault, 50), 1, 10000);
+
+        const bool hasExplicitTraceTop =
+            hasOverrideKey(candidateOverrides, "YAMS_SEARCH_STAGE_TRACE_TOP_N");
+        if (!hasExplicitTraceTop && std::getenv("YAMS_SEARCH_STAGE_TRACE_TOP_N") == nullptr) {
+            candidateOverrides.push_back(
+                {"YAMS_SEARCH_STAGE_TRACE_TOP_N", std::to_string(traceTopNDefault)});
+        }
+
+        const bool hasExplicitComponentTop =
+            hasOverrideKey(candidateOverrides, "YAMS_SEARCH_STAGE_TRACE_COMPONENT_TOP_N");
+        if (!hasExplicitComponentTop &&
+            std::getenv("YAMS_SEARCH_STAGE_TRACE_COMPONENT_TOP_N") == nullptr) {
+            candidateOverrides.push_back(
+                {"YAMS_SEARCH_STAGE_TRACE_COMPONENT_TOP_N", std::to_string(traceComponentDefault)});
+        }
+    } else {
+        result.stageTraceEnabled = envTruthy(std::getenv("YAMS_SEARCH_STAGE_TRACE"));
+    }
+
+    ScopedEnvOverrides scopedEnv(candidateOverrides);
+    result.traceTopN = parseIntEnvOrDefault("YAMS_SEARCH_STAGE_TRACE_TOP_N", 0, 0, 10000);
+    result.traceComponentTopN =
+        parseIntEnvOrDefault("YAMS_SEARCH_STAGE_TRACE_COMPONENT_TOP_N", 0, 0, 10000);
+    g_debugRunContext = DebugRunContext{
+        .runId = result.runId,
+        .candidate = result.candidate.name,
+        .dataset = "",
+        .corpusSize = 0,
+        .numQueries = 0,
+        .topK = 0,
+        .traceTopN = result.traceTopN,
+        .traceComponentTopN = result.traceComponentTopN,
+        .stageTraceEnabled = envTruthy(std::getenv("YAMS_SEARCH_STAGE_TRACE")),
+        .debugFile = result.debugFile,
+    };
     CleanupFixture();
 
     try {
@@ -3013,16 +3413,31 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
             result.tuningReason = status.value().searchTuningReason;
         }
 
+        g_debugRunContext->dataset = g_fixture->useBEIR ? g_fixture->beirDatasetName : "synthetic";
+        g_debugRunContext->corpusSize = g_fixture->corpusSize;
+        g_debugRunContext->numQueries = static_cast<int>(g_fixture->queries.size());
+        g_debugRunContext->topK = g_fixture->topK;
+        g_debugRunContext->traceTopN =
+            parseIntEnvOrDefault("YAMS_SEARCH_STAGE_TRACE_TOP_N", result.traceTopN, 0, 10000);
+        g_debugRunContext->traceComponentTopN = parseIntEnvOrDefault(
+            "YAMS_SEARCH_STAGE_TRACE_COMPONENT_TOP_N", result.traceComponentTopN, 0, 10000);
+        g_debugRunContext->stageTraceEnabled = envTruthy(std::getenv("YAMS_SEARCH_STAGE_TRACE"));
+        result.traceTopN = g_debugRunContext->traceTopN;
+        result.traceComponentTopN = g_debugRunContext->traceComponentTopN;
+        result.stageTraceEnabled = g_debugRunContext->stageTraceEnabled;
+
         const auto hybridStart = std::chrono::steady_clock::now();
-        result.hybridMetrics = evaluateQueries(*g_fixture->client, g_fixture->benchCorpusDir,
-                                               g_fixture->queries, g_fixture->topK, "hybrid");
+        result.hybridMetrics =
+            evaluateQueries(*g_fixture->client, g_fixture->benchCorpusDir, g_fixture->queries,
+                            g_fixture->topK, "hybrid", &result.hybridDiagnostics);
         const auto hybridEnd = std::chrono::steady_clock::now();
         result.hybridEvalMs =
             std::chrono::duration<double, std::milli>(hybridEnd - hybridStart).count();
 
         const auto keywordStart = std::chrono::steady_clock::now();
-        result.keywordMetrics = evaluateQueries(*g_fixture->client, g_fixture->benchCorpusDir,
-                                                g_fixture->queries, g_fixture->topK, "keyword");
+        result.keywordMetrics =
+            evaluateQueries(*g_fixture->client, g_fixture->benchCorpusDir, g_fixture->queries,
+                            g_fixture->topK, "keyword", &result.keywordDiagnostics);
         const auto keywordEnd = std::chrono::steady_clock::now();
         result.keywordEvalMs =
             std::chrono::duration<double, std::milli>(keywordEnd - keywordStart).count();
@@ -3041,6 +3456,7 @@ static OptimizationRunResult runOptimizationCandidate(const OptimizationCandidat
         result.errorMessage = e.what();
     }
 
+    g_debugRunContext.reset();
     CleanupFixture();
 
     if (outputFile.has_value()) {
@@ -3157,8 +3573,23 @@ static int runOptimizationLoop() {
                   << std::setprecision(4) << mrrDelta << std::noshowpos
                   << "  dup@k=" << std::setprecision(4) << result.hybridMetrics.duplicateRateAtK
                   << "  avg_hybrid_ms=" << std::setprecision(1) << avgMs << "\n";
+        const auto hybridDiag = queryDiagnosticsToJson(result.hybridDiagnostics);
+        std::cout << "    trace_cov=" << std::setprecision(3)
+                  << hybridDiag["trace_coverage"].get<double>() << "  sem_rescue_mean="
+                  << hybridDiag["semantic_rescue_rate"]["mean"].get<double>()
+                  << "  vec_only_below_mean="
+                  << hybridDiag["vector_only_below_threshold"]["mean"].get<double>()
+                  << "  no_relevant_hit_rate="
+                  << hybridDiag["query_without_relevant_hit_rate"].get<double>() << "\n";
+        if (result.traceTopN > 0 || result.traceComponentTopN > 0) {
+            std::cout << "    trace_top_n=" << result.traceTopN
+                      << "  trace_component_top_n=" << result.traceComponentTopN << "\n";
+        }
         std::cout << "    tuning_state="
                   << (result.tuningState.empty() ? "<unknown>" : result.tuningState) << "\n";
+        if (!result.debugFile.empty()) {
+            std::cout << "    debug_file=" << result.debugFile << "\n";
+        }
     }
 
     std::vector<OptimizationRunResult> successful;

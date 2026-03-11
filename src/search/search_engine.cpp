@@ -124,6 +124,17 @@ bool envFlagEnabled(const char* name) {
     return false;
 }
 
+size_t envSizeTOrDefault(const char* name, size_t defaultValue, size_t minValue, size_t maxValue) {
+    if (const char* env = std::getenv(name); env && *env) {
+        try {
+            const auto parsed = static_cast<size_t>(std::stoull(env));
+            return std::clamp(parsed, minValue, maxValue);
+        } catch (...) {
+        }
+    }
+    return std::clamp(defaultValue, minValue, maxValue);
+}
+
 std::string deriveDocIdFromPath(const std::string& path) {
     if (path.empty()) {
         return {};
@@ -2076,9 +2087,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         !response.timedOutComponents.empty() || !response.failedComponents.empty();
 
     if (stageTraceEnabled) {
-        const size_t traceTopCount =
+        const size_t traceTopDefault =
             std::max(userLimit, std::max(config_.rerankTopK, config_.graphRerankTopN));
-        const size_t componentTopCount = std::min<size_t>(traceTopCount, 25);
+        const size_t traceTopCount =
+            envSizeTOrDefault("YAMS_SEARCH_STAGE_TRACE_TOP_N", traceTopDefault, 1, 10000);
+        const size_t componentTopDefault = std::min<size_t>(traceTopCount, 25);
+        const size_t componentTopCount =
+            std::min(traceTopCount, envSizeTOrDefault("YAMS_SEARCH_STAGE_TRACE_COMPONENT_TOP_N",
+                                                      componentTopDefault, 1, 10000));
 
         const std::vector<std::string> postFusionAllDocIds =
             collectRankedResultDocIds(postFusionSnapshot);
@@ -2184,6 +2200,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.debugStats["trace_user_limit"] = std::to_string(userLimit);
         response.debugStats["trace_fusion_candidate_limit"] = std::to_string(fusionCandidateLimit);
         response.debugStats["trace_top_window"] = std::to_string(traceTopCount);
+        response.debugStats["trace_top_window_default"] = std::to_string(traceTopDefault);
+        response.debugStats["trace_component_top_window"] = std::to_string(componentTopCount);
+        response.debugStats["trace_component_top_window_default"] =
+            std::to_string(componentTopDefault);
         response.debugStats["trace_graph_rerank_applied"] = graphRerankApplied ? "1" : "0";
         response.debugStats["trace_cross_rerank_applied"] = crossRerankApplied ? "1" : "0";
 

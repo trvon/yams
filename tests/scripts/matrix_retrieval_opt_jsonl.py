@@ -26,6 +26,17 @@ class Row:
     hybrid_map: float
     hybrid_eval_ms: float
     keyword_eval_ms: float
+    hybrid_keyword_mrr_delta: float
+    hybrid_duplicate_rate_at_k: float
+    objective_penalty_hybrid_regression: float
+    objective_penalty_duplicate_rate: float
+    trace_coverage: float
+    graph_rerank_apply_rate: float
+    semantic_rescue_rate_mean: float
+    vector_only_below_threshold_mean: float
+    query_without_relevant_hit_rate: float
+    trace_top_n: float
+    trace_component_top_n: float
     tuning_state: str
     tuning_reason: str
     env_overrides: dict[str, Any]
@@ -56,6 +67,17 @@ def _objective(row: dict[str, Any]) -> float:
     return 0.0
 
 
+def _nested(data: dict[str, Any], path: list[str], default: Any = None) -> Any:
+    cur: Any = data
+    for key in path:
+        if not isinstance(cur, dict):
+            return default
+        if key not in cur:
+            return default
+        cur = cur[key]
+    return cur
+
+
 def _load_rows(inputs: list[Path]) -> list[Row]:
     out: list[Row] = []
     for path in inputs:
@@ -76,6 +98,8 @@ def _load_rows(inputs: list[Path]) -> list[Row]:
                     continue
 
                 hybrid = data.get("hybrid", {})
+                hybrid_debug = data.get("hybrid_debug_summary", {})
+                objective_penalties = data.get("objective_penalties", {})
                 out.append(
                     Row(
                         candidate=candidate,
@@ -88,8 +112,47 @@ def _load_rows(inputs: list[Path]) -> list[Row]:
                         hybrid_ndcg=_safe_float(hybrid.get("ndcg_at_k"), 0.0),
                         hybrid_recall=_safe_float(hybrid.get("recall_at_k"), 0.0),
                         hybrid_map=_safe_float(hybrid.get("map"), 0.0),
+                        hybrid_duplicate_rate_at_k=_safe_float(
+                            hybrid.get("duplicate_rate_at_k"), 0.0
+                        ),
                         hybrid_eval_ms=_safe_float(data.get("hybrid_eval_ms"), 0.0),
                         keyword_eval_ms=_safe_float(data.get("keyword_eval_ms"), 0.0),
+                        hybrid_keyword_mrr_delta=_safe_float(
+                            data.get("hybrid_keyword_mrr_delta"), 0.0
+                        ),
+                        objective_penalty_hybrid_regression=_safe_float(
+                            objective_penalties.get("hybrid_regression"), 0.0
+                        ),
+                        objective_penalty_duplicate_rate=_safe_float(
+                            objective_penalties.get("duplicate_rate"), 0.0
+                        ),
+                        trace_coverage=_safe_float(
+                            hybrid_debug.get("trace_coverage"), 0.0
+                        ),
+                        graph_rerank_apply_rate=_safe_float(
+                            hybrid_debug.get("graph_rerank_apply_rate"), 0.0
+                        ),
+                        semantic_rescue_rate_mean=_safe_float(
+                            _nested(
+                                hybrid_debug, ["semantic_rescue_rate", "mean"], 0.0
+                            ),
+                            0.0,
+                        ),
+                        vector_only_below_threshold_mean=_safe_float(
+                            _nested(
+                                hybrid_debug,
+                                ["vector_only_below_threshold", "mean"],
+                                0.0,
+                            ),
+                            0.0,
+                        ),
+                        query_without_relevant_hit_rate=_safe_float(
+                            hybrid_debug.get("query_without_relevant_hit_rate"), 0.0
+                        ),
+                        trace_top_n=_safe_float(data.get("trace_top_n"), 0.0),
+                        trace_component_top_n=_safe_float(
+                            data.get("trace_component_top_n"), 0.0
+                        ),
                         tuning_state=str(data.get("tuning_state", "")),
                         tuning_reason=str(data.get("tuning_reason", "")),
                         env_overrides=data.get("env_overrides", {}),
@@ -120,6 +183,17 @@ def _matrix_rows(latest_success: dict[str, Row]) -> list[dict[str, Any]]:
                 "map": row.hybrid_map,
                 "hybrid_eval_ms": row.hybrid_eval_ms,
                 "keyword_eval_ms": row.keyword_eval_ms,
+                "hybrid_keyword_mrr_delta": row.hybrid_keyword_mrr_delta,
+                "duplicate_rate_at_k": row.hybrid_duplicate_rate_at_k,
+                "objective_penalty_hybrid_regression": row.objective_penalty_hybrid_regression,
+                "objective_penalty_duplicate_rate": row.objective_penalty_duplicate_rate,
+                "trace_coverage": row.trace_coverage,
+                "graph_rerank_apply_rate": row.graph_rerank_apply_rate,
+                "semantic_rescue_rate_mean": row.semantic_rescue_rate_mean,
+                "vector_only_below_threshold_mean": row.vector_only_below_threshold_mean,
+                "query_without_relevant_hit_rate": row.query_without_relevant_hit_rate,
+                "trace_top_n": row.trace_top_n,
+                "trace_component_top_n": row.trace_component_top_n,
                 "source_file": row.source_file,
                 "line_number": row.line_number,
                 "tuning_state": row.tuning_state,
@@ -145,6 +219,17 @@ def _write_csv(path: Path, matrix: list[dict[str, Any]]) -> None:
         "map",
         "hybrid_eval_ms",
         "keyword_eval_ms",
+        "hybrid_keyword_mrr_delta",
+        "duplicate_rate_at_k",
+        "objective_penalty_hybrid_regression",
+        "objective_penalty_duplicate_rate",
+        "trace_coverage",
+        "graph_rerank_apply_rate",
+        "semantic_rescue_rate_mean",
+        "vector_only_below_threshold_mean",
+        "query_without_relevant_hit_rate",
+        "trace_top_n",
+        "trace_component_top_n",
         "source_file",
         "line_number",
         "tuning_state",
