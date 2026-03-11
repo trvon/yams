@@ -6,6 +6,7 @@
 #include <limits>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
@@ -28,7 +29,11 @@ namespace yams::daemon {
 namespace {
 std::atomic<uint8_t> gPostIngestScaleTestMode{
     static_cast<uint8_t>(TuningManager::PostIngestScaleTestMode::Normal)};
-}
+
+// Wakeup flag for idle-to-active transition. Set by notifyWakeup(), cleared by tuningLoop().
+// When set, the timer is cancelled early so the loop can re-evaluate immediately.
+std::atomic<bool> gWakeupRequested{false};
+} // namespace
 
 TuningManager::TuningManager(ServiceManager* sm, StateComponent* state,
                              WorkCoordinator* coordinator)
@@ -67,12 +72,10 @@ void TuningManager::start() {
     } catch (...) {
     }
 
-    if (TuneAdvisor::postExtractionConcurrent() == 0) {
-        TuneAdvisor::setPostExtractionConcurrentDynamicCap(2);
-    }
-    if (TuneAdvisor::postEmbedConcurrent() == 0) {
-        TuneAdvisor::setPostEmbedConcurrentDynamicCap(1);
-    }
+    // Start seeding is no longer needed: UINT32_MAX sentinel means "unset" and
+    // the base budget allocator provides non-zero defaults when no DynamicCap is set.
+    // Previously, DynamicCap(0) was the "unset" sentinel so the daemon force-seeded
+    // extraction=2 and embed=1 to work around the allocator treating 0 as unset.
 
     tuningFuture_ = boost::asio::co_spawn(strand_, tuningLoop(), boost::asio::use_future);
 }
@@ -92,23 +95,35 @@ void TuningManager::stop() {
     }
 }
 
+void TuningManager::notifyWakeup() {
+    gWakeupRequested.store(true, std::memory_order_release);
+}
+
 boost::asio::awaitable<void> TuningManager::tuningLoop() {
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
     spdlog::debug("TuningManager loop started");
 
     while (running_.load()) {
         YAMS_ZONE_SCOPED_N("TuningManager::loop");
+        bool idle = false;
         try {
-            tick_once();
+            idle = tick_once();
         } catch (const std::exception& e) {
             spdlog::debug("TuningManager tick error: {}", e.what());
         } catch (...) {
         }
 
-        // Cadence derived from TuneAdvisor status tick
-        auto ms = TuneAdvisor::statusTickMs();
+        // Choose cadence: active mode uses the fast 5ms tick, idle mode backs off
+        // to a much longer interval (default 1000ms) to reduce CPU wake-ups.
+        // A wakeup flag (set by notifyWakeup()) can cut the idle sleep short.
+        const uint32_t ms = idle ? TuneAdvisor::idleTickMs() : TuneAdvisor::statusTickMs();
+        gWakeupRequested.store(false, std::memory_order_relaxed);
         timer.expires_after(std::chrono::milliseconds(ms));
-        co_await timer.async_wait(boost::asio::use_awaitable);
+
+        boost::system::error_code ec;
+        co_await timer.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+        // ec == operation_aborted when timer was cancelled (e.g., shutdown or wakeup).
+        // Either way, loop back and re-evaluate.
     }
 
     spdlog::debug("TuningManager loop exiting");
@@ -306,10 +321,10 @@ void TuningManager::configureOnnxConcurrencyRegistry() {
         maxSlots, glinerReserved, embedReserved, rerankerReserved);
 }
 
-void TuningManager::tick_once() {
+bool TuningManager::tick_once() {
     YAMS_ZONE_SCOPED_N("TuningManager::tick_once");
     if (!sm_ || !state_)
-        return;
+        return true; // No services → treat as idle
 
     // Resource governor must keep running during startup so pressure/readiness
     // state remains current even before all metadata services are ready.
@@ -319,7 +334,7 @@ void TuningManager::tick_once() {
     // Don't perform adaptive tuning until services are at least partially ready,
     // to avoid acting on default pool configs.
     if (!state_->readiness.metadataRepoReady.load()) {
-        return;
+        return true; // Not ready yet → treat as idle
     }
 
     // Configure ONNX concurrency registry once on first tick
@@ -399,6 +414,10 @@ void TuningManager::tick_once() {
 
     // Gather minimal metrics
     const std::uint64_t activeConns = state_->stats.activeConnections.load();
+    const std::uint64_t healthConns = state_->stats.healthCheckConnections.load();
+    // Non-health connections are the ones that count for idle detection
+    const std::uint64_t nonHealthConns =
+        (activeConns > healthConns) ? (activeConns - healthConns) : 0;
     const std::uint64_t workerThreads = sm_->getWorkerThreads();
     const std::uint64_t workerQueued = sm_->getWorkerQueueDepth();
     const auto msnap = MuxMetricsRegistry::instance().snapshot();
@@ -473,8 +492,8 @@ void TuningManager::tick_once() {
                 muxHigh = (muxCap > 0 && muxQueuedBytes >= muxCap);
             } catch (...) {
             }
-            bool busy = (activeConns > 0) || workerQHigh || muxHigh;
-            bool idle = (activeConns == 0) && (workerQueued == 0) && (muxQueuedBytes == 0);
+            bool busy = (nonHealthConns > 0) || workerQHigh || muxHigh;
+            bool idle = (nonHealthConns == 0) && (workerQueued == 0) && (muxQueuedBytes == 0);
             if (busy) {
                 uint32_t next = clampMs(static_cast<uint32_t>(currentMs * 0.5));
                 if (next < currentMs) {
@@ -718,7 +737,7 @@ void TuningManager::tick_once() {
                 applyActiveMask(1u << 4u, titleTarget);
                 applyActiveMask(1u << 5u, embedTarget);
                 const bool daemonIdle =
-                    (activeConns == 0) && (workerQueued == 0) && (muxQueuedBytes == 0);
+                    (nonHealthConns == 0) && (workerQueued == 0) && (muxQueuedBytes == 0);
                 const bool postIngestBusy = (queuedItems > 0) || (currentInFlight > 0) ||
                                             (kgQueued > 0) || (symbolQueued > 0) ||
                                             (entityQueued > 0) || (titleQueued > 0) ||
@@ -870,12 +889,12 @@ void TuningManager::tick_once() {
             if (currentPressure < previousPressureLevel_) {
                 // Pressure dropped — clear all DynamicCaps to let base budget through
                 TuneAdvisor::beginDynamicCapWrite();
-                TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
-                TuneAdvisor::setPostKgConcurrentDynamicCap(0);
-                TuneAdvisor::setPostSymbolConcurrentDynamicCap(0);
-                TuneAdvisor::setPostEntityConcurrentDynamicCap(0);
-                TuneAdvisor::setPostTitleConcurrentDynamicCap(0);
-                TuneAdvisor::setPostEmbedConcurrentDynamicCap(0);
+                TuneAdvisor::setPostExtractionConcurrentDynamicCap(UINT32_MAX);
+                TuneAdvisor::setPostKgConcurrentDynamicCap(UINT32_MAX);
+                TuneAdvisor::setPostSymbolConcurrentDynamicCap(UINT32_MAX);
+                TuneAdvisor::setPostEntityConcurrentDynamicCap(UINT32_MAX);
+                TuneAdvisor::setPostTitleConcurrentDynamicCap(UINT32_MAX);
+                TuneAdvisor::setPostEmbedConcurrentDynamicCap(UINT32_MAX);
                 TuneAdvisor::endDynamicCapWrite();
             }
             previousPressureLevel_ = currentPressure;
@@ -1275,6 +1294,9 @@ void TuningManager::tick_once() {
         }
     } catch (...) {
     }
+
+    // Return idle hint for tuning loop cadence: true when no real work is pending.
+    return (nonHealthConns == 0) && (workerQueued == 0) && (muxQueuedBytes == 0);
 }
 
 } // namespace yams::daemon

@@ -893,6 +893,10 @@ awaitable<void> SocketServer::handle_connection(std::shared_ptr<TrackedSocket> t
         }
         handlerConfig.stream_chunk_timeout = std::chrono::milliseconds(streamChunkTimeoutMs);
         handlerConfig.max_inflight_per_connection = TuneAdvisor::serverMaxInflightPerConn();
+        // Wire health-check counter so RequestHandler can tag ping/status connections
+        if (state_) {
+            handlerConfig.health_check_counter = &state_->stats.healthCheckConnections;
+        }
         MuxMetricsRegistry::instance().setWriterBudget(handlerConfig.writer_budget_bytes_per_turn);
         RequestDispatcher* disp = nullptr;
         {

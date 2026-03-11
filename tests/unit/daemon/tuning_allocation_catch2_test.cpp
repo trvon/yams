@@ -2,13 +2,14 @@
 // Tests 4 bugs: integer truncation, governor cap inversion, ONNX zero shared capacity,
 // stage starvation. These tests should FAIL against the current buggy code (TDD red phase).
 
-#include <catch2/catch_test_macros.hpp>
-#include <yams/daemon/components/TuneAdvisor.h>
-#include <yams/daemon/components/ResourceGovernor.h>
+#include <climits>
 #include <cstdlib>
 #include <string>
 #include "../../common/env_compat.h"
+#include <catch2/catch_test_macros.hpp>
 #include <yams/compat/unistd.h>
+#include <yams/daemon/components/ResourceGovernor.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 
 using namespace yams::daemon;
 
@@ -61,7 +62,7 @@ public:
     HwGuard& operator=(const HwGuard&) = delete;
 };
 
-/// Reset all per-stage overrides to 0 (no override)
+/// Reset all per-stage overrides to 0 (no override) and dynamic caps to UINT32_MAX (unset)
 void resetPostIngestOverrides() {
     TuneAdvisor::setPostExtractionConcurrent(0);
     TuneAdvisor::setPostKgConcurrent(0);
@@ -69,12 +70,12 @@ void resetPostIngestOverrides() {
     TuneAdvisor::setPostEntityConcurrent(0);
     TuneAdvisor::setPostTitleConcurrent(0);
     TuneAdvisor::setPostEmbedConcurrent(0);
-    TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
-    TuneAdvisor::setPostKgConcurrentDynamicCap(0);
-    TuneAdvisor::setPostSymbolConcurrentDynamicCap(0);
-    TuneAdvisor::setPostEntityConcurrentDynamicCap(0);
-    TuneAdvisor::setPostTitleConcurrentDynamicCap(0);
-    TuneAdvisor::setPostEmbedConcurrentDynamicCap(0);
+    TuneAdvisor::setPostExtractionConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostKgConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostSymbolConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostEntityConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostTitleConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostEmbedConcurrentDynamicCap(UINT32_MAX);
     TuneAdvisor::setPostIngestTotalConcurrent(0);
 }
 

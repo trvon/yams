@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -441,6 +442,27 @@ public:
         }
         return def;
     }
+
+    // Idle-mode tick cadence for daemon tuning loop. Default 1000 ms.
+    // When the daemon has no real work (zero non-health connections, empty queues),
+    // the tuning loop sleeps for this duration instead of the active-mode 5 ms.
+    // Dramatically reduces CPU wake-ups during idle periods.
+    static uint32_t idleTickMs() {
+        if (const char* s = std::getenv("YAMS_IDLE_TICK_MS")) {
+            try {
+                uint32_t v = static_cast<uint32_t>(std::stoul(s));
+                if (v > 0 && v < 60000)
+                    return v;
+            } catch (...) {
+            }
+        }
+        return 1000;
+    }
+
+#ifdef YAMS_TESTING
+    /// Test-only accessor: returns idle tick cadence.
+    static uint32_t testing_idleTickMs() { return idleTickMs(); }
+#endif
 
     // -------- Repair coordinator tuning (env-driven) --------
     // Max repair batch size per cycle.
@@ -1966,9 +1988,10 @@ public:
     static void setPostExtractionConcurrent(uint32_t v) {
         postExtractionConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
     }
-    // Runtime (daemon-only) dynamic cap. 0 = unset.
+    // Runtime (daemon-only) dynamic cap. UINT32_MAX = unset; 0 = zero concurrency.
     static void setPostExtractionConcurrentDynamicCap(uint32_t v) {
-        postExtractionConcurrentDynamicCap_.store(std::min(v, 64u), std::memory_order_relaxed);
+        postExtractionConcurrentDynamicCap_.store(v == UINT32_MAX ? UINT32_MAX : std::min(v, 64u),
+                                                  std::memory_order_relaxed);
     }
 
     /// Maximum concurrent KG ingestion tasks (profile-scaled, max 64)
@@ -1984,7 +2007,8 @@ public:
         postKgConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
     }
     static void setPostKgConcurrentDynamicCap(uint32_t v) {
-        postKgConcurrentDynamicCap_.store(std::min(v, 64u), std::memory_order_relaxed);
+        postKgConcurrentDynamicCap_.store(v == UINT32_MAX ? UINT32_MAX : std::min(v, 64u),
+                                          std::memory_order_relaxed);
     }
 
     /// Maximum concurrent symbol extraction tasks (profile-scaled, max 32)
@@ -2000,7 +2024,8 @@ public:
         postSymbolConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
     }
     static void setPostSymbolConcurrentDynamicCap(uint32_t v) {
-        postSymbolConcurrentDynamicCap_.store(std::min(v, 32u), std::memory_order_relaxed);
+        postSymbolConcurrentDynamicCap_.store(v == UINT32_MAX ? UINT32_MAX : std::min(v, 32u),
+                                              std::memory_order_relaxed);
     }
 
     /// Maximum concurrent entity extraction tasks (profile-scaled, max 16)
@@ -2017,7 +2042,8 @@ public:
         postEntityConcurrentOverride_.store(std::min(v, 16u), std::memory_order_relaxed);
     }
     static void setPostEntityConcurrentDynamicCap(uint32_t v) {
-        postEntityConcurrentDynamicCap_.store(std::min(v, 16u), std::memory_order_relaxed);
+        postEntityConcurrentDynamicCap_.store(v == UINT32_MAX ? UINT32_MAX : std::min(v, 16u),
+                                              std::memory_order_relaxed);
     }
 
     /// Maximum concurrent title extraction tasks (profile-scaled, max 16)
@@ -2032,7 +2058,8 @@ public:
         postTitleConcurrentOverride_.store(std::min(v, 16u), std::memory_order_relaxed);
     }
     static void setPostTitleConcurrentDynamicCap(uint32_t v) {
-        postTitleConcurrentDynamicCap_.store(std::min(v, 16u), std::memory_order_relaxed);
+        postTitleConcurrentDynamicCap_.store(v == UINT32_MAX ? UINT32_MAX : std::min(v, 16u),
+                                             std::memory_order_relaxed);
     }
 
     // PBI-05b: EmbeddingService concurrency (parallel embedding workers)
@@ -2048,7 +2075,8 @@ public:
         postEmbedConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
     }
     static void setPostEmbedConcurrentDynamicCap(uint32_t v) {
-        postEmbedConcurrentDynamicCap_.store(std::min(v, 32u), std::memory_order_relaxed);
+        postEmbedConcurrentDynamicCap_.store(v == UINT32_MAX ? UINT32_MAX : std::min(v, 32u),
+                                             std::memory_order_relaxed);
     }
 
     // Seqlock helpers for DynamicCap batch writes.
@@ -2638,7 +2666,7 @@ private:
             // Use seqlock-protected consistent read to avoid torn values
             const auto dyn = readDynamicCapsConsistent();
             for (std::size_t i = 0; i < kStageCount; ++i) {
-                if (dyn[i] > 0) {
+                if (dyn[i] != UINT32_MAX) {
                     caps[i] = std::min(caps[i], std::min(dyn[i], kMaxCaps[i]));
                     hasDynamicCap = true;
                 }
@@ -2738,17 +2766,17 @@ private:
     static inline std::atomic<uint32_t> postEntityConcurrentOverride_{0};
     static inline std::atomic<uint32_t> postTitleConcurrentOverride_{0};
 
-    // Runtime (daemon-only) dynamic caps for post-ingest stages (0 = unset)
-    static inline std::atomic<uint32_t> postExtractionConcurrentDynamicCap_{0};
-    static inline std::atomic<uint32_t> postKgConcurrentDynamicCap_{0};
-    static inline std::atomic<uint32_t> postSymbolConcurrentDynamicCap_{0};
-    static inline std::atomic<uint32_t> postEntityConcurrentDynamicCap_{0};
-    static inline std::atomic<uint32_t> postTitleConcurrentDynamicCap_{0};
+    // Runtime (daemon-only) dynamic caps for post-ingest stages (UINT32_MAX = unset)
+    static inline std::atomic<uint32_t> postExtractionConcurrentDynamicCap_{UINT32_MAX};
+    static inline std::atomic<uint32_t> postKgConcurrentDynamicCap_{UINT32_MAX};
+    static inline std::atomic<uint32_t> postSymbolConcurrentDynamicCap_{UINT32_MAX};
+    static inline std::atomic<uint32_t> postEntityConcurrentDynamicCap_{UINT32_MAX};
+    static inline std::atomic<uint32_t> postTitleConcurrentDynamicCap_{UINT32_MAX};
 
     // PBI-05b: EmbeddingService concurrency overrides
     static inline std::atomic<uint32_t> embedMaxConcurrencyOverride_{0};
     static inline std::atomic<uint32_t> postEmbedConcurrentOverride_{0};
-    static inline std::atomic<uint32_t> postEmbedConcurrentDynamicCap_{0};
+    static inline std::atomic<uint32_t> postEmbedConcurrentDynamicCap_{UINT32_MAX};
 
     // Seqlock counter for DynamicCap batch writes.
     // Writer increments to odd before stores, even after. Reader retries if odd or changed.

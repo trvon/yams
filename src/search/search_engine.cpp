@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <future>
 #include <limits>
 #include <set>
@@ -1770,19 +1771,39 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
 
         if (!rerankerCoolingDown && !skipRerank) {
-            // Extract document snippets for reranking
+            // Extract document snippets for reranking.
+            // Fallback: if snippet is empty (e.g. BEIR/benchmark data where
+            // VectorRecord::content is not populated), read from the source file.
             std::vector<std::string> snippets;
             std::vector<size_t> rerankIndices;
             snippets.reserve(rerankWindow);
             rerankIndices.reserve(rerankWindow);
             for (size_t i = 0; i < rerankWindow; ++i) {
-                // Only rerank when we have real text; skip file-path-only samples.
+                std::string text;
                 if (!response.results[i].snippet.empty()) {
-                    snippets.push_back(truncateSnippet(response.results[i].snippet,
-                                                       config_.rerankSnippetMaxChars));
+                    text = response.results[i].snippet;
+                } else if (!response.results[i].document.filePath.empty()) {
+                    // Fallback: read content from source file on disk
+                    std::ifstream ifs(response.results[i].document.filePath,
+                                      std::ios::in | std::ios::binary);
+                    if (ifs) {
+                        const size_t readLimit = config_.rerankSnippetMaxChars + 64;
+                        std::string buf(readLimit, '\0');
+                        ifs.read(buf.data(), static_cast<std::streamsize>(readLimit));
+                        buf.resize(static_cast<size_t>(ifs.gcount()));
+                        if (!buf.empty()) {
+                            text = std::move(buf);
+                            spdlog::debug("[reranker] Loaded {} bytes from file for doc {}",
+                                          text.size(), i);
+                        }
+                    }
+                }
+
+                if (!text.empty()) {
+                    snippets.push_back(truncateSnippet(text, config_.rerankSnippetMaxChars));
                     rerankIndices.push_back(i);
                 } else {
-                    spdlog::debug("[reranker] Skipping doc {} (no snippet available)", i);
+                    spdlog::debug("[reranker] Skipping doc {} (no snippet or file content)", i);
                 }
             }
 

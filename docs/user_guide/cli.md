@@ -492,7 +492,7 @@ Options:
 Description:
 - Displays documents with names, types, sizes, content snippets, and timestamps.
 - Rich table format shows stable NAME, TYPE, SIZE, SNIPPET, and WHEN columns.
-- By default, detail lines show tags plus key metadata (`owner`, `source`) under each row when present.
+- By default, a compact detail line shows tags plus key metadata (`owner`, `source`) under each row when present.
 - `--show-metadata` expands detail lines to include all metadata keys.
 - The --recent flag filters to the N most recent documents before applying other sorting options.
 - Content snippets provide quick previews of document contents.

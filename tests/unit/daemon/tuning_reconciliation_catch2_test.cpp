@@ -6,16 +6,17 @@
 //
 // Uses same TDD pattern as tuning_allocation_catch2_test.cpp.
 
+#include <array>
+#include <climits>
+#include <cstdlib>
+#include <string>
+#include "../../common/env_compat.h"
 #include <catch2/catch_test_macros.hpp>
+#include <yams/compat/unistd.h>
 #include <yams/daemon/components/GradientLimiter.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningManager.h>
-#include <array>
-#include <cstdlib>
-#include <string>
-#include "../../common/env_compat.h"
-#include <yams/compat/unistd.h>
 
 using namespace yams::daemon;
 
@@ -68,7 +69,7 @@ public:
     HwGuard& operator=(const HwGuard&) = delete;
 };
 
-/// Reset all per-stage overrides to 0 (no override)
+/// Reset all per-stage overrides to 0 (no override) and dynamic caps to UINT32_MAX (unset)
 void resetPostIngestOverrides() {
     TuneAdvisor::setPostExtractionConcurrent(0);
     TuneAdvisor::setPostKgConcurrent(0);
@@ -76,12 +77,12 @@ void resetPostIngestOverrides() {
     TuneAdvisor::setPostEntityConcurrent(0);
     TuneAdvisor::setPostTitleConcurrent(0);
     TuneAdvisor::setPostEmbedConcurrent(0);
-    TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
-    TuneAdvisor::setPostKgConcurrentDynamicCap(0);
-    TuneAdvisor::setPostSymbolConcurrentDynamicCap(0);
-    TuneAdvisor::setPostEntityConcurrentDynamicCap(0);
-    TuneAdvisor::setPostTitleConcurrentDynamicCap(0);
-    TuneAdvisor::setPostEmbedConcurrentDynamicCap(0);
+    TuneAdvisor::setPostExtractionConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostKgConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostSymbolConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostEntityConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostTitleConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostEmbedConcurrentDynamicCap(UINT32_MAX);
     TuneAdvisor::setPostIngestTotalConcurrent(0);
 }
 
@@ -751,4 +752,90 @@ TEST_CASE("Embed tuning simulation improves queue control with gradient limiter"
     CHECK(dynamic.peakQueue <= baseline.peakQueue);
     CHECK(dynamic.finalQueue <= baseline.finalQueue);
     CHECK(dynamic.avgTarget >= baseline.avgTarget);
+}
+
+// =============================================================================
+// Group F: End-to-end idle zero-targets via DynamicCap (Bug 1 + Bug 4 combined)
+// =============================================================================
+// When the tuning loop writes DynamicCap(0) to all stages (idle path), the
+// effective per-stage concurrency must be exactly zero. This tests the full
+// chain: TuningManager writes caps → TuneAdvisor allocator respects them.
+//
+// TDD Red Phase: FAILS because DynamicCap(0) is the unset sentinel (Bug 1)
+// AND the allocator has hardcoded minimums (Bug 4).
+
+TEST_CASE("Idle DynamicCap(0) on all stages yields zero effective concurrency (E2E)",
+          "[daemon][tune][reconciliation][idle][e2e][catch2]") {
+    resetPostIngestOverrides();
+    setAllPostIngestStagesActive();
+
+    HwGuard hwGuard(16);
+    ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
+    TuneAdvisor::setPostIngestTotalConcurrent(12);
+
+    // Simulate what TuningManager::tick_once does when idle: write DynamicCap(0) to all stages
+    TuneAdvisor::beginDynamicCapWrite();
+    TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
+    TuneAdvisor::setPostKgConcurrentDynamicCap(0);
+    TuneAdvisor::setPostSymbolConcurrentDynamicCap(0);
+    TuneAdvisor::setPostEntityConcurrentDynamicCap(0);
+    TuneAdvisor::setPostTitleConcurrentDynamicCap(0);
+    TuneAdvisor::setPostEmbedConcurrentDynamicCap(0);
+    TuneAdvisor::endDynamicCapWrite();
+
+    // Read back via the public per-stage accessors (includes DynamicCaps)
+    const uint32_t total = TuneAdvisor::postExtractionConcurrent() +
+                           TuneAdvisor::postKgConcurrent() + TuneAdvisor::postSymbolConcurrent() +
+                           TuneAdvisor::postEntityConcurrent() +
+                           TuneAdvisor::postTitleConcurrent() + TuneAdvisor::postEmbedConcurrent();
+
+    // BUG: DynamicCap(0) = unset sentinel → caps ignored → total >= 6
+    // FIXED: total == 0
+    CHECK(total == 0);
+}
+
+TEST_CASE("Clearing DynamicCaps after idle restores non-zero defaults (E2E)",
+          "[daemon][tune][reconciliation][idle][e2e][recovery][catch2]") {
+    resetPostIngestOverrides();
+    setAllPostIngestStagesActive();
+
+    HwGuard hwGuard(16);
+    ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
+    TuneAdvisor::setPostIngestTotalConcurrent(12);
+
+    // Capture defaults
+    const auto defaultExtract = TuneAdvisor::postExtractionDefaultConcurrent();
+    const auto defaultEmbed = TuneAdvisor::postEmbedDefaultConcurrent();
+    REQUIRE(defaultExtract >= 1);
+    REQUIRE(defaultEmbed >= 1);
+
+    // Go idle: cap everything to 0
+    TuneAdvisor::beginDynamicCapWrite();
+    TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
+    TuneAdvisor::setPostKgConcurrentDynamicCap(0);
+    TuneAdvisor::setPostSymbolConcurrentDynamicCap(0);
+    TuneAdvisor::setPostEntityConcurrentDynamicCap(0);
+    TuneAdvisor::setPostTitleConcurrentDynamicCap(0);
+    TuneAdvisor::setPostEmbedConcurrentDynamicCap(0);
+    TuneAdvisor::endDynamicCapWrite();
+
+    // Verify idle state (after Bug 1+4 fix)
+    CHECK(TuneAdvisor::postExtractionConcurrent() == 0);
+    CHECK(TuneAdvisor::postEmbedConcurrent() == 0);
+
+    // Wake up: clear caps (set to UINT32_MAX sentinel — after Bug 1 fix)
+    // In current code, clearing is done by writing 0. After fix, clearing
+    // is done by writing UINT32_MAX.
+    TuneAdvisor::beginDynamicCapWrite();
+    TuneAdvisor::setPostExtractionConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostKgConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostSymbolConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostEntityConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostTitleConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostEmbedConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::endDynamicCapWrite();
+
+    // Defaults should be fully restored
+    CHECK(TuneAdvisor::postExtractionConcurrent() == defaultExtract);
+    CHECK(TuneAdvisor::postEmbedConcurrent() == defaultEmbed);
 }

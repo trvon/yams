@@ -1281,6 +1281,42 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_dynamic_cap_sentinel_exe = executable('catch2_dynamic_cap_sentinel',
+    files('unit/daemon/dynamic_cap_sentinel_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_idle_zero_concurrency_exe = executable('catch2_idle_zero_concurrency',
+    files('unit/daemon/idle_zero_concurrency_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_health_check_isolation_exe = executable('catch2_health_check_isolation',
+    files('unit/daemon/health_check_isolation_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_tuning_loop_wakeup_exe = executable('catch2_tuning_loop_wakeup',
+    files('unit/daemon/tuning_loop_wakeup_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   if onnx_dep.found()
     catch2_onnx_model_pool_exe = executable('catch2_onnx_model_pool',
       files(
@@ -2156,6 +2192,33 @@ if catch2_dep.found()
     install: false,
   )
 
+  simd_memmem_exe = executable('simd_memmem',
+    files('unit/app/services/simd_memmem_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  grep_regex_exe = executable('grep_regex',
+    files('unit/app/services/grep_regex_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  literal_extractor_exe = executable('literal_extractor',
+    files('unit/app/services/literal_extractor_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   search_test_deps = [
     dependency('spdlog'),
     dependency('yams_core'),
@@ -2499,6 +2562,24 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
+  )
+
+  test('simd_memmem', simd_memmem_exe,
+    suite: ['catch2', 'unit', 'services', 'simd'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('grep_regex', grep_regex_exe,
+    suite: ['catch2', 'unit', 'services', 'grep'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('literal_extractor', literal_extractor_exe,
+    suite: ['catch2', 'unit', 'services', 'literal'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   # Search tests
@@ -2898,6 +2979,30 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'timing-audit'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
+  )
+
+  test('dynamic_cap_sentinel', catch2_dynamic_cap_sentinel_exe,
+    suite: ['catch2', 'unit', 'daemon', 'tune', 'dynamic-cap'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('idle_zero_concurrency', catch2_idle_zero_concurrency_exe,
+    suite: ['catch2', 'unit', 'daemon', 'tune', 'idle'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('health_check_isolation', catch2_health_check_isolation_exe,
+    suite: ['catch2', 'unit', 'daemon', 'state', 'health-check'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('tuning_loop_wakeup', catch2_tuning_loop_wakeup_exe,
+    suite: ['catch2', 'unit', 'daemon', 'tune', 'wakeup'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   if onnx_dep.found()

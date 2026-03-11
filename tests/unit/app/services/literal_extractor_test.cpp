@@ -129,7 +129,7 @@ TEST_CASE("BMHSearcher: Basic literal search", "[bmh]") {
         auto matches = searcher.findAll(text);
         REQUIRE(matches.size() == 2);
         REQUIRE(matches[0] == 0);
-        REQUIRE(matches[1] == 32);
+        REQUIRE(matches[1] == 31);
     }
 }
 
@@ -217,5 +217,105 @@ TEST_CASE("BMHSearcher: Real-world patterns", "[bmh]") {
         std::string text = "Visit https://example.com or https://github.com";
         auto matches = searcher.findAll(text);
         REQUIRE(matches.size() == 2);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BMHSearcher: Long patterns (exercise SIMD memmem codepath)
+//
+// When the needle is >= 16 bytes, findBMH delegates to simdMemmem / simdMemmemCI
+// instead of the scalar Boyer-Moore-Horspool loop.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("BMHSearcher: Long case-sensitive pattern (SIMD path)", "[bmh][simd]") {
+    // 20-char needle — well above the 16-byte threshold.
+    const std::string needle = "namespace yams::app";
+
+    SECTION("found in middle of text") {
+        BMHSearcher searcher(needle, false);
+        std::string text = "// file header\nnamespace yams::app {\n// body\n}";
+        REQUIRE(searcher.find(text) == 15);
+    }
+
+    SECTION("found at start") {
+        BMHSearcher searcher(needle, false);
+        std::string text = "namespace yams::app::services { /* ... */ }";
+        REQUIRE(searcher.find(text) == 0);
+    }
+
+    SECTION("not found") {
+        BMHSearcher searcher(needle, false);
+        std::string text = "namespace yams::search { /* ... */ }";
+        REQUIRE(searcher.find(text) == std::string::npos);
+    }
+
+    SECTION("findAll in large text") {
+        BMHSearcher searcher(needle, false);
+        std::string text;
+        // Build a text with the needle at known offsets.
+        text += std::string(100, 'x'); // padding
+        text += needle;                // match 1 at offset 100
+        text += std::string(200, 'y'); // padding
+        text += needle;                // match 2 at offset 100+needle.size()+200
+        text += std::string(50, 'z');  // trailing padding
+        auto matches = searcher.findAll(text);
+        REQUIRE(matches.size() == 2);
+        REQUIRE(matches[0] == 100);
+        REQUIRE(matches[1] == 100 + needle.size() + 200);
+    }
+}
+
+TEST_CASE("BMHSearcher: Long case-insensitive pattern (SIMD CI path)", "[bmh][simd]") {
+    // 24-char needle — exercises simdMemmemCI via findBMH.
+    const std::string needle = "The Quick Brown Fox Jump";
+
+    SECTION("matches uppercase haystack") {
+        BMHSearcher searcher(needle, true);
+        std::string text = "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG";
+        REQUIRE(searcher.find(text) == 0);
+    }
+
+    SECTION("matches mixed-case haystack") {
+        BMHSearcher searcher(needle, true);
+        std::string text = "see the quick BROWN Fox Jump here";
+        REQUIRE(searcher.find(text) == 4);
+    }
+
+    SECTION("not found") {
+        BMHSearcher searcher(needle, true);
+        std::string text = "the slow red cat sleeps on the warm mat";
+        REQUIRE(searcher.find(text) == std::string::npos);
+    }
+
+    SECTION("findAll in large text with mixed case") {
+        BMHSearcher searcher(needle, true);
+        std::string text;
+        text += std::string(64, '.');
+        text += "THE QUICK BROWN FOX JUMP"; // match 1 at 64
+        text += std::string(64, '.');
+        text += "the quick brown fox jump"; // match 2 at 64+24+64 = 152
+        text += std::string(64, '.');
+        auto matches = searcher.findAll(text);
+        REQUIRE(matches.size() == 2);
+        REQUIRE(matches[0] == 64);
+        REQUIRE(matches[1] == 152);
+    }
+}
+
+TEST_CASE("BMHSearcher: Exactly 16-byte pattern (boundary)", "[bmh][simd]") {
+    // 16 bytes is the exact threshold — should still use the SIMD path.
+    const std::string needle = "0123456789abcdef"; // exactly 16 bytes
+    REQUIRE(needle.size() == 16);
+
+    SECTION("case-sensitive") {
+        BMHSearcher searcher(needle, false);
+        std::string text = "prefix_0123456789abcdef_suffix";
+        REQUIRE(searcher.find(text) == 7);
+    }
+
+    SECTION("case-insensitive") {
+        BMHSearcher searcher(needle, true);
+        std::string text = "PREFIX_0123456789ABCDEF_SUFFIX";
+        REQUIRE(searcher.find(text) == 7);
     }
 }

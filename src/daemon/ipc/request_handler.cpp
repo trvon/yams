@@ -958,6 +958,22 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             }
         } job_guard{std::move(job_cleanup)};
 
+        // Track health-check/ping requests so TuningManager can exclude them from idle detection.
+        // Increment counter when a liveness request is identified; RAII guard decrements on exit.
+        const bool is_health_check = std::holds_alternative<PingRequest>(request) ||
+                                     std::holds_alternative<StatusRequest>(request);
+        struct HealthCheckGuard {
+            std::atomic<uint64_t>* counter;
+            ~HealthCheckGuard() {
+                if (counter)
+                    counter->fetch_sub(1, std::memory_order_relaxed);
+            }
+        } health_guard{nullptr};
+        if (is_health_check && config_.health_check_counter) {
+            config_.health_check_counter->fetch_add(1, std::memory_order_relaxed);
+            health_guard.counter = config_.health_check_counter;
+        }
+
         // Use a request-scoped processor instance for streaming paths.
         // The shared handler-level StreamingRequestProcessor stores mutable per-request state
         // (pending_request_, mode_, chunk cursors). Under multiplexed concurrent requests,

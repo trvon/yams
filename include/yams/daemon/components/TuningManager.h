@@ -64,9 +64,18 @@ public:
     static PostIngestScaleTestMode testing_postIngestScaleTestMode();
     static bool testing_shouldAllowZeroPostIngestTargets(bool daemonIdle, bool postIngestBusy);
 
+    /// Notify the tuning loop to wake from idle sleep early (e.g., when work arrives).
+    /// Thread-safe; can be called from any thread. No-op if the loop is not sleeping.
+    static void notifyWakeup();
+
+#ifdef YAMS_TESTING
+    /// Test-only: trigger a wakeup signal. Verifies the mechanism exists.
+    static void testing_notifyWakeup() { notifyWakeup(); }
+#endif
+
 private:
     boost::asio::awaitable<void> tuningLoop();
-    void tick_once();
+    bool tick_once(); // Returns true when daemon appears idle (no work pending)
     static void rebalanceTargetsByQueue(std::array<uint32_t, 6>& targets,
                                         const std::array<uint32_t, 6>& floors,
                                         const std::array<std::size_t, 6>& queueDepths,

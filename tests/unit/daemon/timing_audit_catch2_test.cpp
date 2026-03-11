@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <thread>
 #include <vector>
 
@@ -80,7 +81,7 @@ public:
     HwGuard& operator=(const HwGuard&) = delete;
 };
 
-/// Reset all per-stage overrides and dynamic caps to 0
+/// Reset all per-stage overrides to 0 and dynamic caps to UINT32_MAX (unset)
 void resetPostIngestOverridesAndCaps() {
     TuneAdvisor::setPostExtractionConcurrent(0);
     TuneAdvisor::setPostKgConcurrent(0);
@@ -89,12 +90,12 @@ void resetPostIngestOverridesAndCaps() {
     TuneAdvisor::setPostTitleConcurrent(0);
     TuneAdvisor::setPostEmbedConcurrent(0);
 
-    TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
-    TuneAdvisor::setPostKgConcurrentDynamicCap(0);
-    TuneAdvisor::setPostSymbolConcurrentDynamicCap(0);
-    TuneAdvisor::setPostEntityConcurrentDynamicCap(0);
-    TuneAdvisor::setPostTitleConcurrentDynamicCap(0);
-    TuneAdvisor::setPostEmbedConcurrentDynamicCap(0);
+    TuneAdvisor::setPostExtractionConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostKgConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostSymbolConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostEntityConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostTitleConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostEmbedConcurrentDynamicCap(UINT32_MAX);
 
     TuneAdvisor::setPostIngestTotalConcurrent(0);
 }
@@ -317,13 +318,13 @@ TEST_CASE("Clearing DynamicCaps immediately restores default concurrency",
     REQUIRE(cappedBudget.extraction <= 1);
     REQUIRE(cappedBudget.embed <= 1);
 
-    // Clear all DynamicCaps (simulating de-escalation to Normal)
-    TuneAdvisor::setPostExtractionConcurrentDynamicCap(0);
-    TuneAdvisor::setPostKgConcurrentDynamicCap(0);
-    TuneAdvisor::setPostSymbolConcurrentDynamicCap(0);
-    TuneAdvisor::setPostEntityConcurrentDynamicCap(0);
-    TuneAdvisor::setPostTitleConcurrentDynamicCap(0);
-    TuneAdvisor::setPostEmbedConcurrentDynamicCap(0);
+    // Clear all DynamicCaps (UINT32_MAX = unset, simulating de-escalation to Normal)
+    TuneAdvisor::setPostExtractionConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostKgConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostSymbolConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostEntityConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostTitleConcurrentDynamicCap(UINT32_MAX);
+    TuneAdvisor::setPostEmbedConcurrentDynamicCap(UINT32_MAX);
 
     // IMMEDIATELY after clearing, the effective concurrency should match defaults.
     // BUG (Issue 6): In TuningManager::tick_once(), the DynamicCaps from the

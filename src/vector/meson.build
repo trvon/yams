@@ -193,6 +193,7 @@ srcs = [
   'vector_schema_migration.cpp',
   'mock_embedding_provider.cpp',
   'dim_resolver.cpp',
+  'tokenizer.cpp',
   '../genai/onnx_genai_adapter.cpp',
 ] + sqlite_vec_cpp_src
 

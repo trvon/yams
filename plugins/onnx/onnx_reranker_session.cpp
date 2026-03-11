@@ -1,5 +1,6 @@
 #include <yams/daemon/resource/onnx_reranker_session.h>
 #include <yams/vector/embedding_generator.h>
+#include <yams/vector/tokenizer.h>
 
 #include "onnx_gpu_provider.h"
 #include <yams/daemon/resource/gpu_info.h>
@@ -206,12 +207,19 @@ private:
     // Format: [CLS] query [SEP] document [SEP]
     std::vector<int32_t> tokenizePair(const std::string& query, const std::string& document,
                                       std::vector<int32_t>& tokenTypeIds) {
-        const int32_t CLS = 101;
-        const int32_t SEP = 102;
+        // Resolve special token IDs from the real tokenizer when available,
+        // otherwise fall back to BERT defaults (CLS=101, SEP=102, PAD=0).
+        const int32_t CLS =
+            tokenizer_.isLoaded() ? tokenizer_.tokenToId("[CLS]") : static_cast<int32_t>(101);
+        const int32_t SEP =
+            tokenizer_.isLoaded() ? tokenizer_.tokenToId("[SEP]") : static_cast<int32_t>(102);
         const int32_t PAD = 0;
 
-        auto queryTokens = preprocessor_.tokenize(query);
-        auto docTokens = preprocessor_.tokenize(document);
+        // Use real tokenizer when loaded, fall back to TextPreprocessor
+        auto queryTokens =
+            tokenizer_.isLoaded() ? tokenizer_.encode(query) : preprocessor_.tokenize(query);
+        auto docTokens =
+            tokenizer_.isLoaded() ? tokenizer_.encode(document) : preprocessor_.tokenize(document);
 
         // Reserve space: [CLS] query [SEP] document [SEP]
         const size_t maxQueryLen = maxSequenceLength_ / 3;
@@ -473,6 +481,28 @@ private:
         } catch (...) {
         }
 
+        // Load tokenizer.json from model directory (same search as config.json)
+        try {
+            fs::path mp(modelPath_);
+            for (const auto& dir : {mp.parent_path(), mp.parent_path().has_parent_path()
+                                                          ? mp.parent_path().parent_path()
+                                                          : fs::path{}}) {
+                if (dir.empty())
+                    continue;
+                fs::path tok = dir / "tokenizer.json";
+                if (fs::exists(tok) && tokenizer_.load(tok.string())) {
+                    spdlog::info("[Reranker] Loaded tokenizer from {} (vocab={})", tok.string(),
+                                 tokenizer_.vocabSize());
+                    break;
+                }
+            }
+            if (!tokenizer_.isLoaded()) {
+                spdlog::warn(
+                    "[Reranker] tokenizer.json not found; using TextPreprocessor fallback");
+            }
+        } catch (...) {
+        }
+
         // Apply config override
         if (config_.max_sequence_length > 0 && config_.max_sequence_length < maxSequenceLength_) {
             maxSequenceLength_ = config_.max_sequence_length;
@@ -488,6 +518,7 @@ private:
     std::string modelName_;
     RerankerConfig config_;
     vector::TextPreprocessor preprocessor_;
+    vector::HuggingFaceTokenizer tokenizer_;
 
     Ort::Env* env_ = nullptr;
     std::unique_ptr<Ort::SessionOptions> sessionOptions_;

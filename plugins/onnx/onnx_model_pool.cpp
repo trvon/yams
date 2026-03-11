@@ -2,6 +2,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/onnx_model_pool.h>
 #include <yams/vector/embedding_generator.h>
+#include <yams/vector/tokenizer.h>
 
 #include "onnx_gpu_provider.h"
 #include <yams/daemon/resource/gpu_info.h>
@@ -21,8 +22,8 @@
 #include <sys/stat.h>
 #else
 #include <fcntl.h>
-#include <sys/file.h>
 #include <unistd.h>
+#include <sys/file.h>
 #endif
 
 // GPU execution provider headers - conditionally included based on Conan build options
@@ -655,6 +656,29 @@ public:
             // length/normalization
             parseModelConfigHints();
 
+            // Load tokenizer.json from model directory (same search dirs as config.json)
+            try {
+                namespace fs = std::filesystem;
+                fs::path mp(modelPath_);
+                for (const auto& dir : {mp.parent_path(), mp.parent_path().has_parent_path()
+                                                              ? mp.parent_path().parent_path()
+                                                              : fs::path{}}) {
+                    if (dir.empty())
+                        continue;
+                    fs::path tok = dir / "tokenizer.json";
+                    if (fs::exists(tok) && tokenizer_.load(tok.string())) {
+                        spdlog::info("[ONNX] Loaded tokenizer from {} (vocab={})", tok.string(),
+                                     tokenizer_.vocabSize());
+                        break;
+                    }
+                }
+                if (!tokenizer_.isLoaded()) {
+                    spdlog::warn(
+                        "[ONNX] tokenizer.json not found; using TextPreprocessor fallback");
+                }
+            } catch (...) {
+            }
+
             // If input shape and config did not give a positive seq_len, fall back to a heuristic.
             if (maxSequenceLength_ == 0) {
                 if (modelName_.find("MiniLM") != std::string::npos) {
@@ -963,7 +987,7 @@ private:
         auto gpuInferenceLock = acquireGpuInferenceLock();
 
         const size_t seq_len = maxSequenceLength_ > 0 ? maxSequenceLength_ : 512;
-        auto tokens = preprocessor_.tokenize(t);
+        auto tokens = tokenizer_.isLoaded() ? tokenizer_.encode(t) : preprocessor_.tokenize(t);
         tokens = preprocessor_.truncateTokens(tokens, seq_len);
 
         // Dynamic padding: pad to aligned actual length instead of model max
@@ -983,14 +1007,21 @@ private:
         const size_t input_tensor_size = effective_seq_len;
         auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
-        // Cap token ids to model vocab; Nomic uses 30528, MiniLM/mpnet ~30522
-        const int64_t MAX_TOKEN_ID = 30527;
-        const int64_t UNK_TOKEN_ID = 100;
         std::vector<int64_t> tokens_i64;
         tokens_i64.reserve(effective_seq_len);
-        for (auto v : tokens) {
-            tokens_i64.push_back((v < 0 || v > MAX_TOKEN_ID) ? UNK_TOKEN_ID
-                                                             : static_cast<int64_t>(v));
+        if (tokenizer_.isLoaded()) {
+            // Real tokenizer produces valid ids — no clamping needed
+            for (auto v : tokens) {
+                tokens_i64.push_back(static_cast<int64_t>(v));
+            }
+        } else {
+            // Fallback: cap token ids to model vocab; Nomic uses 30528, MiniLM/mpnet ~30522
+            const int64_t MAX_TOKEN_ID = 30527;
+            const int64_t UNK_TOKEN_ID = 100;
+            for (auto v : tokens) {
+                tokens_i64.push_back((v < 0 || v > MAX_TOKEN_ID) ? UNK_TOKEN_ID
+                                                                 : static_cast<int64_t>(v));
+            }
         }
         std::vector<int64_t> mask_i64(attention_mask.begin(), attention_mask.end());
 
@@ -1156,7 +1187,7 @@ private:
         std::vector<std::vector<int32_t>> token_seqs;
         token_seqs.reserve(texts.size());
         for (const auto& t : texts) {
-            auto tokens = preprocessor_.tokenize(t);
+            auto tokens = tokenizer_.isLoaded() ? tokenizer_.encode(t) : preprocessor_.tokenize(t);
             tokens = preprocessor_.truncateTokens(tokens, seq_len);
             token_seqs.push_back(std::move(tokens));
         }
@@ -1189,22 +1220,31 @@ private:
         const size_t tensor_size = B * effective_seq_len;
         auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
-        const int64_t MAX_TOKEN_ID = 30527;
-        const int64_t UNK_TOKEN_ID = 100;
         std::vector<int64_t> tokens_batched;
         tokens_batched.reserve(tensor_size);
         std::vector<int64_t> masks_batched;
         masks_batched.reserve(tensor_size);
+
+        // When real tokenizer is loaded, ids are valid — no clamping needed.
+        // Fallback path clamps to avoid out-of-range embedding lookups.
+        const bool useRealTokenizer = tokenizer_.isLoaded();
+        const int64_t MAX_TOKEN_ID = 30527;
+        const int64_t UNK_TOKEN_ID = 100;
+
         for (size_t i = 0; i < B; ++i) {
             const auto& toks = token_seqs[i];
             const auto& m = masks[i];
             for (size_t j = 0; j < effective_seq_len && j < toks.size(); ++j) {
                 int64_t v = toks[j];
-                tokens_batched.push_back((v < 0 || v > MAX_TOKEN_ID) ? UNK_TOKEN_ID : v);
+                if (useRealTokenizer) {
+                    tokens_batched.push_back(v);
+                } else {
+                    tokens_batched.push_back((v < 0 || v > MAX_TOKEN_ID) ? UNK_TOKEN_ID : v);
+                }
                 masks_batched.push_back(static_cast<int64_t>(m[j]));
             }
             for (size_t j = toks.size(); j < effective_seq_len; ++j) {
-                tokens_batched.push_back(UNK_TOKEN_ID);
+                tokens_batched.push_back(useRealTokenizer ? 0 : UNK_TOKEN_ID);
                 masks_batched.push_back(0);
             }
         }
@@ -1547,6 +1587,7 @@ private:
     std::string modelName_;
     vector::EmbeddingConfig config_;
     yams::vector::TextPreprocessor preprocessor_;
+    vector::HuggingFaceTokenizer tokenizer_;
 
     Ort::Env* env_ = nullptr; // shared global env
     std::unique_ptr<Ort::SessionOptions> sessionOptions_;

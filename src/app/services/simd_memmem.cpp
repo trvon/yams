@@ -382,20 +382,26 @@ static size_t sse2MemmemCI(const char* haystack, size_t haystackLen, const char*
 
 // Helper: create a 16-bit bitmask from a NEON uint8x16 comparison result.
 // Each byte in `v` is either 0x00 or 0xFF; we extract one bit per byte.
+//
+// Uses AND-mask + pairwise-add: AND each byte with its positional power-of-2
+// (1, 2, 4, 8, ..., 128), then collapse each 8-byte half to a single byte
+// via three rounds of pairwise addition.
 static inline uint16_t neonMovemask(uint8x16_t v) {
-    // Shift each byte so that the MSB of byte i ends up in bit position i.
-    static const int8_t kShift[16] = {-7, -6, -5, -4, -3, -2, -1, 0, -7, -6, -5, -4, -3, -2, -1, 0};
-    const int8x16_t shift = vld1q_s8(kShift);
-    uint8x16_t shifted = vreinterpretq_u8_s8(vshlq_s8(vreinterpretq_s8_u8(v), shift));
-    // Pairwise-add across bytes to accumulate bits.
-    uint8x8_t lo = vget_low_u8(shifted);
-    uint8x8_t hi = vget_high_u8(shifted);
-    uint8x8_t sumLo = vpadd_u8(vpadd_u8(vpadd_u8(lo, lo), vpadd_u8(lo, lo)),
-                               vpadd_u8(vpadd_u8(lo, lo), vpadd_u8(lo, lo)));
-    uint8x8_t sumHi = vpadd_u8(vpadd_u8(vpadd_u8(hi, hi), vpadd_u8(hi, hi)),
-                               vpadd_u8(vpadd_u8(hi, hi), vpadd_u8(hi, hi)));
-    return static_cast<uint16_t>(vget_lane_u8(sumLo, 0)) |
-           (static_cast<uint16_t>(vget_lane_u8(sumHi, 0)) << 8);
+    static const uint8_t kBitMask[16] = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
+    const uint8x16_t mask = vld1q_u8(kBitMask);
+    uint8x16_t masked = vandq_u8(v, mask);
+    // Each byte now has at most one bit set at the correct position.
+    // Pairwise-add across the 8-byte halves to accumulate bits into one byte each.
+    uint8x8_t lo = vget_low_u8(masked);
+    uint8x8_t hi = vget_high_u8(masked);
+    lo = vpadd_u8(lo, lo); // 8 → 4 bytes
+    lo = vpadd_u8(lo, lo); // 4 → 2 bytes
+    lo = vpadd_u8(lo, lo); // 2 → 1 byte
+    hi = vpadd_u8(hi, hi);
+    hi = vpadd_u8(hi, hi);
+    hi = vpadd_u8(hi, hi);
+    return static_cast<uint16_t>(vget_lane_u8(lo, 0)) |
+           (static_cast<uint16_t>(vget_lane_u8(hi, 0)) << 8);
 }
 
 // Count trailing zeros for a 16-bit mask.

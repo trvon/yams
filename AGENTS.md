@@ -135,6 +135,21 @@ yams search "agent_id=opencode-<task-slug>" --type keyword --limit 50
 - Use `Result<T>` for fallible operations and explicit propagation.
 - Prefer `YAMS_HAS_*` feature gates from `include/yams/core/cpp23_features.hpp` over raw compiler checks.
 
+## Testing Conventions
+
+- **Framework**: Catch2 (v3+). All test files end in `_catch2_test.cpp`.
+- **Test location**: `tests/unit/<subsystem>/` (e.g., `tests/unit/daemon/`).
+- **Build system**: Meson. Register test executables in `tests/meson.build`.
+- **Test targets**: Named without `_exe` suffix (e.g., `catch2_dynamic_cap_sentinel`).
+- **Compile**: `meson compile -C build/debug -j4 <target_name>`. Never run parallel `meson compile` commands — they contend for the build directory lock.
+- **Run**: `build/debug/tests/<target_name>` directly, or `meson test -C build/debug <test_name>`.
+- **YAMS_TESTING gate**: Test executables are compiled with `-DYAMS_TESTING=1`. Use `#ifdef YAMS_TESTING` in production headers to expose `testing_*` helpers (e.g., `testing_postIngestBudget`, `testing_notifyWakeup`).
+- **Isolation guards**: Use RAII guards for global state (`ProfileGuard`, `EnvGuard`, `HwGuard` from TuneAdvisor). Reset atomics and overrides between test cases.
+- **Naming**: Descriptive file names reflecting the feature under test (e.g., `dynamic_cap_sentinel_catch2_test.cpp`, `health_check_isolation_catch2_test.cpp`).
+- **TDD workflow**: Write tests first (red), implement fix (green), refactor. Tests should assert post-fix behavior and fail against pre-fix code.
+- **DynamicCap sentinel**: `UINT32_MAX` means "unset/no cap". `0` means "cap to zero concurrency". When resetting DynamicCaps in tests, use `UINT32_MAX` (requires `#include <climits>`), not `0`.
+- **Known pre-existing issues**: Several daemon infrastructure tests (`catch2_daemon_fsm`, `catch2_daemon_background`, `catch2_daemon_components`, `catch2_daemon_reranker`, `catch2_daemon_onnx_provider`) have fmt v12 linker errors. Some socket/coroutine tests have SIGSEGV crashes unrelated to tuning code.
+
 ## Repo Patterns To Reuse (High Signal)
 
 - `TuneAdvisor`: runtime knob pattern uses static inline atomics and relaxed ordering for advisory reads.

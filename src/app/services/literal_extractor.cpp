@@ -108,13 +108,13 @@ std::vector<std::string> LiteralExtractor::extractAllLiterals(std::string_view p
 
 BMHSearcher::BMHSearcher(std::string_view pattern, bool ignoreCase)
     : pattern_(pattern), ignoreCase_(ignoreCase), useFastPath_(false) {
-    if (pattern_.size() < kMinBMHLength) {
-        useFastPath_ = true;
-        return;
-    }
     if (ignoreCase_) {
         std::transform(pattern_.begin(), pattern_.end(), pattern_.begin(),
                        [](unsigned char c) { return std::tolower(c); });
+    }
+    if (pattern_.size() < kMinBMHLength) {
+        useFastPath_ = true;
+        return;
     }
     buildShiftTable();
 }

@@ -352,6 +352,30 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine rerankTopK overridden to {} via env", cfg.rerankTopK);
         }
 
+        if (auto rerankSnippetMax = getEnvInt("YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS")) {
+            cfg.rerankSnippetMaxChars = static_cast<size_t>(std::max(0, *rerankSnippetMax));
+            spdlog::info("SearchEngine rerankSnippetMaxChars overridden to {} via env",
+                         cfg.rerankSnippetMaxChars);
+        }
+
+        if (auto rerankScoreGap = getEnvFloat("YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD")) {
+            cfg.rerankScoreGapThreshold = *rerankScoreGap;
+            spdlog::info("SearchEngine rerankScoreGapThreshold overridden to {:.4f} via env",
+                         cfg.rerankScoreGapThreshold);
+        }
+
+        if (auto rerankWeight = getEnvFloat("YAMS_SEARCH_RERANK_WEIGHT")) {
+            cfg.rerankWeight = std::clamp(*rerankWeight, 0.0f, 1.0f);
+            spdlog::info("SearchEngine rerankWeight overridden to {:.3f} via env",
+                         cfg.rerankWeight);
+        }
+
+        if (auto rerankReplace = getEnvBool("YAMS_SEARCH_RERANK_REPLACE_SCORES")) {
+            cfg.rerankReplaceScores = *rerankReplace;
+            spdlog::info("SearchEngine rerankReplaceScores overridden to {} via env",
+                         cfg.rerankReplaceScores);
+        }
+
         if (auto graphRerankEnabled = getEnvBool("YAMS_SEARCH_ENABLE_GRAPH_RERANK")) {
             cfg.enableGraphRerank = *graphRerankEnabled;
             spdlog::info("SearchEngine enableGraphRerank overridden to {} via env",
