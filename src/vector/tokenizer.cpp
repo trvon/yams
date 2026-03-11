@@ -142,9 +142,9 @@ size_t HuggingFaceTokenizer::vocabSize() const {
 
 std::vector<int32_t> HuggingFaceTokenizer::encodeUnigram(const std::string& text) const {
     std::vector<int32_t> ids;
-    std::string normalized = text;
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    // NOTE: Do NOT lowercase — XLM-RoBERTa (bge-reranker-base) is case-sensitive.
+    // The Unigram/SentencePiece vocab contains cased entries.
+    const std::string& normalized = text;
 
     size_t pos = 0;
     while (pos < normalized.size()) {

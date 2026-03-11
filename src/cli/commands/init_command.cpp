@@ -1197,6 +1197,8 @@ private:
                 return "sentence-transformers/multi-qa-MiniLM-L6-cos-v1";
             if (name == "all-mpnet-base-v2")
                 return "sentence-transformers/all-mpnet-base-v2";
+            if (name == "embeddinggemma-300m")
+                return "onnx-community/embeddinggemma-300m-ONNX";
             return "";
         };
 

@@ -204,16 +204,14 @@ public:
 
 private:
     // Tokenize a (query, document) pair for cross-encoder
-    // Format: [CLS] query [SEP] document [SEP]
+    // BERT format:        [CLS] query [SEP] document [SEP]
+    // RoBERTa/XLM-R format: <s> query </s></s> document </s>
     std::vector<int32_t> tokenizePair(const std::string& query, const std::string& document,
                                       std::vector<int32_t>& tokenTypeIds) {
-        // Resolve special token IDs from the real tokenizer when available,
-        // otherwise fall back to BERT defaults (CLS=101, SEP=102, PAD=0).
-        const int32_t CLS =
-            tokenizer_.isLoaded() ? tokenizer_.tokenToId("[CLS]") : static_cast<int32_t>(101);
-        const int32_t SEP =
-            tokenizer_.isLoaded() ? tokenizer_.tokenToId("[SEP]") : static_cast<int32_t>(102);
-        const int32_t PAD = 0;
+        // Use token IDs from config.json (set in parseModelConfig)
+        const int32_t BOS = bosTokenId_; // CLS-equivalent (BERT: 101, XLM-R: 0)
+        const int32_t EOS = eosTokenId_; // SEP-equivalent (BERT: 102, XLM-R: 2)
+        const int32_t PAD = padTokenId_; // Padding        (BERT: 0,   XLM-R: 1)
 
         // Use real tokenizer when loaded, fall back to TextPreprocessor
         auto queryTokens =
@@ -221,9 +219,12 @@ private:
         auto docTokens =
             tokenizer_.isLoaded() ? tokenizer_.encode(document) : preprocessor_.tokenize(document);
 
-        // Reserve space: [CLS] query [SEP] document [SEP]
+        // Reserve space for: BOS query EOS [EOS] document EOS
+        // RoBERTa uses double EOS between segments; BERT uses single SEP
+        const size_t separatorTokens =
+            isRobertaFamily_ ? 4 : 3; // <s>..EOS EOS..EOS vs CLS..SEP..SEP
         const size_t maxQueryLen = maxSequenceLength_ / 3;
-        const size_t maxDocLen = maxSequenceLength_ - maxQueryLen - 3;
+        const size_t maxDocLen = maxSequenceLength_ - maxQueryLen - separatorTokens;
 
         if (queryTokens.size() > maxQueryLen) {
             queryTokens.resize(maxQueryLen);
@@ -237,28 +238,38 @@ private:
         tokenTypeIds.clear();
         tokenTypeIds.reserve(maxSequenceLength_);
 
-        // [CLS] query [SEP]
-        inputIds.push_back(CLS);
+        // BOS / [CLS]
+        inputIds.push_back(BOS);
         tokenTypeIds.push_back(0);
 
+        // query tokens
         for (auto t : queryTokens) {
             inputIds.push_back(t);
             tokenTypeIds.push_back(0);
         }
 
-        inputIds.push_back(SEP);
+        // EOS / [SEP] after query
+        inputIds.push_back(EOS);
         tokenTypeIds.push_back(0);
 
-        // document [SEP]
-        for (auto t : docTokens) {
-            inputIds.push_back(t);
-            tokenTypeIds.push_back(1);
+        // RoBERTa pair format requires a second EOS before the document
+        // (equivalent to </s></s> between segments)
+        if (isRobertaFamily_) {
+            inputIds.push_back(EOS);
+            tokenTypeIds.push_back(0); // RoBERTa type_vocab_size=1, all zeros
         }
 
-        inputIds.push_back(SEP);
-        tokenTypeIds.push_back(1);
+        // document tokens
+        for (auto t : docTokens) {
+            inputIds.push_back(t);
+            tokenTypeIds.push_back(isRobertaFamily_ ? 0 : 1); // RoBERTa: all 0; BERT: segment 1
+        }
 
-        // Pad to max sequence length
+        // EOS / [SEP] after document
+        inputIds.push_back(EOS);
+        tokenTypeIds.push_back(isRobertaFamily_ ? 0 : 1);
+
+        // Pad to max sequence length with PAD token
         while (inputIds.size() < maxSequenceLength_) {
             inputIds.push_back(PAD);
             tokenTypeIds.push_back(0);
@@ -278,10 +289,10 @@ private:
         std::vector<int64_t> inputIds64(inputIds.begin(), inputIds.end());
         std::vector<int64_t> tokenTypeIds64(tokenTypeIds.begin(), tokenTypeIds.end());
 
-        // Generate attention mask
+        // Generate attention mask: 1 for real tokens, 0 for padding
         std::vector<int64_t> attentionMask(maxSequenceLength_, 0);
         for (size_t i = 0; i < inputIds.size(); ++i) {
-            attentionMask[i] = (inputIds[i] != 0) ? 1 : 0;
+            attentionMask[i] = (inputIds[i] != padTokenId_) ? 1 : 0;
         }
 
         std::vector<Ort::Value> inputs;
@@ -353,7 +364,7 @@ private:
 
             for (auto id : inputIds) {
                 inputIdsBatch.push_back(static_cast<int64_t>(id));
-                attentionMaskBatch.push_back(id != 0 ? 1 : 0);
+                attentionMaskBatch.push_back(id != padTokenId_ ? 1 : 0);
             }
             for (auto t : tokenTypeIds) {
                 tokenTypeIdsBatch.push_back(static_cast<int64_t>(t));
@@ -476,6 +487,39 @@ private:
                 if (j.contains("max_length") && j["max_length"].is_number_integer()) {
                     maxSequenceLength_ = static_cast<size_t>(j["max_length"].get<int>());
                 }
+
+                // Read special token IDs from config.json (critical for XLM-RoBERTa vs BERT)
+                if (j.contains("bos_token_id") && j["bos_token_id"].is_number_integer()) {
+                    bosTokenId_ = j["bos_token_id"].get<int32_t>();
+                }
+                if (j.contains("eos_token_id") && j["eos_token_id"].is_number_integer()) {
+                    eosTokenId_ = j["eos_token_id"].get<int32_t>();
+                }
+                if (j.contains("pad_token_id") && j["pad_token_id"].is_number_integer()) {
+                    padTokenId_ = j["pad_token_id"].get<int32_t>();
+                }
+
+                // Detect model family from architectures or model_type
+                if (j.contains("architectures") && j["architectures"].is_array()) {
+                    for (const auto& arch : j["architectures"]) {
+                        std::string archStr = arch.get<std::string>();
+                        if (archStr.find("XLMRoberta") != std::string::npos ||
+                            archStr.find("Roberta") != std::string::npos) {
+                            isRobertaFamily_ = true;
+                        }
+                    }
+                }
+                if (!isRobertaFamily_ && j.contains("model_type") && j["model_type"].is_string()) {
+                    std::string mt = j["model_type"].get<std::string>();
+                    if (mt.find("roberta") != std::string::npos ||
+                        mt.find("xlm-roberta") != std::string::npos) {
+                        isRobertaFamily_ = true;
+                    }
+                }
+
+                spdlog::info("[Reranker] Config: bos={}, eos={}, pad={}, roberta={}", bosTokenId_,
+                             eosTokenId_, padTokenId_, isRobertaFamily_);
+
                 break;
             }
         } catch (...) {
@@ -531,6 +575,14 @@ private:
     bool isLoaded_ = false;
     bool testMode_ = false;
     std::mutex inferMutex_;
+
+    // Special token IDs (read from config.json; defaults are BERT-style)
+    // XLM-RoBERTa: bos=0 (<s>), eos=2 (</s>), pad=1 (<pad>)
+    // BERT:        bos=101 ([CLS]), eos=102 ([SEP]), pad=0
+    int32_t bosTokenId_ = 101; // overridden by config.json bos_token_id
+    int32_t eosTokenId_ = 102; // overridden by config.json eos_token_id
+    int32_t padTokenId_ = 0;   // overridden by config.json pad_token_id
+    bool isRobertaFamily_ = false;
 };
 
 // ============================================================================

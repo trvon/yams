@@ -689,6 +689,9 @@ public:
                     // Nomic BERT supports very long contexts (e.g., 8192). Default to 2048 unless
                     // user config overrides to avoid excessive memory on defaults.
                     maxSequenceLength_ = 2048;
+                } else if (modelName_.find("embeddinggemma") != std::string::npos ||
+                           modelName_.find("gemma") != std::string::npos) {
+                    maxSequenceLength_ = 2048;
                 } else {
                     maxSequenceLength_ = 512;
                 }
@@ -1692,6 +1695,18 @@ private:
                                     if (maxSequenceLength_ == 0 || maxSequenceLength_ < 2048) {
                                         maxSequenceLength_ = 8192;
                                     }
+                                    break;
+                                }
+                                // EmbeddingGemma: mean pool + L2 normalize, 2048 context
+                                if (s.find("Gemma") != std::string::npos) {
+                                    pooling_mode_ = Pooling::MEAN;
+                                    normalize_ = true;
+                                    if (maxSequenceLength_ == 0) {
+                                        maxSequenceLength_ = 2048;
+                                    }
+                                    spdlog::info("[ONNX] Detected Gemma architecture: "
+                                                 "mean pooling, L2 normalize, max_seq={}",
+                                                 maxSequenceLength_);
                                     break;
                                 }
                             }

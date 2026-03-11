@@ -1814,6 +1814,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     const auto& scores = rerankResult.value();
                     spdlog::debug("[reranker] Reranked {} documents", scores.size());
 
+                    // Diagnostic: log score distribution for debugging reranker quality
+                    if (!scores.empty()) {
+                        float minScore = *std::min_element(scores.begin(), scores.end());
+                        float maxScore = *std::max_element(scores.begin(), scores.end());
+                        float sumScore = 0.0f;
+                        for (float s : scores)
+                            sumScore += s;
+                        spdlog::info("[reranker] Score distribution: n={} min={:.4f} max={:.4f} "
+                                     "mean={:.4f}",
+                                     scores.size(), minScore, maxScore, sumScore / scores.size());
+                    }
+
                     // Apply reranker scores to eligible results.
                     for (size_t i = 0; i < scores.size() && i < rerankIndices.size(); ++i) {
                         const size_t idx = rerankIndices[i];

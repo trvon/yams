@@ -61,6 +61,9 @@ static const std::vector<ModelInfo> AVAILABLE_MODELS = {
     {"jina-embeddings-v2-base-code",
      "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/main/onnx/model.onnx",
      "Code-aware 768-dim embeddings for 30+ programming languages", 550, "embedding"},
+    {"embeddinggemma-300m",
+     "https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX/resolve/main/onnx/model.onnx",
+     "Google EmbeddingGemma 768-dim, SentencePiece tokenizer (2048 max tokens)", 1200, "embedding"},
     // Reranker models (cross-encoder for two-stage retrieval)
     {"bge-reranker-base",
      "https://huggingface.co/BAAI/bge-reranker-base/resolve/main/onnx/model.onnx",
@@ -731,6 +734,8 @@ private:
                 return "nomic-ai/nomic-embed-text-v1";
             if (name == "nomic-embed-text-v1.5")
                 return "nomic-ai/nomic-embed-text-v1.5";
+            if (name == "embeddinggemma-300m")
+                return "onnx-community/embeddinggemma-300m-ONNX";
             return {};
         };
 

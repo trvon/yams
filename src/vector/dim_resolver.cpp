@@ -38,6 +38,8 @@ std::optional<std::size_t> dim_from_model_name(const std::string& modelName) {
         return 768;
     if (name.find("e5-large") != std::string::npos)
         return 1024;
+    if (name.find("embeddinggemma") != std::string::npos)
+        return 768;
 
     return std::nullopt; // Unknown model - caller must query actual model
 }

@@ -15,7 +15,10 @@ const std::vector<EmbeddingModel> kEmbeddingModels = {
     {"multi-qa-MiniLM-L6-cos-v1",
      "https://huggingface.co/sentence-transformers/multi-qa-MiniLM-L6-cos-v1/resolve/main/onnx/"
      "model.onnx",
-     "Optimized for semantic search on QA pairs (215M training samples)", 90, 384}};
+     "Optimized for semantic search on QA pairs (215M training samples)", 90, 384},
+    {"embeddinggemma-300m",
+     "https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX/resolve/main/onnx/model.onnx",
+     "Google EmbeddingGemma 768-dim, SentencePiece tokenizer (2048 max tokens)", 1200, 768}};
 
 const std::vector<GlinerModel> kGlinerModels = {
     {"gliner_small-v2.1-quantized", "onnx-community/gliner_small-v2.1", "model_quantized.onnx",
