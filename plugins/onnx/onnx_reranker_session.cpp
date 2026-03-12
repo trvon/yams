@@ -120,11 +120,12 @@ public:
         try {
             spdlog::info("[Reranker] Creating Ort::Session for '{}' at {}", modelName_, modelPath_);
 
-            auto options = sessionOptions_->Clone();
-            options.SetIntraOpNumThreads(1);
-            options.SetInterOpNumThreads(1);
-
-            session_ = std::make_unique<Ort::Session>(*env_, fs::path(modelPath_).c_str(), options);
+            // Use the session options configured in the constructor (with proper
+            // intra-op thread count from config/env).  Previously this was
+            // overridden to 1/1 threads, defeating the RerankerConfig.num_threads
+            // setting and YAMS_ONNX_INTRA_OP_THREADS env var.
+            session_ = std::make_unique<Ort::Session>(*env_, fs::path(modelPath_).c_str(),
+                                                      *sessionOptions_);
             spdlog::info("[Reranker] Ort::Session created successfully");
 
             // Get input/output names
@@ -208,14 +209,22 @@ private:
     // RoBERTa/XLM-R format: <s> query </s></s> document </s>
     std::vector<int32_t> tokenizePair(const std::string& query, const std::string& document,
                                       std::vector<int32_t>& tokenTypeIds) {
+        auto queryTokens =
+            tokenizer_.isLoaded() ? tokenizer_.encode(query) : preprocessor_.tokenize(query);
+        return tokenizePairWithCachedQuery(queryTokens, document, tokenTypeIds);
+    }
+
+    // Optimized variant: accepts pre-tokenized query tokens so the query is
+    // encoded once per batch instead of once per document.
+    // Returns UNPADDED tokens (actual content length only).  The caller is
+    // responsible for batch-level padding to the dynamic batchMaxLen.
+    std::vector<int32_t> tokenizePairWithCachedQuery(const std::vector<int32_t>& cachedQueryTokens,
+                                                     const std::string& document,
+                                                     std::vector<int32_t>& tokenTypeIds) {
         // Use token IDs from config.json (set in parseModelConfig)
         const int32_t BOS = bosTokenId_; // CLS-equivalent (BERT: 101, XLM-R: 0)
         const int32_t EOS = eosTokenId_; // SEP-equivalent (BERT: 102, XLM-R: 2)
-        const int32_t PAD = padTokenId_; // Padding        (BERT: 0,   XLM-R: 1)
 
-        // Use real tokenizer when loaded, fall back to TextPreprocessor
-        auto queryTokens =
-            tokenizer_.isLoaded() ? tokenizer_.encode(query) : preprocessor_.tokenize(query);
         auto docTokens =
             tokenizer_.isLoaded() ? tokenizer_.encode(document) : preprocessor_.tokenize(document);
 
@@ -226,6 +235,8 @@ private:
         const size_t maxQueryLen = maxSequenceLength_ / 3;
         const size_t maxDocLen = maxSequenceLength_ - maxQueryLen - separatorTokens;
 
+        // Copy query tokens so we can truncate without mutating the cache
+        auto queryTokens = cachedQueryTokens;
         if (queryTokens.size() > maxQueryLen) {
             queryTokens.resize(maxQueryLen);
         }
@@ -233,10 +244,14 @@ private:
             docTokens.resize(maxDocLen);
         }
 
+        // Pre-compute exact output size (no padding)
+        const size_t exactLen =
+            1 + queryTokens.size() + (isRobertaFamily_ ? 2 : 1) + docTokens.size() + 1;
+
         std::vector<int32_t> inputIds;
-        inputIds.reserve(maxSequenceLength_);
+        inputIds.reserve(exactLen);
         tokenTypeIds.clear();
-        tokenTypeIds.reserve(maxSequenceLength_);
+        tokenTypeIds.reserve(exactLen);
 
         // BOS / [CLS]
         inputIds.push_back(BOS);
@@ -269,11 +284,8 @@ private:
         inputIds.push_back(EOS);
         tokenTypeIds.push_back(isRobertaFamily_ ? 0 : 1);
 
-        // Pad to max sequence length with PAD token
-        while (inputIds.size() < maxSequenceLength_) {
-            inputIds.push_back(PAD);
-            tokenTypeIds.push_back(0);
-        }
+        // NOTE: No padding here.  Batch-level dynamic padding happens in
+        // runOnnxBatch() which pads all pairs to the same batchMaxLen.
 
         return inputIds;
     }
@@ -282,18 +294,17 @@ private:
         std::vector<int32_t> tokenTypeIds;
         auto inputIds = tokenizePair(query, document, tokenTypeIds);
 
-        std::vector<int64_t> inputShape = {1, static_cast<int64_t>(maxSequenceLength_)};
+        // tokenizePair() now returns unpadded tokens — use actual length
+        const size_t seqLen = inputIds.size();
+        std::vector<int64_t> inputShape = {1, static_cast<int64_t>(seqLen)};
         auto memoryInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
         // Convert to int64
         std::vector<int64_t> inputIds64(inputIds.begin(), inputIds.end());
         std::vector<int64_t> tokenTypeIds64(tokenTypeIds.begin(), tokenTypeIds.end());
 
-        // Generate attention mask: 1 for real tokens, 0 for padding
-        std::vector<int64_t> attentionMask(maxSequenceLength_, 0);
-        for (size_t i = 0; i < inputIds.size(); ++i) {
-            attentionMask[i] = (inputIds[i] != padTokenId_) ? 1 : 0;
-        }
+        // Attention mask: all 1s (no padding in single-doc path)
+        std::vector<int64_t> attentionMask(seqLen, 1);
 
         std::vector<Ort::Value> inputs;
         inputs.push_back(Ort::Value::CreateTensor<int64_t>(
@@ -346,78 +357,78 @@ private:
 
         const size_t batchSize = documents.size();
 
-        auto memoryInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        // Phase 0: Encode query tokens ONCE (cache across all documents).
+        // Previously tokenizePair() called tokenizer_.encode(query) for every
+        // document — O(batchSize) redundant tokenizations.
+        auto cachedQueryTokens =
+            tokenizer_.isLoaded() ? tokenizer_.encode(query) : preprocessor_.tokenize(query);
 
-        // Phase 1: Tokenize all pairs and find actual max sequence length in
-        // this batch.  tokenizePair() pads to maxSequenceLength_, but we will
-        // trim to the actual content length so ONNX doesn't waste compute on
-        // hundreds of padding tokens (attention is O(n²)).
+        // Phase 1: Tokenize all pairs using cached query tokens.
+        // tokenizePairWithCachedQuery() returns UNPADDED tokens (actual content
+        // length), so we no longer need the old pad-then-trim scan.
         struct TokenizedPair {
             std::vector<int32_t> inputIds;
             std::vector<int32_t> tokenTypeIds;
-            size_t contentLength{0}; // non-padding length
+            size_t origIndex; // original document index for score mapping
         };
         std::vector<TokenizedPair> pairs(batchSize);
-        size_t batchMaxLen = 0;
         for (size_t i = 0; i < batchSize; ++i) {
-            pairs[i].inputIds = tokenizePair(query, documents[i], pairs[i].tokenTypeIds);
-            // Find last non-pad position
-            size_t len = pairs[i].inputIds.size();
-            while (len > 0 && pairs[i].inputIds[len - 1] == padTokenId_)
-                --len;
-            pairs[i].contentLength = len;
-            batchMaxLen = std::max(batchMaxLen, len);
+            pairs[i].inputIds =
+                tokenizePairWithCachedQuery(cachedQueryTokens, documents[i], pairs[i].tokenTypeIds);
+            pairs[i].origIndex = i;
         }
-        // Minimum length 1 to avoid degenerate tensors
-        if (batchMaxLen == 0)
-            batchMaxLen = 1;
 
-        // Phase 2: Build compact tensors padded to batchMaxLen (not maxSequenceLength_)
-        std::vector<int64_t> inputShape = {static_cast<int64_t>(batchSize),
-                                           static_cast<int64_t>(batchMaxLen)};
-        const size_t tensorSize = batchSize * batchMaxLen;
+        // Phase 2: Sort by token length for length-bucket chunking.
+        // This groups similar-length sequences together so short docs don't pay
+        // the padding cost of the longest doc in a 200-doc batch.
+        std::sort(pairs.begin(), pairs.end(), [](const TokenizedPair& a, const TokenizedPair& b) {
+            return a.inputIds.size() < b.inputIds.size();
+        });
 
-        std::vector<int64_t> inputIdsBatch;
-        std::vector<int64_t> attentionMaskBatch;
-        std::vector<int64_t> tokenTypeIdsBatch;
-        inputIdsBatch.resize(tensorSize, static_cast<int64_t>(padTokenId_));
-        attentionMaskBatch.resize(tensorSize, 0);
-        tokenTypeIdsBatch.resize(tensorSize, 0);
+        // Phase 3: Split into sub-batches by length buckets.
+        // Strategy: each sub-batch allows at most 50% padding overhead relative
+        // to its shortest sequence, capped at maxSubBatchSize docs.
+        static constexpr size_t kMaxSubBatchSize = 64;
+        static constexpr double kMaxPaddingOverhead = 1.5; // 50% overhead max
 
-        for (size_t i = 0; i < batchSize; ++i) {
-            const size_t offset = i * batchMaxLen;
-            const size_t len = std::min(pairs[i].contentLength, batchMaxLen);
-            for (size_t j = 0; j < len; ++j) {
-                inputIdsBatch[offset + j] = static_cast<int64_t>(pairs[i].inputIds[j]);
-                attentionMaskBatch[offset + j] = 1;
+        struct SubBatch {
+            size_t startIdx;
+            size_t count;
+            size_t maxLen;
+        };
+        std::vector<SubBatch> subBatches;
+
+        size_t batchStart = 0;
+        while (batchStart < batchSize) {
+            size_t minLen = pairs[batchStart].inputIds.size();
+            if (minLen == 0)
+                minLen = 1;
+            size_t maxLen = minLen;
+            size_t batchEnd = batchStart + 1;
+
+            while (batchEnd < batchSize && (batchEnd - batchStart) < kMaxSubBatchSize) {
+                size_t candidateLen = pairs[batchEnd].inputIds.size();
+                if (candidateLen > static_cast<size_t>(minLen * kMaxPaddingOverhead)) {
+                    break; // would cause too much padding for short sequences
+                }
+                maxLen = std::max(maxLen, candidateLen);
+                ++batchEnd;
             }
-            for (size_t j = 0; j < std::min(pairs[i].tokenTypeIds.size(), batchMaxLen); ++j) {
-                tokenTypeIdsBatch[offset + j] = static_cast<int64_t>(pairs[i].tokenTypeIds[j]);
-            }
+
+            subBatches.push_back({batchStart, batchEnd - batchStart, maxLen});
+            batchStart = batchEnd;
         }
 
-        if (batchMaxLen != maxSequenceLength_) {
-            spdlog::debug("[Reranker] Dynamic padding: batchMaxLen={} vs modelMax={} (saved {}%)",
-                          batchMaxLen, maxSequenceLength_,
-                          100 - (100 * batchMaxLen / maxSequenceLength_));
-        }
+        spdlog::debug("[Reranker] Length-bucket chunking: {} docs -> {} sub-batches", batchSize,
+                      subBatches.size());
 
-        std::vector<Ort::Value> inputs;
-        inputs.push_back(Ort::Value::CreateTensor<int64_t>(
-            memoryInfo, inputIdsBatch.data(), inputIdsBatch.size(), inputShape.data(), 2));
-        inputs.push_back(Ort::Value::CreateTensor<int64_t>(memoryInfo, attentionMaskBatch.data(),
-                                                           attentionMaskBatch.size(),
-                                                           inputShape.data(), 2));
-        if (inputNames_.size() >= 3) {
-            inputs.push_back(Ort::Value::CreateTensor<int64_t>(memoryInfo, tokenTypeIdsBatch.data(),
-                                                               tokenTypeIdsBatch.size(),
-                                                               inputShape.data(), 2));
-        }
+        // Phase 4: Run ONNX inference per sub-batch and collect scores.
+        std::vector<float> scores(batchSize, 0.0f);
+        auto memoryInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
         std::vector<const char*> inNames;
         for (auto& n : inputNames_)
             inNames.push_back(n.c_str());
-
         std::vector<const char*> outNames;
         for (auto& n : outputNames_)
             outNames.push_back(n.c_str());
@@ -426,31 +437,69 @@ private:
             outNames.push_back(defaultOut);
         }
 
-        try {
-            auto outputs = session_->Run(Ort::RunOptions{nullptr}, inNames.data(), inputs.data(),
-                                         inputs.size(), outNames.data(), outNames.size());
+        for (const auto& sb : subBatches) {
+            const size_t sbSize = sb.count;
+            const size_t sbMaxLen = std::max(sb.maxLen, size_t{1});
 
-            if (outputs.empty()) {
-                return Error{ErrorCode::InternalError, "Reranker returned no outputs"};
+            std::vector<int64_t> inputShape = {static_cast<int64_t>(sbSize),
+                                               static_cast<int64_t>(sbMaxLen)};
+            const size_t tensorSize = sbSize * sbMaxLen;
+
+            std::vector<int64_t> inputIdsBatch(tensorSize, static_cast<int64_t>(padTokenId_));
+            std::vector<int64_t> attentionMaskBatch(tensorSize, 0);
+            std::vector<int64_t> tokenTypeIdsBatch(tensorSize, 0);
+
+            for (size_t i = 0; i < sbSize; ++i) {
+                const auto& pair = pairs[sb.startIdx + i];
+                const size_t offset = i * sbMaxLen;
+                const size_t len = std::min(pair.inputIds.size(), sbMaxLen);
+                for (size_t j = 0; j < len; ++j) {
+                    inputIdsBatch[offset + j] = static_cast<int64_t>(pair.inputIds[j]);
+                    attentionMaskBatch[offset + j] = 1;
+                }
+                for (size_t j = 0; j < std::min(pair.tokenTypeIds.size(), sbMaxLen); ++j) {
+                    tokenTypeIdsBatch[offset + j] = static_cast<int64_t>(pair.tokenTypeIds[j]);
+                }
             }
 
-            const float* data = outputs[0].GetTensorData<float>();
-            auto shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
-
-            std::vector<float> scores;
-            scores.reserve(batchSize);
-
-            for (size_t i = 0; i < batchSize; ++i) {
-                float logit = data[i];
-                float score = 1.0f / (1.0f + std::exp(-logit));
-                scores.push_back(score);
+            std::vector<Ort::Value> inputs;
+            inputs.push_back(Ort::Value::CreateTensor<int64_t>(
+                memoryInfo, inputIdsBatch.data(), inputIdsBatch.size(), inputShape.data(), 2));
+            inputs.push_back(
+                Ort::Value::CreateTensor<int64_t>(memoryInfo, attentionMaskBatch.data(),
+                                                  attentionMaskBatch.size(), inputShape.data(), 2));
+            if (inputNames_.size() >= 3) {
+                inputs.push_back(Ort::Value::CreateTensor<int64_t>(
+                    memoryInfo, tokenTypeIdsBatch.data(), tokenTypeIdsBatch.size(),
+                    inputShape.data(), 2));
             }
 
-            return scores;
+            try {
+                auto outputs =
+                    session_->Run(Ort::RunOptions{nullptr}, inNames.data(), inputs.data(),
+                                  inputs.size(), outNames.data(), outNames.size());
 
-        } catch (const Ort::Exception& e) {
-            return Error{ErrorCode::InternalError, std::string("ONNX batch error: ") + e.what()};
+                if (outputs.empty()) {
+                    return Error{ErrorCode::InternalError, "Reranker returned no outputs"};
+                }
+
+                const float* data = outputs[0].GetTensorData<float>();
+
+                // Map scores back to original document order
+                for (size_t i = 0; i < sbSize; ++i) {
+                    float logit = data[i];
+                    float score = 1.0f / (1.0f + std::exp(-logit));
+                    size_t origIdx = pairs[sb.startIdx + i].origIndex;
+                    scores[origIdx] = score;
+                }
+
+            } catch (const Ort::Exception& e) {
+                return Error{ErrorCode::InternalError,
+                             std::string("ONNX batch error: ") + e.what()};
+            }
         }
+
+        return scores;
     }
 
     float computeMockScore(const std::string& query, const std::string& document) {
