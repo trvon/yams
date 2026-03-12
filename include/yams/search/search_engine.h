@@ -233,6 +233,12 @@ struct SearchEngineConfig {
     float rerankScoreGapThreshold = 0.05f; // Skip rerank if top1-top2 gap exceeds this
     float rerankWeight = 0.60f;            // Blend weight for model reranking
     bool rerankReplaceScores = true;       // If true, replace scores entirely; if false, blend
+    bool rerankAdaptiveBlend = false;      // Scale blend weight by reranker confidence
+    float rerankAdaptiveFloor = 0.10f;     // Minimum effective blend weight when adaptive
+
+    // Fusion candidate limit: how many fused results to keep before reranking
+    // 0 = auto: max(userLimit, max(rerankTopK, graphRerankTopN))
+    size_t fusionCandidateLimit = 0;
 
     // Graph reranking (PR1: post-fusion rerank-only, default off)
     bool enableGraphRerank = false;     // Enable KG-based reranking on fused top-N candidates

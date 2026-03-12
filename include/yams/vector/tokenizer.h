@@ -23,8 +23,21 @@ public:
     /// Load vocabulary / model data from a file (e.g. tokenizer.json).
     virtual bool load(const std::string& path) = 0;
 
-    /// Encode text into a sequence of token ids.
+    /// Encode text into a sequence of token ids (raw subword encoding, no special tokens).
     virtual std::vector<int32_t> encode(const std::string& text) const = 0;
+
+    /**
+     * Encode text and wrap with special tokens as defined by the post_processor
+     * section of the tokenizer config (e.g. [CLS]...[SEP] for BERT, <s>...</s>
+     * for SentencePiece).  Falls back to plain encode() when no post_processor
+     * is configured.
+     */
+    virtual std::vector<int32_t> encodeWithSpecialTokens(const std::string& text) const = 0;
+
+    /// Pair-encoding variant: encode two segments with separator tokens.
+    /// For BERT: [CLS] A [SEP] B [SEP].  For SentencePiece: <s> A </s> B </s>.
+    virtual std::vector<int32_t> encodeWithSpecialTokens(const std::string& textA,
+                                                         const std::string& textB) const = 0;
 
     /// Return the unknown-token id.
     virtual int32_t unkTokenId() const = 0;
@@ -60,6 +73,9 @@ class HuggingFaceTokenizer : public ITokenizer {
 public:
     bool load(const std::string& path) override;
     std::vector<int32_t> encode(const std::string& text) const override;
+    std::vector<int32_t> encodeWithSpecialTokens(const std::string& text) const override;
+    std::vector<int32_t> encodeWithSpecialTokens(const std::string& textA,
+                                                 const std::string& textB) const override;
     int32_t unkTokenId() const override;
     int32_t tokenToId(const std::string& token) const override;
     std::string idToToken(int32_t id) const override;
@@ -83,6 +99,13 @@ private:
     int unkTokenId_ = 0;
     bool isUnigram_ = false;
     bool loaded_ = false;
+
+    // Post-processor state (parsed from "post_processor" in tokenizer.json)
+    // When hasPostProcessor_ is true, encodeWithSpecialTokens() wraps output
+    // with the configured BOS / EOS tokens.
+    bool hasPostProcessor_ = false;
+    int32_t bosTokenId_ = -1; // e.g. [CLS]=101 for BERT, <s>=1 for SentencePiece
+    int32_t eosTokenId_ = -1; // e.g. [SEP]=102 for BERT, </s>=2 for SentencePiece
 };
 
 /**

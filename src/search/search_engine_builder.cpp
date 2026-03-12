@@ -376,6 +376,24 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                          cfg.rerankReplaceScores);
         }
 
+        if (auto rerankAdaptive = getEnvBool("YAMS_SEARCH_RERANK_ADAPTIVE_BLEND")) {
+            cfg.rerankAdaptiveBlend = *rerankAdaptive;
+            spdlog::info("SearchEngine rerankAdaptiveBlend overridden to {} via env",
+                         cfg.rerankAdaptiveBlend);
+        }
+
+        if (auto rerankAdaptiveFloor = getEnvFloat("YAMS_SEARCH_RERANK_ADAPTIVE_BLEND_FLOOR")) {
+            cfg.rerankAdaptiveFloor = std::clamp(*rerankAdaptiveFloor, 0.0f, 1.0f);
+            spdlog::info("SearchEngine rerankAdaptiveFloor overridden to {:.3f} via env",
+                         cfg.rerankAdaptiveFloor);
+        }
+
+        if (auto fusionLimit = getEnvInt("YAMS_SEARCH_FUSION_CANDIDATE_LIMIT")) {
+            cfg.fusionCandidateLimit = static_cast<size_t>(std::max(0, *fusionLimit));
+            spdlog::info("SearchEngine fusionCandidateLimit overridden to {} via env",
+                         cfg.fusionCandidateLimit);
+        }
+
         if (auto graphRerankEnabled = getEnvBool("YAMS_SEARCH_ENABLE_GRAPH_RERANK")) {
             cfg.enableGraphRerank = *graphRerankEnabled;
             spdlog::info("SearchEngine enableGraphRerank overridden to {} via env",

@@ -345,30 +345,61 @@ private:
             return std::vector<float>{};
 
         const size_t batchSize = documents.size();
-        std::vector<int64_t> inputShape = {static_cast<int64_t>(batchSize),
-                                           static_cast<int64_t>(maxSequenceLength_)};
-        const size_t tensorSize = batchSize * maxSequenceLength_;
 
         auto memoryInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+
+        // Phase 1: Tokenize all pairs and find actual max sequence length in
+        // this batch.  tokenizePair() pads to maxSequenceLength_, but we will
+        // trim to the actual content length so ONNX doesn't waste compute on
+        // hundreds of padding tokens (attention is O(n²)).
+        struct TokenizedPair {
+            std::vector<int32_t> inputIds;
+            std::vector<int32_t> tokenTypeIds;
+            size_t contentLength{0}; // non-padding length
+        };
+        std::vector<TokenizedPair> pairs(batchSize);
+        size_t batchMaxLen = 0;
+        for (size_t i = 0; i < batchSize; ++i) {
+            pairs[i].inputIds = tokenizePair(query, documents[i], pairs[i].tokenTypeIds);
+            // Find last non-pad position
+            size_t len = pairs[i].inputIds.size();
+            while (len > 0 && pairs[i].inputIds[len - 1] == padTokenId_)
+                --len;
+            pairs[i].contentLength = len;
+            batchMaxLen = std::max(batchMaxLen, len);
+        }
+        // Minimum length 1 to avoid degenerate tensors
+        if (batchMaxLen == 0)
+            batchMaxLen = 1;
+
+        // Phase 2: Build compact tensors padded to batchMaxLen (not maxSequenceLength_)
+        std::vector<int64_t> inputShape = {static_cast<int64_t>(batchSize),
+                                           static_cast<int64_t>(batchMaxLen)};
+        const size_t tensorSize = batchSize * batchMaxLen;
 
         std::vector<int64_t> inputIdsBatch;
         std::vector<int64_t> attentionMaskBatch;
         std::vector<int64_t> tokenTypeIdsBatch;
-        inputIdsBatch.reserve(tensorSize);
-        attentionMaskBatch.reserve(tensorSize);
-        tokenTypeIdsBatch.reserve(tensorSize);
+        inputIdsBatch.resize(tensorSize, static_cast<int64_t>(padTokenId_));
+        attentionMaskBatch.resize(tensorSize, 0);
+        tokenTypeIdsBatch.resize(tensorSize, 0);
 
-        for (const auto& doc : documents) {
-            std::vector<int32_t> tokenTypeIds;
-            auto inputIds = tokenizePair(query, doc, tokenTypeIds);
+        for (size_t i = 0; i < batchSize; ++i) {
+            const size_t offset = i * batchMaxLen;
+            const size_t len = std::min(pairs[i].contentLength, batchMaxLen);
+            for (size_t j = 0; j < len; ++j) {
+                inputIdsBatch[offset + j] = static_cast<int64_t>(pairs[i].inputIds[j]);
+                attentionMaskBatch[offset + j] = 1;
+            }
+            for (size_t j = 0; j < std::min(pairs[i].tokenTypeIds.size(), batchMaxLen); ++j) {
+                tokenTypeIdsBatch[offset + j] = static_cast<int64_t>(pairs[i].tokenTypeIds[j]);
+            }
+        }
 
-            for (auto id : inputIds) {
-                inputIdsBatch.push_back(static_cast<int64_t>(id));
-                attentionMaskBatch.push_back(id != padTokenId_ ? 1 : 0);
-            }
-            for (auto t : tokenTypeIds) {
-                tokenTypeIdsBatch.push_back(static_cast<int64_t>(t));
-            }
+        if (batchMaxLen != maxSequenceLength_) {
+            spdlog::debug("[Reranker] Dynamic padding: batchMaxLen={} vs modelMax={} (saved {}%)",
+                          batchMaxLen, maxSequenceLength_,
+                          100 - (100 * batchMaxLen / maxSequenceLength_));
         }
 
         std::vector<Ort::Value> inputs;

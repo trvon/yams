@@ -1115,22 +1115,17 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
     const size_t userLimit =
         params.limit > 0 ? static_cast<size_t>(params.limit) : config_.maxResults;
-    const size_t fusionCandidateLimit =
+    const size_t autoFusionLimit =
         std::max(userLimit, std::max(config_.rerankTopK, config_.graphRerankTopN));
-    const size_t componentCap = std::max(userLimit * 3, static_cast<size_t>(50));
+    const size_t fusionCandidateLimit =
+        config_.fusionCandidateLimit > 0 ? config_.fusionCandidateLimit : autoFusionLimit;
 
     SearchEngineConfig workingConfig = config_;
-    workingConfig.textMaxResults = std::min(config_.textMaxResults, componentCap);
-    workingConfig.pathTreeMaxResults = std::min(config_.pathTreeMaxResults, componentCap);
-    workingConfig.kgMaxResults = std::min(config_.kgMaxResults, componentCap);
-    workingConfig.vectorMaxResults = std::min(config_.vectorMaxResults, componentCap);
-    workingConfig.entityVectorMaxResults = std::min(config_.entityVectorMaxResults, componentCap);
-    workingConfig.tagMaxResults = std::min(config_.tagMaxResults, componentCap);
-    workingConfig.metadataMaxResults = std::min(config_.metadataMaxResults, componentCap);
     workingConfig.maxResults = fusionCandidateLimit;
 
-    spdlog::debug("Search limit optimization: userLimit={}, componentCap={}", userLimit,
-                  componentCap);
+    spdlog::debug("Search limit: userLimit={}, fusionCandidateLimit={}, textMax={}, vectorMax={}",
+                  userLimit, fusionCandidateLimit, workingConfig.textMaxResults,
+                  workingConfig.vectorMaxResults);
 
     const QueryIntent intent = detectQueryIntent(query);
     applyIntentWeights(workingConfig, intent);
@@ -1827,6 +1822,21 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     }
 
                     // Apply reranker scores to eligible results.
+                    // Compute effective blend weight (may be adaptive).
+                    double effectiveWeight = config_.rerankWeight;
+                    if (!config_.rerankReplaceScores && config_.rerankAdaptiveBlend &&
+                        !scores.empty()) {
+                        float maxRerankScore = *std::max_element(scores.begin(), scores.end());
+                        // Scale weight by reranker confidence, floor prevents near-zero
+                        effectiveWeight =
+                            std::clamp(static_cast<double>(config_.rerankWeight) * maxRerankScore,
+                                       static_cast<double>(config_.rerankAdaptiveFloor),
+                                       static_cast<double>(config_.rerankWeight));
+                        spdlog::debug("[reranker] Adaptive blend: maxScore={:.4f} "
+                                      "effectiveWeight={:.4f} (base={:.3f})",
+                                      maxRerankScore, effectiveWeight, config_.rerankWeight);
+                    }
+
                     for (size_t i = 0; i < scores.size() && i < rerankIndices.size(); ++i) {
                         const size_t idx = rerankIndices[i];
                         double originalScore = response.results[idx].score;
@@ -1837,9 +1847,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                             response.results[idx].score = rerankScore;
                         } else {
                             // Blend: final = rerank * weight + original * (1 - weight)
-                            response.results[idx].score =
-                                rerankScore * config_.rerankWeight +
-                                originalScore * (1.0 - config_.rerankWeight);
+                            response.results[idx].score = rerankScore * effectiveWeight +
+                                                          originalScore * (1.0 - effectiveWeight);
                         }
                         response.results[idx].rerankerScore = rerankScore;
                     }

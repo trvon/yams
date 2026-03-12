@@ -548,6 +548,10 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<
     if (auto bt = parse_ms(std::getenv("YAMS_BODY_TIMEOUT_MS"))) {
         pImpl->bodyTimeout_ = *bt;
     }
+    // Re-sync transport options (and the pooled connection opts) after env-var
+    // overrides — the initial refresh_transport() above ran before these were
+    // parsed, so the connection pool was created with default 30s header timeout.
+    pImpl->refresh_transport();
     // Note: Request-type-aware timeouts are now applied per-request in
     // sendRequest/sendRequestStreaming Fast ops (ping/status): 5s, Medium ops (search/list): 30s,
     // Slow ops (add/embed): 120s

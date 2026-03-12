@@ -1569,6 +1569,20 @@ if catch2_dep.found()
     )
   endif
 
+  # Tokenizer Tests (Catch2) - HuggingFaceTokenizer WordPiece, Unigram, special token injection
+  # Always-on: uses synthetic tokenizer.json files, no model downloads or sqlite-vec required.
+  # --------------------------------------------------------------------------
+  catch2_tokenizer_exe = executable('catch2_tokenizer',
+    files(
+      'unit/vector/tokenizer_catch2_test.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   # API Test Suites (Catch2) - content store API tests
   # Migrated from GTest as part of yams-3s4 / api
   # --------------------------------------------------------------------------
@@ -3104,6 +3118,13 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'api', 'yams-api'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
+  )
+
+  # Tokenizer tests (WordPiece, Unigram, special token injection)
+  test('tokenizer', catch2_tokenizer_exe,
+    suite: ['catch2', 'unit', 'vector', 'yams-tokenizer'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   # Downloader submodule tests (download manager, resume, CAS)

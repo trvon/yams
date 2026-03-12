@@ -1519,6 +1519,238 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
              {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "512"},
          }},
+        // --- Faster rerank candidates (top-20) for quicker iteration ---
+        {"rerank_3x_replace_top20",
+         "3x pool + cross-encoder rerank top-20, replace scores",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "20"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "1"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+         }},
+        {"rerank_3x_blend40_top20",
+         "3x pool + cross-encoder rerank top-20, blend 40/60 (conservative)",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "20"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.40"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+         }},
+        {"rerank_3x_blend60_top20",
+         "3x pool + cross-encoder rerank top-20, blend 60/40",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "20"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.60"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+         }},
+
+        // Adaptive blend: scale reranker weight by max-score confidence
+        {"rerank_3x_adaptive80_top20",
+         "3x pool + cross-encoder rerank top-20, adaptive blend (base 0.80, floor 0.10)",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "20"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.80"},
+             {"YAMS_SEARCH_RERANK_ADAPTIVE_BLEND", "1"},
+             {"YAMS_SEARCH_RERANK_ADAPTIVE_BLEND_FLOOR", "0.10"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+         }},
+
+        {"rerank_3x_adaptive60_top20",
+         "3x pool + cross-encoder rerank top-20, adaptive blend (base 0.60, floor 0.05)",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "20"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.60"},
+             {"YAMS_SEARCH_RERANK_ADAPTIVE_BLEND", "1"},
+             {"YAMS_SEARCH_RERANK_ADAPTIVE_BLEND_FLOOR", "0.05"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+         }},
+
+        {"rerank_3x_blend70_top20",
+         "3x pool + cross-encoder rerank top-20, blend 70/30 with fusion scores",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             // Cross-encoder reranking: rerank the top-20, stronger blend
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "20"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.70"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+         }},
+        {"rerank_3x_blend80_top20",
+         "3x pool + cross-encoder rerank top-20, blend 80/20 with fusion scores",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             // Cross-encoder reranking: rerank the top-20, aggressive blend
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "20"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.80"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+         }},
+        {"rerank_3x_blend70_top50",
+         "3x pool + cross-encoder rerank top-50, blend 70/30 with fusion scores",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             // Cross-encoder reranking: rerank the top-50, strong blend
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "50"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.70"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+         }},
+
+        // Wide fusion window: pass many more fused results through the reranker
+        {"rerank_3x_blend70_top200_fuse200",
+         "3x pool + cross-encoder rerank top-200, blend 70/30, fusion window 200",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             // Cross-encoder reranking: rerank the top-200, strong blend
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "200"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.70"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+             // Wider fusion window: keep 200 fused results (vs default 50)
+             {"YAMS_SEARCH_FUSION_CANDIDATE_LIMIT", "200"},
+         }},
     };
 }
 
@@ -1983,6 +2215,7 @@ struct BenchFixture {
     std::vector<TestQuery> queries;
     int corpusSize = 50, numQueries = 10, topK = 10;
     bool useBEIR = false;
+    bool warmDataDir = false;    // True when reusing a pre-ingested data directory
     std::string beirDatasetName; // Name of BEIR dataset (scifact, cqadupstack, etc.)
 
     void setup() {
@@ -2154,6 +2387,21 @@ struct BenchFixture {
         harnessOptions.autoLoadPlugins = !vectorsDisabled;
         harnessOptions.configureModelPool = !vectorsDisabled;
         harnessOptions.modelPoolLazyLoading = false;
+
+        // YAMS_BENCH_DATA_DIR: reuse a pre-ingested data directory to skip
+        // corpus ingestion + embedding wait on repeated benchmark runs.
+        // The daemon boots from the existing DB/vectors, so startup is fast.
+        if (const char* envDataDir = std::getenv("YAMS_BENCH_DATA_DIR")) {
+            fs::path dataDirPath(envDataDir);
+            if (fs::exists(dataDirPath)) {
+                harnessOptions.dataDir = dataDirPath;
+                warmDataDir = true;
+                spdlog::info("[Bench] Reusing warm data dir: {} (skip ingestion + embed wait)",
+                             dataDirPath.string());
+            } else {
+                spdlog::warn("[Bench] YAMS_BENCH_DATA_DIR={} does not exist, ignoring", envDataDir);
+            }
+        }
 
         if (!vectorsDisabled) {
             const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR");
@@ -2341,6 +2589,11 @@ struct BenchFixture {
             }
 
             client = std::make_unique<yams::daemon::DaemonClient>(clientCfg);
+            // Override header/body timeouts to handle slow reranker queries.
+            // Default headerTimeout=30s is too short when cross-encoder reranking
+            // takes 20-60s before any response header is sent.
+            client->setHeaderTimeout(std::chrono::milliseconds(300000)); // 5 min
+            client->setBodyTimeout(std::chrono::milliseconds(300000));   // 5 min
             auto connectResult = yams::cli::run_sync(client->connect(), 5s);
             if (!connectResult) {
                 throw std::runtime_error("Failed to connect: " + connectResult.error().message);
@@ -2377,6 +2630,8 @@ struct BenchFixture {
                     auto reconnectWait = std::chrono::milliseconds(80);
                     std::this_thread::sleep_for(reconnectWait);
                     client = std::make_unique<yams::daemon::DaemonClient>(clientCfg);
+                    client->setHeaderTimeout(std::chrono::milliseconds(300000));
+                    client->setBodyTimeout(std::chrono::milliseconds(300000));
                     auto reconnectResult = yams::cli::run_sync(client->connect(), 5s);
                     if (!reconnectResult) {
                         throw std::runtime_error("Failed to reconnect after probe EOF: " +
@@ -2390,708 +2645,739 @@ struct BenchFixture {
 
         connectClientWithProbe("initial setup");
 
-        // Use directory ingestion for faster bulk add via IndexingService
-        fs::path corpusDir = useBEIR ? beirCorpus->corpusDir : corpus->corpusDir;
-        spdlog::info("Ingesting {} documents from {}...", corpusSize, corpusDir.string());
+        if (!warmDataDir) {
+            // Use directory ingestion for faster bulk add via IndexingService
+            fs::path corpusDir = useBEIR ? beirCorpus->corpusDir : corpus->corpusDir;
+            spdlog::info("Ingesting {} documents from {}...", corpusSize, corpusDir.string());
 
-        yams::daemon::AddDocumentRequest addReq;
-        addReq.path = corpusDir.string();
-        addReq.recursive = true;
-        addReq.noEmbeddings = false;
-        addReq.includePatterns = {"*.txt"};
+            yams::daemon::AddDocumentRequest addReq;
+            addReq.path = corpusDir.string();
+            addReq.recursive = true;
+            addReq.noEmbeddings = false;
+            addReq.includePatterns = {"*.txt"};
 
-        Result<yams::daemon::AddDocumentResponse> addResult =
-            Error{ErrorCode::Unknown, "ingest not attempted"};
-        constexpr int kIngestAttempts = 2;
-        for (int ingestAttempt = 1; ingestAttempt <= kIngestAttempts; ++ingestAttempt) {
-            addResult = yams::cli::run_sync(client->streamingAddDocument(addReq), 120s);
-            if (addResult) {
-                break;
-            }
-
-            const bool eofLike = isEofLikeError(addResult.error());
-            if (!(eofLike && ingestAttempt < kIngestAttempts)) {
-                break;
-            }
-
-            spdlog::warn("[Bench] Directory ingest attempt {}/{} failed with eof-like transport "
-                         "error ({}). Retrying once with a fresh client.",
-                         ingestAttempt, kIngestAttempts, addResult.error().message);
-            client.reset();
-            yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(250));
-            std::this_thread::sleep_for(std::chrono::milliseconds(120));
-            connectClientWithProbe("ingest retry after eof");
-        }
-
-        if (!addResult) {
-            throw std::runtime_error("Failed to ingest directory: " + addResult.error().message);
-        }
-        spdlog::info("Directory ingestion request accepted: {}", addResult.value().message);
-
-        // Wait for directory ingestion to complete by monitoring document count
-        // Use progress-based timeout: only timeout if no progress for N seconds
-        // This is more robust than a hard deadline because slow ingestion won't fail,
-        // but true hangs will still be detected.
-        auto progressTimeoutSec = std::chrono::seconds(
-            300); // 5 minutes without progress = stalled (embedding/model load)
-        if (const char* env = std::getenv("YAMS_BENCH_PROGRESS_TIMEOUT")) {
-            progressTimeoutSec = std::chrono::seconds(std::stoi(env));
-        }
-        spdlog::info("Waiting for ingestion to complete (expecting {} documents, "
-                     "progress timeout {}s)...",
-                     corpusSize, progressTimeoutSec.count());
-
-        auto lastProgressTime = std::chrono::steady_clock::now();
-        auto ingestHeartbeatAt = lastProgressTime + std::chrono::seconds(5);
-        uint64_t lastDocCount = 0;
-        uint64_t lastIndexedDocCount = 0;
-        uint64_t lastContentExtracted = 0;
-        uint64_t lastPostProcessed = 0;
-        uint64_t lastEmbedQueued = 0;
-        uint64_t lastEmbedInFlight = 0;
-        uint64_t lastVectorCount = 0;
-        uint32_t lastDepth = 0;
-        bool completed = false;
-        int stableChecks = 0;
-
-        // Helper to get metric from requestCounts with presence flag
-        auto getMetric = [](const auto& counts,
-                            const std::string& key) -> std::pair<uint64_t, bool> {
-            auto it = counts.find(key);
-            if (it == counts.end())
-                return {0, false};
-            return {it->second, true};
-        };
-
-        uint64_t lastKgInFlight = 0, lastSymbolInFlight = 0, lastEntityInFlight = 0;
-        uint64_t lastExtractionInFlight = 0;
-
-        auto ingestionLooksCompleteFromLastObserved = [&]() -> bool {
-            const bool targetReached = (lastIndexedDocCount >= static_cast<uint64_t>(corpusSize)) ||
-                                       (lastDocCount >= static_cast<uint64_t>(corpusSize));
-            const bool allQueuesDrained =
-                (lastDepth == 0 && lastExtractionInFlight == 0 && lastKgInFlight == 0 &&
-                 lastSymbolInFlight == 0 && lastEntityInFlight == 0 && lastEmbedQueued == 0 &&
-                 lastEmbedInFlight == 0);
-            const bool extractionOrPostDone =
-                (lastContentExtracted >= static_cast<uint64_t>(corpusSize)) ||
-                (lastPostProcessed >= static_cast<uint64_t>(corpusSize));
-            return targetReached && allQueuesDrained && extractionOrPostDone;
-        };
-
-        while (true) {
-            auto now = std::chrono::steady_clock::now();
-            auto timeSinceProgress =
-                std::chrono::duration_cast<std::chrono::seconds>(now - lastProgressTime);
-
-            if (now >= ingestHeartbeatAt) {
-                ingestHeartbeatAt = now + std::chrono::seconds(5);
-                spdlog::info("Ingest wait heartbeat: since_progress={}s last_total={} "
-                             "last_indexed={} last_queue={} "
-                             "last_processed={}",
-                             timeSinceProgress.count(), lastDocCount, lastIndexedDocCount,
-                             lastDepth, lastPostProcessed);
-            }
-
-            // Check for stall (no progress for progressTimeoutSec)
-            if (timeSinceProgress > progressTimeoutSec) {
-                if (ingestionLooksCompleteFromLastObserved()) {
-                    spdlog::warn("Ingestion progress timeout reached, but last observed metrics "
-                                 "already indicate completion; accepting completion.");
-                    completed = true;
+            Result<yams::daemon::AddDocumentResponse> addResult =
+                Error{ErrorCode::Unknown, "ingest not attempted"};
+            constexpr int kIngestAttempts = 2;
+            for (int ingestAttempt = 1; ingestAttempt <= kIngestAttempts; ++ingestAttempt) {
+                addResult = yams::cli::run_sync(client->streamingAddDocument(addReq), 120s);
+                if (addResult) {
                     break;
                 }
 
-                // Status polls may intermittently fail even when work is done; perform one
-                // final verification poll before classifying as stalled.
-                auto finalVerify = yams::cli::run_sync(client->status(), 10s);
-                if (finalVerify) {
-                    const auto& counts = finalVerify.value().requestCounts;
-                    auto get = [&](const std::string& key) -> uint64_t {
-                        auto it = counts.find(key);
-                        return (it == counts.end()) ? 0ULL : it->second;
-                    };
+                const bool eofLike = isEofLikeError(addResult.error());
+                if (!(eofLike && ingestAttempt < kIngestAttempts)) {
+                    break;
+                }
 
-                    const uint64_t docsTotal = get("documents_total");
-                    const uint64_t docsIndexed = get("documents_indexed");
-                    const uint64_t extracted = get("documents_content_extracted");
-                    const uint64_t postQueued = get("post_ingest_queued");
-                    const uint64_t postInFlight = get("post_ingest_inflight");
-                    const uint64_t postProcessed = get("post_ingest_processed");
-                    const uint64_t extractionInFlight = get("extraction_inflight");
-                    const uint64_t kgInFlight = get("kg_inflight");
-                    const uint64_t symbolInFlight = get("symbol_inflight");
-                    const uint64_t entityInFlight = get("entity_inflight");
-                    const uint64_t embedQueued = get("embed_svc_queued");
-                    const uint64_t embedInFlight = get("embed_in_flight");
+                spdlog::warn(
+                    "[Bench] Directory ingest attempt {}/{} failed with eof-like transport "
+                    "error ({}). Retrying once with a fresh client.",
+                    ingestAttempt, kIngestAttempts, addResult.error().message);
+                client.reset();
+                yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(250));
+                std::this_thread::sleep_for(std::chrono::milliseconds(120));
+                connectClientWithProbe("ingest retry after eof");
+            }
 
-                    const bool targetReached = (docsIndexed >= static_cast<uint64_t>(corpusSize)) ||
-                                               (docsTotal >= static_cast<uint64_t>(corpusSize));
-                    const bool allQueuesDrained =
-                        (postQueued == 0 && postInFlight == 0 && extractionInFlight == 0 &&
-                         kgInFlight == 0 && symbolInFlight == 0 && entityInFlight == 0 &&
-                         embedQueued == 0 && embedInFlight == 0);
-                    const bool extractionOrPostDone =
-                        (extracted >= static_cast<uint64_t>(corpusSize)) ||
-                        (postProcessed >= static_cast<uint64_t>(corpusSize));
+            if (!addResult) {
+                throw std::runtime_error("Failed to ingest directory: " +
+                                         addResult.error().message);
+            }
+            spdlog::info("Directory ingestion request accepted: {}", addResult.value().message);
 
-                    if (targetReached && allQueuesDrained && extractionOrPostDone) {
-                        spdlog::warn("Ingestion progress timeout reached but final verification "
-                                     "shows completion (docs_total={}, docs_indexed={}, "
-                                     "extracted={}, post_processed={}); accepting completion.",
-                                     docsTotal, docsIndexed, extracted, postProcessed);
+            // Wait for directory ingestion to complete by monitoring document count
+            // Use progress-based timeout: only timeout if no progress for N seconds
+            // This is more robust than a hard deadline because slow ingestion won't fail,
+            // but true hangs will still be detected.
+            auto progressTimeoutSec = std::chrono::seconds(
+                300); // 5 minutes without progress = stalled (embedding/model load)
+            if (const char* env = std::getenv("YAMS_BENCH_PROGRESS_TIMEOUT")) {
+                progressTimeoutSec = std::chrono::seconds(std::stoi(env));
+            }
+            spdlog::info("Waiting for ingestion to complete (expecting {} documents, "
+                         "progress timeout {}s)...",
+                         corpusSize, progressTimeoutSec.count());
+
+            auto lastProgressTime = std::chrono::steady_clock::now();
+            auto ingestHeartbeatAt = lastProgressTime + std::chrono::seconds(5);
+            uint64_t lastDocCount = 0;
+            uint64_t lastIndexedDocCount = 0;
+            uint64_t lastContentExtracted = 0;
+            uint64_t lastPostProcessed = 0;
+            uint64_t lastEmbedQueued = 0;
+            uint64_t lastEmbedInFlight = 0;
+            uint64_t lastVectorCount = 0;
+            uint32_t lastDepth = 0;
+            bool completed = false;
+            int stableChecks = 0;
+
+            // Helper to get metric from requestCounts with presence flag
+            auto getMetric = [](const auto& counts,
+                                const std::string& key) -> std::pair<uint64_t, bool> {
+                auto it = counts.find(key);
+                if (it == counts.end())
+                    return {0, false};
+                return {it->second, true};
+            };
+
+            uint64_t lastKgInFlight = 0, lastSymbolInFlight = 0, lastEntityInFlight = 0;
+            uint64_t lastExtractionInFlight = 0;
+
+            auto ingestionLooksCompleteFromLastObserved = [&]() -> bool {
+                const bool targetReached =
+                    (lastIndexedDocCount >= static_cast<uint64_t>(corpusSize)) ||
+                    (lastDocCount >= static_cast<uint64_t>(corpusSize));
+                const bool allQueuesDrained =
+                    (lastDepth == 0 && lastExtractionInFlight == 0 && lastKgInFlight == 0 &&
+                     lastSymbolInFlight == 0 && lastEntityInFlight == 0 && lastEmbedQueued == 0 &&
+                     lastEmbedInFlight == 0);
+                const bool extractionOrPostDone =
+                    (lastContentExtracted >= static_cast<uint64_t>(corpusSize)) ||
+                    (lastPostProcessed >= static_cast<uint64_t>(corpusSize));
+                return targetReached && allQueuesDrained && extractionOrPostDone;
+            };
+
+            while (true) {
+                auto now = std::chrono::steady_clock::now();
+                auto timeSinceProgress =
+                    std::chrono::duration_cast<std::chrono::seconds>(now - lastProgressTime);
+
+                if (now >= ingestHeartbeatAt) {
+                    ingestHeartbeatAt = now + std::chrono::seconds(5);
+                    spdlog::info("Ingest wait heartbeat: since_progress={}s last_total={} "
+                                 "last_indexed={} last_queue={} "
+                                 "last_processed={}",
+                                 timeSinceProgress.count(), lastDocCount, lastIndexedDocCount,
+                                 lastDepth, lastPostProcessed);
+                }
+
+                // Check for stall (no progress for progressTimeoutSec)
+                if (timeSinceProgress > progressTimeoutSec) {
+                    if (ingestionLooksCompleteFromLastObserved()) {
+                        spdlog::warn(
+                            "Ingestion progress timeout reached, but last observed metrics "
+                            "already indicate completion; accepting completion.");
                         completed = true;
                         break;
                     }
-                }
 
-                spdlog::error(
-                    "Ingestion stalled - no progress for {}s (docs: total={} indexed={} target={} "
-                    "queue={}, inflight: extract={} kg={} symbol={} entity={} extracted={} "
-                    "processed={} embed_queue={} embed_in_flight={} vectors={})",
-                    timeSinceProgress.count(), lastDocCount, lastIndexedDocCount, corpusSize,
-                    lastDepth, lastExtractionInFlight, lastKgInFlight, lastSymbolInFlight,
-                    lastEntityInFlight, lastContentExtracted, lastPostProcessed, lastEmbedQueued,
-                    lastEmbedInFlight, lastVectorCount);
-                throw std::runtime_error("Ingestion stalled - benchmark results would be invalid. "
-                                         "Set YAMS_BENCH_PROGRESS_TIMEOUT=300 for slower systems. "
-                                         "For faster ingestion: YAMS_POST_EMBED_CONCURRENT=12 "
-                                         "YAMS_POST_EXTRACTION_CONCURRENT=12 YAMS_DB_POOL_MAX=48");
-            }
+                    // Status polls may intermittently fail even when work is done; perform one
+                    // final verification poll before classifying as stalled.
+                    auto finalVerify = yams::cli::run_sync(client->status(), 10s);
+                    if (finalVerify) {
+                        const auto& counts = finalVerify.value().requestCounts;
+                        auto get = [&](const std::string& key) -> uint64_t {
+                            auto it = counts.find(key);
+                            return (it == counts.end()) ? 0ULL : it->second;
+                        };
 
-            auto statusResult = yams::cli::run_sync(client->status(), 5s);
-            if (statusResult) {
-                const auto& counts = statusResult.value().requestCounts;
-                uint32_t depth = statusResult.value().postIngestQueueDepth;
-                auto [docCount, docCountPresent] = getMetric(counts, "documents_total");
-                auto [indexedCount, indexedPresent] = getMetric(counts, "documents_indexed");
-                auto [contentExtracted, extractedPresent] =
-                    getMetric(counts, "documents_content_extracted");
-                auto [postQueued, postQueuedPresent] = getMetric(counts, "post_ingest_queued");
-                auto [postInflight, postInflightPresent] =
-                    getMetric(counts, "post_ingest_inflight");
-                auto [postProcessed, postProcessedPresent] =
-                    getMetric(counts, "post_ingest_processed");
-                auto [embedQueued, embedQueuedPresent] = getMetric(counts, "embed_svc_queued");
-                auto [embedInFlight, embedInFlightPresent] = getMetric(counts, "embed_in_flight");
-                auto [vectorCount, vectorPresent] = getMetric(counts, "vector_count");
-                uint64_t queuedTotal = std::max<uint64_t>(depth, postQueued);
+                        const uint64_t docsTotal = get("documents_total");
+                        const uint64_t docsIndexed = get("documents_indexed");
+                        const uint64_t extracted = get("documents_content_extracted");
+                        const uint64_t postQueued = get("post_ingest_queued");
+                        const uint64_t postInFlight = get("post_ingest_inflight");
+                        const uint64_t postProcessed = get("post_ingest_processed");
+                        const uint64_t extractionInFlight = get("extraction_inflight");
+                        const uint64_t kgInFlight = get("kg_inflight");
+                        const uint64_t symbolInFlight = get("symbol_inflight");
+                        const uint64_t entityInFlight = get("entity_inflight");
+                        const uint64_t embedQueued = get("embed_svc_queued");
+                        const uint64_t embedInFlight = get("embed_in_flight");
 
-                // Check all processing stage in-flight counters
-                auto [extractionInFlight, extractionPresent] =
-                    getMetric(counts, "extraction_inflight");
-                auto [kgInFlight, kgPresent] = getMetric(counts, "kg_inflight");
-                auto [symbolInFlight, symbolPresent] = getMetric(counts, "symbol_inflight");
-                auto [entityInFlight, entityPresent] = getMetric(counts, "entity_inflight");
+                        const bool targetReached =
+                            (docsIndexed >= static_cast<uint64_t>(corpusSize)) ||
+                            (docsTotal >= static_cast<uint64_t>(corpusSize));
+                        const bool allQueuesDrained =
+                            (postQueued == 0 && postInFlight == 0 && extractionInFlight == 0 &&
+                             kgInFlight == 0 && symbolInFlight == 0 && entityInFlight == 0 &&
+                             embedQueued == 0 && embedInFlight == 0);
+                        const bool extractionOrPostDone =
+                            (extracted >= static_cast<uint64_t>(corpusSize)) ||
+                            (postProcessed >= static_cast<uint64_t>(corpusSize));
 
-                // Total in-flight across all stages (matches PostIngestQueue::totalInFlight())
-                uint64_t totalInFlight =
-                    extractionInFlight + kgInFlight + symbolInFlight + entityInFlight;
-
-                bool statusChanged =
-                    (queuedTotal != lastDepth || docCount != lastDocCount ||
-                     indexedCount != lastIndexedDocCount ||
-                     contentExtracted != lastContentExtracted ||
-                     postProcessed != lastPostProcessed || kgInFlight != lastKgInFlight ||
-                     symbolInFlight != lastSymbolInFlight || entityInFlight != lastEntityInFlight ||
-                     extractionInFlight != lastExtractionInFlight ||
-                     embedQueued != lastEmbedQueued || embedInFlight != lastEmbedInFlight ||
-                     vectorCount != lastVectorCount);
-
-                if (statusChanged) {
-                    bool vectorDbReady = statusResult.value().vectorDbReady;
-                    if (auto it = statusResult.value().readinessStates.find("vector_db");
-                        it != statusResult.value().readinessStates.end()) {
-                        vectorDbReady = it->second;
+                        if (targetReached && allQueuesDrained && extractionOrPostDone) {
+                            spdlog::warn(
+                                "Ingestion progress timeout reached but final verification "
+                                "shows completion (docs_total={}, docs_indexed={}, "
+                                "extracted={}, post_processed={}); accepting completion.",
+                                docsTotal, docsIndexed, extracted, postProcessed);
+                            completed = true;
+                            break;
+                        }
                     }
-                    spdlog::debug(
-                        "Documents: total={} indexed={} / {} | queue={} inflight={} | extracted={} "
-                        "processed={} | extract={} kg={} symbol={} entity={} (total={}) | "
-                        "embed_queue={} embed_in_flight={} vectors={} (ready={})",
-                        docCount, indexedCount, corpusSize, queuedTotal, postInflight,
-                        contentExtracted, postProcessed, extractionInFlight, kgInFlight,
-                        symbolInFlight, entityInFlight, totalInFlight, embedQueued, embedInFlight,
-                        vectorCount, (vectorDbReady ? "true" : "false"));
-                    lastDepth = static_cast<uint32_t>(queuedTotal);
-                    lastDocCount = docCount;
-                    lastIndexedDocCount = indexedCount;
-                    lastContentExtracted = contentExtracted;
-                    lastPostProcessed = postProcessed;
-                    lastEmbedQueued = embedQueued;
-                    lastEmbedInFlight = embedInFlight;
-                    lastVectorCount = vectorCount;
-                    lastKgInFlight = kgInFlight;
-                    lastSymbolInFlight = symbolInFlight;
-                    lastEntityInFlight = entityInFlight;
-                    lastExtractionInFlight = extractionInFlight;
-                    stableChecks = 0;
-                    lastProgressTime = now; // Reset progress timer on any change
-                } else {
-                    stableChecks++;
-                }
 
-                // Complete when ALL stages are idle:
-                // - post_ingest_queued == 0 AND post_ingest_inflight == 0 (queue empty)
-                // - totalInFlight == 0 (all stages: extraction, KG, symbol, entity)
-                // - indexedCount >= corpusSize (or stable for 5+ seconds after reaching target)
-                bool allStagesDrained =
-                    (queuedTotal == 0 && postInflight == 0 && totalInFlight == 0);
-                bool indexedReady = indexedPresent
-                                        ? (indexedCount >= static_cast<uint64_t>(corpusSize))
-                                        : (docCount >= static_cast<uint64_t>(corpusSize));
-                bool extractedReady = extractedPresent
-                                          ? (contentExtracted >= static_cast<uint64_t>(corpusSize))
-                                          : true;
-                bool processedReady = postProcessedPresent
-                                          ? (postProcessed >= static_cast<uint64_t>(corpusSize))
-                                          : true;
-                bool stableAfterDrain = (stableChecks >= 6);
-                if (allStagesDrained && indexedReady &&
-                    (extractedReady || processedReady || stableAfterDrain)) {
-                    spdlog::info("Ingestion complete: total={} indexed={} (target={}), all stages "
-                                 "drained (extracted={}, processed={})",
-                                 docCount, indexedCount, corpusSize, contentExtracted,
-                                 postProcessed);
-                    completed = true;
-                    break;
-                }
-            } else {
-                if (now >= ingestHeartbeatAt - std::chrono::seconds(5)) {
-                    spdlog::warn("Status polling failed during ingest wait: {}",
-                                 statusResult.error().message);
-                }
-            }
-            std::this_thread::sleep_for(500ms);
-        }
-
-        // Wait for embedding provider to become available
-        spdlog::info("Waiting for embedding provider to become available...");
-        auto deadline = std::chrono::steady_clock::now() + 30s;
-        bool embeddingReady = false;
-        while (std::chrono::steady_clock::now() < deadline) {
-            auto statusResult = yams::cli::run_sync(client->status(), 5s);
-            if (statusResult && statusResult.value().embeddingAvailable) {
-                spdlog::info("Embedding provider is available (backend: {}, model: {})",
-                             statusResult.value().embeddingBackend,
-                             statusResult.value().embeddingModel);
-                embeddingReady = true;
-                break;
-            }
-            std::this_thread::sleep_for(500ms);
-        }
-        if (!embeddingReady) {
-            spdlog::warn("Embedding provider did not become available within 30s");
-        }
-
-        // Wait for embeddings to be generated by checking document-level embedding progress
-        // (documents_embedded) and queue drain. We still track vector_count for row-level
-        // visibility, but vector_count is not a document counter.
-        bool vectorsEnabled = !vectorsDisabled;
-        if (vectorsEnabled && !embeddingReady) {
-            vectorsEnabled = false;
-            spdlog::warn("Disabling vector wait for this benchmark run: embedding provider is "
-                         "unavailable; proceeding with keyword-dominant evaluation");
-            if (summaryLog) {
-                summaryLog << "Embedding provider unavailable after 30s; skipping vector wait"
-                           << std::endl;
-                summaryLog.flush();
-            }
-        }
-
-        if (vectorsEnabled) {
-            spdlog::info("Waiting for embeddings to be generated (target: {} docs)...", corpusSize);
-
-            auto embedHeartbeatAt = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-
-            // Log to summary file
-            if (summaryLog) {
-                summaryLog << "=== Embedding Generation ===" << std::endl;
-                summaryLog << "Target: " << corpusSize << " documents" << std::endl;
-            }
-
-            auto embedProgressTimeoutSec = std::chrono::seconds(600);
-            if (const char* env = std::getenv("YAMS_BENCH_EMBED_PROGRESS_TIMEOUT")) {
-                embedProgressTimeoutSec = std::chrono::seconds(std::stoi(env));
-            }
-            auto embedMaxWaitSec = std::chrono::seconds(7200); // 2h hard cap (configurable)
-            if (const char* env = std::getenv("YAMS_BENCH_EMBED_MAX_WAIT")) {
-                embedMaxWaitSec = std::chrono::seconds(std::stoi(env));
-            }
-            uint64_t lastVectorCount = 0;
-            uint64_t lastDocsEmbeddedCount = 0;
-            uint64_t lastPreparedDocsCount = 0;
-            uint64_t lastPreparedChunksCount = 0;
-            uint64_t lastEmbedQueuedObserved = 0;
-            uint64_t lastEmbedInFlightObserved = 0;
-            uint64_t lastEmbedDroppedObserved = 0;
-            bool seenEmbedMetrics = false;
-            int stableCount = 0;
-            uint64_t embedDropped = 0;
-            bool embeddingDrainSatisfied = false;
-            auto embedStartTime = std::chrono::steady_clock::now();
-            auto lastEmbedProgressTime = embedStartTime;
-            uint64_t lastObservedVectorCount = 0;
-            uint64_t lastObservedDocsEmbedded = 0;
-            uint64_t lastObservedPreparedDocs = 0;
-            uint64_t lastObservedPreparedChunks = 0;
-            uint64_t lastObservedEmbedQueued = 0;
-            uint64_t lastObservedEmbedInFlight = 0;
-            uint64_t lastObservedEmbedDropped = 0;
-
-            // Phase 1: Wait for embedding queue to drain and embedded documents to reach target.
-            // Uses progress-based stall detection (like ingestion wait) to avoid failing while
-            // work is still actively progressing on large corpora/slow accelerators.
-            while (true) {
-                auto now = std::chrono::steady_clock::now();
-                auto elapsed =
-                    std::chrono::duration_cast<std::chrono::seconds>(now - embedStartTime);
-                auto sinceProgress =
-                    std::chrono::duration_cast<std::chrono::seconds>(now - lastEmbedProgressTime);
-
-                if (embedMaxWaitSec.count() > 0 && elapsed > embedMaxWaitSec) {
+                    spdlog::error(
+                        "Ingestion stalled - no progress for {}s (docs: total={} indexed={} "
+                        "target={} "
+                        "queue={}, inflight: extract={} kg={} symbol={} entity={} extracted={} "
+                        "processed={} embed_queue={} embed_in_flight={} vectors={})",
+                        timeSinceProgress.count(), lastDocCount, lastIndexedDocCount, corpusSize,
+                        lastDepth, lastExtractionInFlight, lastKgInFlight, lastSymbolInFlight,
+                        lastEntityInFlight, lastContentExtracted, lastPostProcessed,
+                        lastEmbedQueued, lastEmbedInFlight, lastVectorCount);
                     throw std::runtime_error(
-                        "Embedding wait exceeded hard limit (" +
-                        std::to_string(embedMaxWaitSec.count()) +
-                        "s) before benchmark queries (embed_svc_queued=" +
-                        std::to_string(lastObservedEmbedQueued) +
-                        ", embed_in_flight=" + std::to_string(lastObservedEmbedInFlight) +
-                        ", docs_embedded=" + std::to_string(lastObservedDocsEmbedded) +
-                        ", vectors=" + std::to_string(lastObservedVectorCount) +
-                        ", dropped=" + std::to_string(lastObservedEmbedDropped) +
-                        "). Increase YAMS_BENCH_EMBED_MAX_WAIT or tune embedding concurrency.");
+                        "Ingestion stalled - benchmark results would be invalid. "
+                        "Set YAMS_BENCH_PROGRESS_TIMEOUT=300 for slower systems. "
+                        "For faster ingestion: YAMS_POST_EMBED_CONCURRENT=12 "
+                        "YAMS_POST_EXTRACTION_CONCURRENT=12 YAMS_DB_POOL_MAX=48");
                 }
 
-                if (sinceProgress > embedProgressTimeoutSec) {
-                    throw std::runtime_error(
-                        "Embedding wait stalled for " +
-                        std::to_string(embedProgressTimeoutSec.count()) +
-                        "s before benchmark queries (embed_svc_queued=" +
-                        std::to_string(lastObservedEmbedQueued) +
-                        ", embed_in_flight=" + std::to_string(lastObservedEmbedInFlight) +
-                        ", docs_embedded=" + std::to_string(lastObservedDocsEmbedded) +
-                        ", vectors=" + std::to_string(lastObservedVectorCount) +
-                        ", dropped=" + std::to_string(lastObservedEmbedDropped) +
-                        "). Increase timeout/concurrency or investigate model/provider stalls.");
-                }
-
-                if (now >= embedHeartbeatAt) {
-                    embedHeartbeatAt = now + std::chrono::seconds(5);
-                    spdlog::info("Embed wait heartbeat: elapsed={}s since_progress={}s "
-                                 "last_docs_embedded={} last_vectors={} queue={} in_flight={}",
-                                 elapsed.count(), sinceProgress.count(), lastObservedDocsEmbedded,
-                                 lastObservedVectorCount, lastObservedEmbedQueued,
-                                 lastObservedEmbedInFlight);
-                }
                 auto statusResult = yams::cli::run_sync(client->status(), 5s);
                 if (statusResult) {
-                    bool vectorDbReady = statusResult.value().vectorDbReady;
-                    if (auto it = statusResult.value().readinessStates.find("vector_db");
-                        it != statusResult.value().readinessStates.end()) {
-                        vectorDbReady = it->second;
-                    }
-                    // Access vector count from requestCounts map
-                    uint64_t vectorCount = 0;
-                    auto it = statusResult.value().requestCounts.find("vector_count");
-                    if (it != statusResult.value().requestCounts.end()) {
-                        vectorCount = it->second;
-                    }
+                    const auto& counts = statusResult.value().requestCounts;
+                    uint32_t depth = statusResult.value().postIngestQueueDepth;
+                    auto [docCount, docCountPresent] = getMetric(counts, "documents_total");
+                    auto [indexedCount, indexedPresent] = getMetric(counts, "documents_indexed");
+                    auto [contentExtracted, extractedPresent] =
+                        getMetric(counts, "documents_content_extracted");
+                    auto [postQueued, postQueuedPresent] = getMetric(counts, "post_ingest_queued");
+                    auto [postInflight, postInflightPresent] =
+                        getMetric(counts, "post_ingest_inflight");
+                    auto [postProcessed, postProcessedPresent] =
+                        getMetric(counts, "post_ingest_processed");
+                    auto [embedQueued, embedQueuedPresent] = getMetric(counts, "embed_svc_queued");
+                    auto [embedInFlight, embedInFlightPresent] =
+                        getMetric(counts, "embed_in_flight");
+                    auto [vectorCount, vectorPresent] = getMetric(counts, "vector_count");
+                    uint64_t queuedTotal = std::max<uint64_t>(depth, postQueued);
 
-                    uint64_t docsEmbedded = 0;
-                    auto itDocsEmbedded =
-                        statusResult.value().requestCounts.find("documents_embedded");
-                    if (itDocsEmbedded != statusResult.value().requestCounts.end()) {
-                        docsEmbedded = itDocsEmbedded->second;
-                    }
+                    // Check all processing stage in-flight counters
+                    auto [extractionInFlight, extractionPresent] =
+                        getMetric(counts, "extraction_inflight");
+                    auto [kgInFlight, kgPresent] = getMetric(counts, "kg_inflight");
+                    auto [symbolInFlight, symbolPresent] = getMetric(counts, "symbol_inflight");
+                    auto [entityInFlight, entityPresent] = getMetric(counts, "entity_inflight");
 
-                    uint64_t preparedDocsQueued = 0;
-                    auto itPreparedDocs =
-                        statusResult.value().requestCounts.find("bus_embed_prepared_docs_queued");
-                    if (itPreparedDocs != statusResult.value().requestCounts.end()) {
-                        preparedDocsQueued = itPreparedDocs->second;
-                    }
+                    // Total in-flight across all stages (matches PostIngestQueue::totalInFlight())
+                    uint64_t totalInFlight =
+                        extractionInFlight + kgInFlight + symbolInFlight + entityInFlight;
 
-                    uint64_t preparedChunksQueued = 0;
-                    auto itPreparedChunks =
-                        statusResult.value().requestCounts.find("bus_embed_prepared_chunks_queued");
-                    if (itPreparedChunks != statusResult.value().requestCounts.end()) {
-                        preparedChunksQueued = itPreparedChunks->second;
-                    }
+                    bool statusChanged =
+                        (queuedTotal != lastDepth || docCount != lastDocCount ||
+                         indexedCount != lastIndexedDocCount ||
+                         contentExtracted != lastContentExtracted ||
+                         postProcessed != lastPostProcessed || kgInFlight != lastKgInFlight ||
+                         symbolInFlight != lastSymbolInFlight ||
+                         entityInFlight != lastEntityInFlight ||
+                         extractionInFlight != lastExtractionInFlight ||
+                         embedQueued != lastEmbedQueued || embedInFlight != lastEmbedInFlight ||
+                         vectorCount != lastVectorCount);
 
-                    // Check embed queue status (jobs waiting in EmbeddingService queue)
-                    // NOTE: The key is "embed_svc_queued" in requestCounts (StatusResponse),
-                    // NOT "bus_embed_queued" which is in additionalStats (GetStatsResponse)
-                    uint64_t embedQueued = 0;
-                    auto itQ = statusResult.value().requestCounts.find("embed_svc_queued");
-                    if (itQ != statusResult.value().requestCounts.end()) {
-                        embedQueued = itQ->second;
-                    }
-
-                    // Check embed in-flight status (jobs being processed)
-                    uint64_t embedInFlight = 0;
-                    auto itInFlight = statusResult.value().requestCounts.find("embed_in_flight");
-                    if (itInFlight != statusResult.value().requestCounts.end()) {
-                        embedInFlight = itInFlight->second;
-                    }
-
-                    auto itD = statusResult.value().requestCounts.find("bus_embed_dropped");
-                    if (itD != statusResult.value().requestCounts.end()) {
-                        embedDropped = itD->second;
-                    }
-
-                    lastObservedVectorCount = vectorCount;
-                    lastObservedDocsEmbedded = docsEmbedded;
-                    lastObservedPreparedDocs = preparedDocsQueued;
-                    lastObservedPreparedChunks = preparedChunksQueued;
-                    lastObservedEmbedQueued = embedQueued;
-                    lastObservedEmbedInFlight = embedInFlight;
-                    lastObservedEmbedDropped = embedDropped;
-
-                    const bool haveQueueMetrics =
-                        (itQ != statusResult.value().requestCounts.end()) ||
-                        (itInFlight != statusResult.value().requestCounts.end());
-
-                    bool metricsChanged = false;
-                    if (!seenEmbedMetrics) {
-                        seenEmbedMetrics = true;
-                        metricsChanged = true;
-                    }
-                    if (vectorCount != lastVectorCount || docsEmbedded != lastDocsEmbeddedCount ||
-                        preparedDocsQueued != lastPreparedDocsCount ||
-                        preparedChunksQueued != lastPreparedChunksCount ||
-                        embedQueued != lastEmbedQueuedObserved ||
-                        embedInFlight != lastEmbedInFlightObserved) {
-                        metricsChanged = true;
-                    }
-
-                    if (metricsChanged) {
-                        lastEmbedProgressTime = now;
-                        stableCount = 0;
-                    } else {
-                        stableCount++;
-                    }
-
-                    if (vectorCount != lastVectorCount || docsEmbedded != lastDocsEmbeddedCount) {
-                        double docCoverage =
-                            corpusSize > 0 ? (docsEmbedded * 100.0 / corpusSize) : 0;
-                        double preparedAvgChunksPerDoc =
-                            preparedDocsQueued > 0 ? static_cast<double>(preparedChunksQueued) /
-                                                         static_cast<double>(preparedDocsQueued)
-                                                   : 0.0;
-                        spdlog::info(
-                            "Embedding progress: docs={} / {} ({:.1f}%) vectors={} "
-                            "prepared_docs={} prepared_chunks={} avg_chunks_per_doc={:.2f} "
-                            "| queue={} in_flight={} dropped={}",
-                            docsEmbedded, corpusSize, docCoverage, vectorCount, preparedDocsQueued,
-                            preparedChunksQueued, preparedAvgChunksPerDoc, embedQueued,
-                            embedInFlight, embedDropped);
-
-                        // Log progress to summary file
-                        if (summaryLog) {
-                            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                               std::chrono::steady_clock::now() - embedStartTime)
-                                               .count();
-                            summaryLog
-                                << "[" << elapsed << "ms] DocsEmbedded: " << docsEmbedded << " / "
-                                << corpusSize << " (" << std::fixed << std::setprecision(1)
-                                << docCoverage << "%)"
-                                << " | vectors=" << vectorCount
-                                << " | prepared_docs=" << preparedDocsQueued
-                                << " prepared_chunks=" << preparedChunksQueued
-                                << " avg_chunks_per_doc=" << std::fixed << std::setprecision(2)
-                                << preparedAvgChunksPerDoc << " | queue=" << embedQueued
-                                << " in_flight=" << embedInFlight << " dropped=" << embedDropped
-                                << std::endl;
-                            summaryLog.flush();
+                    if (statusChanged) {
+                        bool vectorDbReady = statusResult.value().vectorDbReady;
+                        if (auto it = statusResult.value().readinessStates.find("vector_db");
+                            it != statusResult.value().readinessStates.end()) {
+                            vectorDbReady = it->second;
                         }
-
+                        spdlog::debug(
+                            "Documents: total={} indexed={} / {} | queue={} inflight={} | "
+                            "extracted={} "
+                            "processed={} | extract={} kg={} symbol={} entity={} (total={}) | "
+                            "embed_queue={} embed_in_flight={} vectors={} (ready={})",
+                            docCount, indexedCount, corpusSize, queuedTotal, postInflight,
+                            contentExtracted, postProcessed, extractionInFlight, kgInFlight,
+                            symbolInFlight, entityInFlight, totalInFlight, embedQueued,
+                            embedInFlight, vectorCount, (vectorDbReady ? "true" : "false"));
+                        lastDepth = static_cast<uint32_t>(queuedTotal);
+                        lastDocCount = docCount;
+                        lastIndexedDocCount = indexedCount;
+                        lastContentExtracted = contentExtracted;
+                        lastPostProcessed = postProcessed;
+                        lastEmbedQueued = embedQueued;
+                        lastEmbedInFlight = embedInFlight;
                         lastVectorCount = vectorCount;
-                        lastDocsEmbeddedCount = docsEmbedded;
-                        lastPreparedDocsCount = preparedDocsQueued;
-                        lastPreparedChunksCount = preparedChunksQueued;
+                        lastKgInFlight = kgInFlight;
+                        lastSymbolInFlight = symbolInFlight;
+                        lastEntityInFlight = entityInFlight;
+                        lastExtractionInFlight = extractionInFlight;
+                        stableChecks = 0;
+                        lastProgressTime = now; // Reset progress timer on any change
+                    } else {
+                        stableChecks++;
                     }
 
-                    lastEmbedQueuedObserved = embedQueued;
-                    lastEmbedInFlightObserved = embedInFlight;
-                    lastEmbedDroppedObserved = embedDropped;
-
-                    // Success condition: embedded docs >= corpusSize AND queue drained.
-                    // vector_count tracks rows (chunks + doc records), not documents.
-                    bool queueDrained = (embedQueued == 0 && embedInFlight == 0);
-                    if (haveQueueMetrics && docsEmbedded >= static_cast<uint64_t>(corpusSize) &&
-                        queueDrained && stableCount >= 10) {
-                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                           std::chrono::steady_clock::now() - embedStartTime)
-                                           .count();
-                        spdlog::info("Full embedding coverage achieved: {} embedded docs for {} "
-                                     "target docs "
-                                     "(queue drained, stable for {}s, vector_db_ready={})",
-                                     docsEmbedded, corpusSize, stableCount / 2,
-                                     (vectorDbReady ? "true" : "false"));
-                        if (summaryLog) {
-                            summaryLog << "\n*** SUCCESS: Full coverage in " << elapsed << "ms ***"
-                                       << std::endl;
-                            summaryLog << "Final embedded docs: " << docsEmbedded << std::endl;
-                            summaryLog << "Final vectors: " << vectorCount << std::endl;
-                            summaryLog << "Total dropped: " << embedDropped << std::endl;
-                            summaryLog.flush();
-                        }
-                        embeddingDrainSatisfied = true;
+                    // Complete when ALL stages are idle:
+                    // - post_ingest_queued == 0 AND post_ingest_inflight == 0 (queue empty)
+                    // - totalInFlight == 0 (all stages: extraction, KG, symbol, entity)
+                    // - indexedCount >= corpusSize (or stable for 5+ seconds after reaching target)
+                    bool allStagesDrained =
+                        (queuedTotal == 0 && postInflight == 0 && totalInFlight == 0);
+                    bool indexedReady = indexedPresent
+                                            ? (indexedCount >= static_cast<uint64_t>(corpusSize))
+                                            : (docCount >= static_cast<uint64_t>(corpusSize));
+                    bool extractedReady =
+                        extractedPresent ? (contentExtracted >= static_cast<uint64_t>(corpusSize))
+                                         : true;
+                    bool processedReady = postProcessedPresent
+                                              ? (postProcessed >= static_cast<uint64_t>(corpusSize))
+                                              : true;
+                    bool stableAfterDrain = (stableChecks >= 6);
+                    if (allStagesDrained && indexedReady &&
+                        (extractedReady || processedReady || stableAfterDrain)) {
+                        spdlog::info(
+                            "Ingestion complete: total={} indexed={} (target={}), all stages "
+                            "drained (extracted={}, processed={})",
+                            docCount, indexedCount, corpusSize, contentExtracted, postProcessed);
+                        completed = true;
                         break;
                     }
-
-                    // If very stable (20s) with queue drained, we're done even if < corpusSize
-                    // This handles cases where some docs have no content to embed
-                    // IMPORTANT: Require minimum 90% coverage to prevent premature exit from
-                    // transient queue drain (e.g., between embedding batches)
-                    double coverage = corpusSize > 0 ? (docsEmbedded * 100.0 / corpusSize) : 0;
-                    constexpr double MIN_COVERAGE_THRESHOLD = 90.0;
-                    if (haveQueueMetrics && stableCount >= 40 && queueDrained && docsEmbedded > 0 &&
-                        coverage >= MIN_COVERAGE_THRESHOLD) {
-                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                           std::chrono::steady_clock::now() - embedStartTime)
-                                           .count();
-                        spdlog::info("Embedding generation complete (queue drained, stable): {} "
-                                     "embedded docs ({:.1f}% coverage, vector_db_ready={})",
-                                     docsEmbedded, coverage, (vectorDbReady ? "true" : "false"));
-                        if (summaryLog) {
-                            summaryLog << "\n*** Complete (queue drained) in " << elapsed
-                                       << "ms ***" << std::endl;
-                            summaryLog << "Final embedded docs: " << docsEmbedded << " ("
-                                       << coverage << "%)" << std::endl;
-                            summaryLog << "Final vectors: " << vectorCount << std::endl;
-                            summaryLog.flush();
-                        }
-                        embeddingDrainSatisfied = true;
-                        break;
-                    }
-
-                    if (haveQueueMetrics && stableCount >= 40 && queueDrained &&
-                        docsEmbedded == 0) {
-                        throw std::runtime_error("Embedding failed before benchmark queries (queue "
-                                                 "drained, no documents "
-                                                 "embedded, dropped=" +
-                                                 std::to_string(embedDropped) +
-                                                 "). Check embedding provider/model availability.");
-                    }
-
-                    if (haveQueueMetrics && queueDrained && docsEmbedded == 0 &&
-                        elapsed > std::chrono::seconds(60)) {
-                        throw std::runtime_error(
-                            "Embedding appears unavailable for this candidate (queue drained, no "
-                            "documents embedded after " +
-                            std::to_string(elapsed.count()) +
-                            "s, dropped=" + std::to_string(embedDropped) +
-                            "). Aborting candidate to keep optimization loop progressing.");
-                    }
-
-                    // If stable but queue NOT drained, warn about potential issues
-                    if (haveQueueMetrics && stableCount >= 20 && !queueDrained &&
-                        docsEmbedded > 0) {
-                        // coverage already computed above
-                        spdlog::warn("Embedding stalled at {:.1f}% but queue not drained "
-                                     "(queue={}, in_flight={}). Continuing to wait...",
-                                     coverage, embedQueued, embedInFlight);
-                        // Don't break - keep waiting for queue to drain
+                } else {
+                    if (now >= ingestHeartbeatAt - std::chrono::seconds(5)) {
+                        spdlog::warn("Status polling failed during ingest wait: {}",
+                                     statusResult.error().message);
                     }
                 }
                 std::this_thread::sleep_for(500ms);
             }
 
-            // Final status check
-            auto finalStatus = yams::cli::run_sync(client->status(), 5s);
-            if (finalStatus) {
-                uint64_t finalVectorCount = 0;
-                auto it = finalStatus.value().requestCounts.find("vector_count");
-                if (it != finalStatus.value().requestCounts.end()) {
-                    finalVectorCount = it->second;
+            // Wait for embedding provider to become available
+            spdlog::info("Waiting for embedding provider to become available...");
+            auto deadline = std::chrono::steady_clock::now() + 30s;
+            bool embeddingReady = false;
+            while (std::chrono::steady_clock::now() < deadline) {
+                auto statusResult = yams::cli::run_sync(client->status(), 5s);
+                if (statusResult && statusResult.value().embeddingAvailable) {
+                    spdlog::info("Embedding provider is available (backend: {}, model: {})",
+                                 statusResult.value().embeddingBackend,
+                                 statusResult.value().embeddingModel);
+                    embeddingReady = true;
+                    break;
                 }
-                uint64_t finalDocsEmbedded = 0;
-                auto itDocsEmbedded = finalStatus.value().requestCounts.find("documents_embedded");
-                if (itDocsEmbedded != finalStatus.value().requestCounts.end()) {
-                    finalDocsEmbedded = itDocsEmbedded->second;
-                }
-                uint64_t finalEmbedQueued = 0;
-                auto itQ = finalStatus.value().requestCounts.find("embed_svc_queued");
-                if (itQ != finalStatus.value().requestCounts.end()) {
-                    finalEmbedQueued = itQ->second;
-                }
-                uint64_t finalEmbedInFlight = 0;
-                auto itInFlight = finalStatus.value().requestCounts.find("embed_in_flight");
-                if (itInFlight != finalStatus.value().requestCounts.end()) {
-                    finalEmbedInFlight = itInFlight->second;
-                }
-                double finalCoverage =
-                    corpusSize > 0 ? (finalDocsEmbedded * 100.0 / corpusSize) : 0;
-                bool vectorDbReady = finalStatus.value().vectorDbReady;
-                if (auto it = finalStatus.value().readinessStates.find("vector_db");
-                    it != finalStatus.value().readinessStates.end()) {
-                    vectorDbReady = it->second;
-                }
-                spdlog::info("Vector DB: ready={} dim={}, docs_embedded={} vectors={} "
-                             "({:.1f}% doc coverage)",
-                             (vectorDbReady ? "true" : "false"), finalStatus.value().vectorDbDim,
-                             finalDocsEmbedded, finalVectorCount, finalCoverage);
+                std::this_thread::sleep_for(500ms);
+            }
+            if (!embeddingReady) {
+                spdlog::warn("Embedding provider did not become available within 30s");
+            }
 
-                if (!embeddingDrainSatisfied) {
-                    const bool queueDrained = (finalEmbedQueued == 0 && finalEmbedInFlight == 0);
-                    if (!queueDrained) {
+            // Wait for embeddings to be generated by checking document-level embedding progress
+            // (documents_embedded) and queue drain. We still track vector_count for row-level
+            // visibility, but vector_count is not a document counter.
+            bool vectorsEnabled = !vectorsDisabled;
+            if (vectorsEnabled && !embeddingReady) {
+                vectorsEnabled = false;
+                spdlog::warn("Disabling vector wait for this benchmark run: embedding provider is "
+                             "unavailable; proceeding with keyword-dominant evaluation");
+                if (summaryLog) {
+                    summaryLog << "Embedding provider unavailable after 30s; skipping vector wait"
+                               << std::endl;
+                    summaryLog.flush();
+                }
+            }
+
+            if (vectorsEnabled) {
+                spdlog::info("Waiting for embeddings to be generated (target: {} docs)...",
+                             corpusSize);
+
+                auto embedHeartbeatAt = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+
+                // Log to summary file
+                if (summaryLog) {
+                    summaryLog << "=== Embedding Generation ===" << std::endl;
+                    summaryLog << "Target: " << corpusSize << " documents" << std::endl;
+                }
+
+                auto embedProgressTimeoutSec = std::chrono::seconds(600);
+                if (const char* env = std::getenv("YAMS_BENCH_EMBED_PROGRESS_TIMEOUT")) {
+                    embedProgressTimeoutSec = std::chrono::seconds(std::stoi(env));
+                }
+                auto embedMaxWaitSec = std::chrono::seconds(7200); // 2h hard cap (configurable)
+                if (const char* env = std::getenv("YAMS_BENCH_EMBED_MAX_WAIT")) {
+                    embedMaxWaitSec = std::chrono::seconds(std::stoi(env));
+                }
+                uint64_t lastVectorCount = 0;
+                uint64_t lastDocsEmbeddedCount = 0;
+                uint64_t lastPreparedDocsCount = 0;
+                uint64_t lastPreparedChunksCount = 0;
+                uint64_t lastEmbedQueuedObserved = 0;
+                uint64_t lastEmbedInFlightObserved = 0;
+                uint64_t lastEmbedDroppedObserved = 0;
+                bool seenEmbedMetrics = false;
+                int stableCount = 0;
+                uint64_t embedDropped = 0;
+                bool embeddingDrainSatisfied = false;
+                auto embedStartTime = std::chrono::steady_clock::now();
+                auto lastEmbedProgressTime = embedStartTime;
+                uint64_t lastObservedVectorCount = 0;
+                uint64_t lastObservedDocsEmbedded = 0;
+                uint64_t lastObservedPreparedDocs = 0;
+                uint64_t lastObservedPreparedChunks = 0;
+                uint64_t lastObservedEmbedQueued = 0;
+                uint64_t lastObservedEmbedInFlight = 0;
+                uint64_t lastObservedEmbedDropped = 0;
+
+                // Phase 1: Wait for embedding queue to drain and embedded documents to reach
+                // target. Uses progress-based stall detection (like ingestion wait) to avoid
+                // failing while work is still actively progressing on large corpora/slow
+                // accelerators.
+                while (true) {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed =
+                        std::chrono::duration_cast<std::chrono::seconds>(now - embedStartTime);
+                    auto sinceProgress = std::chrono::duration_cast<std::chrono::seconds>(
+                        now - lastEmbedProgressTime);
+
+                    if (embedMaxWaitSec.count() > 0 && elapsed > embedMaxWaitSec) {
                         throw std::runtime_error(
-                            "Embedding drain not reached before benchmark queries "
-                            "(embed_svc_queued=" +
-                            std::to_string(finalEmbedQueued) +
-                            ", embed_in_flight=" + std::to_string(finalEmbedInFlight) +
-                            ", docs_embedded=" + std::to_string(finalDocsEmbedded) +
-                            ", vectors=" + std::to_string(finalVectorCount) +
-                            "). Increase timeout/concurrency or reduce corpus size to obtain valid "
-                            "results.");
+                            "Embedding wait exceeded hard limit (" +
+                            std::to_string(embedMaxWaitSec.count()) +
+                            "s) before benchmark queries (embed_svc_queued=" +
+                            std::to_string(lastObservedEmbedQueued) +
+                            ", embed_in_flight=" + std::to_string(lastObservedEmbedInFlight) +
+                            ", docs_embedded=" + std::to_string(lastObservedDocsEmbedded) +
+                            ", vectors=" + std::to_string(lastObservedVectorCount) +
+                            ", dropped=" + std::to_string(lastObservedEmbedDropped) +
+                            "). Increase YAMS_BENCH_EMBED_MAX_WAIT or tune embedding concurrency.");
                     }
 
-                    // Queue may only be fully drained on the final status check.
-                    embeddingDrainSatisfied = true;
-                }
+                    if (sinceProgress > embedProgressTimeoutSec) {
+                        throw std::runtime_error(
+                            "Embedding wait stalled for " +
+                            std::to_string(embedProgressTimeoutSec.count()) +
+                            "s before benchmark queries (embed_svc_queued=" +
+                            std::to_string(lastObservedEmbedQueued) +
+                            ", embed_in_flight=" + std::to_string(lastObservedEmbedInFlight) +
+                            ", docs_embedded=" + std::to_string(lastObservedDocsEmbedded) +
+                            ", vectors=" + std::to_string(lastObservedVectorCount) +
+                            ", dropped=" + std::to_string(lastObservedEmbedDropped) +
+                            "). Increase timeout/concurrency or investigate model/provider "
+                            "stalls.");
+                    }
 
-                if (finalDocsEmbedded == 0) {
-                    spdlog::warn("No embedded documents present after embedding wait");
-                } else if (finalCoverage < 90.0) {
-                    spdlog::error(
-                        "WARNING: Low document embedding coverage ({:.1f}%) will degrade retrieval "
-                        "quality!",
-                        finalCoverage);
-                    spdlog::error(
-                        "Consider reducing corpus size or increasing embed channel capacity.");
-                }
-
-                if (!vectorDbReady) {
-                    spdlog::warn("Vector DB not ready yet; waiting briefly before queries...");
-                    const auto guardDeadline = std::chrono::steady_clock::now() + 30s;
-                    while (std::chrono::steady_clock::now() < guardDeadline) {
-                        auto st = yams::cli::run_sync(client->status(), 5s);
-                        if (st) {
-                            bool ready = st.value().vectorDbReady;
-                            if (auto it = st.value().readinessStates.find("vector_db");
-                                it != st.value().readinessStates.end()) {
-                                ready = it->second;
-                            }
-                            if (ready) {
-                                spdlog::info("Vector DB is now ready after guard wait");
-                                break;
-                            }
+                    if (now >= embedHeartbeatAt) {
+                        embedHeartbeatAt = now + std::chrono::seconds(5);
+                        spdlog::info("Embed wait heartbeat: elapsed={}s since_progress={}s "
+                                     "last_docs_embedded={} last_vectors={} queue={} in_flight={}",
+                                     elapsed.count(), sinceProgress.count(),
+                                     lastObservedDocsEmbedded, lastObservedVectorCount,
+                                     lastObservedEmbedQueued, lastObservedEmbedInFlight);
+                    }
+                    auto statusResult = yams::cli::run_sync(client->status(), 5s);
+                    if (statusResult) {
+                        bool vectorDbReady = statusResult.value().vectorDbReady;
+                        if (auto it = statusResult.value().readinessStates.find("vector_db");
+                            it != statusResult.value().readinessStates.end()) {
+                            vectorDbReady = it->second;
                         }
-                        std::this_thread::sleep_for(500ms);
+                        // Access vector count from requestCounts map
+                        uint64_t vectorCount = 0;
+                        auto it = statusResult.value().requestCounts.find("vector_count");
+                        if (it != statusResult.value().requestCounts.end()) {
+                            vectorCount = it->second;
+                        }
+
+                        uint64_t docsEmbedded = 0;
+                        auto itDocsEmbedded =
+                            statusResult.value().requestCounts.find("documents_embedded");
+                        if (itDocsEmbedded != statusResult.value().requestCounts.end()) {
+                            docsEmbedded = itDocsEmbedded->second;
+                        }
+
+                        uint64_t preparedDocsQueued = 0;
+                        auto itPreparedDocs = statusResult.value().requestCounts.find(
+                            "bus_embed_prepared_docs_queued");
+                        if (itPreparedDocs != statusResult.value().requestCounts.end()) {
+                            preparedDocsQueued = itPreparedDocs->second;
+                        }
+
+                        uint64_t preparedChunksQueued = 0;
+                        auto itPreparedChunks = statusResult.value().requestCounts.find(
+                            "bus_embed_prepared_chunks_queued");
+                        if (itPreparedChunks != statusResult.value().requestCounts.end()) {
+                            preparedChunksQueued = itPreparedChunks->second;
+                        }
+
+                        // Check embed queue status (jobs waiting in EmbeddingService queue)
+                        // NOTE: The key is "embed_svc_queued" in requestCounts (StatusResponse),
+                        // NOT "bus_embed_queued" which is in additionalStats (GetStatsResponse)
+                        uint64_t embedQueued = 0;
+                        auto itQ = statusResult.value().requestCounts.find("embed_svc_queued");
+                        if (itQ != statusResult.value().requestCounts.end()) {
+                            embedQueued = itQ->second;
+                        }
+
+                        // Check embed in-flight status (jobs being processed)
+                        uint64_t embedInFlight = 0;
+                        auto itInFlight =
+                            statusResult.value().requestCounts.find("embed_in_flight");
+                        if (itInFlight != statusResult.value().requestCounts.end()) {
+                            embedInFlight = itInFlight->second;
+                        }
+
+                        auto itD = statusResult.value().requestCounts.find("bus_embed_dropped");
+                        if (itD != statusResult.value().requestCounts.end()) {
+                            embedDropped = itD->second;
+                        }
+
+                        lastObservedVectorCount = vectorCount;
+                        lastObservedDocsEmbedded = docsEmbedded;
+                        lastObservedPreparedDocs = preparedDocsQueued;
+                        lastObservedPreparedChunks = preparedChunksQueued;
+                        lastObservedEmbedQueued = embedQueued;
+                        lastObservedEmbedInFlight = embedInFlight;
+                        lastObservedEmbedDropped = embedDropped;
+
+                        const bool haveQueueMetrics =
+                            (itQ != statusResult.value().requestCounts.end()) ||
+                            (itInFlight != statusResult.value().requestCounts.end());
+
+                        bool metricsChanged = false;
+                        if (!seenEmbedMetrics) {
+                            seenEmbedMetrics = true;
+                            metricsChanged = true;
+                        }
+                        if (vectorCount != lastVectorCount ||
+                            docsEmbedded != lastDocsEmbeddedCount ||
+                            preparedDocsQueued != lastPreparedDocsCount ||
+                            preparedChunksQueued != lastPreparedChunksCount ||
+                            embedQueued != lastEmbedQueuedObserved ||
+                            embedInFlight != lastEmbedInFlightObserved) {
+                            metricsChanged = true;
+                        }
+
+                        if (metricsChanged) {
+                            lastEmbedProgressTime = now;
+                            stableCount = 0;
+                        } else {
+                            stableCount++;
+                        }
+
+                        if (vectorCount != lastVectorCount ||
+                            docsEmbedded != lastDocsEmbeddedCount) {
+                            double docCoverage =
+                                corpusSize > 0 ? (docsEmbedded * 100.0 / corpusSize) : 0;
+                            double preparedAvgChunksPerDoc =
+                                preparedDocsQueued > 0 ? static_cast<double>(preparedChunksQueued) /
+                                                             static_cast<double>(preparedDocsQueued)
+                                                       : 0.0;
+                            spdlog::info(
+                                "Embedding progress: docs={} / {} ({:.1f}%) vectors={} "
+                                "prepared_docs={} prepared_chunks={} avg_chunks_per_doc={:.2f} "
+                                "| queue={} in_flight={} dropped={}",
+                                docsEmbedded, corpusSize, docCoverage, vectorCount,
+                                preparedDocsQueued, preparedChunksQueued, preparedAvgChunksPerDoc,
+                                embedQueued, embedInFlight, embedDropped);
+
+                            // Log progress to summary file
+                            if (summaryLog) {
+                                auto elapsed =
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - embedStartTime)
+                                        .count();
+                                summaryLog
+                                    << "[" << elapsed << "ms] DocsEmbedded: " << docsEmbedded
+                                    << " / " << corpusSize << " (" << std::fixed
+                                    << std::setprecision(1) << docCoverage << "%)"
+                                    << " | vectors=" << vectorCount
+                                    << " | prepared_docs=" << preparedDocsQueued
+                                    << " prepared_chunks=" << preparedChunksQueued
+                                    << " avg_chunks_per_doc=" << std::fixed << std::setprecision(2)
+                                    << preparedAvgChunksPerDoc << " | queue=" << embedQueued
+                                    << " in_flight=" << embedInFlight << " dropped=" << embedDropped
+                                    << std::endl;
+                                summaryLog.flush();
+                            }
+
+                            lastVectorCount = vectorCount;
+                            lastDocsEmbeddedCount = docsEmbedded;
+                            lastPreparedDocsCount = preparedDocsQueued;
+                            lastPreparedChunksCount = preparedChunksQueued;
+                        }
+
+                        lastEmbedQueuedObserved = embedQueued;
+                        lastEmbedInFlightObserved = embedInFlight;
+                        lastEmbedDroppedObserved = embedDropped;
+
+                        // Success condition: embedded docs >= corpusSize AND queue drained.
+                        // vector_count tracks rows (chunks + doc records), not documents.
+                        bool queueDrained = (embedQueued == 0 && embedInFlight == 0);
+                        if (haveQueueMetrics && docsEmbedded >= static_cast<uint64_t>(corpusSize) &&
+                            queueDrained && stableCount >= 10) {
+                            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::steady_clock::now() - embedStartTime)
+                                               .count();
+                            spdlog::info(
+                                "Full embedding coverage achieved: {} embedded docs for {} "
+                                "target docs "
+                                "(queue drained, stable for {}s, vector_db_ready={})",
+                                docsEmbedded, corpusSize, stableCount / 2,
+                                (vectorDbReady ? "true" : "false"));
+                            if (summaryLog) {
+                                summaryLog << "\n*** SUCCESS: Full coverage in " << elapsed
+                                           << "ms ***" << std::endl;
+                                summaryLog << "Final embedded docs: " << docsEmbedded << std::endl;
+                                summaryLog << "Final vectors: " << vectorCount << std::endl;
+                                summaryLog << "Total dropped: " << embedDropped << std::endl;
+                                summaryLog.flush();
+                            }
+                            embeddingDrainSatisfied = true;
+                            break;
+                        }
+
+                        // If very stable (20s) with queue drained, we're done even if < corpusSize
+                        // This handles cases where some docs have no content to embed
+                        // IMPORTANT: Require minimum 90% coverage to prevent premature exit from
+                        // transient queue drain (e.g., between embedding batches)
+                        double coverage = corpusSize > 0 ? (docsEmbedded * 100.0 / corpusSize) : 0;
+                        constexpr double MIN_COVERAGE_THRESHOLD = 90.0;
+                        if (haveQueueMetrics && stableCount >= 40 && queueDrained &&
+                            docsEmbedded > 0 && coverage >= MIN_COVERAGE_THRESHOLD) {
+                            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::steady_clock::now() - embedStartTime)
+                                               .count();
+                            spdlog::info(
+                                "Embedding generation complete (queue drained, stable): {} "
+                                "embedded docs ({:.1f}% coverage, vector_db_ready={})",
+                                docsEmbedded, coverage, (vectorDbReady ? "true" : "false"));
+                            if (summaryLog) {
+                                summaryLog << "\n*** Complete (queue drained) in " << elapsed
+                                           << "ms ***" << std::endl;
+                                summaryLog << "Final embedded docs: " << docsEmbedded << " ("
+                                           << coverage << "%)" << std::endl;
+                                summaryLog << "Final vectors: " << vectorCount << std::endl;
+                                summaryLog.flush();
+                            }
+                            embeddingDrainSatisfied = true;
+                            break;
+                        }
+
+                        if (haveQueueMetrics && stableCount >= 40 && queueDrained &&
+                            docsEmbedded == 0) {
+                            throw std::runtime_error(
+                                "Embedding failed before benchmark queries (queue "
+                                "drained, no documents "
+                                "embedded, dropped=" +
+                                std::to_string(embedDropped) +
+                                "). Check embedding provider/model availability.");
+                        }
+
+                        if (haveQueueMetrics && queueDrained && docsEmbedded == 0 &&
+                            elapsed > std::chrono::seconds(60)) {
+                            throw std::runtime_error(
+                                "Embedding appears unavailable for this candidate (queue drained, "
+                                "no "
+                                "documents embedded after " +
+                                std::to_string(elapsed.count()) +
+                                "s, dropped=" + std::to_string(embedDropped) +
+                                "). Aborting candidate to keep optimization loop progressing.");
+                        }
+
+                        // If stable but queue NOT drained, warn about potential issues
+                        if (haveQueueMetrics && stableCount >= 20 && !queueDrained &&
+                            docsEmbedded > 0) {
+                            // coverage already computed above
+                            spdlog::warn("Embedding stalled at {:.1f}% but queue not drained "
+                                         "(queue={}, in_flight={}). Continuing to wait...",
+                                         coverage, embedQueued, embedInFlight);
+                            // Don't break - keep waiting for queue to drain
+                        }
+                    }
+                    std::this_thread::sleep_for(500ms);
+                }
+
+                // Final status check
+                auto finalStatus = yams::cli::run_sync(client->status(), 5s);
+                if (finalStatus) {
+                    uint64_t finalVectorCount = 0;
+                    auto it = finalStatus.value().requestCounts.find("vector_count");
+                    if (it != finalStatus.value().requestCounts.end()) {
+                        finalVectorCount = it->second;
+                    }
+                    uint64_t finalDocsEmbedded = 0;
+                    auto itDocsEmbedded =
+                        finalStatus.value().requestCounts.find("documents_embedded");
+                    if (itDocsEmbedded != finalStatus.value().requestCounts.end()) {
+                        finalDocsEmbedded = itDocsEmbedded->second;
+                    }
+                    uint64_t finalEmbedQueued = 0;
+                    auto itQ = finalStatus.value().requestCounts.find("embed_svc_queued");
+                    if (itQ != finalStatus.value().requestCounts.end()) {
+                        finalEmbedQueued = itQ->second;
+                    }
+                    uint64_t finalEmbedInFlight = 0;
+                    auto itInFlight = finalStatus.value().requestCounts.find("embed_in_flight");
+                    if (itInFlight != finalStatus.value().requestCounts.end()) {
+                        finalEmbedInFlight = itInFlight->second;
+                    }
+                    double finalCoverage =
+                        corpusSize > 0 ? (finalDocsEmbedded * 100.0 / corpusSize) : 0;
+                    bool vectorDbReady = finalStatus.value().vectorDbReady;
+                    if (auto it = finalStatus.value().readinessStates.find("vector_db");
+                        it != finalStatus.value().readinessStates.end()) {
+                        vectorDbReady = it->second;
+                    }
+                    spdlog::info("Vector DB: ready={} dim={}, docs_embedded={} vectors={} "
+                                 "({:.1f}% doc coverage)",
+                                 (vectorDbReady ? "true" : "false"),
+                                 finalStatus.value().vectorDbDim, finalDocsEmbedded,
+                                 finalVectorCount, finalCoverage);
+
+                    if (!embeddingDrainSatisfied) {
+                        const bool queueDrained =
+                            (finalEmbedQueued == 0 && finalEmbedInFlight == 0);
+                        if (!queueDrained) {
+                            throw std::runtime_error(
+                                "Embedding drain not reached before benchmark queries "
+                                "(embed_svc_queued=" +
+                                std::to_string(finalEmbedQueued) +
+                                ", embed_in_flight=" + std::to_string(finalEmbedInFlight) +
+                                ", docs_embedded=" + std::to_string(finalDocsEmbedded) +
+                                ", vectors=" + std::to_string(finalVectorCount) +
+                                "). Increase timeout/concurrency or reduce corpus size to obtain "
+                                "valid "
+                                "results.");
+                        }
+
+                        // Queue may only be fully drained on the final status check.
+                        embeddingDrainSatisfied = true;
+                    }
+
+                    if (finalDocsEmbedded == 0) {
+                        spdlog::warn("No embedded documents present after embedding wait");
+                    } else if (finalCoverage < 90.0) {
+                        spdlog::error("WARNING: Low document embedding coverage ({:.1f}%) will "
+                                      "degrade retrieval "
+                                      "quality!",
+                                      finalCoverage);
+                        spdlog::error(
+                            "Consider reducing corpus size or increasing embed channel capacity.");
+                    }
+
+                    if (!vectorDbReady) {
+                        spdlog::warn("Vector DB not ready yet; waiting briefly before queries...");
+                        const auto guardDeadline = std::chrono::steady_clock::now() + 30s;
+                        while (std::chrono::steady_clock::now() < guardDeadline) {
+                            auto st = yams::cli::run_sync(client->status(), 5s);
+                            if (st) {
+                                bool ready = st.value().vectorDbReady;
+                                if (auto it = st.value().readinessStates.find("vector_db");
+                                    it != st.value().readinessStates.end()) {
+                                    ready = it->second;
+                                }
+                                if (ready) {
+                                    spdlog::info("Vector DB is now ready after guard wait");
+                                    break;
+                                }
+                            }
+                            std::this_thread::sleep_for(500ms);
+                        }
+                    }
+                } else {
+                    spdlog::warn("Final status check failed after embedding wait: {}",
+                                 finalStatus.error().message);
+                    if (!embeddingDrainSatisfied) {
+                        throw std::runtime_error("Final status check failed after embedding wait; "
+                                                 "cannot verify embedding drain. "
+                                                 "Benchmark results would be unreliable.");
                     }
                 }
             } else {
-                spdlog::warn("Final status check failed after embedding wait: {}",
-                             finalStatus.error().message);
-                if (!embeddingDrainSatisfied) {
-                    throw std::runtime_error("Final status check failed after embedding wait; "
-                                             "cannot verify embedding drain. "
-                                             "Benchmark results would be unreliable.");
-                }
+                spdlog::info("Vectors disabled - skipping embedding generation wait");
             }
+
         } else {
-            spdlog::info("Vectors disabled - skipping embedding generation wait");
-        }
+            spdlog::info("[Bench] Warm data dir: skipping ingestion + embedding wait");
+        } // end if (!warmDataDir) / else
 
         // Wait for search engine to be ready (critical for hybrid search!)
         // Without this, all hybrid searches fall back to keyword-only

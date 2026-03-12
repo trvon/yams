@@ -421,7 +421,18 @@ AsioConnectionPool::get_or_create(const TransportOptions& opts) {
         std::shared_lock<std::shared_mutex> lk(registry_mutex());
         auto& map = registry_map();
         if (auto it = map.find(key); it != map.end()) {
-            return it->second;
+            // Propagate updated timeout values to the existing pool so that
+            // setHeaderTimeout / setBodyTimeout / env-var overrides take
+            // effect on newly-created connections.  Only widen timeouts —
+            // never shrink them — to avoid surprising mid-flight requests.
+            auto& pool = it->second;
+            if (opts.headerTimeout > pool->opts_.headerTimeout)
+                pool->opts_.headerTimeout = opts.headerTimeout;
+            if (opts.bodyTimeout > pool->opts_.bodyTimeout)
+                pool->opts_.bodyTimeout = opts.bodyTimeout;
+            if (opts.requestTimeout > pool->opts_.requestTimeout)
+                pool->opts_.requestTimeout = opts.requestTimeout;
+            return pool;
         }
     }
 
@@ -431,7 +442,15 @@ AsioConnectionPool::get_or_create(const TransportOptions& opts) {
         auto& map = registry_map();
         // Double-check: another thread may have created it while we waited
         if (auto it = map.find(key); it != map.end()) {
-            return it->second;
+            // Same propagation as fast path above.
+            auto& pool = it->second;
+            if (opts.headerTimeout > pool->opts_.headerTimeout)
+                pool->opts_.headerTimeout = opts.headerTimeout;
+            if (opts.bodyTimeout > pool->opts_.bodyTimeout)
+                pool->opts_.bodyTimeout = opts.bodyTimeout;
+            if (opts.requestTimeout > pool->opts_.requestTimeout)
+                pool->opts_.requestTimeout = opts.requestTimeout;
+            return pool;
         }
         auto pool = std::make_shared<AsioConnectionPool>(opts, true);
         map[key] = pool;
