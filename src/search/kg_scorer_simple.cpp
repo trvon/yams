@@ -78,8 +78,18 @@ public:
                 auto fuzzy = store_->resolveAliasFuzzy(a, 16);
                 if (!fuzzy)
                     return fuzzy.error();
-                for (const auto& ar : fuzzy.value()) {
-                    query_nodes.insert(ar.nodeId);
+                if (fuzzy.value().empty()) {
+                    auto labelMatches = store_->searchNodesByLabel(a, 16, 0);
+                    if (!labelMatches) {
+                        return labelMatches.error();
+                    }
+                    for (const auto& node : labelMatches.value()) {
+                        query_nodes.insert(node.id);
+                    }
+                } else {
+                    for (const auto& ar : fuzzy.value()) {
+                        query_nodes.insert(ar.nodeId);
+                    }
                 }
             } else {
                 for (const auto& ar : exact.value()) {
@@ -113,24 +123,33 @@ public:
             KGScore s{};
             KGExplain expl;
             expl.id = cid;
+            expl.components["query_node_count"] = static_cast<double>(query_nodes.size());
+            expl.components["query_neighbor_count"] =
+                static_cast<double>(query_neighbor_union.size());
 
             // Resolve candidate as document id (numeric id, hash, or path)
             auto docIdOpt = resolveDocumentId(cid);
             if (!docIdOpt.has_value()) {
                 // If not numeric, emit zeros (missing id implies zero by contract)
+                expl.reasons.emplace_back("Candidate could not be resolved to a document id");
+                last_expl_.push_back(std::move(expl));
                 out.emplace(cid, s);
                 continue;
             }
             const auto docId = docIdOpt.value();
+            expl.components["resolved_document_id"] = static_cast<double>(docId);
 
             // Fetch document entities
             auto entsR = store_->getDocEntitiesForDocument(docId, 2000, 0);
             if (!entsR) {
                 // If doc lookup fails, keep zero scores (do not hard-fail the whole batch)
+                expl.reasons.emplace_back("Document entity lookup failed");
+                last_expl_.push_back(std::move(expl));
                 out.emplace(cid, s);
                 continue;
             }
             const auto& ents = entsR.value();
+            expl.components["candidate_doc_entity_count"] = static_cast<double>(ents.size());
 
             // Build candidate node set
             std::unordered_set<std::int64_t> cand_nodes;
@@ -140,6 +159,7 @@ public:
                     cand_nodes.insert(de.nodeId.value());
                 }
             }
+            expl.components["candidate_node_count"] = static_cast<double>(cand_nodes.size());
 
             // Entity score: Jaccard between query_nodes and cand_nodes
             const float entity = jaccard(query_nodes, cand_nodes);
@@ -237,6 +257,13 @@ public:
                 if (s.structural > 0.0f) {
                     expl.reasons.emplace_back(
                         "Candidate entities are neighbors of query-linked entities");
+                }
+            } else {
+                if (query_nodes.empty()) {
+                    expl.reasons.emplace_back("No query entities resolved from KG aliases/labels");
+                }
+                if (cand_nodes.empty()) {
+                    expl.reasons.emplace_back("Candidate has no linked KG entities");
                 }
             }
             last_expl_.push_back(std::move(expl));
@@ -495,7 +522,7 @@ private:
         std::vector<std::string> filtered;
         filtered.reserve(tokens.size());
         for (const auto& tok : tokens) {
-            if (tok.size() < 3) {
+            if (tok.size() < 2) {
                 continue;
             }
             if (kStopwords.find(tok) != kStopwords.end()) {

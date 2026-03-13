@@ -1453,7 +1453,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
                     int build_timeout = 30000; // 30s timeout
                     auto result = co_await searchEngineManager_.buildEngine(
-                        metadataRepo_, vectorDatabase_, embGen, reason, build_timeout,
+                        metadataRepo_, kgStore_, vectorDatabase_, embGen, reason, build_timeout,
                         getWorkerExecutor());
 
                     if (result.has_value()) {
@@ -2200,7 +2200,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             }
         }
         auto buildResult = co_await searchEngineManager_.buildEngine(
-            metadataRepo_, vectorDatabase_, embGen, "initial", build_timeout, getWorkerExecutor());
+            metadataRepo_, kgStore_, vectorDatabase_, embGen, "initial", build_timeout,
+            getWorkerExecutor());
 
         if (buildResult.has_value()) {
             const auto& built = buildResult.value();
@@ -2732,7 +2733,7 @@ boost::asio::awaitable<void> ServiceManager::co_enableEmbeddingsAndRebuild() {
 
         int build_timeout = 30000; // 30s timeout
         auto rebuildResult = co_await searchEngineManager_.buildEngine(
-            metadataRepo_, vectorDatabase_, embGen, "rebuild_enabled", build_timeout,
+            metadataRepo_, kgStore_, vectorDatabase_, embGen, "rebuild_enabled", build_timeout,
             getWorkerExecutor());
 
         if (rebuildResult.has_value()) {
@@ -2819,7 +2820,7 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
 
             // Phase 2.4: Use SearchEngineManager instead of co_buildEngine
             auto rebuildResult = co_await searchEngineManager_.buildEngine(
-                metadataRepo_, vectorDatabase_, embGen, "rebuild", build_timeout,
+                metadataRepo_, kgStore_, vectorDatabase_, embGen, "rebuild", build_timeout,
                 getWorkerExecutor());
 
             if (rebuildResult.has_value()) {
@@ -3231,8 +3232,8 @@ ServiceManager::co_buildEngine(int timeout_ms, const boost::asio::cancellation_s
         } catch (...) {
         }
     }
-    auto res = co_await searchEngineManager_.buildEngine(metadataRepo_, vectorDatabase_, gen,
-                                                         "co_buildEngine", timeout_ms, exec);
+    auto res = co_await searchEngineManager_.buildEngine(metadataRepo_, kgStore_, vectorDatabase_,
+                                                         gen, "co_buildEngine", timeout_ms, exec);
     if (res.has_value()) {
         co_return res.value();
     }

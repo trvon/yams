@@ -517,11 +517,18 @@ struct QueryDiagnosticsSummary {
     std::uint64_t queryWithResultsCount = 0;
     std::uint64_t queryWithoutResultsCount = 0;
     std::uint64_t queryWithoutRelevantHitCount = 0;
+    std::uint64_t queryWithRelevantInPreFusionCount = 0;
+    std::uint64_t queryWithRelevantInPostFusionCount = 0;
+    std::uint64_t queryWithRelevantInFinalWindowCount = 0;
     std::uint64_t queryWithTopKDuplicateCount = 0;
     std::uint64_t degradedQueryCount = 0;
     std::uint64_t traceEnabledQueryCount = 0;
     std::uint64_t graphRerankAppliedQueryCount = 0;
     std::uint64_t semanticRescueNonZeroQueryCount = 0;
+    std::uint64_t missMissingPreFusionCount = 0;
+    std::uint64_t missFusionCutoffCount = 0;
+    std::uint64_t missRerankWindowDropCount = 0;
+    std::uint64_t missTopKDropCount = 0;
     std::vector<double> semanticRescueRateSamples;
     std::vector<double> semanticRescueFinalCountSamples;
     std::vector<double> semanticRescueTargetSamples;
@@ -530,7 +537,171 @@ struct QueryDiagnosticsSummary {
     std::vector<double> vectorOnlyBelowThresholdSamples;
     std::vector<double> vectorOnlyAboveThresholdSamples;
     std::vector<double> vectorOnlyNearMissEligibleSamples;
+    std::vector<double> strongVectorOnlyDocsSamples;
+    std::vector<double> strongVectorOnlyScoreEligibleDocsSamples;
+    std::vector<double> strongVectorOnlyRankEligibleDocsSamples;
+    std::vector<double> multiVectorGeneratedPhraseSamples;
+    std::vector<double> multiVectorRawHitSamples;
+    std::vector<double> multiVectorAddedNewSamples;
+    std::vector<double> multiVectorReplacedBaseSamples;
+    std::vector<double> subPhraseGeneratedSamples;
+    std::vector<double> subPhraseClauseSamples;
+    std::vector<double> subPhraseFtsHitSamples;
+    std::vector<double> subPhraseFtsAddedSamples;
+    std::vector<double> aggressiveFtsClauseSamples;
+    std::vector<double> aggressiveFtsHitSamples;
+    std::vector<double> aggressiveFtsAddedSamples;
 };
+
+static std::unordered_set<std::string> splitTabSet(const std::string& value) {
+    std::unordered_set<std::string> out;
+    if (value.empty()) {
+        return out;
+    }
+    size_t start = 0;
+    while (start <= value.size()) {
+        const size_t end = value.find('\t', start);
+        const size_t len = (end == std::string::npos) ? (value.size() - start) : (end - start);
+        if (len > 0) {
+            out.insert(value.substr(start, len));
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return out;
+}
+
+static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantDocIds,
+                                       const std::vector<std::string>& returnedDocIds,
+                                       const std::map<std::string, std::string>& searchStats) {
+    const auto preSet = splitTabSet(searchStats.contains("trace_pre_fusion_doc_ids")
+                                        ? searchStats.at("trace_pre_fusion_doc_ids")
+                                        : "");
+    const auto postSet = splitTabSet(searchStats.contains("trace_post_fusion_doc_ids")
+                                         ? searchStats.at("trace_post_fusion_doc_ids")
+                                         : "");
+    const auto finalWindowSet = splitTabSet(
+        searchStats.contains("trace_final_doc_ids") ? searchStats.at("trace_final_doc_ids") : "");
+    const std::unordered_set<std::string> returnedTopKSet(returnedDocIds.begin(),
+                                                          returnedDocIds.end());
+
+    json fusionTop = json::array();
+    if (auto it = searchStats.find("trace_fusion_top_json"); it != searchStats.end()) {
+        try {
+            fusionTop = json::parse(it->second);
+        } catch (...) {
+        }
+    }
+    json finalTop = json::array();
+    if (auto it = searchStats.find("trace_final_top_json"); it != searchStats.end()) {
+        try {
+            finalTop = json::parse(it->second);
+        } catch (...) {
+        }
+    }
+    json componentHits = json::object();
+    if (auto it = searchStats.find("trace_component_hits_json"); it != searchStats.end()) {
+        try {
+            componentHits = json::parse(it->second);
+        } catch (...) {
+        }
+    }
+
+    const auto findDoc = [](const json& docs, const std::string& docId) -> json {
+        if (!docs.is_array()) {
+            return json();
+        }
+        for (const auto& item : docs) {
+            if (item.is_object() && item.value("doc_id", "") == docId) {
+                return item;
+            }
+        }
+        return json();
+    };
+
+    json relevant = json::array();
+    bool anyPre = false;
+    bool anyPost = false;
+    bool anyFinalWindow = false;
+    bool anyReturnedTopK = false;
+
+    for (const auto& docId : relevantDocIds) {
+        const bool inPre = preSet.contains(docId);
+        const bool inPost = postSet.contains(docId);
+        const bool inFinalWindow = finalWindowSet.contains(docId);
+        const bool inReturnedTopK = returnedTopKSet.contains(docId);
+        anyPre = anyPre || inPre;
+        anyPost = anyPost || inPost;
+        anyFinalWindow = anyFinalWindow || inFinalWindow;
+        anyReturnedTopK = anyReturnedTopK || inReturnedTopK;
+
+        json componentSources = json::array();
+        if (componentHits.is_object()) {
+            for (const auto& [component, details] : componentHits.items()) {
+                if (!details.is_object()) {
+                    continue;
+                }
+                const auto topIdsIt = details.find("unique_top_doc_ids");
+                if (topIdsIt == details.end() || !topIdsIt->is_array()) {
+                    continue;
+                }
+                for (const auto& id : *topIdsIt) {
+                    if (id.is_string() && id.get<std::string>() == docId) {
+                        componentSources.push_back(component);
+                        break;
+                    }
+                }
+            }
+        }
+
+        json entry = {
+            {"doc_id", docId},
+            {"in_pre_fusion", inPre},
+            {"in_post_fusion", inPost},
+            {"in_final_window", inFinalWindow},
+            {"in_returned_topk", inReturnedTopK},
+            {"component_top_hits", componentSources},
+        };
+
+        if (auto match = findDoc(fusionTop, docId); !match.is_null()) {
+            entry["post_fusion"] = match;
+        }
+        if (auto match = findDoc(finalTop, docId); !match.is_null()) {
+            entry["final_window"] = match;
+        }
+        relevant.push_back(std::move(entry));
+    }
+
+    std::string missStage = "hit";
+    if (!anyReturnedTopK) {
+        if (!anyPre) {
+            missStage = "missing_pre_fusion";
+        } else if (!anyPost) {
+            missStage = "dropped_before_fusion_window";
+        } else if (!anyFinalWindow) {
+            missStage = "dropped_during_rerank_window";
+        } else {
+            missStage = "dropped_before_topk";
+        }
+    }
+
+    return {
+        {"trace_enabled",
+         searchStats.contains("trace_enabled") && searchStats.at("trace_enabled") == "1"},
+        {"graph_rerank_applied", searchStats.contains("trace_graph_rerank_applied") &&
+                                     searchStats.at("trace_graph_rerank_applied") == "1"},
+        {"cross_rerank_applied", searchStats.contains("trace_cross_rerank_applied") &&
+                                     searchStats.at("trace_cross_rerank_applied") == "1"},
+        {"any_relevant_in_pre_fusion", anyPre},
+        {"any_relevant_in_post_fusion", anyPost},
+        {"any_relevant_in_final_window", anyFinalWindow},
+        {"any_relevant_in_returned_topk", anyReturnedTopK},
+        {"miss_stage", missStage},
+        {"relevant_docs", relevant},
+    };
+}
 
 struct DebugLogEntry {
     std::string query;
@@ -642,8 +813,8 @@ static json summarizeSamples(const std::vector<double>& samples) {
 
 static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
                                    const std::map<std::string, std::string>& searchStats,
-                                   bool degraded, bool hadResults, bool hadTopKDuplicate,
-                                   int firstRelevantRank) {
+                                   const json& relevantDecisionTrace, bool degraded,
+                                   bool hadResults, bool hadTopKDuplicate, int firstRelevantRank) {
     summary.queryCount++;
     if (hadResults) {
         summary.queryWithResultsCount++;
@@ -658,6 +829,34 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
     }
     if (degraded) {
         summary.degradedQueryCount++;
+    }
+
+    if (relevantDecisionTrace.is_object()) {
+        const bool anyPre = relevantDecisionTrace.value("any_relevant_in_pre_fusion", false);
+        const bool anyPost = relevantDecisionTrace.value("any_relevant_in_post_fusion", false);
+        const bool anyFinalWindow =
+            relevantDecisionTrace.value("any_relevant_in_final_window", false);
+        if (anyPre) {
+            summary.queryWithRelevantInPreFusionCount++;
+        }
+        if (anyPost) {
+            summary.queryWithRelevantInPostFusionCount++;
+        }
+        if (anyFinalWindow) {
+            summary.queryWithRelevantInFinalWindowCount++;
+        }
+        if (firstRelevantRank < 0) {
+            const std::string missStage = relevantDecisionTrace.value("miss_stage", "unknown");
+            if (missStage == "missing_pre_fusion") {
+                summary.missMissingPreFusionCount++;
+            } else if (missStage == "dropped_before_fusion_window") {
+                summary.missFusionCutoffCount++;
+            } else if (missStage == "dropped_during_rerank_window") {
+                summary.missRerankWindowDropCount++;
+            } else if (missStage == "dropped_before_topk") {
+                summary.missTopKDropCount++;
+            }
+        }
     }
 
     if (parseBoolStat(searchStats, "trace_enabled").value_or(false)) {
@@ -681,6 +880,39 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
     }
     if (auto v = parseDoubleStat(searchStats, "trace_fusion_dropped_count")) {
         summary.fusionDroppedCountSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "multi_vector_generated_phrases")) {
+        summary.multiVectorGeneratedPhraseSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "multi_vector_raw_hit_count")) {
+        summary.multiVectorRawHitSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "multi_vector_added_new_count")) {
+        summary.multiVectorAddedNewSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "multi_vector_replaced_base_count")) {
+        summary.multiVectorReplacedBaseSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "subphrase_generated_count")) {
+        summary.subPhraseGeneratedSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "subphrase_clause_count")) {
+        summary.subPhraseClauseSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "subphrase_fts_hit_count")) {
+        summary.subPhraseFtsHitSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "subphrase_fts_added_count")) {
+        summary.subPhraseFtsAddedSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "aggressive_fts_clause_count")) {
+        summary.aggressiveFtsClauseSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "aggressive_fts_hit_count")) {
+        summary.aggressiveFtsHitSamples.push_back(*v);
+    }
+    if (auto v = parseDoubleStat(searchStats, "aggressive_fts_added_count")) {
+        summary.aggressiveFtsAddedSamples.push_back(*v);
     }
 
     auto prefusion = searchStats.find("trace_prefusion_signal_summary_json");
@@ -708,6 +940,25 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
                         summary.vectorOnlyNearMissEligibleSamples.push_back(it->get<double>());
                     }
                 }
+                if (auto it = parsed.find("strong_vector_only_docs"); it != parsed.end()) {
+                    if (it->is_number()) {
+                        summary.strongVectorOnlyDocsSamples.push_back(it->get<double>());
+                    }
+                }
+                if (auto it = parsed.find("strong_vector_only_score_eligible_docs");
+                    it != parsed.end()) {
+                    if (it->is_number()) {
+                        summary.strongVectorOnlyScoreEligibleDocsSamples.push_back(
+                            it->get<double>());
+                    }
+                }
+                if (auto it = parsed.find("strong_vector_only_rank_eligible_docs");
+                    it != parsed.end()) {
+                    if (it->is_number()) {
+                        summary.strongVectorOnlyRankEligibleDocsSamples.push_back(
+                            it->get<double>());
+                    }
+                }
             }
         } catch (...) {
         }
@@ -722,15 +973,28 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"query_with_results_count", summary.queryWithResultsCount},
         {"query_without_results_count", summary.queryWithoutResultsCount},
         {"query_without_relevant_hit_count", summary.queryWithoutRelevantHitCount},
+        {"query_with_relevant_in_pre_fusion_count", summary.queryWithRelevantInPreFusionCount},
+        {"query_with_relevant_in_post_fusion_count", summary.queryWithRelevantInPostFusionCount},
+        {"query_with_relevant_in_final_window_count", summary.queryWithRelevantInFinalWindowCount},
         {"query_with_topk_duplicate_count", summary.queryWithTopKDuplicateCount},
         {"degraded_query_count", summary.degradedQueryCount},
         {"trace_enabled_query_count", summary.traceEnabledQueryCount},
         {"graph_rerank_applied_query_count", summary.graphRerankAppliedQueryCount},
         {"semantic_rescue_nonzero_query_count", summary.semanticRescueNonZeroQueryCount},
+        {"miss_missing_pre_fusion_count", summary.missMissingPreFusionCount},
+        {"miss_fusion_cutoff_count", summary.missFusionCutoffCount},
+        {"miss_rerank_window_drop_count", summary.missRerankWindowDropCount},
+        {"miss_topk_drop_count", summary.missTopKDropCount},
         {"query_with_results_rate",
          static_cast<double>(summary.queryWithResultsCount) / queryCount},
         {"query_without_relevant_hit_rate",
          static_cast<double>(summary.queryWithoutRelevantHitCount) / queryCount},
+        {"query_with_relevant_in_pre_fusion_rate",
+         static_cast<double>(summary.queryWithRelevantInPreFusionCount) / queryCount},
+        {"query_with_relevant_in_post_fusion_rate",
+         static_cast<double>(summary.queryWithRelevantInPostFusionCount) / queryCount},
+        {"query_with_relevant_in_final_window_rate",
+         static_cast<double>(summary.queryWithRelevantInFinalWindowCount) / queryCount},
         {"query_with_topk_duplicate_rate",
          static_cast<double>(summary.queryWithTopKDuplicateCount) / queryCount},
         {"degraded_query_rate", static_cast<double>(summary.degradedQueryCount) / queryCount},
@@ -739,6 +1003,13 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
          static_cast<double>(summary.graphRerankAppliedQueryCount) / queryCount},
         {"semantic_rescue_nonzero_rate",
          static_cast<double>(summary.semanticRescueNonZeroQueryCount) / queryCount},
+        {"miss_missing_pre_fusion_rate",
+         static_cast<double>(summary.missMissingPreFusionCount) / queryCount},
+        {"miss_fusion_cutoff_rate",
+         static_cast<double>(summary.missFusionCutoffCount) / queryCount},
+        {"miss_rerank_window_drop_rate",
+         static_cast<double>(summary.missRerankWindowDropCount) / queryCount},
+        {"miss_topk_drop_rate", static_cast<double>(summary.missTopKDropCount) / queryCount},
         {"semantic_rescue_rate", summarizeSamples(summary.semanticRescueRateSamples)},
         {"semantic_rescue_final_count", summarizeSamples(summary.semanticRescueFinalCountSamples)},
         {"semantic_rescue_target", summarizeSamples(summary.semanticRescueTargetSamples)},
@@ -748,6 +1019,24 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"vector_only_above_threshold", summarizeSamples(summary.vectorOnlyAboveThresholdSamples)},
         {"vector_only_near_miss_eligible",
          summarizeSamples(summary.vectorOnlyNearMissEligibleSamples)},
+        {"strong_vector_only_docs", summarizeSamples(summary.strongVectorOnlyDocsSamples)},
+        {"strong_vector_only_score_eligible_docs",
+         summarizeSamples(summary.strongVectorOnlyScoreEligibleDocsSamples)},
+        {"strong_vector_only_rank_eligible_docs",
+         summarizeSamples(summary.strongVectorOnlyRankEligibleDocsSamples)},
+        {"multi_vector_generated_phrases",
+         summarizeSamples(summary.multiVectorGeneratedPhraseSamples)},
+        {"multi_vector_raw_hit_count", summarizeSamples(summary.multiVectorRawHitSamples)},
+        {"multi_vector_added_new_count", summarizeSamples(summary.multiVectorAddedNewSamples)},
+        {"multi_vector_replaced_base_count",
+         summarizeSamples(summary.multiVectorReplacedBaseSamples)},
+        {"subphrase_generated_count", summarizeSamples(summary.subPhraseGeneratedSamples)},
+        {"subphrase_clause_count", summarizeSamples(summary.subPhraseClauseSamples)},
+        {"subphrase_fts_hit_count", summarizeSamples(summary.subPhraseFtsHitSamples)},
+        {"subphrase_fts_added_count", summarizeSamples(summary.subPhraseFtsAddedSamples)},
+        {"aggressive_fts_clause_count", summarizeSamples(summary.aggressiveFtsClauseSamples)},
+        {"aggressive_fts_hit_count", summarizeSamples(summary.aggressiveFtsHitSamples)},
+        {"aggressive_fts_added_count", summarizeSamples(summary.aggressiveFtsAddedSamples)},
     };
 
     return out;
@@ -1751,6 +2040,126 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              // Wider fusion window: keep 200 fused results (vs default 50)
              {"YAMS_SEARCH_FUSION_CANDIDATE_LIMIT", "200"},
          }},
+
+        // ── Tier 3: query expansion before rerank ───────────────────────────
+
+        {"rerank_3x_blend70_top50_multivec",
+         "3x pool + rerank top-50, blend 70/30, multi-vector sub-phrase search",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "50"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.70"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+             {"YAMS_SEARCH_MULTI_VECTOR_QUERY", "1"},
+             {"YAMS_SEARCH_MULTI_VECTOR_MAX_PHRASES", "3"},
+             {"YAMS_SEARCH_MULTI_VECTOR_SCORE_DECAY", "0.85"},
+         }},
+
+        {"rerank_3x_blend70_top50_subphrase_fts",
+         "3x pool + rerank top-50, blend 70/30, sub-phrase FTS expansion",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "50"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.70"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+             {"YAMS_SEARCH_SUB_PHRASE_EXPANSION", "1"},
+             {"YAMS_SEARCH_SUB_PHRASE_MIN_HITS", "5"},
+             {"YAMS_SEARCH_SUB_PHRASE_PENALTY", "0.70"},
+         }},
+
+        {"rerank_3x_blend70_top50_multivec_subphrase",
+         "3x pool + rerank top-50, blend 70/30, multi-vector + sub-phrase FTS",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "50"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.70"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+             {"YAMS_SEARCH_MULTI_VECTOR_QUERY", "1"},
+             {"YAMS_SEARCH_MULTI_VECTOR_MAX_PHRASES", "3"},
+             {"YAMS_SEARCH_MULTI_VECTOR_SCORE_DECAY", "0.85"},
+             {"YAMS_SEARCH_SUB_PHRASE_EXPANSION", "1"},
+             {"YAMS_SEARCH_SUB_PHRASE_MIN_HITS", "5"},
+             {"YAMS_SEARCH_SUB_PHRASE_PENALTY", "0.70"},
+         }},
+
+        {"rerank_3x_blend50_top50_multivec_subphrase",
+         "3x pool + rerank top-50, blend 50/50, multi-vector + sub-phrase FTS",
+         {
+             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
+             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
+             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
+             {"YAMS_SEARCH_VECTOR_ONLY_THRESHOLD", "0.92"},
+             {"YAMS_SEARCH_VECTOR_ONLY_PENALTY", "0.65"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS", "2"},
+             {"YAMS_SEARCH_SEMANTIC_RESCUE_MIN_VECTOR_SCORE", "0.30"},
+             {"YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK", "0"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_TOPN", "14"},
+             {"YAMS_SEARCH_LEXICAL_FLOOR_BOOST", "0.22"},
+             {"YAMS_SEARCH_ENABLE_LEXICAL_TIEBREAK", "1"},
+             {"YAMS_SEARCH_LEXICAL_TIEBREAK_EPS", "0.010"},
+             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
+             {"YAMS_SEARCH_ENABLE_RERANKING", "1"},
+             {"YAMS_SEARCH_RERANK_TOPK", "50"},
+             {"YAMS_SEARCH_RERANK_REPLACE_SCORES", "0"},
+             {"YAMS_SEARCH_RERANK_WEIGHT", "0.50"},
+             {"YAMS_SEARCH_RERANK_SCORE_GAP_THRESHOLD", "0.0"},
+             {"YAMS_SEARCH_RERANK_SNIPPET_MAX_CHARS", "256"},
+             {"YAMS_SEARCH_MULTI_VECTOR_QUERY", "1"},
+             {"YAMS_SEARCH_MULTI_VECTOR_MAX_PHRASES", "3"},
+             {"YAMS_SEARCH_MULTI_VECTOR_SCORE_DECAY", "0.85"},
+             {"YAMS_SEARCH_SUB_PHRASE_EXPANSION", "1"},
+             {"YAMS_SEARCH_SUB_PHRASE_MIN_HITS", "5"},
+             {"YAMS_SEARCH_SUB_PHRASE_PENALTY", "0.70"},
+         }},
     };
 }
 
@@ -2058,6 +2467,10 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
             debugEntry.returnedGrades.push_back(grade);
         }
 
+        const json relevantDecisionTrace = buildRelevantDecisionTrace(
+            debugEntry.relevantDocIds, debugEntry.returnedDocIds, debugEntry.searchStats);
+        debugEntry.extraFields["relevant_decision_trace"] = relevantDecisionTrace;
+
         if (benchDiagEnabled && results.empty() && tq.useDocIds && !tq.relevantDocIds.empty()) {
             // Opt-in diagnostic: show a snippet of the relevant BEIR doc file(s).
             std::size_t printed = 0;
@@ -2160,8 +2573,9 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         debugLogWriteJsonLine(debugEntry);
 
         if (diagnostics) {
-            ingestQueryDiagnostics(*diagnostics, run.value().response.searchStats, false,
-                                   !results.empty(), hadTopKDuplicate, firstRelevantRank);
+            ingestQueryDiagnostics(*diagnostics, run.value().response.searchStats,
+                                   relevantDecisionTrace, false, !results.empty(), hadTopKDuplicate,
+                                   firstRelevantRank);
         }
 
         if (firstRelevantRank > 0)
@@ -3429,6 +3843,8 @@ struct BenchFixture {
             uint64_t lastKgConsumed = 0;
             uint64_t lastSymbolInflight = 0;
             uint64_t lastEntityInflight = 0;
+            uint64_t lastTitleInflight = 0;
+            uint64_t lastTitleQueueDepth = 0;
             uint64_t lastExtractionInflight = 0;
             bool stickyInflightActive = false;
             uint64_t stickyInflightValue = 0;
@@ -3456,11 +3872,14 @@ struct BenchFixture {
                     lastKgConsumed = getCount("kg_consumed");
                     lastSymbolInflight = getCount("symbol_inflight");
                     lastEntityInflight = getCount("entity_inflight");
+                    lastTitleInflight = getCount("title_inflight");
+                    lastTitleQueueDepth = getCount("title_queue_depth");
 
                     queuesDrained =
                         (lastQueueDepth == 0 && lastPostQueued == 0 && lastPostInflight == 0 &&
                          lastExtractionInflight == 0 && lastKgInflight == 0 &&
-                         lastSymbolInflight == 0 && lastEntityInflight == 0);
+                         lastSymbolInflight == 0 && lastEntityInflight == 0 &&
+                         lastTitleInflight == 0 && lastTitleQueueDepth == 0);
                 }
 
                 bool hasKg = false;
@@ -3485,7 +3904,8 @@ struct BenchFixture {
                 const bool queueIdle = (lastQueueDepth == 0 && lastPostQueued == 0);
                 const bool stageInflightIdle =
                     (lastExtractionInflight == 0 && lastKgInflight == 0 &&
-                     lastSymbolInflight == 0 && lastEntityInflight == 0);
+                     lastSymbolInflight == 0 && lastEntityInflight == 0 && lastTitleInflight == 0 &&
+                     lastTitleQueueDepth == 0);
 
                 bool stickyInflightReady = false;
                 if (kgSignalReady && queueIdle && stageInflightIdle && lastPostInflight > 0) {
@@ -3530,6 +3950,8 @@ struct BenchFixture {
                     ", kg_inflight=" + std::to_string(lastKgInflight) +
                     ", symbol_inflight=" + std::to_string(lastSymbolInflight) +
                     ", entity_inflight=" + std::to_string(lastEntityInflight) +
+                    ", title_inflight=" + std::to_string(lastTitleInflight) +
+                    ", title_queue_depth=" + std::to_string(lastTitleQueueDepth) +
                     "). Increase YAMS_BENCH_KG_READY_TIMEOUT or reduce ingestion load.");
             }
 
@@ -3598,6 +4020,11 @@ struct BenchFixture {
                 uint64_t vectorCount = 0;
                 uint64_t preparedDocsQueued = 0;
                 uint64_t preparedChunksQueued = 0;
+                uint64_t titleInflight = 0;
+                uint64_t titleQueueDepth = 0;
+                uint64_t titleQueued = 0;
+                uint64_t titleDropped = 0;
+                uint64_t titleConsumed = 0;
                 if (auto it = st.requestCounts.find("documents_total");
                     it != st.requestCounts.end()) {
                     documentsTotal = it->second;
@@ -3616,6 +4043,25 @@ struct BenchFixture {
                 if (auto it = st.requestCounts.find("bus_embed_prepared_chunks_queued");
                     it != st.requestCounts.end()) {
                     preparedChunksQueued = it->second;
+                }
+                if (auto it = st.requestCounts.find("title_inflight");
+                    it != st.requestCounts.end()) {
+                    titleInflight = it->second;
+                }
+                if (auto it = st.requestCounts.find("title_queue_depth");
+                    it != st.requestCounts.end()) {
+                    titleQueueDepth = it->second;
+                }
+                if (auto it = st.requestCounts.find("title_queued"); it != st.requestCounts.end()) {
+                    titleQueued = it->second;
+                }
+                if (auto it = st.requestCounts.find("title_dropped");
+                    it != st.requestCounts.end()) {
+                    titleDropped = it->second;
+                }
+                if (auto it = st.requestCounts.find("title_consumed");
+                    it != st.requestCounts.end()) {
+                    titleConsumed = it->second;
                 }
 
                 // Log search tuning state (epic yams-7ez4)
@@ -3639,6 +4085,15 @@ struct BenchFixture {
                                                     std::to_string(preparedDocsQueued));
                 statusEntry.returnedPaths.push_back("bus_embed_prepared_chunks_queued=" +
                                                     std::to_string(preparedChunksQueued));
+                statusEntry.returnedPaths.push_back("title_inflight=" +
+                                                    std::to_string(titleInflight));
+                statusEntry.returnedPaths.push_back("title_queue_depth=" +
+                                                    std::to_string(titleQueueDepth));
+                statusEntry.returnedPaths.push_back("title_queued=" + std::to_string(titleQueued));
+                statusEntry.returnedPaths.push_back("title_dropped=" +
+                                                    std::to_string(titleDropped));
+                statusEntry.returnedPaths.push_back("title_consumed=" +
+                                                    std::to_string(titleConsumed));
                 statusEntry.returnedPaths.push_back("post_ingest_queue_depth=" +
                                                     std::to_string(st.postIngestQueueDepth));
                 statusEntry.returnedPaths.push_back(std::string("embedding_available=") +
@@ -3700,6 +4155,21 @@ struct BenchFixture {
                                                    std::to_string(st.indexedDocuments));
                 statsEntry.returnedPaths.push_back("vectorIndexSize=" +
                                                    std::to_string(st.vectorIndexSize));
+
+                const auto appendIfPresent = [&](std::string_view key) {
+                    auto it = st.additionalStats.find(std::string(key));
+                    if (it != st.additionalStats.end()) {
+                        statsEntry.returnedPaths.push_back(std::string(key) + "=" + it->second);
+                    }
+                };
+                appendIfPresent("kg_doc_entities_total");
+                appendIfPresent("post_title_nl_docs_processed");
+                appendIfPresent("post_title_nl_docs_with_entities");
+                appendIfPresent("post_title_nl_entities_extracted");
+                appendIfPresent("post_deferred_doc_entities_queued");
+                appendIfPresent("post_deferred_doc_entity_queue_failures");
+                appendIfPresent("kg_write_doc_entities_inserted");
+                appendIfPresent("kg_write_deferred_doc_entities_skipped");
 
                 statsEntry.extraFields = {
                     {"additional_stats", st.additionalStats},

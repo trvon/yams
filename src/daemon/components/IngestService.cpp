@@ -341,21 +341,10 @@ static PendingPostIngestByMime processTask(ServiceManager* sm,
                 sm->onSnapshotPersisted();
             }
 
-            if (sm && sm->getPostIngestQueue()) {
-                constexpr std::size_t kBatchSize = 128;
-                auto& pending = pendingPostIngest[std::string()];
-                pending.reserve(pending.size() + std::min<std::size_t>(kBatchSize, 256));
-                for (const auto& r : serviceResp.results) {
-                    if (!r.success || r.hash.empty()) {
-                        continue;
-                    }
-                    pending.push_back(r.hash);
-                    if (pending.size() >= kBatchSize) {
-                        sm->enqueuePostIngestBatch(pending, std::string());
-                        pending.clear();
-                    }
-                }
-            }
+            // NOTE: addDirectory() already dispatches successful file hashes into the
+            // post-ingest InternalEventBus as each file is stored. Re-enqueueing the full
+            // response batch here duplicates post-ingest work (including title/NL extraction)
+            // and can make benchmark KG readiness wait on hundreds of redundant jobs.
         }
     } else {
         auto docService = yams::app::services::makeDocumentService(appContext);

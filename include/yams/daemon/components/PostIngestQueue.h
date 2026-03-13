@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <deque>
 #include <functional>
 #include <list>
@@ -11,7 +12,6 @@
 #include <optional>
 #include <semaphore>
 #include <string>
-#include <cstddef>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -201,6 +201,21 @@ public:
     std::size_t size() const;
     std::size_t processed() const { return processed_.load(); }
     std::size_t failed() const { return failed_.load(); }
+    std::uint64_t titleNlDocsProcessed() const {
+        return titleNlDocsProcessed_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t titleNlDocsWithEntities() const {
+        return titleNlDocsWithEntities_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t titleNlEntitiesExtracted() const {
+        return titleNlEntitiesExtracted_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t deferredDocEntitiesQueued() const {
+        return deferredDocEntitiesQueued_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t deferredDocEntityQueueFailures() const {
+        return deferredDocEntityQueueFailures_.load(std::memory_order_relaxed);
+    }
 
     // File/directory add tracking
     std::uint64_t filesAdded() const { return filesAdded_.load(); }
@@ -424,6 +439,11 @@ private:
 
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};
+    std::atomic<std::uint64_t> titleNlDocsProcessed_{0};
+    std::atomic<std::uint64_t> titleNlDocsWithEntities_{0};
+    std::atomic<std::uint64_t> titleNlEntitiesExtracted_{0};
+    std::atomic<std::uint64_t> deferredDocEntitiesQueued_{0};
+    std::atomic<std::uint64_t> deferredDocEntityQueueFailures_{0};
     // File/directory add tracking
     std::atomic<std::uint64_t> filesAdded_{0};
     std::atomic<std::uint64_t> directoriesAdded_{0};

@@ -9,10 +9,10 @@
 #include <string>
 #include <vector>
 
+#include <spdlog/spdlog.h>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
-#include <spdlog/spdlog.h>
 
 #include <yams/core/types.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -163,6 +163,8 @@ public:
         std::uint64_t documentsProcessed = 0;
         std::uint64_t nodesInserted = 0;
         std::uint64_t edgesInserted = 0;
+        std::uint64_t docEntitiesInserted = 0;
+        std::uint64_t deferredDocEntitiesSkipped = 0;
         std::uint64_t commitErrors = 0;
     };
     Stats getStats() const;

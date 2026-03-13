@@ -18,6 +18,7 @@ class SearchEngineBuilder;
 
 namespace yams::metadata {
 class MetadataRepository;
+class KnowledgeGraphStore;
 } // namespace yams::metadata
 
 namespace yams::vector {
@@ -65,6 +66,7 @@ public:
      */
     boost::asio::awaitable<Result<std::shared_ptr<yams::search::SearchEngine>>>
     buildEngine(std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo,
+                std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore,
                 std::shared_ptr<yams::vector::VectorDatabase> vectorDatabase,
                 std::shared_ptr<yams::vector::EmbeddingGenerator> embeddingGen,
                 const std::string& reason, int timeoutMs,

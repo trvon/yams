@@ -110,6 +110,14 @@ struct SearchEngineConfig {
     float vectorWeight = 0.30f;        // Vector similarity weight (increased for hybrid value)
     float vectorOnlyPenalty = 0.8f;    // Penalty for vector-only results (no text match)
     float vectorOnlyThreshold = 0.90f; // Minimum confidence for vector-only inclusion
+    bool enableStrongVectorOnlyRelief =
+        false; // Relax vector-only penalty for very strong semantic-only candidates
+    float strongVectorOnlyMinScore =
+        0.97f; // Raw vector score threshold where relief starts applying
+    size_t strongVectorOnlyTopRank =
+        0; // Vector rank threshold where relief starts applying (0 disables rank-based relief)
+    float strongVectorOnlyPenalty =
+        0.95f; // Maximum effective penalty for strong semantic-only candidates
     size_t vectorOnlyNearMissReserve =
         0; // Keep up to N near-threshold vector-only docs (0 disables reserve)
     float vectorOnlyNearMissSlack = 0.05f; // Near-miss band below threshold eligible for reserve
@@ -189,6 +197,25 @@ struct SearchEngineConfig {
         0; // Reserve up to N top-k slots for strong vector-only candidates (0 disables)
     float semanticRescueMinVectorScore =
         0.0f; // Minimum vector contribution for semantic rescue eligibility
+    size_t fusionEvidenceRescueSlots =
+        0; // Reserve up to N top-k slots for strong evidence docs below the fusion cutoff
+    float fusionEvidenceRescueMinScore =
+        0.0f; // Minimum raw evidence score for fusion evidence rescue eligibility
+
+    // Multi-vector sub-phrase search: decompose query into overlapping sub-phrases,
+    // embed each independently, and run separate HNSW searches. Results are merged
+    // (max score per document) before entering fusion. Addresses vocabulary mismatch
+    // where the full-query embedding misses semantically related documents.
+    bool enableMultiVectorQuery = false; // Enable sub-phrase vector search
+    size_t multiVectorMaxPhrases = 3;    // Max sub-phrases (in addition to original query)
+    float multiVectorScoreDecay = 0.85f; // Score penalty for sub-phrase results vs original
+
+    // Enhanced sub-phrase FTS expansion: when primary FTS hits are sparse, generate
+    // overlapping content-word sub-phrases and run OR queries for each. Broader than
+    // the basic lexical expansion which only ORs individual tokens.
+    bool enableSubPhraseExpansion = false;   // Enable sub-phrase FTS expansion
+    size_t subPhraseExpansionMinHits = 5;    // Trigger when primary FTS hits below this
+    float subPhraseExpansionPenalty = 0.70f; // Score penalty for sub-phrase FTS results
 
     /// Convert FusionStrategy to string for logging/debugging
     [[nodiscard]] static constexpr const char*
@@ -246,6 +273,9 @@ struct SearchEngineConfig {
     float graphRerankWeight = 0.15f;    // Multiplicative weight applied to KG signal
     float graphRerankMaxBoost = 0.20f;  // Per-document cap for graph-induced boost
     float graphRerankMinSignal = 0.01f; // Ignore weak KG signals below this threshold
+    bool graphUseQueryConcepts = true;  // Enrich graph rerank query with extracted concepts
+    bool graphFallbackToTopSignal =
+        true; // If no candidate clears minSignal, still boost the top positive graph hit
 
     // KG scorer budget controls used by graph rerank
     size_t graphMaxNeighbors = 16;           // Neighbor cap per node for structural scoring
@@ -525,6 +555,54 @@ inline void accumulateComponentScore(SearchResult& r, ComponentResult::Source so
     }
 }
 
+inline double strongVectorOnlyReliefStrength(const SearchEngineConfig& config, double rawVector,
+                                             size_t bestVectorRank) {
+    if (!config.enableStrongVectorOnlyRelief) {
+        return 0.0;
+    }
+
+    const double minScore =
+        std::clamp(static_cast<double>(config.strongVectorOnlyMinScore), 0.0, 1.0);
+    double rawStrength = 0.0;
+    if (rawVector >= minScore) {
+        if (minScore >= 1.0) {
+            rawStrength = 1.0;
+        } else {
+            rawStrength = std::clamp((rawVector - minScore) / (1.0 - minScore), 0.0, 1.0);
+        }
+    }
+
+    double rankStrength = 0.0;
+    if (config.strongVectorOnlyTopRank > 0 &&
+        bestVectorRank != std::numeric_limits<size_t>::max() &&
+        bestVectorRank < config.strongVectorOnlyTopRank) {
+        rankStrength =
+            std::clamp(static_cast<double>(config.strongVectorOnlyTopRank - bestVectorRank) /
+                           static_cast<double>(config.strongVectorOnlyTopRank),
+                       0.0, 1.0);
+    }
+
+    return std::max(rawStrength, rankStrength);
+}
+
+inline bool strongVectorOnlyReliefEligible(const SearchEngineConfig& config, double rawVector,
+                                           size_t bestVectorRank) {
+    return strongVectorOnlyReliefStrength(config, rawVector, bestVectorRank) > 0.0;
+}
+
+inline double effectiveVectorOnlyPenalty(const SearchEngineConfig& config, double rawVector,
+                                         size_t bestVectorRank) {
+    const double basePenalty = std::clamp(static_cast<double>(config.vectorOnlyPenalty), 0.0, 1.0);
+    if (!config.enableStrongVectorOnlyRelief) {
+        return basePenalty;
+    }
+
+    const double reliefPenalty =
+        std::clamp(static_cast<double>(config.strongVectorOnlyPenalty), basePenalty, 1.0);
+    const double t = strongVectorOnlyReliefStrength(config, rawVector, bestVectorRank);
+    return basePenalty + (reliefPenalty - basePenalty) * t;
+}
+
 // Template implementation - must be in header
 template <typename ScoreFunc>
 std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<ComponentResult>& results,
@@ -538,6 +616,8 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
     anchoredDocs.reserve(results.size());
     std::unordered_map<std::string, size_t> bestTextRank;
     bestTextRank.reserve(results.size());
+    std::unordered_map<std::string, size_t> bestVectorRank;
+    bestVectorRank.reserve(results.size());
 
     const auto dedupKeyForComponent = [this](const ComponentResult& comp) {
         if (config_.enablePathDedupInFusion && !comp.filePath.empty()) {
@@ -589,6 +669,10 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
             if (!inserted) {
                 it->second = std::max(it->second, clampedRaw);
             }
+            auto [rankIt, rankInserted] = bestVectorRank.try_emplace(dedupKey, comp.rank);
+            if (!rankInserted) {
+                rankIt->second = std::min(rankIt->second, comp.rank);
+            }
         } else if (isTextAnchoringComponent(comp.source)) {
             anchoredDocs.insert(dedupKey);
         }
@@ -607,8 +691,6 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
 
     const double vectorOnlyThreshold =
         std::clamp(static_cast<double>(config_.vectorOnlyThreshold), 0.0, 1.0);
-    const double vectorOnlyPenalty =
-        std::clamp(static_cast<double>(config_.vectorOnlyPenalty), 0.0, 1.0);
     const double nearMissSlack =
         std::clamp(static_cast<double>(config_.vectorOnlyNearMissSlack), 0.0, 1.0);
     const double nearMissPenalty =
@@ -634,21 +716,32 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
 
         if (hasVector && !hasAnchoring) {
             const double rawVector = vecIt->second;
+            const size_t bestSemanticRank = bestVectorRank.contains(hash)
+                                                ? bestVectorRank.at(hash)
+                                                : std::numeric_limits<size_t>::max();
+            const bool strongRelief =
+                strongVectorOnlyReliefEligible(config_, rawVector, bestSemanticRank);
+            const double vectorOnlyPenalty =
+                effectiveVectorOnlyPenalty(config_, rawVector, bestSemanticRank);
             if (rawVector < vectorOnlyThreshold) {
                 const bool reserveEnabled = config_.vectorOnlyNearMissReserve > 0;
                 const bool isNearMiss = reserveEnabled && vectorOnlyThreshold > 0.0 &&
                                         rawVector + nearMissSlack >= vectorOnlyThreshold;
-                if (!isNearMiss) {
+                if (!isNearMiss && !strongRelief) {
                     continue;
                 }
 
-                const double thresholdRatio =
-                    vectorOnlyThreshold > 0.0
-                        ? std::clamp(rawVector / vectorOnlyThreshold, 0.0, 1.0)
-                        : std::clamp(rawVector, 0.0, 1.0);
-                r.score *= (vectorOnlyPenalty * nearMissPenalty * thresholdRatio);
-                nearMissReserve.emplace_back(rawVector, std::move(r));
-                continue;
+                if (strongRelief) {
+                    r.score *= vectorOnlyPenalty;
+                } else {
+                    const double thresholdRatio =
+                        vectorOnlyThreshold > 0.0
+                            ? std::clamp(rawVector / vectorOnlyThreshold, 0.0, 1.0)
+                            : std::clamp(rawVector, 0.0, 1.0);
+                    r.score *= (vectorOnlyPenalty * nearMissPenalty * thresholdRatio);
+                    nearMissReserve.emplace_back(rawVector, std::move(r));
+                    continue;
+                }
             }
             r.score *= vectorOnlyPenalty;
         }
@@ -697,6 +790,21 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
         const double vector = r.vectorScore.value_or(0.0);
         return lexical <= 0.0 &&
                vector >= std::max(0.0, static_cast<double>(config_.semanticRescueMinVectorScore));
+    };
+
+    const auto evidenceRescueScore = [&lexicalAnchorScore](const SearchResult& r) -> double {
+        const double lexical = lexicalAnchorScore(r);
+        const double vector = r.vectorScore.value_or(0.0);
+        const double kg = r.kgScore.value_or(0.0);
+        const double bestSignal = std::max({lexical, vector, kg, r.pathScore.value_or(0.0),
+                                            r.symbolScore.value_or(0.0), r.tagScore.value_or(0.0)});
+        const double componentBonus = (lexical > 0.0 && vector > 0.0) ? 0.01 : 0.0;
+        return bestSignal + componentBonus;
+    };
+
+    const auto isEvidenceRescueCandidate = [this, &evidenceRescueScore](const SearchResult& r) {
+        return evidenceRescueScore(r) >=
+               std::max(0.0, static_cast<double>(config_.fusionEvidenceRescueMinScore));
     };
 
     const auto lexicalAwareLess = [this, &lexicalAnchorScore](const SearchResult& a,
@@ -775,6 +883,57 @@ std::vector<SearchResult> ResultFusion::fuseSinglePass(const std::vector<Compone
                     }
                 }
                 if (victimIndex >= topK) {
+                    break;
+                }
+
+                std::swap(fusedResults[victimIndex], fusedResults[bestTailIndex]);
+                rescuePresent++;
+            }
+
+            std::sort(fusedResults.begin(), fusedResults.begin() + static_cast<ptrdiff_t>(topK),
+                      lexicalAwareLess);
+        }
+
+        if (config_.fusionEvidenceRescueSlots > 0) {
+            const size_t topK = config_.maxResults;
+            const size_t rescueTarget = std::min(config_.fusionEvidenceRescueSlots, topK);
+            size_t rescuePresent = 0;
+            for (size_t i = 0; i < topK; ++i) {
+                if (isEvidenceRescueCandidate(fusedResults[i])) {
+                    rescuePresent++;
+                }
+            }
+
+            while (rescuePresent < rescueTarget) {
+                size_t bestTailIndex = fusedResults.size();
+                double bestTailEvidence = -1.0;
+                for (size_t i = topK; i < fusedResults.size(); ++i) {
+                    if (!isEvidenceRescueCandidate(fusedResults[i])) {
+                        continue;
+                    }
+                    const double evidence = evidenceRescueScore(fusedResults[i]);
+                    if (evidence > bestTailEvidence ||
+                        (evidence == bestTailEvidence &&
+                         (bestTailIndex >= fusedResults.size() ||
+                          lexicalAwareLess(fusedResults[i], fusedResults[bestTailIndex])))) {
+                        bestTailIndex = i;
+                        bestTailEvidence = evidence;
+                    }
+                }
+                if (bestTailIndex >= fusedResults.size()) {
+                    break;
+                }
+
+                size_t victimIndex = topK;
+                double victimEvidence = std::numeric_limits<double>::max();
+                for (size_t i = 0; i < topK; ++i) {
+                    const double evidence = evidenceRescueScore(fusedResults[i]);
+                    if (evidence < victimEvidence) {
+                        victimEvidence = evidence;
+                        victimIndex = i;
+                    }
+                }
+                if (victimIndex >= topK || bestTailEvidence <= victimEvidence) {
                     break;
                 }
 

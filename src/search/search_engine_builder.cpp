@@ -191,6 +191,29 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine vectorOnlyPenalty overridden to {:.3f} via env",
                          cfg.vectorOnlyPenalty);
         }
+        if (auto strongVectorOnlyRelief =
+                getEnvBool("YAMS_SEARCH_ENABLE_STRONG_VECTOR_ONLY_RELIEF")) {
+            cfg.enableStrongVectorOnlyRelief = *strongVectorOnlyRelief;
+            spdlog::info("SearchEngine enableStrongVectorOnlyRelief overridden to {} via env",
+                         cfg.enableStrongVectorOnlyRelief);
+        }
+        if (auto strongVectorOnlyMinScore =
+                getEnvFloat("YAMS_SEARCH_STRONG_VECTOR_ONLY_MIN_SCORE")) {
+            cfg.strongVectorOnlyMinScore = std::clamp(*strongVectorOnlyMinScore, 0.0f, 1.0f);
+            spdlog::info("SearchEngine strongVectorOnlyMinScore overridden to {:.3f} via env",
+                         cfg.strongVectorOnlyMinScore);
+        }
+        if (auto strongVectorOnlyTopRank = getEnvInt("YAMS_SEARCH_STRONG_VECTOR_ONLY_TOP_RANK")) {
+            cfg.strongVectorOnlyTopRank =
+                static_cast<size_t>(std::max(0, *strongVectorOnlyTopRank));
+            spdlog::info("SearchEngine strongVectorOnlyTopRank overridden to {} via env",
+                         cfg.strongVectorOnlyTopRank);
+        }
+        if (auto strongVectorOnlyPenalty = getEnvFloat("YAMS_SEARCH_STRONG_VECTOR_ONLY_PENALTY")) {
+            cfg.strongVectorOnlyPenalty = std::clamp(*strongVectorOnlyPenalty, 0.0f, 1.0f);
+            spdlog::info("SearchEngine strongVectorOnlyPenalty overridden to {:.3f} via env",
+                         cfg.strongVectorOnlyPenalty);
+        }
         if (auto nearMissReserve = getEnvInt("YAMS_SEARCH_VECTOR_ONLY_NEAR_MISS_RESERVE")) {
             cfg.vectorOnlyNearMissReserve = static_cast<size_t>(std::max(0, *nearMissReserve));
             spdlog::info("SearchEngine vectorOnlyNearMissReserve overridden to {} via env",
@@ -423,6 +446,16 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine graphRerankMinSignal overridden to {:.3f} via env",
                          cfg.graphRerankMinSignal);
         }
+        if (auto graphUseQueryConcepts = getEnvBool("YAMS_SEARCH_GRAPH_USE_QUERY_CONCEPTS")) {
+            cfg.graphUseQueryConcepts = *graphUseQueryConcepts;
+            spdlog::info("SearchEngine graphUseQueryConcepts overridden to {} via env",
+                         cfg.graphUseQueryConcepts);
+        }
+        if (auto graphFallbackTopSignal = getEnvBool("YAMS_SEARCH_GRAPH_FALLBACK_TOP_SIGNAL")) {
+            cfg.graphFallbackToTopSignal = *graphFallbackTopSignal;
+            spdlog::info("SearchEngine graphFallbackToTopSignal overridden to {} via env",
+                         cfg.graphFallbackToTopSignal);
+        }
 
         if (auto graphNeighbors = getEnvInt("YAMS_SEARCH_GRAPH_MAX_NEIGHBORS")) {
             cfg.graphMaxNeighbors = static_cast<size_t>(std::max(1, *graphNeighbors));
@@ -481,6 +514,17 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine enableAdaptiveVectorFallback overridden to {} via env",
                          cfg.enableAdaptiveVectorFallback);
         }
+        if (auto evidenceRescueSlots = getEnvInt("YAMS_SEARCH_FUSION_EVIDENCE_RESCUE_SLOTS")) {
+            cfg.fusionEvidenceRescueSlots = static_cast<size_t>(std::max(0, *evidenceRescueSlots));
+            spdlog::info("SearchEngine fusionEvidenceRescueSlots overridden to {} via env",
+                         cfg.fusionEvidenceRescueSlots);
+        }
+        if (auto evidenceRescueMinScore =
+                getEnvFloat("YAMS_SEARCH_FUSION_EVIDENCE_RESCUE_MIN_SCORE")) {
+            cfg.fusionEvidenceRescueMinScore = std::max(0.0f, *evidenceRescueMinScore);
+            spdlog::info("SearchEngine fusionEvidenceRescueMinScore overridden to {:.3f} via env",
+                         cfg.fusionEvidenceRescueMinScore);
+        }
 
         if (auto adaptiveMinHits = getEnvInt("YAMS_SEARCH_ADAPTIVE_MIN_TIER1_HITS")) {
             cfg.adaptiveVectorSkipMinTier1Hits = static_cast<size_t>(std::max(0, *adaptiveMinHits));
@@ -507,6 +551,40 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info(
                 "SearchEngine adaptiveVectorSkipMinTopTextScore overridden to {:.3f} via env",
                 cfg.adaptiveVectorSkipMinTopTextScore);
+        }
+
+        // Multi-vector sub-phrase search overrides
+        if (auto multiVec = getEnvBool("YAMS_SEARCH_MULTI_VECTOR_QUERY")) {
+            cfg.enableMultiVectorQuery = *multiVec;
+            spdlog::info("SearchEngine enableMultiVectorQuery overridden to {} via env",
+                         cfg.enableMultiVectorQuery);
+        }
+        if (auto multiVecPhrases = getEnvInt("YAMS_SEARCH_MULTI_VECTOR_MAX_PHRASES")) {
+            cfg.multiVectorMaxPhrases = static_cast<size_t>(std::clamp(*multiVecPhrases, 1, 8));
+            spdlog::info("SearchEngine multiVectorMaxPhrases overridden to {} via env",
+                         cfg.multiVectorMaxPhrases);
+        }
+        if (auto multiVecDecay = getEnvFloat("YAMS_SEARCH_MULTI_VECTOR_SCORE_DECAY")) {
+            cfg.multiVectorScoreDecay = std::clamp(*multiVecDecay, 0.1f, 1.0f);
+            spdlog::info("SearchEngine multiVectorScoreDecay overridden to {:.3f} via env",
+                         cfg.multiVectorScoreDecay);
+        }
+
+        // Sub-phrase FTS expansion overrides
+        if (auto subPhrase = getEnvBool("YAMS_SEARCH_SUB_PHRASE_EXPANSION")) {
+            cfg.enableSubPhraseExpansion = *subPhrase;
+            spdlog::info("SearchEngine enableSubPhraseExpansion overridden to {} via env",
+                         cfg.enableSubPhraseExpansion);
+        }
+        if (auto subPhraseMinHits = getEnvInt("YAMS_SEARCH_SUB_PHRASE_MIN_HITS")) {
+            cfg.subPhraseExpansionMinHits = static_cast<size_t>(std::max(0, *subPhraseMinHits));
+            spdlog::info("SearchEngine subPhraseExpansionMinHits overridden to {} via env",
+                         cfg.subPhraseExpansionMinHits);
+        }
+        if (auto subPhrasePenalty = getEnvFloat("YAMS_SEARCH_SUB_PHRASE_PENALTY")) {
+            cfg.subPhraseExpansionPenalty = std::clamp(*subPhrasePenalty, 0.1f, 1.0f);
+            spdlog::info("SearchEngine subPhraseExpansionPenalty overridden to {:.3f} via env",
+                         cfg.subPhraseExpansionPenalty);
         }
     }
 

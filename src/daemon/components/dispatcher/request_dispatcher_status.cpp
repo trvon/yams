@@ -782,6 +782,15 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 std::to_string(bus.postConsumed());
             response.additionalStats[std::string(metrics::kBusPostDropped)] =
                 std::to_string(bus.postDropped());
+            response.additionalStats["bus_kg_queued"] = std::to_string(bus.kgQueued());
+            response.additionalStats["bus_kg_dropped"] = std::to_string(bus.kgDropped());
+            response.additionalStats["bus_kg_consumed"] = std::to_string(bus.kgConsumed());
+            response.additionalStats["bus_entity_queued"] = std::to_string(bus.entityQueued());
+            response.additionalStats["bus_entity_dropped"] = std::to_string(bus.entityDropped());
+            response.additionalStats["bus_entity_consumed"] = std::to_string(bus.entityConsumed());
+            response.additionalStats["bus_title_queued"] = std::to_string(bus.titleQueued());
+            response.additionalStats["bus_title_dropped"] = std::to_string(bus.titleDropped());
+            response.additionalStats["bus_title_consumed"] = std::to_string(bus.titleConsumed());
         } catch (...) {
         }
         // Embedding service metrics (in-flight jobs being processed)
@@ -791,6 +800,37 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                     std::to_string(serviceManager_->getEmbeddingInFlightJobs());
                 response.additionalStats["embed_svc_queued"] =
                     std::to_string(serviceManager_->getEmbeddingQueuedJobs());
+                if (auto piq = serviceManager_->getPostIngestQueue()) {
+                    response.additionalStats["post_kg_queue_depth"] =
+                        std::to_string(piq->kgQueueDepth());
+                    response.additionalStats["post_entity_queue_depth"] =
+                        std::to_string(piq->entityQueueDepth());
+                    response.additionalStats["post_title_queue_depth"] =
+                        std::to_string(piq->titleQueueDepth());
+                    response.additionalStats["post_title_nl_docs_processed"] =
+                        std::to_string(piq->titleNlDocsProcessed());
+                    response.additionalStats["post_title_nl_docs_with_entities"] =
+                        std::to_string(piq->titleNlDocsWithEntities());
+                    response.additionalStats["post_title_nl_entities_extracted"] =
+                        std::to_string(piq->titleNlEntitiesExtracted());
+                    response.additionalStats["post_deferred_doc_entities_queued"] =
+                        std::to_string(piq->deferredDocEntitiesQueued());
+                    response.additionalStats["post_deferred_doc_entity_queue_failures"] =
+                        std::to_string(piq->deferredDocEntityQueueFailures());
+                }
+                if (auto kgq = serviceManager_->getKgWriteQueue()) {
+                    auto stats = kgq->getStats();
+                    response.additionalStats["kg_write_batches_enqueued"] =
+                        std::to_string(stats.batchesEnqueued);
+                    response.additionalStats["kg_write_batches_committed"] =
+                        std::to_string(stats.batchesCommitted);
+                    response.additionalStats["kg_write_documents_processed"] =
+                        std::to_string(stats.documentsProcessed);
+                    response.additionalStats["kg_write_doc_entities_inserted"] =
+                        std::to_string(stats.docEntitiesInserted);
+                    response.additionalStats["kg_write_deferred_doc_entities_skipped"] =
+                        std::to_string(stats.deferredDocEntitiesSkipped);
+                }
             }
         } catch (...) {
         }
@@ -937,6 +977,8 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                     if (statsResult) {
                         auto corpusJson = statsResult.value().toJson();
                         response.additionalStats["corpus_stats"] = corpusJson.dump();
+                        response.additionalStats["kg_doc_entities_total"] =
+                            std::to_string(statsResult.value().symbolCount);
                     }
                 }
             }

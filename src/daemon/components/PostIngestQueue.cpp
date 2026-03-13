@@ -1786,6 +1786,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                                                   const std::string& filePath,
                                                   const std::string& language,
                                                   const std::string& /*mimeType*/) {
+    titleNlDocsProcessed_.fetch_add(1, std::memory_order_relaxed);
     if (!titleExtractor_) {
         spdlog::debug("[PostIngestQueue] Title+NL extraction skipped for {} - no titleExtractor",
                       hash);
@@ -1862,6 +1863,10 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                   [](const search::QueryConcept* a, const search::QueryConcept* b) {
                       return a->confidence > b->confidence;
                   });
+        if (!nlEntities.empty()) {
+            titleNlDocsWithEntities_.fetch_add(1, std::memory_order_relaxed);
+            titleNlEntitiesExtracted_.fetch_add(nlEntities.size(), std::memory_order_relaxed);
+        }
 
         // Update title if we found a good candidate
         if (bestTitle) {
@@ -2014,6 +2019,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                     docEnt.confidence = qc->confidence;
                     docEnt.extractor = "gliner_title_nl";
                     batch->deferredDocEntities.push_back(std::move(docEnt));
+                    deferredDocEntitiesQueued_.fetch_add(1, std::memory_order_relaxed);
                 }
             }
 
@@ -2061,6 +2067,8 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                 spdlog::debug("[PostIngestQueue] Queued {} NL entities for KG from {}",
                               nlEntities.size(), hash.substr(0, 12));
             } catch (const std::exception& e) {
+                deferredDocEntityQueueFailures_.fetch_add(batch->deferredDocEntities.size(),
+                                                          std::memory_order_relaxed);
                 spdlog::warn("[PostIngestQueue] Failed to queue NL entities for KG: {}", e.what());
             }
         }

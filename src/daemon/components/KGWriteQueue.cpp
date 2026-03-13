@@ -192,6 +192,7 @@ Result<void> KGWriteQueue::applyBatches(std::vector<std::unique_ptr<DeferredKGBa
 
     std::size_t totalNodes = 0;
     std::size_t totalEdges = 0;
+    std::size_t totalDocEntities = 0;
     std::size_t totalDocs = batches.size();
     std::size_t skippedDeferredEdges = 0;
     std::size_t skippedDeferredAliases = 0;
@@ -258,6 +259,7 @@ Result<void> KGWriteQueue::applyBatches(std::vector<std::unique_ptr<DeferredKGBa
                              batch->docEntities.size(), batch->sourceFile,
                              deResult.error().message);
             }
+            totalDocEntities += batch->docEntities.size();
         }
 
         // Upsert symbol metadata
@@ -412,6 +414,8 @@ Result<void> KGWriteQueue::applyBatches(std::vector<std::unique_ptr<DeferredKGBa
                     spdlog::warn("[KGWriteQueue] Failed to add {} deferred doc entities for {}: {}",
                                  resolvedDocEntities.size(), batch->sourceFile,
                                  deResult.error().message);
+                } else {
+                    totalDocEntities += resolvedDocEntities.size();
                 }
             }
         }
@@ -441,12 +445,14 @@ Result<void> KGWriteQueue::applyBatches(std::vector<std::unique_ptr<DeferredKGBa
         stats_.documentsProcessed += totalDocs;
         stats_.nodesInserted += totalNodes;
         stats_.edgesInserted += totalEdges;
+        stats_.docEntitiesInserted += totalDocEntities;
+        stats_.deferredDocEntitiesSkipped += skippedDeferredDocEntities;
     }
 
-    spdlog::info("[KGWriteQueue] Committed {} batches ({} nodes, {} edges) in {}ms"
+    spdlog::info("[KGWriteQueue] Committed {} batches ({} nodes, {} edges, {} doc_entities) in {}ms"
                  " [skipped deferred: edges={}, aliases={}, doc_entities={}]",
-                 totalDocs, totalNodes, totalEdges, elapsed.count(), skippedDeferredEdges,
-                 skippedDeferredAliases, skippedDeferredDocEntities);
+                 totalDocs, totalNodes, totalEdges, totalDocEntities, elapsed.count(),
+                 skippedDeferredEdges, skippedDeferredAliases, skippedDeferredDocEntities);
 
     return Result<void>();
 }
