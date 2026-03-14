@@ -398,6 +398,9 @@ public:
     uint64_t getEmbeddingInferLastMs() const;
     uint64_t getEmbeddingInferMaxMs() const;
     uint64_t getEmbeddingInferWarnCount() const;
+    uint64_t getEmbeddingSemanticEdgesCreated() const;
+    uint64_t getEmbeddingSemanticDocsProcessed() const;
+    uint64_t getEmbeddingSemanticUpdateErrors() const;
 
     RetrievalSessionManager* getRetrievalSessionManager() const { return retrievalSessions_.get(); }
 

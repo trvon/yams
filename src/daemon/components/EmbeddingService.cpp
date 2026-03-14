@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <nlohmann/json.hpp>
 #include <fmt/format.h>
 
 #include <boost/asio/co_spawn.hpp>
@@ -31,6 +32,7 @@
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/ingest/ingest_helpers.h>
+#include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/vector_database.h>
@@ -180,10 +182,12 @@ void EmbeddingService::shutdown() {
 void EmbeddingService::setProviders(
     std::function<std::shared_ptr<IModelProvider>()> providerGetter,
     std::function<std::string()> modelNameGetter,
-    std::function<std::shared_ptr<yams::vector::VectorDatabase>()> dbGetter) {
+    std::function<std::shared_ptr<yams::vector::VectorDatabase>()> dbGetter,
+    std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> kgGetter) {
     getModelProvider_ = std::move(providerGetter);
     getPreferredModel_ = std::move(modelNameGetter);
     getVectorDatabase_ = std::move(dbGetter);
+    getKgStore_ = std::move(kgGetter);
 }
 
 std::size_t EmbeddingService::queuedJobs() const {
@@ -236,6 +240,116 @@ uint64_t EmbeddingService::inferOldestActiveMs() const {
     }
     return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(now - oldest).count());
+}
+
+void EmbeddingService::updateSemanticNeighborGraph(
+    const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
+    const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
+    const std::vector<InternalEventBus::EmbedPreparedDoc>& /*preparedDocs*/,
+    const std::vector<std::tuple<std::string, std::string, std::vector<float>>>&
+        documentEmbeddings) {
+    if (!kgStore || !vdb || documentEmbeddings.empty()) {
+        return;
+    }
+
+    const auto semanticTopK = []() {
+        if (const char* env = std::getenv("YAMS_GRAPH_SEMANTIC_TOPK")) {
+            try {
+                return static_cast<size_t>(std::max(1, std::stoi(env)));
+            } catch (...) {
+            }
+        }
+        return static_cast<size_t>(4);
+    }();
+    const auto semanticThreshold = []() {
+        if (const char* env = std::getenv("YAMS_GRAPH_SEMANTIC_THRESHOLD")) {
+            try {
+                return std::clamp(std::stof(env), 0.0f, 1.0f);
+            } catch (...) {
+            }
+        }
+        return 0.88f;
+    }();
+
+    std::vector<metadata::KGEdge> semanticEdges;
+    semanticEdges.reserve(documentEmbeddings.size() * semanticTopK);
+    const auto nowSecs = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+
+    for (const auto& [documentHash, filePath, embedding] : documentEmbeddings) {
+        semanticDocsProcessed_.fetch_add(1, std::memory_order_relaxed);
+        if (embedding.empty()) {
+            continue;
+        }
+
+        auto srcNode = kgStore->getNodeByKey("doc:" + documentHash);
+        if (!srcNode || !srcNode.value().has_value()) {
+            continue;
+        }
+
+        yams::vector::VectorSearchParams params;
+        params.k = semanticTopK + 3; // allow self + non-doc vectors to be filtered out
+        params.similarity_threshold = semanticThreshold;
+        auto neighbors = vdb->search(embedding, params);
+
+        size_t kept = 0;
+        for (const auto& rec : neighbors) {
+            if (kept >= semanticTopK) {
+                break;
+            }
+            if (rec.level != yams::vector::EmbeddingLevel::DOCUMENT) {
+                continue;
+            }
+            if (rec.document_hash.empty() || rec.document_hash == documentHash) {
+                continue;
+            }
+            if (rec.relevance_score < semanticThreshold) {
+                continue;
+            }
+
+            auto dstNode = kgStore->getNodeByKey("doc:" + rec.document_hash);
+            if (!dstNode || !dstNode.value().has_value()) {
+                continue;
+            }
+
+            metadata::KGEdge edge;
+            edge.srcNodeId = srcNode.value()->id;
+            edge.dstNodeId = dstNode.value()->id;
+            edge.relation = "semantic_neighbor";
+            edge.weight = std::clamp(rec.relevance_score, semanticThreshold, 1.0f);
+            edge.createdTime = nowSecs;
+
+            nlohmann::json props;
+            props["source"] = "embedding_service";
+            props["source_file"] = filePath;
+            props["document_hash"] = documentHash;
+            props["neighbor_hash"] = rec.document_hash;
+            props["model"] = modelName;
+            props["similarity"] = rec.relevance_score;
+            props["rank"] = kept + 1;
+            props["layer"] = "semantic";
+            edge.properties = props.dump();
+            semanticEdges.push_back(std::move(edge));
+            ++kept;
+        }
+    }
+
+    if (semanticEdges.empty()) {
+        return;
+    }
+
+    auto edgeResult = kgStore->addEdgesUnique(semanticEdges);
+    if (!edgeResult) {
+        semanticUpdateErrors_.fetch_add(1, std::memory_order_relaxed);
+        spdlog::warn("EmbeddingService: failed to add {} semantic_neighbor edges: {}",
+                     semanticEdges.size(), edgeResult.error().message);
+        return;
+    }
+
+    semanticEdgesCreated_.fetch_add(semanticEdges.size(), std::memory_order_relaxed);
+    spdlog::info("EmbeddingService: added {} semantic_neighbor edges using model '{}'",
+                 semanticEdges.size(), modelName);
 }
 
 boost::asio::awaitable<void> EmbeddingService::channelPoller() {
@@ -745,6 +859,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     };
     std::vector<DocData> docsToEmbed;
     docsToEmbed.reserve(job.hashes.size());
+    std::vector<std::tuple<std::string, std::string, std::vector<float>>> documentEmbeddings;
+    documentEmbeddings.reserve(job.hashes.size());
 
     // Phase 2: optional prepared payload from post-ingest.
     std::vector<const InternalEventBus::EmbedPreparedDoc*> preparedDocPtr;
@@ -1557,6 +1673,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         }
 
         const auto& doc = docsToEmbed[docIdx];
+        documentEmbeddings.emplace_back(doc.hash, doc.filePath, acc.sumEmbedding);
         yams::vector::VectorRecord docRec;
         docRec.document_hash = doc.hash;
         docRec.chunk_id = yams::vector::utils::generateChunkId(doc.hash, 999999);
@@ -1599,6 +1716,14 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     (void)meta_->batchUpdateDocumentEmbeddingStatusByHashes(successHashes, true, modelName);
     (void)meta_->batchUpdateDocumentRepairStatuses(successHashes,
                                                    metadata::RepairStatus::Completed);
+
+    if (getKgStore_) {
+        auto kgStore = getKgStore_();
+        if (kgStore) {
+            updateSemanticNeighborGraph(kgStore, vdb, modelName, job.preparedDocs,
+                                        documentEmbeddings);
+        }
+    }
 
     logPhase("metadata_update", tMeta,
              fmt::format("docs={} model='{}'", successHashes.size(), modelName));

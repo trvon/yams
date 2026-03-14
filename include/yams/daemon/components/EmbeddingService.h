@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
@@ -21,7 +22,8 @@ class IContentStore;
 }
 namespace metadata {
 class MetadataRepository;
-}
+class KnowledgeGraphStore;
+} // namespace metadata
 namespace vector {
 class VectorDatabase;
 }
@@ -48,9 +50,11 @@ public:
     Result<void> initialize() override;
     void shutdown() override;
 
-    void setProviders(std::function<std::shared_ptr<IModelProvider>()> providerGetter,
-                      std::function<std::string()> modelNameGetter,
-                      std::function<std::shared_ptr<yams::vector::VectorDatabase>()> dbGetter);
+    void
+    setProviders(std::function<std::shared_ptr<IModelProvider>()> providerGetter,
+                 std::function<std::string()> modelNameGetter,
+                 std::function<std::shared_ptr<yams::vector::VectorDatabase>()> dbGetter,
+                 std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> kgGetter = {});
 
     std::size_t processed() const { return processed_.load(); }
     std::size_t failed() const { return failed_.load(); }
@@ -63,6 +67,15 @@ public:
     uint64_t inferSubBatchMaxDurationMs() const;
     uint64_t inferSubBatchWarnCount() const;
     uint64_t inferOldestActiveMs() const;
+    uint64_t semanticEdgesCreated() const {
+        return semanticEdgesCreated_.load(std::memory_order_relaxed);
+    }
+    uint64_t semanticDocsProcessed() const {
+        return semanticDocsProcessed_.load(std::memory_order_relaxed);
+    }
+    uint64_t semanticUpdateErrors() const {
+        return semanticUpdateErrors_.load(std::memory_order_relaxed);
+    }
 
     void start();
 
@@ -72,6 +85,12 @@ private:
 
     // Synchronous job processor (runs on work executor threads)
     void processEmbedJob(InternalEventBus::EmbedJob job);
+    void updateSemanticNeighborGraph(
+        const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
+        const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
+        const std::vector<InternalEventBus::EmbedPreparedDoc>& preparedDocs,
+        const std::vector<std::tuple<std::string, std::string, std::vector<float>>>&
+            documentEmbeddings);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
@@ -81,6 +100,7 @@ private:
     std::function<std::shared_ptr<IModelProvider>()> getModelProvider_;
     std::function<std::string()> getPreferredModel_;
     std::function<std::shared_ptr<yams::vector::VectorDatabase>()> getVectorDatabase_;
+    std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> getKgStore_;
 
     std::atomic<bool> stop_{false};
     std::atomic<std::size_t> processed_{0};
@@ -100,6 +120,9 @@ private:
     std::atomic<uint64_t> inferSubBatchLastDurationMs_{0};
     std::atomic<uint64_t> inferSubBatchMaxDurationMs_{0};
     std::atomic<uint64_t> inferSubBatchWarnCount_{0};
+    std::atomic<uint64_t> semanticEdgesCreated_{0};
+    std::atomic<uint64_t> semanticDocsProcessed_{0};
+    std::atomic<uint64_t> semanticUpdateErrors_{0};
     std::atomic<uint64_t> inferTokenCounter_{0};
     mutable std::mutex inferTrackerMutex_;
     std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> activeInferSubBatches_;

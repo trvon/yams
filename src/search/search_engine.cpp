@@ -7,7 +7,9 @@
 #include <yams/search/graph_expansion.h>
 #include <yams/search/kg_scorer.h>
 #include <yams/search/kg_scorer_simple.h>
+#include <yams/search/query_expansion.h>
 #include <yams/search/query_text_utils.h>
+#include <yams/search/search_tracing.h>
 
 #include <algorithm>
 #include <chrono>
@@ -105,238 +107,6 @@ struct QueryExpansionStats {
     size_t graphExpansionFtsAddedCount = 0;
 };
 
-struct FtsFallbackClause {
-    std::string query;
-    float penalty = 1.0f;
-};
-
-float tokenFallbackSalience(const QueryToken& token) {
-    const bool hasDigit = std::any_of(token.original.begin(), token.original.end(),
-                                      [](unsigned char c) { return std::isdigit(c) != 0; });
-    const size_t len = token.normalized.size();
-
-    float score = 0.05f;
-    if (hasDigit) {
-        score += 1.25f;
-    }
-    if (len >= 10) {
-        score += 0.75f;
-    } else if (len >= 6) {
-        score += 0.35f;
-    } else if (len >= 3) {
-        score += 0.10f;
-    }
-    return score;
-}
-
-std::string joinQueryWindow(const std::vector<QueryToken>& tokens, size_t start, size_t length) {
-    std::string phrase;
-    for (size_t i = start; i < start + length; ++i) {
-        if (!phrase.empty()) {
-            phrase.push_back(' ');
-        }
-        phrase += tokens[i].original;
-    }
-    return phrase;
-}
-
-std::vector<std::string>
-generateAnchoredSubPhrases(const std::string& query, size_t maxPhrases,
-                           const std::unordered_map<std::string, float>* idfByToken) {
-    if (maxPhrases == 0) {
-        return {};
-    }
-
-    auto tokens = tokenizeQueryTokens(query);
-    if (tokens.size() < 3) {
-        return {};
-    }
-
-    struct AnchorCandidate {
-        size_t index = 0;
-        float salience = 0.0f;
-    };
-
-    std::vector<AnchorCandidate> anchors;
-    anchors.reserve(tokens.size());
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        const auto& token = tokens[i];
-        if (token.normalized.size() < 2) {
-            continue;
-        }
-
-        float score = tokenFallbackSalience(token);
-        if (idfByToken != nullptr) {
-            auto it = idfByToken->find(token.normalized);
-            if (it != idfByToken->end() && it->second > 0.0f) {
-                score += it->second;
-            }
-        }
-
-        anchors.push_back({i, score});
-    }
-
-    std::stable_sort(anchors.begin(), anchors.end(),
-                     [](const auto& a, const auto& b) { return a.salience > b.salience; });
-
-    std::vector<std::string> phrases;
-    phrases.reserve(std::min(maxPhrases, tokens.size()));
-    std::unordered_set<std::string> seen;
-    seen.reserve(maxPhrases * 2);
-
-    const auto fullNormalized = [&]() {
-        std::string joined;
-        for (const auto& token : tokens) {
-            if (!joined.empty()) {
-                joined.push_back(' ');
-            }
-            joined += token.normalized;
-        }
-        return joined;
-    }();
-
-    for (const auto& anchor : anchors) {
-        if (phrases.size() >= maxPhrases) {
-            break;
-        }
-
-        for (size_t length : {static_cast<size_t>(3), static_cast<size_t>(2)}) {
-            if (tokens.size() < length) {
-                continue;
-            }
-
-            const size_t startMin = (anchor.index + 1 >= length) ? (anchor.index + 1 - length) : 0;
-            const size_t startMax = std::min(anchor.index, tokens.size() - length);
-
-            std::vector<size_t> starts;
-            starts.reserve(startMax >= startMin ? (startMax - startMin + 1) : 0);
-            for (size_t start = startMin; start <= startMax; ++start) {
-                starts.push_back(start);
-            }
-
-            std::stable_sort(starts.begin(), starts.end(), [&](size_t a, size_t b) {
-                const size_t centerA = a + (length / 2);
-                const size_t centerB = b + (length / 2);
-                const auto distA =
-                    (centerA > anchor.index) ? (centerA - anchor.index) : (anchor.index - centerA);
-                const auto distB =
-                    (centerB > anchor.index) ? (centerB - anchor.index) : (anchor.index - centerB);
-                return distA < distB;
-            });
-
-            for (size_t start : starts) {
-                if (phrases.size() >= maxPhrases) {
-                    break;
-                }
-
-                std::string normalizedPhrase;
-                for (size_t i = start; i < start + length; ++i) {
-                    if (!normalizedPhrase.empty()) {
-                        normalizedPhrase.push_back(' ');
-                    }
-                    normalizedPhrase += tokens[i].normalized;
-                }
-
-                if (normalizedPhrase == fullNormalized || !seen.insert(normalizedPhrase).second) {
-                    continue;
-                }
-
-                phrases.push_back(joinQueryWindow(tokens, start, length));
-            }
-        }
-    }
-
-    return phrases;
-}
-
-std::string inferFallbackConceptType(std::string_view text) {
-    const std::string normalized = normalizeGraphSurface(text);
-    const auto hasDigit =
-        std::any_of(text.begin(), text.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
-    const auto hasUpper =
-        std::any_of(text.begin(), text.end(), [](unsigned char c) { return std::isupper(c) != 0; });
-    if ((hasDigit && hasUpper) || normalized.starts_with("cd") || normalized.starts_with("il ") ||
-        normalized.find("protein") != std::string::npos ||
-        normalized.find("receptor") != std::string::npos ||
-        normalized.find("kinase") != std::string::npos) {
-        return "protein";
-    }
-    if (normalized.find("cell") != std::string::npos ||
-        normalized.find("bipolar") != std::string::npos ||
-        normalized.find("monocyte") != std::string::npos ||
-        normalized.find("stem cell") != std::string::npos) {
-        return "cell";
-    }
-    if (normalized.find("cancer") != std::string::npos ||
-        normalized.find("disease") != std::string::npos ||
-        normalized.find("tumor") != std::string::npos ||
-        normalized.find("metast") != std::string::npos) {
-        return "disease";
-    }
-    if (normalized.find("pathway") != std::string::npos ||
-        normalized.find("response") != std::string::npos ||
-        normalized.find("activation") != std::string::npos ||
-        normalized.find("inhibition") != std::string::npos) {
-        return "biological_process";
-    }
-    return "concept";
-}
-
-std::vector<QueryConcept>
-generateFallbackQueryConcepts(const std::string& query,
-                              const std::unordered_map<std::string, float>& idfByToken,
-                              size_t maxConcepts) {
-    if (maxConcepts == 0) {
-        return {};
-    }
-
-    std::vector<QueryConcept> out;
-    out.reserve(maxConcepts);
-    std::unordered_set<std::string> seen;
-
-    auto addConcept = [&](std::string text, float confidence) {
-        const std::string normalized = normalizeGraphSurface(text);
-        if (normalized.size() < 3 || !seen.insert(normalized).second || out.size() >= maxConcepts) {
-            return;
-        }
-        QueryConcept qc;
-        qc.text = std::move(text);
-        qc.type = inferFallbackConceptType(qc.text);
-        qc.confidence = std::clamp(confidence, 0.2f, 0.8f);
-        qc.startOffset = 0;
-        qc.endOffset = static_cast<uint32_t>(qc.text.size());
-        out.push_back(std::move(qc));
-    };
-
-    for (const auto& phrase : generateAnchoredSubPhrases(query, maxConcepts, &idfByToken)) {
-        addConcept(phrase, 0.62f);
-    }
-
-    auto tokens = tokenizeQueryTokens(query);
-    std::vector<std::pair<std::string, float>> rankedTokens;
-    rankedTokens.reserve(tokens.size());
-    for (const auto& token : tokens) {
-        if (token.normalized.size() < 2) {
-            continue;
-        }
-        float score = tokenFallbackSalience(token);
-        if (auto it = idfByToken.find(token.normalized); it != idfByToken.end()) {
-            score += it->second;
-        }
-        rankedTokens.emplace_back(token.original, score);
-    }
-    std::stable_sort(rankedTokens.begin(), rankedTokens.end(),
-                     [](const auto& a, const auto& b) { return a.second > b.second; });
-    for (const auto& [text, score] : rankedTokens) {
-        addConcept(text, 0.45f + std::min(0.25f, score * 0.02f));
-        if (out.size() >= maxConcepts) {
-            break;
-        }
-    }
-
-    return out;
-}
-
 bool envFlagEnabled(const char* name) {
     if (const char* env = std::getenv(name)) {
         std::string value(env);
@@ -359,107 +129,6 @@ size_t envSizeTOrDefault(const char* name, size_t defaultValue, size_t minValue,
     return std::clamp(defaultValue, minValue, maxValue);
 }
 
-std::string deriveDocIdFromPath(const std::string& path) {
-    if (path.empty()) {
-        return {};
-    }
-
-    const auto slashPos = path.find_last_of("/\\");
-    std::string fileName =
-        (slashPos == std::string::npos) ? path : path.substr(static_cast<size_t>(slashPos + 1));
-
-    constexpr std::string_view kTxtSuffix = ".txt";
-    if (fileName.size() > kTxtSuffix.size() &&
-        fileName.compare(fileName.size() - kTxtSuffix.size(), kTxtSuffix.size(), kTxtSuffix) == 0) {
-        fileName.resize(fileName.size() - kTxtSuffix.size());
-    }
-    return fileName;
-}
-
-std::string documentIdForTrace(const std::string& filePath, const std::string& documentHash) {
-    std::string docId = deriveDocIdFromPath(filePath);
-    if (!docId.empty()) {
-        return docId;
-    }
-    return documentHash;
-}
-
-std::vector<std::string>
-collectUniqueComponentDocIds(const std::vector<ComponentResult>& componentResults) {
-    std::unordered_set<std::string> uniqueIds;
-    uniqueIds.reserve(componentResults.size());
-
-    for (const auto& comp : componentResults) {
-        const std::string docId = documentIdForTrace(comp.filePath, comp.documentHash);
-        if (!docId.empty()) {
-            uniqueIds.insert(docId);
-        }
-    }
-
-    std::vector<std::string> out;
-    out.reserve(uniqueIds.size());
-    for (const auto& id : uniqueIds) {
-        out.push_back(id);
-    }
-    std::sort(out.begin(), out.end());
-    return out;
-}
-
-std::vector<std::string>
-collectRankedResultDocIds(const std::vector<SearchResult>& results,
-                          size_t maxCount = std::numeric_limits<size_t>::max()) {
-    const size_t count = std::min(results.size(), maxCount);
-    std::vector<std::string> out;
-    out.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-        out.push_back(
-            documentIdForTrace(results[i].document.filePath, results[i].document.sha256Hash));
-    }
-    return out;
-}
-
-std::vector<std::string> setDifferenceIds(const std::vector<std::string>& lhs,
-                                          const std::vector<std::string>& rhs) {
-    std::unordered_set<std::string> rhsSet;
-    rhsSet.reserve(rhs.size());
-    for (const auto& id : rhs) {
-        rhsSet.insert(id);
-    }
-
-    std::vector<std::string> out;
-    out.reserve(lhs.size());
-    for (const auto& id : lhs) {
-        if (rhsSet.find(id) == rhsSet.end()) {
-            out.push_back(id);
-        }
-    }
-    std::sort(out.begin(), out.end());
-    out.erase(std::unique(out.begin(), out.end()), out.end());
-    return out;
-}
-
-std::string joinWithTab(const std::vector<std::string>& values) {
-    if (values.empty()) {
-        return {};
-    }
-    std::string out;
-    size_t totalChars = 0;
-    for (const auto& value : values) {
-        totalChars += value.size();
-    }
-    out.reserve(totalChars + values.size());
-
-    bool first = true;
-    for (const auto& value : values) {
-        if (!first) {
-            out.push_back('\t');
-        }
-        out += value;
-        first = false;
-    }
-    return out;
-}
-
 struct PreFusionDocSignal {
     bool hasAnchoring = false;
     bool hasVector = false;
@@ -469,6 +138,65 @@ struct PreFusionDocSignal {
 };
 
 using PreFusionSignalMap = std::unordered_map<std::string, PreFusionDocSignal>;
+
+std::vector<GraphExpansionSeedDoc>
+collectGraphSeedDocs(const std::vector<ComponentResult>& componentResults, size_t maxDocs) {
+    struct SeedAccumulator {
+        std::string documentHash;
+        std::string filePath;
+        float score = 0.0f;
+    };
+
+    std::unordered_map<std::string, SeedAccumulator> bestByDoc;
+    bestByDoc.reserve(componentResults.size());
+    for (const auto& comp : componentResults) {
+        const std::string docKey = documentIdForTrace(comp.filePath, comp.documentHash);
+        if (docKey.empty()) {
+            continue;
+        }
+
+        float sourceBoost = 1.0f;
+        switch (comp.source) {
+            case ComponentResult::Source::Text:
+            case ComponentResult::Source::Vector:
+            case ComponentResult::Source::EntityVector:
+            case ComponentResult::Source::KnowledgeGraph:
+                sourceBoost = 1.0f;
+                break;
+            case ComponentResult::Source::PathTree:
+                sourceBoost = 0.70f;
+                break;
+            case ComponentResult::Source::Symbol:
+                sourceBoost = 0.80f;
+                break;
+            case ComponentResult::Source::Tag:
+            case ComponentResult::Source::Metadata:
+                sourceBoost = 0.60f;
+                break;
+            case ComponentResult::Source::Unknown:
+                sourceBoost = 0.50f;
+                break;
+        }
+        const float weightedScore = comp.score * sourceBoost;
+
+        auto it = bestByDoc.find(docKey);
+        if (it == bestByDoc.end() || weightedScore > it->second.score) {
+            bestByDoc[docKey] = SeedAccumulator{comp.documentHash, comp.filePath, weightedScore};
+        }
+    }
+
+    std::vector<GraphExpansionSeedDoc> docs;
+    docs.reserve(bestByDoc.size());
+    for (const auto& [_, seed] : bestByDoc) {
+        docs.push_back({seed.documentHash, seed.filePath, seed.score});
+    }
+    std::stable_sort(docs.begin(), docs.end(),
+                     [](const auto& a, const auto& b) { return a.score > b.score; });
+    if (docs.size() > maxDocs) {
+        docs.resize(maxDocs);
+    }
+    return docs;
+}
 
 PreFusionSignalMap buildPreFusionSignalMap(const std::vector<ComponentResult>& componentResults) {
     PreFusionSignalMap signals;
@@ -494,179 +222,6 @@ PreFusionSignalMap buildPreFusionSignalMap(const std::vector<ComponentResult>& c
     }
 
     return signals;
-}
-
-json buildComponentHitSummaryJson(const std::vector<ComponentResult>& componentResults,
-                                  size_t topPerComponent) {
-    std::unordered_map<ComponentResult::Source, std::vector<std::pair<size_t, std::string>>>
-        grouped;
-    grouped.reserve(8);
-
-    for (const auto& comp : componentResults) {
-        const std::string docId = documentIdForTrace(comp.filePath, comp.documentHash);
-        if (docId.empty()) {
-            continue;
-        }
-        grouped[comp.source].emplace_back(comp.rank, docId);
-    }
-
-    json out = json::object();
-    for (auto& [source, docs] : grouped) {
-        std::sort(docs.begin(), docs.end(), [](const auto& a, const auto& b) {
-            if (a.first != b.first) {
-                return a.first < b.first;
-            }
-            return a.second < b.second;
-        });
-
-        std::vector<std::string> topDocIds;
-        topDocIds.reserve(std::min(topPerComponent, docs.size()));
-        std::unordered_set<std::string> seen;
-        seen.reserve(docs.size());
-        for (const auto& [rank, docId] : docs) {
-            (void)rank;
-            if (!seen.insert(docId).second) {
-                continue;
-            }
-            topDocIds.push_back(docId);
-            if (topDocIds.size() >= topPerComponent) {
-                break;
-            }
-        }
-
-        out[componentSourceToString(source)] = {
-            {"raw_hits", docs.size()},
-            {"unique_top_doc_ids", topDocIds},
-        };
-    }
-
-    return out;
-}
-
-json buildFusionTopSummaryJson(const std::vector<SearchResult>& results, size_t maxDocs) {
-    json out = json::array();
-    const size_t count = std::min(results.size(), maxDocs);
-    for (size_t i = 0; i < count; ++i) {
-        const auto& res = results[i];
-        out.push_back({
-            {"rank", i + 1},
-            {"doc_id", documentIdForTrace(res.document.filePath, res.document.sha256Hash)},
-            {"path", res.document.filePath},
-            {"score", res.score},
-            {"keyword_score", res.keywordScore.value_or(0.0)},
-            {"vector_score", res.vectorScore.value_or(0.0)},
-            {"kg_score", res.kgScore.value_or(0.0)},
-            {"path_score", res.pathScore.value_or(0.0)},
-            {"tag_score", res.tagScore.value_or(0.0)},
-            {"symbol_score", res.symbolScore.value_or(0.0)},
-            {"reranker_score", res.rerankerScore.value_or(0.0)},
-        });
-    }
-    return out;
-}
-
-std::optional<std::int64_t>
-resolveKgDocumentId(const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
-                    const metadata::DocumentInfo& doc) {
-    if (!kgStore) {
-        return std::nullopt;
-    }
-    if (!doc.sha256Hash.empty()) {
-        auto byHash = kgStore->getDocumentIdByHash(doc.sha256Hash);
-        if (byHash && byHash.value().has_value()) {
-            return byHash.value();
-        }
-    }
-    if (!doc.filePath.empty()) {
-        auto byPath = kgStore->getDocumentIdByPath(doc.filePath);
-        if (byPath && byPath.value().has_value()) {
-            return byPath.value();
-        }
-    }
-    return std::nullopt;
-}
-
-json buildGraphDocProbeJson(const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
-                            const std::vector<SearchResult>& results, size_t limit) {
-    json out = json::array();
-    if (!kgStore) {
-        return out;
-    }
-    const size_t maxDocs = std::min(limit, results.size());
-    for (size_t i = 0; i < maxDocs; ++i) {
-        const auto& result = results[i];
-        json item = {
-            {"doc_id", documentIdForTrace(result.document.filePath, result.document.sha256Hash)},
-            {"rank", i + 1},
-            {"score", result.score},
-            {"keyword_score", result.keywordScore.value_or(0.0)},
-            {"vector_score", result.vectorScore.value_or(0.0)},
-            {"kg_score", result.kgScore.value_or(0.0)},
-        };
-
-        auto docId = resolveKgDocumentId(kgStore, result.document);
-        if (!docId.has_value()) {
-            item["resolved_document_id"] = nullptr;
-            item["doc_entity_count"] = 0;
-            item["linked_node_count"] = 0;
-            item["entity_text_samples"] = json::array();
-            item["node_label_samples"] = json::array();
-            out.push_back(std::move(item));
-            continue;
-        }
-
-        item["resolved_document_id"] = *docId;
-        auto ents = kgStore->getDocEntitiesForDocument(*docId, 2000, 0);
-        if (!ents) {
-            item["doc_entity_count"] = -1;
-            item["linked_node_count"] = -1;
-            item["entity_lookup_error"] = ents.error().message;
-            out.push_back(std::move(item));
-            continue;
-        }
-
-        std::unordered_set<std::int64_t> uniqueNodeIds;
-        json entitySamples = json::array();
-        for (const auto& ent : ents.value()) {
-            if (ent.nodeId.has_value()) {
-                uniqueNodeIds.insert(*ent.nodeId);
-            }
-            if (entitySamples.size() < 5) {
-                entitySamples.push_back({
-                    {"text", ent.entityText},
-                    {"node_id", ent.nodeId.has_value() ? json(*ent.nodeId) : json(nullptr)},
-                    {"extractor", ent.extractor.value_or("")},
-                    {"confidence",
-                     ent.confidence.has_value() ? json(*ent.confidence) : json(nullptr)},
-                });
-            }
-        }
-
-        json nodeLabelSamples = json::array();
-        for (auto nodeIdVal : uniqueNodeIds) {
-            if (nodeLabelSamples.size() >= 5) {
-                break;
-            }
-            auto nodeRes = kgStore->getNodeById(nodeIdVal);
-            if (!nodeRes || !nodeRes.value().has_value()) {
-                continue;
-            }
-            const auto& node = *nodeRes.value();
-            nodeLabelSamples.push_back({
-                {"node_id", nodeIdVal},
-                {"label", node.label.value_or("")},
-                {"type", node.type.value_or("")},
-                {"node_key", node.nodeKey},
-            });
-        }
-
-        item["doc_entity_count"] = ents.value().size();
-        item["linked_node_count"] = uniqueNodeIds.size();
-        item["entity_text_samples"] = std::move(entitySamples);
-        item["node_label_samples"] = std::move(nodeLabelSamples);
-        out.push_back(std::move(item));
-    }
-    return out;
 }
 
 std::string_view::size_type ci_find(std::string_view haystack, std::string_view needle) {
@@ -1373,8 +928,6 @@ private:
     std::unordered_map<std::string, float> lookupQueryTermIdf(const std::string& query) const;
     std::vector<std::string> generateQuerySubPhrases(const std::string& query,
                                                      size_t maxPhrases) const;
-    std::vector<FtsFallbackClause> generateAggressiveFtsFallbackClauses(const std::string& query,
-                                                                        size_t maxClauses) const;
 
     std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<vector::VectorDatabase> vectorDb_;
@@ -1449,107 +1002,6 @@ std::vector<std::string> SearchEngine::Impl::generateQuerySubPhrases(const std::
                                       idfByToken.empty() ? nullptr : &idfByToken);
 }
 
-std::vector<FtsFallbackClause>
-SearchEngine::Impl::generateAggressiveFtsFallbackClauses(const std::string& query,
-                                                         size_t maxClauses) const {
-    if (maxClauses == 0) {
-        return {};
-    }
-
-    const auto tokens = tokenizeQueryTokens(query);
-    if (tokens.empty()) {
-        return {};
-    }
-
-    const auto idfByToken = lookupQueryTermIdf(query);
-
-    struct RankedToken {
-        QueryToken token;
-        float salience = 0.0f;
-    };
-
-    std::vector<RankedToken> rankedTokens;
-    rankedTokens.reserve(tokens.size());
-    for (const auto& token : tokens) {
-        if (token.normalized.size() < 2) {
-            continue;
-        }
-        float score = tokenFallbackSalience(token);
-        if (auto it = idfByToken.find(token.normalized);
-            it != idfByToken.end() && it->second > 0.0f) {
-            score += it->second;
-        }
-        rankedTokens.push_back({token, score});
-    }
-    std::stable_sort(rankedTokens.begin(), rankedTokens.end(),
-                     [](const auto& a, const auto& b) { return a.salience > b.salience; });
-
-    std::vector<FtsFallbackClause> clauses;
-    clauses.reserve(maxClauses);
-    std::unordered_set<std::string> seen;
-    seen.reserve(maxClauses * 2);
-
-    auto addClause = [&](std::string clause, float penalty) {
-        if (clause.empty() || clauses.size() >= maxClauses) {
-            return;
-        }
-        if (!seen.insert(clause).second) {
-            return;
-        }
-        clauses.push_back({std::move(clause), std::clamp(penalty, 0.1f, 1.0f)});
-    };
-
-    auto addAndClauseFromTerms = [&](const std::vector<std::string>& terms, float penalty) {
-        if (terms.empty()) {
-            return;
-        }
-        std::string clause;
-        if (terms.size() > 1) {
-            clause.push_back('(');
-        }
-        for (size_t i = 0; i < terms.size(); ++i) {
-            if (i > 0) {
-                clause += " AND ";
-            }
-            clause += terms[i];
-        }
-        if (terms.size() > 1) {
-            clause.push_back(')');
-        }
-        addClause(std::move(clause), penalty);
-    };
-
-    auto anchoredPhrases = generateAnchoredSubPhrases(query, std::min(maxClauses, size_t(8)),
-                                                      idfByToken.empty() ? nullptr : &idfByToken);
-    for (const auto& phrase : anchoredPhrases) {
-        if (clauses.size() >= maxClauses) {
-            break;
-        }
-        std::vector<std::string> terms;
-        for (const auto& token : tokenizeQueryTokens(phrase)) {
-            if (token.normalized.size() >= 2) {
-                terms.push_back(token.normalized);
-            }
-        }
-        if (terms.size() >= 2) {
-            addAndClauseFromTerms(terms, 0.78f);
-        }
-    }
-
-    if (!rankedTokens.empty()) {
-        const auto& anchor = rankedTokens.front().token.normalized;
-        for (size_t i = 1; i < rankedTokens.size() && i < 5 && clauses.size() < maxClauses; ++i) {
-            addAndClauseFromTerms({anchor, rankedTokens[i].token.normalized}, 0.68f);
-        }
-    }
-
-    for (size_t i = 0; i < rankedTokens.size() && i < 6 && clauses.size() < maxClauses; ++i) {
-        addClause(rankedTokens[i].token.normalized, 0.55f);
-    }
-
-    return clauses;
-}
-
 Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& query,
                                                           const SearchParams& params) {
     YAMS_ZONE_SCOPED_N("search_engine::execute");
@@ -1582,6 +1034,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     size_t multiVectorPhraseHits = 0;
     size_t multiVectorAddedNewCount = 0;
     size_t multiVectorReplacedBaseCount = 0;
+    size_t graphDocExpansionTermCount = 0;
+    size_t graphDocExpansionFtsHitCount = 0;
+    size_t graphDocExpansionFtsAddedCount = 0;
     size_t graphVectorGeneratedTerms = 0;
     size_t graphVectorRawHitCount = 0;
     size_t graphVectorAddedNewCount = 0;
@@ -1617,6 +1072,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::vector<QueryConcept> concepts;
     bool conceptsMaterialized = false;
     std::vector<GraphExpansionTerm> graphExpansionTerms;
+    std::vector<GraphExpansionTerm> docSeedGraphTerms;
     bool graphExpansionMaterialized = false;
     if (conceptExtractor_) {
         conceptStart = std::chrono::steady_clock::now();
@@ -1715,8 +1171,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (waitForConcepts) {
             materializeConcepts(true);
         }
-        graphExpansionTerms =
-            generateGraphExpansionTerms(query, concepts, config_.graphExpansionMaxTerms);
+        graphExpansionTerms = generateGraphExpansionTerms(
+            kgStore_, query, concepts,
+            GraphExpansionConfig{.maxTerms = config_.graphExpansionMaxTerms,
+                                 .maxSeeds = config_.graphExpansionMaxSeeds,
+                                 .maxNeighbors = config_.graphMaxNeighbors});
         graphExpansionMaterialized = true;
     };
 
@@ -2147,6 +1606,88 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                       stats_.avgMetadataTimeMicros);
     }
 
+    if (config_.enableGraphQueryExpansion && kgStore_ && metadataRepo_ &&
+        !allComponentResults.empty()) {
+        const auto seedDocs =
+            collectGraphSeedDocs(allComponentResults, config_.graphExpansionMaxSeeds * 2);
+        docSeedGraphTerms = generateGraphExpansionTermsFromDocuments(
+            kgStore_, seedDocs,
+            GraphExpansionConfig{.maxTerms = config_.graphExpansionMaxTerms,
+                                 .maxSeeds = config_.graphExpansionMaxSeeds,
+                                 .maxNeighbors = config_.graphMaxNeighbors});
+        graphDocExpansionTermCount = docSeedGraphTerms.size();
+
+        if (!docSeedGraphTerms.empty()) {
+            std::unordered_set<std::string> existingDocIds;
+            existingDocIds.reserve(allComponentResults.size() * 2);
+            for (const auto& comp : allComponentResults) {
+                const auto docId = documentIdForTrace(comp.filePath, comp.documentHash);
+                if (!docId.empty()) {
+                    existingDocIds.insert(docId);
+                }
+            }
+
+            for (const auto& term : docSeedGraphTerms) {
+                auto searchResults =
+                    metadataRepo_->search(term.text, workingConfig.textMaxResults, 0);
+                if (!searchResults) {
+                    continue;
+                }
+                graphDocExpansionFtsHitCount += searchResults.value().results.size();
+
+                double minBm25 = 0.0;
+                double maxBm25 = 0.0;
+                bool rangeInitialized = false;
+                for (const auto& sr : searchResults.value().results) {
+                    if (!rangeInitialized) {
+                        minBm25 = maxBm25 = sr.score;
+                        rangeInitialized = true;
+                    } else {
+                        minBm25 = std::min(minBm25, sr.score);
+                        maxBm25 = std::max(maxBm25, sr.score);
+                    }
+                }
+
+                const size_t startRank = allComponentResults.size();
+                for (size_t rank = 0; rank < searchResults.value().results.size(); ++rank) {
+                    const auto& sr = searchResults.value().results[rank];
+                    const auto docId =
+                        documentIdForTrace(sr.document.filePath, sr.document.sha256Hash);
+                    if (!docId.empty() && existingDocIds.contains(docId)) {
+                        continue;
+                    }
+
+                    ComponentResult cr;
+                    cr.documentHash = sr.document.sha256Hash;
+                    cr.filePath = sr.document.filePath;
+                    cr.score = std::clamp(config_.graphExpansionFtsPenalty *
+                                              std::clamp(term.score, 0.2f, 1.0f) *
+                                              normalizedBm25Score(sr.score, config_.bm25NormDivisor,
+                                                                  minBm25, maxBm25),
+                                          0.0f, 1.0f);
+                    cr.source = ComponentResult::Source::Text;
+                    cr.rank = startRank + rank;
+                    cr.snippet =
+                        sr.snippet.empty() ? std::nullopt : std::optional<std::string>(sr.snippet);
+                    cr.debugInfo["graph_doc_expansion_term"] = term.text;
+                    allComponentResults.push_back(std::move(cr));
+                    if (!docId.empty()) {
+                        existingDocIds.insert(docId);
+                    }
+                    ++graphDocExpansionFtsAddedCount;
+                }
+            }
+
+            if (graphDocExpansionFtsAddedCount > 0) {
+                contributing.push_back("graph_doc_text");
+            }
+            spdlog::debug(
+                "graph_doc_text: seed_docs={} terms={} raw_hits={} added={} for query '{}'",
+                seedDocs.size(), docSeedGraphTerms.size(), graphDocExpansionFtsHitCount,
+                graphDocExpansionFtsAddedCount, query.substr(0, 60));
+        }
+    }
+
     // ============================================================================
     // Auxiliary vector expansion: sub-phrases and graph-derived labels both run additional
     // vector searches and merge into the vector component before fusion.
@@ -2165,6 +1706,21 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             materializeGraphExpansionTerms(config_.waitForConceptExtraction);
         }
         auto graphTerms = graphExpansionTerms;
+        for (const auto& term : docSeedGraphTerms) {
+            auto it = std::find_if(graphTerms.begin(), graphTerms.end(), [&](const auto& existing) {
+                return existing.text == term.text;
+            });
+            if (it == graphTerms.end()) {
+                graphTerms.push_back(term);
+            } else {
+                it->score = std::max(it->score, term.score);
+            }
+        }
+        std::stable_sort(graphTerms.begin(), graphTerms.end(),
+                         [](const auto& a, const auto& b) { return a.score > b.score; });
+        if (graphTerms.size() > config_.graphExpansionMaxTerms) {
+            graphTerms.resize(config_.graphExpansionMaxTerms);
+        }
         if (!config_.enableGraphQueryExpansion) {
             graphTerms.clear();
         }
@@ -2926,6 +2482,19 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(textExpansionStats.graphExpansionFtsHitCount);
     response.debugStats["graph_expansion_fts_added_count"] =
         std::to_string(textExpansionStats.graphExpansionFtsAddedCount);
+    response.debugStats["graph_doc_expansion_term_count"] =
+        std::to_string(graphDocExpansionTermCount);
+    response.debugStats["graph_doc_expansion_fts_hit_count"] =
+        std::to_string(graphDocExpansionFtsHitCount);
+    response.debugStats["graph_doc_expansion_fts_added_count"] =
+        std::to_string(graphDocExpansionFtsAddedCount);
+    if (!docSeedGraphTerms.empty()) {
+        json graphDocTerms = json::array();
+        for (const auto& term : docSeedGraphTerms) {
+            graphDocTerms.push_back({{"text", term.text}, {"score", term.score}});
+        }
+        response.debugStats["graph_doc_expansion_terms_json"] = graphDocTerms.dump();
+    }
     response.debugStats["graph_vector_generated_terms"] = std::to_string(graphVectorGeneratedTerms);
     response.debugStats["graph_vector_raw_hit_count"] = std::to_string(graphVectorRawHitCount);
     response.debugStats["graph_vector_added_new_count"] = std::to_string(graphVectorAddedNewCount);
@@ -3471,8 +3040,8 @@ SearchEngine::Impl::queryFullText(const std::string& query, size_t limit,
         if ((!baseFtsSucceeded || baseFtsHitCount == 0 || results.size() < 3) && metadataRepo_) {
             const size_t maxAggressiveClauses =
                 (!baseFtsSucceeded || baseFtsHitCount == 0) ? 10 : 6;
-            auto aggressiveClauses =
-                generateAggressiveFtsFallbackClauses(query, maxAggressiveClauses);
+            auto aggressiveClauses = generateAggressiveFtsFallbackClauses(
+                query, maxAggressiveClauses, lookupQueryTermIdf(query));
             if (expansionStats != nullptr) {
                 expansionStats->aggressiveClauseCount = aggressiveClauses.size();
             }
@@ -3512,7 +3081,11 @@ SearchEngine::Impl::queryFullText(const std::string& query, size_t limit,
             if (graphExpansionTerms != nullptr) {
                 graphTerms = *graphExpansionTerms;
             } else {
-                graphTerms = generateGraphExpansionTerms(query, {}, config_.graphExpansionMaxTerms);
+                graphTerms = generateGraphExpansionTerms(
+                    kgStore_, query, {},
+                    GraphExpansionConfig{.maxTerms = config_.graphExpansionMaxTerms,
+                                         .maxSeeds = config_.graphExpansionMaxSeeds,
+                                         .maxNeighbors = config_.graphMaxNeighbors});
             }
             if (expansionStats != nullptr) {
                 expansionStats->graphExpansionTermCount = graphTerms.size();

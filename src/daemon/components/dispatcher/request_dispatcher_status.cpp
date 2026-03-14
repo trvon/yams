@@ -800,6 +800,12 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                     std::to_string(serviceManager_->getEmbeddingInFlightJobs());
                 response.additionalStats["embed_svc_queued"] =
                     std::to_string(serviceManager_->getEmbeddingQueuedJobs());
+                response.additionalStats["embed_semantic_edges_created"] =
+                    std::to_string(serviceManager_->getEmbeddingSemanticEdgesCreated());
+                response.additionalStats["embed_semantic_docs_processed"] =
+                    std::to_string(serviceManager_->getEmbeddingSemanticDocsProcessed());
+                response.additionalStats["embed_semantic_update_errors"] =
+                    std::to_string(serviceManager_->getEmbeddingSemanticUpdateErrors());
                 if (auto piq = serviceManager_->getPostIngestQueue()) {
                     response.additionalStats["post_kg_queue_depth"] =
                         std::to_string(piq->kgQueueDepth());

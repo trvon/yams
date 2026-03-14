@@ -11,6 +11,10 @@ yams_vector = dependency('yams_vector', required: false)
 yams_search = static_library('yams_search',
   [
     'query_tokenizer.cpp',
+    'query_text_utils.cpp',
+    'graph_expansion.cpp',
+    'search_tracing.cpp',
+    'query_expansion.cpp',
     'query_parser.cpp',
     'query_literal_extractor.cpp',
     'search_results.cpp',

@@ -148,7 +148,6 @@ yams search "agent_id=opencode-<task-slug>" --type keyword --limit 50
 - **Naming**: Descriptive file names reflecting the feature under test (e.g., `dynamic_cap_sentinel_catch2_test.cpp`, `health_check_isolation_catch2_test.cpp`).
 - **TDD workflow**: Write tests first (red), implement fix (green), refactor. Tests should assert post-fix behavior and fail against pre-fix code.
 - **DynamicCap sentinel**: `UINT32_MAX` means "unset/no cap". `0` means "cap to zero concurrency". When resetting DynamicCaps in tests, use `UINT32_MAX` (requires `#include <climits>`), not `0`.
-- **Known pre-existing issues**: Several daemon infrastructure tests (`catch2_daemon_fsm`, `catch2_daemon_background`, `catch2_daemon_components`, `catch2_daemon_reranker`, `catch2_daemon_onnx_provider`) have fmt v12 linker errors. Some socket/coroutine tests have SIGSEGV crashes unrelated to tuning code.
 
 ## Repo Patterns To Reuse (High Signal)
 

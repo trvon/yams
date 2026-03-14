@@ -1941,7 +1941,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         if (initRes) {
             embeddingService->setProviders([this]() { return this->loadModelProvider(); },
                                            [this]() { return this->resolvePreferredModel(); },
-                                           [this]() { return this->vectorDatabase_; });
+                                           [this]() { return this->vectorDatabase_; },
+                                           [this]() { return this->getKgStore(); });
             embeddingService->start();
             std::atomic_store_explicit(&embeddingService_, std::move(embeddingService),
                                        std::memory_order_release);
@@ -3084,6 +3085,33 @@ uint64_t ServiceManager::getEmbeddingInferWarnCount() const {
         std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
     if (embeddingService) {
         return embeddingService->inferSubBatchWarnCount();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingSemanticEdgesCreated() const {
+    auto embeddingService =
+        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embeddingService) {
+        return embeddingService->semanticEdgesCreated();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingSemanticDocsProcessed() const {
+    auto embeddingService =
+        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embeddingService) {
+        return embeddingService->semanticDocsProcessed();
+    }
+    return 0;
+}
+
+uint64_t ServiceManager::getEmbeddingSemanticUpdateErrors() const {
+    auto embeddingService =
+        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+    if (embeddingService) {
+        return embeddingService->semanticUpdateErrors();
     }
     return 0;
 }

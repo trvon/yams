@@ -6,6 +6,7 @@
 #include <chrono>
 #include <yams/daemon/resource/abi_entity_extractor_adapter.h>
 #include <yams/plugins/entity_extractor_v2.h>
+#include <yams/search/query_text_utils.h>
 
 #include <algorithm>
 #include <functional>
@@ -27,40 +28,11 @@ constexpr float kMinConfidence = 0.4f;
 constexpr std::size_t kMaxEntityTextLen = 160;
 
 std::string toLowerCopy(std::string_view input) {
-    std::string out;
-    out.reserve(input.size());
-    for (unsigned char c : input) {
-        out.push_back(static_cast<char>(std::tolower(c)));
-    }
-    return out;
+    return yams::search::toLowerCopy(input);
 }
 
 std::string trimAndCollapse(std::string_view input) {
-    std::string out;
-    out.reserve(input.size());
-
-    bool inWs = false;
-    std::size_t start = 0;
-    while (start < input.size() && std::isspace(static_cast<unsigned char>(input[start]))) {
-        ++start;
-    }
-    std::size_t end = input.size();
-    while (end > start && std::isspace(static_cast<unsigned char>(input[end - 1]))) {
-        --end;
-    }
-
-    for (std::size_t i = start; i < end; ++i) {
-        unsigned char c = static_cast<unsigned char>(input[i]);
-        if (std::isspace(c)) {
-            if (!inWs) {
-                out.push_back(' ');
-                inWs = true;
-            }
-        } else {
-            out.push_back(static_cast<char>(c));
-            inWs = false;
-        }
-    }
+    std::string out = yams::search::trimAndCollapseWhitespace(input);
 
     while (!out.empty() && std::ispunct(static_cast<unsigned char>(out.front())) &&
            out.front() != '_' && out.front() != '-') {
