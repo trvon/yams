@@ -32,6 +32,7 @@
 #include <yams/ingest/ingest_helpers.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
+#include <yams/search/query_text_utils.h>
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
@@ -46,6 +47,11 @@ namespace {
 constexpr size_t kMaxGlinerChars = 2000;
 constexpr float kMinTitleConfidence = 0.55f;
 constexpr float kMinNlEntityConfidence = 0.45f;
+const std::unordered_set<std::string> kLowValueNlEntityTexts = {
+    "encoded protein product", "crossover products", "study participants", "control group",
+    "treatment group",         "study period",       "follow up",          "follow-up",
+    "patient cohort",
+};
 
 std::string normalizeGraphPath(const std::string& path) {
     if (path.empty()) {
@@ -66,29 +72,127 @@ std::string makePathFileNodeKey(const std::string& path) {
 }
 
 std::string normalizeEntityTextForKey(std::string_view text) {
-    std::string out;
-    out.reserve(text.size());
+    return yams::search::normalizeEntityTextForKey(text);
+}
 
-    bool inWs = false;
+bool looksLikeBiomedicalSymbol(std::string_view text) {
+    size_t alphaCount = 0;
+    size_t digitCount = 0;
+    size_t upperCount = 0;
     for (unsigned char c : text) {
-        if (std::isspace(c)) {
-            if (!inWs) {
-                out.push_back(' ');
-                inWs = true;
+        if (std::isalpha(c)) {
+            ++alphaCount;
+            if (std::isupper(c)) {
+                ++upperCount;
             }
-            continue;
+        } else if (std::isdigit(c)) {
+            ++digitCount;
         }
-        out.push_back(static_cast<char>(std::tolower(c)));
-        inWs = false;
     }
+    if (text.size() < 2 || text.size() > 24) {
+        return false;
+    }
+    if (alphaCount == 0) {
+        return false;
+    }
+    if (digitCount > 0 && upperCount > 0) {
+        return true;
+    }
+    if (upperCount >= 2 && alphaCount == upperCount && text.size() <= 8) {
+        return true;
+    }
+    return false;
+}
 
-    while (!out.empty() && std::isspace(static_cast<unsigned char>(out.front()))) {
-        out.erase(out.begin());
+std::string canonicalizeNlEntityType(std::string_view rawType, std::string_view rawText) {
+    std::string type = normalizeEntityTextForKey(rawType);
+    const std::string text = normalizeEntityTextForKey(rawText);
+
+    if (looksLikeBiomedicalSymbol(rawText) || text.starts_with("il ") || text.starts_with("cd") ||
+        text.find("protein") != std::string::npos || text.find("receptor") != std::string::npos ||
+        text.find("kinase") != std::string::npos || text.find("interleukin") != std::string::npos ||
+        text.find("tet") != std::string::npos || text.find("erg") != std::string::npos) {
+        return "protein";
     }
-    while (!out.empty() && std::isspace(static_cast<unsigned char>(out.back()))) {
-        out.pop_back();
+    if (text.find("cell") != std::string::npos || text.find("bipolar") != std::string::npos ||
+        text.find("monocyte") != std::string::npos || text.find("stem cell") != std::string::npos) {
+        return "cell";
     }
-    return out;
+    if (text.find("cancer") != std::string::npos || text.find("disease") != std::string::npos ||
+        text.find("tumor") != std::string::npos || text.find("metast") != std::string::npos) {
+        return "disease";
+    }
+    if (type == "technology") {
+        return "method";
+    }
+    return type.empty() ? "concept" : type;
+}
+
+bool isLowValueNlEntity(std::string_view normalizedText, std::string_view normalizedType) {
+    if (normalizedText.empty()) {
+        return true;
+    }
+    if (kLowValueNlEntityTexts.find(std::string(normalizedText)) != kLowValueNlEntityTexts.end()) {
+        return true;
+    }
+    if (normalizedType == "date" || normalizedType == "time" || normalizedType == "duration" ||
+        normalizedType == "number" || normalizedType == "percentage" ||
+        normalizedType == "ordinal") {
+        return true;
+    }
+    if (normalizedText.find("january") != std::string::npos ||
+        normalizedText.find("february") != std::string::npos ||
+        normalizedText.find("march") != std::string::npos ||
+        normalizedText.find("april") != std::string::npos ||
+        normalizedText.find("june") != std::string::npos ||
+        normalizedText.find("july") != std::string::npos ||
+        normalizedText.find("august") != std::string::npos ||
+        normalizedText.find("september") != std::string::npos ||
+        normalizedText.find("october") != std::string::npos ||
+        normalizedText.find("november") != std::string::npos ||
+        normalizedText.find("december") != std::string::npos) {
+        return true;
+    }
+    return false;
+}
+
+bool isHighValueGraphType(std::string_view normalizedType) {
+    return normalizedType == "protein" || normalizedType == "gene" || normalizedType == "cell" ||
+           normalizedType == "disease" || normalizedType == "chemical" ||
+           normalizedType == "drug" || normalizedType == "pathway" ||
+           normalizedType == "biological_process" || normalizedType == "biomarker" ||
+           normalizedType == "anatomy" || normalizedType == "organism";
+}
+
+bool entityTextOverlapsTitle(std::string_view entityText, std::string_view titleText) {
+    const std::string normEntity = normalizeEntityTextForKey(entityText);
+    const std::string normTitle = normalizeEntityTextForKey(titleText);
+    if (normEntity.empty() || normTitle.empty()) {
+        return false;
+    }
+    return normTitle.find(normEntity) != std::string::npos ||
+           (normEntity.size() >= 4 && normEntity.find(normTitle) != std::string::npos);
+}
+
+std::string coOccurrenceRelation(std::string_view lhsType, std::string_view rhsType) {
+    const bool lhsBio = isHighValueGraphType(lhsType);
+    const bool rhsBio = isHighValueGraphType(rhsType);
+    if (lhsBio && rhsBio) {
+        return "co_occurs_biomedical";
+    }
+    if ((lhsType == "protein" && rhsType == "cell") ||
+        (lhsType == "cell" && rhsType == "protein")) {
+        return "protein_cell_association";
+    }
+    if ((lhsType == "protein" && rhsType == "disease") ||
+        (lhsType == "disease" && rhsType == "protein")) {
+        return "protein_disease_association";
+    }
+    if ((lhsType == "drug" && rhsType == "disease") ||
+        (lhsType == "disease" && rhsType == "drug")) {
+        return "drug_disease_association";
+    }
+    return "co_mentioned_with";
 }
 
 bool isUsefulNlEntity(const search::QueryConcept& qc) {
@@ -107,7 +211,16 @@ bool isUsefulNlEntity(const search::QueryConcept& qc) {
             break;
         }
     }
-    return hasAlphaNum;
+    if (!hasAlphaNum) {
+        return false;
+    }
+
+    const std::string normalizedText = normalizeEntityTextForKey(qc.text);
+    const std::string normalizedType = canonicalizeNlEntityType(qc.type, qc.text);
+    if (isLowValueNlEntity(normalizedText, normalizedType)) {
+        return false;
+    }
+    return true;
 }
 
 std::vector<std::pair<std::string, float>> buildNlAliasVariants(const std::string& entityText,
@@ -141,7 +254,7 @@ std::vector<std::pair<std::string, float>> buildNlAliasVariants(const std::strin
     std::string token;
     while (iss >> token) {
         std::string t = normalizeEntityTextForKey(token);
-        if (t.size() < 3) {
+        if (t.size() < 3 && !looksLikeBiomedicalSymbol(token)) {
             continue;
         }
         addVariant(t, 0.72f);
@@ -1843,7 +1956,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                     continue;
                 }
 
-                std::string key = normalizeEntityTextForKey(qc.type);
+                std::string key = canonicalizeNlEntityType(qc.type, qc.text);
                 key.push_back(':');
                 key.append(normalizeEntityTextForKey(qc.text));
 
@@ -1943,16 +2056,22 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
 
             // Build entity nodes and edges
             std::string targetNodeKey = !docNodeKey.empty() ? docNodeKey : fileNodeKey;
+            const std::string effectiveTitle = !fallbackTitle.empty() ? fallbackTitle : filePath;
             struct EntityRef {
                 std::string nodeKey;
+                std::string type;
+                std::string text;
                 float confidence{0.0f};
+                bool titleOverlap{false};
+                bool highValue{false};
             };
             std::vector<EntityRef> entityRefs;
             entityRefs.reserve(nlEntities.size());
 
             for (const auto* qc : nlEntities) {
                 std::string text = common::sanitizeUtf8(qc->text);
-                std::string type = common::sanitizeUtf8(qc->type);
+                std::string type =
+                    common::sanitizeUtf8(canonicalizeNlEntityType(qc->type, qc->text));
 
                 // Normalize text for canonical matching
                 std::string normalizedText = normalizeEntityTextForKey(text);
@@ -1975,7 +2094,10 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                 }
                 node.properties = props.dump();
                 batch->nodes.push_back(std::move(node));
-                entityRefs.push_back(EntityRef{nodeKey, qc->confidence});
+                const bool titleOverlap = entityTextOverlapsTitle(text, effectiveTitle);
+                const bool highValue = isHighValueGraphType(type);
+                entityRefs.push_back(
+                    EntityRef{nodeKey, type, text, qc->confidence, titleOverlap, highValue});
 
                 // Add aliases for query-time KG resolution. KGWriteQueue resolves nodeId from
                 // source when encoded as "source|nodeKey".
@@ -2006,6 +2128,24 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                     }
                     edge.properties = edgeProps.dump();
                     batch->deferredEdges.push_back(std::move(edge));
+
+                    if (titleOverlap) {
+                        DeferredEdge titleEdge;
+                        titleEdge.srcNodeKey = nodeKey;
+                        titleEdge.dstNodeKey = targetNodeKey;
+                        titleEdge.relation = "title_mentions";
+                        titleEdge.weight = std::min(1.0f, qc->confidence * 1.15f);
+
+                        nlohmann::json titleProps;
+                        titleProps["source"] = "gliner";
+                        titleProps["region"] = "title";
+                        titleProps["confidence"] = titleEdge.weight;
+                        if (!hash.empty()) {
+                            titleProps["snapshot_id"] = hash;
+                        }
+                        titleEdge.properties = titleProps.dump();
+                        batch->deferredEdges.push_back(std::move(titleEdge));
+                    }
                 }
 
                 // Add doc entity reference
@@ -2023,6 +2163,54 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                 }
             }
 
+            std::stable_sort(entityRefs.begin(), entityRefs.end(),
+                             [](const EntityRef& a, const EntityRef& b) {
+                                 if (a.titleOverlap != b.titleOverlap) {
+                                     return a.titleOverlap > b.titleOverlap;
+                                 }
+                                 if (a.highValue != b.highValue) {
+                                     return a.highValue > b.highValue;
+                                 }
+                                 return a.confidence > b.confidence;
+                             });
+
+            // Add stronger document semantics for top title/high-value entities.
+            constexpr std::size_t kMaxPrimaryTopicEdges = 3;
+            std::size_t primaryTopicCount = 0;
+            for (const auto& ref : entityRefs) {
+                if (primaryTopicCount >= kMaxPrimaryTopicEdges) {
+                    break;
+                }
+                if (!ref.highValue) {
+                    continue;
+                }
+                if (!ref.titleOverlap && ref.confidence < 0.78f) {
+                    continue;
+                }
+                if (targetNodeKey.empty()) {
+                    break;
+                }
+
+                DeferredEdge primaryEdge;
+                primaryEdge.srcNodeKey = ref.nodeKey;
+                primaryEdge.dstNodeKey = targetNodeKey;
+                primaryEdge.relation = "primary_topic_of";
+                primaryEdge.weight =
+                    std::min(1.0f, ref.confidence * (ref.titleOverlap ? 1.20f : 1.05f));
+
+                nlohmann::json primaryProps;
+                primaryProps["source"] = "gliner";
+                primaryProps["confidence"] = primaryEdge.weight;
+                primaryProps["title_overlap"] = ref.titleOverlap;
+                primaryProps["entity_type"] = ref.type;
+                if (!hash.empty()) {
+                    primaryProps["snapshot_id"] = hash;
+                }
+                primaryEdge.properties = primaryProps.dump();
+                batch->deferredEdges.push_back(std::move(primaryEdge));
+                ++primaryTopicCount;
+            }
+
             // Add bounded co-mention edges among strongest entities to enrich local graph
             // structure without exploding edge count.
             constexpr std::size_t kMaxCoMentionEntities = 12;
@@ -2038,13 +2226,22 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                     DeferredEdge coEdge;
                     coEdge.srcNodeKey = entityRefs[i].nodeKey;
                     coEdge.dstNodeKey = entityRefs[j].nodeKey;
-                    coEdge.relation = "co_mentioned_with";
+                    coEdge.relation = coOccurrenceRelation(entityRefs[i].type, entityRefs[j].type);
+                    const float confidenceFloor =
+                        (entityRefs[i].highValue && entityRefs[j].highValue) ? 0.10f : 0.05f;
                     coEdge.weight = std::max(
-                        0.05f, std::min(entityRefs[i].confidence, entityRefs[j].confidence) * 0.5f);
+                        confidenceFloor,
+                        std::min(entityRefs[i].confidence, entityRefs[j].confidence) *
+                            ((entityRefs[i].titleOverlap || entityRefs[j].titleOverlap) ? 0.75f
+                                                                                        : 0.5f));
 
                     nlohmann::json edgeProps;
                     edgeProps["source"] = "gliner";
                     edgeProps["confidence"] = coEdge.weight;
+                    edgeProps["lhs_type"] = entityRefs[i].type;
+                    edgeProps["rhs_type"] = entityRefs[j].type;
+                    edgeProps["title_overlap_pair"] =
+                        entityRefs[i].titleOverlap || entityRefs[j].titleOverlap;
                     edgeProps["provenance"] =
                         nlohmann::json{{"source", "gliner"}, {"confidence", coEdge.weight}};
                     if (!hash.empty()) {

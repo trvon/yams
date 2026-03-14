@@ -2,6 +2,7 @@
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/search/kg_scorer.h>
 #include <yams/search/kg_scorer_simple.h>
+#include <yams/search/query_text_utils.h>
 
 #include <algorithm>
 #include <cctype>
@@ -62,8 +63,22 @@ public:
         // 1) Build query node set from query text
         auto query_aliases = tokenize(query_text);
         std::unordered_set<std::int64_t> query_nodes;
+        std::unordered_map<std::int64_t, metadata::KGNode> nodeCache;
 
-        // Resolve aliases to nodes (budget-aware)
+        const auto getNodeCached = [&](std::int64_t nodeId) -> std::optional<metadata::KGNode> {
+            auto it = nodeCache.find(nodeId);
+            if (it != nodeCache.end()) {
+                return it->second;
+            }
+            auto nodeRes = store_->getNodeById(nodeId);
+            if (!nodeRes || !nodeRes.value().has_value()) {
+                return std::nullopt;
+            }
+            nodeCache.emplace(nodeId, *nodeRes.value());
+            return *nodeRes.value();
+        };
+
+        // Resolve aliases/phrases to nodes (budget-aware)
         for (const auto& a : query_aliases) {
             if (timedOut(t0))
                 break;
@@ -74,26 +89,42 @@ public:
                 return exact.error();
 
             if (exact.value().empty()) {
-                // Fallback to fuzzy/FTS if enabled by store config
-                auto fuzzy = store_->resolveAliasFuzzy(a, 16);
-                if (!fuzzy)
-                    return fuzzy.error();
-                if (fuzzy.value().empty()) {
-                    auto labelMatches = store_->searchNodesByLabel(a, 16, 0);
-                    if (!labelMatches) {
-                        return labelMatches.error();
-                    }
+                // For claim-style biomedical queries, labels are often more reliable than
+                // alias FTS. Prefer label lookup before fuzzy alias expansion.
+                auto labelMatches = store_->searchNodesByLabel(a, 16, 0);
+                if (!labelMatches) {
+                    return labelMatches.error();
+                }
+                if (!labelMatches.value().empty()) {
                     for (const auto& node : labelMatches.value()) {
-                        query_nodes.insert(node.id);
+                        if (nodeTypeWeight(node.type, node.label.value_or("")) > 0.10f) {
+                            query_nodes.insert(node.id);
+                        }
                     }
                 } else {
+                    // Fallback to fuzzy/FTS if enabled by store config
+                    auto fuzzy = store_->resolveAliasFuzzy(a, 16);
+                    if (!fuzzy)
+                        return fuzzy.error();
                     for (const auto& ar : fuzzy.value()) {
-                        query_nodes.insert(ar.nodeId);
+                        const auto node = getNodeCached(ar.nodeId);
+                        const float weight =
+                            node.has_value() ? nodeTypeWeight(node->type, node->label.value_or(""))
+                                             : 0.60f;
+                        if (weight > 0.10f) {
+                            query_nodes.insert(ar.nodeId);
+                        }
                     }
                 }
             } else {
                 for (const auto& ar : exact.value()) {
-                    query_nodes.insert(ar.nodeId);
+                    const auto node = getNodeCached(ar.nodeId);
+                    const float weight = node.has_value()
+                                             ? nodeTypeWeight(node->type, node->label.value_or(""))
+                                             : 0.60f;
+                    if (weight > 0.10f) {
+                        query_nodes.insert(ar.nodeId);
+                    }
                 }
             }
         }
@@ -154,9 +185,37 @@ public:
             // Build candidate node set
             std::unordered_set<std::int64_t> cand_nodes;
             cand_nodes.reserve(ents.size());
+            float bestSurfaceSignal = 0.0f;
+            float bestQueryCoverage = 0.0f;
+            float bestTypeWeight = 0.0f;
+            std::string bestSurfaceLabel;
             for (const auto& de : ents) {
+                std::optional<metadata::KGNode> node;
                 if (de.nodeId.has_value()) {
-                    cand_nodes.insert(de.nodeId.value());
+                    node = getNodeCached(de.nodeId.value());
+                    const float weight = node.has_value()
+                                             ? nodeTypeWeight(node->type, node->label.value_or(""))
+                                             : 0.60f;
+                    if (weight > 0.10f) {
+                        cand_nodes.insert(de.nodeId.value());
+                    }
+                }
+
+                const std::string label =
+                    node.has_value() ? node->label.value_or(de.entityText) : de.entityText;
+                const float typeWeight = nodeTypeWeight(
+                    node.has_value() ? node->type : std::optional<std::string>{}, label);
+                const float confidence = de.confidence.value_or(1.0f);
+                const float surfaceScore = std::max(surfaceMatchScore(query_aliases, de.entityText),
+                                                    surfaceMatchScore(query_aliases, label));
+                if (surfaceScore > 0.0f) {
+                    const float weighted = clamp01(surfaceScore * typeWeight * confidence);
+                    if (weighted > bestSurfaceSignal) {
+                        bestSurfaceSignal = weighted;
+                        bestTypeWeight = typeWeight;
+                        bestSurfaceLabel = label;
+                    }
+                    bestQueryCoverage = std::max(bestQueryCoverage, clamp01(surfaceScore));
                 }
             }
             expl.components["candidate_node_count"] = static_cast<double>(cand_nodes.size());
@@ -167,7 +226,7 @@ public:
             // Structural score: neighbor overlap normalized by candidate size
             const float structural = structuralOverlap(query_neighbor_union, cand_nodes);
 
-            s.entity = clamp01(entity);
+            s.entity = std::max(clamp01(entity), bestSurfaceSignal);
             s.structural = clamp01(structural);
             // Auxiliary, normalized features
             // Overlap ratios relative to candidate and query sets (when non-zero)
@@ -183,6 +242,11 @@ public:
             if (qry_den > 0.0f) {
                 s.features["feature_query_coverage_ratio"] = std::min(
                     1.0f, static_cast<float>(intersectionSize(query_nodes, cand_nodes)) / qry_den);
+            } else if (bestQueryCoverage > 0.0f) {
+                s.features["feature_query_coverage_ratio"] = bestQueryCoverage;
+            }
+            if (bestSurfaceSignal > 0.0f) {
+                s.features["feature_surface_match_ratio"] = bestSurfaceSignal;
             }
 
             // Relation diversity: count distinct relations from candidate nodes that touch the
@@ -258,12 +322,24 @@ public:
                     expl.reasons.emplace_back(
                         "Candidate entities are neighbors of query-linked entities");
                 }
+                if (bestSurfaceSignal > 0.0f) {
+                    expl.components["surface_match_score"] = bestSurfaceSignal;
+                    expl.components["surface_type_weight"] = bestTypeWeight;
+                    expl.reasons.emplace_back("Candidate entity labels overlap query phrases: " +
+                                              bestSurfaceLabel);
+                }
             } else {
                 if (query_nodes.empty()) {
                     expl.reasons.emplace_back("No query entities resolved from KG aliases/labels");
                 }
                 if (cand_nodes.empty()) {
                     expl.reasons.emplace_back("Candidate has no linked KG entities");
+                }
+                if (bestSurfaceSignal > 0.0f) {
+                    expl.components["surface_match_score"] = bestSurfaceSignal;
+                    expl.components["surface_type_weight"] = bestTypeWeight;
+                    expl.reasons.emplace_back("Candidate entity labels overlap query phrases: " +
+                                              bestSurfaceLabel);
                 }
             }
             last_expl_.push_back(std::move(expl));
@@ -276,6 +352,116 @@ public:
 
 private:
     // Helpers
+    static std::vector<std::string> tokenizeSurface(std::string_view text) {
+        std::vector<std::string> out;
+        std::string cur;
+        for (unsigned char uc : text) {
+            if (std::isalnum(uc)) {
+                cur.push_back(static_cast<char>(std::tolower(uc)));
+            } else if (!cur.empty()) {
+                out.push_back(cur);
+                cur.clear();
+            }
+        }
+        if (!cur.empty()) {
+            out.push_back(cur);
+        }
+        return out;
+    }
+
+    static std::string normalizeSurface(std::string_view text) {
+        return normalizeGraphSurface(text);
+    }
+
+    static float nodeTypeWeight(const std::optional<std::string>& typeOpt,
+                                std::string_view labelView) {
+        std::string type;
+        if (typeOpt.has_value()) {
+            type.reserve(typeOpt->size());
+            for (unsigned char uc : *typeOpt) {
+                type.push_back(static_cast<char>(std::tolower(uc)));
+            }
+        }
+        const std::string label = normalizeSurface(labelView);
+
+        if (type == "date" || type == "time" || type == "duration" || type == "number" ||
+            type == "percentage" || type == "money" || type == "ordinal") {
+            return 0.0f;
+        }
+        if (label.find("january") != std::string::npos ||
+            label.find("february") != std::string::npos ||
+            label.find("march") != std::string::npos || label.find("april") != std::string::npos ||
+            label.find("may ") != std::string::npos || label.find("june") != std::string::npos ||
+            label.find("july") != std::string::npos || label.find("august") != std::string::npos ||
+            label.find("september") != std::string::npos ||
+            label.find("october") != std::string::npos ||
+            label.find("november") != std::string::npos ||
+            label.find("december") != std::string::npos) {
+            return 0.0f;
+        }
+        if (type == "gene" || type == "protein" || type == "receptor" || type == "cell" ||
+            type == "cell_type" || type == "disease" || type == "chemical" || type == "drug" ||
+            type == "pathway" || type == "biological_process" || type == "mutation" ||
+            type == "anatomy" || type == "organism" || type == "species" || type == "biomarker") {
+            return 1.0f;
+        }
+        if (type == "product") {
+            return 0.45f;
+        }
+        if (type == "location") {
+            return 0.25f;
+        }
+        if (type == "person" || type == "organization") {
+            return 0.15f;
+        }
+        if (label == "encoded protein product" || label == "plasma membrane" ||
+            label == "cell membrane" || label == "crossover products") {
+            return 0.10f;
+        }
+        return 0.60f;
+    }
+
+    static float surfaceMatchScore(const std::vector<std::string>& queryAliases,
+                                   std::string_view surface) {
+        const std::string normSurface = normalizeSurface(surface);
+        if (normSurface.empty()) {
+            return 0.0f;
+        }
+        const auto surfaceTokens = tokenizeSurface(normSurface);
+        const std::unordered_set<std::string> surfaceSet(surfaceTokens.begin(),
+                                                         surfaceTokens.end());
+
+        float best = 0.0f;
+        for (const auto& alias : queryAliases) {
+            if (alias.empty()) {
+                continue;
+            }
+            if (alias == normSurface) {
+                return 1.0f;
+            }
+            if (alias.size() >= 3 && (normSurface.find(alias) != std::string::npos ||
+                                      alias.find(normSurface) != std::string::npos)) {
+                best = std::max(best, 0.85f);
+            }
+            const auto aliasTokens = tokenizeSurface(alias);
+            if (aliasTokens.empty()) {
+                continue;
+            }
+            size_t overlap = 0;
+            for (const auto& tok : aliasTokens) {
+                if (surfaceSet.find(tok) != surfaceSet.end()) {
+                    ++overlap;
+                }
+            }
+            if (overlap > 0) {
+                const float coverage = static_cast<float>(overlap) /
+                                       static_cast<float>(std::max<size_t>(1, aliasTokens.size()));
+                best = std::max(best, coverage * 0.75f);
+            }
+        }
+        return best;
+    }
+
     static float clamp01(float v) {
         if (v < 0.0f)
             return 0.0f;
@@ -502,25 +688,76 @@ private:
             "has",  "have", "in",    "into", "is", "it",  "its",  "of",  "on",  "or",
             "that", "the",  "their", "this", "to", "was", "were", "with"};
 
+        const auto flushTokenVariants = [](const std::string& raw, std::vector<std::string>& dest) {
+            if (raw.empty()) {
+                return;
+            }
+
+            std::string lowered;
+            lowered.reserve(raw.size());
+            for (unsigned char uc : raw) {
+                lowered.push_back(static_cast<char>(std::tolower(uc)));
+            }
+            dest.push_back(lowered);
+
+            // Also split mixed biomedical tokens on alpha<->digit boundaries so forms like
+            // p16INK4A can contribute p16 / ink4a / p16 ink4a candidates.
+            std::vector<std::string> parts;
+            std::string current = lowered;
+            if (!current.empty()) {
+                std::string part;
+                part.push_back(current[0]);
+                for (size_t i = 1; i < current.size(); ++i) {
+                    const bool prevDigit = std::isdigit(static_cast<unsigned char>(current[i - 1]));
+                    const bool curDigit = std::isdigit(static_cast<unsigned char>(current[i]));
+                    if (prevDigit != curDigit && !part.empty()) {
+                        parts.push_back(part);
+                        part.clear();
+                    }
+                    part.push_back(current[i]);
+                }
+                if (!part.empty()) {
+                    parts.push_back(std::move(part));
+                }
+            }
+
+            if (parts.size() >= 2) {
+                for (const auto& p : parts) {
+                    if (p.size() >= 2) {
+                        dest.push_back(p);
+                    }
+                }
+                std::string joined = parts[0];
+                for (size_t i = 1; i < parts.size(); ++i) {
+                    joined.push_back(' ');
+                    joined += parts[i];
+                }
+                dest.push_back(std::move(joined));
+            }
+        };
+
         std::vector<std::string> tokens;
-        tokens.reserve(text.size() / 5 + 1);
+        tokens.reserve(text.size() / 4 + 1);
         std::string cur;
         for (unsigned char uc : text) {
             if (std::isalnum(uc)) {
-                cur.push_back(static_cast<char>(std::tolower(uc)));
+                cur.push_back(static_cast<char>(uc));
+            } else if (uc == '-' || uc == '/' || uc == '_') {
+                // Preserve biomedical compounds as token boundaries that still contribute a
+                // combined phrase via variant expansion.
+                flushTokenVariants(cur, tokens);
+                cur.clear();
             } else {
-                if (!cur.empty()) {
-                    tokens.push_back(cur);
-                    cur.clear();
-                }
+                flushTokenVariants(cur, tokens);
+                cur.clear();
             }
         }
-        if (!cur.empty())
-            tokens.push_back(cur);
+        flushTokenVariants(cur, tokens);
 
         // Prune obvious noise tokens before generating phrase aliases.
         std::vector<std::string> filtered;
         filtered.reserve(tokens.size());
+        std::unordered_set<std::string> seenFiltered;
         for (const auto& tok : tokens) {
             if (tok.size() < 2) {
                 continue;
@@ -528,23 +765,21 @@ private:
             if (kStopwords.find(tok) != kStopwords.end()) {
                 continue;
             }
-            filtered.push_back(tok);
+            if (seenFiltered.insert(tok).second) {
+                filtered.push_back(tok);
+            }
         }
 
         std::vector<std::string> out;
         out.reserve(filtered.size() * 3);
+        std::unordered_set<std::string> seenOut;
 
-        // Unigrams
-        for (const auto& tok : filtered) {
-            out.push_back(tok);
-        }
-
-        // N-grams (2..4) with soft cap to contain combinatorics.
+        // N-grams (4..2) first so phrase/entity labels are attempted before noisy unigrams.
         constexpr std::size_t kMaxN = 4;
         constexpr std::size_t kMaxAliases = 96;
-        for (std::size_t n = 2; n <= kMaxN; ++n) {
+        for (std::size_t n = kMaxN; n >= 2; --n) {
             if (filtered.size() < n) {
-                break;
+                continue;
             }
             for (std::size_t i = 0; i + n <= filtered.size(); ++i) {
                 std::string phrase = filtered[i];
@@ -552,10 +787,25 @@ private:
                     phrase.push_back(' ');
                     phrase.append(filtered[i + j]);
                 }
-                out.push_back(std::move(phrase));
+                if (seenOut.insert(phrase).second) {
+                    out.push_back(std::move(phrase));
+                }
                 if (out.size() >= kMaxAliases) {
                     return out;
                 }
+            }
+            if (n == 2) {
+                break;
+            }
+        }
+
+        // Unigrams after phrases.
+        for (const auto& tok : filtered) {
+            if (seenOut.insert(tok).second) {
+                out.push_back(tok);
+            }
+            if (out.size() >= kMaxAliases) {
+                break;
             }
         }
 

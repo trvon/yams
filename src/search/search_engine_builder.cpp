@@ -525,6 +525,38 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             spdlog::info("SearchEngine fusionEvidenceRescueMinScore overridden to {:.3f} via env",
                          cfg.fusionEvidenceRescueMinScore);
         }
+        if (auto graphQueryExpansion = getEnvBool("YAMS_SEARCH_ENABLE_GRAPH_QUERY_EXPANSION")) {
+            cfg.enableGraphQueryExpansion = *graphQueryExpansion;
+            spdlog::info("SearchEngine enableGraphQueryExpansion overridden to {} via env",
+                         cfg.enableGraphQueryExpansion);
+        }
+        if (auto graphExpansionMinHits = getEnvInt("YAMS_SEARCH_GRAPH_EXPANSION_MIN_HITS")) {
+            cfg.graphExpansionMinHits = static_cast<size_t>(std::max(0, *graphExpansionMinHits));
+            spdlog::info("SearchEngine graphExpansionMinHits overridden to {} via env",
+                         cfg.graphExpansionMinHits);
+        }
+        if (auto graphExpansionMaxTerms = getEnvInt("YAMS_SEARCH_GRAPH_EXPANSION_MAX_TERMS")) {
+            cfg.graphExpansionMaxTerms = static_cast<size_t>(std::max(0, *graphExpansionMaxTerms));
+            spdlog::info("SearchEngine graphExpansionMaxTerms overridden to {} via env",
+                         cfg.graphExpansionMaxTerms);
+        }
+        if (auto graphExpansionMaxSeeds = getEnvInt("YAMS_SEARCH_GRAPH_EXPANSION_MAX_SEEDS")) {
+            cfg.graphExpansionMaxSeeds = static_cast<size_t>(std::max(0, *graphExpansionMaxSeeds));
+            spdlog::info("SearchEngine graphExpansionMaxSeeds overridden to {} via env",
+                         cfg.graphExpansionMaxSeeds);
+        }
+        if (auto graphExpansionFtsPenalty =
+                getEnvFloat("YAMS_SEARCH_GRAPH_EXPANSION_FTS_PENALTY")) {
+            cfg.graphExpansionFtsPenalty = std::clamp(*graphExpansionFtsPenalty, 0.1f, 1.0f);
+            spdlog::info("SearchEngine graphExpansionFtsPenalty overridden to {:.3f} via env",
+                         cfg.graphExpansionFtsPenalty);
+        }
+        if (auto graphExpansionVectorPenalty =
+                getEnvFloat("YAMS_SEARCH_GRAPH_EXPANSION_VECTOR_PENALTY")) {
+            cfg.graphExpansionVectorPenalty = std::clamp(*graphExpansionVectorPenalty, 0.1f, 1.0f);
+            spdlog::info("SearchEngine graphExpansionVectorPenalty overridden to {:.3f} via env",
+                         cfg.graphExpansionVectorPenalty);
+        }
 
         if (auto adaptiveMinHits = getEnvInt("YAMS_SEARCH_ADAPTIVE_MIN_TIER1_HITS")) {
             cfg.adaptiveVectorSkipMinTier1Hits = static_cast<size_t>(std::max(0, *adaptiveMinHits));

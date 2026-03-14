@@ -4,8 +4,10 @@
 #include <yams/core/cpp23_features.hpp>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/search/graph_expansion.h>
 #include <yams/search/kg_scorer.h>
 #include <yams/search/kg_scorer_simple.h>
+#include <yams/search/query_text_utils.h>
 
 #include <algorithm>
 #include <chrono>
@@ -78,31 +80,6 @@ auto postWork(Work work, const std::optional<boost::asio::any_io_executor>& exec
     return future;
 }
 
-std::vector<std::string> tokenizeLower(const std::string& input) {
-    std::string normalized = input;
-    for (char& c : normalized) {
-        if (c == '\\') {
-            c = '/';
-        }
-    }
-    std::vector<std::string> tokens;
-    std::string current;
-    for (unsigned char c : normalized) {
-        if (std::isalnum(c)) {
-            current.push_back(static_cast<char>(std::tolower(c)));
-        } else {
-            if (!current.empty()) {
-                tokens.push_back(std::move(current));
-                current.clear();
-            }
-        }
-    }
-    if (!current.empty()) {
-        tokens.push_back(std::move(current));
-    }
-    return tokens;
-}
-
 std::string truncateSnippet(const std::string& content, size_t maxLen) {
     if (content.empty()) {
         return {};
@@ -115,44 +92,6 @@ std::string truncateSnippet(const std::string& content, size_t maxLen) {
     return out;
 }
 
-struct QueryToken {
-    std::string original;
-    std::string normalized;
-    size_t index = 0;
-};
-
-std::vector<QueryToken> tokenizeQueryTokens(const std::string& input) {
-    std::vector<QueryToken> tokens;
-    std::string currentOriginal;
-    std::string currentNormalized;
-
-    const auto flush = [&]() {
-        if (currentNormalized.empty()) {
-            currentOriginal.clear();
-            currentNormalized.clear();
-            return;
-        }
-        QueryToken token;
-        token.original = currentOriginal;
-        token.normalized = currentNormalized;
-        token.index = tokens.size();
-        tokens.push_back(std::move(token));
-        currentOriginal.clear();
-        currentNormalized.clear();
-    };
-
-    for (unsigned char c : input) {
-        if (std::isalnum(c)) {
-            currentOriginal.push_back(static_cast<char>(c));
-            currentNormalized.push_back(static_cast<char>(std::tolower(c)));
-        } else {
-            flush();
-        }
-    }
-    flush();
-    return tokens;
-}
-
 struct QueryExpansionStats {
     size_t generatedSubPhrases = 0;
     size_t subPhraseClauseCount = 0;
@@ -161,6 +100,9 @@ struct QueryExpansionStats {
     size_t aggressiveClauseCount = 0;
     size_t aggressiveFtsHitCount = 0;
     size_t aggressiveFtsAddedCount = 0;
+    size_t graphExpansionTermCount = 0;
+    size_t graphExpansionFtsHitCount = 0;
+    size_t graphExpansionFtsAddedCount = 0;
 };
 
 struct FtsFallbackClause {
@@ -305,6 +247,94 @@ generateAnchoredSubPhrases(const std::string& query, size_t maxPhrases,
     }
 
     return phrases;
+}
+
+std::string inferFallbackConceptType(std::string_view text) {
+    const std::string normalized = normalizeGraphSurface(text);
+    const auto hasDigit =
+        std::any_of(text.begin(), text.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+    const auto hasUpper =
+        std::any_of(text.begin(), text.end(), [](unsigned char c) { return std::isupper(c) != 0; });
+    if ((hasDigit && hasUpper) || normalized.starts_with("cd") || normalized.starts_with("il ") ||
+        normalized.find("protein") != std::string::npos ||
+        normalized.find("receptor") != std::string::npos ||
+        normalized.find("kinase") != std::string::npos) {
+        return "protein";
+    }
+    if (normalized.find("cell") != std::string::npos ||
+        normalized.find("bipolar") != std::string::npos ||
+        normalized.find("monocyte") != std::string::npos ||
+        normalized.find("stem cell") != std::string::npos) {
+        return "cell";
+    }
+    if (normalized.find("cancer") != std::string::npos ||
+        normalized.find("disease") != std::string::npos ||
+        normalized.find("tumor") != std::string::npos ||
+        normalized.find("metast") != std::string::npos) {
+        return "disease";
+    }
+    if (normalized.find("pathway") != std::string::npos ||
+        normalized.find("response") != std::string::npos ||
+        normalized.find("activation") != std::string::npos ||
+        normalized.find("inhibition") != std::string::npos) {
+        return "biological_process";
+    }
+    return "concept";
+}
+
+std::vector<QueryConcept>
+generateFallbackQueryConcepts(const std::string& query,
+                              const std::unordered_map<std::string, float>& idfByToken,
+                              size_t maxConcepts) {
+    if (maxConcepts == 0) {
+        return {};
+    }
+
+    std::vector<QueryConcept> out;
+    out.reserve(maxConcepts);
+    std::unordered_set<std::string> seen;
+
+    auto addConcept = [&](std::string text, float confidence) {
+        const std::string normalized = normalizeGraphSurface(text);
+        if (normalized.size() < 3 || !seen.insert(normalized).second || out.size() >= maxConcepts) {
+            return;
+        }
+        QueryConcept qc;
+        qc.text = std::move(text);
+        qc.type = inferFallbackConceptType(qc.text);
+        qc.confidence = std::clamp(confidence, 0.2f, 0.8f);
+        qc.startOffset = 0;
+        qc.endOffset = static_cast<uint32_t>(qc.text.size());
+        out.push_back(std::move(qc));
+    };
+
+    for (const auto& phrase : generateAnchoredSubPhrases(query, maxConcepts, &idfByToken)) {
+        addConcept(phrase, 0.62f);
+    }
+
+    auto tokens = tokenizeQueryTokens(query);
+    std::vector<std::pair<std::string, float>> rankedTokens;
+    rankedTokens.reserve(tokens.size());
+    for (const auto& token : tokens) {
+        if (token.normalized.size() < 2) {
+            continue;
+        }
+        float score = tokenFallbackSalience(token);
+        if (auto it = idfByToken.find(token.normalized); it != idfByToken.end()) {
+            score += it->second;
+        }
+        rankedTokens.emplace_back(token.original, score);
+    }
+    std::stable_sort(rankedTokens.begin(), rankedTokens.end(),
+                     [](const auto& a, const auto& b) { return a.second > b.second; });
+    for (const auto& [text, score] : rankedTokens) {
+        addConcept(text, 0.45f + std::min(0.25f, score * 0.02f));
+        if (out.size() >= maxConcepts) {
+            break;
+        }
+    }
+
+    return out;
 }
 
 bool envFlagEnabled(const char* name) {
@@ -535,6 +565,110 @@ json buildFusionTopSummaryJson(const std::vector<SearchResult>& results, size_t 
     return out;
 }
 
+std::optional<std::int64_t>
+resolveKgDocumentId(const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
+                    const metadata::DocumentInfo& doc) {
+    if (!kgStore) {
+        return std::nullopt;
+    }
+    if (!doc.sha256Hash.empty()) {
+        auto byHash = kgStore->getDocumentIdByHash(doc.sha256Hash);
+        if (byHash && byHash.value().has_value()) {
+            return byHash.value();
+        }
+    }
+    if (!doc.filePath.empty()) {
+        auto byPath = kgStore->getDocumentIdByPath(doc.filePath);
+        if (byPath && byPath.value().has_value()) {
+            return byPath.value();
+        }
+    }
+    return std::nullopt;
+}
+
+json buildGraphDocProbeJson(const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
+                            const std::vector<SearchResult>& results, size_t limit) {
+    json out = json::array();
+    if (!kgStore) {
+        return out;
+    }
+    const size_t maxDocs = std::min(limit, results.size());
+    for (size_t i = 0; i < maxDocs; ++i) {
+        const auto& result = results[i];
+        json item = {
+            {"doc_id", documentIdForTrace(result.document.filePath, result.document.sha256Hash)},
+            {"rank", i + 1},
+            {"score", result.score},
+            {"keyword_score", result.keywordScore.value_or(0.0)},
+            {"vector_score", result.vectorScore.value_or(0.0)},
+            {"kg_score", result.kgScore.value_or(0.0)},
+        };
+
+        auto docId = resolveKgDocumentId(kgStore, result.document);
+        if (!docId.has_value()) {
+            item["resolved_document_id"] = nullptr;
+            item["doc_entity_count"] = 0;
+            item["linked_node_count"] = 0;
+            item["entity_text_samples"] = json::array();
+            item["node_label_samples"] = json::array();
+            out.push_back(std::move(item));
+            continue;
+        }
+
+        item["resolved_document_id"] = *docId;
+        auto ents = kgStore->getDocEntitiesForDocument(*docId, 2000, 0);
+        if (!ents) {
+            item["doc_entity_count"] = -1;
+            item["linked_node_count"] = -1;
+            item["entity_lookup_error"] = ents.error().message;
+            out.push_back(std::move(item));
+            continue;
+        }
+
+        std::unordered_set<std::int64_t> uniqueNodeIds;
+        json entitySamples = json::array();
+        for (const auto& ent : ents.value()) {
+            if (ent.nodeId.has_value()) {
+                uniqueNodeIds.insert(*ent.nodeId);
+            }
+            if (entitySamples.size() < 5) {
+                entitySamples.push_back({
+                    {"text", ent.entityText},
+                    {"node_id", ent.nodeId.has_value() ? json(*ent.nodeId) : json(nullptr)},
+                    {"extractor", ent.extractor.value_or("")},
+                    {"confidence",
+                     ent.confidence.has_value() ? json(*ent.confidence) : json(nullptr)},
+                });
+            }
+        }
+
+        json nodeLabelSamples = json::array();
+        for (auto nodeIdVal : uniqueNodeIds) {
+            if (nodeLabelSamples.size() >= 5) {
+                break;
+            }
+            auto nodeRes = kgStore->getNodeById(nodeIdVal);
+            if (!nodeRes || !nodeRes.value().has_value()) {
+                continue;
+            }
+            const auto& node = *nodeRes.value();
+            nodeLabelSamples.push_back({
+                {"node_id", nodeIdVal},
+                {"label", node.label.value_or("")},
+                {"type", node.type.value_or("")},
+                {"node_key", node.nodeKey},
+            });
+        }
+
+        item["doc_entity_count"] = ents.value().size();
+        item["linked_node_count"] = uniqueNodeIds.size();
+        item["entity_text_samples"] = std::move(entitySamples);
+        item["node_label_samples"] = std::move(nodeLabelSamples);
+        out.push_back(std::move(item));
+    }
+    return out;
+}
+
 std::string_view::size_type ci_find(std::string_view haystack, std::string_view needle) {
     if (needle.empty()) {
         return 0;
@@ -741,22 +875,6 @@ void applyIntentWeights(SearchEngineConfig& config, QueryIntent intent) {
         case QueryIntent::Mixed:
             break;
     }
-}
-
-std::vector<std::string> tokenizeKgQuery(std::string_view query) {
-    static const std::unordered_set<std::string> kStopwords = {
-        "the", "a",   "an",   "and", "or",   "not",  "to",    "of",   "in",
-        "on",  "for", "with", "by",  "from", "is",   "are",   "was",  "were",
-        "be",  "as",  "at",   "it",  "this", "that", "these", "those"};
-
-    std::vector<std::string> tokens = tokenizeLower(std::string(query));
-    tokens.erase(std::remove_if(tokens.begin(), tokens.end(),
-                                [](const std::string& token) {
-                                    return token.size() < 2 ||
-                                           kStopwords.find(token) != kStopwords.end();
-                                }),
-                 tokens.end());
-    return tokens;
 }
 
 } // namespace
@@ -1237,7 +1355,8 @@ private:
 
     Result<std::vector<ComponentResult>>
     queryFullText(const std::string& query, size_t limit,
-                  QueryExpansionStats* expansionStats = nullptr);
+                  QueryExpansionStats* expansionStats = nullptr,
+                  const std::vector<GraphExpansionTerm>* graphExpansionTerms = nullptr);
     Result<std::vector<ComponentResult>> queryPathTree(const std::string& query, size_t limit);
     Result<std::vector<ComponentResult>> queryKnowledgeGraph(const std::string& query,
                                                              size_t limit);
@@ -1463,6 +1582,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     size_t multiVectorPhraseHits = 0;
     size_t multiVectorAddedNewCount = 0;
     size_t multiVectorReplacedBaseCount = 0;
+    size_t graphVectorGeneratedTerms = 0;
+    size_t graphVectorRawHitCount = 0;
+    size_t graphVectorAddedNewCount = 0;
+    size_t graphVectorReplacedBaseCount = 0;
 
     // Embedding generation may be launched eagerly or lazily depending on tiering strategy.
     std::optional<std::vector<float>> queryEmbedding;
@@ -1493,6 +1616,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::chrono::steady_clock::time_point conceptStart;
     std::vector<QueryConcept> concepts;
     bool conceptsMaterialized = false;
+    std::vector<GraphExpansionTerm> graphExpansionTerms;
+    bool graphExpansionMaterialized = false;
     if (conceptExtractor_) {
         conceptStart = std::chrono::steady_clock::now();
         conceptFuture = postWork(
@@ -1571,7 +1696,33 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             timedOut.push_back("concepts");
             conceptsMaterialized = true;
         }
+
+        if (conceptsMaterialized && concepts.empty()) {
+            auto idfByToken = lookupQueryTermIdf(query);
+            concepts =
+                generateFallbackQueryConcepts(query, idfByToken, workingConfig.conceptMaxCount);
+            if (!concepts.empty()) {
+                spdlog::debug("concepts: generated {} fallback query concepts for '{}'",
+                              concepts.size(), query.substr(0, 60));
+            }
+        }
     };
+
+    auto materializeGraphExpansionTerms = [&](bool waitForConcepts) {
+        if (graphExpansionMaterialized || !config_.enableGraphQueryExpansion) {
+            return;
+        }
+        if (waitForConcepts) {
+            materializeConcepts(true);
+        }
+        graphExpansionTerms =
+            generateGraphExpansionTerms(query, concepts, config_.graphExpansionMaxTerms);
+        graphExpansionMaterialized = true;
+    };
+
+    if (config_.enableGraphQueryExpansion && config_.waitForConceptExtraction) {
+        materializeGraphExpansionTerms(true);
+    }
 
     spdlog::debug("Search limit: userLimit={}, fusionCandidateLimit={}, textMax={}, vectorMax={}",
                   userLimit, fusionCandidateLimit, workingConfig.textMaxResults,
@@ -1697,9 +1848,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // --- TIER 1: Text + Path (fast, high precision) ---
             textFuture = schedule(
                 "text", config_.textWeight, stats_.textQueries, stats_.avgTextTimeMicros,
-                [this, &query, &workingConfig, &textExpansionStats]() {
+                [this, &query, &workingConfig, &textExpansionStats, &graphExpansionTerms]() {
                     YAMS_ZONE_SCOPED_N("component::text");
-                    return queryFullText(query, workingConfig.textMaxResults, &textExpansionStats);
+                    return queryFullText(query, workingConfig.textMaxResults, &textExpansionStats,
+                                         &graphExpansionTerms);
                 });
 
             pathFuture = schedule("path", config_.pathTreeWeight, stats_.pathTreeQueries,
@@ -1850,9 +2002,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // All components run in parallel
             textFuture = schedule(
                 "text", config_.textWeight, stats_.textQueries, stats_.avgTextTimeMicros,
-                [this, &query, &workingConfig, &textExpansionStats]() {
+                [this, &query, &workingConfig, &textExpansionStats, &graphExpansionTerms]() {
                     YAMS_ZONE_SCOPED_N("component::text");
-                    return queryFullText(query, workingConfig.textMaxResults, &textExpansionStats);
+                    return queryFullText(query, workingConfig.textMaxResults, &textExpansionStats,
+                                         &graphExpansionTerms);
                 });
 
             if (kgStore_) {
@@ -1949,7 +2102,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
         runSequential(
             [&]() {
-                return queryFullText(query, workingConfig.textMaxResults, &textExpansionStats);
+                return queryFullText(query, workingConfig.textMaxResults, &textExpansionStats,
+                                     &graphExpansionTerms);
             },
             "text", config_.textWeight, stats_.textQueries, stats_.avgTextTimeMicros);
 
@@ -1994,24 +2148,35 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
 
     // ============================================================================
-    // Multi-vector sub-phrase search (Tier 3 Feature 1)
-    // Decompose query into overlapping sub-phrases, embed each, run HNSW search,
-    // then merge results (max score per doc) with a decay penalty into the
-    // allComponentResults pool before fusion.
+    // Auxiliary vector expansion: sub-phrases and graph-derived labels both run additional
+    // vector searches and merge into the vector component before fusion.
     // ============================================================================
-    if (config_.enableMultiVectorQuery && queryEmbedding.has_value() && vectorDb_ &&
-        embeddingGen_) {
+    if ((config_.enableMultiVectorQuery || config_.enableGraphQueryExpansion) &&
+        queryEmbedding.has_value() && vectorDb_ && embeddingGen_) {
         YAMS_ZONE_SCOPED_N("multi_vector::sub_phrase_search");
         auto mvStart = std::chrono::steady_clock::now();
 
         auto subPhrases = generateQuerySubPhrases(query, config_.multiVectorMaxPhrases);
+        if (!config_.enableMultiVectorQuery) {
+            subPhrases.clear();
+        }
         multiVectorGeneratedPhrases = subPhrases.size();
+        if (!graphExpansionMaterialized) {
+            materializeGraphExpansionTerms(config_.waitForConceptExtraction);
+        }
+        auto graphTerms = graphExpansionTerms;
+        if (!config_.enableGraphQueryExpansion) {
+            graphTerms.clear();
+        }
+        graphVectorGeneratedTerms = graphTerms.size();
         size_t multiVecHits = 0;
         size_t baseVectorCount = 0;
 
-        if (!subPhrases.empty()) {
+        if (!subPhrases.empty() || !graphTerms.empty()) {
             spdlog::debug("multi_vector: generated {} sub-phrases from query '{}'",
                           subPhrases.size(), query.substr(0, 60));
+            spdlog::debug("graph_vector: generated {} graph terms from query '{}'",
+                          graphTerms.size(), query.substr(0, 60));
 
             std::vector<ComponentResult> nonVectorResults;
             nonVectorResults.reserve(allComponentResults.size());
@@ -2040,6 +2205,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             }
 
             const float decay = std::clamp(config_.multiVectorScoreDecay, 0.1f, 1.0f);
+            const float graphPenalty = std::clamp(config_.graphExpansionVectorPenalty, 0.1f, 1.0f);
 
             for (size_t pi = 0; pi < subPhrases.size(); ++pi) {
                 try {
@@ -2083,6 +2249,44 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 }
             }
 
+            for (size_t gi = 0; gi < graphTerms.size(); ++gi) {
+                try {
+                    auto graphEmbedding = embeddingGen_->generateEmbedding(graphTerms[gi].text);
+                    if (graphEmbedding.empty()) {
+                        continue;
+                    }
+                    auto graphResults =
+                        queryVectorIndex(graphEmbedding, workingConfig.vectorMaxResults);
+                    if (!graphResults || graphResults.value().empty()) {
+                        continue;
+                    }
+                    graphVectorRawHitCount += graphResults.value().size();
+
+                    for (const auto& rawResult : graphResults.value()) {
+                        ComponentResult cr = rawResult;
+                        if (cr.documentHash.empty()) {
+                            continue;
+                        }
+                        cr.score *= (graphPenalty * std::clamp(graphTerms[gi].score, 0.2f, 1.0f));
+                        cr.debugInfo["graph_vector_term"] = graphTerms[gi].text;
+                        cr.debugInfo["graph_vector_term_idx"] = std::to_string(gi);
+
+                        auto it = bestVectorByHash.find(cr.documentHash);
+                        if (it == bestVectorByHash.end()) {
+                            bestVectorByHash.emplace(cr.documentHash, mergedVectorResults.size());
+                            mergedVectorResults.push_back(std::move(cr));
+                            ++graphVectorAddedNewCount;
+                        } else if (cr.score > mergedVectorResults[it->second].score) {
+                            mergedVectorResults[it->second] = std::move(cr);
+                            ++graphVectorReplacedBaseCount;
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("graph_vector: term embedding failed for '{}': {}",
+                                 graphTerms[gi].text, e.what());
+                }
+            }
+
             std::sort(mergedVectorResults.begin(), mergedVectorResults.end(),
                       [](const auto& a, const auto& b) { return a.score > b.score; });
             if (mergedVectorResults.size() > workingConfig.vectorMaxResults) {
@@ -2104,11 +2308,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (multiVecHits > 0) {
             contributing.push_back("multi_vector");
         }
+        if (graphVectorAddedNewCount > 0 || graphVectorReplacedBaseCount > 0) {
+            contributing.push_back("graph_vector");
+        }
         spdlog::debug(
             "multi_vector: merged {} vector updates from {} sub-phrases "
             "(raw_hits={}, added={}, replaced={}, base_vectors={}, final_components={}) in {}us",
             multiVecHits, subPhrases.size(), multiVectorPhraseHits, multiVectorAddedNewCount,
             multiVectorReplacedBaseCount, baseVectorCount, allComponentResults.size(), mvDuration);
+        spdlog::debug(
+            "graph_vector: merged graph terms={} raw_hits={} added={} replaced={} in {}us",
+            graphTerms.size(), graphVectorRawHitCount, graphVectorAddedNewCount,
+            graphVectorReplacedBaseCount, mvDuration);
     }
 
     YAMS_PLOT("component_results_count", static_cast<int64_t>(allComponentResults.size()));
@@ -2312,6 +2523,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         });
                     }
                     response.debugStats["graph_explanations_json"] = graphExplainJson.dump();
+                    response.debugStats["graph_doc_probe_json"] =
+                        buildGraphDocProbeJson(kgStore_, response.results, rerankWindow).dump();
                 }
             } else {
                 failed.push_back("graph_rerank");
@@ -2707,6 +2920,17 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(textExpansionStats.aggressiveFtsHitCount);
     response.debugStats["aggressive_fts_added_count"] =
         std::to_string(textExpansionStats.aggressiveFtsAddedCount);
+    response.debugStats["graph_expansion_term_count"] =
+        std::to_string(textExpansionStats.graphExpansionTermCount);
+    response.debugStats["graph_expansion_fts_hit_count"] =
+        std::to_string(textExpansionStats.graphExpansionFtsHitCount);
+    response.debugStats["graph_expansion_fts_added_count"] =
+        std::to_string(textExpansionStats.graphExpansionFtsAddedCount);
+    response.debugStats["graph_vector_generated_terms"] = std::to_string(graphVectorGeneratedTerms);
+    response.debugStats["graph_vector_raw_hit_count"] = std::to_string(graphVectorRawHitCount);
+    response.debugStats["graph_vector_added_new_count"] = std::to_string(graphVectorAddedNewCount);
+    response.debugStats["graph_vector_replaced_base_count"] =
+        std::to_string(graphVectorReplacedBaseCount);
     response.debugStats["strong_vector_only_relief_enabled"] =
         config_.enableStrongVectorOnlyRelief ? "1" : "0";
     response.debugStats["strong_vector_only_min_score"] =
@@ -3035,7 +3259,8 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryPathTree(const std
 
 Result<std::vector<ComponentResult>>
 SearchEngine::Impl::queryFullText(const std::string& query, size_t limit,
-                                  QueryExpansionStats* expansionStats) {
+                                  QueryExpansionStats* expansionStats,
+                                  const std::vector<GraphExpansionTerm>* graphExpansionTerms) {
     std::vector<ComponentResult> results;
     results.reserve(limit);
 
@@ -3282,6 +3507,50 @@ SearchEngine::Impl::queryFullText(const std::string& query, size_t limit,
             }
         }
 
+        if (config_.enableGraphQueryExpansion && baseFtsHitCount < config_.graphExpansionMinHits) {
+            std::vector<GraphExpansionTerm> graphTerms;
+            if (graphExpansionTerms != nullptr) {
+                graphTerms = *graphExpansionTerms;
+            } else {
+                graphTerms = generateGraphExpansionTerms(query, {}, config_.graphExpansionMaxTerms);
+            }
+            if (expansionStats != nullptr) {
+                expansionStats->graphExpansionTermCount = graphTerms.size();
+            }
+
+            size_t totalGraphHits = 0;
+            const size_t beforeGraph = results.size();
+            for (const auto& term : graphTerms) {
+                auto graphResults = metadataRepo_->search(term.text, limit, 0);
+                if (!graphResults) {
+                    continue;
+                }
+                totalGraphHits += graphResults.value().results.size();
+                const float penalty = std::clamp(config_.graphExpansionFtsPenalty *
+                                                     std::clamp(term.score, 0.2f, 1.0f),
+                                                 0.1f, 1.0f);
+                appendResults(graphResults.value(), penalty, true, &seenHashes);
+            }
+
+            if (expansionStats != nullptr) {
+                expansionStats->graphExpansionFtsHitCount = totalGraphHits;
+                expansionStats->graphExpansionFtsAddedCount =
+                    results.size() > beforeGraph ? (results.size() - beforeGraph) : 0;
+            }
+
+            if (!graphTerms.empty()) {
+                std::vector<std::string> debugTerms;
+                debugTerms.reserve(graphTerms.size());
+                for (const auto& term : graphTerms) {
+                    debugTerms.push_back(term.text);
+                }
+                spdlog::debug("queryFullText graph expansion: base_hits={} graph_terms={} "
+                              "graph_hits={} final_hits={} query='{}' terms='{}'",
+                              baseFtsHitCount, graphTerms.size(), totalGraphHits, results.size(),
+                              query, fmt::join(debugTerms, " || "));
+            }
+        }
+
         spdlog::debug("queryFullText: {} results for query '{}' (limit={})", results.size(),
                       query.substr(0, 50), limit);
 
@@ -3325,30 +3594,11 @@ SearchEngine::Impl::queryKnowledgeGraph(const std::string& query, size_t limit) 
 
         for (const auto& tok : queryTokens) {
             auto aliasResults = kgStore_->resolveAliasExact(tok, aliasesPerToken);
-            bool usedFuzzy = false;
             if (!aliasResults || aliasResults.value().empty()) {
-                aliasResults = kgStore_->resolveAliasFuzzy(tok, aliasesPerToken);
-                usedFuzzy = true;
-            }
-
-            if (aliasResults && !aliasResults.value().empty()) {
-                for (const auto& alias : aliasResults.value()) {
-                    const float score = usedFuzzy ? alias.score * 0.8f : alias.score;
-                    // Track best score for each node (multiple tokens may match same node)
-                    auto it = nodeIdToScore.find(alias.nodeId);
-                    if (it == nodeIdToScore.end()) {
-                        nodeIdToScore[alias.nodeId] = score;
-                        aliases.push_back(alias);
-                    } else {
-                        // Boost score if multiple tokens match same node
-                        it->second = std::min(1.0f, it->second + score * 0.5f);
-                    }
-                }
-            } else {
                 auto labelMatches = kgStore_->searchNodesByLabel(tok, aliasesPerToken, 0);
-                if (labelMatches) {
+                if (labelMatches && !labelMatches.value().empty()) {
                     for (const auto& node : labelMatches.value()) {
-                        const float score = 0.75f;
+                        const float score = tok.find(' ') != std::string::npos ? 0.90f : 0.75f;
                         auto it = nodeIdToScore.find(node.id);
                         if (it == nodeIdToScore.end()) {
                             metadata::AliasResolution alias;
@@ -3360,6 +3610,33 @@ SearchEngine::Impl::queryKnowledgeGraph(const std::string& query, size_t limit) 
                             it->second = std::min(1.0f, it->second + score * 0.5f);
                         }
                     }
+                    continue;
+                }
+
+                auto fuzzyResults = kgStore_->resolveAliasFuzzy(tok, aliasesPerToken);
+                if (fuzzyResults && !fuzzyResults.value().empty()) {
+                    for (const auto& alias : fuzzyResults.value()) {
+                        const float score = alias.score * 0.8f;
+                        auto it = nodeIdToScore.find(alias.nodeId);
+                        if (it == nodeIdToScore.end()) {
+                            nodeIdToScore[alias.nodeId] = score;
+                            aliases.push_back(alias);
+                        } else {
+                            it->second = std::min(1.0f, it->second + score * 0.5f);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            for (const auto& alias : aliasResults.value()) {
+                const float score = alias.score;
+                auto it = nodeIdToScore.find(alias.nodeId);
+                if (it == nodeIdToScore.end()) {
+                    nodeIdToScore[alias.nodeId] = score;
+                    aliases.push_back(alias);
+                } else {
+                    it->second = std::min(1.0f, it->second + score * 0.5f);
                 }
             }
         }

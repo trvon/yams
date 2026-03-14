@@ -217,6 +217,15 @@ struct SearchEngineConfig {
     size_t subPhraseExpansionMinHits = 5;    // Trigger when primary FTS hits below this
     float subPhraseExpansionPenalty = 0.70f; // Score penalty for sub-phrase FTS results
 
+    // Graph-expanded retrieval: resolve query concepts/aliases into KG nodes, walk a small
+    // neighborhood, and use resulting entity labels as early FTS/vector expansion terms.
+    bool enableGraphQueryExpansion = false;    // Enable graph -> FTS/vector expansion pre-fusion
+    size_t graphExpansionMinHits = 8;          // Trigger when primary FTS hits below this threshold
+    size_t graphExpansionMaxTerms = 8;         // Max graph-derived labels/phrases to use
+    size_t graphExpansionMaxSeeds = 6;         // Max resolved query seed nodes
+    float graphExpansionFtsPenalty = 0.78f;    // Penalty applied to graph-expanded FTS matches
+    float graphExpansionVectorPenalty = 0.82f; // Penalty applied to graph-expanded vector matches
+
     /// Convert FusionStrategy to string for logging/debugging
     [[nodiscard]] static constexpr const char*
     fusionStrategyToString(FusionStrategy strategy) noexcept {
