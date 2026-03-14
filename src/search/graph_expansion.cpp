@@ -3,6 +3,7 @@
 
 #include <yams/search/graph_expansion.h>
 
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
 #include <unordered_map>
@@ -43,21 +44,84 @@ std::optional<std::string> documentHashFromDocNodeKey(std::string_view nodeKey) 
     return std::string(nodeKey.substr(kPrefix.size()));
 }
 
-float relationExpansionWeight(std::string_view relation) {
+float relationExpansionWeight(const metadata::KGEdge& edge) {
+    float base = 0.35f;
+    const auto& relation = edge.relation;
     if (relation == "primary_topic_of" || relation == "title_mentions") {
-        return 0.95f;
+        base = 0.95f;
+    } else if (relation == "mentioned_in_segment") {
+        base = 0.90f;
+    } else if (relation == "contains_segment" || relation == "segment_of") {
+        base = 0.55f;
+    } else if (relation == "co_occurs_biomedical" || relation == "protein_cell_association" ||
+               relation == "protein_disease_association" ||
+               relation == "drug_disease_association") {
+        base = 0.80f;
+    } else if (relation == "co_mentioned_with") {
+        base = 0.50f;
+    } else if (relation == "mentioned_in") {
+        base = 0.10f;
     }
-    if (relation == "co_occurs_biomedical" || relation == "protein_cell_association" ||
-        relation == "protein_disease_association" || relation == "drug_disease_association") {
-        return 0.80f;
+
+    if (edge.properties.has_value()) {
+        try {
+            auto props = nlohmann::json::parse(*edge.properties);
+            const std::string region = props.value("region", "");
+            const std::string scope = props.value("scope", "");
+            if (region == "body_claim" || scope == "body_segment") {
+                base *= 1.25f;
+            } else if (region == "title" || scope == "title") {
+                base *= 1.20f;
+            } else if (region == "summary" || scope == "summary") {
+                base *= 0.90f;
+            }
+        } catch (...) {
+        }
     }
-    if (relation == "co_mentioned_with") {
-        return 0.50f;
+
+    return std::clamp(base, 0.0f, 1.25f);
+}
+
+float surfaceQueryMatchScore(const std::vector<std::string>& queryAliases,
+                             std::string_view candidateText) {
+    const std::string normalizedCandidate = normalizeGraphSurface(candidateText);
+    if (normalizedCandidate.empty()) {
+        return 0.0f;
     }
-    if (relation == "mentioned_in") {
-        return 0.10f;
+    const auto candidateTokens = tokenizeKgQuery(normalizedCandidate);
+    const std::unordered_set<std::string> candidateSet(candidateTokens.begin(),
+                                                       candidateTokens.end());
+
+    float best = 0.0f;
+    for (const auto& alias : queryAliases) {
+        if (alias.empty()) {
+            continue;
+        }
+        if (alias == normalizedCandidate) {
+            return 1.0f;
+        }
+        if (alias.size() >= 4 && (normalizedCandidate.find(alias) != std::string::npos ||
+                                  alias.find(normalizedCandidate) != std::string::npos)) {
+            best = std::max(best, 0.85f);
+        }
+
+        const auto aliasTokens = tokenizeKgQuery(alias);
+        if (aliasTokens.empty()) {
+            continue;
+        }
+        size_t overlap = 0;
+        for (const auto& tok : aliasTokens) {
+            if (candidateSet.find(tok) != candidateSet.end()) {
+                ++overlap;
+            }
+        }
+        if (overlap > 0) {
+            const float coverage = static_cast<float>(overlap) /
+                                   static_cast<float>(std::max<size_t>(1, aliasTokens.size()));
+            best = std::max(best, coverage);
+        }
     }
-    return 0.35f;
+    return best;
 }
 
 } // namespace
@@ -341,7 +405,7 @@ generateGraphExpansionTerms(const std::shared_ptr<metadata::KnowledgeGraphStore>
             if (nodeWeight <= 0.0f) {
                 continue;
             }
-            const float relationWeight = relationExpansionWeight(edge.relation);
+            const float relationWeight = relationExpansionWeight(edge);
             addTerm(neighbor->label.value_or(neighbor->nodeKey),
                     seed.score * nodeWeight * relationWeight * std::clamp(edge.weight, 0.1f, 1.0f));
         }
@@ -361,10 +425,25 @@ generateGraphExpansionTerms(const std::shared_ptr<metadata::KnowledgeGraphStore>
 }
 
 std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
-    const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
-    const std::vector<GraphExpansionSeedDoc>& seedDocs, const GraphExpansionConfig& config) {
+    const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore, const std::string& query,
+    const std::vector<QueryConcept>& concepts, const std::vector<GraphExpansionSeedDoc>& seedDocs,
+    const GraphExpansionConfig& config) {
     if (!kgStore || config.maxTerms == 0 || seedDocs.empty()) {
         return {};
+    }
+
+    std::vector<std::string> queryAliases = tokenizeKgQuery(query);
+    queryAliases.reserve(queryAliases.size() + concepts.size() * 2);
+    for (const auto& qc : concepts) {
+        if (qc.text.empty() || qc.confidence < 0.35f) {
+            continue;
+        }
+        const std::string normalized = normalizeGraphSurface(qc.text);
+        if (normalized.size() >= 3) {
+            queryAliases.push_back(normalized);
+        }
+        const auto conceptTokens = tokenizeKgQuery(qc.text);
+        queryAliases.insert(queryAliases.end(), conceptTokens.begin(), conceptTokens.end());
     }
 
     std::vector<GraphExpansionSeedDoc> docs = seedDocs;
@@ -396,7 +475,12 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
         if (normalized.size() < 3) {
             return;
         }
-        termScores[normalized] = std::max(termScores[normalized], score);
+        const float queryMatch = surfaceQueryMatchScore(queryAliases, normalized);
+        if (queryMatch <= 0.0f) {
+            return;
+        }
+        termScores[normalized] =
+            std::max(termScores[normalized], score * std::clamp(queryMatch, 0.2f, 1.0f));
     };
 
     for (const auto& doc : docs) {
@@ -429,7 +513,27 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
             }
 
             const float baseScore = std::clamp(doc.score, 0.1f, 1.0f) * confidence * nodeWeight;
-            addTerm(node->label.value_or(node->nodeKey), baseScore);
+            float segmentBoost = 1.0f;
+            auto segEdges = kgStore->getEdgesFrom(
+                *ent.nodeId, std::string_view("mentioned_in_segment"), config.maxNeighbors, 0);
+            if (segEdges) {
+                for (const auto& segEdge : segEdges.value()) {
+                    if (!segEdge.properties.has_value()) {
+                        continue;
+                    }
+                    try {
+                        auto props = nlohmann::json::parse(*segEdge.properties);
+                        const std::string region = props.value("region", "");
+                        if (region == "body_claim") {
+                            segmentBoost = std::max(segmentBoost, 1.30f);
+                        } else if (region == "title") {
+                            segmentBoost = std::max(segmentBoost, 1.20f);
+                        }
+                    } catch (...) {
+                    }
+                }
+            }
+            addTerm(node->label.value_or(node->nodeKey), baseScore * segmentBoost);
 
             auto edges = kgStore->getEdgesFrom(*ent.nodeId, std::nullopt, config.maxNeighbors, 0);
             if (!edges) {
@@ -446,7 +550,7 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
                     continue;
                 }
                 addTerm(neighbor->label.value_or(neighbor->nodeKey),
-                        baseScore * neighborWeight * relationExpansionWeight(edge.relation) *
+                        baseScore * neighborWeight * relationExpansionWeight(edge) *
                             std::clamp(edge.weight, 0.1f, 1.0f));
             }
         }

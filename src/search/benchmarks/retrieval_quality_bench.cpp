@@ -519,7 +519,10 @@ struct QueryDiagnosticsSummary {
     std::uint64_t queryWithoutRelevantHitCount = 0;
     std::uint64_t queryWithRelevantInPreFusionCount = 0;
     std::uint64_t queryWithRelevantInPostFusionCount = 0;
+    std::uint64_t queryWithRelevantInGraphlessPostFusionCount = 0;
     std::uint64_t queryWithRelevantInFinalWindowCount = 0;
+    std::uint64_t queryWithGraphAddedRelevantPostFusionCount = 0;
+    std::uint64_t queryWithGraphDisplacedRelevantPostFusionCount = 0;
     std::uint64_t queryWithTopKDuplicateCount = 0;
     std::uint64_t degradedQueryCount = 0;
     std::uint64_t traceEnabledQueryCount = 0;
@@ -540,6 +543,8 @@ struct QueryDiagnosticsSummary {
     std::vector<double> strongVectorOnlyDocsSamples;
     std::vector<double> strongVectorOnlyScoreEligibleDocsSamples;
     std::vector<double> strongVectorOnlyRankEligibleDocsSamples;
+    std::vector<double> graphAddedPostFusionSamples;
+    std::vector<double> graphDisplacedPostFusionSamples;
     std::vector<double> multiVectorGeneratedPhraseSamples;
     std::vector<double> multiVectorRawHitSamples;
     std::vector<double> multiVectorAddedNewSamples;
@@ -582,6 +587,10 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
     const auto postSet = splitTabSet(searchStats.contains("trace_post_fusion_doc_ids")
                                          ? searchStats.at("trace_post_fusion_doc_ids")
                                          : "");
+    const auto graphlessPostSet =
+        splitTabSet(searchStats.contains("trace_graphless_post_fusion_doc_ids")
+                        ? searchStats.at("trace_graphless_post_fusion_doc_ids")
+                        : "");
     const auto finalWindowSet = splitTabSet(
         searchStats.contains("trace_final_doc_ids") ? searchStats.at("trace_final_doc_ids") : "");
     const std::unordered_set<std::string> returnedTopKSet(returnedDocIds.begin(),
@@ -624,18 +633,30 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
     json relevant = json::array();
     bool anyPre = false;
     bool anyPost = false;
+    bool anyGraphlessPost = false;
     bool anyFinalWindow = false;
     bool anyReturnedTopK = false;
+    json graphAddedRelevant = json::array();
+    json graphDisplacedRelevant = json::array();
 
     for (const auto& docId : relevantDocIds) {
         const bool inPre = preSet.contains(docId);
         const bool inPost = postSet.contains(docId);
+        const bool inGraphlessPost = graphlessPostSet.contains(docId);
         const bool inFinalWindow = finalWindowSet.contains(docId);
         const bool inReturnedTopK = returnedTopKSet.contains(docId);
         anyPre = anyPre || inPre;
         anyPost = anyPost || inPost;
+        anyGraphlessPost = anyGraphlessPost || inGraphlessPost;
         anyFinalWindow = anyFinalWindow || inFinalWindow;
         anyReturnedTopK = anyReturnedTopK || inReturnedTopK;
+
+        if (inPost && !inGraphlessPost) {
+            graphAddedRelevant.push_back(docId);
+        }
+        if (inGraphlessPost && !inPost) {
+            graphDisplacedRelevant.push_back(docId);
+        }
 
         json componentSources = json::array();
         if (componentHits.is_object()) {
@@ -660,6 +681,7 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
             {"doc_id", docId},
             {"in_pre_fusion", inPre},
             {"in_post_fusion", inPost},
+            {"in_graphless_post_fusion", inGraphlessPost},
             {"in_final_window", inFinalWindow},
             {"in_returned_topk", inReturnedTopK},
             {"component_top_hits", componentSources},
@@ -696,8 +718,13 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
                                      searchStats.at("trace_cross_rerank_applied") == "1"},
         {"any_relevant_in_pre_fusion", anyPre},
         {"any_relevant_in_post_fusion", anyPost},
+        {"any_relevant_in_graphless_post_fusion", anyGraphlessPost},
         {"any_relevant_in_final_window", anyFinalWindow},
         {"any_relevant_in_returned_topk", anyReturnedTopK},
+        {"graph_added_relevant_post_fusion_count", graphAddedRelevant.size()},
+        {"graph_displaced_relevant_post_fusion_count", graphDisplacedRelevant.size()},
+        {"graph_added_relevant_post_fusion_doc_ids", graphAddedRelevant},
+        {"graph_displaced_relevant_post_fusion_doc_ids", graphDisplacedRelevant},
         {"miss_stage", missStage},
         {"relevant_docs", relevant},
     };
@@ -834,6 +861,8 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
     if (relevantDecisionTrace.is_object()) {
         const bool anyPre = relevantDecisionTrace.value("any_relevant_in_pre_fusion", false);
         const bool anyPost = relevantDecisionTrace.value("any_relevant_in_post_fusion", false);
+        const bool anyGraphlessPost =
+            relevantDecisionTrace.value("any_relevant_in_graphless_post_fusion", false);
         const bool anyFinalWindow =
             relevantDecisionTrace.value("any_relevant_in_final_window", false);
         if (anyPre) {
@@ -842,8 +871,17 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
         if (anyPost) {
             summary.queryWithRelevantInPostFusionCount++;
         }
+        if (anyGraphlessPost) {
+            summary.queryWithRelevantInGraphlessPostFusionCount++;
+        }
         if (anyFinalWindow) {
             summary.queryWithRelevantInFinalWindowCount++;
+        }
+        if (relevantDecisionTrace.value("graph_added_relevant_post_fusion_count", 0) > 0) {
+            summary.queryWithGraphAddedRelevantPostFusionCount++;
+        }
+        if (relevantDecisionTrace.value("graph_displaced_relevant_post_fusion_count", 0) > 0) {
+            summary.queryWithGraphDisplacedRelevantPostFusionCount++;
         }
         if (firstRelevantRank < 0) {
             const std::string missStage = relevantDecisionTrace.value("miss_stage", "unknown");
@@ -963,6 +1001,24 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
         } catch (...) {
         }
     }
+
+    auto graphDisplacement = searchStats.find("trace_graph_displacement_summary_json");
+    if (graphDisplacement != searchStats.end()) {
+        try {
+            auto parsed = json::parse(graphDisplacement->second);
+            if (parsed.is_object()) {
+                if (auto it = parsed.find("graph_added_post_fusion_count");
+                    it != parsed.end() && it->is_number()) {
+                    summary.graphAddedPostFusionSamples.push_back(it->get<double>());
+                }
+                if (auto it = parsed.find("graph_displaced_post_fusion_count");
+                    it != parsed.end() && it->is_number()) {
+                    summary.graphDisplacedPostFusionSamples.push_back(it->get<double>());
+                }
+            }
+        } catch (...) {
+        }
+    }
 }
 
 static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
@@ -975,7 +1031,13 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"query_without_relevant_hit_count", summary.queryWithoutRelevantHitCount},
         {"query_with_relevant_in_pre_fusion_count", summary.queryWithRelevantInPreFusionCount},
         {"query_with_relevant_in_post_fusion_count", summary.queryWithRelevantInPostFusionCount},
+        {"query_with_relevant_in_graphless_post_fusion_count",
+         summary.queryWithRelevantInGraphlessPostFusionCount},
         {"query_with_relevant_in_final_window_count", summary.queryWithRelevantInFinalWindowCount},
+        {"query_with_graph_added_relevant_post_fusion_count",
+         summary.queryWithGraphAddedRelevantPostFusionCount},
+        {"query_with_graph_displaced_relevant_post_fusion_count",
+         summary.queryWithGraphDisplacedRelevantPostFusionCount},
         {"query_with_topk_duplicate_count", summary.queryWithTopKDuplicateCount},
         {"degraded_query_count", summary.degradedQueryCount},
         {"trace_enabled_query_count", summary.traceEnabledQueryCount},
@@ -993,8 +1055,14 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
          static_cast<double>(summary.queryWithRelevantInPreFusionCount) / queryCount},
         {"query_with_relevant_in_post_fusion_rate",
          static_cast<double>(summary.queryWithRelevantInPostFusionCount) / queryCount},
+        {"query_with_relevant_in_graphless_post_fusion_rate",
+         static_cast<double>(summary.queryWithRelevantInGraphlessPostFusionCount) / queryCount},
         {"query_with_relevant_in_final_window_rate",
          static_cast<double>(summary.queryWithRelevantInFinalWindowCount) / queryCount},
+        {"query_with_graph_added_relevant_post_fusion_rate",
+         static_cast<double>(summary.queryWithGraphAddedRelevantPostFusionCount) / queryCount},
+        {"query_with_graph_displaced_relevant_post_fusion_rate",
+         static_cast<double>(summary.queryWithGraphDisplacedRelevantPostFusionCount) / queryCount},
         {"query_with_topk_duplicate_rate",
          static_cast<double>(summary.queryWithTopKDuplicateCount) / queryCount},
         {"degraded_query_rate", static_cast<double>(summary.degradedQueryCount) / queryCount},
@@ -1024,6 +1092,9 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
          summarizeSamples(summary.strongVectorOnlyScoreEligibleDocsSamples)},
         {"strong_vector_only_rank_eligible_docs",
          summarizeSamples(summary.strongVectorOnlyRankEligibleDocsSamples)},
+        {"graph_added_post_fusion_count", summarizeSamples(summary.graphAddedPostFusionSamples)},
+        {"graph_displaced_post_fusion_count",
+         summarizeSamples(summary.graphDisplacedPostFusionSamples)},
         {"multi_vector_generated_phrases",
          summarizeSamples(summary.multiVectorGeneratedPhraseSamples)},
         {"multi_vector_raw_hit_count", summarizeSamples(summary.multiVectorRawHitSamples)},

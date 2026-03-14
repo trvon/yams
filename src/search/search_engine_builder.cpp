@@ -172,10 +172,20 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.textWeight = *textWeight;
             spdlog::info("SearchEngine textWeight overridden to {:.2f} via env", cfg.textWeight);
         }
+        if (auto graphTextWeight = getEnvFloat("YAMS_SEARCH_GRAPH_TEXT_WEIGHT")) {
+            cfg.graphTextWeight = *graphTextWeight;
+            spdlog::info("SearchEngine graphTextWeight overridden to {:.2f} via env",
+                         cfg.graphTextWeight);
+        }
         if (auto vectorWeight = getEnvFloat("YAMS_SEARCH_VECTOR_WEIGHT")) {
             cfg.vectorWeight = *vectorWeight;
             spdlog::info("SearchEngine vectorWeight overridden to {:.2f} via env",
                          cfg.vectorWeight);
+        }
+        if (auto graphVectorWeight = getEnvFloat("YAMS_SEARCH_GRAPH_VECTOR_WEIGHT")) {
+            cfg.graphVectorWeight = *graphVectorWeight;
+            spdlog::info("SearchEngine graphVectorWeight overridden to {:.2f} via env",
+                         cfg.graphVectorWeight);
         }
         if (auto rrfK = getEnvFloat("YAMS_SEARCH_RRF_K")) {
             cfg.rrfK = std::clamp(*rrfK, 1.0f, 200.0f);
@@ -544,6 +554,66 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.graphExpansionMaxSeeds = static_cast<size_t>(std::max(0, *graphExpansionMaxSeeds));
             spdlog::info("SearchEngine graphExpansionMaxSeeds overridden to {} via env",
                          cfg.graphExpansionMaxSeeds);
+        }
+        if (auto graphExpansionQueryNeighborK =
+                getEnvInt("YAMS_SEARCH_GRAPH_EXPANSION_QUERY_NEIGHBOR_K")) {
+            cfg.graphExpansionQueryNeighborK =
+                static_cast<size_t>(std::max(0, *graphExpansionQueryNeighborK));
+            spdlog::info("SearchEngine graphExpansionQueryNeighborK overridden to {} via env",
+                         cfg.graphExpansionQueryNeighborK);
+        }
+        if (auto graphExpansionQueryNeighborMinScore =
+                getEnvFloat("YAMS_SEARCH_GRAPH_EXPANSION_QUERY_NEIGHBOR_MIN_SCORE")) {
+            cfg.graphExpansionQueryNeighborMinScore =
+                std::clamp(*graphExpansionQueryNeighborMinScore, 0.0f, 1.0f);
+            spdlog::info(
+                "SearchEngine graphExpansionQueryNeighborMinScore overridden to {:.3f} via env",
+                cfg.graphExpansionQueryNeighborMinScore);
+        }
+        if (auto graphVectorRequireCorroboration =
+                getEnvBool("YAMS_SEARCH_GRAPH_VECTOR_REQUIRE_CORROBORATION")) {
+            cfg.graphVectorRequireCorroboration = *graphVectorRequireCorroboration;
+            spdlog::info("SearchEngine graphVectorRequireCorroboration overridden to {} via env",
+                         cfg.graphVectorRequireCorroboration);
+        }
+        if (auto graphVectorRequireTextAnchoring =
+                getEnvBool("YAMS_SEARCH_GRAPH_VECTOR_REQUIRE_TEXT_ANCHORING")) {
+            cfg.graphVectorRequireTextAnchoring = *graphVectorRequireTextAnchoring;
+            spdlog::info("SearchEngine graphVectorRequireTextAnchoring overridden to {} via env",
+                         cfg.graphVectorRequireTextAnchoring);
+        }
+        if (auto graphVectorRequireBaselineTextAnchoring =
+                getEnvBool("YAMS_SEARCH_GRAPH_VECTOR_REQUIRE_BASELINE_TEXT_ANCHORING")) {
+            cfg.graphVectorRequireBaselineTextAnchoring = *graphVectorRequireBaselineTextAnchoring;
+            spdlog::info(
+                "SearchEngine graphVectorRequireBaselineTextAnchoring overridden to {} via env",
+                cfg.graphVectorRequireBaselineTextAnchoring);
+        }
+        if (auto graphFusionWindowGuard =
+                getEnvBool("YAMS_SEARCH_ENABLE_GRAPH_FUSION_WINDOW_GUARD")) {
+            cfg.enableGraphFusionWindowGuard = *graphFusionWindowGuard;
+            spdlog::info("SearchEngine enableGraphFusionWindowGuard overridden to {} via env",
+                         cfg.enableGraphFusionWindowGuard);
+        }
+        if (auto graphFusionGuardDepthMultiplier =
+                getEnvInt("YAMS_SEARCH_GRAPH_FUSION_GUARD_DEPTH_MULTIPLIER")) {
+            cfg.graphFusionGuardDepthMultiplier =
+                static_cast<size_t>(std::max(1, *graphFusionGuardDepthMultiplier));
+            spdlog::info("SearchEngine graphFusionGuardDepthMultiplier overridden to {} via env",
+                         cfg.graphFusionGuardDepthMultiplier);
+        }
+        if (auto graphMaxAddedInFusionWindow =
+                getEnvInt("YAMS_SEARCH_GRAPH_MAX_ADDED_IN_FUSION_WINDOW")) {
+            cfg.graphMaxAddedInFusionWindow =
+                static_cast<size_t>(std::max(0, *graphMaxAddedInFusionWindow));
+            spdlog::info("SearchEngine graphMaxAddedInFusionWindow overridden to {} via env",
+                         cfg.graphMaxAddedInFusionWindow);
+        }
+        if (auto graphTextMinAdmissionScore =
+                getEnvFloat("YAMS_SEARCH_GRAPH_TEXT_MIN_ADMISSION_SCORE")) {
+            cfg.graphTextMinAdmissionScore = std::max(0.0f, *graphTextMinAdmissionScore);
+            spdlog::info("SearchEngine graphTextMinAdmissionScore overridden to {:.4f} via env",
+                         cfg.graphTextMinAdmissionScore);
         }
         if (auto graphExpansionFtsPenalty =
                 getEnvFloat("YAMS_SEARCH_GRAPH_EXPANSION_FTS_PENALTY")) {

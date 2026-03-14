@@ -105,6 +105,7 @@ struct QueryExpansionStats {
     size_t graphExpansionTermCount = 0;
     size_t graphExpansionFtsHitCount = 0;
     size_t graphExpansionFtsAddedCount = 0;
+    size_t graphTextBlockedLowScoreCount = 0;
 };
 
 bool envFlagEnabled(const char* name) {
@@ -158,7 +159,9 @@ collectGraphSeedDocs(const std::vector<ComponentResult>& componentResults, size_
         float sourceBoost = 1.0f;
         switch (comp.source) {
             case ComponentResult::Source::Text:
+            case ComponentResult::Source::GraphText:
             case ComponentResult::Source::Vector:
+            case ComponentResult::Source::GraphVector:
             case ComponentResult::Source::EntityVector:
             case ComponentResult::Source::KnowledgeGraph:
                 sourceBoost = 1.0f;
@@ -505,6 +508,7 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
             scoreScale = 0.60;
             switch (comp.source) {
                 case ComponentResult::Source::Text:
+                case ComponentResult::Source::GraphText:
                     scoreScale = 1.00;
                     break;
                 case ComponentResult::Source::PathTree:
@@ -518,6 +522,7 @@ ResultFusion::fuseWeightedReciprocal(const std::vector<ComponentResult>& results
                     scoreScale = 0.65;
                     break;
                 case ComponentResult::Source::Vector:
+                case ComponentResult::Source::GraphVector:
                     scoreScale = 0.45;
                     break;
                 case ComponentResult::Source::EntityVector:
@@ -550,7 +555,9 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
         double pathScore = 0.0;
         double tagScore = 0.0;
         double symbolScore = 0.0;
+        double graphTextScore = 0.0;
         double vectorScore = 0.0;
+        double graphVectorScore = 0.0;
         std::string documentHash;
         std::string filePath;
         std::string snippet;
@@ -610,6 +617,9 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
             case ComponentResult::Source::Text:
                 acc.keywordScore += contribution;
                 break;
+            case ComponentResult::Source::GraphText:
+                acc.graphTextScore += contribution;
+                break;
             case ComponentResult::Source::PathTree:
                 acc.pathScore += contribution;
                 break;
@@ -623,6 +633,9 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
             case ComponentResult::Source::Vector:
             case ComponentResult::Source::EntityVector:
                 acc.vectorScore += contribution;
+                break;
+            case ComponentResult::Source::GraphVector:
+                acc.graphVectorScore += contribution;
                 break;
             case ComponentResult::Source::KnowledgeGraph:
             case ComponentResult::Source::Unknown:
@@ -650,8 +663,14 @@ std::vector<SearchResult> ResultFusion::fuseCombMNZ(const std::vector<ComponentR
         if (entry.second.symbolScore > 0.0) {
             r.symbolScore = entry.second.symbolScore;
         }
+        if (entry.second.graphTextScore > 0.0) {
+            r.graphTextScore = entry.second.graphTextScore;
+        }
         if (entry.second.vectorScore > 0.0) {
             r.vectorScore = entry.second.vectorScore;
+        }
+        if (entry.second.graphVectorScore > 0.0) {
+            r.graphVectorScore = entry.second.graphVectorScore;
         }
 
         if (config_.lexicalFloorBoost > 0.0f &&
@@ -817,12 +836,16 @@ float ResultFusion::getComponentWeight(ComponentResult::Source source) const {
     switch (source) {
         case ComponentResult::Source::Text:
             return config_.textWeight;
+        case ComponentResult::Source::GraphText:
+            return config_.graphTextWeight;
         case ComponentResult::Source::PathTree:
             return config_.pathTreeWeight;
         case ComponentResult::Source::KnowledgeGraph:
             return config_.kgWeight;
         case ComponentResult::Source::Vector:
             return config_.vectorWeight;
+        case ComponentResult::Source::GraphVector:
+            return config_.graphVectorWeight;
         case ComponentResult::Source::EntityVector:
             return config_.entityVectorWeight;
         case ComponentResult::Source::Tag:
@@ -1020,9 +1043,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::vector<std::string> preFusionDocIds;
     PreFusionSignalMap preFusionSignals;
     std::vector<SearchResult> postFusionSnapshot;
+    std::vector<SearchResult> graphlessPostFusionSnapshot;
     std::vector<SearchResult> postGraphSnapshot;
     bool graphRerankApplied = false;
     bool crossRerankApplied = false;
+    size_t graphWindowGuardReplacementCount = 0;
+    size_t graphWindowCapReplacementCount = 0;
     size_t graphMatchedCandidates = 0;
     size_t graphPositiveSignalCandidates = 0;
     size_t graphBoostedDocs = 0;
@@ -1041,6 +1067,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     size_t graphVectorRawHitCount = 0;
     size_t graphVectorAddedNewCount = 0;
     size_t graphVectorReplacedBaseCount = 0;
+    size_t graphVectorBlockedUncorroboratedCount = 0;
+    size_t graphVectorBlockedMissingTextAnchorCount = 0;
+    size_t graphVectorBlockedMissingBaselineTextAnchorCount = 0;
 
     // Embedding generation may be launched eagerly or lazily depending on tiering strategy.
     std::optional<std::vector<float>> queryEmbedding;
@@ -1074,6 +1103,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::vector<GraphExpansionTerm> graphExpansionTerms;
     std::vector<GraphExpansionTerm> docSeedGraphTerms;
     bool graphExpansionMaterialized = false;
+    size_t graphQueryNeighborSeedDocCount = 0;
     if (conceptExtractor_) {
         conceptStart = std::chrono::steady_clock::now();
         conceptFuture = postWork(
@@ -1176,6 +1206,60 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             GraphExpansionConfig{.maxTerms = config_.graphExpansionMaxTerms,
                                  .maxSeeds = config_.graphExpansionMaxSeeds,
                                  .maxNeighbors = config_.graphMaxNeighbors});
+
+        if (vectorDb_ && embeddingGen_ && config_.graphExpansionQueryNeighborK > 0) {
+            awaitEmbedding();
+            if (queryEmbedding.has_value()) {
+                yams::vector::VectorSearchParams params;
+                params.k = config_.graphExpansionQueryNeighborK + 6;
+                params.similarity_threshold = config_.graphExpansionQueryNeighborMinScore;
+                auto neighbors = vectorDb_->search(queryEmbedding.value(), params);
+
+                std::vector<GraphExpansionSeedDoc> seedDocs;
+                seedDocs.reserve(config_.graphExpansionQueryNeighborK);
+                std::unordered_set<std::string> seenHashes;
+                seenHashes.reserve(config_.graphExpansionQueryNeighborK * 2);
+                for (const auto& rec : neighbors) {
+                    if (seedDocs.size() >= config_.graphExpansionQueryNeighborK) {
+                        break;
+                    }
+                    if (rec.level != yams::vector::EmbeddingLevel::DOCUMENT ||
+                        rec.document_hash.empty() || !seenHashes.insert(rec.document_hash).second) {
+                        continue;
+                    }
+                    auto pathIt = rec.metadata.find("path");
+                    seedDocs.push_back(
+                        {.documentHash = rec.document_hash,
+                         .filePath = pathIt != rec.metadata.end() ? pathIt->second : "",
+                         .score = rec.relevance_score});
+                }
+                graphQueryNeighborSeedDocCount = seedDocs.size();
+
+                if (!seedDocs.empty()) {
+                    auto neighborTerms = generateGraphExpansionTermsFromDocuments(
+                        kgStore_, query, concepts, seedDocs,
+                        GraphExpansionConfig{.maxTerms = config_.graphExpansionMaxTerms,
+                                             .maxSeeds = config_.graphExpansionMaxSeeds,
+                                             .maxNeighbors = config_.graphMaxNeighbors});
+                    for (const auto& term : neighborTerms) {
+                        auto it = std::find_if(
+                            graphExpansionTerms.begin(), graphExpansionTerms.end(),
+                            [&](const auto& existing) { return existing.text == term.text; });
+                        if (it == graphExpansionTerms.end()) {
+                            graphExpansionTerms.push_back(term);
+                        } else {
+                            it->score = std::max(it->score, term.score);
+                        }
+                    }
+                    std::stable_sort(
+                        graphExpansionTerms.begin(), graphExpansionTerms.end(),
+                        [](const auto& a, const auto& b) { return a.score > b.score; });
+                    if (graphExpansionTerms.size() > config_.graphExpansionMaxTerms) {
+                        graphExpansionTerms.resize(config_.graphExpansionMaxTerms);
+                    }
+                }
+            }
+        }
         graphExpansionMaterialized = true;
     };
 
@@ -1611,7 +1695,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         const auto seedDocs =
             collectGraphSeedDocs(allComponentResults, config_.graphExpansionMaxSeeds * 2);
         docSeedGraphTerms = generateGraphExpansionTermsFromDocuments(
-            kgStore_, seedDocs,
+            kgStore_, query, concepts, seedDocs,
             GraphExpansionConfig{.maxTerms = config_.graphExpansionMaxTerms,
                                  .maxSeeds = config_.graphExpansionMaxSeeds,
                                  .maxNeighbors = config_.graphMaxNeighbors});
@@ -1665,7 +1749,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                               normalizedBm25Score(sr.score, config_.bm25NormDivisor,
                                                                   minBm25, maxBm25),
                                           0.0f, 1.0f);
-                    cr.source = ComponentResult::Source::Text;
+                    if (cr.score < config_.graphTextMinAdmissionScore) {
+                        ++textExpansionStats.graphTextBlockedLowScoreCount;
+                        continue;
+                    }
+                    cr.source = ComponentResult::Source::GraphText;
                     cr.rank = startRank + rank;
                     cr.snippet =
                         sr.snippet.empty() ? std::nullopt : std::optional<std::string>(sr.snippet);
@@ -1740,23 +1828,71 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::vector<ComponentResult> mergedVectorResults;
             std::unordered_map<std::string, size_t> bestVectorByHash;
             bestVectorByHash.reserve(workingConfig.vectorMaxResults * 2);
+            std::vector<ComponentResult> mergedGraphVectorResults;
+            std::unordered_map<std::string, size_t> bestGraphVectorByHash;
+            bestGraphVectorByHash.reserve(workingConfig.vectorMaxResults * 2);
+            std::unordered_set<std::string> graphVectorCorroboratedHashes;
+            graphVectorCorroboratedHashes.reserve(allComponentResults.size() * 2);
+            std::unordered_set<std::string> graphVectorTextAnchoredHashes;
+            graphVectorTextAnchoredHashes.reserve(allComponentResults.size() * 2);
+            std::unordered_set<std::string> graphVectorBaselineTextAnchoredHashes;
+            graphVectorBaselineTextAnchoredHashes.reserve(allComponentResults.size() * 2);
 
             for (const auto& cr : allComponentResults) {
-                if (cr.source != ComponentResult::Source::Vector) {
-                    nonVectorResults.push_back(cr);
-                    continue;
-                }
-                if (cr.documentHash.empty()) {
-                    continue;
-                }
+                if (cr.source == ComponentResult::Source::Vector ||
+                    cr.source == ComponentResult::Source::EntityVector) {
+                    if (cr.documentHash.empty()) {
+                        continue;
+                    }
 
-                ++baseVectorCount;
-                auto it = bestVectorByHash.find(cr.documentHash);
-                if (it == bestVectorByHash.end()) {
-                    bestVectorByHash.emplace(cr.documentHash, mergedVectorResults.size());
-                    mergedVectorResults.push_back(cr);
-                } else if (cr.score > mergedVectorResults[it->second].score) {
-                    mergedVectorResults[it->second] = cr;
+                    ++baseVectorCount;
+                    graphVectorCorroboratedHashes.insert(cr.documentHash);
+                    auto it = bestVectorByHash.find(cr.documentHash);
+                    if (it == bestVectorByHash.end()) {
+                        bestVectorByHash.emplace(cr.documentHash, mergedVectorResults.size());
+                        mergedVectorResults.push_back(cr);
+                    } else if (cr.score > mergedVectorResults[it->second].score) {
+                        mergedVectorResults[it->second] = cr;
+                    }
+                    continue;
+                }
+                if (cr.source == ComponentResult::Source::GraphVector) {
+                    if (cr.documentHash.empty()) {
+                        continue;
+                    }
+                    auto it = bestGraphVectorByHash.find(cr.documentHash);
+                    if (it == bestGraphVectorByHash.end()) {
+                        bestGraphVectorByHash.emplace(cr.documentHash,
+                                                      mergedGraphVectorResults.size());
+                        mergedGraphVectorResults.push_back(cr);
+                    } else if (cr.score > mergedGraphVectorResults[it->second].score) {
+                        mergedGraphVectorResults[it->second] = cr;
+                    }
+                    continue;
+                }
+                {
+                    if (!cr.documentHash.empty()) {
+                        if (isTextAnchoringComponent(cr.source) ||
+                            cr.source == ComponentResult::Source::KnowledgeGraph) {
+                            graphVectorCorroboratedHashes.insert(cr.documentHash);
+                        }
+                        if (cr.source == ComponentResult::Source::Text ||
+                            cr.source == ComponentResult::Source::GraphText ||
+                            cr.source == ComponentResult::Source::PathTree ||
+                            cr.source == ComponentResult::Source::KnowledgeGraph ||
+                            cr.source == ComponentResult::Source::Tag ||
+                            cr.source == ComponentResult::Source::Metadata ||
+                            cr.source == ComponentResult::Source::Symbol) {
+                            graphVectorTextAnchoredHashes.insert(cr.documentHash);
+                        }
+                        if (cr.source == ComponentResult::Source::Text ||
+                            cr.source == ComponentResult::Source::PathTree ||
+                            cr.source == ComponentResult::Source::KnowledgeGraph ||
+                            cr.source == ComponentResult::Source::Symbol) {
+                            graphVectorBaselineTextAnchoredHashes.insert(cr.documentHash);
+                        }
+                    }
+                    nonVectorResults.push_back(cr);
                 }
             }
 
@@ -1823,17 +1959,34 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         if (cr.documentHash.empty()) {
                             continue;
                         }
+                        if (config_.graphVectorRequireCorroboration &&
+                            !graphVectorCorroboratedHashes.contains(cr.documentHash)) {
+                            ++graphVectorBlockedUncorroboratedCount;
+                            continue;
+                        }
+                        if (config_.graphVectorRequireTextAnchoring &&
+                            !graphVectorTextAnchoredHashes.contains(cr.documentHash)) {
+                            ++graphVectorBlockedMissingTextAnchorCount;
+                            continue;
+                        }
+                        if (config_.graphVectorRequireBaselineTextAnchoring &&
+                            !graphVectorBaselineTextAnchoredHashes.contains(cr.documentHash)) {
+                            ++graphVectorBlockedMissingBaselineTextAnchorCount;
+                            continue;
+                        }
+                        cr.source = ComponentResult::Source::GraphVector;
                         cr.score *= (graphPenalty * std::clamp(graphTerms[gi].score, 0.2f, 1.0f));
                         cr.debugInfo["graph_vector_term"] = graphTerms[gi].text;
                         cr.debugInfo["graph_vector_term_idx"] = std::to_string(gi);
 
-                        auto it = bestVectorByHash.find(cr.documentHash);
-                        if (it == bestVectorByHash.end()) {
-                            bestVectorByHash.emplace(cr.documentHash, mergedVectorResults.size());
-                            mergedVectorResults.push_back(std::move(cr));
+                        auto it = bestGraphVectorByHash.find(cr.documentHash);
+                        if (it == bestGraphVectorByHash.end()) {
+                            bestGraphVectorByHash.emplace(cr.documentHash,
+                                                          mergedGraphVectorResults.size());
+                            mergedGraphVectorResults.push_back(std::move(cr));
                             ++graphVectorAddedNewCount;
-                        } else if (cr.score > mergedVectorResults[it->second].score) {
-                            mergedVectorResults[it->second] = std::move(cr);
+                        } else if (cr.score > mergedGraphVectorResults[it->second].score) {
+                            mergedGraphVectorResults[it->second] = std::move(cr);
                             ++graphVectorReplacedBaseCount;
                         }
                     }
@@ -1852,9 +2005,20 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 mergedVectorResults[i].rank = i;
             }
 
+            std::sort(mergedGraphVectorResults.begin(), mergedGraphVectorResults.end(),
+                      [](const auto& a, const auto& b) { return a.score > b.score; });
+            if (mergedGraphVectorResults.size() > workingConfig.vectorMaxResults) {
+                mergedGraphVectorResults.resize(workingConfig.vectorMaxResults);
+            }
+            for (size_t i = 0; i < mergedGraphVectorResults.size(); ++i) {
+                mergedGraphVectorResults[i].rank = i;
+            }
+
             allComponentResults = std::move(nonVectorResults);
             allComponentResults.insert(allComponentResults.end(), mergedVectorResults.begin(),
                                        mergedVectorResults.end());
+            allComponentResults.insert(allComponentResults.end(), mergedGraphVectorResults.begin(),
+                                       mergedGraphVectorResults.end());
         }
 
         auto mvEnd = std::chrono::steady_clock::now();
@@ -1915,8 +2079,150 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         YAMS_ZONE_SCOPED_N("fusion::results");
         response.results = fusion.fuse(allComponentResults);
     }
-    if (stageTraceEnabled) {
+    const bool hasGraphSources =
+        std::any_of(allComponentResults.begin(), allComponentResults.end(), [](const auto& comp) {
+            return comp.source == ComponentResult::Source::GraphText ||
+                   comp.source == ComponentResult::Source::GraphVector;
+        });
+    if ((stageTraceEnabled || (config_.enableGraphFusionWindowGuard && hasGraphSources))) {
         postFusionSnapshot = response.results;
+        std::vector<ComponentResult> graphlessComponentResults;
+        graphlessComponentResults.reserve(allComponentResults.size());
+        for (const auto& comp : allComponentResults) {
+            if (comp.source == ComponentResult::Source::GraphText ||
+                comp.source == ComponentResult::Source::GraphVector) {
+                continue;
+            }
+            graphlessComponentResults.push_back(comp);
+        }
+        if (graphlessComponentResults.size() != allComponentResults.size()) {
+            graphlessPostFusionSnapshot = fusion.fuse(graphlessComponentResults);
+        } else {
+            graphlessPostFusionSnapshot = postFusionSnapshot;
+        }
+    }
+
+    if (config_.enableGraphFusionWindowGuard && hasGraphSources &&
+        !graphlessPostFusionSnapshot.empty()) {
+        const size_t guardWindow = std::min(
+            response.results.size(),
+            std::min(graphlessPostFusionSnapshot.size(),
+                     (config_.enableReranking && config_.rerankTopK > 0) ? config_.rerankTopK
+                                                                         : size_t(50)));
+        const size_t guardDepth = std::min(graphlessPostFusionSnapshot.size(),
+                                           guardWindow * config_.graphFusionGuardDepthMultiplier);
+        const auto graphlessTopIds =
+            collectRankedResultDocIds(graphlessPostFusionSnapshot, guardWindow);
+        const auto graphlessDepthIds =
+            collectRankedResultDocIds(graphlessPostFusionSnapshot, guardDepth);
+        const auto actualTopIds = collectRankedResultDocIds(response.results, guardWindow);
+        std::unordered_set<std::string> graphlessTopSet(graphlessTopIds.begin(),
+                                                        graphlessTopIds.end());
+        std::unordered_set<std::string> graphlessDepthSet(graphlessDepthIds.begin(),
+                                                          graphlessDepthIds.end());
+        std::unordered_set<std::string> actualTopSet(actualTopIds.begin(), actualTopIds.end());
+        std::unordered_map<std::string, SearchResult> graphlessById;
+        graphlessById.reserve(guardDepth);
+        for (size_t i = 0; i < guardDepth; ++i) {
+            const auto docId =
+                documentIdForTrace(graphlessPostFusionSnapshot[i].document.filePath,
+                                   graphlessPostFusionSnapshot[i].document.sha256Hash);
+            if (!docId.empty()) {
+                graphlessById.emplace(docId, graphlessPostFusionSnapshot[i]);
+            }
+        }
+
+        std::vector<std::string> displacedGraphlessIds;
+        for (const auto& docId : graphlessTopIds) {
+            if (!actualTopSet.contains(docId)) {
+                displacedGraphlessIds.push_back(docId);
+            }
+        }
+
+        size_t displacedCursor = 0;
+        for (size_t i = 0; i < guardWindow && displacedCursor < displacedGraphlessIds.size(); ++i) {
+            const auto actualId = documentIdForTrace(response.results[i].document.filePath,
+                                                     response.results[i].document.sha256Hash);
+            if (graphlessTopSet.contains(actualId)) {
+                continue;
+            }
+            if (graphlessDepthSet.contains(actualId)) {
+                continue; // allow graph to promote graphless near-misses
+            }
+
+            const auto& restoreId = displacedGraphlessIds[displacedCursor++];
+            auto restoreIt = graphlessById.find(restoreId);
+            if (restoreIt == graphlessById.end()) {
+                continue;
+            }
+            response.results[i] = restoreIt->second;
+            ++graphWindowGuardReplacementCount;
+        }
+        if (stageTraceEnabled) {
+            postFusionSnapshot = response.results;
+        }
+    }
+
+    if (config_.graphMaxAddedInFusionWindow > 0 && hasGraphSources &&
+        !graphlessPostFusionSnapshot.empty()) {
+        const size_t guardWindow = std::min(
+            response.results.size(),
+            std::min(graphlessPostFusionSnapshot.size(),
+                     (config_.enableReranking && config_.rerankTopK > 0) ? config_.rerankTopK
+                                                                         : size_t(50)));
+        const auto graphlessTopIds =
+            collectRankedResultDocIds(graphlessPostFusionSnapshot, guardWindow);
+        const auto actualTopIds = collectRankedResultDocIds(response.results, guardWindow);
+        std::unordered_set<std::string> graphlessTopSet(graphlessTopIds.begin(),
+                                                        graphlessTopIds.end());
+        std::unordered_map<std::string, SearchResult> graphlessById;
+        graphlessById.reserve(guardWindow);
+        for (size_t i = 0; i < guardWindow; ++i) {
+            const auto docId =
+                documentIdForTrace(graphlessPostFusionSnapshot[i].document.filePath,
+                                   graphlessPostFusionSnapshot[i].document.sha256Hash);
+            if (!docId.empty()) {
+                graphlessById.emplace(docId, graphlessPostFusionSnapshot[i]);
+            }
+        }
+
+        std::vector<size_t> graphAddedIndices;
+        graphAddedIndices.reserve(guardWindow);
+        for (size_t i = 0; i < guardWindow; ++i) {
+            const auto actualId = documentIdForTrace(response.results[i].document.filePath,
+                                                     response.results[i].document.sha256Hash);
+            if (!graphlessTopSet.contains(actualId)) {
+                graphAddedIndices.push_back(i);
+            }
+        }
+
+        if (graphAddedIndices.size() > config_.graphMaxAddedInFusionWindow) {
+            std::vector<std::string> restoreIds;
+            restoreIds.reserve(graphAddedIndices.size());
+            for (const auto& docId : graphlessTopIds) {
+                const bool present =
+                    std::any_of(actualTopIds.begin(), actualTopIds.end(),
+                                [&](const auto& actual) { return actual == docId; });
+                if (!present) {
+                    restoreIds.push_back(docId);
+                }
+            }
+
+            const size_t replacements = std::min(
+                restoreIds.size(), graphAddedIndices.size() - config_.graphMaxAddedInFusionWindow);
+            for (size_t ri = 0; ri < replacements; ++ri) {
+                const size_t replaceIndex = graphAddedIndices[graphAddedIndices.size() - 1 - ri];
+                auto restoreIt = graphlessById.find(restoreIds[ri]);
+                if (restoreIt == graphlessById.end()) {
+                    continue;
+                }
+                response.results[replaceIndex] = restoreIt->second;
+                ++graphWindowCapReplacementCount;
+            }
+            if (stageTraceEnabled) {
+                postFusionSnapshot = response.results;
+            }
+        }
     }
 
     if (config_.enableGraphRerank && kgScorer_ && !response.results.empty()) {
@@ -2488,6 +2794,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(graphDocExpansionFtsHitCount);
     response.debugStats["graph_doc_expansion_fts_added_count"] =
         std::to_string(graphDocExpansionFtsAddedCount);
+    response.debugStats["graph_text_blocked_low_score_count"] =
+        std::to_string(textExpansionStats.graphTextBlockedLowScoreCount);
     if (!docSeedGraphTerms.empty()) {
         json graphDocTerms = json::array();
         for (const auto& term : docSeedGraphTerms) {
@@ -2500,6 +2808,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.debugStats["graph_vector_added_new_count"] = std::to_string(graphVectorAddedNewCount);
     response.debugStats["graph_vector_replaced_base_count"] =
         std::to_string(graphVectorReplacedBaseCount);
+    response.debugStats["graph_vector_blocked_uncorroborated_count"] =
+        std::to_string(graphVectorBlockedUncorroboratedCount);
+    response.debugStats["graph_vector_blocked_missing_text_anchor_count"] =
+        std::to_string(graphVectorBlockedMissingTextAnchorCount);
+    response.debugStats["graph_vector_blocked_missing_baseline_text_anchor_count"] =
+        std::to_string(graphVectorBlockedMissingBaselineTextAnchorCount);
     response.debugStats["strong_vector_only_relief_enabled"] =
         config_.enableStrongVectorOnlyRelief ? "1" : "0";
     response.debugStats["strong_vector_only_min_score"] =
@@ -2509,6 +2823,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.debugStats["strong_vector_only_penalty"] =
         fmt::format("{:.3f}", config_.strongVectorOnlyPenalty);
     response.debugStats["graph_query_concept_count"] = std::to_string(graphQueryConceptCount);
+    response.debugStats["graph_query_neighbor_seed_docs"] =
+        std::to_string(graphQueryNeighborSeedDocCount);
+    response.debugStats["graph_window_guard_replacement_count"] =
+        std::to_string(graphWindowGuardReplacementCount);
+    response.debugStats["graph_window_cap_replacement_count"] =
+        std::to_string(graphWindowCapReplacementCount);
     response.debugStats["graph_matched_candidates"] = std::to_string(graphMatchedCandidates);
     response.debugStats["graph_positive_signal_candidates"] =
         std::to_string(graphPositiveSignalCandidates);
@@ -2577,12 +2897,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
         const std::vector<std::string> postFusionAllDocIds =
             collectRankedResultDocIds(postFusionSnapshot);
+        const std::vector<std::string> graphlessPostFusionAllDocIds = collectRankedResultDocIds(
+            graphlessPostFusionSnapshot.empty() ? postFusionSnapshot : graphlessPostFusionSnapshot);
         const std::vector<std::string> postGraphAllDocIds = collectRankedResultDocIds(
             postGraphSnapshot.empty() ? postFusionSnapshot : postGraphSnapshot);
         const std::vector<std::string> finalAllDocIds = collectRankedResultDocIds(response.results);
 
         const std::vector<std::string> fusionDroppedDocIds =
             setDifferenceIds(preFusionDocIds, postFusionAllDocIds);
+        const std::vector<std::string> graphAddedPostFusionDocIds =
+            setDifferenceIds(postFusionAllDocIds, graphlessPostFusionAllDocIds);
+        const std::vector<std::string> graphDisplacedPostFusionDocIds =
+            setDifferenceIds(graphlessPostFusionAllDocIds, postFusionAllDocIds);
 
         size_t vectorOnlyDocs = 0;
         size_t vectorOnlyBelowThreshold = 0;
@@ -2664,9 +2990,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         const json componentSummary =
             buildComponentHitSummaryJson(allComponentResults, componentTopCount);
         const json fusionTopSummary = buildFusionTopSummaryJson(postFusionSnapshot, traceTopCount);
+        const json graphlessFusionTopSummary = buildFusionTopSummaryJson(
+            graphlessPostFusionSnapshot.empty() ? postFusionSnapshot : graphlessPostFusionSnapshot,
+            traceTopCount);
         const json graphTopSummary = buildFusionTopSummaryJson(
             postGraphSnapshot.empty() ? postFusionSnapshot : postGraphSnapshot, traceTopCount);
         const json finalTopSummary = buildFusionTopSummaryJson(response.results, traceTopCount);
+        const json graphDisplacementSummary = {
+            {"graph_added_post_fusion_count", graphAddedPostFusionDocIds.size()},
+            {"graph_displaced_post_fusion_count", graphDisplacedPostFusionDocIds.size()},
+            {"graph_added_post_fusion_doc_ids", graphAddedPostFusionDocIds},
+            {"graph_displaced_post_fusion_doc_ids", graphDisplacedPostFusionDocIds},
+        };
         const json preFusionSignalSummary = {
             {"vector_only_docs", vectorOnlyDocs},
             {"vector_only_below_threshold", vectorOnlyBelowThreshold},
@@ -2723,9 +3058,15 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
         response.debugStats["trace_pre_fusion_doc_ids"] = joinWithTab(preFusionDocIds);
         response.debugStats["trace_post_fusion_doc_ids"] = joinWithTab(postFusionAllDocIds);
+        response.debugStats["trace_graphless_post_fusion_doc_ids"] =
+            joinWithTab(graphlessPostFusionAllDocIds);
         response.debugStats["trace_post_graph_doc_ids"] = joinWithTab(postGraphAllDocIds);
         response.debugStats["trace_final_doc_ids"] = joinWithTab(finalAllDocIds);
         response.debugStats["trace_fusion_dropped_doc_ids"] = joinWithTab(fusionDroppedDocIds);
+        response.debugStats["trace_graph_added_post_fusion_doc_ids"] =
+            joinWithTab(graphAddedPostFusionDocIds);
+        response.debugStats["trace_graph_displaced_post_fusion_doc_ids"] =
+            joinWithTab(graphDisplacedPostFusionDocIds);
 
         response.debugStats["trace_post_fusion_top_doc_ids"] =
             joinWithTab(collectRankedResultDocIds(postFusionSnapshot, traceTopCount));
@@ -2737,8 +3078,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.debugStats["trace_component_hits_json"] = componentSummary.dump();
         response.debugStats["trace_prefusion_signal_summary_json"] = preFusionSignalSummary.dump();
         response.debugStats["trace_fusion_top_json"] = fusionTopSummary.dump();
+        response.debugStats["trace_graphless_fusion_top_json"] = graphlessFusionTopSummary.dump();
         response.debugStats["trace_post_graph_top_json"] = graphTopSummary.dump();
         response.debugStats["trace_final_top_json"] = finalTopSummary.dump();
+        response.debugStats["trace_graph_displacement_summary_json"] =
+            graphDisplacementSummary.dump();
     }
 
     auto endTime = std::chrono::steady_clock::now();
@@ -2859,7 +3203,8 @@ SearchEngine::Impl::queryFullText(const std::string& query, size_t limit,
 
         auto appendResults = [&](const yams::metadata::SearchResults& searchResults,
                                  float scorePenalty, bool dedupe,
-                                 std::unordered_set<std::string>* seenHashes) {
+                                 std::unordered_set<std::string>* seenHashes,
+                                 ComponentResult::Source source = ComponentResult::Source::Text) {
             double minBm25 = 0.0;
             double maxBm25 = 0.0;
             bool bm25RangeInitialized = false;
@@ -2901,7 +3246,14 @@ SearchEngine::Impl::queryFullText(const std::string& query, size_t limit,
                 float normalizedScore =
                     normalizedBm25Score(rawScore, config_.bm25NormDivisor, minBm25, maxBm25);
                 result.score = std::clamp(scoreMultiplier * normalizedScore, 0.0f, 1.0f);
-                result.source = ComponentResult::Source::Text;
+                if (source == ComponentResult::Source::GraphText &&
+                    result.score < config_.graphTextMinAdmissionScore) {
+                    if (expansionStats != nullptr) {
+                        ++expansionStats->graphTextBlockedLowScoreCount;
+                    }
+                    continue;
+                }
+                result.source = source;
                 result.rank = startRank + rank;
                 result.snippet = searchResult.snippet.empty()
                                      ? std::nullopt
@@ -3102,7 +3454,8 @@ SearchEngine::Impl::queryFullText(const std::string& query, size_t limit,
                 const float penalty = std::clamp(config_.graphExpansionFtsPenalty *
                                                      std::clamp(term.score, 0.2f, 1.0f),
                                                  0.1f, 1.0f);
-                appendResults(graphResults.value(), penalty, true, &seenHashes);
+                appendResults(graphResults.value(), penalty, true, &seenHashes,
+                              ComponentResult::Source::GraphText);
             }
 
             if (expansionStats != nullptr) {

@@ -823,6 +823,16 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                         std::to_string(piq->deferredDocEntitiesQueued());
                     response.additionalStats["post_deferred_doc_entity_queue_failures"] =
                         std::to_string(piq->deferredDocEntityQueueFailures());
+                    response.additionalStats["post_segment_nodes_created"] =
+                        std::to_string(piq->segmentNodesCreated());
+                    response.additionalStats["post_segment_edges_created"] =
+                        std::to_string(piq->segmentEdgesCreated());
+                    response.additionalStats["post_entity_segment_edges_created"] =
+                        std::to_string(piq->entitySegmentEdgesCreated());
+                    response.additionalStats["post_body_segment_nodes_created"] =
+                        std::to_string(piq->bodySegmentNodesCreated());
+                    response.additionalStats["post_body_entity_segment_edges_created"] =
+                        std::to_string(piq->bodyEntitySegmentEdgesCreated());
                 }
                 if (auto kgq = serviceManager_->getKgWriteQueue()) {
                     auto stats = kgq->getStats();

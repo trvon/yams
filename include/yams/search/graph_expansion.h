@@ -42,7 +42,8 @@ generateGraphExpansionTerms(const std::shared_ptr<metadata::KnowledgeGraphStore>
                             const GraphExpansionConfig& config);
 
 std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
-    const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
-    const std::vector<GraphExpansionSeedDoc>& seedDocs, const GraphExpansionConfig& config);
+    const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore, const std::string& query,
+    const std::vector<QueryConcept>& concepts, const std::vector<GraphExpansionSeedDoc>& seedDocs,
+    const GraphExpansionConfig& config);
 
 } // namespace yams::search

@@ -216,6 +216,21 @@ public:
     std::uint64_t deferredDocEntityQueueFailures() const {
         return deferredDocEntityQueueFailures_.load(std::memory_order_relaxed);
     }
+    std::uint64_t segmentNodesCreated() const {
+        return segmentNodesCreated_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t segmentEdgesCreated() const {
+        return segmentEdgesCreated_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t entitySegmentEdgesCreated() const {
+        return entitySegmentEdgesCreated_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t bodySegmentNodesCreated() const {
+        return bodySegmentNodesCreated_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t bodyEntitySegmentEdgesCreated() const {
+        return bodyEntitySegmentEdgesCreated_.load(std::memory_order_relaxed);
+    }
 
     // File/directory add tracking
     std::uint64_t filesAdded() const { return filesAdded_.load(); }
@@ -444,6 +459,11 @@ private:
     std::atomic<std::uint64_t> titleNlEntitiesExtracted_{0};
     std::atomic<std::uint64_t> deferredDocEntitiesQueued_{0};
     std::atomic<std::uint64_t> deferredDocEntityQueueFailures_{0};
+    std::atomic<std::uint64_t> segmentNodesCreated_{0};
+    std::atomic<std::uint64_t> segmentEdgesCreated_{0};
+    std::atomic<std::uint64_t> entitySegmentEdgesCreated_{0};
+    std::atomic<std::uint64_t> bodySegmentNodesCreated_{0};
+    std::atomic<std::uint64_t> bodyEntitySegmentEdgesCreated_{0};
     // File/directory add tracking
     std::atomic<std::uint64_t> filesAdded_{0};
     std::atomic<std::uint64_t> directoriesAdded_{0};

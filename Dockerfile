@@ -109,6 +109,7 @@ RUN --mount=type=cache,target=/root/.conan2 \
   echo "setup.sh attempt $attempt failed"; \
   if [ $attempt -lt 3 ]; then \
   echo "Cleaning cache and retrying after 30s..."; \
+  rm -rf /src/build/release; \
   rm -rf /root/.conan2/p/*/metadata.json 2>/dev/null || true; \
   conan cache clean "*" || true; \
   sleep 30; \

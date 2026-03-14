@@ -1,0 +1,38 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "bash": "command -v sage >/dev/null 2>&1 && sage security scan-hook || true",
+        "timeoutSec": 10,
+        "type": "command"
+      }
+    ],
+    "SessionStart": [
+      {
+        "bash": "command -v sage >/dev/null 2>&1 && sage skill context --format copilot 2>/dev/null || true",
+        "timeoutSec": 10,
+        "type": "command"
+      }
+    ],
+    "Stop": [
+      {
+        "bash": "command -v sage >/dev/null 2>&1 && sage capture hook response 2>/dev/null || true",
+        "timeoutSec": 5,
+        "type": "command"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "bash": "command -v sage >/dev/null 2>&1 && sage suggest hook skill --limit 3 --provision 2>/dev/null || true",
+        "timeoutSec": 10,
+        "type": "command"
+      },
+      {
+        "bash": "command -v sage >/dev/null 2>&1 && sage capture hook prompt 2>/dev/null || true",
+        "timeoutSec": 5,
+        "type": "command"
+      }
+    ]
+  },
+  "version": 1
+}

@@ -105,9 +105,11 @@ struct SearchEngineConfig {
 
     // Component weights (0.0 = disabled, 1.0 = full weight)
     float textWeight = 0.70f;          // Full-text search weight
+    float graphTextWeight = 0.12f;     // Graph-expanded text search weight
     float pathTreeWeight = 0.08f;      // Path tree hierarchical weight
     float kgWeight = 0.04f;            // Knowledge graph weight
     float vectorWeight = 0.30f;        // Vector similarity weight (increased for hybrid value)
+    float graphVectorWeight = 0.08f;   // Graph-expanded vector search weight
     float vectorOnlyPenalty = 0.8f;    // Penalty for vector-only results (no text match)
     float vectorOnlyThreshold = 0.90f; // Minimum confidence for vector-only inclusion
     bool enableStrongVectorOnlyRelief =
@@ -219,10 +221,27 @@ struct SearchEngineConfig {
 
     // Graph-expanded retrieval: resolve query concepts/aliases into KG nodes, walk a small
     // neighborhood, and use resulting entity labels as early FTS/vector expansion terms.
-    bool enableGraphQueryExpansion = false;    // Enable graph -> FTS/vector expansion pre-fusion
-    size_t graphExpansionMinHits = 8;          // Trigger when primary FTS hits below this threshold
-    size_t graphExpansionMaxTerms = 8;         // Max graph-derived labels/phrases to use
-    size_t graphExpansionMaxSeeds = 6;         // Max resolved query seed nodes
+    bool enableGraphQueryExpansion = false;   // Enable graph -> FTS/vector expansion pre-fusion
+    size_t graphExpansionMinHits = 8;         // Trigger when primary FTS hits below this threshold
+    size_t graphExpansionMaxTerms = 8;        // Max graph-derived labels/phrases to use
+    size_t graphExpansionMaxSeeds = 6;        // Max resolved query seed nodes
+    size_t graphExpansionQueryNeighborK = 12; // Top document-level vector neighbors to inspect
+    float graphExpansionQueryNeighborMinScore =
+        0.84f; // Minimum document-level similarity for graph neighbor seeding
+    bool graphVectorRequireCorroboration =
+        true; // Require baseline text/vector/KG evidence before admitting GraphVector docs
+    bool graphVectorRequireTextAnchoring =
+        true; // Require text-like anchoring before admitting GraphVector docs
+    bool graphVectorRequireBaselineTextAnchoring =
+        true; // Require baseline non-graph text/KG/symbol anchoring before admitting GraphVector
+              // docs
+    bool enableGraphFusionWindowGuard =
+        false; // Legacy graphless-window replacement guard (too blunt; disabled by default)
+    size_t graphFusionGuardDepthMultiplier = 2; // Graph-added docs may intrude only if they are
+                                                // within top-(window * multiplier) graphless ranks
+    size_t graphMaxAddedInFusionWindow = 0; // Cap graph-added docs in fused window (0 disables cap)
+    float graphTextMinAdmissionScore =
+        0.0010f; // Minimum GraphText fused contribution to admit a graph-expanded text doc
     float graphExpansionFtsPenalty = 0.78f;    // Penalty applied to graph-expanded FTS matches
     float graphExpansionVectorPenalty = 0.82f; // Penalty applied to graph-expanded vector matches
 
@@ -436,9 +455,11 @@ struct ComponentResult {
     float score; // Component-specific score [0.0, 1.0]
     enum class Source {
         Text,
+        GraphText,
         PathTree,
         KnowledgeGraph,
         Vector,
+        GraphVector,
         EntityVector,
         Tag,
         Metadata,
@@ -454,12 +475,16 @@ inline constexpr const char* componentSourceToString(ComponentResult::Source sou
     switch (source) {
         case ComponentResult::Source::Text:
             return "text";
+        case ComponentResult::Source::GraphText:
+            return "graph_text";
         case ComponentResult::Source::PathTree:
             return "path_tree";
         case ComponentResult::Source::KnowledgeGraph:
             return "kg";
         case ComponentResult::Source::Vector:
             return "vector";
+        case ComponentResult::Source::GraphVector:
+            return "graph_vector";
         case ComponentResult::Source::EntityVector:
             return "entity_vector";
         case ComponentResult::Source::Tag:
@@ -476,11 +501,14 @@ inline constexpr const char* componentSourceToString(ComponentResult::Source sou
 
 inline constexpr bool isVectorComponent(ComponentResult::Source source) noexcept {
     return source == ComponentResult::Source::Vector ||
+           source == ComponentResult::Source::GraphVector ||
            source == ComponentResult::Source::EntityVector;
 }
 
 inline constexpr bool isTextAnchoringComponent(ComponentResult::Source source) noexcept {
-    return source == ComponentResult::Source::Text || source == ComponentResult::Source::PathTree ||
+    return source == ComponentResult::Source::Text ||
+           source == ComponentResult::Source::GraphText ||
+           source == ComponentResult::Source::PathTree ||
            source == ComponentResult::Source::KnowledgeGraph ||
            source == ComponentResult::Source::Tag || source == ComponentResult::Source::Metadata ||
            source == ComponentResult::Source::Symbol;
@@ -543,8 +571,14 @@ inline void accumulateComponentScore(SearchResult& r, ComponentResult::Source so
         case ComponentResult::Source::EntityVector:
             r.vectorScore = r.vectorScore.value_or(0.0) + contribution;
             break;
+        case ComponentResult::Source::GraphVector:
+            r.graphVectorScore = r.graphVectorScore.value_or(0.0) + contribution;
+            break;
         case ComponentResult::Source::Text:
             r.keywordScore = r.keywordScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::GraphText:
+            r.graphTextScore = r.graphTextScore.value_or(0.0) + contribution;
             break;
         case ComponentResult::Source::KnowledgeGraph:
             r.kgScore = r.kgScore.value_or(0.0) + contribution;
