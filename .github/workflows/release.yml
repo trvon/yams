@@ -14,10 +14,6 @@ name: Release
         description: "Release channel (stable|weekly|nightly)"
         required: false
         default: "nightly"
-      upload_r2:
-        description: "Also upload built assets to Cloudflare R2 via Wrangler"
-        required: false
-        default: "false"
       fast_mode:
         description: "Skip packaging & verification steps (speed up local / act runs)"
         required: false
@@ -1168,12 +1164,6 @@ jobs:
       channel: ${{ steps.meta.outputs.channel }}
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
-    env:
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ENDPOINT: ${{ secrets.CLOUDFLARE_ENDPOINT }}
-      R2_PREFIX: ${{ secrets.R2_PREFIX }}
-      R2_BUCKET: ${{ secrets.R2_BUCKET }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -1919,118 +1909,6 @@ jobs:
           LJSON
           echo "latest.json manifest (assets/latest.json):" >&2
           sed 's/^/  /' latest.json >&2
-
-      - name: Initialize yams-repo submodule (for R2 bucket config)
-        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true'))
-        shell: bash
-        run: |
-          git submodule update --init external/yams-repo || echo "Failed to initialize yams-repo submodule"
-
-      - name: Install Wrangler CLI
-        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true')) && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_API_TOKEN != ''
-        shell: bash
-        run: |
-          npm i -g wrangler
-
-      - name: Upload assets to Cloudflare R2 (Wrangler)
-        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.upload_r2 == 'true')) && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_API_TOKEN != ''
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ENDPOINT: ${{ secrets.CLOUDFLARE_ENDPOINT }}
-          R2_PREFIX: ${{ secrets.R2_PREFIX }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          GPG_PUBLIC_KEY_B64: ${{ secrets.GPG_PUBLIC_KEY_B64 || '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd assets
-          # Resolve bucket name: prefer secret R2_BUCKET, else parse wrangler.toml if present
-          BUCKET="${R2_BUCKET:-}"
-          if [ -z "$BUCKET" ] && [ -f "$GITHUB_WORKSPACE/external/yams-repo/worker/wrangler.toml" ]; then
-            BUCKET=$(sed -E -n 's/^bucket_name\s*=\s*"(.*)"/\1/p' "$GITHUB_WORKSPACE/external/yams-repo/worker/wrangler.toml" | head -1)
-          fi
-          if [ -z "$BUCKET" ]; then
-            echo "Skipping R2 upload: no R2_BUCKET secret and wrangler.toml missing or without bucket_name." >&2
-            exit 0
-          fi
-          echo "Uploading to R2 bucket: $BUCKET (prefix='${R2_PREFIX:-}')"
-
-          # Publish repository public key as bucket root object "gpg.key" for /gpg.key route.
-          # Prefer secret, then fall back to a local repository file if present.
-          if [ -n "${GPG_PUBLIC_KEY_B64:-}" ]; then
-            echo "$GPG_PUBLIC_KEY_B64" | base64 -d > gpg.key
-          elif [ -f "$GITHUB_WORKSPACE/gpg.key" ]; then
-            cp "$GITHUB_WORKSPACE/gpg.key" gpg.key
-          fi
-          if [ -f gpg.key ]; then
-            wrangler r2 object put "${BUCKET}/gpg.key" --file=gpg.key --content-type application/pgp-keys --remote
-          else
-            echo "No public key found (GPG_PUBLIC_KEY_B64 or ./gpg.key); skipping gpg.key upload" >&2
-          fi
-          
-          # Upload latest.json manifest with JSON content-type
-          if [ -f latest.json ]; then
-            wrangler r2 object put "${BUCKET}/${R2_PREFIX:-}latest.json" --file=latest.json --content-type application/json --remote
-          fi
-          
-          # Upload SHA256SUMS
-          if [ -f SHA256SUMS ]; then
-            wrangler r2 object put "${BUCKET}/${R2_PREFIX:-}SHA256SUMS" --file=SHA256SUMS --content-type text/plain --remote
-          fi
-          
-          # Upload complete APT repository structure if available
-          if [ -d "$GITHUB_WORKSPACE/aptrepo" ]; then
-            echo "Uploading APT repository to R2..."
-            cd "$GITHUB_WORKSPACE/aptrepo"
-            find . -type f | while read -r f; do
-              key="${R2_PREFIX:-}aptrepo/${f#./}"
-              # Set content-type based on extension
-              case "$f" in
-                *.deb) ct="application/vnd.debian.binary-package" ;;
-                *.gz) ct="application/gzip" ;;
-                *) ct="text/plain" ;;
-              esac
-              wrangler r2 object put "${BUCKET}/${key}" --file="$f" --content-type "$ct" --remote
-            done
-            cd "$GITHUB_WORKSPACE/assets"
-          fi
-          
-          # Upload complete YUM repository structure if available
-          if [ -d "$GITHUB_WORKSPACE/yumrepo" ]; then
-            echo "Uploading YUM repository to R2..."
-            cd "$GITHUB_WORKSPACE/yumrepo"
-            find . -type f | while read -r f; do
-              key="${R2_PREFIX:-}yumrepo/${f#./}"
-              # Set content-type based on extension
-              case "$f" in
-                *.rpm) ct="application/x-rpm" ;;
-                *.xml) ct="application/xml" ;;
-                *.gz) ct="application/gzip" ;;
-                *) ct="application/octet-stream" ;;
-              esac
-              wrangler r2 object put "${BUCKET}/${key}" --file="$f" --content-type "$ct" --remote
-            done
-            cd "$GITHUB_WORKSPACE/assets"
-          fi
-          
-          # Upload distributable assets (archives for direct download)
-          shopt -s nullglob
-          for f in *.tar.gz *.zip *.AppImage *.deb *.rpm *.msi; do
-            [ -f "$f" ] || continue
-            # Set content-type based on extension
-            case "$f" in
-              *.tar.gz) ct="application/gzip" ;;
-              *.zip) ct="application/zip" ;;
-              *.AppImage) ct="application/x-executable" ;;
-              *.deb) ct="application/vnd.debian.binary-package" ;;
-              *.rpm) ct="application/x-rpm" ;;
-              *.msi) ct="application/x-msi" ;;
-              *) ct="application/octet-stream" ;;
-            esac
-            DEST="${BUCKET}/${R2_PREFIX:-}${f}"
-            wrangler r2 object put "$DEST" --file="$f" --content-type "$ct" --remote
-          done
 
       - name: Check existing release (stable only)
         id: existing_release

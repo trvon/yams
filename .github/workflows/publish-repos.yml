@@ -80,6 +80,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GPG_PUBLIC_KEY_B64: ${{ secrets.GPG_PUBLIC_KEY_B64 || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -103,6 +104,10 @@ jobs:
             echo "-- Upload $key" >&2
             npx wrangler r2 object put "yams-repository/$key" --file "$src" --content-type "$ct"
           }
+          if [ -n "${GPG_PUBLIC_KEY_B64:-}" ]; then
+            echo "$GPG_PUBLIC_KEY_B64" | base64 -d > gpg.key
+            upload_file gpg.key gpg.key
+          fi
           if [ -d aptrepo ]; then
             find aptrepo -type f -print0 | while IFS= read -r -d '' f; do
               rel="${f#aptrepo/}"; upload_file "$f" "aptrepo/$rel";
