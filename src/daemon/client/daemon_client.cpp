@@ -110,7 +110,7 @@ TimeoutCategory getTimeoutCategory(const Request& req) {
 
 // Requests that should use fresh, single-use connections (avoid pooled reuse)
 bool requires_single_use_connection(const Request& req) {
-    return std::holds_alternative<PruneRequest>(req);
+    return std::holds_alternative<PruneRequest>(req) || std::holds_alternative<RepairRequest>(req);
 }
 
 // Get timeout milliseconds for a category
@@ -161,6 +161,35 @@ std::optional<Error> rewriteListTransportError(const Error& err) {
         default:
             return std::nullopt;
     }
+}
+
+template <typename T>
+Result<T> awaitResultSync(boost::asio::awaitable<Result<T>> aw, std::chrono::milliseconds timeout) {
+    auto prom = std::make_shared<std::promise<Result<T>>>();
+    auto fut = prom->get_future();
+    auto& io = GlobalIOContext::instance().get_io_context();
+
+    boost::asio::co_spawn(
+        io,
+        [aw = std::move(aw), prom]() mutable -> boost::asio::awaitable<void> {
+            try {
+                prom->set_value(co_await std::move(aw));
+            } catch (const std::exception& e) {
+                prom->set_value(
+                    Error{ErrorCode::InternalError, std::string("Awaitable threw: ") + e.what()});
+            } catch (...) {
+                prom->set_value(
+                    Error{ErrorCode::InternalError, "Awaitable threw unknown exception"});
+            }
+            co_return;
+        },
+        boost::asio::detached);
+
+    if (timeout.count() > 0 && fut.wait_for(timeout) != std::future_status::ready) {
+        return Error{ErrorCode::Timeout, "Awaitable timed out"};
+    }
+
+    return fut.get();
 }
 
 } // namespace
@@ -594,18 +623,44 @@ void DaemonClient::setBodyTimeout(std::chrono::milliseconds timeout) {
 
 // New: lightweight readiness probe that sends a real Ping and waits briefly
 static bool pingDaemonSync(const std::filesystem::path& socketPath) {
-    // Best-effort synchronous connectivity probe: try to synchronously connect to the UNIX socket.
     try {
         auto path = socketPath.empty() ? DaemonClient::resolveSocketPathConfigFirst() : socketPath;
         if (path.empty())
             return false;
-        boost::asio::io_context io;
-        boost::asio::local::stream_protocol::socket sock(io);
-        boost::system::error_code ec;
-        sock.connect(boost::asio::local::stream_protocol::endpoint(path.string()), ec);
-        if (!ec) {
-            sock.close();
+
+        constexpr auto kProbeTimeout = std::chrono::milliseconds(1000);
+
+        TransportOptions opts;
+        opts.socketPath = path;
+        opts.requestTimeout = kProbeTimeout;
+        opts.headerTimeout = kProbeTimeout;
+        opts.bodyTimeout = kProbeTimeout;
+        opts.poolEnabled = false;
+
+        AsioTransportAdapter adapter(opts);
+
+        PingRequest ping;
+        ping.timestamp = std::chrono::steady_clock::now();
+
+        auto response = awaitResultSync<Response>(
+            adapter.send_request(Request{std::in_place_type<PingRequest>, ping}),
+            kProbeTimeout + std::chrono::milliseconds(250));
+        if (!response) {
+            spdlog::debug("DaemonClient::pingDaemonSync probe failed for '{}': {}", path.string(),
+                          response.error().message);
+            return false;
+        }
+
+        if (std::holds_alternative<PongResponse>(response.value())) {
             return true;
+        }
+
+        if (const auto* err = std::get_if<ErrorResponse>(&response.value())) {
+            spdlog::debug("DaemonClient::pingDaemonSync probe error response for '{}': {}",
+                          path.string(), err->message);
+        } else {
+            spdlog::debug("DaemonClient::pingDaemonSync probe got unexpected response for '{}'",
+                          path.string());
         }
         return false;
     } catch (...) {
@@ -689,6 +744,8 @@ static bool shouldRetryViaMainSocket(const Error& err) {
             case IpcFailureKind::SocketMissing:
             case IpcFailureKind::PathNotSocket:
             case IpcFailureKind::Refused:
+            case IpcFailureKind::ResetOrBrokenPipe:
+            case IpcFailureKind::Eof:
                 return true;
             default:
                 break;
@@ -697,6 +754,10 @@ static bool shouldRetryViaMainSocket(const Error& err) {
 
     const std::string& msg = err.message;
     return msg.find("Connection refused") != std::string::npos ||
+           msg.find("Connection closed") != std::string::npos ||
+           msg.find("Connection reset") != std::string::npos ||
+           msg.find("Broken pipe") != std::string::npos ||
+           msg.find("End of file") != std::string::npos ||
            msg.find("socket_missing") != std::string::npos ||
            msg.find("path_not_socket") != std::string::npos;
 }
@@ -1187,8 +1248,28 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
     if (requires_single_use_connection(req)) {
         opts.poolEnabled = false;
     }
+    Request retryReq = req;
     AsioTransportAdapter adapter(opts);
     auto r = co_await adapter.send_request(std::move(req));
+
+    if (!r && isProxySocketPath(opts.socketPath) && shouldRetryViaMainSocket(r.error())) {
+        const auto fallbackSocket = deriveMainSocketFromProxy(opts.socketPath);
+        if (!fallbackSocket.empty()) {
+            auto retryOpts = opts;
+            retryOpts.socketPath = fallbackSocket;
+            spdlog::debug("DaemonClient: retrying move request on main socket {}",
+                          fallbackSocket.string());
+            AsioTransportAdapter retryAdapter(retryOpts);
+            auto retryRes = co_await retryAdapter.send_request(std::move(retryReq));
+            if (retryRes) {
+                impl->config_.socketPath = fallbackSocket;
+                impl->refresh_transport();
+                co_return retryRes.value();
+            }
+            r = std::move(retryRes);
+        }
+    }
+
     // After resumption, check if client was destroyed during suspension
     if (impl->isShuttingDown()) {
         co_return Error{ErrorCode::InvalidState, "DaemonClient destroyed during request"};
