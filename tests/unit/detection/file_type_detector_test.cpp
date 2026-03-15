@@ -137,6 +137,83 @@ TEST_CASE_METHOD(DetectorFixture, "File detection falls back to extension when c
     CHECK_FALSE(sig.magicNumber.empty());
 }
 
+TEST_CASE_METHOD(DetectorFixture, "Executable MIME specializes from extension hints",
+                 "[detection][file]") {
+    auto config = configWithCustomPatterns();
+    config.useLibMagic = false;
+    REQUIRE(detector.initialize(config));
+
+    auto sharedObject = dir.createBinaryFile(
+        "libsample.so", std::array<std::byte, 8>{std::byte{0x7F}, std::byte{0x45},
+                                                   std::byte{0x4C}, std::byte{0x46},
+                                                   std::byte{0x02}, std::byte{0x01},
+                                                   std::byte{0x01}, std::byte{0x00}});
+    auto objectFile = dir.createBinaryFile(
+        "module.o", std::array<std::byte, 8>{std::byte{0x7F}, std::byte{0x45},
+                                              std::byte{0x4C}, std::byte{0x46},
+                                              std::byte{0x01}, std::byte{0x01},
+                                              std::byte{0x01}, std::byte{0x00}});
+
+    auto sharedResult = detector.detectFromFile(sharedObject);
+    REQUIRE(sharedResult);
+    CHECK(sharedResult.value().mimeType == "application/x-sharedlib");
+    CHECK(sharedResult.value().fileType == "executable");
+    CHECK(sharedResult.value().isBinary);
+
+    auto objectResult = detector.detectFromFile(objectFile);
+    REQUIRE(objectResult);
+    CHECK(objectResult.value().mimeType == "application/x-object");
+    CHECK(objectResult.value().fileType == "executable");
+    CHECK(objectResult.value().isBinary);
+}
+
+TEST_CASE_METHOD(DetectorFixture, "Generic binary extensions override weak text fallback",
+                 "[detection][file]") {
+    auto config = configWithCustomPatterns();
+    config.useLibMagic = false;
+    REQUIRE(detector.initialize(config));
+
+    auto binPath = dir.createBinaryFile(
+        "payload.bin", std::array<std::byte, 16>{std::byte{'B'}, std::byte{'I'}, std::byte{'N'},
+                                                  std::byte{'A'}, std::byte{'R'}, std::byte{'Y'},
+                                                  std::byte{'-'}, std::byte{'D'}, std::byte{'A'},
+                                                  std::byte{'T'}, std::byte{'A'}, std::byte{'-'},
+                                                  std::byte{'0'}, std::byte{'0'}, std::byte{'0'},
+                                                  std::byte{'1'}});
+
+    auto result = detector.detectFromFile(binPath);
+    REQUIRE(result);
+    CHECK(result.value().mimeType == "application/octet-stream");
+    CHECK(result.value().fileType == "binary");
+    CHECK(result.value().isBinary);
+    CHECK(result.value().confidence >= 0.55f);
+}
+
+TEST_CASE_METHOD(DetectorFixture,
+                 "Extensionless printable blobs do not fall through to text/plain",
+                 "[detection][file]") {
+    auto config = configWithCustomPatterns();
+    config.useLibMagic = false;
+    REQUIRE(detector.initialize(config));
+
+    auto blobPath = dir.createBinaryFile(
+        "88f051b8c01feda0b07cc00112233445",
+        std::array<std::byte, 24>{std::byte{'?'}, std::byte{'<'}, std::byte{'?'},
+                                  std::byte{'?'}, std::byte{'Y'}, std::byte{'?'},
+                                  std::byte{'?'}, std::byte{'<'}, std::byte{'['},
+                                  std::byte{'o'}, std::byte{'+'}, std::byte{'?'},
+                                  std::byte{'g'}, std::byte{'?'}, std::byte{'<'},
+                                  std::byte{'R'}, std::byte{'`'}, std::byte{'g'},
+                                  std::byte{'='}, std::byte{'?'}, std::byte{'#'},
+                                  std::byte{'!'}, std::byte{'='}, std::byte{'{'}});
+
+    auto result = detector.detectFromFile(blobPath);
+    REQUIRE(result);
+    CHECK(result.value().mimeType == "application/octet-stream");
+    CHECK(result.value().fileType == "binary");
+    CHECK(result.value().isBinary);
+}
+
 TEST_CASE_METHOD(DetectorFixture, "Classification utilities report mime details",
                  "[detection][classification]") {
     auto config = configWithCustomPatterns();
@@ -156,6 +233,11 @@ TEST_CASE_METHOD(DetectorFixture, "Classification utilities report mime details"
     CHECK(detector.getFileTypeCategory("application/pdf") == "document");
     CHECK(detector.getFileTypeCategory("application/json") == "text");
     CHECK(detector.getFileTypeCategory("application/zip") == "archive");
+    CHECK(detector.getFileTypeCategory("application/x-executable") == "executable");
+    CHECK(detector.getFileTypeCategory("application/x-sharedlib") == "executable");
+    CHECK(detector.getFileTypeCategory("application/x-object") == "executable");
+    CHECK(detector.getFileTypeCategory("application/vnd.android.dex") == "executable");
+    CHECK(detector.getFileTypeCategory("application/wasm") == "executable");
 }
 
 TEST_CASE("Extension-based mime fallback", "[detection][classification]") {
@@ -163,6 +245,11 @@ TEST_CASE("Extension-based mime fallback", "[detection][classification]") {
     CHECK(FileTypeDetector::getMimeTypeFromExtension(".png") == "image/png");
     CHECK(FileTypeDetector::getMimeTypeFromExtension(".pdf") == "application/pdf");
     CHECK(FileTypeDetector::getMimeTypeFromExtension(".txt") == "text/plain");
+    CHECK(FileTypeDetector::getMimeTypeFromExtension(".so") == "application/x-sharedlib");
+    CHECK(FileTypeDetector::getMimeTypeFromExtension(".o") == "application/x-object");
+    CHECK(FileTypeDetector::getMimeTypeFromExtension(".bin") == "application/octet-stream");
+    CHECK(FileTypeDetector::getMimeTypeFromExtension(".dex") == "application/vnd.android.dex");
+    CHECK(FileTypeDetector::getMimeTypeFromExtension(".wasm") == "application/wasm");
     CHECK(FileTypeDetector::getMimeTypeFromExtension(".unknown") == "application/octet-stream");
 }
 

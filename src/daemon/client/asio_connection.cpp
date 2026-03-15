@@ -22,6 +22,22 @@ using boost::asio::as_tuple;
 using boost::asio::use_awaitable;
 namespace this_coro = boost::asio::this_coro;
 
+namespace {
+bool isExpectedDisconnectError(const boost::system::error_code& ec) {
+    if (ec == boost::asio::error::broken_pipe || ec == boost::asio::error::connection_reset ||
+        ec == boost::asio::error::eof) {
+        return true;
+    }
+
+    const auto msg = ec.message();
+    return msg.find("Broken pipe") != std::string::npos ||
+           msg.find("Connection reset") != std::string::npos ||
+           msg.find("End of file") != std::string::npos ||
+           msg.find("EPIPE") != std::string::npos ||
+           msg.find("ECONNRESET") != std::string::npos;
+}
+} // namespace
+
 boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vector<uint8_t> frame) {
     // Check cancellation before proceeding
     auto cs = co_await this_coro::cancellation_state;
@@ -156,7 +172,13 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
 
         auto& [write_ec, result] = std::get<0>(write_result);
         if (write_ec) {
-            spdlog::error("AsioConnection::async_write_frame: write error: {}", write_ec.message());
+            if (isExpectedDisconnectError(write_ec)) {
+                spdlog::debug("AsioConnection::async_write_frame: peer disconnected during write: {}",
+                              write_ec.message());
+            } else {
+                spdlog::error("AsioConnection::async_write_frame: write error: {}",
+                              write_ec.message());
+            }
             // Re-acquire strand before modifying shared state
             co_await boost::asio::dispatch(strand, use_awaitable);
             writing = false;

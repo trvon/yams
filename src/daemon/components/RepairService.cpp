@@ -33,9 +33,12 @@
 
 #include <sqlite3.h>
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <span>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -53,6 +56,89 @@ bool vectorsDisabledByEnv() {
     if (const char* env = std::getenv("YAMS_DISABLE_VECTOR_DB"); env && *env)
         return true;
     return false;
+}
+
+std::string normalizedRepairExtension(const metadata::DocumentInfo& doc) {
+    std::string extension = doc.fileExtension;
+    if (extension.empty()) {
+        auto pos = doc.fileName.rfind('.');
+        if (pos != std::string::npos)
+            extension = doc.fileName.substr(pos);
+    }
+    if (extension.empty())
+        return {};
+    if (extension.front() != '.')
+        extension.insert(extension.begin(), '.');
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return extension;
+}
+
+bool shouldRedetectMime(const metadata::DocumentInfo& doc) {
+    if (doc.mimeType.empty() || doc.mimeType == "application/octet-stream")
+        return true;
+
+    if (doc.mimeType != "text/plain")
+        return false;
+
+    const auto extension = normalizedRepairExtension(doc);
+    if (extension.empty())
+        return true;
+
+    const auto hintedMime = detection::FileTypeDetector::getMimeTypeFromExtension(extension);
+    return !hintedMime.empty() && hintedMime != "text/plain";
+}
+
+std::string bestEffortMimeForDocument(const metadata::DocumentInfo& doc,
+                                     const std::shared_ptr<api::IContentStore>& store) {
+    try {
+        (void)detection::FileTypeDetector::initializeWithMagicNumbers();
+        auto& detector = detection::FileTypeDetector::instance();
+        const auto extension = normalizedRepairExtension(doc);
+        const auto hintedMime = extension.empty()
+                                    ? std::string{}
+                                    : detection::FileTypeDetector::getMimeTypeFromExtension(extension);
+
+        if (store) {
+            auto bytesResult = store->retrieveBytes(doc.sha256Hash);
+            if (bytesResult && !bytesResult.value().empty()) {
+                auto detected = detector.detectFromBuffer(std::span<const std::byte>(
+                    bytesResult.value().data(), bytesResult.value().size()));
+                if (detected) {
+                    std::string mime = detected.value().mimeType;
+                    if (!hintedMime.empty() && hintedMime != "application/octet-stream") {
+                        const auto detectedType = detector.getFileTypeCategory(mime);
+                        const auto hintedType = detector.getFileTypeCategory(hintedMime);
+                        if (mime.empty() || mime == "application/octet-stream" ||
+                            (mime == "text/plain" && hintedMime != "text/plain") ||
+                            (detectedType == "executable" && hintedType == "executable" &&
+                             mime != hintedMime)) {
+                            mime = hintedMime;
+                        }
+                    }
+                    if (!mime.empty())
+                        return mime;
+                }
+            }
+        }
+
+        if (!doc.filePath.empty() && std::filesystem::exists(doc.filePath)) {
+            if (auto detected = detector.detectFromFile(doc.filePath)) {
+                const auto& mime = detected.value().mimeType;
+                if (!mime.empty())
+                    return mime;
+            }
+        }
+
+        if (!extension.empty()) {
+            const auto mime = hintedMime;
+            if (!mime.empty())
+                return mime;
+        }
+    } catch (...) {
+    }
+
+    return "application/octet-stream";
 }
 
 // Shared thread pool for RepairService background coroutines
@@ -1270,22 +1356,15 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
         return result;
     }
 
+    auto store = services_ ? services_->getContentStore() : nullptr;
+    (void)detection::FileTypeDetector::initializeWithMagicNumbers();
+    auto& detector = detection::FileTypeDetector::instance();
+
     std::vector<std::pair<int64_t, std::string>> toRepair;
     for (const auto& doc : docsResult.value()) {
-        if (doc.mimeType.empty() || doc.mimeType == "application/octet-stream") {
-            std::string detectedMime;
-            if (!doc.fileExtension.empty())
-                detectedMime =
-                    detection::FileTypeDetector::getMimeTypeFromExtension(doc.fileExtension);
-            if (detectedMime.empty() || detectedMime == "application/octet-stream") {
-                auto pos = doc.fileName.rfind('.');
-                if (pos != std::string::npos)
-                    detectedMime = detection::FileTypeDetector::getMimeTypeFromExtension(
-                        doc.fileName.substr(pos));
-            }
-            if (detectedMime.empty() || detectedMime == "application/octet-stream")
-                detectedMime = "text/plain";
-            if (!detectedMime.empty() && detectedMime != "application/octet-stream")
+        if (shouldRedetectMime(doc)) {
+            const auto detectedMime = bestEffortMimeForDocument(doc, store);
+            if (!detectedMime.empty() && detectedMime != doc.mimeType)
                 toRepair.push_back({doc.id, detectedMime});
         }
     }
@@ -1303,20 +1382,29 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
         return result;
     }
 
-    auto batchResult = meta->updateDocumentsMimeBatch(toRepair);
-    if (batchResult) {
-        result.succeeded = batchResult.value();
-    } else {
-        for (const auto& [id, mimeType] : toRepair) {
-            auto docResult = meta->getDocument(id);
-            if (docResult && docResult.value()) {
-                auto doc = *docResult.value();
-                doc.mimeType = mimeType;
-                if (meta->updateDocument(doc))
-                    result.succeeded++;
-                else
-                    result.failed++;
+    for (const auto& [id, mimeType] : toRepair) {
+        auto docResult = meta->getDocument(id);
+        if (!(docResult && docResult.value())) {
+            result.failed++;
+            continue;
+        }
+
+        auto doc = *docResult.value();
+        const bool oldWasText = detector.isTextMimeType(doc.mimeType);
+        const bool newIsText = detector.isTextMimeType(mimeType);
+        doc.mimeType = mimeType;
+
+        if (meta->updateDocument(doc)) {
+            if (oldWasText && !newIsText) {
+                (void)meta->deleteContent(id);
+                (void)meta->removeFromIndex(id);
+                (void)meta->updateDocumentExtractionStatus(
+                    id, false, metadata::ExtractionStatus::Pending,
+                    "MIME repaired; stale text content cleared");
             }
+            result.succeeded++;
+        } else {
+            result.failed++;
         }
     }
 
@@ -2207,20 +2295,12 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
             progress(ev);
         }
 
-        std::string ext = d.fileExtension;
-        if (!ext.empty() && ext[0] == '.')
-            ext.erase(0, 1);
+        const std::string extension = normalizedRepairExtension(d);
 
-        // Re-detect MIME for unhelpful types
+        // Re-detect MIME for unhelpful or clearly wrong types
         std::string effectiveMime = d.mimeType;
-        if (effectiveMime.empty() || effectiveMime == "application/octet-stream") {
-            if (!ext.empty()) {
-                auto detected = detection::FileTypeDetector::getMimeTypeFromExtension(ext);
-                if (!detected.empty() && detected != "application/octet-stream")
-                    effectiveMime = detected;
-            }
-            if (effectiveMime.empty() || effectiveMime == "application/octet-stream")
-                effectiveMime = "text/plain";
+        if (shouldRedetectMime(d)) {
+            effectiveMime = bestEffortMimeForDocument(d, store);
             auto updated = d;
             updated.mimeType = effectiveMime;
             (void)meta->updateDocument(updated);
@@ -2249,7 +2329,7 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
 
         try {
             auto extractedOpt = yams::extraction::util::extractDocumentText(
-                store, d.sha256Hash, effectiveMime, ext, customExtractors);
+                store, d.sha256Hash, effectiveMime, extension, customExtractors);
             if (extractedOpt && !extractedOpt->empty()) {
                 (void)meta->updateDocumentExtractionStatus(
                     d.id, false, metadata::ExtractionStatus::Pending, "repair fts5 processing");

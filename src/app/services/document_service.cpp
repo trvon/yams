@@ -661,10 +661,19 @@ public:
                 }
             }
             if (info.mimeType.empty() || info.mimeType == "application/octet-stream") {
-                // For stdin content with no extension, default to text/plain since
-                // the user explicitly piped text content in.
-                if (!req.content.empty() && info.fileExtension.empty())
-                    info.mimeType = "text/plain";
+                // For extensionless inline content, sniff the provided bytes instead of
+                // assuming everything piped on stdin is text.
+                if (!req.content.empty() && info.fileExtension.empty()) {
+                    try {
+                        (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
+                        auto& det = yams::detection::FileTypeDetector::instance();
+                        auto bytes = std::as_bytes(std::span(req.content.data(), req.content.size()));
+                        if (auto sig = det.detectFromBuffer(bytes)) {
+                            info.mimeType = sig.value().mimeType;
+                        }
+                    } catch (...) {
+                    }
+                }
                 else if (info.mimeType.empty())
                     info.mimeType = "application/octet-stream";
             }
@@ -1330,6 +1339,32 @@ public:
         bool useFallback = false;
         bool useTree = false;
         std::string treePrefix;
+        std::string requestedType = req.type;
+        std::transform(requestedType.begin(), requestedType.end(), requestedType.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        auto classifiedFileType = [](const metadata::DocumentInfo& doc) {
+            return utils::classifyFileType(doc.mimeType, doc.fileExtension);
+        };
+
+        auto matchesTypeFilters = [&](const metadata::DocumentInfo& doc) {
+            if (req.text && !isTextMime(doc.mimeType)) {
+                return false;
+            }
+            if (req.binary && isTextMime(doc.mimeType)) {
+                return false;
+            }
+            if (requestedType.empty()) {
+                return true;
+            }
+            if (requestedType == "text") {
+                return isTextMime(doc.mimeType);
+            }
+            if (requestedType == "binary") {
+                return !isTextMime(doc.mimeType);
+            }
+            return classifiedFileType(doc) == requestedType;
+        };
 
         // Canonicalize pattern to resolve symlinks (e.g., /var -> /private/var on macOS)
         std::string canonicalPattern = req.pattern;
@@ -1448,21 +1483,6 @@ public:
                            docs.end());
             }
 
-            // Filter by type (text/binary) or explicit flags
-            if (req.text || req.type == "text") {
-                docs.erase(std::remove_if(docs.begin(), docs.end(),
-                                          [](const metadata::DocumentInfo& d) {
-                                              return !isTextMime(d.mimeType);
-                                          }),
-                           docs.end());
-            } else if (req.binary || req.type == "binary") {
-                docs.erase(std::remove_if(docs.begin(), docs.end(),
-                                          [](const metadata::DocumentInfo& d) {
-                                              return isTextMime(d.mimeType);
-                                          }),
-                           docs.end());
-            }
-
             // Filter by tags (presence-based)
             if (!req.tags.empty()) {
                 std::vector<metadata::DocumentInfo> filtered;
@@ -1533,6 +1553,14 @@ public:
             }
         }
 
+        if (req.text || req.binary || !requestedType.empty()) {
+            docs.erase(std::remove_if(docs.begin(), docs.end(),
+                                      [&](const metadata::DocumentInfo& doc) {
+                                          return !matchesTypeFilters(doc);
+                                      }),
+                       docs.end());
+        }
+
         // Pagination: offset, limit
         int start = std::max(0, req.offset);
         int lim = std::max(0, req.limit);
@@ -1573,7 +1601,7 @@ public:
                 e.extension = d.fileExtension;
                 e.size = static_cast<uint64_t>(d.fileSize);
                 e.mimeType = d.mimeType;
-                e.fileType = toFileType(d.mimeType);
+                e.fileType = classifiedFileType(d);
                 e.created = toEpochSeconds(d.createdTime);
                 e.modified = toEpochSeconds(d.modifiedTime);
                 e.indexed = toEpochSeconds(d.indexedTime);
@@ -1648,7 +1676,7 @@ public:
             e.extension = d.fileExtension;
             e.size = static_cast<uint64_t>(d.fileSize);
             e.mimeType = d.mimeType;
-            e.fileType = toFileType(d.mimeType);
+            e.fileType = classifiedFileType(d);
             e.created = toEpochSeconds(d.createdTime);
             e.modified = toEpochSeconds(d.modifiedTime);
             e.indexed = toEpochSeconds(d.indexedTime);

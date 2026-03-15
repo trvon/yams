@@ -2,11 +2,17 @@
 #include <chrono>
 #include <filesystem>
 #include <yams/app/services/services.hpp>
+#include <yams/detection/file_type_detector.h>
 #include <yams/downloader/downloader.hpp>
+#include <yams/extraction/extraction_util.h>
 
 namespace fs = std::filesystem;
 
 namespace yams::app::services {
+
+namespace {
+constexpr size_t kMaxIndexedDownloadTextBytes = 16 * 1024 * 1024;
+}
 
 class DownloadServiceImpl : public IDownloadService {
 public:
@@ -135,8 +141,25 @@ public:
                         }
                         docInfo.fileSize = static_cast<int64_t>(finalResult.sizeBytes);
                         docInfo.sha256Hash = storeRes.value().contentHash;
-                        docInfo.mimeType =
-                            finalResult.contentType.value_or("application/octet-stream");
+                        docInfo.mimeType = finalResult.contentType.value_or("");
+                        try {
+                            (void)detection::FileTypeDetector::initializeWithMagicNumbers();
+                            auto& detector = detection::FileTypeDetector::instance();
+                            if (auto sig = detector.detectFromFile(finalResult.storedPath)) {
+                                if (!sig.value().mimeType.empty())
+                                    docInfo.mimeType = sig.value().mimeType;
+                            }
+                            if ((docInfo.mimeType.empty() ||
+                                 docInfo.mimeType == "application/octet-stream") &&
+                                !docInfo.fileExtension.empty()) {
+                                docInfo.mimeType = detection::FileTypeDetector::getMimeTypeFromExtension(
+                                    docInfo.fileExtension);
+                            }
+                        } catch (...) {
+                        }
+                        if (docInfo.mimeType.empty()) {
+                            docInfo.mimeType = "application/octet-stream";
+                        }
                         using std::chrono::floor;
                         using namespace std::chrono;
                         auto now = std::chrono::system_clock::now();
@@ -233,15 +256,40 @@ public:
                                 // best-effort tag derivation
                             }
 
-                            // Index content for search/snippet
-                            auto contentBytes =
-                                ctx_.store->retrieveBytes(storeRes.value().contentHash);
-                            if (contentBytes) {
-                                std::string fileContent(
-                                    reinterpret_cast<const char*>(contentBytes.value().data()),
-                                    contentBytes.value().size());
+                            auto extractedText = extraction::util::extractDocumentText(
+                                ctx_.store, storeRes.value().contentHash, docInfo.mimeType,
+                                docInfo.fileExtension, ctx_.contentExtractors);
+                            if (extractedText && !extractedText->empty()) {
+                                metadata::DocumentContent content;
+                                content.documentId = docId;
+                                if (extractedText->size() > kMaxIndexedDownloadTextBytes) {
+                                    content.contentText =
+                                        extractedText->substr(0, kMaxIndexedDownloadTextBytes);
+                                } else {
+                                    content.contentText = *extractedText;
+                                }
+                                content.extractionMethod = "download_ingest";
+
+                                (void)ctx_.metadataRepo->insertContent(content);
                                 (void)ctx_.metadataRepo->indexDocumentContent(
-                                    docId, filename, fileContent, docInfo.mimeType);
+                                    docId, filename, content.contentText, docInfo.mimeType);
+                                (void)ctx_.metadataRepo->updateDocumentExtractionStatus(
+                                    docId, true, metadata::ExtractionStatus::Success);
+                            } else {
+                                bool textLike = false;
+                                try {
+                                    (void)detection::FileTypeDetector::initializeWithMagicNumbers();
+                                    textLike = detection::FileTypeDetector::instance().isTextMimeType(
+                                        docInfo.mimeType);
+                                } catch (...) {
+                                }
+
+                                (void)ctx_.metadataRepo->updateDocumentExtractionStatus(
+                                    docId, false,
+                                    textLike ? metadata::ExtractionStatus::Pending
+                                             : metadata::ExtractionStatus::Skipped,
+                                    textLike ? "Download stored; extraction pending"
+                                             : "No extractable text");
                             }
                         } else {
                             spdlog::warn("DownloadService: Failed to insert document metadata: {}",

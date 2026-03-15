@@ -34,6 +34,7 @@ using nlohmann::json;
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <optional>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -304,6 +305,57 @@ private:
         return display;
     }
 
+    static std::filesystem::path normalizePath(std::filesystem::path path) {
+        std::error_code ec;
+        auto canonical = std::filesystem::weakly_canonical(path, ec);
+        return ec ? path.lexically_normal() : canonical;
+    }
+
+    static bool isEphemeralDataDir(const std::filesystem::path& path) {
+        if (path.empty())
+            return false;
+
+        const auto normalized = normalizePath(path);
+        std::error_code ec;
+        const auto tmpRoot = std::filesystem::temp_directory_path(ec);
+        if (!ec) {
+            const auto normalizedTmp = normalizePath(tmpRoot);
+            const auto rel = normalized.lexically_relative(normalizedTmp);
+            if (rel.empty() || rel == "." || (!rel.empty() && *rel.begin() != "..")) {
+                return true;
+            }
+        }
+
+        const std::string generic = normalized.generic_string();
+        return generic == "/tmp" || generic.rfind("/tmp/", 0) == 0 || generic == "/private/tmp" ||
+               generic.rfind("/private/tmp/", 0) == 0;
+    }
+
+    std::filesystem::path expectedDataDir() const {
+        if (!dataDir_.empty())
+            return std::filesystem::path(dataDir_);
+        if (cli_) {
+            try {
+                auto cliDataDir = cli_->getDataPath();
+                if (!cliDataDir.empty())
+                    return cliDataDir;
+            } catch (...) {
+            }
+        }
+        return yams::config::resolve_data_dir_from_config();
+    }
+
+    static std::optional<std::filesystem::path>
+    daemonDataDirFromStatus(const yams::daemon::StatusResponse& status) {
+        if (status.contentStoreRoot.empty())
+            return std::nullopt;
+
+        std::filesystem::path contentRoot(status.contentStoreRoot);
+        if (!contentRoot.empty() && contentRoot.filename() == "storage")
+            return contentRoot.parent_path();
+        return contentRoot;
+    }
+
     // Shared helper: paint a status value with severity icon and color
     // Delegates to ui::severity_text for consistency
     static std::string paintStatus(Severity sev, std::string text) {
@@ -416,6 +468,7 @@ private:
                            pid_t fallbackPid = -1) {
         const auto start = std::chrono::steady_clock::now();
         const auto interval = std::chrono::milliseconds(100);
+        const std::filesystem::path socketFsPath(socketPath);
 
         while (std::chrono::steady_clock::now() - start < timeout) {
             pid_t pid = readPidFromFile(pidFilePath);
@@ -424,15 +477,20 @@ private:
             }
 
             bool processGone = (pid <= 0) || (kill(pid, 0) != 0);
-            bool socketGone = !daemon::DaemonClient::isDaemonRunning(socketPath);
+            bool socketFilePresent = !socketPath.empty() && safe_exists(socketFsPath);
+            bool proxySocketPresent = !socketPath.empty() && safe_exists(deriveProxySocketPath(socketFsPath));
+            bool socketBoundProcessAlive = isDaemonProcessRunningForSocket(socketPath);
+            bool socketGone = (!socketFilePresent && !proxySocketPresent) || !socketBoundProcessAlive;
 
             if (processGone && socketGone) {
                 spdlog::debug("Daemon fully stopped (PID {}), socket cleared", pid);
                 return true;
             }
 
-            spdlog::debug("Waiting for daemon to stop... PID={}, process_gone={}, socket_gone={}",
-                          pid, processGone, socketGone);
+            spdlog::debug("Waiting for daemon to stop... PID={}, process_gone={}, socket_gone={}, "
+                          "socket_file_present={}, proxy_socket_present={}, socket_process_alive={}",
+                          pid, processGone, socketGone, socketFilePresent, proxySocketPresent,
+                          socketBoundProcessAlive);
             std::this_thread::sleep_for(interval);
         }
 
@@ -1030,6 +1088,14 @@ private:
         }
 
         bool stopped = false;
+        auto isExpectedShutdownDisconnect = [](const std::string& message) {
+            return message.find("Broken pipe") != std::string::npos ||
+                   message.find("Connection reset") != std::string::npos ||
+                   message.find("Connection closed") != std::string::npos ||
+                   message.find("End of file") != std::string::npos ||
+                   message.find("EPIPE") != std::string::npos ||
+                   message.find("ECONNRESET") != std::string::npos;
+        };
         auto pidAlive = [&]() -> bool {
             pid_t pid = readPidFromFile(pidFile_);
             if (pid <= 0) {
@@ -1050,37 +1116,27 @@ private:
                 std::chrono::seconds(10));
             if (shutdownResult) {
                 spdlog::info("Sent shutdown request to daemon");
-
-                // Wait for daemon to stop (increased timeout to account for graceful shutdown)
-                // SocketServer now waits up to 3s for connection handlers, so we need more time
-                for (int i = 0; i < 60; i++) {
-                    if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                        if (!pidAlive()) {
-                            stopped = true;
-                            spdlog::info("Daemon stopped successfully");
-                            break;
-                        }
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-
-                // If not yet stopped, proceed to PID-based termination fallback
-                if (!stopped) {
+                stopped = waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(8),
+                                            initialPid);
+                if (stopped) {
+                    spdlog::info("Daemon stopped successfully after graceful shutdown request");
+                } else {
                     spdlog::info("Daemon shutdown requested; waiting for process to exit");
                 }
             } else {
                 // Treat common peer-closure/transient errors as potentially-successful if the
                 // daemon disappears shortly after the request.
-                spdlog::debug("Socket shutdown encountered: {}", shutdownResult.error().message);
-                for (int i = 0; i < 60; ++i) {
-                    if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                        if (!pidAlive()) {
-                            stopped = true;
-                            spdlog::info("Daemon stopped successfully");
-                            break;
-                        }
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                const auto& shutdownMessage = shutdownResult.error().message;
+                if (isExpectedShutdownDisconnect(shutdownMessage)) {
+                    spdlog::debug("Shutdown request disconnected during daemon exit: {}",
+                                  shutdownMessage);
+                } else {
+                    spdlog::debug("Socket shutdown encountered: {}", shutdownMessage);
+                }
+                stopped = waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(8),
+                                            initialPid);
+                if (stopped) {
+                    spdlog::info("Daemon stopped successfully after shutdown disconnect");
                 }
             }
         }
@@ -1211,8 +1267,10 @@ private:
         if (stopped) {
 #ifndef _WIN32
             if (isDaemonProcessRunningForSocket(effectiveSocket)) {
-                spdlog::warn("Daemon process still running after stop verification");
-                stopped = false;
+                spdlog::info("Daemon process still exiting after stop request; allowing extra grace "
+                             "period");
+                stopped = waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(3),
+                                            initialPid);
             }
 #endif
         }
@@ -1226,6 +1284,10 @@ private:
             spdlog::error("Failed to stop YAMS daemon");
             std::cerr << "[FAIL] Failed to stop YAMS daemon\n";
             std::cerr << "  💡 Hint: The daemon may be unresponsive or owned by another user\n";
+            if (pidAlive()) {
+                std::cerr << "  ℹ Daemon may still be shutting down; retry in a few seconds if this "
+                             "was a graceful stop\n";
+            }
             if (!force_) {
                 std::cerr << "  📋 Try: yams daemon stop --force\n";
             }
@@ -1952,12 +2014,25 @@ private:
                         std::string lowerLabel = rd.label;
                         std::transform(lowerLabel.begin(), lowerLabel.end(), lowerLabel.begin(),
                                        ::tolower);
-                        if (lowerLabel.find("build reason") == std::string::npos)
+                        const bool skipReadinessLabel =
+                            lowerLabel.find("build reason") != std::string::npos ||
+                            lowerLabel == "vector db ready" ||
+                            lowerLabel == "vector db init attempted";
+                        if (!skipReadinessLabel)
                             waiting.push_back(rd.label);
                     }
                 }
                 std::sort(waiting.begin(), waiting.end());
                 waiting.erase(std::unique(waiting.begin(), waiting.end()), waiting.end());
+
+                const auto daemonDataDir = daemonDataDirFromStatus(status);
+                const auto configuredDataDir = expectedDataDir();
+                const bool hasDaemonDataDir = daemonDataDir.has_value() && !daemonDataDir->empty();
+                const bool dataDirMismatch =
+                    hasDaemonDataDir && !configuredDataDir.empty() &&
+                    normalizePath(*daemonDataDir) != normalizePath(configuredDataDir);
+                const bool daemonUsesEphemeralData =
+                    hasDaemonDataDir && isEphemeralDataDir(*daemonDataDir);
 
                 bool degraded = status.overallStatus == "degraded" || !waiting.empty();
                 if (!status.lastError.empty())
@@ -2488,9 +2563,12 @@ private:
 
                 // Vector DB
                 {
-                    bool ready = getReadiness("vector_db");
+                    const bool ready = getReadiness("vector_db");
+                    const bool initialized = status.vectorDbInitAttempted;
                     Severity sev = ready ? Severity::Good : Severity::Warn;
-                    std::string text = ready ? "Ready" : "Not initialized";
+                    std::string text = ready ? "Ready"
+                                             : (initialized ? "Initialized (empty)"
+                                                            : "Not initialized");
                     std::string extra;
                     if (status.vectorDbDim > 0) {
                         extra = "dim=" + std::to_string(status.vectorDbDim);
@@ -2523,7 +2601,37 @@ private:
                     storageRows.push_back(
                         {"Content root", status.contentStoreRoot, status.contentStoreError});
                 }
+                if (hasDaemonDataDir) {
+                    storageRows.push_back({"Daemon data dir", daemonDataDir->string(), ""});
+                }
+                if (!configuredDataDir.empty()) {
+                    std::string extra;
+                    if (dataDirMismatch) {
+                        extra = paintStatus(Severity::Warn, "daemon differs from CLI/config");
+                    }
+                    storageRows.push_back({"Expected data dir", configuredDataDir.string(), extra});
+                }
                 render_rows(std::cout, storageRows);
+
+                std::vector<Row> dataDirWarningRows;
+                if (daemonUsesEphemeralData) {
+                    dataDirWarningRows.push_back(
+                        {"Ephemeral data dir",
+                         paintStatus(Severity::Warn,
+                                     "Daemon is serving a temporary data directory"),
+                         daemonDataDir->string()});
+                }
+                if (dataDirMismatch) {
+                    dataDirWarningRows.push_back(
+                        {"Data dir mismatch",
+                         paintStatus(Severity::Warn,
+                                     "Daemon is not using the current CLI/config data directory"),
+                         "Restart daemon if this was accidental"});
+                }
+                if (!dataDirWarningRows.empty()) {
+                    std::cout << "\n" << section_header("Data Directory Warnings") << "\n\n";
+                    render_rows(std::cout, dataDirWarningRows);
+                }
 
                 // Only show Readiness section if there are issues or non-ready components
                 std::vector<Row> issueRows;

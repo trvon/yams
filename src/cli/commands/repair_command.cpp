@@ -2,8 +2,11 @@
 /// @brief Thin RPC client for `yams repair` — delegates all work to the daemon's RepairService.
 
 #include <spdlog/spdlog.h>
+#include <atomic>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
+#include <optional>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -153,9 +156,33 @@ public:
         std::string lastOperation;
         uint64_t lastProcessed = 0;
         uint64_t lastTotal = 0;
+        std::mutex progressMutex;
+        std::string lastObservedOperation;
+        std::string lastPhase;
+        std::string lastMessage;
+        const auto startTime = std::chrono::steady_clock::now();
+        auto nowMillis = [] {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        };
+        std::atomic<long long> lastProgressAtMs{nowMillis()};
 
         // Streaming event callback — renders progress to stdout
         auto onEvent = [&](const RepairEvent& ev) {
+            lastProgressAtMs.store(nowMillis(), std::memory_order_relaxed);
+            {
+                std::lock_guard<std::mutex> lock(progressMutex);
+                if (!ev.operation.empty())
+                    lastObservedOperation = ev.operation;
+                lastPhase = ev.phase;
+                lastMessage = ev.message;
+                if (ev.processed > 0)
+                    lastProcessed = ev.processed;
+                if (ev.total > 0)
+                    lastTotal = ev.total;
+            }
+
             // Print section transitions
             if (ev.operation != lastOperation) {
                 if (!lastOperation.empty()) {
@@ -217,15 +244,59 @@ public:
             }
         }
 
-        auto res = (fut.wait_for(localWaitTimeout) == std::future_status::ready)
-                       ? fut.get()
-                       : Result<RepairResponse>(Error{ErrorCode::Timeout, "Repair RPC timed out"});
+        std::optional<Result<RepairResponse>> res;
+        constexpr auto kPollInterval = std::chrono::milliseconds(500);
+        while (fut.wait_for(kPollInterval) != std::future_status::ready) {
+            const auto idleFor =
+                std::chrono::milliseconds(nowMillis() - lastProgressAtMs.load(std::memory_order_relaxed));
+            if (idleFor >= localWaitTimeout) {
+                std::string op;
+                std::string phase;
+                std::string message;
+                uint64_t processed = 0;
+                uint64_t total = 0;
+                {
+                    std::lock_guard<std::mutex> lock(progressMutex);
+                    op = lastObservedOperation;
+                    phase = lastPhase;
+                    message = lastMessage;
+                    processed = lastProcessed;
+                    total = lastTotal;
+                }
 
-        if (!res) {
-            return Error{res.error().code, res.error().message};
+                const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - startTime);
+                std::string timeoutMessage =
+                    "Repair RPC timed out after " + std::to_string(localWaitTimeout.count()) +
+                    "ms without progress";
+                if (!op.empty()) {
+                    timeoutMessage += " (last phase: " + op;
+                    if (!phase.empty())
+                        timeoutMessage += "/" + phase;
+                    if (total > 0)
+                        timeoutMessage += " " + std::to_string(processed) + "/" +
+                                          std::to_string(total);
+                    timeoutMessage += ")";
+                }
+                if (!message.empty())
+                    timeoutMessage += ": " + message;
+                timeoutMessage += ". Total elapsed=" + std::to_string(elapsed.count()) +
+                                  "s. Increase YAMS_REPAIR_RPC_TIMEOUT_MS if work is still progressing.";
+
+                res = Result<RepairResponse>(Error{ErrorCode::Timeout, timeoutMessage});
+                break;
+            }
         }
 
-        const auto& resp = res.value();
+        if (!res.has_value()) {
+            res = fut.get();
+        }
+
+        if (!res.value()) {
+            return Error{res.value().error().code, res.value().error().message};
+        }
+
+        const auto& resp = res.value().value();
 
         // Check if repair was rejected because another is already in progress
         if (!resp.success && resp.operationResults.empty() && !resp.errors.empty()) {

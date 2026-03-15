@@ -56,6 +56,15 @@ namespace this_coro = boost::asio::this_coro;
 
 namespace {
 
+bool isExpectedDisconnectMessage(const std::string& message) {
+    return message.find("Broken pipe") != std::string::npos ||
+           message.find("Connection reset") != std::string::npos ||
+           message.find("Connection closed") != std::string::npos ||
+           message.find("End of file") != std::string::npos ||
+           message.find("EPIPE") != std::string::npos ||
+           message.find("ECONNRESET") != std::string::npos;
+}
+
 bool ipc_wait_trace_enabled() {
     static const bool enabled = [] {
         if (const char* raw = std::getenv("YAMS_IPC_WAIT_TRACE")) {
@@ -462,8 +471,13 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
         conn->handlers.erase(msg.requestId);
         // Release connection before returning error
         conn->in_use.store(false, std::memory_order_release);
-        spdlog::error("AsioTransportAdapter::send_request write failed req_id={}: {}",
-                      msg.requestId, wres.error().message);
+        if (isExpectedDisconnectMessage(wres.error().message)) {
+            spdlog::debug("AsioTransportAdapter::send_request peer disconnected req_id={}: {}",
+                          msg.requestId, wres.error().message);
+        } else {
+            spdlog::error("AsioTransportAdapter::send_request write failed req_id={}: {}",
+                          msg.requestId, wres.error().message);
+        }
         co_return wres.error();
     }
     spdlog::debug("AsioTransportAdapter::send_request wrote frame req_id={} type={} bytes={}",

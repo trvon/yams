@@ -7,10 +7,37 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <span>
 
 using json = nlohmann::json;
 
 namespace yams::extraction {
+
+namespace {
+
+std::string encodeBase64(std::span<const std::byte> bytes) {
+    static constexpr char kBase64Chars[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    std::string base64;
+    base64.reserve(((bytes.size() + 2) / 3) * 4);
+
+    const size_t len = bytes.size();
+    for (size_t i = 0; i < len; i += 3) {
+        const uint32_t b0 = static_cast<uint8_t>(bytes[i]);
+        const uint32_t b1 = (i + 1 < len) ? static_cast<uint8_t>(bytes[i + 1]) : 0;
+        const uint32_t b2 = (i + 2 < len) ? static_cast<uint8_t>(bytes[i + 2]) : 0;
+        const uint32_t n = (b0 << 16) | (b1 << 8) | b2;
+        base64 += kBase64Chars[(n >> 18) & 0x3F];
+        base64 += kBase64Chars[(n >> 12) & 0x3F];
+        base64 += (i + 1 < len) ? kBase64Chars[(n >> 6) & 0x3F] : '=';
+        base64 += (i + 2 < len) ? kBase64Chars[n & 0x3F] : '=';
+    }
+
+    return base64;
+}
+
+} // namespace
 
 //==============================================================================
 // ExternalPluginExtractorConfig implementation
@@ -222,20 +249,22 @@ public:
     }
 
     [[nodiscard]] auto extractText(const std::vector<std::byte>& bytes, const std::string& mime,
-                                   const std::string& /* extension */)
+                                   const std::string& extension)
         -> std::optional<std::string> {
         if (!is_initialized_) {
             spdlog::error("Plugin not initialized");
             return std::nullopt;
         }
 
-        // Build request params
-        json params;
-        params["content"] = json::binary(
-            std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(bytes.data()),
-                                 reinterpret_cast<const uint8_t*>(bytes.data()) + bytes.size()));
-        params["mime_type"] = mime;
-        params["options"] = {{"extract_metadata", true}, {"max_text_size", 1000000}};
+        const std::string base64 = encodeBase64(bytes);
+        json params = {
+            {"source", {{"type", "bytes"}, {"data", base64}}},
+            {"options",
+             {{"mime_type", mime},
+              {"extension", extension},
+              {"extract_metadata", true},
+              {"max_text_size", 1000000}}},
+        };
 
         // Call extractor.extract
         auto result = rpc_client_->call("extractor.extract", params);

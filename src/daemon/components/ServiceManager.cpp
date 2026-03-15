@@ -94,6 +94,31 @@
 #include <yams/vector/vector_database.h>
 
 namespace {
+bool isEphemeralDataDir(const std::filesystem::path& path) {
+    namespace fs = std::filesystem;
+
+    auto normalize = [](const fs::path& in) {
+        std::error_code ec;
+        auto canonical = fs::weakly_canonical(in, ec);
+        return ec ? in.lexically_normal() : canonical;
+    };
+
+    const fs::path normalized = normalize(path);
+    std::error_code ec;
+    const fs::path tmpRoot = fs::temp_directory_path(ec);
+    if (!ec) {
+        const fs::path normalizedTmp = normalize(tmpRoot);
+        auto rel = normalized.lexically_relative(normalizedTmp);
+        if (rel.empty() || rel == "." || (!rel.empty() && *rel.begin() != "..")) {
+            return true;
+        }
+    }
+
+    const std::string generic = normalized.generic_string();
+    return generic == "/tmp" || generic.rfind("/tmp/", 0) == 0 || generic == "/private/tmp" ||
+           generic.rfind("/private/tmp/", 0) == 0;
+}
+
 // Convenience alias for ConfigResolver timeouts
 inline int read_timeout_ms(const char* envName, int defaultMs, int minMs) {
     return yams::daemon::ConfigResolver::readTimeoutMs(envName, defaultMs, minMs);
@@ -604,6 +629,12 @@ yams::Result<void> ServiceManager::initialize() {
     std::error_code ec;
     fs::create_directories(dataDir, ec);
     spdlog::info("ServiceManager: resolved data directory: {}", dataDir.string());
+    if (isEphemeralDataDir(dataDir)) {
+        spdlog::warn("ServiceManager: resolved data directory appears ephemeral: {}. "
+                     "This is allowed, but status/repair results will reflect only this temporary "
+                     "store.",
+                     dataDir.string());
+    }
     if (ec) {
         return Error{ErrorCode::IOError,
                      std::string("Failed to create storage directory: ") + ec.message()};

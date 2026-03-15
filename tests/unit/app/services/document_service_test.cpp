@@ -113,9 +113,15 @@ struct DocumentFixture {
     void setupTestDocuments() {
         auto testFile1 = testDir_ / "test1.txt";
         auto testFile2 = testDir_ / "test2.md";
+        auto testFile3 = testDir_ / "libsample.so";
 
         std::ofstream{testFile1} << "Test document content for retrieval testing";
         std::ofstream{testFile2} << "Another test document with different content";
+        {
+            std::ofstream binary(testFile3, std::ios::binary);
+            const unsigned char elfBytes[] = {0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01, 0x01, 0x00};
+            binary.write(reinterpret_cast<const char*>(elfBytes), sizeof(elfBytes));
+        }
 
         StoreDocumentRequest storeReq1;
         storeReq1.path = testFile1.string();
@@ -125,13 +131,20 @@ struct DocumentFixture {
         storeReq2.path = testFile2.string();
         storeReq2.tags = {"test", "markdown"};
 
+        StoreDocumentRequest storeReq3;
+        storeReq3.path = testFile3.string();
+        storeReq3.tags = {"test", "binary"};
+
         auto result1 = documentService_->store(storeReq1);
         auto result2 = documentService_->store(storeReq2);
+        auto result3 = documentService_->store(storeReq3);
 
-        if (result1 && result2) {
-            testHash1_ = result1.value().hash;
-            testHash2_ = result2.value().hash;
-        }
+        REQUIRE(result1);
+        REQUIRE(result2);
+        REQUIRE(result3);
+
+        testHash1_ = result1.value().hash;
+        testHash2_ = result2.value().hash;
     }
 
     std::string createTestContent(std::string_view identifier) {
@@ -214,6 +227,27 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         auto result = fixture.documentService_->list(request);
 
         REQUIRE(result);
+    }
+
+    SECTION("List with executable type filter") {
+        ListDocumentsRequest request;
+        request.limit = 100;
+        request.type = "executable";
+
+        auto result = fixture.documentService_->list(request);
+
+        REQUIRE(result);
+        REQUIRE_FALSE(result.value().documents.empty());
+
+        bool foundSharedObject = false;
+        for (const auto& doc : result.value().documents) {
+            CHECK(doc.fileType == "executable");
+            if (doc.fileName == "libsample.so") {
+                foundSharedObject = true;
+                CHECK(doc.mimeType == "application/x-sharedlib");
+            }
+        }
+        CHECK(foundSharedObject);
     }
 
     SECTION("List recent documents") {
@@ -517,5 +551,20 @@ TEST_CASE("DocumentService - Integration", "[document][service][integration]") {
         REQUIRE(fixture.documentService_);
         CHECK(fixture.appContext_.store);
         CHECK(fixture.appContext_.metadataRepo);
+    }
+
+    SECTION("Inline extensionless binary content is not forced to text") {
+        StoreDocumentRequest request;
+        request.name = "88f051b8c01feda0b07cc00112233445";
+        request.content = "?<<??Y??<[o+?g?<R`g=?#!={?;=?t?:}?";
+
+        auto stored = fixture.documentService_->store(request);
+
+        REQUIRE(stored);
+        auto doc = fixture.metadataRepo_->getDocumentByHash(stored.value().hash);
+        REQUIRE(doc);
+        REQUIRE(doc.value().has_value());
+        CHECK(doc.value()->mimeType == "application/octet-stream");
+        CHECK_FALSE(doc.value()->contentExtracted);
     }
 }

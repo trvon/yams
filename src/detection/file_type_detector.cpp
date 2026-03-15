@@ -4,12 +4,14 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
+#include <string_view>
 
 #ifdef __linux__
 #include <unistd.h>
@@ -27,6 +29,216 @@
 namespace yams::detection {
 
 namespace {
+std::string toLowerCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+std::string normalizeExtensionCopy(std::string extension) {
+    if (extension.empty())
+        return {};
+    if (extension.front() != '.')
+        extension.insert(extension.begin(), '.');
+    return toLowerCopy(std::move(extension));
+}
+
+std::string normalizeMimeType(std::string mimeType) {
+    mimeType = toLowerCopy(std::move(mimeType));
+
+    if (mimeType == "application/x-dosexec")
+        return "application/x-msdownload";
+    if (mimeType == "application/x-pie-executable" || mimeType == "application/x-elf")
+        return "application/x-executable";
+    if (mimeType == "application/x-java-class")
+        return "application/java-vm";
+
+    return mimeType;
+}
+
+bool isCodeMime(std::string_view mimeType) {
+    return mimeType.find("text/x-c") == 0 || mimeType.find("text/x-python") == 0 ||
+           mimeType.find("text/x-java") == 0 || mimeType.find("text/x-rust") == 0 ||
+           mimeType.find("text/x-go") == 0 || mimeType.find("text/x-ruby") == 0 ||
+           mimeType.find("text/x-perl") == 0 || mimeType.find("text/x-php") == 0 ||
+           mimeType.find("text/x-swift") == 0 || mimeType.find("text/x-kotlin") == 0 ||
+           mimeType.find("text/x-scala") == 0 || mimeType.find("text/x-typescript") == 0 ||
+           mimeType.find("text/x-csharp") == 0 || mimeType.find("text/x-objc") == 0 ||
+           mimeType.find("text/x-asm") == 0 || mimeType.find("text/x-makefile") == 0 ||
+           mimeType.find("text/x-cmake") == 0 || mimeType == "application/javascript" ||
+           mimeType == "application/x-sh" || mimeType == "application/x-perl" ||
+           mimeType == "application/x-python" || mimeType == "application/x-ruby";
+}
+
+bool isStructuredTextMime(std::string_view mimeType) {
+    return mimeType == "application/json" || mimeType == "application/xml" ||
+           mimeType == "application/x-yaml" || mimeType == "application/yaml";
+}
+
+bool isExecutableMime(std::string_view mimeType) {
+    return mimeType == "application/x-msdownload" || mimeType == "application/x-executable" ||
+           mimeType == "application/x-sharedlib" || mimeType == "application/x-mach-binary" ||
+           mimeType == "application/x-object" || mimeType == "application/vnd.android.dex" ||
+           mimeType == "application/wasm" || mimeType == "application/java-vm" ||
+           mimeType == "application/java-archive";
+}
+
+bool isKnownGenericBinaryExtension(std::string_view extension) {
+    return extension == ".bin" || extension == ".out";
+}
+
+bool isConvincingTextData(std::span<const std::byte> data) {
+    if (data.empty())
+        return false;
+
+    const size_t checkLength = std::min(data.size(), size_t(512));
+    size_t asciiPrintable = 0;
+    size_t whitespace = 0;
+    size_t alphaNum = 0;
+    size_t punctuation = 0;
+    size_t utf8LeadBytes = 0;
+    size_t invalidUtf8Bytes = 0;
+
+    for (size_t i = 0; i < checkLength; ++i) {
+        const unsigned char c = static_cast<unsigned char>(data[i]);
+
+        if (c == '\t' || c == '\n' || c == '\r' || c == ' ') {
+            whitespace++;
+            continue;
+        }
+
+        if (c >= 32 && c < 127) {
+            asciiPrintable++;
+            if (std::isalnum(c))
+                alphaNum++;
+            else if (std::ispunct(c))
+                punctuation++;
+            continue;
+        }
+
+        if (c < 0x80) {
+            invalidUtf8Bytes++;
+            continue;
+        }
+
+        size_t sequenceLength = 0;
+        if (c >= 0xC2 && c <= 0xDF)
+            sequenceLength = 2;
+        else if (c >= 0xE0 && c <= 0xEF)
+            sequenceLength = 3;
+        else if (c >= 0xF0 && c <= 0xF4)
+            sequenceLength = 4;
+        else {
+            invalidUtf8Bytes++;
+            continue;
+        }
+
+        if (i + sequenceLength > checkLength) {
+            invalidUtf8Bytes += sequenceLength;
+            break;
+        }
+
+        bool valid = true;
+        for (size_t j = 1; j < sequenceLength; ++j) {
+            const unsigned char continuation = static_cast<unsigned char>(data[i + j]);
+            if ((continuation & 0xC0) != 0x80) {
+                valid = false;
+                break;
+            }
+        }
+
+        if (!valid) {
+            invalidUtf8Bytes++;
+            continue;
+        }
+
+        utf8LeadBytes++;
+        i += sequenceLength - 1;
+    }
+
+    const size_t textishBytes = asciiPrintable + whitespace + utf8LeadBytes;
+    if (invalidUtf8Bytes > checkLength / 50)
+        return false;
+    if (textishBytes < (checkLength * 9) / 10)
+        return false;
+    if (whitespace == 0 && alphaNum < checkLength / 3)
+        return false;
+    if (alphaNum < checkLength / 5 && punctuation > alphaNum * 2)
+        return false;
+
+    return true;
+}
+
+std::string classifyMimeCategory(std::string mimeType) {
+    mimeType = normalizeMimeType(std::move(mimeType));
+
+    if (isCodeMime(mimeType))
+        return "code";
+    if (isExecutableMime(mimeType))
+        return "executable";
+    if (mimeType.find("text/") == 0)
+        return "text";
+    if (mimeType.find("image/") == 0)
+        return "image";
+    if (mimeType.find("video/") == 0)
+        return "video";
+    if (mimeType.find("audio/") == 0)
+        return "audio";
+    if (mimeType.find("application/pdf") == 0 || mimeType.find("application/msword") == 0 ||
+        mimeType.find("application/vnd.") == 0)
+        return "document";
+    if (mimeType.find("zip") != std::string::npos || mimeType.find("tar") != std::string::npos ||
+        mimeType.find("compressed") != std::string::npos ||
+        mimeType.find("archive") != std::string::npos)
+        return "archive";
+    if (isStructuredTextMime(mimeType))
+        return "text";
+
+    return "binary";
+}
+
+void applyExtensionHint(FileSignature& signature, const std::string& extension) {
+    const std::string normalizedExtension = normalizeExtensionCopy(extension);
+    if (normalizedExtension.empty())
+        return;
+
+    const std::string extensionMime =
+        normalizeMimeType(FileTypeDetector::getMimeTypeFromExtension(normalizedExtension));
+    const std::string detectedMime = normalizeMimeType(signature.mimeType);
+
+    if (signature.fileType == "executable" && classifyMimeCategory(extensionMime) == "executable" &&
+        extensionMime != "application/octet-stream" && extensionMime != detectedMime) {
+        signature.mimeType = extensionMime;
+        signature.fileType = "executable";
+        signature.isBinary = true;
+        return;
+    }
+
+    const bool lowConfidenceText =
+        signature.confidence <= 0.3f && (signature.fileType == "text" || detectedMime == "text/plain");
+    if (!lowConfidenceText)
+        return;
+
+    const std::string extensionFileType = classifyMimeCategory(extensionMime);
+    if (extensionMime != "application/octet-stream" &&
+        (extensionFileType == "executable" || extensionFileType == "binary")) {
+        signature.mimeType = extensionMime;
+        signature.fileType = extensionFileType;
+        signature.isBinary = true;
+        signature.description = extensionFileType == "executable" ? "Executable file" : "Binary file";
+        signature.confidence = 0.6f;
+        return;
+    }
+
+    if (isKnownGenericBinaryExtension(normalizedExtension)) {
+        signature.mimeType = "application/octet-stream";
+        signature.fileType = "binary";
+        signature.isBinary = true;
+        signature.description = "Binary file";
+        signature.confidence = 0.55f;
+    }
+}
+
 // Extension to MIME type mapping - wrapped in function to avoid static initialization order fiasco
 const std::unordered_map<std::string, std::string>& getExtensionMimeMap() {
     static const std::unordered_map<std::string, std::string> EXTENSION_MIME_MAP = {
@@ -97,8 +309,21 @@ const std::unordered_map<std::string, std::string>& getExtensionMimeMap() {
         // Executables
         {".exe", "application/x-msdownload"},
         {".dll", "application/x-msdownload"},
+        {".sys", "application/x-msdownload"},
+        {".drv", "application/x-msdownload"},
+        {".ocx", "application/x-msdownload"},
+        {".cpl", "application/x-msdownload"},
+        {".scr", "application/x-msdownload"},
+        {".elf", "application/x-executable"},
         {".so", "application/x-sharedlib"},
         {".dylib", "application/x-sharedlib"},
+        {".o", "application/x-object"},
+        {".obj", "application/x-object"},
+        {".a", "application/x-object"},
+        {".bin", "application/octet-stream"},
+        {".out", "application/octet-stream"},
+        {".dex", "application/vnd.android.dex"},
+        {".wasm", "application/wasm"},
         {".class", "application/java-vm"},
         {".jar", "application/java-archive"}};
     return EXTENSION_MIME_MAP;
@@ -176,11 +401,11 @@ public:
         }
 
         FileSignature sig;
-        sig.mimeType = mimeType;
+        sig.mimeType = normalizeMimeType(mimeType);
         sig.magicNumber = FileTypeDetector::bytesToHex(data, 16);
         // Use the instance methods to ensure consistency
-        sig.isBinary = FileTypeDetector::instance().isBinaryMimeType(mimeType);
-        sig.fileType = FileTypeDetector::instance().getFileTypeCategory(mimeType);
+        sig.isBinary = FileTypeDetector::instance().isBinaryMimeType(sig.mimeType);
+        sig.fileType = FileTypeDetector::instance().getFileTypeCategory(sig.mimeType);
         sig.confidence = 0.95f; // High confidence from libmagic
 
         // Set description based on file type
@@ -314,19 +539,11 @@ Result<void> FileTypeDetector::initialize(const FileTypeDetectorConfig& config) 
         // Build classification maps from built-in patterns
         for (const auto& pattern : pImpl->patterns) {
             if (!pattern.mimeType.empty()) {
-                pImpl->mimeToFileType[pattern.mimeType] = pattern.fileType;
-
-                bool isBinary = true;
-                if (pattern.fileType == "text" || pattern.mimeType.find("text/") == 0 ||
-                    pattern.mimeType == "application/json" ||
-                    pattern.mimeType == "application/xml" ||
-                    pattern.mimeType == "application/javascript" ||
-                    pattern.mimeType == "application/x-yaml" ||
-                    pattern.mimeType == "application/yaml" ||
-                    pattern.mimeType == "application/x-sh") {
-                    isBinary = false;
-                }
-                pImpl->mimeToIsBinary[pattern.mimeType] = isBinary;
+                const std::string normalizedMime = normalizeMimeType(pattern.mimeType);
+                pImpl->mimeToFileType[normalizedMime] = classifyMimeCategory(normalizedMime);
+                pImpl->mimeToIsBinary[normalizedMime] = !isStructuredTextMime(normalizedMime) &&
+                                                       normalizedMime.find("text/") != 0 &&
+                                                       !isCodeMime(normalizedMime);
             }
         }
     }
@@ -341,40 +558,11 @@ Result<void> FileTypeDetector::initialize(const FileTypeDetectorConfig& config) 
 
     // Always populate extension-based MIME mappings
     for (const auto& [ext, mime] : getExtensionMimeMap()) {
-        if (pImpl->mimeToFileType.find(mime) == pImpl->mimeToFileType.end()) {
-            std::string fileType = "binary";
-
-            // Check for code/programming file types
-            if (mime.find("text/x-c") == 0 || mime.find("text/x-python") == 0 ||
-                mime.find("text/x-java") == 0 || mime.find("text/x-rust") == 0 ||
-                mime.find("text/x-go") == 0 || mime.find("text/x-ruby") == 0 ||
-                mime.find("text/x-perl") == 0 || mime.find("text/x-php") == 0 ||
-                mime == "application/javascript" || mime == "application/x-sh" ||
-                mime == "application/x-perl" || mime == "application/x-python" ||
-                mime == "application/x-ruby") {
-                fileType = "code";
-            } else if (mime.find("text/") == 0)
-                fileType = "text";
-            else if (mime.find("image/") == 0)
-                fileType = "image";
-            else if (mime.find("video/") == 0)
-                fileType = "video";
-            else if (mime.find("audio/") == 0)
-                fileType = "audio";
-            else if (mime.find("application/pdf") == 0 || mime.find("application/msword") == 0 ||
-                     mime.find("application/vnd.") == 0)
-                fileType = "document";
-            else if (mime.find("zip") != std::string::npos ||
-                     mime.find("tar") != std::string::npos ||
-                     mime.find("compressed") != std::string::npos ||
-                     mime.find("archive") != std::string::npos)
-                fileType = "archive";
-            else if (mime == "application/json" || mime == "application/xml" ||
-                     mime == "application/x-yaml" || mime == "application/yaml")
-                fileType = "text";
-
-            pImpl->mimeToFileType[mime] = fileType;
-            pImpl->mimeToIsBinary[mime] = (fileType != "text" && fileType != "code");
+        const std::string normalizedMime = normalizeMimeType(mime);
+        if (pImpl->mimeToFileType.find(normalizedMime) == pImpl->mimeToFileType.end()) {
+            const std::string fileType = classifyMimeCategory(normalizedMime);
+            pImpl->mimeToFileType[normalizedMime] = fileType;
+            pImpl->mimeToIsBinary[normalizedMime] = (fileType != "text" && fileType != "code");
         }
     }
 
@@ -532,7 +720,7 @@ Result<FileSignature> FileTypeDetector::detectFromBuffer(std::span<const std::by
 
     // Fallback to binary/text detection
     if (!detected) {
-        result.isBinary = isBinaryData(data);
+        result.isBinary = isBinaryData(data) || !isConvincingTextData(data);
         result.mimeType = result.isBinary ? "application/octet-stream" : "text/plain";
         result.fileType = result.isBinary ? "binary" : "text";
         result.description = result.isBinary ? "Binary file" : "Text file";
@@ -574,10 +762,17 @@ Result<FileSignature> FileTypeDetector::detectFromFile(const std::filesystem::pa
 
     auto result = detectFromBuffer(buffer);
 
+    if (result) {
+        result.value().mimeType = normalizeMimeType(result.value().mimeType);
+        result.value().fileType = classifyMimeCategory(result.value().mimeType);
+        result.value().isBinary = (result.value().fileType != "text" && result.value().fileType != "code");
+        applyExtensionHint(result.value(), path.extension().string());
+    }
+
     // If detection failed or has low confidence, try extension-based detection
     if (!result || result.value().confidence < 0.5f) {
         std::string extension = path.extension().string();
-        std::string mimeType = getMimeTypeFromExtension(extension);
+        std::string mimeType = normalizeMimeType(getMimeTypeFromExtension(extension));
 
         if (mimeType != "application/octet-stream") {
             FileSignature sig;
@@ -588,6 +783,17 @@ Result<FileSignature> FileTypeDetector::detectFromFile(const std::filesystem::pa
             sig.isBinary = FileTypeDetector::instance().isBinaryMimeType(mimeType);
             sig.fileType = FileTypeDetector::instance().getFileTypeCategory(mimeType);
 
+            return sig;
+        }
+
+        if (isKnownGenericBinaryExtension(normalizeExtensionCopy(extension))) {
+            FileSignature sig;
+            sig.mimeType = "application/octet-stream";
+            sig.confidence = 0.55f;
+            sig.magicNumber = extractMagicNumber(buffer);
+            sig.isBinary = true;
+            sig.fileType = "binary";
+            sig.description = "Binary file";
             return sig;
         }
     }
@@ -625,61 +831,22 @@ Result<void> FileTypeDetector::loadPatternsFromFile(const std::filesystem::path&
 
             // Build classification maps
             if (!pattern.mimeType.empty()) {
-                pImpl->mimeToFileType[pattern.mimeType] = pattern.fileType;
-
-                // Determine if binary based on file type and MIME type
-                bool isBinary = true;
-                if (pattern.fileType == "text" || pattern.mimeType.find("text/") == 0 ||
-                    pattern.mimeType == "application/json" ||
-                    pattern.mimeType == "application/xml" ||
-                    pattern.mimeType == "application/javascript" ||
-                    pattern.mimeType == "application/x-yaml" ||
-                    pattern.mimeType == "application/yaml" ||
-                    pattern.mimeType == "application/x-sh") {
-                    isBinary = false;
-                }
-                pImpl->mimeToIsBinary[pattern.mimeType] = isBinary;
+                const std::string normalizedMime = normalizeMimeType(pattern.mimeType);
+                pImpl->mimeToFileType[normalizedMime] = classifyMimeCategory(normalizedMime);
+                pImpl->mimeToIsBinary[normalizedMime] = !isStructuredTextMime(normalizedMime) &&
+                                                       normalizedMime.find("text/") != 0 &&
+                                                       !isCodeMime(normalizedMime);
             }
         }
 
         // Also add extension-based MIME types to maps
         for (const auto& [ext, mime] : getExtensionMimeMap()) {
             // Only add if not already present from patterns
-            if (pImpl->mimeToFileType.find(mime) == pImpl->mimeToFileType.end()) {
-                // Determine file type from MIME
-                std::string fileType = "binary";
-
-                // Check for code/programming file types
-                if (mime.find("text/x-c") == 0 || mime.find("text/x-python") == 0 ||
-                    mime.find("text/x-java") == 0 || mime.find("text/x-rust") == 0 ||
-                    mime.find("text/x-go") == 0 || mime.find("text/x-ruby") == 0 ||
-                    mime.find("text/x-perl") == 0 || mime.find("text/x-php") == 0 ||
-                    mime == "application/javascript" || mime == "application/x-sh" ||
-                    mime == "application/x-perl" || mime == "application/x-python" ||
-                    mime == "application/x-ruby") {
-                    fileType = "code";
-                } else if (mime.find("text/") == 0)
-                    fileType = "text";
-                else if (mime.find("image/") == 0)
-                    fileType = "image";
-                else if (mime.find("video/") == 0)
-                    fileType = "video";
-                else if (mime.find("audio/") == 0)
-                    fileType = "audio";
-                else if (mime.find("application/pdf") == 0 ||
-                         mime.find("application/msword") == 0 || mime.find("application/vnd.") == 0)
-                    fileType = "document";
-                else if (mime.find("zip") != std::string::npos ||
-                         mime.find("tar") != std::string::npos ||
-                         mime.find("compressed") != std::string::npos ||
-                         mime.find("archive") != std::string::npos)
-                    fileType = "archive";
-                else if (mime == "application/json" || mime == "application/xml" ||
-                         mime == "application/x-yaml" || mime == "application/yaml")
-                    fileType = "text";
-
-                pImpl->mimeToFileType[mime] = fileType;
-                pImpl->mimeToIsBinary[mime] = (fileType != "text" && fileType != "code");
+            const std::string normalizedMime = normalizeMimeType(mime);
+            if (pImpl->mimeToFileType.find(normalizedMime) == pImpl->mimeToFileType.end()) {
+                const std::string fileType = classifyMimeCategory(normalizedMime);
+                pImpl->mimeToFileType[normalizedMime] = fileType;
+                pImpl->mimeToIsBinary[normalizedMime] = (fileType != "text" && fileType != "code");
             }
         }
 
@@ -832,20 +999,20 @@ std::string FileTypeDetector::getMimeTypeFromExtension(const std::string& extens
 }
 
 bool FileTypeDetector::isTextMimeType(const std::string& mimeType) const {
+    const std::string normalizedMime = normalizeMimeType(mimeType);
+
     // First check our loaded patterns
-    auto it = pImpl->mimeToIsBinary.find(mimeType);
+    auto it = pImpl->mimeToIsBinary.find(normalizedMime);
     if (it != pImpl->mimeToIsBinary.end()) {
         return !it->second; // Return true if NOT binary
     }
 
     // Fall back to common text MIME types
-    if (mimeType.find("text/") == 0)
+    if (normalizedMime.find("text/") == 0)
         return true;
 
-    // Known text application types
-    return mimeType == "application/json" || mimeType == "application/xml" ||
-           mimeType == "application/javascript" || mimeType == "application/x-yaml" ||
-           mimeType == "application/yaml" || mimeType == "application/x-sh";
+    return isStructuredTextMime(normalizedMime) || normalizedMime == "application/javascript" ||
+           normalizedMime == "application/x-sh";
 }
 
 bool FileTypeDetector::isBinaryMimeType(const std::string& mimeType) const {
@@ -916,59 +1083,15 @@ std::vector<std::string> FileTypeDetector::getTextExtensions() const {
 }
 
 std::string FileTypeDetector::getFileTypeCategory(const std::string& mimeType) const {
+    const std::string normalizedMime = normalizeMimeType(mimeType);
+
     // First check our loaded patterns
-    auto it = pImpl->mimeToFileType.find(mimeType);
+    auto it = pImpl->mimeToFileType.find(normalizedMime);
     if (it != pImpl->mimeToFileType.end()) {
         return it->second;
     }
 
-    // Check for code/programming file types
-    if (mimeType.find("text/x-c") == 0 ||          // C/C++ source
-        mimeType.find("text/x-python") == 0 ||     // Python
-        mimeType.find("text/x-java") == 0 ||       // Java
-        mimeType.find("text/x-rust") == 0 ||       // Rust
-        mimeType.find("text/x-go") == 0 ||         // Go
-        mimeType.find("text/x-ruby") == 0 ||       // Ruby
-        mimeType.find("text/x-perl") == 0 ||       // Perl
-        mimeType.find("text/x-php") == 0 ||        // PHP
-        mimeType.find("text/x-swift") == 0 ||      // Swift
-        mimeType.find("text/x-kotlin") == 0 ||     // Kotlin
-        mimeType.find("text/x-scala") == 0 ||      // Scala
-        mimeType.find("text/x-typescript") == 0 || // TypeScript
-        mimeType.find("text/x-csharp") == 0 ||     // C#
-        mimeType.find("text/x-objc") == 0 ||       // Objective-C
-        mimeType.find("text/x-asm") == 0 ||        // Assembly
-        mimeType.find("text/x-makefile") == 0 ||   // Makefile
-        mimeType.find("text/x-cmake") == 0 ||      // CMake
-        mimeType == "application/javascript" ||    // JavaScript
-        mimeType == "application/x-sh" ||          // Shell script
-        mimeType == "application/x-perl" ||        // Perl
-        mimeType == "application/x-python" ||      // Python
-        mimeType == "application/x-ruby") {        // Ruby
-        return "code";
-    }
-
-    // Fall back to MIME type analysis
-    if (mimeType.find("text/") == 0)
-        return "text";
-    if (mimeType.find("image/") == 0)
-        return "image";
-    if (mimeType.find("video/") == 0)
-        return "video";
-    if (mimeType.find("audio/") == 0)
-        return "audio";
-    if (mimeType.find("application/pdf") == 0 || mimeType.find("application/msword") == 0 ||
-        mimeType.find("application/vnd.") == 0)
-        return "document";
-    if (mimeType.find("zip") != std::string::npos || mimeType.find("tar") != std::string::npos ||
-        mimeType.find("compressed") != std::string::npos ||
-        mimeType.find("archive") != std::string::npos)
-        return "archive";
-    if (mimeType == "application/json" || mimeType == "application/xml" ||
-        mimeType == "application/x-yaml" || mimeType == "application/yaml")
-        return "text";
-
-    return "binary";
+    return classifyMimeCategory(normalizedMime);
 }
 
 std::string FileTypeDetector::bytesToHex(std::span<const std::byte> data, size_t maxLength) {
