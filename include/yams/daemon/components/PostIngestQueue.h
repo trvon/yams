@@ -12,12 +12,14 @@
 #include <optional>
 #include <semaphore>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <variant>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
+#include <taskflow/taskflow.hpp>
 #include <yams/daemon/components/GradientLimiter.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/metadata/document_metadata.h>
@@ -552,16 +554,6 @@ private:
     /// Dispatch successes to downstream channels (KG, symbol, entity, title)
     void dispatchSuccesses(const std::vector<PreparedMetadataEntry>& successes);
 
-    /// Process a chunk of tasks in parallel (used by processBatch)
-    struct ChunkResult {
-        std::vector<PreparedMetadataEntry> successes;
-        std::vector<ExtractionFailure> failures;
-    };
-    ChunkResult processChunkParallel(
-        const std::vector<InternalEventBus::PostIngestTask>& tasks,
-        const std::unordered_map<std::string, std::string>& symbolExtensionMap,
-        const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders);
-
     /// Get document info from cache or DB
     std::optional<metadata::DocumentInfo> getCachedDocumentInfo(const std::string& hash);
 
@@ -576,6 +568,9 @@ private:
 
     /// Initialize the extraction semaphore based on TuneAdvisor limits
     void initializeExtractionSemaphore();
+
+    /// Taskflow executor for CPU-bound extraction parallelism
+    std::unique_ptr<tf::Executor> tfExecutor_;
 
     // Backpressure metrics
     std::atomic<std::uint64_t> backpressureRejects_{0};

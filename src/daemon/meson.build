@@ -75,6 +75,7 @@ proto_generated = proto_generator.process(
 )
 
 nlohmann_json_dep = dependency('nlohmann_json')
+taskflow_dep = dependency('taskflow', required: true)
 
 # Resolve CLI11 similarly to src/cli/meson.build (pkg-config first, then CMake
 # via Conan generator paths when available), to avoid environment-specific
@@ -241,6 +242,7 @@ yams_daemon_lib = static_library('yams_daemon',
     dependency('zlib'),
     nlohmann_json_dep,
     protobuf_dep,
+    taskflow_dep,
   ] + tracy_deps,
   cpp_args: tracy_args + (cpp.get_id() == 'msvc' ? ['/wd4100'] : ['-Wno-unused-parameter']),
   include_directories: [

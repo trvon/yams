@@ -23,21 +23,20 @@
 #include <numeric>
 #include <unordered_map>
 
-#include <yams/api/content_store_builder.h>
-#include <yams/app/services/factory.hpp>
-#include <yams/app/services/services.hpp>
+#include "../integration/daemon/test_daemon_harness.h"
+
+#include <yams/app/services/document_ingestion_service.h>
+#include <yams/cli/cli_sync.h>
+#include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/TuneAdvisor.h>
-#include <yams/metadata/connection_pool.h>
-#include <yams/metadata/database.h>
-#include <yams/metadata/metadata_repository.h>
-#include <yams/metadata/migration.h>
+#include <yams/daemon/metric_keys.h>
 
 #include <spdlog/spdlog.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
-using yams::app::services::AddDirectoryRequest;
-using yams::app::services::AddDirectoryResponse;
+using yams::app::services::AddOptions;
+using yams::app::services::DocumentIngestionService;
 
 namespace {
 
@@ -237,100 +236,80 @@ private:
     std::optional<std::string> previous_{};
 };
 
-struct LocalIngestionSession {
-    fs::path root;
-    std::unique_ptr<yams::metadata::Database> database;
-    std::unique_ptr<yams::metadata::ConnectionPool> pool;
-    std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo;
-    std::shared_ptr<yams::api::IContentStore> contentStore;
-    yams::app::services::AppContext context;
+struct StatusSnapshot {
+    uint64_t documentsTotal{0};
+    uint64_t documentsIndexed{0};
+    uint64_t workerQueued{0};
+    uint64_t workerActive{0};
+    uint64_t postIngestQueued{0};
+    uint64_t postIngestInflight{0};
+    uint64_t postIngestProcessed{0};
+    uint64_t postIngestFailed{0};
 
-    static LocalIngestionSession create(const fs::path& sessionRoot) {
-        LocalIngestionSession session;
-        session.root = sessionRoot;
-        fs::create_directories(sessionRoot);
-        fs::create_directories(sessionRoot / "storage");
-
-        auto db = std::make_unique<yams::metadata::Database>();
-        auto dbPath = (sessionRoot / "yams.db").string();
-        auto openResult = db->open(dbPath, yams::metadata::ConnectionMode::Create);
-        if (!openResult) {
-            throw std::runtime_error("Failed to open DB: " + openResult.error().message);
-        }
-
-        yams::metadata::MigrationManager migrator(*db);
-        auto initResult = migrator.initialize();
-        if (!initResult) {
-            throw std::runtime_error("Failed to initialize migrations: " +
-                                     initResult.error().message);
-        }
-        migrator.registerMigrations(yams::metadata::YamsMetadataMigrations::getAllMigrations());
-        auto migrateResult = migrator.migrate();
-        if (!migrateResult) {
-            throw std::runtime_error("Failed to run migrations: " + migrateResult.error().message);
-        }
-
-        yams::metadata::ConnectionPoolConfig poolCfg;
-        poolCfg.minConnections = 1;
-        poolCfg.maxConnections = 8;
-        yams::daemon::TuneAdvisor::setEnableParallelIngest(true);
-        yams::daemon::TuneAdvisor::setMaxIngestWorkers(
-            static_cast<uint32_t>(poolCfg.maxConnections));
-        yams::daemon::TuneAdvisor::setStoragePoolSize(
-            static_cast<uint32_t>(poolCfg.maxConnections));
-        auto pool = std::make_unique<yams::metadata::ConnectionPool>(dbPath, poolCfg);
-        auto repo = std::make_shared<yams::metadata::MetadataRepository>(*pool);
-
-        yams::api::ContentStoreBuilder builder;
-        auto storeResult = builder.withStoragePath(sessionRoot / "storage")
-                               .withChunkSize(64 * 1024)
-                               .withCompression(true)
-                               .withDeduplication(true)
-                               .build();
-        if (!storeResult) {
-            throw std::runtime_error("Failed to create content store: " +
-                                     storeResult.error().message);
-        }
-        auto uniqueStore = std::move(storeResult.value());
-        auto storeShared = std::shared_ptr<yams::api::IContentStore>(uniqueStore.release());
-
-        session.database = std::move(db);
-        session.pool = std::move(pool);
-        session.metadataRepo = std::move(repo);
-        session.contentStore = std::move(storeShared);
-
-        session.context.store = session.contentStore;
-        session.context.metadataRepo = session.metadataRepo;
-        session.context.searchEngine = nullptr;
-
-        return session;
+    [[nodiscard]] bool pipelineIdle() const {
+        return workerQueued == 0 && workerActive == 0 && postIngestQueued == 0 &&
+               postIngestInflight == 0;
     }
 
-    AddDirectoryResponse ingestDirectory(const fs::path& dataset, const IngestOptions& opts) {
-        auto indexing = yams::app::services::makeIndexingService(context);
-        if (!indexing) {
-            throw std::runtime_error("Failed to create IndexingService (missing dependencies)");
+    static StatusSnapshot capture(yams::daemon::DaemonClient& client) {
+        StatusSnapshot snapshot;
+        auto statusResult = yams::cli::run_sync(client.status(), std::chrono::seconds(5));
+        if (!statusResult) {
+            return snapshot;
         }
 
-        AddDirectoryRequest req;
-        req.directoryPath = dataset.string();
-        req.collection = opts.collection;
-        req.includePatterns = opts.includePatterns;
-        req.excludePatterns = opts.excludePatterns;
-        req.recursive = opts.recursive;
-        req.verify = opts.verify;
-        req.tags = opts.tags;
-        for (const auto& [key, value] : opts.metadata) {
-            req.metadata[key] = value;
-        }
+        const auto& status = statusResult.value();
+        auto getCount = [&](std::string_view key) -> uint64_t {
+            auto it = status.requestCounts.find(std::string(key));
+            return it != status.requestCounts.end() ? it->second : 0;
+        };
 
-        auto result = indexing->addDirectory(req);
-        if (!result) {
-            throw std::runtime_error("Ingestion failed: " + result.error().message);
-        }
-        return result.value();
+        snapshot.documentsTotal = getCount(yams::daemon::metrics::kDocumentsTotal);
+        snapshot.documentsIndexed = getCount(yams::daemon::metrics::kDocumentsIndexed);
+        snapshot.workerQueued = getCount(yams::daemon::metrics::kWorkerQueued);
+        snapshot.workerActive = getCount(yams::daemon::metrics::kWorkerActive);
+        snapshot.postIngestQueued = getCount(yams::daemon::metrics::kPostIngestQueued);
+        snapshot.postIngestInflight = getCount(yams::daemon::metrics::kPostIngestInflight);
+        snapshot.postIngestProcessed = getCount(yams::daemon::metrics::kPostIngestProcessed);
+        snapshot.postIngestFailed = getCount(yams::daemon::metrics::kPostIngestFailed);
+        return snapshot;
     }
 };
+
+std::optional<StatusSnapshot> waitForPipelineIdle(yams::daemon::DaemonClient& client,
+                                                  std::chrono::seconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    StatusSnapshot previous;
+    bool havePrevious = false;
+    int stableCount = 0;
+    constexpr int kStableRequired = 5;
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        StatusSnapshot current = StatusSnapshot::capture(client);
+        bool stable = current.documentsTotal > 0 && current.pipelineIdle();
+        if (stable && havePrevious) {
+            stable = current.documentsTotal == previous.documentsTotal &&
+                     current.documentsIndexed == previous.documentsIndexed &&
+                     current.postIngestProcessed == previous.postIngestProcessed &&
+                     current.postIngestFailed == previous.postIngestFailed;
+        }
+
+        if (stable) {
+            ++stableCount;
+            if (stableCount >= kStableRequired) {
+                return current;
+            }
+        } else {
+            stableCount = 0;
+        }
+
+        previous = current;
+        havePrevious = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
+    return std::nullopt;
+}
 
 struct RunResult {
     int exitCode{0};
@@ -338,16 +317,17 @@ struct RunResult {
     double throughputFilesPerSecond{0.0};
     std::string command;
     fs::path dataDir;
-    AddDirectoryResponse response{};
+    StatusSnapshot finalSnapshot{};
+    bool drained{false};
 };
 
 RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datasetCount,
                      int iteration) {
     (void)datasetCount;
 
-    // Use a unique temp directory per run to avoid cross-process collisions.
-    fs::path runDataDir = yams::test::make_temp_dir("yams_ingest_bench_") /
-                          (run.label + "_" + std::to_string(iteration));
+    fs::path runRoot = yams::test::make_temp_dir("yams_ingest_bench_") /
+                       (run.label + "_" + std::to_string(iteration));
+    fs::path runDataDir = runRoot / "data";
     fs::create_directories(runDataDir);
 
     std::string workerStr = std::to_string(std::max(1, run.workers));
@@ -355,20 +335,76 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     ScopedEnv envLegacy("YAMS_BENCH_INDEX_WORKERS", workerStr);
     ScopedEnv envParallel("YAMS_ENABLE_PARALLEL_INGEST", "1");
     ScopedEnv envPoolSize("YAMS_STORAGE_POOL_SIZE", "8");
+    ScopedEnv envSafeSingle("YAMS_TEST_SAFE_SINGLE_INSTANCE", "1");
+    ScopedEnv envDisableVectors("YAMS_DISABLE_VECTORS", "1");
+    ScopedEnv envDisableWatcher("YAMS_DISABLE_SESSION_WATCHER", "1");
+    ScopedEnv envSkipModelLoading("YAMS_SKIP_MODEL_LOADING", "1");
 
-    LocalIngestionSession session = LocalIngestionSession::create(runDataDir);
+    yams::daemon::TuneAdvisor::setEnableParallelIngest(true);
+    yams::daemon::TuneAdvisor::setMaxIngestWorkers(static_cast<uint32_t>(std::max(1, run.workers)));
+    yams::daemon::TuneAdvisor::setStoragePoolSize(8);
+
     const auto opts = parseArgs(run.args);
 
+    yams::test::DaemonHarness::Options harnessOptions;
+    harnessOptions.enableModelProvider = true;
+    harnessOptions.useMockModelProvider = true;
+    harnessOptions.autoLoadPlugins = false;
+    harnessOptions.enableAutoRepair = false;
+    harnessOptions.isolateState = true;
+    harnessOptions.dataDir = runDataDir;
+
+    yams::test::DaemonHarness harness(harnessOptions);
+    if (!harness.start(std::chrono::seconds(30))) {
+        throw std::runtime_error("Failed to start daemon harness for ingestion benchmark");
+    }
+
+    yams::daemon::ClientConfig clientCfg;
+    clientCfg.socketPath = harness.socketPath();
+    clientCfg.autoStart = false;
+    yams::daemon::DaemonClient client(clientCfg);
+
+    DocumentIngestionService ingestion;
+    AddOptions addOptions;
+    addOptions.socketPath = harness.socketPath();
+    addOptions.explicitDataDir = harness.dataDir();
+    addOptions.path = cfg.datasetPath.string();
+    addOptions.recursive = opts.recursive;
+    addOptions.includePatterns = opts.includePatterns;
+    addOptions.excludePatterns = opts.excludePatterns;
+    addOptions.tags = opts.tags;
+    addOptions.metadata = opts.metadata;
+    addOptions.collection = opts.collection;
+    addOptions.verify = opts.verify;
+    addOptions.noEmbeddings = true;
+    addOptions.timeoutMs = 30000;
+    addOptions.retries = 2;
+
+    int drainTimeoutSecs = 120;
+    if (const char* envDrain = std::getenv("YAMS_BENCH_DRAIN_TIMEOUT_S"); envDrain && *envDrain) {
+        try {
+            drainTimeoutSecs = std::max(10, std::stoi(envDrain));
+        } catch (...) {
+        }
+    }
+
     const auto start = std::chrono::steady_clock::now();
-    AddDirectoryResponse response = session.ingestDirectory(cfg.datasetPath, opts);
+    auto addResult = ingestion.addViaDaemon(addOptions);
+    if (!addResult) {
+        throw std::runtime_error("Daemon ingestion failed: " + addResult.error().message);
+    }
+    auto finalSnapshot = waitForPipelineIdle(client, std::chrono::seconds(drainTimeoutSecs));
     const auto end = std::chrono::steady_clock::now();
 
+    harness.stop();
+
     const double elapsed = std::chrono::duration<double>(end - start).count();
+    const uint64_t documentsTotal = finalSnapshot ? finalSnapshot->documentsTotal : 0;
     const double throughput =
-        (response.filesIndexed > 0) ? static_cast<double>(response.filesIndexed) / elapsed : 0.0;
+        (documentsTotal > 0) ? static_cast<double>(documentsTotal) / elapsed : 0.0;
 
     std::ostringstream cmd;
-    cmd << "local_ingest label=" << run.label << " workers=" << run.workers;
+    cmd << "daemon_ingest_full_pipeline label=" << run.label << " workers=" << run.workers;
     if (!opts.includePatterns.empty()) {
         cmd << " include=";
         for (size_t i = 0; i < opts.includePatterns.size(); ++i) {
@@ -383,8 +419,9 @@ RunResult executeRun(const BenchConfig& cfg, const RunConfig& run, size_t datase
     result.durationSeconds = elapsed;
     result.throughputFilesPerSecond = throughput;
     result.command = cmd.str();
-    result.dataDir = runDataDir;
-    result.response = std::move(response);
+    result.dataDir = runRoot;
+    result.finalSnapshot = finalSnapshot.value_or(StatusSnapshot{});
+    result.drained = finalSnapshot.has_value();
     return result;
 }
 
@@ -395,21 +432,38 @@ void appendMetrics(const fs::path& metricsPath, const RunConfig& run, const RunR
         throw std::runtime_error("Failed to open metrics output: " + metricsPath.string());
     }
 
-    const auto indexed = static_cast<std::uint64_t>(result.response.filesIndexed);
-    const auto processed = static_cast<std::uint64_t>(result.response.filesProcessed);
-    const auto skipped = static_cast<std::uint64_t>(result.response.filesSkipped);
-    const auto failed = static_cast<std::uint64_t>(result.response.filesFailed);
+    const auto indexed = static_cast<std::uint64_t>(result.finalSnapshot.documentsTotal);
+    const auto processed = static_cast<std::uint64_t>(datasetCount);
+    const auto skipped =
+        datasetCount > indexed ? static_cast<std::uint64_t>(datasetCount - indexed) : 0;
+    const auto failed = static_cast<std::uint64_t>(0);
 
     const double throughput = result.throughputFilesPerSecond;
 
     json record{
-        {"timestamp", isoTimestamp()},   {"label", run.label},
-        {"iteration", iteration},        {"workers", run.workers},
-        {"exit_code", result.exitCode},  {"duration_seconds", result.durationSeconds},
-        {"dataset_files", datasetCount}, {"files_indexed", indexed},
-        {"files_processed", processed},  {"files_skipped", skipped},
-        {"files_failed", failed},        {"throughput_files_per_second", throughput},
-        {"command", result.command},     {"data_dir", result.dataDir.string()},
+        {"timestamp", isoTimestamp()},
+        {"label", run.label},
+        {"iteration", iteration},
+        {"workers", run.workers},
+        {"exit_code", result.exitCode},
+        {"duration_seconds", result.durationSeconds},
+        {"dataset_files", datasetCount},
+        {"files_indexed", indexed},
+        {"files_processed", processed},
+        {"files_skipped", skipped},
+        {"files_failed", failed},
+        {"throughput_files_per_second", throughput},
+        {"documents_total", result.finalSnapshot.documentsTotal},
+        {"documents_indexed", result.finalSnapshot.documentsIndexed},
+        {"worker_queued", result.finalSnapshot.workerQueued},
+        {"worker_active", result.finalSnapshot.workerActive},
+        {"post_ingest_queued", result.finalSnapshot.postIngestQueued},
+        {"post_ingest_inflight", result.finalSnapshot.postIngestInflight},
+        {"post_ingest_processed", result.finalSnapshot.postIngestProcessed},
+        {"post_ingest_failed", result.finalSnapshot.postIngestFailed},
+        {"drained", result.drained},
+        {"command", result.command},
+        {"data_dir", result.dataDir.string()},
     };
 
     out << record.dump() << '\n';

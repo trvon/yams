@@ -394,6 +394,17 @@ void PostIngestQueue::start() {
         refreshStageAvailability();
         logStageAvailabilitySnapshot();
         initializeGradientLimiters();
+
+        // Initialize Taskflow executor for CPU-bound extraction parallelism.
+        // Thread count: min(maxExtractionConcurrent(), hardware_concurrency/4, 8)
+        // These threads replace the unbounded std::async threads in the extraction pipeline.
+        const std::size_t tfThreads =
+            std::clamp(std::min(static_cast<std::size_t>(maxExtractionConcurrent()),
+                                static_cast<std::size_t>(std::thread::hardware_concurrency() / 4u)),
+                       std::size_t{2}, std::size_t{8});
+        tfExecutor_ = std::make_unique<tf::Executor>(tfThreads);
+        spdlog::info("[PostIngestQueue] Taskflow executor started with {} threads", tfThreads);
+
         spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
         boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
         spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
@@ -437,6 +448,13 @@ void PostIngestQueue::stop() {
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, false);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, false);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, false);
+
+    // Drain Taskflow executor
+    if (tfExecutor_) {
+        tfExecutor_->wait_for_all();
+        tfExecutor_.reset();
+    }
+
     spdlog::info("[PostIngestQueue] Stop requested");
 
     auto allPollersStopped = [this]() {
@@ -2970,58 +2988,114 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     // Get current concurrency limits from TuneAdvisor
     const uint32_t maxWorkers = static_cast<uint32_t>(maxExtractionConcurrent());
     if (maxWorkers <= 1 || tasks.size() < 4) {
-        // Sequential: single chunk
-        auto result =
-            processChunkParallel(tasks, stageCfg.symbolExtensionMap, stageCfg.entityProviders);
-        processed_.fetch_add(result.successes.size(), std::memory_order_relaxed);
-        failed_.fetch_add(result.failures.size(), std::memory_order_relaxed);
-        commitBatchResults(result.successes, result.failures);
-        dispatchSuccesses(result.successes);
+        // Sequential path: process tasks one by one
+        std::vector<PreparedMetadataEntry> allSuccesses;
+        std::vector<ExtractionFailure> allFailures;
+        allSuccesses.reserve(tasks.size());
+        allFailures.reserve(tasks.size() / 10);
+
+        for (const auto& task : tasks) {
+            // Acquire semaphore slot for memory-safe extraction
+            if (extractionSemaphore_) {
+                extractionSemaphore_->acquire();
+            }
+            struct SemaphoreGuard {
+                std::counting_semaphore<>* sem;
+                explicit SemaphoreGuard(std::counting_semaphore<>* s) : sem(s) {}
+                ~SemaphoreGuard() {
+                    if (sem)
+                        sem->release();
+                }
+                SemaphoreGuard(const SemaphoreGuard&) = delete;
+                SemaphoreGuard& operator=(const SemaphoreGuard&) = delete;
+            };
+            SemaphoreGuard guard(extractionSemaphore_.get());
+
+            auto infoOpt = getCachedDocumentInfo(task.hash);
+            if (!infoOpt) {
+                allFailures.push_back(
+                    ExtractionFailure{-1, task.hash, "Metadata not found in cache or DB"});
+                continue;
+            }
+
+            auto tagsOpt = getCachedDocumentTags(infoOpt->id);
+            const std::vector<std::string> emptyTags;
+            const auto& tags = tagsOpt ? *tagsOpt : emptyTags;
+
+            auto result =
+                prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
+                                     stageCfg.symbolExtensionMap, stageCfg.entityProviders);
+            if (std::holds_alternative<PreparedMetadataEntry>(result)) {
+                allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(result)));
+            } else {
+                allFailures.push_back(std::get<ExtractionFailure>(std::move(result)));
+            }
+        }
+
+        processed_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
+        failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
+        commitBatchResults(allSuccesses, allFailures);
+        dispatchSuccesses(allSuccesses);
         return;
     }
 
     YAMS_ZONE_SCOPED_N("PostIngestQueue::processBatch");
 
-    // Calculate optimal chunk size
-    const size_t numChunks = std::min(static_cast<size_t>(maxWorkers), tasks.size());
-    const size_t chunkSize = (tasks.size() + numChunks - 1) / numChunks;
+    // Flat Taskflow DAG: one task per document (no nested chunking)
+    // Each slot stores its per-task result (variant)
+    using TaskResult = std::variant<PreparedMetadataEntry, ExtractionFailure>;
+    std::vector<TaskResult> taskResults(tasks.size());
 
-    // Launch parallel chunks via coordinator thread pool (bounded)
-    std::vector<std::future<ChunkResult>> futures;
-    futures.reserve(numChunks);
-    auto executor = coordinator_->getExecutor();
-
-    for (size_t i = 0; i < tasks.size(); i += chunkSize) {
-        size_t end = std::min(i + chunkSize, tasks.size());
-        std::vector<InternalEventBus::PostIngestTask> chunk(tasks.begin() + i, tasks.begin() + end);
-
-        auto promise = std::make_shared<std::promise<ChunkResult>>();
-        futures.push_back(promise->get_future());
-        boost::asio::post(executor, [this, p = std::move(promise), chunk = std::move(chunk),
-                                     &stageCfg]() mutable {
-            try {
-                p->set_value(processChunkParallel(chunk, stageCfg.symbolExtensionMap,
-                                                  stageCfg.entityProviders));
-            } catch (...) {
-                p->set_exception(std::current_exception());
+    tf::Taskflow taskflow("processBatch");
+    for (std::size_t i = 0; i < tasks.size(); ++i) {
+        taskflow.emplace([this, &tasks, &taskResults, &stageCfg, i]() {
+            // Acquire semaphore slot for memory-safe extraction
+            if (extractionSemaphore_) {
+                extractionSemaphore_->acquire();
             }
+            struct SemaphoreGuard {
+                std::counting_semaphore<>* sem;
+                explicit SemaphoreGuard(std::counting_semaphore<>* s) : sem(s) {}
+                ~SemaphoreGuard() {
+                    if (sem)
+                        sem->release();
+                }
+                SemaphoreGuard(const SemaphoreGuard&) = delete;
+                SemaphoreGuard& operator=(const SemaphoreGuard&) = delete;
+            };
+            SemaphoreGuard guard(extractionSemaphore_.get());
+
+            const auto& task = tasks[i];
+            auto infoOpt = getCachedDocumentInfo(task.hash);
+            if (!infoOpt) {
+                taskResults[i] =
+                    ExtractionFailure{-1, task.hash, "Metadata not found in cache or DB"};
+                return;
+            }
+
+            auto tagsOpt = getCachedDocumentTags(infoOpt->id);
+            const std::vector<std::string> emptyTags;
+            const auto& tags = tagsOpt ? *tagsOpt : emptyTags;
+            taskResults[i] =
+                prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
+                                     stageCfg.symbolExtensionMap, stageCfg.entityProviders);
         });
     }
 
-    // Collect results
+    // Execute on the Taskflow executor (safe: called from Asio thread, not a Taskflow worker)
+    tfExecutor_->run(taskflow).wait();
+
+    // Collect results (sequential, on caller's Asio thread)
     std::vector<PreparedMetadataEntry> allSuccesses;
     std::vector<ExtractionFailure> allFailures;
+    allSuccesses.reserve(tasks.size());
+    allFailures.reserve(tasks.size() / 10);
 
-    for (auto& future : futures) {
-        try {
-            ChunkResult result = future.get();
-            allSuccesses.insert(allSuccesses.end(),
-                                std::make_move_iterator(result.successes.begin()),
-                                std::make_move_iterator(result.successes.end()));
-            allFailures.insert(allFailures.end(), std::make_move_iterator(result.failures.begin()),
-                               std::make_move_iterator(result.failures.end()));
-        } catch (const std::exception& e) {
-            spdlog::error("[PostIngestQueue] Chunk processing failed: {}", e.what());
+    for (auto& variant : taskResults) {
+        if (std::holds_alternative<PreparedMetadataEntry>(variant)) {
+            allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(variant)));
+        } else {
+            allFailures.push_back(std::get<ExtractionFailure>(std::move(variant)));
         }
     }
 
@@ -3029,82 +3103,6 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
     failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
     commitBatchResults(allSuccesses, allFailures);
     dispatchSuccesses(allSuccesses);
-}
-
-PostIngestQueue::ChunkResult PostIngestQueue::processChunkParallel(
-    const std::vector<InternalEventBus::PostIngestTask>& tasks,
-    const std::unordered_map<std::string, std::string>& symbolExtensionMap,
-    const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders) {
-    ChunkResult result;
-    result.successes.reserve(tasks.size());
-    result.failures.reserve(tasks.size() / 10);
-
-    // Parallel extraction within the chunk.
-    // NOTE: Uses std::async intentionally — this is leaf-level work already bounded by
-    // extractionSemaphore_. Using boost::asio::post here would risk deadlock because the
-    // calling pool thread (from processBatch's post) is blocked waiting for these futures,
-    // and posting more work to the same pool with semaphore blocking inside would exhaust
-    // available threads.
-    std::vector<std::future<std::variant<PreparedMetadataEntry, ExtractionFailure>>> futures;
-    futures.reserve(tasks.size());
-
-    for (const auto& task : tasks) {
-        const auto taskCopy = task;
-        futures.push_back(std::async(
-            std::launch::async, [this, taskCopy, &symbolExtensionMap, &entityProviders]() {
-                // Acquire semaphore slot for memory-safe extraction
-                if (extractionSemaphore_) {
-                    extractionSemaphore_->acquire();
-                }
-
-                // RAII guard to release semaphore
-                struct SemaphoreGuard {
-                    std::counting_semaphore<>* sem;
-                    explicit SemaphoreGuard(std::counting_semaphore<>* s) : sem(s) {}
-                    ~SemaphoreGuard() {
-                        if (sem) {
-                            sem->release();
-                        }
-                    }
-                    SemaphoreGuard(const SemaphoreGuard&) = delete;
-                    SemaphoreGuard& operator=(const SemaphoreGuard&) = delete;
-                    SemaphoreGuard(SemaphoreGuard&&) = delete;
-                    SemaphoreGuard& operator=(SemaphoreGuard&&) = delete;
-                };
-                SemaphoreGuard guard(extractionSemaphore_.get());
-
-                // Get cached metadata
-                auto infoOpt = getCachedDocumentInfo(taskCopy.hash);
-                if (!infoOpt) {
-                    return std::variant<PreparedMetadataEntry, ExtractionFailure>(
-                        ExtractionFailure{-1, taskCopy.hash, "Metadata not found in cache or DB"});
-                }
-
-                auto tagsOpt = getCachedDocumentTags(infoOpt->id);
-                const std::vector<std::string> emptyTags;
-                const std::vector<std::string>& tags = tagsOpt ? *tagsOpt : emptyTags;
-
-                // Extract and prepare
-                return prepareMetadataEntry(taskCopy.hash, taskCopy.mime, *infoOpt, tags,
-                                            symbolExtensionMap, entityProviders);
-            }));
-    }
-
-    // Collect results
-    for (auto& future : futures) {
-        try {
-            auto variant = future.get();
-            if (std::holds_alternative<PreparedMetadataEntry>(variant)) {
-                result.successes.push_back(std::get<PreparedMetadataEntry>(std::move(variant)));
-            } else {
-                result.failures.push_back(std::get<ExtractionFailure>(std::move(variant)));
-            }
-        } catch (const std::exception& e) {
-            spdlog::error("[PostIngestQueue] Parallel extraction failed: {}", e.what());
-        }
-    }
-
-    return result;
 }
 
 } // namespace yams::daemon

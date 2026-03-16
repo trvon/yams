@@ -163,6 +163,12 @@ struct SearchEngineConfig {
         3; // Minimum text hits required to allow semantic skip when text-signal gating enabled
     float adaptiveVectorSkipMinTopTextScore =
         0.30f; // Minimum top text score required to allow semantic skip
+    bool enableWeakQueryFanoutBoost =
+        true; // Expand vector/entity candidate fanout when Tier 1 lexical signal is weak
+    float weakQueryVectorFanoutMultiplier =
+        2.0f; // Multiplier for vectorMaxResults when weak-query boost triggers
+    float weakQueryEntityVectorFanoutMultiplier =
+        1.5f; // Multiplier for entityVectorMaxResults when weak-query boost triggers
 
     // RRF (Reciprocal Rank Fusion) parameter
     // Lower k = more weight on top-ranked items (better precision/MRR)

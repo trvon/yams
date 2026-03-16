@@ -70,6 +70,7 @@ class YamsConan(ConanFile):
         self.requires("taglib/2.0")
         self.requires("tl-expected/1.1.0")
         self.requires("boost/1.85.0")
+        self.requires("taskflow/3.8.0")
 
         if self.options.enable_symbol_extraction:  # type: ignore
             try:

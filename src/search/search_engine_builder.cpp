@@ -409,6 +409,12 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
                          cfg.rerankReplaceScores);
         }
 
+        if (auto scoreBasedReranking = getEnvBool("YAMS_SEARCH_USE_SCORE_BASED_RERANKING")) {
+            cfg.useScoreBasedReranking = *scoreBasedReranking;
+            spdlog::info("SearchEngine useScoreBasedReranking overridden to {} via env",
+                         cfg.useScoreBasedReranking);
+        }
+
         if (auto rerankAdaptive = getEnvBool("YAMS_SEARCH_RERANK_ADAPTIVE_BLEND")) {
             cfg.rerankAdaptiveBlend = *rerankAdaptive;
             spdlog::info("SearchEngine rerankAdaptiveBlend overridden to {} via env",
@@ -523,6 +529,25 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.enableAdaptiveVectorFallback = *adaptiveFallback;
             spdlog::info("SearchEngine enableAdaptiveVectorFallback overridden to {} via env",
                          cfg.enableAdaptiveVectorFallback);
+        }
+        if (auto weakFanout = getEnvBool("YAMS_SEARCH_ENABLE_WEAK_QUERY_FANOUT_BOOST")) {
+            cfg.enableWeakQueryFanoutBoost = *weakFanout;
+            spdlog::info("SearchEngine enableWeakQueryFanoutBoost overridden to {} via env",
+                         cfg.enableWeakQueryFanoutBoost);
+        }
+        if (auto weakVectorFanout =
+                getEnvFloat("YAMS_SEARCH_WEAK_QUERY_VECTOR_FANOUT_MULTIPLIER")) {
+            cfg.weakQueryVectorFanoutMultiplier = std::max(1.0f, *weakVectorFanout);
+            spdlog::info(
+                "SearchEngine weakQueryVectorFanoutMultiplier overridden to {:.2f} via env",
+                cfg.weakQueryVectorFanoutMultiplier);
+        }
+        if (auto weakEntityFanout =
+                getEnvFloat("YAMS_SEARCH_WEAK_QUERY_ENTITY_VECTOR_FANOUT_MULTIPLIER")) {
+            cfg.weakQueryEntityVectorFanoutMultiplier = std::max(1.0f, *weakEntityFanout);
+            spdlog::info(
+                "SearchEngine weakQueryEntityVectorFanoutMultiplier overridden to {:.2f} via env",
+                cfg.weakQueryEntityVectorFanoutMultiplier);
         }
         if (auto evidenceRescueSlots = getEnvInt("YAMS_SEARCH_FUSION_EVIDENCE_RESCUE_SLOTS")) {
             cfg.fusionEvidenceRescueSlots = static_cast<size_t>(std::max(0, *evidenceRescueSlots));

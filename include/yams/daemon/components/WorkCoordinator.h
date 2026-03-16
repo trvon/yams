@@ -149,6 +149,16 @@ public:
     bool joinWithTimeout(std::chrono::milliseconds timeout);
 
     /**
+     * @brief Detach any remaining worker threads and abandon coordinated shutdown.
+     *
+     * This is a last-resort escape hatch for benchmark/teardown scenarios where
+     * results are already produced but some workers fail to exit in bounded time.
+     * After this call, the coordinator is considered no longer running and its
+     * destructor will not attempt another blocking join.
+     */
+    void abandonWorkersForShutdown();
+
+    /**
      * @brief Get shared pointer to io_context for direct access.
      *
      * Used by components that need to spawn coroutines with co_spawn.

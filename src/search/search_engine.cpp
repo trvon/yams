@@ -335,6 +335,57 @@ constexpr const char* queryIntentToString(QueryIntent intent) {
     return "mixed";
 }
 
+double scoreBasedRerankSignal(const SearchResult& result, QueryIntent intent) {
+    const double text = result.keywordScore.value_or(0.0);
+    const double vector = result.vectorScore.value_or(0.0);
+    const double graphText = result.graphTextScore.value_or(0.0);
+    const double graphVector = result.graphVectorScore.value_or(0.0);
+    const double kg = result.kgScore.value_or(0.0);
+    const double path = result.pathScore.value_or(0.0);
+    const double symbol = result.symbolScore.value_or(0.0);
+    const double tag = result.tagScore.value_or(0.0);
+
+    const bool hasText = text > 0.0 || graphText > 0.0;
+    const bool hasVector = vector > 0.0 || graphVector > 0.0;
+    const bool hasPath = path > 0.0;
+    const bool hasSymbol = symbol > 0.0;
+    const bool hasKg = kg > 0.0;
+
+    double signal = result.score;
+    if (hasText && hasVector) {
+        signal += 0.12;
+    }
+    if (hasText && hasKg) {
+        signal += 0.05;
+    }
+    if (hasText && hasPath) {
+        signal += 0.03;
+    }
+    if (hasSymbol && hasVector) {
+        signal += 0.04;
+    }
+    if (tag > 0.0) {
+        signal += std::min(0.02, tag * 0.2);
+    }
+
+    switch (intent) {
+        case QueryIntent::Code:
+            signal += path * 0.10 + symbol * 0.10;
+            break;
+        case QueryIntent::Path:
+            signal += path * 0.15;
+            break;
+        case QueryIntent::Prose:
+            signal += text * 0.08 + vector * 0.04 + kg * 0.04;
+            break;
+        case QueryIntent::Mixed:
+            signal += text * 0.05 + vector * 0.05 + kg * 0.03 + path * 0.02;
+            break;
+    }
+
+    return signal;
+}
+
 bool hasCamelCase(const std::string& input) {
     bool hasLower = false;
     bool hasUpper = false;
@@ -1070,6 +1121,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     size_t graphVectorBlockedUncorroboratedCount = 0;
     size_t graphVectorBlockedMissingTextAnchorCount = 0;
     size_t graphVectorBlockedMissingBaselineTextAnchorCount = 0;
+    bool weakQueryFanoutBoostApplied = false;
+    size_t effectiveVectorMaxResults = 0;
+    size_t effectiveEntityVectorMaxResults = 0;
 
     // Embedding generation may be launched eagerly or lazily depending on tiering strategy.
     std::optional<std::vector<float>> queryEmbedding;
@@ -1471,6 +1525,25 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     tier1TopTextScore >= config_.adaptiveVectorSkipMinTopTextScore;
             }
 
+            effectiveVectorMaxResults = workingConfig.vectorMaxResults;
+            effectiveEntityVectorMaxResults = workingConfig.entityVectorMaxResults;
+            const bool weakTier1Query = !hasStrongTextSignal || tier1TextHits == 0;
+            if (config_.enableWeakQueryFanoutBoost && weakTier1Query) {
+                effectiveVectorMaxResults = static_cast<size_t>(
+                    std::ceil(static_cast<double>(workingConfig.vectorMaxResults) *
+                              config_.weakQueryVectorFanoutMultiplier));
+                effectiveEntityVectorMaxResults = static_cast<size_t>(
+                    std::ceil(static_cast<double>(workingConfig.entityVectorMaxResults) *
+                              config_.weakQueryEntityVectorFanoutMultiplier));
+                weakQueryFanoutBoostApplied = true;
+                spdlog::debug(
+                    "Tiered search: weak-query fanout boost applied (text_hits={}, "
+                    "top_text_score={:.3f}, vector_max={} -> {}, entity_vector_max={} -> {})",
+                    tier1TextHits, tier1TopTextScore, workingConfig.vectorMaxResults,
+                    effectiveVectorMaxResults, workingConfig.entityVectorMaxResults,
+                    effectiveEntityVectorMaxResults);
+            }
+
             const bool shouldSkipSemantic = config_.enableAdaptiveVectorFallback &&
                                             (tier1CandidateCount >= adaptiveSkipMinHits) &&
                                             hasStrongTextSignal;
@@ -1505,25 +1578,27 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 vectorFuture = schedule(
                     "vector", config_.vectorWeight, stats_.vectorQueries,
                     stats_.avgVectorTimeMicros,
-                    [this, &queryEmbedding, &workingConfig, &tier1Candidates, shouldNarrow]() {
+                    [this, &queryEmbedding, &tier1Candidates, shouldNarrow,
+                     effectiveVectorMaxResults]() {
                         YAMS_ZONE_SCOPED_N("component::vector");
                         if (shouldNarrow) {
                             return queryVectorIndex(queryEmbedding.value(),
-                                                    workingConfig.vectorMaxResults,
+                                                    effectiveVectorMaxResults,
                                                     tier1Candidates); // Narrowed search
                         } else {
                             return queryVectorIndex(queryEmbedding.value(),
-                                                    workingConfig.vectorMaxResults); // Full search
+                                                    effectiveVectorMaxResults); // Full search
                         }
                     });
 
-                entityVectorFuture = schedule(
-                    "entity_vector", config_.entityVectorWeight, stats_.entityVectorQueries,
-                    stats_.avgEntityVectorTimeMicros, [this, &queryEmbedding, &workingConfig]() {
-                        YAMS_ZONE_SCOPED_N("component::entity_vector");
-                        return queryEntityVectors(queryEmbedding.value(),
-                                                  workingConfig.entityVectorMaxResults);
-                    });
+                entityVectorFuture =
+                    schedule("entity_vector", config_.entityVectorWeight,
+                             stats_.entityVectorQueries, stats_.avgEntityVectorTimeMicros,
+                             [this, &queryEmbedding, effectiveEntityVectorMaxResults]() {
+                                 YAMS_ZONE_SCOPED_N("component::entity_vector");
+                                 return queryEntityVectors(queryEmbedding.value(),
+                                                           effectiveEntityVectorMaxResults);
+                             });
             }
 
             if (kgStore_) {
@@ -2069,8 +2144,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     }
 
+    preFusionDocIds = collectUniqueComponentDocIds(allComponentResults);
     if (stageTraceEnabled) {
-        preFusionDocIds = collectUniqueComponentDocIds(allComponentResults);
         preFusionSignals = buildPreFusionSignalMap(allComponentResults);
     }
 
@@ -2416,6 +2491,16 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         YAMS_ZONE_SCOPED_N("reranking");
         const size_t rerankWindow = std::min(config_.rerankTopK, response.results.size());
 
+        if (config_.useScoreBasedReranking && rerankWindow > 1) {
+            std::stable_sort(response.results.begin(),
+                             response.results.begin() + static_cast<ptrdiff_t>(rerankWindow),
+                             [&](const SearchResult& a, const SearchResult& b) {
+                                 return scoreBasedRerankSignal(a, intent) >
+                                        scoreBasedRerankSignal(b, intent);
+                             });
+            contributing.push_back("score_rerank");
+        }
+
         const int64_t nowMicros = std::chrono::duration_cast<std::chrono::microseconds>(
                                       std::chrono::steady_clock::now().time_since_epoch())
                                       .count();
@@ -2617,6 +2702,27 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     } else if (config_.enableReranking && !rerankAvailable) {
         spdlog::debug("[reranker] Unavailable; falling back to fused scores");
     }
+
+    const size_t compactRerankWindow = std::min(
+        response.results.size(),
+        (config_.enableReranking && config_.rerankTopK > 0) ? config_.rerankTopK : size_t(0));
+    if (effectiveVectorMaxResults == 0) {
+        effectiveVectorMaxResults = workingConfig.vectorMaxResults;
+    }
+    if (effectiveEntityVectorMaxResults == 0) {
+        effectiveEntityVectorMaxResults = workingConfig.entityVectorMaxResults;
+    }
+    response.debugStats["compact_pre_fusion_count"] = std::to_string(preFusionDocIds.size());
+    response.debugStats["compact_post_fusion_count"] = std::to_string(
+        postFusionSnapshot.empty() ? response.results.size() : postFusionSnapshot.size());
+    response.debugStats["compact_rerank_window_count"] = std::to_string(compactRerankWindow);
+    response.debugStats["compact_final_count"] = std::to_string(response.results.size());
+    response.debugStats["compact_effective_vector_max_results"] =
+        std::to_string(effectiveVectorMaxResults);
+    response.debugStats["compact_effective_entity_vector_max_results"] =
+        std::to_string(effectiveEntityVectorMaxResults);
+    response.debugStats["compact_weak_query_fanout_boost_applied"] =
+        weakQueryFanoutBoostApplied ? "1" : "0";
 
     if (!concepts.empty() && workingConfig.conceptBoostWeight > 0.0f &&
         workingConfig.conceptMaxBoost > 0.0f && !response.results.empty()) {

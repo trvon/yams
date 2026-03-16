@@ -388,6 +388,24 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
     return completed;
 }
 
+void WorkCoordinator::abandonWorkersForShutdown() {
+    try {
+        spdlog::warn("[WorkCoordinator] Abandoning remaining workers for shutdown");
+    } catch (...) {
+    }
+
+    for (auto& worker : workers_) {
+        if (worker.joinable()) {
+            try {
+                worker.detach();
+            } catch (...) {
+            }
+        }
+    }
+    workers_.clear();
+    started_ = false;
+}
+
 std::shared_ptr<boost::asio::io_context> WorkCoordinator::getIOContext() const noexcept {
     return ioContext_;
 }
