@@ -2,7 +2,6 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cctype>
-#include <future>
 #include <sstream>
 #include <string_view>
 #include <thread>
@@ -898,48 +897,6 @@ std::size_t PostIngestQueue::titleQueueDepth() const {
     return titleChannel_ ? titleChannel_->size_approx() : 0;
 }
 
-void PostIngestQueue::processTask(const std::string& hash, const std::string& mime) {
-    try {
-        std::optional<metadata::DocumentInfo> info;
-        std::vector<std::string> tags;
-
-        if (meta_) {
-            auto infoRes = meta_->batchGetDocumentsByHash(std::vector<std::string>{hash});
-            if (infoRes) {
-                auto& infoMap = infoRes.value();
-                auto it = infoMap.find(hash);
-                if (it != infoMap.end() && it->second.id >= 0) {
-                    info = it->second;
-
-                    auto tagsRes = meta_->batchGetDocumentTags(std::vector<int64_t>{it->second.id});
-                    if (tagsRes) {
-                        auto& tagsById = tagsRes.value();
-                        auto tagsIt = tagsById.find(it->second.id);
-                        if (tagsIt != tagsById.end()) {
-                            tags = tagsIt->second;
-                        }
-                    } else {
-                        spdlog::warn("[PostIngestQueue] batchGetDocumentTags failed: {}",
-                                     tagsRes.error().message);
-                    }
-                }
-            } else {
-                spdlog::warn("[PostIngestQueue] batchGetDocumentsByHash failed: {}",
-                             infoRes.error().message);
-            }
-        }
-
-        // If metadata lookup didn't find a document, still skip per-doc tag query.
-        static const std::vector<std::string> kEmptyTags;
-        processMetadataStage(hash, mime, info, info ? &tags : &kEmptyTags, {}, {});
-        processed_++;
-        InternalEventBus::instance().incPostConsumed();
-    } catch (const std::exception& e) {
-        spdlog::error("[PostIngestQueue] Failed to process {}: {}", hash, e.what());
-        failed_++;
-    }
-}
-
 namespace {
 
 inline bool extensionSupportsEntityProviders(
@@ -954,129 +911,6 @@ inline bool extensionSupportsEntityProviders(
 }
 
 } // namespace
-
-void PostIngestQueue::processMetadataStage(
-    const std::string& hash, const std::string& mime,
-    const std::optional<metadata::DocumentInfo>& infoOpt,
-    const std::vector<std::string>* tagsOverride,
-    const std::unordered_map<std::string, std::string>& symbolExtensionMap,
-    const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders) {
-    if (!store_ || !meta_) {
-        spdlog::warn("[PostIngestQueue] store or metadata unavailable; dropping task {}", hash);
-        return;
-    }
-
-    try {
-        auto startTime = std::chrono::steady_clock::now();
-
-        int64_t docId = -1;
-        std::string fileName;
-        std::string filePath;
-        std::string mimeType = mime;
-        std::string extension;
-        metadata::DocumentInfo info;
-
-        if (infoOpt.has_value()) {
-            info = infoOpt.value();
-        } else {
-            auto infoRes = meta_->getDocumentByHash(hash);
-            if (infoRes && infoRes.value().has_value()) {
-                info = *infoRes.value();
-            } else {
-                spdlog::warn(
-                    "[PostIngestQueue] Metadata not found for hash {}; content may be orphaned",
-                    hash);
-                return;
-            }
-        }
-        docId = info.id;
-        if (!info.fileName.empty())
-            fileName = info.fileName;
-        if (!info.filePath.empty())
-            filePath = info.filePath;
-        if (!info.mimeType.empty())
-            mimeType = info.mimeType;
-        if (!info.fileExtension.empty())
-            extension = info.fileExtension;
-
-        auto txt = extractDocumentText(store_, hash, mimeType, extension, extractors_);
-        if (!txt || txt->empty()) {
-            spdlog::info("[PostIngestQueue] no text extracted for {} (mime={}, ext={})", hash,
-                         mimeType, extension);
-            if (docId >= 0) {
-                auto updateRes = meta_->updateDocumentExtractionStatus(
-                    docId, false, metadata::ExtractionStatus::Failed, "No text extracted");
-                if (!updateRes) {
-                    spdlog::warn("[PostIngestQueue] Failed to mark extraction failed for {}: {}",
-                                 hash, updateRes.error().message);
-                }
-                (void)meta_->batchUpdateDocumentRepairStatuses({hash},
-                                                               metadata::RepairStatus::Failed);
-            }
-        } else if (docId >= 0) {
-            spdlog::info("[PostIngestQueue] Extracted {} bytes for {} (docId={})", txt->size(),
-                         hash, docId);
-            auto pr = yams::ingest::persist_content_and_index(*meta_, docId, fileName, *txt,
-                                                              mimeType, "post_ingest");
-            if (!pr) {
-                std::string errorMsg = "Persist failed: " + pr.error().message;
-                spdlog::warn("[PostIngestQueue] persist/index failed for {}: {}", hash, errorMsg);
-                // Track lock errors for adaptive concurrency scaling
-                if (pr.error().message.find("database is locked") != std::string::npos) {
-                    TuneAdvisor::reportDbLockError();
-                }
-                // FIX: Update extraction status to Failed to prevent state inconsistency
-                auto updateRes = meta_->updateDocumentExtractionStatus(
-                    docId, false, metadata::ExtractionStatus::Failed, errorMsg);
-                if (!updateRes) {
-                    spdlog::error("[PostIngestQueue] Failed to update extraction status for {}: {}",
-                                  hash, updateRes.error().message);
-                }
-                (void)meta_->batchUpdateDocumentRepairStatuses({hash},
-                                                               metadata::RepairStatus::Failed);
-            } else {
-                (void)meta_->batchUpdateDocumentRepairStatuses({hash},
-                                                               metadata::RepairStatus::Completed);
-                auto duration = std::chrono::steady_clock::now() - startTime;
-                double ms = std::chrono::duration<double, std::milli>(duration).count();
-                spdlog::info("[PostIngestQueue] Metadata stage completed for {} in {:.2f}ms", hash,
-                             ms);
-            }
-        }
-
-        if (docId >= 0) {
-            std::vector<std::string> tags;
-            if (tagsOverride) {
-                tags = *tagsOverride;
-            }
-            dispatchToKgChannel(hash, docId, filePath.empty() ? fileName : filePath,
-                                std::move(tags), nullptr);
-
-            // Dispatch symbol extraction for code files (if plugin supports this extension)
-            {
-                // Extension map keys don't have leading dots, but DB stores with dots
-                std::string extKey = extension;
-                if (!extKey.empty() && extKey[0] == '.') {
-                    extKey = extKey.substr(1);
-                }
-                auto it = symbolExtensionMap.find(extKey);
-                if (it != symbolExtensionMap.end()) {
-                    dispatchToSymbolChannel(hash, docId, filePath.empty() ? fileName : filePath,
-                                            it->second, nullptr);
-                }
-            }
-
-            // Dispatch entity extraction for binary files (if any entity provider supports this
-            // extension)
-            if (extensionSupportsEntityProviders(entityProviders, extension)) {
-                dispatchToEntityChannel(hash, docId, filePath.empty() ? fileName : filePath,
-                                        extension, nullptr);
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::error("[PostIngestQueue] Metadata stage failed for {}: {}", hash, e.what());
-    }
-}
 
 std::variant<PostIngestQueue::PreparedMetadataEntry, PostIngestQueue::ExtractionFailure>
 PostIngestQueue::prepareMetadataEntry(
@@ -2687,17 +2521,6 @@ void PostIngestQueue::completeJob(const std::string& jobId, bool success) {
 // Parallel Processing & Caching (PBI-05a optimizations)
 // =========================================================================
 
-void PostIngestQueue::initializeExtractionSemaphore() {
-    // Keep semaphore capacity aligned with the effective extraction floor used by pollers.
-    // Using the raw tuned value can collapse runtime concurrency to 1 under pressure.
-    const uint32_t maxConcurrent = static_cast<uint32_t>(maxExtractionConcurrent());
-    if (maxConcurrent > 0) {
-        extractionSemaphore_ = std::make_unique<std::counting_semaphore<>>(maxConcurrent);
-        spdlog::info("[PostIngestQueue] Extraction semaphore initialized with {} slots",
-                     maxConcurrent);
-    }
-}
-
 std::optional<metadata::DocumentInfo>
 PostIngestQueue::getCachedDocumentInfo(const std::string& hash) {
     // Try cache first
@@ -2983,7 +2806,28 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         return;
     }
 
+    if (!store_ || !meta_) {
+        spdlog::warn("[PostIngestQueue] store or metadata unavailable; dropping {} tasks",
+                     tasks.size());
+        failed_.fetch_add(tasks.size(), std::memory_order_relaxed);
+        return;
+    }
+
     auto stageCfg = snapshotStageConfig();
+    auto prepareTask = [this, &stageCfg](const InternalEventBus::PostIngestTask& task)
+        -> std::variant<PreparedMetadataEntry, ExtractionFailure> {
+        auto infoOpt = getCachedDocumentInfo(task.hash);
+        if (!infoOpt) {
+            return ExtractionFailure{-1, task.hash, "Metadata not found in cache or DB"};
+        }
+
+        auto tagsOpt = getCachedDocumentTags(infoOpt->id);
+        const std::vector<std::string> emptyTags;
+        const auto& tags = tagsOpt ? *tagsOpt : emptyTags;
+
+        return prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
+                                    stageCfg.symbolExtensionMap, stageCfg.entityProviders);
+    };
 
     // Get current concurrency limits from TuneAdvisor
     const uint32_t maxWorkers = static_cast<uint32_t>(maxExtractionConcurrent());
@@ -2995,36 +2839,7 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         allFailures.reserve(tasks.size() / 10);
 
         for (const auto& task : tasks) {
-            // Acquire semaphore slot for memory-safe extraction
-            if (extractionSemaphore_) {
-                extractionSemaphore_->acquire();
-            }
-            struct SemaphoreGuard {
-                std::counting_semaphore<>* sem;
-                explicit SemaphoreGuard(std::counting_semaphore<>* s) : sem(s) {}
-                ~SemaphoreGuard() {
-                    if (sem)
-                        sem->release();
-                }
-                SemaphoreGuard(const SemaphoreGuard&) = delete;
-                SemaphoreGuard& operator=(const SemaphoreGuard&) = delete;
-            };
-            SemaphoreGuard guard(extractionSemaphore_.get());
-
-            auto infoOpt = getCachedDocumentInfo(task.hash);
-            if (!infoOpt) {
-                allFailures.push_back(
-                    ExtractionFailure{-1, task.hash, "Metadata not found in cache or DB"});
-                continue;
-            }
-
-            auto tagsOpt = getCachedDocumentTags(infoOpt->id);
-            const std::vector<std::string> emptyTags;
-            const auto& tags = tagsOpt ? *tagsOpt : emptyTags;
-
-            auto result =
-                prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
-                                     stageCfg.symbolExtensionMap, stageCfg.entityProviders);
+            auto result = prepareTask(task);
             if (std::holds_alternative<PreparedMetadataEntry>(result)) {
                 allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(result)));
             } else {
@@ -3048,37 +2863,9 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
 
     tf::Taskflow taskflow("processBatch");
     for (std::size_t i = 0; i < tasks.size(); ++i) {
-        taskflow.emplace([this, &tasks, &taskResults, &stageCfg, i]() {
-            // Acquire semaphore slot for memory-safe extraction
-            if (extractionSemaphore_) {
-                extractionSemaphore_->acquire();
-            }
-            struct SemaphoreGuard {
-                std::counting_semaphore<>* sem;
-                explicit SemaphoreGuard(std::counting_semaphore<>* s) : sem(s) {}
-                ~SemaphoreGuard() {
-                    if (sem)
-                        sem->release();
-                }
-                SemaphoreGuard(const SemaphoreGuard&) = delete;
-                SemaphoreGuard& operator=(const SemaphoreGuard&) = delete;
-            };
-            SemaphoreGuard guard(extractionSemaphore_.get());
-
+        taskflow.emplace([&tasks, &taskResults, &prepareTask, i]() {
             const auto& task = tasks[i];
-            auto infoOpt = getCachedDocumentInfo(task.hash);
-            if (!infoOpt) {
-                taskResults[i] =
-                    ExtractionFailure{-1, task.hash, "Metadata not found in cache or DB"};
-                return;
-            }
-
-            auto tagsOpt = getCachedDocumentTags(infoOpt->id);
-            const std::vector<std::string> emptyTags;
-            const auto& tags = tagsOpt ? *tagsOpt : emptyTags;
-            taskResults[i] =
-                prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
-                                     stageCfg.symbolExtensionMap, stageCfg.entityProviders);
+            taskResults[i] = prepareTask(task);
         });
     }
 

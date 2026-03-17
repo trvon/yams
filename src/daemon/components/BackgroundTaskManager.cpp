@@ -203,9 +203,7 @@ void BackgroundTaskManager::launchFts5JobConsumer() {
                                 }
                             }
 
-                            PostIngestQueue::Task task{h, mime, "",
-                                                       std::chrono::steady_clock::now(),
-                                                       PostIngestQueue::Task::Stage::Metadata};
+                            PostIngestQueue::Task task{h, mime};
 
                             if (postIngest->tryEnqueue(std::move(task))) {
                                 ++enqueued;

@@ -3498,10 +3498,7 @@ void ServiceManager::enqueuePostIngest(const std::string& hash, const std::strin
         return;
     }
 
-    PostIngestQueue::Task task{hash, mime,
-                               "", // session
-                               std::chrono::steady_clock::now(),
-                               PostIngestQueue::Task::Stage::Metadata};
+    PostIngestQueue::Task task{hash, mime};
     piq->enqueue(std::move(task));
 }
 
@@ -3516,13 +3513,11 @@ void ServiceManager::enqueuePostIngestBatch(const std::vector<std::string>& hash
     // so this stage should backpressure instead of dropping.
     std::vector<PostIngestQueue::Task> tasks;
     tasks.reserve(hashes.size());
-    const auto now = std::chrono::steady_clock::now();
     for (const auto& hash : hashes) {
         if (hash.empty()) {
             continue;
         }
-        tasks.push_back(
-            PostIngestQueue::Task{hash, mime, "", now, PostIngestQueue::Task::Stage::Metadata});
+        tasks.push_back(PostIngestQueue::Task{hash, mime});
     }
     if (!tasks.empty()) {
         piq->enqueueBatch(std::move(tasks));

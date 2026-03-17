@@ -148,9 +148,6 @@ public:
     struct Task {
         std::string hash;
         std::string mime;
-        std::string session;
-        std::chrono::steady_clock::time_point enqueuedAt;
-        enum class Stage : uint8_t { Metadata = 0, KnowledgeGraph = 1 } stage;
     };
 
     /// Result of successful text extraction, ready for batch DB insertion.
@@ -373,13 +370,6 @@ private:
     boost::asio::awaitable<void> symbolPoller();
     boost::asio::awaitable<void> entityPoller();
     boost::asio::awaitable<void> titlePoller();
-    void processTask(const std::string& hash, const std::string& mime);
-    void processMetadataStage(
-        const std::string& hash, const std::string& mime,
-        const std::optional<metadata::DocumentInfo>& info = std::nullopt,
-        const std::vector<std::string>* tagsOverride = nullptr,
-        const std::unordered_map<std::string, std::string>& symbolExtensionMap = {},
-        const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders = {});
 
     /// Prepare metadata for batch insertion (extraction only, no DB writes).
     /// Returns PreparedMetadataEntry on success, ExtractionFailure on failure.
@@ -562,12 +552,6 @@ private:
 
     /// Cache for metadata lookups
     MetadataCache metadataCache_;
-
-    /// Semaphore to limit concurrent text extractions (memory safety)
-    std::unique_ptr<std::counting_semaphore<>> extractionSemaphore_;
-
-    /// Initialize the extraction semaphore based on TuneAdvisor limits
-    void initializeExtractionSemaphore();
 
     /// Taskflow executor for CPU-bound extraction parallelism
     std::unique_ptr<tf::Executor> tfExecutor_;

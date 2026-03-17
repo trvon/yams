@@ -539,8 +539,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
         }
         REQUIRE(queue->started());
 
-        PostIngestQueue::Task task{
-            doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
+        PostIngestQueue::Task task{doc.sha256Hash, doc.mimeType};
         REQUIRE(queue->tryEnqueue(std::move(task)));
 
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -579,8 +578,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
         }
         REQUIRE(queue->started());
 
-        PostIngestQueue::Task task{
-            doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
+        PostIngestQueue::Task task{doc.sha256Hash, doc.mimeType};
         REQUIRE(queue->tryEnqueue(std::move(task)));
 
         stopAndResetQueue(queue);
@@ -664,8 +662,7 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
     REQUIRE(queue->started());
 
     for (const auto& doc : docs) {
-        PostIngestQueue::Task task{
-            doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
+        PostIngestQueue::Task task{doc.sha256Hash, doc.mimeType};
         REQUIRE(queue->tryEnqueue(std::move(task)));
     }
 
@@ -759,8 +756,7 @@ TEST_CASE("PostIngestQueue: Parallel extraction preserves per-task identity",
     REQUIRE(queue->started());
 
     for (const auto& doc : docs) {
-        PostIngestQueue::Task task{
-            doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata};
+        PostIngestQueue::Task task{doc.sha256Hash, doc.mimeType};
         REQUIRE(queue->tryEnqueue(std::move(task)));
     }
 
@@ -817,8 +813,7 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
         metadataRepo->setDocument(doc);
         store->setContent(doc.sha256Hash, "batch-payload-" + std::to_string(i));
 
-        tasks.push_back(PostIngestQueue::Task{
-            doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata});
+        tasks.push_back(PostIngestQueue::Task{doc.sha256Hash, doc.mimeType});
     }
 
     auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
@@ -880,8 +875,7 @@ TEST_CASE("PostIngestQueue: keeps multi-doc batches when extraction concurrency 
             std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
         metadataRepo->setDocument(doc);
         store->setContent(doc.sha256Hash, "payload-" + std::to_string(i));
-        tasks.push_back(PostIngestQueue::Task{
-            doc.sha256Hash, doc.mimeType, "", {}, PostIngestQueue::Task::Stage::Metadata});
+        tasks.push_back(PostIngestQueue::Task{doc.sha256Hash, doc.mimeType});
     }
 
     auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
@@ -922,10 +916,8 @@ TEST_CASE("PostIngestQueue: full-channel enqueueBatch waits only log at debug",
                                                    nullptr, nullptr, nullptr, 1);
 
     std::vector<PostIngestQueue::Task> tasks;
-    tasks.push_back(PostIngestQueue::Task{
-        "log-test-hash-1", "text/plain", "", {}, PostIngestQueue::Task::Stage::Metadata});
-    tasks.push_back(PostIngestQueue::Task{
-        "log-test-hash-2", "text/plain", "", {}, PostIngestQueue::Task::Stage::Metadata});
+    tasks.push_back(PostIngestQueue::Task{"log-test-hash-1", "text/plain"});
+    tasks.push_back(PostIngestQueue::Task{"log-test-hash-2", "text/plain"});
 
     std::thread producer(
         [&queue, tasks = std::move(tasks)]() mutable { queue->enqueueBatch(std::move(tasks)); });

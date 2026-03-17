@@ -404,7 +404,6 @@ TEST_CASE("PostIngestQueue - Capacity and Backpressure", "[daemon][post-ingest][
             PostIngestQueue::Task task;
             task.hash = "hash_" + std::to_string(i);
             task.mime = "text/plain";
-            task.stage = PostIngestQueue::Task::Stage::Metadata;
             tasks.push_back(task);
         }
 
