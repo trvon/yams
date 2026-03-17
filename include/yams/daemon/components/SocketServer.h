@@ -165,10 +165,6 @@ private:
     mutable std::mutex activeSocketsMutex_;
     std::vector<std::weak_ptr<TrackedSocket>> activeSockets_;
 
-    // Track connection futures for graceful shutdown (PBI-066-41)
-    std::mutex connectionFuturesMutex_;
-    std::vector<std::future<void>> connectionFutures_;
-
     std::unique_ptr<std::counting_semaphore<>> connectionSlots_;
     std::unique_ptr<std::counting_semaphore<>> proxyConnectionSlots_;
 
@@ -176,7 +172,6 @@ private:
     std::atomic<size_t> slotLimit_{0};   // Current slot limit (tracked for resize decisions)
     std::atomic<int32_t> shrinkDebt_{0}; // Deficit when shrinking below active connections
 
-    void prune_completed_futures();
     void execute_on_io_context(std::function<void()> fn);
     void close_acceptor_on_executor();
     std::size_t

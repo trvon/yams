@@ -1422,26 +1422,34 @@ void PostIngestQueue::processEntityExtractionBatch(
     if (jobs.empty()) {
         return;
     }
-    // Fan out entity extraction via coordinator pool (bounded threads)
-    auto executor =
-        entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor();
-    std::vector<std::future<void>> futures;
-    futures.reserve(jobs.size());
-    for (auto& job : jobs) {
-        auto promise = std::make_shared<std::promise<void>>();
-        futures.push_back(promise->get_future());
-        boost::asio::post(executor, [this, p = std::move(promise), job = std::move(job)]() mutable {
+    if (!tfExecutor_ || jobs.size() == 1) {
+        for (auto& job : jobs) {
+            processEntityExtractionStage(job.hash, job.documentId, job.filePath, job.extension,
+                                         std::move(job.contentBytes));
+        }
+        return;
+    }
+
+    std::vector<std::exception_ptr> failures(jobs.size());
+    tf::Taskflow taskflow("processEntityExtractionBatch");
+    for (std::size_t i = 0; i < jobs.size(); ++i) {
+        taskflow.emplace([this, &jobs, &failures, i]() {
             try {
+                auto& job = jobs[i];
                 processEntityExtractionStage(job.hash, job.documentId, job.filePath, job.extension,
                                              std::move(job.contentBytes));
-                p->set_value();
             } catch (...) {
-                p->set_exception(std::current_exception());
+                failures[i] = std::current_exception();
             }
         });
     }
-    for (auto& f : futures) {
-        f.get();
+
+    tfExecutor_->run(taskflow).wait();
+
+    for (const auto& failure : failures) {
+        if (failure) {
+            std::rethrow_exception(failure);
+        }
     }
 }
 
@@ -1781,26 +1789,36 @@ void PostIngestQueue::processTitleExtractionBatch(
     if (jobs.empty()) {
         return;
     }
-    // Fan out title extraction via coordinator pool (bounded threads)
-    auto executor = coordinator_->getExecutor();
-    std::vector<std::future<void>> futures;
-    futures.reserve(jobs.size());
-    for (auto& job : jobs) {
-        auto promise = std::make_shared<std::promise<void>>();
-        futures.push_back(promise->get_future());
-        boost::asio::post(executor, [this, p = std::move(promise), job = std::move(job)]() mutable {
+    if (!tfExecutor_ || jobs.size() == 1) {
+        for (auto& job : jobs) {
+            processTitleExtractionStage(job.hash, job.documentId, job.textSnippet,
+                                        job.fallbackTitle, job.filePath, job.language,
+                                        job.mimeType);
+        }
+        return;
+    }
+
+    std::vector<std::exception_ptr> failures(jobs.size());
+    tf::Taskflow taskflow("processTitleExtractionBatch");
+    for (std::size_t i = 0; i < jobs.size(); ++i) {
+        taskflow.emplace([this, &jobs, &failures, i]() {
             try {
+                auto& job = jobs[i];
                 processTitleExtractionStage(job.hash, job.documentId, job.textSnippet,
                                             job.fallbackTitle, job.filePath, job.language,
                                             job.mimeType);
-                p->set_value();
             } catch (...) {
-                p->set_exception(std::current_exception());
+                failures[i] = std::current_exception();
             }
         });
     }
-    for (auto& f : futures) {
-        f.get();
+
+    tfExecutor_->run(taskflow).wait();
+
+    for (const auto& failure : failures) {
+        if (failure) {
+            std::rethrow_exception(failure);
+        }
     }
 }
 
@@ -2329,7 +2347,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
 
             // Enqueue the batch (non-blocking)
             try {
-                auto future = kgWriteQueue_->enqueue(std::move(batch));
+                kgWriteQueue_->enqueue(std::move(batch));
                 // Don't wait for completion - fire and forget for async KG population
                 // The KGWriteQueue will batch and commit efficiently
                 spdlog::debug("[PostIngestQueue] Queued {} NL entities for KG from {}",

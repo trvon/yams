@@ -255,6 +255,7 @@ yams_daemon_lib = static_library('yams_daemon',
 
 yams_daemon_dep = declare_dependency(
   link_with: yams_daemon_lib,
+  dependencies: [taskflow_dep],
   include_directories: include_directories('../../include'),
 )
 

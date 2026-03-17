@@ -2,11 +2,11 @@
 
 #include <atomic>
 #include <chrono>
-#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <spdlog/spdlog.h>
@@ -75,14 +75,10 @@ struct DeferredKGBatch {
     // Maps original nodeKey to assigned database ID
     std::unordered_map<std::string, std::int64_t> nodeKeyToId;
 
-    // Promise for async completion notification
-    std::shared_ptr<std::promise<Result<void>>> completionPromise;
-
     DeferredKGBatch() = default;
     DeferredKGBatch(DeferredKGBatch&&) = default;
     DeferredKGBatch& operator=(DeferredKGBatch&&) = default;
 
-    // Non-copyable due to promise
     DeferredKGBatch(const DeferredKGBatch&) = delete;
     DeferredKGBatch& operator=(const DeferredKGBatch&) = delete;
 };
@@ -98,8 +94,7 @@ struct DeferredKGBatch {
  *   auto batch = std::make_unique<DeferredKGBatch>();
  *   batch->nodes.push_back(...);
  *   batch->edges.push_back(...);
- *   auto future = queue.enqueue(std::move(batch));
- *   // Optionally wait: future.get();
+ *   queue.enqueue(std::move(batch));
  */
 class KGWriteQueue {
 public:
@@ -130,9 +125,8 @@ public:
 
     /**
      * Enqueue a deferred batch for writing.
-     * Returns a future that resolves when the batch is committed.
      */
-    std::future<Result<void>> enqueue(std::unique_ptr<DeferredKGBatch> batch);
+    void enqueue(std::unique_ptr<DeferredKGBatch> batch);
 
     /**
      * Start the writer coroutine.
@@ -177,10 +171,8 @@ private:
     std::shared_ptr<metadata::KnowledgeGraphStore> kg_;
     Config config_;
 
-    // Thread-safe queue using mutex + condition variable
-    // (simpler than channel for this use case)
+    // Thread-safe queue using a mutex-protected vector.
     mutable std::mutex queueMutex_;
-    std::condition_variable queueCv_;
     std::vector<std::unique_ptr<DeferredKGBatch>> pendingBatches_;
 
     std::atomic<bool> stop_{false};

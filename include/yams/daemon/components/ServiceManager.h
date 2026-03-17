@@ -521,26 +521,6 @@ private:
     void wireSearchEngineRuntimeAdapters(const std::shared_ptr<search::SearchEngine>& engine,
                                          const char* contextLabel);
 
-    boost::asio::awaitable<yams::Result<void>>
-    co_initContentStore(boost::asio::any_io_executor exec,
-                        const boost::asio::cancellation_state& token);
-
-    boost::asio::awaitable<yams::Result<void>>
-    co_initDatabase(boost::asio::any_io_executor exec,
-                    const boost::asio::cancellation_state& token);
-
-    boost::asio::awaitable<yams::Result<void>>
-    co_initSearchEngine(boost::asio::any_io_executor exec,
-                        const boost::asio::cancellation_state& token);
-
-    boost::asio::awaitable<yams::Result<void>>
-    co_initVectorSystem(boost::asio::any_io_executor exec,
-                        const boost::asio::cancellation_state& token);
-
-    boost::asio::awaitable<yams::Result<void>>
-    co_initPluginSystem(boost::asio::any_io_executor exec,
-                        const boost::asio::cancellation_state& token);
-
     boost::asio::awaitable<void> co_runSessionWatcher(yams::compat::stop_token token);
 
     // Awaitable phase helpers for modern architecture
@@ -569,7 +549,6 @@ private:
     std::shared_ptr<IModelProvider> modelProvider_;
 
     std::unique_ptr<IngestService> ingestService_;
-    yams::compat::jthread initThread_; // Retained for legacy async init (will be removed later)
 
     std::unique_ptr<AbiPluginLoader> abiPluginLoader_;
     std::unique_ptr<AbiPluginHost> abiHost_;

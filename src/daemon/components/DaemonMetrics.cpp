@@ -116,25 +116,6 @@ static std::uint64_t readRssKb() {
 #endif
 }
 
-[[maybe_unused]] double readMemoryUsageMb() {
-#ifdef __APPLE__
-    // On macOS, PSS is not easily available, so we rely on RSS.
-    std::uint64_t rss_kb = readRssKb();
-    if (rss_kb > 0)
-        return static_cast<double>(rss_kb) / 1024.0;
-    return 0.0;
-#else
-    // Prefer PSS if available (more accurate for shared pages), otherwise RSS
-    std::uint64_t pss_kb = readPssKb();
-    if (pss_kb > 0)
-        return static_cast<double>(pss_kb) / 1024.0;
-    std::uint64_t rss_kb = readRssKb();
-    if (rss_kb > 0)
-        return static_cast<double>(rss_kb) / 1024.0;
-    return 0.0;
-#endif
-}
-
 template <typename NumeratorT, typename DenominatorT>
 double safeRatio(NumeratorT numerator, DenominatorT denominator) {
     const auto denom = static_cast<double>(denominator);
@@ -299,8 +280,8 @@ double readCpuUsagePercent(std::uint64_t& lastProcJiffies, std::uint64_t& lastTo
 DaemonMetrics::DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateComponent* state,
                              const ServiceManager* services, WorkCoordinator* coordinator,
                              const SocketServer* socketServer)
-    : lifecycle_(lifecycle), state_(state), services_(services), coordinator_(coordinator),
-      socketServer_(socketServer), strand_(coordinator->getExecutor()) {
+    : lifecycle_(lifecycle), state_(state), services_(services), socketServer_(socketServer),
+      strand_(coordinator->getExecutor()) {
     cacheMs_ = TuneAdvisor::metricsCacheMs();
 }
 

@@ -381,7 +381,6 @@ private:
     const DaemonLifecycleFsm* lifecycle_;
     const StateComponent* state_;
     const ServiceManager* services_;
-    [[maybe_unused]] WorkCoordinator* coordinator_; // Retained for future metrics expansion
     const SocketServer* socketServer_;
     boost::asio::strand<boost::asio::io_context::executor_type> strand_;
 

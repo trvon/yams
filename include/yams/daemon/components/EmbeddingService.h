@@ -13,6 +13,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
+#include <taskflow/taskflow.hpp>
 #include <yams/daemon/components/IComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
 
@@ -128,6 +129,7 @@ private:
     std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> activeInferSubBatches_;
     std::shared_ptr<SpscQueue<InternalEventBus::EmbedJob>> embedChannel_;
     std::vector<InternalEventBus::EmbedJob> pendingJobs_;
+    std::unique_ptr<tf::Executor> preprocessExecutor_;
 };
 
 } // namespace daemon

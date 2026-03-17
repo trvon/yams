@@ -2,7 +2,6 @@
 #include <spdlog/spdlog.h>
 #include <atomic>
 #include <filesystem>
-#include <future>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -1121,21 +1120,7 @@ RequestDispatcher::handleFileHistoryRequest(const FileHistoryRequest& req) {
                 spdlog::debug("[FileHistory] Processing doc {}/{}: id={}, path={}", idx + 1,
                               docsToProcess, doc.id, doc.filePath);
 
-                // Use std::async with timeout to prevent blocking indefinitely
-                auto metadataFuture = std::async(std::launch::async, [&]() {
-                    return appContext.metadataRepo->getAllMetadata(doc.id);
-                });
-
-                // Wait with 500ms timeout per document
-                if (metadataFuture.wait_for(std::chrono::milliseconds(500)) !=
-                    std::future_status::ready) {
-                    spdlog::warn(
-                        "[FileHistory] Timeout getting metadata for doc {} (path={}), skipping",
-                        doc.id, doc.filePath);
-                    continue;
-                }
-
-                auto metadataRes = metadataFuture.get();
+                auto metadataRes = appContext.metadataRepo->getAllMetadata(doc.id);
                 if (!metadataRes) {
                     spdlog::debug("[FileHistory] Failed to get metadata for doc {}: {}", doc.id,
                                   metadataRes.error().message);

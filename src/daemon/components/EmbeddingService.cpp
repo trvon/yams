@@ -7,7 +7,6 @@
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
-#include <future>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -77,6 +76,13 @@ void EmbeddingService::start() {
     {
         std::lock_guard<std::mutex> lock(inferTrackerMutex_);
         activeInferSubBatches_.clear();
+    }
+    if (!preprocessExecutor_) {
+        const std::size_t tfThreads = std::clamp<std::size_t>(
+            static_cast<std::size_t>(TuneAdvisor::postEmbedConcurrent()), 2u, 8u);
+        preprocessExecutor_ = std::make_unique<tf::Executor>(tfThreads);
+        spdlog::info("EmbeddingService: Taskflow preprocess executor started with {} threads",
+                     tfThreads);
     }
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Embed, true);
     boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
@@ -176,6 +182,11 @@ void EmbeddingService::shutdown() {
                      "infer_active={} infer_oldest_ms={} last_model='{}')",
                      pendingApprox, channelQueued, inferActive, inferOldestMs,
                      lastModel.empty() ? "<default>" : lastModel);
+    }
+
+    if (preprocessExecutor_) {
+        preprocessExecutor_->wait_for_all();
+        preprocessExecutor_.reset();
     }
 }
 
@@ -1031,56 +1042,115 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     // Chunk any remaining docs the legacy way.
     const bool needChunker = std::any_of(docHasPreparedChunks.begin(), docHasPreparedChunks.end(),
                                          [](bool v) { return !v; });
+    auto markChunkingAborted = [&]() {
+        spdlog::info("EmbeddingService: aborting job={} during chunking (docs={}) due to shutdown",
+                     jobTag, docsToEmbed.size());
+        failed_.fetch_add(docsToEmbed.size(), std::memory_order_relaxed);
+        InternalEventBus::instance().incEmbedDropped(docsToEmbed.size());
+        std::vector<std::string> failedHashes;
+        failedHashes.reserve(docsToEmbed.size());
+        for (const auto& doc : docsToEmbed) {
+            failedHashes.push_back(doc.hash);
+        }
+        (void)meta_->batchUpdateDocumentRepairStatuses(failedHashes,
+                                                       metadata::RepairStatus::Failed);
+    };
 
-    std::unique_ptr<yams::vector::DocumentChunker> chunker;
-    if (needChunker) {
-        chunker = yams::vector::createChunker(strategy, ccfg, nullptr);
+    struct ChunkBuildResult {
+        uint64_t docChars{0};
+        uint64_t chunkChars{0};
+        std::string preview;
+        std::vector<ChunkInfo> chunks;
+        std::exception_ptr error;
+    };
+
+    std::vector<ChunkBuildResult> chunkResults(docsToEmbed.size());
+    bool abortedDuringChunking = false;
+
+    auto buildChunksForDoc = [&](std::size_t docIdx) {
+        if (preparedDocPtr[docIdx]) {
+            return;
+        }
+        if (stop_.load(std::memory_order_acquire)) {
+            abortedDuringChunking = true;
+            return;
+        }
+
+        auto& result = chunkResults[docIdx];
+        const auto& doc = docsToEmbed[docIdx];
+        result.docChars = static_cast<uint64_t>(doc.text.size());
+        result.preview = doc.text.size() <= 1000 ? doc.text : doc.text.substr(0, 1000);
+
+        if (!needChunker) {
+            return;
+        }
+
+        auto localChunker = yams::vector::createChunker(strategy, ccfg, nullptr);
+        if (!localChunker) {
+            return;
+        }
+
+        auto chunks = localChunker->chunkDocument(doc.text, doc.hash);
+        if (chunks.empty()) {
+            result.chunks.push_back({docIdx, yams::vector::utils::generateChunkId(doc.hash, 0),
+                                     doc.text, 0, doc.text.size(), false});
+            result.chunkChars += static_cast<uint64_t>(doc.text.size());
+            return;
+        }
+
+        result.chunks.reserve(chunks.size());
+        for (std::size_t i = 0; i < chunks.size(); ++i) {
+            auto& c = chunks[i];
+            std::string chunkId =
+                c.chunk_id.empty() ? yams::vector::utils::generateChunkId(doc.hash, i) : c.chunk_id;
+            result.chunkChars += static_cast<uint64_t>(c.content.size());
+            result.chunks.push_back(
+                {docIdx, chunkId, std::move(c.content), c.start_offset, c.end_offset, false});
+        }
+    };
+
+    if (preprocessExecutor_ && docsToEmbed.size() > 1) {
+        tf::Taskflow chunkTaskflow("embeddingChunkDocs");
+        for (std::size_t docIdx = 0; docIdx < docsToEmbed.size(); ++docIdx) {
+            chunkTaskflow.emplace([&chunkResults, &buildChunksForDoc, docIdx]() {
+                try {
+                    buildChunksForDoc(docIdx);
+                } catch (...) {
+                    chunkResults[docIdx].error = std::current_exception();
+                }
+            });
+        }
+        preprocessExecutor_->run(chunkTaskflow).wait();
+    } else {
+        for (std::size_t docIdx = 0; docIdx < docsToEmbed.size(); ++docIdx) {
+            try {
+                buildChunksForDoc(docIdx);
+            } catch (...) {
+                chunkResults[docIdx].error = std::current_exception();
+            }
+        }
     }
 
-    for (size_t docIdx = 0; docIdx < docsToEmbed.size(); ++docIdx) {
+    for (std::size_t docIdx = 0; docIdx < docsToEmbed.size(); ++docIdx) {
+        if (chunkResults[docIdx].error) {
+            std::rethrow_exception(chunkResults[docIdx].error);
+        }
+    }
+    if (abortedDuringChunking) {
+        markChunkingAborted();
+        return;
+    }
+
+    for (std::size_t docIdx = 0; docIdx < docsToEmbed.size(); ++docIdx) {
         if (preparedDocPtr[docIdx]) {
             continue;
         }
-        if (stop_.load(std::memory_order_acquire)) {
-            spdlog::info("EmbeddingService: aborting job={} during chunking (docs={}) due to "
-                         "shutdown",
-                         jobTag, docsToEmbed.size());
-            failed_.fetch_add(docsToEmbed.size(), std::memory_order_relaxed);
-            InternalEventBus::instance().incEmbedDropped(docsToEmbed.size());
-            std::vector<std::string> failedHashes;
-            failedHashes.reserve(docsToEmbed.size());
-            for (const auto& doc : docsToEmbed) {
-                failedHashes.push_back(doc.hash);
-            }
-            (void)meta_->batchUpdateDocumentRepairStatuses(failedHashes,
-                                                           metadata::RepairStatus::Failed);
-            return;
-        }
-        const auto& doc = docsToEmbed[docIdx];
-        totalDocChars += static_cast<uint64_t>(doc.text.size());
-        docPreviews[docIdx] = doc.text.size() <= 1000 ? doc.text : doc.text.substr(0, 1000);
-
-        if (!chunker) {
-            continue;
-        }
-        auto chunks = chunker->chunkDocument(doc.text, doc.hash);
-
-        if (chunks.empty()) {
-            std::string chunkId = yams::vector::utils::generateChunkId(doc.hash, 0);
-            allChunks.push_back({docIdx, chunkId, doc.text, 0, doc.text.size(), false});
-            totalChunkChars += static_cast<uint64_t>(doc.text.size());
-        } else {
-            for (size_t i = 0; i < chunks.size(); ++i) {
-                auto& c = chunks[i];
-                std::string chunkId = c.chunk_id.empty()
-                                          ? yams::vector::utils::generateChunkId(doc.hash, i)
-                                          : c.chunk_id;
-                allChunks.push_back(
-                    {docIdx, chunkId, std::move(c.content), c.start_offset, c.end_offset, false});
-                totalChunkChars += static_cast<uint64_t>(allChunks.back().content.size());
-            }
-        }
-
+        auto& result = chunkResults[docIdx];
+        totalDocChars += result.docChars;
+        docPreviews[docIdx] = std::move(result.preview);
+        totalChunkChars += result.chunkChars;
+        allChunks.insert(allChunks.end(), std::make_move_iterator(result.chunks.begin()),
+                         std::make_move_iterator(result.chunks.end()));
         docsToEmbed[docIdx].text.clear();
         docsToEmbed[docIdx].text.shrink_to_fit();
     }
@@ -1155,11 +1225,21 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             }
         }
 
-        for (const auto& chunkIndexes : perDocChunkIdx) {
+        struct SelectionResult {
+            std::vector<ChunkInfo> chunks;
+            std::size_t droppedChunks{0};
+            std::size_t selectedChars{0};
+            std::exception_ptr error;
+        };
+
+        std::vector<SelectionResult> selectionResults(perDocChunkIdx.size());
+        auto selectChunksForDoc = [&](std::size_t docIdx) {
+            const auto& chunkIndexes = perDocChunkIdx[docIdx];
             if (chunkIndexes.empty()) {
-                continue;
+                return;
             }
 
+            auto& out = selectionResults[docIdx];
             std::size_t effectiveMaxChunks = selectionCfg.maxChunksPerDoc;
             std::size_t effectiveMaxChars = selectionCfg.maxCharsPerDoc;
             if (selectionCfg.mode == ConfigResolver::EmbeddingSelectionPolicy::Mode::Adaptive) {
@@ -1195,21 +1275,21 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                         (selectedChars + chunkSize) > effectiveMaxChars) {
                         continue;
                     }
-                    selectedChunks.push_back(std::move(allChunks[idx]));
+                    out.chunks.push_back(chunk);
                     pickedAny = true;
                     selectedCount += 1;
                     selectedChars += chunkSize;
-                    totalSelectedChars += chunkSize;
                 }
 
                 if (!pickedAny) {
                     const auto fallbackIdx = chunkIndexes.front();
-                    totalSelectedChars += allChunks[fallbackIdx].content.size();
-                    selectedChunks.push_back(std::move(allChunks[fallbackIdx]));
+                    out.chunks.push_back(allChunks[fallbackIdx]);
+                    selectedChars += allChunks[fallbackIdx].content.size();
                     selectedCount = 1;
                 }
-                droppedChunks += (chunkIndexes.size() - selectedCount);
-                continue;
+                out.selectedChars = selectedChars;
+                out.droppedChunks = chunkIndexes.size() - selectedCount;
+                return;
             }
 
             struct ScoredChunk {
@@ -1244,9 +1324,6 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
             std::size_t selectedCount = 0;
             std::size_t selectedChars = 0;
-            std::unordered_set<std::size_t> picked;
-            picked.reserve(scored.size());
-
             for (const auto& item : scored) {
                 if (effectiveMaxChunks > 0 && selectedCount >= effectiveMaxChunks) {
                     break;
@@ -1256,22 +1333,56 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                     (selectedChars + chunkSize) > effectiveMaxChars) {
                     continue;
                 }
-                selectedChunks.push_back(std::move(allChunks[item.idx]));
-                picked.insert(item.idx);
+                out.chunks.push_back(allChunks[item.idx]);
                 selectedCount += 1;
                 selectedChars += chunkSize;
-                totalSelectedChars += chunkSize;
             }
 
             if (selectedCount == 0) {
                 const auto fallbackIdx = chunkIndexes.front();
-                totalSelectedChars += allChunks[fallbackIdx].content.size();
-                selectedChunks.push_back(std::move(allChunks[fallbackIdx]));
-                picked.insert(fallbackIdx);
+                out.chunks.push_back(allChunks[fallbackIdx]);
+                selectedChars += allChunks[fallbackIdx].content.size();
                 selectedCount = 1;
             }
 
-            droppedChunks += (chunkIndexes.size() - selectedCount);
+            out.selectedChars = selectedChars;
+            out.droppedChunks = chunkIndexes.size() - selectedCount;
+        };
+
+        if (preprocessExecutor_ && perDocChunkIdx.size() > 1) {
+            tf::Taskflow selectionTaskflow("embeddingSelectChunks");
+            for (std::size_t docIdx = 0; docIdx < perDocChunkIdx.size(); ++docIdx) {
+                selectionTaskflow.emplace([&selectionResults, &selectChunksForDoc, docIdx]() {
+                    try {
+                        selectChunksForDoc(docIdx);
+                    } catch (...) {
+                        selectionResults[docIdx].error = std::current_exception();
+                    }
+                });
+            }
+            preprocessExecutor_->run(selectionTaskflow).wait();
+        } else {
+            for (std::size_t docIdx = 0; docIdx < perDocChunkIdx.size(); ++docIdx) {
+                try {
+                    selectChunksForDoc(docIdx);
+                } catch (...) {
+                    selectionResults[docIdx].error = std::current_exception();
+                }
+            }
+        }
+
+        for (const auto& result : selectionResults) {
+            if (result.error) {
+                std::rethrow_exception(result.error);
+            }
+        }
+
+        for (auto& result : selectionResults) {
+            droppedChunks += result.droppedChunks;
+            totalSelectedChars += result.selectedChars;
+            selectedChunks.insert(selectedChunks.end(),
+                                  std::make_move_iterator(result.chunks.begin()),
+                                  std::make_move_iterator(result.chunks.end()));
         }
 
         if (!selectedChunks.empty()) {

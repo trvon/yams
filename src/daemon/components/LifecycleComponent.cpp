@@ -5,7 +5,6 @@
 #include <csignal>
 #include <cstring>
 #include <fstream>
-#include <future>
 #include <iomanip>
 #include <random>
 #include <sstream>
@@ -15,10 +14,8 @@
 using nlohmann::json;
 
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/thread_pool.hpp>
 
+#include <yams/cli/cli_sync.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/LifecycleComponent.h>
 #include <yams/daemon/daemon.h>
@@ -51,50 +48,32 @@ using yams::daemon::ClientConfig;
 using yams::daemon::DaemonClient;
 
 Result<void> sendShutdownRequest(const ClientConfig& cfg, std::chrono::milliseconds timeout) {
-    auto promise = std::make_shared<std::promise<Result<void>>>();
-    auto future = promise->get_future();
-
     try {
-        boost::asio::thread_pool pool(1);
-        boost::asio::co_spawn(
-            pool,
-            [cfg, promise]() -> boost::asio::awaitable<void> {
-                try {
-                    DaemonClient client(cfg);
-                    auto connected = co_await client.connect();
-                    if (!connected) {
-                        promise->set_value(connected.error());
-                        co_return;
-                    }
-                    auto result = co_await client.shutdown(true);
-                    promise->set_value(result);
-                } catch (const std::exception& e) {
-                    promise->set_value(Error{ErrorCode::InternalError,
-                                             std::string("Shutdown RPC exception: ") + e.what()});
-                } catch (...) {
-                    promise->set_value(
-                        Error{ErrorCode::InternalError, "Shutdown RPC threw unknown exception"});
+        auto request = [cfg]() -> boost::asio::awaitable<Result<void>> {
+            try {
+                DaemonClient client(cfg);
+                auto connected = co_await client.connect();
+                if (!connected) {
+                    co_return connected.error();
                 }
-                co_return;
-            },
-            boost::asio::detached);
-
-        auto wait_ready = [&]() -> bool {
-            if (timeout.count() > 0) {
-                return future.wait_for(timeout) == std::future_status::ready;
+                co_return co_await client.shutdown(true);
+            } catch (const std::exception& e) {
+                co_return Error{ErrorCode::InternalError,
+                                std::string("Shutdown RPC exception: ") + e.what()};
+            } catch (...) {
+                co_return Error{ErrorCode::InternalError, "Shutdown RPC threw unknown exception"};
             }
-            future.wait();
-            return true;
-        }();
+        };
 
-        if (!wait_ready) {
-            pool.stop();
-            pool.join();
-            return Error{ErrorCode::Timeout, "Shutdown request timed out"};
+        if (timeout.count() > 0) {
+            auto result = yams::cli::run_sync(request(), timeout);
+            if (!result && result.error().code == ErrorCode::Timeout) {
+                return Error{ErrorCode::Timeout, "Shutdown request timed out"};
+            }
+            return result;
         }
 
-        pool.join();
-        return future.get();
+        return yams::cli::run_sync(request(), std::chrono::hours(24));
     } catch (const std::exception& e) {
         return Error{ErrorCode::InternalError,
                      std::string("Failed to dispatch shutdown RPC: ") + e.what()};

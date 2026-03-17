@@ -478,19 +478,27 @@ private:
 
             bool processGone = (pid <= 0) || (kill(pid, 0) != 0);
             bool socketFilePresent = !socketPath.empty() && safe_exists(socketFsPath);
-            bool proxySocketPresent = !socketPath.empty() && safe_exists(deriveProxySocketPath(socketFsPath));
-            bool socketBoundProcessAlive = isDaemonProcessRunningForSocket(socketPath);
-            bool socketGone = (!socketFilePresent && !proxySocketPresent) || !socketBoundProcessAlive;
+            bool proxySocketPresent =
+                !socketPath.empty() && safe_exists(deriveProxySocketPath(socketFsPath));
+            bool socketBoundProcessAlive = false;
+#ifndef _WIN32
+            socketBoundProcessAlive = isDaemonProcessRunningForSocket(socketPath);
+#else
+            socketBoundProcessAlive = socketFilePresent || proxySocketPresent;
+#endif
+            bool socketGone =
+                (!socketFilePresent && !proxySocketPresent) || !socketBoundProcessAlive;
 
             if (processGone && socketGone) {
                 spdlog::debug("Daemon fully stopped (PID {}), socket cleared", pid);
                 return true;
             }
 
-            spdlog::debug("Waiting for daemon to stop... PID={}, process_gone={}, socket_gone={}, "
-                          "socket_file_present={}, proxy_socket_present={}, socket_process_alive={}",
-                          pid, processGone, socketGone, socketFilePresent, proxySocketPresent,
-                          socketBoundProcessAlive);
+            spdlog::debug(
+                "Waiting for daemon to stop... PID={}, process_gone={}, socket_gone={}, "
+                "socket_file_present={}, proxy_socket_present={}, socket_process_alive={}",
+                pid, processGone, socketGone, socketFilePresent, proxySocketPresent,
+                socketBoundProcessAlive);
             std::this_thread::sleep_for(interval);
         }
 
@@ -1267,8 +1275,9 @@ private:
         if (stopped) {
 #ifndef _WIN32
             if (isDaemonProcessRunningForSocket(effectiveSocket)) {
-                spdlog::info("Daemon process still exiting after stop request; allowing extra grace "
-                             "period");
+                spdlog::info(
+                    "Daemon process still exiting after stop request; allowing extra grace "
+                    "period");
                 stopped = waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(3),
                                             initialPid);
             }
@@ -1285,8 +1294,9 @@ private:
             std::cerr << "[FAIL] Failed to stop YAMS daemon\n";
             std::cerr << "  💡 Hint: The daemon may be unresponsive or owned by another user\n";
             if (pidAlive()) {
-                std::cerr << "  ℹ Daemon may still be shutting down; retry in a few seconds if this "
-                             "was a graceful stop\n";
+                std::cerr
+                    << "  ℹ Daemon may still be shutting down; retry in a few seconds if this "
+                       "was a graceful stop\n";
             }
             if (!force_) {
                 std::cerr << "  📋 Try: yams daemon stop --force\n";
@@ -2566,9 +2576,8 @@ private:
                     const bool ready = getReadiness("vector_db");
                     const bool initialized = status.vectorDbInitAttempted;
                     Severity sev = ready ? Severity::Good : Severity::Warn;
-                    std::string text = ready ? "Ready"
-                                             : (initialized ? "Initialized (empty)"
-                                                            : "Not initialized");
+                    std::string text =
+                        ready ? "Ready" : (initialized ? "Initialized (empty)" : "Not initialized");
                     std::string extra;
                     if (status.vectorDbDim > 0) {
                         extra = "dim=" + std::to_string(status.vectorDbDim);

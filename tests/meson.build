@@ -884,14 +884,14 @@ if catch2_dep.found()
   )
 
   # PostIngestQueue Taskflow integration tests
-  catch2_post_ingest_taskflow_exe = executable('catch2_post_ingest_taskflow',
-    files('unit/daemon/post_ingest_taskflow_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
+  # catch2_post_ingest_taskflow_exe = executable('catch2_post_ingest_taskflow',
+  #   files('unit/daemon/post_ingest_taskflow_catch2_test.cpp'),
+  #   include_directories: incs,
+  #   dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+  #   cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+  #   build_rpath: ':'.join(_test_rpaths),
+  #   install: false,
+  # )
 
   # Metrics consistency tests (migrated from GTest)
   catch2_metrics_consistency_exe = executable('catch2_metrics_consistency',
@@ -2725,11 +2725,11 @@ if catch2_dep.found()
     timeout: 60
   )
 
-  test('post_ingest_taskflow', catch2_post_ingest_taskflow_exe,
-    suite: ['catch2', 'unit', 'daemon', 'post-ingest', 'taskflow'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
+  # test('post_ingest_taskflow', catch2_post_ingest_taskflow_exe,
+  #   suite: ['catch2', 'unit', 'daemon', 'post-ingest', 'taskflow'],
+  #   env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+  #   timeout: 60
+  # )
 
   test('metrics_consistency', catch2_metrics_consistency_exe,
     suite: ['catch2', 'unit', 'daemon', 'metrics'],

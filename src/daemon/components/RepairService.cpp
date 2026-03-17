@@ -90,14 +90,14 @@ bool shouldRedetectMime(const metadata::DocumentInfo& doc) {
 }
 
 std::string bestEffortMimeForDocument(const metadata::DocumentInfo& doc,
-                                     const std::shared_ptr<api::IContentStore>& store) {
+                                      const std::shared_ptr<api::IContentStore>& store) {
     try {
         (void)detection::FileTypeDetector::initializeWithMagicNumbers();
         auto& detector = detection::FileTypeDetector::instance();
         const auto extension = normalizedRepairExtension(doc);
-        const auto hintedMime = extension.empty()
-                                    ? std::string{}
-                                    : detection::FileTypeDetector::getMimeTypeFromExtension(extension);
+        const auto hintedMime =
+            extension.empty() ? std::string{}
+                              : detection::FileTypeDetector::getMimeTypeFromExtension(extension);
 
         if (store) {
             auto bytesResult = store->retrieveBytes(doc.sha256Hash);
@@ -289,6 +289,12 @@ void RepairService::start() {
     shutdownState_->finished.store(false, std::memory_order_relaxed);
     shutdownState_->running.store(true, std::memory_order_relaxed);
     shutdownState_->config = cfg_;
+    if (!detectExecutor_) {
+        const std::size_t tfThreads = std::clamp<std::size_t>(cfg_.maintenanceTokens + 1u, 2u, 8u);
+        detectExecutor_ = std::make_unique<tf::Executor>(tfThreads);
+        spdlog::debug("RepairService: Taskflow detect executor initialized with {} threads",
+                      tfThreads);
+    }
 
     auto exec = RepairThreadPool::instance().get_executor();
     auto shutdownState = shutdownState_;
@@ -341,6 +347,10 @@ void RepairService::stop() {
         std::unique_lock<std::mutex> lk(shutdownState_->mutex);
         shutdownState_->cv.wait_for(lk, std::chrono::milliseconds(2000),
                                     [this] { return shutdownState_->finished.load(); });
+    }
+    if (detectExecutor_) {
+        detectExecutor_->wait_for_all();
+        detectExecutor_.reset();
     }
     spdlog::debug("RepairService stopped");
 }
@@ -856,6 +866,43 @@ void RepairService::performVectorCleanup() {
     }
 }
 
+RepairService::MissingWorkFlags RepairService::analyzeMissingWorkForHash(
+    const std::string& hash, bool checkEmbeddings,
+    const std::shared_ptr<api::IContentStore>& contentStore,
+    const std::shared_ptr<metadata::MetadataRepository>& metaRepo,
+    const std::vector<std::shared_ptr<extraction::IContentExtractor>>& customExtractors) const {
+    MissingWorkFlags flags;
+    if (!metaRepo) {
+        return flags;
+    }
+
+    if (checkEmbeddings) {
+        auto hasEmbedRes = metaRepo->hasDocumentEmbeddingByHash(hash);
+        flags.missingEmbedding = !hasEmbedRes || !hasEmbedRes.value();
+    }
+
+    auto docRes = metaRepo->getDocumentByHash(hash);
+    if (!(docRes && docRes.value().has_value())) {
+        return flags;
+    }
+
+    const auto& d = docRes.value().value();
+    if (d.repairStatus == yams::metadata::RepairStatus::Completed ||
+        d.repairStatus == yams::metadata::RepairStatus::Processing) {
+        return flags;
+    }
+
+    if (!d.contentExtracted || d.extractionStatus != yams::metadata::ExtractionStatus::Success) {
+        flags.missingFts5 =
+            canExtractDocument(d.mimeType, d.fileExtension, customExtractors, contentStore, hash);
+        return flags;
+    }
+
+    auto ftsRes = metaRepo->hasFtsEntry(d.id);
+    flags.missingFts5 = ftsRes && !ftsRes.value();
+    return flags;
+}
+
 RepairService::MissingWorkResult
 RepairService::detectMissingWork(const std::vector<std::string>& batch) {
     MissingWorkResult result;
@@ -864,87 +911,100 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
     if (!(content && meta_repo))
         return result;
 
-    // Detect missing embeddings
-    if (!vectorsDisabledByEnv() && meta_repo) {
-        for (const auto& hash : batch) {
-            auto hasEmbedRes = meta_repo->hasDocumentEmbeddingByHash(hash);
-            if (!hasEmbedRes || !hasEmbedRes.value())
-                result.missingEmbeddings.push_back(hash);
+    const bool checkEmbeddings = !vectorsDisabledByEnv();
+    auto customExtractors = services_
+                                ? services_->getContentExtractors()
+                                : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
+
+    std::vector<MissingWorkFlags> flags(batch.size());
+    std::vector<std::exception_ptr> errors(batch.size());
+
+    if (detectExecutor_ && batch.size() > 1) {
+        tf::Taskflow taskflow("repairDetectMissingWork");
+        for (std::size_t i = 0; i < batch.size(); ++i) {
+            taskflow.emplace([this, &batch, &flags, &errors, checkEmbeddings, &content, &meta_repo,
+                              &customExtractors, i]() {
+                try {
+                    flags[i] = analyzeMissingWorkForHash(batch[i], checkEmbeddings, content,
+                                                         meta_repo, customExtractors);
+                } catch (...) {
+                    errors[i] = std::current_exception();
+                }
+            });
         }
-
-        if (!result.missingEmbeddings.empty()) {
-            auto provider = services_ ? services_->getModelProvider() : nullptr;
-            auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
-            if (provider && provider->isAvailable()) {
-                size_t modelDim = 0;
-                if (services_) {
-                    const auto preferredModel = services_->resolvePreferredModel();
-                    if (!preferredModel.empty())
-                        modelDim = provider->getEmbeddingDim(preferredModel);
-                }
-                if (modelDim == 0)
-                    modelDim = provider->getEmbeddingDim("");
-
-                size_t storedDim = 0;
-                if (vectorDb)
-                    storedDim = vectorDb->getConfig().embedding_dim;
-
-                if (modelDim > 0 && storedDim > 0 && modelDim != storedDim) {
-                    if (cfg_.autoRebuildOnDimMismatch && !dimMismatchRebuildDone_.exchange(true)) {
-                        spdlog::warn(
-                            "RepairService: rebuilding vectors (model dim {} != db dim {})",
-                            modelDim, storedDim);
-                        if (vectorDb) {
-                            try {
-                                const auto dbPath = vectorDb->getConfig().database_path;
-                                yams::vector::SqliteVecBackend backend;
-                                auto initRes = backend.initialize(dbPath);
-                                if (initRes) {
-                                    auto dropRes = backend.dropTables();
-                                    if (dropRes) {
-                                        auto createRes = backend.createTables(modelDim);
-                                        if (createRes)
-                                            ConfigResolver::writeVectorSentinel(
-                                                cfg_.dataDir, modelDim, "vec0", 1);
-                                    }
-                                }
-                                backend.close();
-                            } catch (...) {
-                            }
-                        }
-                    } else {
-                        result.missingEmbeddings.clear();
-                    }
-                }
+        detectExecutor_->run(taskflow).wait();
+    } else {
+        for (std::size_t i = 0; i < batch.size(); ++i) {
+            try {
+                flags[i] = analyzeMissingWorkForHash(batch[i], checkEmbeddings, content, meta_repo,
+                                                     customExtractors);
+            } catch (...) {
+                errors[i] = std::current_exception();
             }
         }
     }
 
-    // Detect missing FTS5 content
-    auto meta = services_ ? services_->getMetadataRepo() : nullptr;
-    if (meta) {
-        auto customExtractors = services_
-                                    ? services_->getContentExtractors()
-                                    : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
-        for (const auto& hash : batch) {
-            auto docRes = meta->getDocumentByHash(hash);
-            if (docRes && docRes.value().has_value()) {
-                const auto& d = docRes.value().value();
-                if (d.repairStatus == yams::metadata::RepairStatus::Completed ||
-                    d.repairStatus == yams::metadata::RepairStatus::Processing)
-                    continue;
-                if (!d.contentExtracted ||
-                    d.extractionStatus != yams::metadata::ExtractionStatus::Success) {
-                    if (canExtractDocument(d.mimeType, d.fileExtension, customExtractors, content,
-                                           hash))
-                        result.missingFts5.push_back(hash);
-                } else {
-                    // Extraction succeeded — verify FTS5 entry actually exists.
-                    // Small batch (per-hash), so per-document lookup is fine.
-                    auto ftsRes = meta->hasFtsEntry(d.id);
-                    if (ftsRes && !ftsRes.value()) {
-                        result.missingFts5.push_back(hash);
+    for (std::size_t i = 0; i < batch.size(); ++i) {
+        if (errors[i]) {
+            try {
+                std::rethrow_exception(errors[i]);
+            } catch (const std::exception& e) {
+                spdlog::warn("RepairService: detectMissingWork failed for {}: {}", batch[i],
+                             e.what());
+            } catch (...) {
+                spdlog::warn("RepairService: detectMissingWork failed for {}", batch[i]);
+            }
+            continue;
+        }
+        if (flags[i].missingEmbedding) {
+            result.missingEmbeddings.push_back(batch[i]);
+        }
+        if (flags[i].missingFts5) {
+            result.missingFts5.push_back(batch[i]);
+        }
+    }
+
+    if (!result.missingEmbeddings.empty()) {
+        auto provider = services_ ? services_->getModelProvider() : nullptr;
+        auto vectorDb = services_ ? services_->getVectorDatabase() : nullptr;
+        if (provider && provider->isAvailable()) {
+            size_t modelDim = 0;
+            if (services_) {
+                const auto preferredModel = services_->resolvePreferredModel();
+                if (!preferredModel.empty())
+                    modelDim = provider->getEmbeddingDim(preferredModel);
+            }
+            if (modelDim == 0)
+                modelDim = provider->getEmbeddingDim("");
+
+            size_t storedDim = 0;
+            if (vectorDb)
+                storedDim = vectorDb->getConfig().embedding_dim;
+
+            if (modelDim > 0 && storedDim > 0 && modelDim != storedDim) {
+                if (cfg_.autoRebuildOnDimMismatch && !dimMismatchRebuildDone_.exchange(true)) {
+                    spdlog::warn("RepairService: rebuilding vectors (model dim {} != db dim {})",
+                                 modelDim, storedDim);
+                    if (vectorDb) {
+                        try {
+                            const auto dbPath = vectorDb->getConfig().database_path;
+                            yams::vector::SqliteVecBackend backend;
+                            auto initRes = backend.initialize(dbPath);
+                            if (initRes) {
+                                auto dropRes = backend.dropTables();
+                                if (dropRes) {
+                                    auto createRes = backend.createTables(modelDim);
+                                    if (createRes)
+                                        ConfigResolver::writeVectorSentinel(cfg_.dataDir, modelDim,
+                                                                            "vec0", 1);
+                                }
+                            }
+                            backend.close();
+                        } catch (...) {
+                        }
                     }
+                } else {
+                    result.missingEmbeddings.clear();
                 }
             }
         }

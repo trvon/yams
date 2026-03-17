@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
+#include <taskflow/taskflow.hpp>
 
 namespace yams::metadata {
 class KnowledgeGraphStore;
@@ -126,7 +127,16 @@ private:
         std::vector<std::string> missingEmbeddings;
         std::vector<std::string> missingFts5;
     };
+    struct MissingWorkFlags {
+        bool missingEmbedding{false};
+        bool missingFts5{false};
+    };
     MissingWorkResult detectMissingWork(const std::vector<std::string>& batch);
+    MissingWorkFlags analyzeMissingWorkForHash(
+        const std::string& hash, bool checkEmbeddings,
+        const std::shared_ptr<api::IContentStore>& contentStore,
+        const std::shared_ptr<metadata::MetadataRepository>& metaRepo,
+        const std::vector<std::shared_ptr<extraction::IContentExtractor>>& customExtractors) const;
 
     // ── Dependencies (virtual for unit tests) ──
     virtual std::shared_ptr<metadata::IMetadataRepository> getMetadataRepoForRepair() const;
@@ -229,6 +239,7 @@ private:
 
     std::atomic<bool> dimMismatchRebuildDone_{false};
     std::shared_ptr<ShutdownState> shutdownState_;
+    std::unique_ptr<tf::Executor> detectExecutor_;
 
     // On-demand repair serialization (only one RPC repair at a time)
     std::mutex repairMutex_;

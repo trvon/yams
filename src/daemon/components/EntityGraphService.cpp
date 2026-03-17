@@ -955,26 +955,9 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
         }
     }
 
-    // === Enqueue and wait ===
+    // === Enqueue ===
     try {
-        auto future = kgQueue->enqueue(std::move(batch));
-
-        // Wait for the batch to be committed (with timeout)
-        auto status = future.wait_for(std::chrono::seconds(60));
-        if (status == std::future_status::timeout) {
-            spdlog::warn("EntityGraphService: KG write queue timeout for {}", job.filePath);
-            return false;
-        }
-
-        auto commitResult = future.get();
-        if (!commitResult) {
-            spdlog::warn("EntityGraphService: KG write queue failed for {}: {}", job.filePath,
-                         commitResult.error().message);
-            if (commitResult.error().message.find("database is locked") != std::string::npos) {
-                TuneAdvisor::reportDbLockError();
-            }
-            return false;
-        }
+        kgQueue->enqueue(std::move(batch));
 
         spdlog::debug("EntityGraphService: queued KG batch with {} symbols from {}",
                       result->symbol_count, job.filePath);

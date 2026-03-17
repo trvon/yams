@@ -28,11 +28,7 @@ KGWriteQueue::~KGWriteQueue() {
     shutdown();
 }
 
-std::future<Result<void>> KGWriteQueue::enqueue(std::unique_ptr<DeferredKGBatch> batch) {
-    auto promise = std::make_shared<std::promise<Result<void>>>();
-    batch->completionPromise = promise;
-    auto future = promise->get_future();
-
+void KGWriteQueue::enqueue(std::unique_ptr<DeferredKGBatch> batch) {
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
 
@@ -52,7 +48,6 @@ std::future<Result<void>> KGWriteQueue::enqueue(std::unique_ptr<DeferredKGBatch>
     }
 
     // Note: writerLoop uses async polling, no need for condition_variable notify
-    return future;
 }
 
 void KGWriteQueue::start() {
@@ -145,17 +140,6 @@ boost::asio::awaitable<void> KGWriteQueue::writerLoop() {
 
         // Apply all batches in a single transaction
         auto result = applyBatches(batchesToProcess);
-
-        // Signal completion to all waiters
-        for (auto& batch : batchesToProcess) {
-            if (batch->completionPromise) {
-                if (result) {
-                    batch->completionPromise->set_value(Result<void>());
-                } else {
-                    batch->completionPromise->set_value(result.error());
-                }
-            }
-        }
 
         inFlight_.store(0);
 

@@ -48,12 +48,15 @@ bool stream_trace_enabled() {
 #include <boost/asio/use_future.hpp>
 #include <boost/asio/write.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdlib>
 
 #ifndef _WIN32
+#include <strings.h>
 #include <sys/un.h>
 #endif
 #include <memory>
@@ -325,35 +328,6 @@ Result<void> SocketServer::stop() {
             spdlog::warn("Exception while closing active sockets: {}", e.what());
         } catch (...) {
             spdlog::warn("Unknown exception while closing active sockets");
-        }
-
-        // Drain connection handler futures so no IPC coroutine continues
-        // running after we tear down executors (prevents TSAN races during
-        // restart cycles).
-        std::vector<std::future<void>> pending;
-        try {
-            std::lock_guard<std::mutex> lk(connectionFuturesMutex_);
-            pending.swap(connectionFutures_);
-        } catch (const std::exception& e) {
-            spdlog::warn("Exception moving connection futures: {}", e.what());
-        }
-
-        for (auto& future : pending) {
-            if (!future.valid()) {
-                continue;
-            }
-            try {
-                // Wait longer for connection handlers to complete gracefully
-                // This prevents race conditions where handlers are cancelled mid-operation
-                auto status = future.wait_for(std::chrono::seconds(2));
-                if (status == std::future_status::timeout) {
-                    spdlog::warn("Connection future timed out during shutdown after 2s");
-                }
-            } catch (const std::exception& e) {
-                spdlog::warn("Connection future wait failed: {}", e.what());
-            } catch (...) {
-                spdlog::warn("Connection future wait failed with unknown exception");
-            }
         }
 
         // Close proxy acceptor first
@@ -707,53 +681,44 @@ awaitable<void> SocketServer::accept_loop(bool isProxy) {
                 std::chrono::steady_clock::now()); // Track connection creation time
             register_socket(tracked);
 
-            // Spawn connection with use_future for graceful shutdown tracking (PBI-066-41)
-            // Pass semaphore for automatic release when connection completes (PBI-066-42)
-            {
-                std::lock_guard<std::mutex> lk(connectionFuturesMutex_);
-
-                // Prune completed futures before adding new one
-                prune_completed_futures();
-
-                if (trace) {
-                    spdlog::info("stream-trace: [conn={}] handler_spawned", conn_token);
-                }
-
-                // Create a capturing lambda that releases the semaphore on completion
-                auto wrapped_handler = [this, conn_token, tracked, isProxy,
-                                        slots]() mutable -> awaitable<void> {
-                    // RAII guard for semaphore - handles shrink debt for graceful downsizing
-                    struct SemaphoreGuard {
-                        SocketServer* server;
-                        std::counting_semaphore<>* sem;
-                        bool proxyConn;
-                        ~SemaphoreGuard() {
-                            if (!sem || !server)
-                                return;
-                            if (proxyConn) {
-                                sem->release();
-                                return;
-                            }
-                            // Main slot pool supports dynamic resizing via shrink debt.
-                            int32_t debt = server->shrinkDebt_.load(std::memory_order_relaxed);
-                            if (debt > 0) {
-                                if (server->shrinkDebt_.compare_exchange_weak(
-                                        debt, debt - 1, std::memory_order_relaxed)) {
-                                    return;
-                                }
-                            }
-                            sem->release();
-                        }
-                    } guard{this, slots, isProxy};
-
-                    // Handle the connection with tracing token
-                    co_await handle_connection(tracked, conn_token, isProxy);
-                };
-
-                // Spawn and track the connection
-                connectionFutures_.push_back(
-                    co_spawn(connectionExecutor, wrapped_handler(), boost::asio::use_future));
+            if (trace) {
+                spdlog::info("stream-trace: [conn={}] handler_spawned", conn_token);
             }
+
+            // Create a capturing lambda that releases the semaphore on completion
+            auto wrapped_handler = [this, conn_token, tracked, isProxy,
+                                    slots]() mutable -> awaitable<void> {
+                // RAII guard for semaphore - handles shrink debt for graceful downsizing
+                struct SemaphoreGuard {
+                    SocketServer* server;
+                    std::counting_semaphore<>* sem;
+                    bool proxyConn;
+                    ~SemaphoreGuard() {
+                        if (!sem || !server)
+                            return;
+                        if (proxyConn) {
+                            sem->release();
+                            return;
+                        }
+                        // Main slot pool supports dynamic resizing via shrink debt.
+                        int32_t debt = server->shrinkDebt_.load(std::memory_order_relaxed);
+                        if (debt > 0) {
+                            if (server->shrinkDebt_.compare_exchange_weak(
+                                    debt, debt - 1, std::memory_order_relaxed)) {
+                                return;
+                            }
+                        }
+                        sem->release();
+                    }
+                } guard{this, slots, isProxy};
+
+                // Handle the connection with tracing token
+                co_await handle_connection(tracked, conn_token, isProxy);
+            };
+
+            // Spawn detached; shutdown closes sockets/acceptors and waits for accept loops before
+            // executor teardown.
+            co_spawn(connectionExecutor, wrapped_handler(), boost::asio::detached);
 
         } catch (const std::exception& e) {
             if (!running_ || stopping_)
@@ -1053,17 +1018,6 @@ void SocketServer::register_socket(std::shared_ptr<TrackedSocket> tracked_socket
     activeSockets_.push_back(tracked_socket);
 }
 
-void SocketServer::prune_completed_futures() {
-    // Caller must hold connectionFuturesMutex_
-    // Remove futures that are ready (completed)
-    connectionFutures_.erase(std::remove_if(connectionFutures_.begin(), connectionFutures_.end(),
-                                            [](std::future<void>& f) {
-                                                return f.wait_for(std::chrono::seconds(0)) ==
-                                                       std::future_status::ready;
-                                            }),
-                             connectionFutures_.end());
-}
-
 void SocketServer::execute_on_io_context(std::function<void()> fn) {
     if (!fn) {
         return;
@@ -1076,21 +1030,29 @@ void SocketServer::execute_on_io_context(std::function<void()> fn) {
         return;
     }
 
-    std::promise<void> promise;
-    auto future = promise.get_future();
-    boost::asio::post(executor, [fn = std::move(fn), promise = std::move(promise)]() mutable {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done = false;
+    std::exception_ptr error;
+
+    boost::asio::post(executor, [fn = std::move(fn), &mutex, &cv, &done, &error]() mutable {
         try {
             fn();
-            promise.set_value();
         } catch (...) {
-            try {
-                promise.set_exception(std::current_exception());
-            } catch (...) {
-            }
+            error = std::current_exception();
         }
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            done = true;
+        }
+        cv.notify_one();
     });
 
-    future.get();
+    std::unique_lock<std::mutex> lock(mutex);
+    cv.wait(lock, [&done] { return done; });
+    if (error) {
+        std::rethrow_exception(error);
+    }
 }
 
 void SocketServer::close_acceptor_on_executor() {
@@ -1120,8 +1082,6 @@ std::size_t SocketServer::close_sockets_on_executor(
         return 0;
     }
 
-    std::vector<std::future<void>> completions;
-    completions.reserve(tracked_sockets.size());
     std::size_t scheduled = 0;
 
     for (auto& tracked : tracked_sockets) {
@@ -1131,9 +1091,6 @@ std::size_t SocketServer::close_sockets_on_executor(
 
         auto sock = tracked->socket;
 
-        auto promise = std::make_shared<std::promise<void>>();
-        auto future = promise->get_future();
-        completions.emplace_back(std::move(future));
         ++scheduled;
 
         auto exec = tracked->executor;
@@ -1141,28 +1098,18 @@ std::size_t SocketServer::close_sockets_on_executor(
             exec = sock->get_executor();
         }
         try {
-            boost::asio::dispatch(exec, [sock, promise]() mutable {
+            boost::asio::dispatch(exec, [sock]() mutable {
                 boost::system::error_code ec;
                 if (sock->is_open()) {
                     boost::system::error_code shutdown_ec;
                     sock->shutdown(boost::asio::socket_base::shutdown_both, shutdown_ec);
                     sock->cancel(ec);
                 }
-                promise->set_value();
             });
         } catch (const std::exception& e) {
             spdlog::warn("SocketServer: failed to dispatch socket close: {}", e.what());
-            promise->set_value();
         } catch (...) {
             spdlog::warn("SocketServer: failed to dispatch socket close (unknown error)");
-            promise->set_value();
-        }
-    }
-
-    for (auto& future : completions) {
-        try {
-            future.wait();
-        } catch (...) {
         }
     }
 
