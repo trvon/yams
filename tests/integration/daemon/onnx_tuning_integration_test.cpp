@@ -14,6 +14,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -24,6 +25,13 @@ using namespace yams::test;
 using namespace std::chrono_literals;
 
 namespace {
+
+struct ExpectedOnnxRegistryConfig {
+    uint32_t totalSlots{0};
+    uint32_t glinerReserved{0};
+    uint32_t embedReserved{0};
+    uint32_t rerankerReserved{0};
+};
 
 /// RAII guard for environment variables - restores previous value on destruction
 class EnvGuard {
@@ -52,19 +60,46 @@ public:
     EnvGuard& operator=(const EnvGuard&) = delete;
 };
 
+ExpectedOnnxRegistryConfig expectedOnnxRegistryConfig() {
+    const uint32_t maxConcurrent = TuneAdvisor::onnxMaxConcurrent();
+    const uint32_t glinerReserved = TuneAdvisor::onnxGlinerReserved();
+    const uint32_t embedReserved = TuneAdvisor::onnxEmbedReserved();
+    const uint32_t rerankerReserved = TuneAdvisor::onnxRerankerReserved();
+    const uint32_t totalReserved = glinerReserved + embedReserved + rerankerReserved;
+
+    return ExpectedOnnxRegistryConfig{
+        .totalSlots = std::max<uint32_t>(std::max<uint32_t>(maxConcurrent, 2u), totalReserved + 1),
+        .glinerReserved = glinerReserved,
+        .embedReserved = embedReserved,
+        .rerankerReserved = rerankerReserved,
+    };
+}
+
+bool onnxRegistryMatchesExpected(const OnnxConcurrencyRegistry& registry,
+                                 const ExpectedOnnxRegistryConfig& expected) {
+    const auto glinerMetrics = registry.laneMetrics(OnnxLane::Gliner);
+    const auto embedMetrics = registry.laneMetrics(OnnxLane::Embedding);
+    const auto rerankerMetrics = registry.laneMetrics(OnnxLane::Reranker);
+
+    return registry.totalSlots() == expected.totalSlots &&
+           glinerMetrics.reserved == expected.glinerReserved &&
+           embedMetrics.reserved == expected.embedReserved &&
+           rerankerMetrics.reserved == expected.rerankerReserved;
+}
+
 /// Wait for TuningManager to complete its first tick and configure the ONNX registry.
 /// The configuration happens on the first TuningManager tick after daemon enters Ready state.
 bool waitForOnnxRegistryConfiguration(std::chrono::milliseconds timeout) {
+    const auto expected = expectedOnnxRegistryConfig();
     auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-        // TuningManager runs on a 500ms tick; give it time to configure
-        std::this_thread::sleep_for(100ms);
-
-        // Check if registry has been configured (totalSlots > 0 indicates configuration)
         auto& registry = OnnxConcurrencyRegistry::instance();
-        if (registry.totalSlots() > 0) {
+        if (onnxRegistryMatchesExpected(registry, expected)) {
             return true;
         }
+
+        // TuningManager runs on a 500ms tick; give it time to configure.
+        std::this_thread::sleep_for(100ms);
     }
     return false;
 }

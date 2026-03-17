@@ -688,6 +688,16 @@ static std::unordered_map<std::string, SocketHealthCacheEntry>& socketHealthCach
     return *cache;
 }
 
+static void updateSocketHealthCache(const std::filesystem::path& socketPath, bool reachable) {
+    if (socketPath.empty()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lk(socketHealthCacheMutex());
+    socketHealthCache()[socketPath.string()] =
+        SocketHealthCacheEntry{reachable, std::chrono::steady_clock::now()};
+}
+
 static bool socketPingCached(const std::filesystem::path& socketPath,
                              std::chrono::steady_clock::duration healthyTtl,
                              std::chrono::steady_clock::duration unhealthyTtl) {
@@ -896,6 +906,7 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
         for (int i = 0; i < quickRetries; ++i) {
             auto r = co_await try_connect(impl->config_.connectTimeout);
             if (r) {
+                updateSocketHealthCache(socketPath, true);
                 if (!impl->config_.enableCircuitBreaker)
                     impl->breaker_.recordSuccess();
                 // Clear explicitly disconnected flag on successful connection
@@ -945,6 +956,7 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
         auto r = co_await try_connect(impl->config_.connectTimeout);
         if (r) {
             spdlog::debug("Daemon started successfully after {} retries", i + 1);
+            updateSocketHealthCache(socketPath, true);
             // Clear explicitly disconnected flag on successful connection
             impl->explicitly_disconnected_ = false;
             co_return Result<void>();

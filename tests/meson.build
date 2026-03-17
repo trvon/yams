@@ -3114,7 +3114,10 @@ if catch2_dep.found()
   # Using should_fail: true until the cleanup issue is fixed.
   test('cli_submodule', catch2_cli_submodule_exe,
     suite: ['catch2', 'unit', 'cli', 'yams-cli'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'TSAN_OPTIONS': _test_tsan_options,
+    },
     timeout: 300,  # Tests take ~200s
     should_fail: host_machine.system() == 'windows'
   )

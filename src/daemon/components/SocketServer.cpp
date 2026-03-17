@@ -324,6 +324,17 @@ Result<void> SocketServer::stop() {
 
             const auto closed = close_sockets_on_executor(std::move(sockets));
             spdlog::info("Closed {} active connections", closed);
+
+            auto shutdownDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (activeConnections_.load(std::memory_order_relaxed) > 0 &&
+                   std::chrono::steady_clock::now() < shutdownDeadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            const auto remaining = activeConnections_.load(std::memory_order_relaxed);
+            if (remaining > 0) {
+                spdlog::warn("SocketServer: {} active connection(s) still draining during shutdown",
+                             remaining);
+            }
         } catch (const std::exception& e) {
             spdlog::warn("Exception while closing active sockets: {}", e.what());
         } catch (...) {

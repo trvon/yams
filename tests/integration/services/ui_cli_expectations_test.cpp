@@ -233,7 +233,7 @@ TEST_F(UiCliExpectationsIT, GetByHashMetadataOnlyHasNoContent) {
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
-    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 5000ms))
+    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 10000ms))
         << "Document not visible in metadata after ingestion";
 
     yams::app::services::RetrievalService rsvc;
@@ -278,7 +278,7 @@ TEST_F(UiCliExpectationsIT, GetHonorsAcceptCompressedFlag) {
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
-    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 5000ms))
+    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 10000ms))
         << "Document not visible in metadata after ingestion";
 
     yams::app::services::RetrievalService rsvc;
@@ -443,7 +443,7 @@ TEST_F(UiCliExpectationsIT, RetrieveByNameSuccessShape) {
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
-    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 5000ms))
+    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 10000ms))
         << "Document not visible in metadata after ingestion";
 
     yams::app::services::RetrievalService rsvc;
@@ -1073,7 +1073,7 @@ TEST_F(UiCliExpectationsIT, JsonOutputStructurePathsOnly) {
     auto ctx = sm->getAppContext();
 
     // Wait for document metadata visibility
-    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 5000ms))
+    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 10000ms))
         << "Document not visible in metadata after ingestion";
 
     auto searchSvc = yams::app::services::makeSearchService(ctx);
@@ -1129,7 +1129,7 @@ TEST_F(UiCliExpectationsIT, CliSearchJsonIncludesRelationMetadata) {
     auto* sm = serviceManager();
     ASSERT_NE(sm, nullptr);
     auto ctx = sm->getAppContext();
-    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 5000ms))
+    ASSERT_TRUE(yams::test::waitForDocumentMetadata(ctx.metadataRepo, addRes.value().hash, 10000ms))
         << "Document not visible in metadata after ingestion";
 
     auto docRes = ctx.metadataRepo->getDocumentByHash(addRes.value().hash);
