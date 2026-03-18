@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <set>
 #include <thread>
@@ -14,7 +15,9 @@
 #include "test_daemon_harness.h"
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/metadata/metadata_repository.h>
 
 using namespace yams::daemon;
 using namespace yams::test;
@@ -378,6 +381,303 @@ TEST_CASE("Daemon client plugin request execution", "[daemon][socket][requests][
     REQUIRE(unloadResult.has_value());
     REQUIRE((std::holds_alternative<SuccessResponse>(unloadResult.value()) ||
              std::holds_alternative<ErrorResponse>(unloadResult.value())));
+}
+
+TEST_CASE("Daemon client prune request execution", "[daemon][socket][requests][prune]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    DaemonHarness harness;
+    startHarnessWithRetry(harness);
+    std::this_thread::sleep_for(200ms);
+
+    auto client = createClient(harness.socketPath());
+
+    yams::Result<void> connectResult;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        connectResult = yams::cli::run_sync(client.connect(), 5s);
+        if (connectResult.has_value())
+            break;
+        std::this_thread::sleep_for(200ms);
+    }
+    REQUIRE(connectResult.has_value());
+
+    AddDocumentRequest addReq;
+    addReq.name = "dispatcher_coverage.log";
+    addReq.content = "prune coverage content\n";
+    auto addResult = yams::cli::run_sync(client.streamingAddDocument(addReq), 10s);
+
+    REQUIRE(addResult.has_value());
+    REQUIRE_FALSE(addResult.value().hash.empty());
+
+    auto getResult = getWithRetry(client, addResult.value().hash);
+    REQUIRE(getResult.has_value());
+
+    PruneRequest pruneReq;
+    pruneReq.extensions = {"log"};
+    pruneReq.smallerThan = "1MB";
+    pruneReq.dryRun = true;
+    pruneReq.verbose = true;
+
+    auto pruneResult = yams::cli::run_sync(client.call<PruneRequest>(pruneReq), 30s);
+
+    REQUIRE(pruneResult.has_value());
+    CHECK(pruneResult.value().filesDeleted == 0);
+    CHECK(pruneResult.value().filesFailed == 0);
+    CHECK(pruneResult.value().totalBytesFreed >= addReq.content.size());
+    CHECK_FALSE(pruneResult.value().categoryCounts.empty());
+}
+
+TEST_CASE("Daemon client graph maintenance request execution",
+          "[daemon][socket][requests][graph]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    DaemonHarness harness;
+    startHarnessWithRetry(harness);
+    std::this_thread::sleep_for(200ms);
+
+    auto client = createClient(harness.socketPath());
+
+    yams::Result<void> connectResult;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        connectResult = yams::cli::run_sync(client.connect(), 5s);
+        if (connectResult.has_value())
+            break;
+        std::this_thread::sleep_for(200ms);
+    }
+    REQUIRE(connectResult.has_value());
+
+    GraphRepairRequest repairReq;
+    repairReq.dryRun = true;
+    auto graphRepairResult = yams::cli::run_sync(client.graphRepair(repairReq), 30s);
+
+    REQUIRE(graphRepairResult.has_value());
+    CHECK(graphRepairResult.value().dryRun);
+    CHECK(graphRepairResult.value().errors == 0);
+
+    GraphValidateRequest validateReq;
+    auto graphValidateResult = yams::cli::run_sync(client.graphValidate(validateReq), 30s);
+
+    REQUIRE(graphValidateResult.has_value());
+    CHECK(graphValidateResult.value().totalNodes >= 0);
+    CHECK(graphValidateResult.value().totalEdges >= 0);
+    CHECK(graphValidateResult.value().issues.empty());
+}
+
+TEST_CASE("Daemon client collection request execution", "[daemon][socket][requests][collections]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    DaemonHarness harness;
+    startHarnessWithRetry(harness);
+    std::this_thread::sleep_for(200ms);
+
+    auto client = createClient(harness.socketPath());
+
+    yams::Result<void> connectResult;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        connectResult = yams::cli::run_sync(client.connect(), 5s);
+        if (connectResult.has_value())
+            break;
+        std::this_thread::sleep_for(200ms);
+    }
+    REQUIRE(connectResult.has_value());
+
+    const std::string collectionName = "dispatcher-coverage-collection";
+    const std::string snapshotId = "dispatcher-coverage-snapshot";
+
+    AddDocumentRequest addReq;
+    addReq.name = "dispatcher_collection_coverage.txt";
+    addReq.content = "collection coverage content\n";
+    addReq.collection = collectionName;
+    addReq.snapshotId = snapshotId;
+    addReq.snapshotLabel = "Dispatcher coverage snapshot";
+
+    auto addResult = yams::cli::run_sync(client.streamingAddDocument(addReq), 10s);
+    REQUIRE(addResult.has_value());
+    REQUIRE_FALSE(addResult.value().hash.empty());
+
+    auto getResult = getWithRetry(client, addResult.value().hash);
+    REQUIRE(getResult.has_value());
+
+    ListSnapshotsRequest listReq;
+    auto listResult = yams::cli::run_sync(client.call<ListSnapshotsRequest>(listReq), 10s);
+
+    REQUIRE(listResult.has_value());
+    CHECK(listResult.value().totalCount >= 1);
+    CHECK(std::any_of(listResult.value().snapshots.begin(), listResult.value().snapshots.end(),
+                      [&](const SnapshotInfo& info) { return info.id == snapshotId; }));
+
+    RestoreCollectionRequest restoreCollectionReq;
+    restoreCollectionReq.collection = collectionName;
+    restoreCollectionReq.outputDirectory = "collection-restore-out";
+    restoreCollectionReq.layoutTemplate = "{name}{ext}";
+    restoreCollectionReq.dryRun = true;
+    auto restoreCollectionResult =
+        yams::cli::run_sync(client.call<RestoreCollectionRequest>(restoreCollectionReq), 30s);
+
+    REQUIRE(restoreCollectionResult.has_value());
+    CHECK(restoreCollectionResult.value().dryRun);
+    CHECK(restoreCollectionResult.value().filesRestored == 1);
+    REQUIRE(restoreCollectionResult.value().files.size() == 1);
+    CHECK(restoreCollectionResult.value().files.front().hash == addResult.value().hash);
+    CHECK_FALSE(restoreCollectionResult.value().files.front().skipped);
+    CHECK(restoreCollectionResult.value().files.front().path.find(
+              "dispatcher_collection_coverage") != std::string::npos);
+
+    RestoreSnapshotRequest restoreSnapshotReq;
+    restoreSnapshotReq.snapshotId = snapshotId;
+    restoreSnapshotReq.outputDirectory = "snapshot-restore-out";
+    restoreSnapshotReq.layoutTemplate = "{hash}{ext}";
+    restoreSnapshotReq.dryRun = true;
+    auto restoreSnapshotResult =
+        yams::cli::run_sync(client.call<RestoreSnapshotRequest>(restoreSnapshotReq), 30s);
+
+    REQUIRE(restoreSnapshotResult.has_value());
+    CHECK(restoreSnapshotResult.value().dryRun);
+    CHECK(restoreSnapshotResult.value().filesRestored == 1);
+    REQUIRE(restoreSnapshotResult.value().files.size() == 1);
+    CHECK(restoreSnapshotResult.value().files.front().hash == addResult.value().hash);
+    CHECK_FALSE(restoreSnapshotResult.value().files.front().skipped);
+    CHECK(restoreSnapshotResult.value().files.front().path.find(addResult.value().hash) !=
+          std::string::npos);
+}
+
+TEST_CASE("Daemon client tree diff request execution", "[daemon][socket][requests][tree-diff]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    DaemonHarness harness;
+    startHarnessWithRetry(harness);
+    std::this_thread::sleep_for(200ms);
+
+    auto client = createClient(harness.socketPath());
+
+    yams::Result<void> connectResult;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        connectResult = yams::cli::run_sync(client.connect(), 5s);
+        if (connectResult.has_value())
+            break;
+        std::this_thread::sleep_for(200ms);
+    }
+    REQUIRE(connectResult.has_value());
+
+    auto* daemon = harness.daemon();
+    REQUIRE(daemon != nullptr);
+    auto* serviceManager = daemon->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+    auto metadataRepo = serviceManager->getMetadataRepo();
+    REQUIRE(metadataRepo != nullptr);
+
+    const std::string baseSnapshotId = "dispatcher-coverage-base";
+    const std::string targetSnapshotId = "dispatcher-coverage-target";
+
+    const auto nowMicros = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+
+    yams::metadata::TreeSnapshotRecord baseSnapshot;
+    baseSnapshot.snapshotId = baseSnapshotId;
+    baseSnapshot.createdTime = nowMicros;
+    baseSnapshot.metadata["directory_path"] = "/tmp/dispatcher-base";
+    REQUIRE(metadataRepo->upsertTreeSnapshot(baseSnapshot).has_value());
+
+    yams::metadata::TreeSnapshotRecord targetSnapshot;
+    targetSnapshot.snapshotId = targetSnapshotId;
+    targetSnapshot.createdTime = nowMicros + 1;
+    targetSnapshot.metadata["directory_path"] = "/tmp/dispatcher-target";
+    REQUIRE(metadataRepo->upsertTreeSnapshot(targetSnapshot).has_value());
+
+    yams::metadata::TreeDiffDescriptor descriptor;
+    descriptor.baseSnapshotId = baseSnapshotId;
+    descriptor.targetSnapshotId = targetSnapshotId;
+    descriptor.computedAt = nowMicros + 2;
+    descriptor.status = "pending";
+
+    auto diffIdResult = metadataRepo->beginTreeDiff(descriptor);
+    REQUIRE(diffIdResult.has_value());
+
+    std::vector<yams::metadata::TreeChangeRecord> changes;
+
+    yams::metadata::TreeChangeRecord added;
+    added.type = yams::metadata::TreeChangeType::Added;
+    added.newPath = "src/new_file.cpp";
+    added.newHash = "hash-added";
+    added.mode = 0644;
+    changes.push_back(added);
+
+    yams::metadata::TreeChangeRecord modified;
+    modified.type = yams::metadata::TreeChangeType::Modified;
+    modified.oldPath = "src/existing.cpp";
+    modified.newPath = "src/existing.cpp";
+    modified.oldHash = "hash-old";
+    modified.newHash = "hash-new";
+    modified.mode = 0644;
+    modified.contentDeltaHash = "delta-existing";
+    changes.push_back(modified);
+
+    yams::metadata::TreeChangeRecord renamed;
+    renamed.type = yams::metadata::TreeChangeType::Renamed;
+    renamed.oldPath = "src/old_name.cpp";
+    renamed.newPath = "src/new_name.cpp";
+    renamed.oldHash = "hash-rename";
+    renamed.newHash = "hash-rename";
+    renamed.mode = 0644;
+    changes.push_back(renamed);
+
+    yams::metadata::TreeChangeRecord deleted;
+    deleted.type = yams::metadata::TreeChangeType::Deleted;
+    deleted.oldPath = "src/removed.cpp";
+    deleted.oldHash = "hash-deleted";
+    deleted.mode = 0644;
+    changes.push_back(deleted);
+
+    auto appendResult = metadataRepo->appendTreeChanges(diffIdResult.value(), changes);
+    REQUIRE(appendResult.has_value());
+
+    auto finalizeResult =
+        metadataRepo->finalizeTreeDiff(diffIdResult.value(), changes.size(), "complete");
+    REQUIRE(finalizeResult.has_value());
+
+    ListTreeDiffRequest listReq;
+    listReq.baseSnapshotId = baseSnapshotId;
+    listReq.targetSnapshotId = targetSnapshotId;
+    listReq.limit = 20000;
+    auto listResult = yams::cli::run_sync(client.call<ListTreeDiffRequest>(listReq), 10s);
+
+    REQUIRE(listResult.has_value());
+    const auto& listResp = listResult.value();
+    CHECK(listResp.totalCount == 4);
+    REQUIRE(listResp.changes.size() == 4);
+    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
+        return entry.changeType == "added" && entry.path == "src/new_file.cpp" &&
+               entry.oldPath.empty();
+    }));
+    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
+        return entry.changeType == "modified" && entry.path == "src/existing.cpp" &&
+               entry.oldPath.empty() && entry.contentDeltaHash == "delta-existing";
+    }));
+    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
+        return entry.changeType == "renamed" && entry.path == "src/new_name.cpp" &&
+               entry.oldPath == "src/old_name.cpp";
+    }));
+    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
+        return entry.changeType == "deleted" && entry.path.empty() &&
+               entry.oldPath == "src/removed.cpp";
+    }));
+
+    ListTreeDiffRequest filteredReq;
+    filteredReq.baseSnapshotId = baseSnapshotId;
+    filteredReq.targetSnapshotId = targetSnapshotId;
+    filteredReq.pathPrefix = "src/new";
+    filteredReq.typeFilter = "renamed";
+    filteredReq.limit = 10;
+    auto filteredResult = yams::cli::run_sync(client.call<ListTreeDiffRequest>(filteredReq), 10s);
+
+    REQUIRE(filteredResult.has_value());
+    const auto& filteredResp = filteredResult.value();
+    CHECK(filteredResp.totalCount == 1);
+    REQUIRE(filteredResp.changes.size() == 1);
+    CHECK(filteredResp.changes.front().changeType == "renamed");
+    CHECK(filteredResp.changes.front().path == "src/new_name.cpp");
+    CHECK(filteredResp.changes.front().oldPath == "src/old_name.cpp");
 }
 
 TEST_CASE("Daemon client error handling", "[daemon][socket][errors]") {

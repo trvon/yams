@@ -149,34 +149,38 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
 }
 
 YamsDaemon::~YamsDaemon() {
-    if (running_) {
-        stop();
-    }
-    if (tuningManager_) {
-        tuningManager_->stop();
-    }
-    {
-        std::lock_guard<std::mutex> lock(shutdownThreadMutex_);
-        if (shutdownThread_.joinable()) {
-            try {
-                shutdownThread_.join();
-            } catch (const std::exception& e) {
-                try {
-                    spdlog::warn("[YamsDaemon] shutdown thread join exception: {}", e.what());
-                } catch (...) {
-                    std::fprintf(stderr,
-                                 "[YamsDaemon] shutdown thread join exception (logging failed)\n");
-                }
-            } catch (...) {
-                try {
-                    spdlog::warn("[YamsDaemon] shutdown thread join unknown exception");
-                } catch (...) {
-                    std::fprintf(
-                        stderr,
-                        "[YamsDaemon] shutdown thread join unknown exception (logging failed)\n");
-                }
+    try {
+        if (running_) {
+            if (auto result = stop(); !result) {
+                spdlog::error("YamsDaemon destructor stop() failed: {}", result.error().message);
             }
         }
+    } catch (const std::exception& e) {
+        spdlog::error("YamsDaemon destructor caught exception from stop(): {}", e.what());
+    } catch (...) {
+        spdlog::error("YamsDaemon destructor caught unknown exception from stop()");
+    }
+
+    if (tuningManager_) {
+        try {
+            tuningManager_->stop();
+        } catch (const std::exception& e) {
+            spdlog::error("YamsDaemon destructor caught exception from tuningManager_->stop(): {}",
+                          e.what());
+        } catch (...) {
+            spdlog::error(
+                "YamsDaemon destructor caught unknown exception from tuningManager_->stop()");
+        }
+    }
+
+    try {
+        reapCompletedShutdownThread();
+    } catch (const std::exception& e) {
+        spdlog::error("YamsDaemon destructor caught exception from shutdown thread cleanup: {}",
+                      e.what());
+    } catch (...) {
+        spdlog::error(
+            "YamsDaemon destructor caught unknown exception from shutdown thread cleanup");
     }
 }
 
@@ -215,10 +219,16 @@ Result<void> YamsDaemon::start() {
     spdlog::info("Starting YAMS daemon...");
 
     // Reset state for restart
+    reapCompletedShutdownThread();
     stopRequested_.store(false, std::memory_order_release);
     asyncInitBarrierSet_.store(false, std::memory_order_release);
     asyncInitStartedPromise_ = std::promise<void>();
     asyncInitStartedFuture_ = asyncInitStartedPromise_.get_future().share();
+    initHandled_.store(false, std::memory_order_release);
+    modelPreloadSkipped_ = false;
+    repairBusySince_ = {};
+    repairReadySince_ = {};
+    state_.stats.startTime = std::chrono::steady_clock::now();
 
     // Starting -> Initializing (ensure ordering so HealthyEvent can promote to Ready)
     spdlog::info("[Startup] Phase: FSM Reset");
@@ -381,13 +391,11 @@ Result<void> YamsDaemon::start() {
 
     if (auto result = socketServer_->start(); !result) {
         running_ = false;
-        if (socketServer_) {
-            try {
-                (void)socketServer_->stop();
-            } catch (...) {
-            }
-            socketServer_.reset();
+        try {
+            (void)socketServer_->stop();
+        } catch (...) {
         }
+        socketServer_.reset();
         if (ioCoordinator_) {
             try {
                 ioCoordinator_->stop();
@@ -423,9 +431,7 @@ Result<void> YamsDaemon::start() {
     } catch (const std::exception& e) {
         running_ = false;
         try {
-            if (socketServer_) {
-                (void)socketServer_->stop();
-            }
+            (void)socketServer_->stop();
         } catch (...) {
         }
         socketServer_.reset();
@@ -723,9 +729,8 @@ void YamsDaemon::runLoop() {
                     }
                 }
 
-                static bool modelPreloadSkipped = false;
-                if (!modelPreloadSkipped) {
-                    modelPreloadSkipped = true;
+                if (!modelPreloadSkipped_) {
+                    modelPreloadSkipped_ = true;
                     spdlog::info("Model preload disabled - models will load on first use");
                 }
             }
@@ -736,27 +741,25 @@ void YamsDaemon::runLoop() {
                 size_t active = static_cast<size_t>(state_.stats.activeConnections.load());
                 uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();
                 auto now = std::chrono::steady_clock::now();
-                static std::chrono::steady_clock::time_point rcBusySince{};
-                static std::chrono::steady_clock::time_point rcReadySince{};
                 bool isBusy = (active >= busyThresh);
                 if (isBusy) {
-                    if (rcBusySince.time_since_epoch().count() == 0)
-                        rcBusySince = now;
-                    rcReadySince = {};
+                    if (repairBusySince_.time_since_epoch().count() == 0)
+                        repairBusySince_ = now;
+                    repairReadySince_ = {};
                 } else {
-                    if (rcReadySince.time_since_epoch().count() == 0)
-                        rcReadySince = now;
-                    rcBusySince = {};
+                    if (repairReadySince_.time_since_epoch().count() == 0)
+                        repairReadySince_ = now;
+                    repairBusySince_ = {};
                 }
                 uint32_t degradeHold = TuneAdvisor::repairDegradeHoldMs();
                 uint32_t readyHold = TuneAdvisor::repairReadyHoldMs();
                 bool busyHeld =
-                    isBusy && rcBusySince.time_since_epoch().count() != 0 &&
-                    std::chrono::duration_cast<std::chrono::milliseconds>(now - rcBusySince)
+                    isBusy && repairBusySince_.time_since_epoch().count() != 0 &&
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - repairBusySince_)
                             .count() >= degradeHold;
                 bool idleHeld =
-                    !isBusy && rcReadySince.time_since_epoch().count() != 0 &&
-                    std::chrono::duration_cast<std::chrono::milliseconds>(now - rcReadySince)
+                    !isBusy && repairReadySince_.time_since_epoch().count() != 0 &&
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - repairReadySince_)
                             .count() >= readyHold;
                 bool pending = state_.stats.repairQueueDepth.load() > 0;
                 auto fsmSnap = lifecycleFsm_.snapshot();
@@ -810,6 +813,8 @@ Result<void> YamsDaemon::stop() {
 
     stopRequested_.store(true, std::memory_order_release);
     stop_cv_.notify_all();
+    repairBusySince_ = {};
+    repairReadySince_ = {};
 
     if (serviceManager_) {
         serviceManager_->cancelServiceManagerWait();
@@ -956,11 +961,7 @@ std::filesystem::path getXDGStateHome() {
 
 std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
     namespace fs = std::filesystem;
-#ifdef _WIN32
-    bool isRoot = false;
-    int uid = 0; // Not used for path generation on Windows usually, or use GetCurrentProcessId() if
-                 // needed
-#else
+#ifndef _WIN32
     bool isRoot = (geteuid() == 0);
     uid_t uid = getuid();
 #endif
@@ -1145,9 +1146,81 @@ void YamsDaemon::reloadTuningConfig() {
 void YamsDaemon::spawnShutdownThread(std::function<void()> shutdownFn) {
     std::lock_guard<std::mutex> lock(shutdownThreadMutex_);
     if (shutdownThread_.joinable()) {
+        if (shutdownThreadActive_.load(std::memory_order_acquire)) {
+            return;
+        }
+        try {
+            shutdownThread_.join();
+        } catch (const std::exception& e) {
+            spdlog::warn("[YamsDaemon] shutdown thread join exception before respawn: {}",
+                         e.what());
+        } catch (...) {
+            spdlog::warn("[YamsDaemon] shutdown thread join unknown exception before respawn");
+        }
+    }
+    shutdownThreadActive_.store(true, std::memory_order_release);
+    shutdownThread_ = std::thread([this, fn = std::move(shutdownFn)]() mutable {
+        struct ShutdownThreadGuard {
+            std::atomic<bool>& active;
+            ~ShutdownThreadGuard() { active.store(false, std::memory_order_release); }
+        } guard{shutdownThreadActive_};
+        try {
+            fn();
+        } catch (const std::exception& e) {
+            spdlog::error("[YamsDaemon] shutdown thread exception: {}", e.what());
+        } catch (...) {
+            spdlog::error("[YamsDaemon] shutdown thread unknown exception");
+        }
+    });
+}
+
+void YamsDaemon::reapCompletedShutdownThread() {
+    std::lock_guard<std::mutex> lock(shutdownThreadMutex_);
+    if (!shutdownThread_.joinable()) {
         return;
     }
-    shutdownThread_ = std::thread(std::move(shutdownFn));
+    if (shutdownThreadActive_.load(std::memory_order_acquire)) {
+        if (shutdownThread_.get_id() == std::this_thread::get_id()) {
+            return;
+        }
+        try {
+            shutdownThread_.join();
+        } catch (const std::exception& e) {
+            try {
+                spdlog::warn("[YamsDaemon] shutdown thread join exception: {}", e.what());
+            } catch (...) {
+                std::fprintf(stderr,
+                             "[YamsDaemon] shutdown thread join exception (logging failed)\n");
+            }
+        } catch (...) {
+            try {
+                spdlog::warn("[YamsDaemon] shutdown thread join unknown exception");
+            } catch (...) {
+                std::fprintf(
+                    stderr,
+                    "[YamsDaemon] shutdown thread join unknown exception (logging failed)\n");
+            }
+        }
+        return;
+    }
+    try {
+        shutdownThread_.join();
+    } catch (const std::exception& e) {
+        try {
+            spdlog::warn("[YamsDaemon] completed shutdown thread join exception: {}", e.what());
+        } catch (...) {
+            std::fprintf(
+                stderr, "[YamsDaemon] completed shutdown thread join exception (logging failed)\n");
+        }
+    } catch (...) {
+        try {
+            spdlog::warn("[YamsDaemon] completed shutdown thread join unknown exception");
+        } catch (...) {
+            std::fprintf(
+                stderr,
+                "[YamsDaemon] completed shutdown thread join unknown exception (logging failed)\n");
+        }
+    }
 }
 
 } // namespace yams::daemon

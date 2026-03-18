@@ -3374,6 +3374,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kListTreeDiffRequest: {
+            auto v = ProtoBinding<ListTreeDiffRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
         case Envelope::kPluginScanRequest: {
             auto v = ProtoBinding<PluginScanRequest>::get(env);
             m.payload = Request{std::move(v)};
@@ -3589,6 +3594,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kListSessionsResponse: {
             auto v = ProtoBinding<ListSessionsResponse>::get(env);
             m.payload = Response{std::in_place_type<ListSessionsResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kListTreeDiffResponse: {
+            auto v = ProtoBinding<ListTreeDiffResponse>::get(env);
+            m.payload = Response{std::in_place_type<ListTreeDiffResponse>, std::move(v)};
             break;
         }
         case Envelope::kFileHistoryResponse: {

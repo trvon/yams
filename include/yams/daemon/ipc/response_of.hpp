@@ -103,6 +103,10 @@ template <> struct ResponseOf<PruneRequest> {
     using type = PruneResponse;
 };
 
+template <> struct ResponseOf<ListTreeDiffRequest> {
+    using type = ListTreeDiffResponse;
+};
+
 // Snapshot operations (PBI-066) - collections use generic metadata query
 template <> struct ResponseOf<ListSnapshotsRequest> {
     using type = ListSnapshotsResponse;

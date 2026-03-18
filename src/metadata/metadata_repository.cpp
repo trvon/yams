@@ -4728,9 +4728,10 @@ Result<void> MetadataRepository::appendTreeChanges(int64_t diffId,
 
         auto stmtResult = db.prepare(R"(
             INSERT INTO tree_changes (
-                diff_id, change_type, old_path, new_path, 
-                old_hash, new_hash, mode, is_directory
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                diff_id, change_type, old_path, new_path,
+                old_hash, new_hash, old_mode, new_mode, is_directory, file_size,
+                content_delta_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         )");
 
         if (!stmtResult) {
@@ -4751,11 +4752,20 @@ Result<void> MetadataRepository::appendTreeChanges(int64_t diffId,
 
             if (change.mode.has_value()) {
                 stmt.bind(7, static_cast<int64_t>(*change.mode));
+                stmt.bind(8, static_cast<int64_t>(*change.mode));
             } else {
                 stmt.bind(7, nullptr);
+                stmt.bind(8, nullptr);
             }
 
-            stmt.bind(8, change.isDirectory ? 1 : 0);
+            stmt.bind(9, change.isDirectory ? 1 : 0);
+            stmt.bind(10, static_cast<int64_t>(0));
+
+            if (change.contentDeltaHash.has_value()) {
+                stmt.bind(11, *change.contentDeltaHash);
+            } else {
+                stmt.bind(11, nullptr);
+            }
 
             auto execResult = stmt.execute();
             if (!execResult) {
@@ -4798,8 +4808,9 @@ MetadataRepository::listTreeChanges(const TreeDiffQuery& query) {
             spec.from = std::optional<std::string>{
                 "tree_changes tc JOIN tree_diffs td ON tc.diff_id = td.diff_id"};
             spec.table = "tree_changes"; // not used when from is set
-            spec.columns = {"change_type", "old_path", "new_path",    "old_hash",
-                            "new_hash",    "mode",     "is_directory"};
+            spec.columns = {"change_type",  "old_path",          "new_path",
+                            "old_hash",     "new_hash",          "COALESCE(new_mode, old_mode)",
+                            "is_directory", "content_delta_hash"};
             spec.conditions = {"td.base_snapshot_id = ?", "td.target_snapshot_id = ?"};
             if (query.pathPrefix.has_value()) {
                 spec.conditions.emplace_back("(old_path LIKE ? OR new_path LIKE ?)");
@@ -4808,8 +4819,12 @@ MetadataRepository::listTreeChanges(const TreeDiffQuery& query) {
                 spec.conditions.emplace_back("change_type = ?");
             }
             spec.orderBy = std::optional<std::string>{"tc.change_id"};
-            spec.limit = static_cast<int>(query.limit);
-            spec.offset = static_cast<int>(query.offset);
+            if (query.limit > 0) {
+                spec.limit = static_cast<int>(query.limit);
+            }
+            if (query.offset > 0) {
+                spec.offset = static_cast<int>(query.offset);
+            }
 
             auto stmtResult = db.prepare(yams::metadata::sql::buildSelect(spec));
             if (!stmtResult) {
@@ -4832,9 +4847,6 @@ MetadataRepository::listTreeChanges(const TreeDiffQuery& query) {
                 stmt.bind(paramIdx++, changeTypeToString(*query.typeFilter));
             }
 
-            stmt.bind(paramIdx++, static_cast<int64_t>(query.limit));
-            stmt.bind(paramIdx++, static_cast<int64_t>(query.offset));
-
             std::vector<TreeChangeRecord> results;
 
             while (stmt.step()) {
@@ -4850,6 +4862,10 @@ MetadataRepository::listTreeChanges(const TreeDiffQuery& query) {
                 }
 
                 record.isDirectory = stmt.getInt(6) != 0;
+
+                if (!stmt.isNull(7)) {
+                    record.contentDeltaHash = stmt.getString(7);
+                }
 
                 results.push_back(std::move(record));
             }

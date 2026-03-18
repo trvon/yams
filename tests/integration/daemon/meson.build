@@ -130,6 +130,42 @@ else
       args: ['Daemon client plugin request execution', '--allow-running-no-tests'],
     )
 
+    test('daemon_socket_prune_request_execution',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon client prune request execution', '--allow-running-no-tests'],
+    )
+
+    test('daemon_socket_graph_request_execution',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon client graph maintenance request execution', '--allow-running-no-tests'],
+    )
+
+    test('daemon_socket_collection_request_execution',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon client collection request execution', '--allow-running-no-tests'],
+    )
+
+    test('daemon_socket_tree_diff_request_execution',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon client tree diff request execution', '--allow-running-no-tests'],
+    )
+
     test('daemon_socket_error_handling',
       daemon_catch2_exe,
       suite: ['integration', 'daemon', 'catch2', 'socket'],
@@ -435,6 +471,15 @@ else
       is_parallel: false,
       timeout: 60,  # 1 minute for sequential start/stop
       args: ['Data-dir lock released on shutdown', '--allow-running-no-tests'],
+    )
+
+    test('lifecycle_repair_hysteresis',
+      lifecycle_single_instance_exe,
+      suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'repair'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 120,
+      args: ['Repair lifecycle hysteresis does not leak across daemon instances', '--allow-running-no-tests'],
     )
 
     # ONNX Concurrency / TuneAdvisor integration tests

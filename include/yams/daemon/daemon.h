@@ -169,6 +169,11 @@ public:
 
     std::mutex shutdownThreadMutex_;
     std::thread shutdownThread_;
+    std::atomic<bool> shutdownThreadActive_{false};
+
+    bool modelPreloadSkipped_{false};
+    std::chrono::steady_clock::time_point repairBusySince_{};
+    std::chrono::steady_clock::time_point repairReadySince_{};
 
     // Signal check hook for integration with main loop (avoids separate thread)
     std::function<bool()> signalCheckHook_;
@@ -197,6 +202,9 @@ public:
     }
 
     void spawnShutdownThread(std::function<void()> shutdownFn);
+
+private:
+    void reapCompletedShutdownThread();
 };
 
 } // namespace yams::daemon

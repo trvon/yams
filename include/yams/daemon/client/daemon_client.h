@@ -437,6 +437,7 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, PluginScanRequest>, std::is_same<Req, PluginLoadRequest>,
             std::is_same<Req, PluginUnloadRequest>, std::is_same<Req, PluginTrustListRequest>,
             std::is_same<Req, PluginTrustAddRequest>, std::is_same<Req, PluginTrustRemoveRequest>,
+            std::is_same<Req, ListTreeDiffRequest>,
             // Doctor commands
             std::is_same<Req, PruneRequest>,
             // Snapshot operations (PBI-066) - collections use generic metadata query

@@ -57,6 +57,29 @@ void startHarnessWithRetry(DaemonHarness& harness, int maxRetries = 3,
 
     SKIP("Skipping shutdown integration section due to daemon startup instability");
 }
+
+bool waitForLifecycleState(YamsDaemon& daemon, LifecycleState state,
+                           std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (daemon.getLifecycle().snapshot().state == state) {
+            return true;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    return daemon.getLifecycle().snapshot().state == state;
+}
+
+bool waitForDaemonToStop(YamsDaemon& daemon, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!daemon.isRunning()) {
+            return true;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    return !daemon.isRunning();
+}
 } // namespace
 
 TEST_CASE("Daemon shutdown timing", "[daemon][shutdown][timing]") {
@@ -75,6 +98,97 @@ TEST_CASE("Daemon shutdown timing", "[daemon][shutdown][timing]") {
 
         REQUIRE(result.has_value());
         REQUIRE(elapsed < 500ms);
+    }
+
+    SECTION("shutdown request still works after restarting the same daemon instance") {
+        namespace fs = std::filesystem;
+
+        harness.stop();
+        yams::daemon::AsioConnectionPool::shutdown_all(500ms);
+#ifndef _WIN32
+        yams::daemon::GlobalIOContext::safe_restart();
+#endif
+
+        const auto unique =
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        const auto root = fs::temp_directory_path() / ("yams_shutdown_restart_" + unique);
+        const auto dataDir = root / "data";
+        const auto pidFile = root / "daemon.pid";
+        const auto logFile = root / "daemon.log";
+#ifdef _WIN32
+        const auto socketPath =
+            fs::temp_directory_path() / ("yams_shutdown_restart_" + unique + ".sock");
+#else
+        const auto socketPath = fs::path("/tmp") / ("yams_shutdown_restart_" + unique + ".sock");
+#endif
+        fs::create_directories(dataDir);
+
+        struct Cleanup {
+            fs::path root;
+            fs::path socketPath;
+            ~Cleanup() {
+                std::error_code ec;
+                fs::remove(socketPath, ec);
+                fs::remove_all(root, ec);
+            }
+        } cleanup{root, socketPath};
+
+        DaemonConfig cfg;
+        cfg.dataDir = dataDir;
+        cfg.socketPath = socketPath;
+        cfg.pidFile = pidFile;
+        cfg.logFile = logFile;
+        cfg.enableModelProvider = false;
+        cfg.useMockModelProvider = false;
+        cfg.autoLoadPlugins = false;
+
+        YamsDaemon daemon(cfg);
+        std::thread runLoopThread;
+        auto cleanupCycle = [&]() {
+            if (runLoopThread.joinable()) {
+                runLoopThread.join();
+            }
+        };
+        auto startCycle = [&]() {
+            auto started = daemon.start();
+            INFO("daemon.start() error: " << (started ? std::string{} : started.error().message));
+            REQUIRE(started.has_value());
+            runLoopThread = std::thread([&daemon]() { daemon.runLoop(); });
+            const bool reachedUsableState =
+                waitForLifecycleState(daemon, LifecycleState::Ready, 15s) ||
+                waitForLifecycleState(daemon, LifecycleState::Degraded, 1s);
+            REQUIRE(reachedUsableState);
+        };
+
+        startCycle();
+        {
+            auto cycleClient = createClient(socketPath);
+            REQUIRE(connectWithRetry(cycleClient));
+            auto result = yams::cli::run_sync(cycleClient.shutdown(true), 5s);
+            REQUIRE(result.has_value());
+            REQUIRE(waitForDaemonToStop(daemon, 10s));
+        }
+        cleanupCycle();
+
+        yams::daemon::AsioConnectionPool::shutdown_all(500ms);
+#ifndef _WIN32
+        yams::daemon::GlobalIOContext::safe_restart();
+#endif
+        std::this_thread::sleep_for(200ms);
+
+        startCycle();
+        {
+            auto cycleClient = createClient(socketPath);
+            REQUIRE(connectWithRetry(cycleClient));
+            auto result = yams::cli::run_sync(cycleClient.shutdown(true), 5s);
+            REQUIRE(result.has_value());
+            CHECK(waitForDaemonToStop(daemon, 5s));
+        }
+
+        if (daemon.isRunning()) {
+            (void)daemon.stop();
+        }
+        cleanupCycle();
     }
 }
 
