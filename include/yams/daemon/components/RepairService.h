@@ -14,7 +14,6 @@
 #include <unordered_set>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
-#include <taskflow/taskflow.hpp>
 
 namespace yams::metadata {
 class KnowledgeGraphStore;
@@ -239,7 +238,6 @@ private:
 
     std::atomic<bool> dimMismatchRebuildDone_{false};
     std::shared_ptr<ShutdownState> shutdownState_;
-    std::unique_ptr<tf::Executor> detectExecutor_;
 
     // On-demand repair serialization (only one RPC repair at a time)
     std::mutex repairMutex_;

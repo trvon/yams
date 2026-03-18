@@ -77,13 +77,6 @@ void EmbeddingService::start() {
         std::lock_guard<std::mutex> lock(inferTrackerMutex_);
         activeInferSubBatches_.clear();
     }
-    if (!preprocessExecutor_) {
-        const std::size_t tfThreads = std::clamp<std::size_t>(
-            static_cast<std::size_t>(TuneAdvisor::postEmbedConcurrent()), 2u, 8u);
-        preprocessExecutor_ = std::make_unique<tf::Executor>(tfThreads);
-        spdlog::info("EmbeddingService: Taskflow preprocess executor started with {} threads",
-                     tfThreads);
-    }
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Embed, true);
     boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
     spdlog::info("EmbeddingService: started parallel channel poller");
@@ -182,11 +175,6 @@ void EmbeddingService::shutdown() {
                      "infer_active={} infer_oldest_ms={} last_model='{}')",
                      pendingApprox, channelQueued, inferActive, inferOldestMs,
                      lastModel.empty() ? "<default>" : lastModel);
-    }
-
-    if (preprocessExecutor_) {
-        preprocessExecutor_->wait_for_all();
-        preprocessExecutor_.reset();
     }
 }
 
@@ -1109,25 +1097,11 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         }
     };
 
-    if (preprocessExecutor_ && docsToEmbed.size() > 1) {
-        tf::Taskflow chunkTaskflow("embeddingChunkDocs");
-        for (std::size_t docIdx = 0; docIdx < docsToEmbed.size(); ++docIdx) {
-            chunkTaskflow.emplace([&chunkResults, &buildChunksForDoc, docIdx]() {
-                try {
-                    buildChunksForDoc(docIdx);
-                } catch (...) {
-                    chunkResults[docIdx].error = std::current_exception();
-                }
-            });
-        }
-        preprocessExecutor_->run(chunkTaskflow).wait();
-    } else {
-        for (std::size_t docIdx = 0; docIdx < docsToEmbed.size(); ++docIdx) {
-            try {
-                buildChunksForDoc(docIdx);
-            } catch (...) {
-                chunkResults[docIdx].error = std::current_exception();
-            }
+    for (std::size_t docIdx = 0; docIdx < docsToEmbed.size(); ++docIdx) {
+        try {
+            buildChunksForDoc(docIdx);
+        } catch (...) {
+            chunkResults[docIdx].error = std::current_exception();
         }
     }
 
@@ -1349,25 +1323,11 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             out.droppedChunks = chunkIndexes.size() - selectedCount;
         };
 
-        if (preprocessExecutor_ && perDocChunkIdx.size() > 1) {
-            tf::Taskflow selectionTaskflow("embeddingSelectChunks");
-            for (std::size_t docIdx = 0; docIdx < perDocChunkIdx.size(); ++docIdx) {
-                selectionTaskflow.emplace([&selectionResults, &selectChunksForDoc, docIdx]() {
-                    try {
-                        selectChunksForDoc(docIdx);
-                    } catch (...) {
-                        selectionResults[docIdx].error = std::current_exception();
-                    }
-                });
-            }
-            preprocessExecutor_->run(selectionTaskflow).wait();
-        } else {
-            for (std::size_t docIdx = 0; docIdx < perDocChunkIdx.size(); ++docIdx) {
-                try {
-                    selectChunksForDoc(docIdx);
-                } catch (...) {
-                    selectionResults[docIdx].error = std::current_exception();
-                }
+        for (std::size_t docIdx = 0; docIdx < perDocChunkIdx.size(); ++docIdx) {
+            try {
+                selectChunksForDoc(docIdx);
+            } catch (...) {
+                selectionResults[docIdx].error = std::current_exception();
             }
         }
 

@@ -394,16 +394,6 @@ void PostIngestQueue::start() {
         logStageAvailabilitySnapshot();
         initializeGradientLimiters();
 
-        // Initialize Taskflow executor for CPU-bound extraction parallelism.
-        // Thread count: min(maxExtractionConcurrent(), hardware_concurrency/4, 8)
-        // These threads replace the unbounded std::async threads in the extraction pipeline.
-        const std::size_t tfThreads =
-            std::clamp(std::min(static_cast<std::size_t>(maxExtractionConcurrent()),
-                                static_cast<std::size_t>(std::thread::hardware_concurrency() / 4u)),
-                       std::size_t{2}, std::size_t{8});
-        tfExecutor_ = std::make_unique<tf::Executor>(tfThreads);
-        spdlog::info("[PostIngestQueue] Taskflow executor started with {} threads", tfThreads);
-
         spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
         boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
         spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
@@ -447,12 +437,6 @@ void PostIngestQueue::stop() {
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, false);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, false);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, false);
-
-    // Drain Taskflow executor
-    if (tfExecutor_) {
-        tfExecutor_->wait_for_all();
-        tfExecutor_.reset();
-    }
 
     spdlog::info("[PostIngestQueue] Stop requested");
 
@@ -1422,34 +1406,9 @@ void PostIngestQueue::processEntityExtractionBatch(
     if (jobs.empty()) {
         return;
     }
-    if (!tfExecutor_ || jobs.size() == 1) {
-        for (auto& job : jobs) {
-            processEntityExtractionStage(job.hash, job.documentId, job.filePath, job.extension,
-                                         std::move(job.contentBytes));
-        }
-        return;
-    }
-
-    std::vector<std::exception_ptr> failures(jobs.size());
-    tf::Taskflow taskflow("processEntityExtractionBatch");
-    for (std::size_t i = 0; i < jobs.size(); ++i) {
-        taskflow.emplace([this, &jobs, &failures, i]() {
-            try {
-                auto& job = jobs[i];
-                processEntityExtractionStage(job.hash, job.documentId, job.filePath, job.extension,
-                                             std::move(job.contentBytes));
-            } catch (...) {
-                failures[i] = std::current_exception();
-            }
-        });
-    }
-
-    tfExecutor_->run(taskflow).wait();
-
-    for (const auto& failure : failures) {
-        if (failure) {
-            std::rethrow_exception(failure);
-        }
+    for (auto& job : jobs) {
+        processEntityExtractionStage(job.hash, job.documentId, job.filePath, job.extension,
+                                     std::move(job.contentBytes));
     }
 }
 
@@ -1789,36 +1748,9 @@ void PostIngestQueue::processTitleExtractionBatch(
     if (jobs.empty()) {
         return;
     }
-    if (!tfExecutor_ || jobs.size() == 1) {
-        for (auto& job : jobs) {
-            processTitleExtractionStage(job.hash, job.documentId, job.textSnippet,
-                                        job.fallbackTitle, job.filePath, job.language,
-                                        job.mimeType);
-        }
-        return;
-    }
-
-    std::vector<std::exception_ptr> failures(jobs.size());
-    tf::Taskflow taskflow("processTitleExtractionBatch");
-    for (std::size_t i = 0; i < jobs.size(); ++i) {
-        taskflow.emplace([this, &jobs, &failures, i]() {
-            try {
-                auto& job = jobs[i];
-                processTitleExtractionStage(job.hash, job.documentId, job.textSnippet,
-                                            job.fallbackTitle, job.filePath, job.language,
-                                            job.mimeType);
-            } catch (...) {
-                failures[i] = std::current_exception();
-            }
-        });
-    }
-
-    tfExecutor_->run(taskflow).wait();
-
-    for (const auto& failure : failures) {
-        if (failure) {
-            std::rethrow_exception(failure);
-        }
+    for (auto& job : jobs) {
+        processTitleExtractionStage(job.hash, job.documentId, job.textSnippet, job.fallbackTitle,
+                                    job.filePath, job.language, job.mimeType);
     }
 }
 
@@ -2874,33 +2806,52 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
 
     YAMS_ZONE_SCOPED_N("PostIngestQueue::processBatch");
 
-    // Flat Taskflow DAG: one task per document (no nested chunking)
-    // Each slot stores its per-task result (variant)
     using TaskResult = std::variant<PreparedMetadataEntry, ExtractionFailure>;
-    std::vector<TaskResult> taskResults(tasks.size());
+    const std::size_t numChunks = std::min<std::size_t>(maxWorkers, tasks.size());
+    const std::size_t chunkSize = (tasks.size() + numChunks - 1) / numChunks;
+    std::vector<std::future<std::vector<TaskResult>>> futures;
+    futures.reserve(numChunks);
+    auto executor = coordinator_->getExecutor();
 
-    tf::Taskflow taskflow("processBatch");
-    for (std::size_t i = 0; i < tasks.size(); ++i) {
-        taskflow.emplace([&tasks, &taskResults, &prepareTask, i]() {
-            const auto& task = tasks[i];
-            taskResults[i] = prepareTask(task);
-        });
+    for (std::size_t i = 0; i < tasks.size(); i += chunkSize) {
+        std::size_t end = std::min(i + chunkSize, tasks.size());
+        std::vector<InternalEventBus::PostIngestTask> chunk(tasks.begin() + i, tasks.begin() + end);
+        auto promise = std::make_shared<std::promise<std::vector<TaskResult>>>();
+        futures.push_back(promise->get_future());
+        boost::asio::post(
+            executor, [p = std::move(promise), chunk = std::move(chunk), prepareTask]() mutable {
+                try {
+                    std::vector<TaskResult> results;
+                    results.reserve(chunk.size());
+                    for (const auto& task : chunk) {
+                        results.push_back(prepareTask(task));
+                    }
+                    p->set_value(std::move(results));
+                } catch (...) {
+                    p->set_exception(std::current_exception());
+                }
+            });
     }
 
-    // Execute on the Taskflow executor (safe: called from Asio thread, not a Taskflow worker)
-    tfExecutor_->run(taskflow).wait();
-
-    // Collect results (sequential, on caller's Asio thread)
     std::vector<PreparedMetadataEntry> allSuccesses;
     std::vector<ExtractionFailure> allFailures;
     allSuccesses.reserve(tasks.size());
     allFailures.reserve(tasks.size() / 10);
 
-    for (auto& variant : taskResults) {
-        if (std::holds_alternative<PreparedMetadataEntry>(variant)) {
-            allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(variant)));
-        } else {
-            allFailures.push_back(std::get<ExtractionFailure>(std::move(variant)));
+    for (auto& future : futures) {
+        try {
+            auto results = future.get();
+            for (auto& variant : results) {
+                if (std::holds_alternative<PreparedMetadataEntry>(variant)) {
+                    allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(variant)));
+                } else {
+                    allFailures.push_back(std::get<ExtractionFailure>(std::move(variant)));
+                }
+            }
+        } catch (const std::exception& e) {
+            spdlog::error("[PostIngestQueue] Chunk processing failed: {}", e.what());
+        } catch (...) {
+            spdlog::error("[PostIngestQueue] Chunk processing failed: unknown exception");
         }
     }
 

@@ -289,12 +289,6 @@ void RepairService::start() {
     shutdownState_->finished.store(false, std::memory_order_relaxed);
     shutdownState_->running.store(true, std::memory_order_relaxed);
     shutdownState_->config = cfg_;
-    if (!detectExecutor_) {
-        const std::size_t tfThreads = std::clamp<std::size_t>(cfg_.maintenanceTokens + 1u, 2u, 8u);
-        detectExecutor_ = std::make_unique<tf::Executor>(tfThreads);
-        spdlog::debug("RepairService: Taskflow detect executor initialized with {} threads",
-                      tfThreads);
-    }
 
     auto exec = RepairThreadPool::instance().get_executor();
     auto shutdownState = shutdownState_;
@@ -347,10 +341,6 @@ void RepairService::stop() {
         std::unique_lock<std::mutex> lk(shutdownState_->mutex);
         shutdownState_->cv.wait_for(lk, std::chrono::milliseconds(2000),
                                     [this] { return shutdownState_->finished.load(); });
-    }
-    if (detectExecutor_) {
-        detectExecutor_->wait_for_all();
-        detectExecutor_.reset();
     }
     spdlog::debug("RepairService stopped");
 }
@@ -919,28 +909,12 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
     std::vector<MissingWorkFlags> flags(batch.size());
     std::vector<std::exception_ptr> errors(batch.size());
 
-    if (detectExecutor_ && batch.size() > 1) {
-        tf::Taskflow taskflow("repairDetectMissingWork");
-        for (std::size_t i = 0; i < batch.size(); ++i) {
-            taskflow.emplace([this, &batch, &flags, &errors, checkEmbeddings, &content, &meta_repo,
-                              &customExtractors, i]() {
-                try {
-                    flags[i] = analyzeMissingWorkForHash(batch[i], checkEmbeddings, content,
-                                                         meta_repo, customExtractors);
-                } catch (...) {
-                    errors[i] = std::current_exception();
-                }
-            });
-        }
-        detectExecutor_->run(taskflow).wait();
-    } else {
-        for (std::size_t i = 0; i < batch.size(); ++i) {
-            try {
-                flags[i] = analyzeMissingWorkForHash(batch[i], checkEmbeddings, content, meta_repo,
-                                                     customExtractors);
-            } catch (...) {
-                errors[i] = std::current_exception();
-            }
+    for (std::size_t i = 0; i < batch.size(); ++i) {
+        try {
+            flags[i] = analyzeMissingWorkForHash(batch[i], checkEmbeddings, content, meta_repo,
+                                                 customExtractors);
+        } catch (...) {
+            errors[i] = std::current_exception();
         }
     }
 

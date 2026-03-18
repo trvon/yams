@@ -19,7 +19,6 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
-#include <taskflow/taskflow.hpp>
 #include <yams/daemon/components/GradientLimiter.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/metadata/document_metadata.h>
@@ -552,9 +551,6 @@ private:
 
     /// Cache for metadata lookups
     MetadataCache metadataCache_;
-
-    /// Taskflow executor for CPU-bound extraction parallelism
-    std::unique_ptr<tf::Executor> tfExecutor_;
 
     // Backpressure metrics
     std::atomic<std::uint64_t> backpressureRejects_{0};

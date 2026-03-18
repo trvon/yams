@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -27,6 +28,35 @@ namespace yams::daemon {
 using PendingPostIngestByMime = std::unordered_map<std::string, std::vector<std::string>>;
 static PendingPostIngestByMime processTask(ServiceManager* sm,
                                            const InternalEventBus::StoreDocumentTask& task);
+static std::future<PendingPostIngestByMime>
+dispatchTaskToCoordinator(ServiceManager* sm, WorkCoordinator* coordinator,
+                          InternalEventBus::StoreDocumentTask task) {
+    std::promise<PendingPostIngestByMime> promise;
+    auto future = promise.get_future();
+
+    if (!coordinator || !coordinator->isRunning()) {
+        try {
+            promise.set_value(processTask(sm, task));
+        } catch (...) {
+            promise.set_exception(std::current_exception());
+        }
+        return future;
+    }
+
+    auto sharedPromise =
+        std::make_shared<std::promise<PendingPostIngestByMime>>(std::move(promise));
+    auto executor = coordinator->getExecutor();
+    boost::asio::post(executor, [sm, task = std::move(task), sharedPromise]() mutable {
+        try {
+            sharedPromise->set_value(processTask(sm, task));
+        } catch (...) {
+            sharedPromise->set_exception(std::current_exception());
+        }
+    });
+
+    return future;
+}
+
 static void mergePendingPostIngest(PendingPostIngestByMime& target,
                                    PendingPostIngestByMime&& source) {
     for (auto& [mime, hashes] : source) {
@@ -115,12 +145,6 @@ IngestService::~IngestService() {
 
 void IngestService::start() {
     if (!stop_.load()) {
-        if (!tfExecutor_) {
-            const std::size_t tfThreads =
-                std::clamp<std::size_t>(resolveIngestParallelism(coordinator_, false), 2u, 16u);
-            tfExecutor_ = std::make_unique<tf::Executor>(tfThreads);
-            spdlog::info("[IngestService] Taskflow executor started with {} threads", tfThreads);
-        }
         boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
     }
 }
@@ -141,11 +165,6 @@ void IngestService::stop() {
         spdlog::warn("[IngestService] Stop timed out after {}ms waiting for channel poller to "
                      "exit",
                      waited.count());
-    }
-
-    if (tfExecutor_) {
-        tfExecutor_->wait_for_all();
-        tfExecutor_.reset();
     }
 }
 
@@ -220,45 +239,22 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
             for (std::size_t offset = 0; offset < batch.size();) {
                 const std::size_t waveSize =
                     std::min<std::size_t>(parallelism, batch.size() - offset);
-                if (!tfExecutor_ || waveSize == 1) {
-                    for (std::size_t i = 0; i < waveSize; ++i) {
-                        try {
-                            mergePendingPostIngest(pendingPostIngest,
-                                                   processTask(sm_, batch[offset + i]));
-                        } catch (const std::exception& e) {
-                            spdlog::error("[IngestService] parallel task failed: {}", e.what());
-                        } catch (...) {
-                            spdlog::error(
-                                "[IngestService] parallel task failed: unknown exception");
-                        }
-                    }
-                } else {
-                    std::vector<PendingPostIngestByMime> waveResults(waveSize);
-                    std::vector<std::exception_ptr> waveErrors(waveSize);
-                    tf::Taskflow taskflow("ingestWave");
-                    for (std::size_t i = 0; i < waveSize; ++i) {
-                        taskflow.emplace([this, &batch, &waveResults, &waveErrors, offset, i]() {
-                            try {
-                                waveResults[i] = processTask(sm_, batch[offset + i]);
-                            } catch (...) {
-                                waveErrors[i] = std::current_exception();
-                            }
-                        });
-                    }
-                    tfExecutor_->run(taskflow).wait();
+                std::vector<std::future<PendingPostIngestByMime>> futures;
+                futures.reserve(waveSize);
 
-                    for (std::size_t i = 0; i < waveSize; ++i) {
-                        try {
-                            if (waveErrors[i]) {
-                                std::rethrow_exception(waveErrors[i]);
-                            }
-                            mergePendingPostIngest(pendingPostIngest, std::move(waveResults[i]));
-                        } catch (const std::exception& e) {
-                            spdlog::error("[IngestService] parallel task failed: {}", e.what());
-                        } catch (...) {
-                            spdlog::error(
-                                "[IngestService] parallel task failed: unknown exception");
-                        }
+                for (std::size_t i = 0; i < waveSize; ++i) {
+                    auto taskCopy = std::move(batch[offset + i]);
+                    futures.push_back(
+                        dispatchTaskToCoordinator(sm_, coordinator_, std::move(taskCopy)));
+                }
+
+                for (auto& fut : futures) {
+                    try {
+                        mergePendingPostIngest(pendingPostIngest, fut.get());
+                    } catch (const std::exception& e) {
+                        spdlog::error("[IngestService] parallel task failed: {}", e.what());
+                    } catch (...) {
+                        spdlog::error("[IngestService] parallel task failed: unknown exception");
                     }
                 }
 
