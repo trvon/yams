@@ -259,7 +259,14 @@ public:
         return kgChannelFillRatio(depthOut, capacityOut);
     }
 
-    bool started() const { return stageStarted_[0].load(); }
+    bool started() const {
+        for (std::size_t i = 0; i < kStageCount; ++i) {
+            if (stageStarted_[i].load(std::memory_order_acquire)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     // Per-stage inflight counts
     std::size_t extractionInFlight() const { return stageInFlight_[0].load(); }
@@ -437,6 +444,7 @@ private:
     WorkCoordinator* entityCoordinator_;
 
     std::atomic<bool> stop_{false};
+    std::atomic<bool> startGuard_{false};
 
     // Per-stage arrays indexed by Stage enum (0..4)
     std::array<std::atomic<bool>, kStageCount> stageStarted_{};

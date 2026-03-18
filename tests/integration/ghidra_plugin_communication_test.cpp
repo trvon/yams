@@ -54,9 +54,10 @@ struct PluginProcess {
             // No fork/kill/waitpid-based lifecycle on Windows.
             pid = -1;
 #else
-            kill(pid, SIGTERM);
-            int status;
-            waitpid(pid, &status, 0);
+            if (kill(pid, SIGTERM) == 0) {
+                int status = 0;
+                (void)waitpid(pid, &status, 0);
+            }
             pid = -1;
 #endif
         }

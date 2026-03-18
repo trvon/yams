@@ -107,6 +107,7 @@ int runCliCommand(const std::vector<std::string>& args) {
 class UiCliExpectationsIT : public ::testing::Test {
 protected:
     std::unique_ptr<yams::test::DaemonHarness> harness_;
+    std::unique_ptr<ScopedEnvVar> sessionEnvOverride_;
     fs::path root_;
     fs::path storageDir_;
     fs::path socketPath_;
@@ -142,7 +143,10 @@ protected:
         if (!canBindUnixSocketHere()) {
             GTEST_SKIP() << "Skipping: AF_UNIX not available in this environment.";
         }
-        harness_ = std::make_unique<yams::test::DaemonHarness>();
+        sessionEnvOverride_ = std::make_unique<ScopedEnvVar>("YAMS_SESSION_CURRENT", "");
+        yams::test::DaemonHarnessOptions options;
+        options.isolateState = true;
+        harness_ = std::make_unique<yams::test::DaemonHarness>(options);
         // Use 15s timeout for CI environments which can be slower
         ASSERT_TRUE(harness_->start(15s)) << "Failed to start daemon";
         storageDir_ = harness_->dataDir();
@@ -153,7 +157,10 @@ protected:
         std::this_thread::sleep_for(100ms);
     }
 
-    void TearDown() override { harness_.reset(); }
+    void TearDown() override {
+        harness_.reset();
+        sessionEnvOverride_.reset();
+    }
 
     yams::daemon::ServiceManager* serviceManager() const {
         return harness_ ? harness_->daemon()->getServiceManager() : nullptr;

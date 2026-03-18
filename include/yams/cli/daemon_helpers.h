@@ -161,8 +161,12 @@ public:
     };
 
     explicit DaemonClientPool(Config cfg) : cfg_(std::move(cfg)), next_id_(1), stop_(false) {
-        // Pre-create min_clients
-        for (size_t i = 0; i < cfg_.min_clients && i < cfg_.max_clients; ++i) {
+        // Pre-create min_clients unless the pool is configured for in-process transport.
+        // Embedded clients can be expensive to tear down, and in-process mode does not benefit
+        // much from eager warmup because the first request can create the client on demand.
+        const bool eagerWarmup =
+            cfg_.client_config.transportMode != yams::daemon::ClientTransportMode::InProcess;
+        for (size_t i = 0; eagerWarmup && i < cfg_.min_clients && i < cfg_.max_clients; ++i) {
             (void)create_entry_unlocked(); // best effort
         }
 
@@ -364,9 +368,10 @@ private:
 
     void pruning_loop() {
         using namespace std::chrono_literals;
+        constexpr auto kWakeInterval = 100ms;
         while (true) {
             std::unique_lock<std::mutex> lk(mtx_);
-            if (cv_.wait_for(lk, 1s, [this] { return stop_; })) {
+            if (cv_.wait_for(lk, kWakeInterval, [this] { return stop_; })) {
                 break;
             }
 

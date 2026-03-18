@@ -1904,6 +1904,11 @@ private:
             }
         }
 
+        const auto enriched = annotateResultRelations(resp.results, ctx_.kgStore.get());
+        if (enriched > 0) {
+            resp.searchStats["relation_enriched"] = std::to_string(enriched);
+        }
+
         applyExtensionFacets(resp);
 
         resp.total = resp.results.size();

@@ -388,46 +388,56 @@ PostIngestQueue::~PostIngestQueue() {
 }
 
 void PostIngestQueue::start() {
-    spdlog::info("[PostIngestQueue] start() called, stop_={}", stop_.load());
-    if (!stop_.load()) {
-        refreshStageAvailability();
-        logStageAvailabilitySnapshot();
-        initializeGradientLimiters();
-
-        spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
-        boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
-        spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
-        boost::asio::co_spawn(coordinator_->getExecutor(), kgPoller(), boost::asio::detached);
-        spdlog::info("[PostIngestQueue] Spawning symbolPoller coroutine...");
-        boost::asio::co_spawn(coordinator_->getExecutor(), symbolPoller(), boost::asio::detached);
-        spdlog::info("[PostIngestQueue] Spawning entityPoller coroutine...");
-        auto entityExec =
-            entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor();
-        boost::asio::co_spawn(entityExec, entityPoller(), boost::asio::detached);
-        spdlog::info("[PostIngestQueue] Spawning titlePoller coroutine...");
-        boost::asio::co_spawn(coordinator_->getExecutor(), titlePoller(), boost::asio::detached);
-
-        constexpr int maxWaitMs = 100;
-        for (int i = 0; i < maxWaitMs; ++i) {
-            bool allStarted = true;
-            for (std::size_t s = 0; s < kStageCount; ++s) {
-                if (!stageStarted_[s].load()) {
-                    allStarted = false;
-                    break;
-                }
-            }
-            if (allStarted)
-                break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-
-        spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={}, "
-                     "entity={}, title={})",
-                     stageStarted_[0].load(), stageStarted_[1].load(), stageStarted_[2].load(),
-                     stageStarted_[3].load(), stageStarted_[4].load());
-    } else {
-        spdlog::warn("[PostIngestQueue] start() skipped because stop_=true");
+    bool expected = false;
+    if (startGuard_.load(std::memory_order_acquire) &&
+        !stageStarted_[0].load(std::memory_order_acquire) &&
+        !stageStarted_[1].load(std::memory_order_acquire) &&
+        !stageStarted_[2].load(std::memory_order_acquire) &&
+        !stageStarted_[3].load(std::memory_order_acquire) &&
+        !stageStarted_[4].load(std::memory_order_acquire) && totalInFlight() == 0) {
+        startGuard_.store(false, std::memory_order_release);
     }
+    if (!startGuard_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        spdlog::debug("[PostIngestQueue] start() ignored; pollers already active or starting");
+        return;
+    }
+
+    stop_.store(false, std::memory_order_release);
+    refreshStageAvailability();
+    logStageAvailabilitySnapshot();
+    initializeGradientLimiters();
+
+    spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
+    boost::asio::co_spawn(coordinator_->getExecutor(), channelPoller(), boost::asio::detached);
+    spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
+    boost::asio::co_spawn(coordinator_->getExecutor(), kgPoller(), boost::asio::detached);
+    spdlog::info("[PostIngestQueue] Spawning symbolPoller coroutine...");
+    boost::asio::co_spawn(coordinator_->getExecutor(), symbolPoller(), boost::asio::detached);
+    spdlog::info("[PostIngestQueue] Spawning entityPoller coroutine...");
+    auto entityExec =
+        entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor();
+    boost::asio::co_spawn(entityExec, entityPoller(), boost::asio::detached);
+    spdlog::info("[PostIngestQueue] Spawning titlePoller coroutine...");
+    boost::asio::co_spawn(coordinator_->getExecutor(), titlePoller(), boost::asio::detached);
+
+    constexpr int maxWaitMs = 100;
+    for (int i = 0; i < maxWaitMs; ++i) {
+        bool allStarted = true;
+        for (std::size_t s = 0; s < kStageCount; ++s) {
+            if (!stageStarted_[s].load()) {
+                allStarted = false;
+                break;
+            }
+        }
+        if (allStarted)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    spdlog::info("[PostIngestQueue] Pollers started (extraction={}, kg={}, symbol={}, entity={}, "
+                 "title={})",
+                 stageStarted_[0].load(), stageStarted_[1].load(), stageStarted_[2].load(),
+                 stageStarted_[3].load(), stageStarted_[4].load());
 }
 
 void PostIngestQueue::stop() {
@@ -452,6 +462,7 @@ void PostIngestQueue::stop() {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
     while (std::chrono::steady_clock::now() < deadline) {
         if (allPollersStopped() && totalInFlight() == 0) {
+            startGuard_.store(false, std::memory_order_release);
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -746,7 +757,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         processBatch(std::move(tasks));
     };
     // Disable CPU throttling for the extraction poller. Extraction concurrency is
-    // already bounded by extractionSemaphore_ and maxExtractionConcurrent(). The
+    // already bounded by the poller's batch fan-out and maxExtractionConcurrent(). The
     // CPU throttle adds 2-25ms delays after every productive batch, compounding
     // across hundreds of documents and significantly reducing throughput.
     cfg.enableCpuThrottling = false;

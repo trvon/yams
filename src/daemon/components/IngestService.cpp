@@ -144,9 +144,14 @@ IngestService::~IngestService() {
 }
 
 void IngestService::start() {
-    if (!stop_.load()) {
-        boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
+    bool expected = false;
+    if (!startGuard_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        spdlog::debug("[IngestService] start() ignored; poller already active or starting");
+        return;
     }
+
+    stop_.store(false, std::memory_order_release);
+    boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
 }
 
 void IngestService::stop() {
@@ -165,6 +170,8 @@ void IngestService::stop() {
         spdlog::warn("[IngestService] Stop timed out after {}ms waiting for channel poller to "
                      "exit",
                      waited.count());
+    } else {
+        startGuard_.store(false, std::memory_order_release);
     }
 }
 
@@ -172,8 +179,12 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
     running_.store(true, std::memory_order_release);
     struct RunningGuard {
         std::atomic<bool>& running;
-        ~RunningGuard() { running.store(false, std::memory_order_release); }
-    } runningGuard{running_};
+        std::atomic<bool>& startGuard;
+        ~RunningGuard() {
+            running.store(false, std::memory_order_release);
+            startGuard.store(false, std::memory_order_release);
+        }
+    } runningGuard{running_, startGuard_};
 
     const std::size_t channelCapacity =
         static_cast<std::size_t>(TuneAdvisor::storeDocumentChannelCapacity());

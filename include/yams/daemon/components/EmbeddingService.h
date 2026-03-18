@@ -33,11 +33,10 @@ class IModelProvider;
 class WorkCoordinator;
 
 /**
- * @brief Parallel embedding service that processes embed jobs from InternalEventBus
+ * @brief Embedding service that processes embed jobs from InternalEventBus
  *
- * PBI-05b: This service now spawns parallel workers based on TuneAdvisor::postEmbedConcurrent()
- * to keep up with bulk ingest workloads. The concurrency limit is dynamically scaled by
- * TuningManager based on embed queue depth and dropped job count.
+ * The service drains queued embed jobs on its strand, tracks in-flight work, and exposes
+ * instrumentation used by tuning and health reporting.
  */
 class EmbeddingService : public IComponent {
 public:

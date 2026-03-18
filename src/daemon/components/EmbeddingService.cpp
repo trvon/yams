@@ -79,7 +79,7 @@ void EmbeddingService::start() {
     }
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Embed, true);
     boost::asio::co_spawn(strand_, channelPoller(), boost::asio::detached);
-    spdlog::info("EmbeddingService: started parallel channel poller");
+    spdlog::info("EmbeddingService: started channel poller");
 }
 
 void EmbeddingService::shutdown() {
