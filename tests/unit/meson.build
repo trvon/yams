@@ -137,7 +137,6 @@ unit_daemon_base = files(
   # 'daemon/daemon_test.cpp',  # Migrated to Catch2 (daemon_catch2_test.cpp)
   # Migrated to Catch2 - see tests/meson.build (plugin_infrastructure_test.cpp)
   # 'daemon/plugin_host_test.cpp',
-  # 'daemon/repair_coordinator_test.cpp',  # Migrated to Catch2
   # 'daemon/repair_scheduling_adapter_test.cpp',  # Migrated
   # 'daemon/request_handler_io_edge_test.cpp',  # Migrated
   # 'daemon/service_manager_test.cpp',  # Migrated

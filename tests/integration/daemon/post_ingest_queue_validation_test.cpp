@@ -6,7 +6,7 @@
  * 1. PostIngestQueue is properly initialized
  * 2. Documents are actually enqueued after ingestion
  * 3. Background indexing (FTS5, KG, embeddings) happens
- * 4. RepairCoordinator detects and fixes missing indexes
+ * 4. Background repair detects and fixes missing indexes
  */
 
 #include <chrono>

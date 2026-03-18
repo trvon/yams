@@ -141,7 +141,6 @@ test_deps = [
   dependency('yams_detection'),
   dependency('yams_content'),
   dependency('yams_downloader'),
-  dependency('yams_plugins_mgmt'),
   dependency('yams_indexing'),
   dependency('yams_vector'),
   dependency('yams_search'),
@@ -150,8 +149,17 @@ test_deps = [
   dependency('yams_app_services'),
   dependency('yams_daemon_client'),
   dependency('yams_daemon'),
-  dependency('yams_mcp'),
 ]
+
+yams_plugins_mgmt_dep = dependency('yams_plugins_mgmt', required: false)
+if yams_plugins_mgmt_dep.found()
+  test_deps += yams_plugins_mgmt_dep
+endif
+
+yams_mcp_dep = dependency('yams_mcp', required: false)
+if yams_mcp_dep.found()
+  test_deps += yams_mcp_dep
+endif
 
 onnxruntime_dep_opt = dependency('onnxruntime', required: false)
 if onnxruntime_dep_opt.found()
@@ -304,7 +312,6 @@ heavy_tests = [
   'ChunkValidatorParallel.*',
   'DownloadManagerExport.*',
   'StorageBackendTest.*',
-  'RepairCoordinatorTest.*',
   # Temporary skips to stabilize shards (Option A): vector DB / WAL heavy
   'VectorDatabaseTest.*',
   'VectorDatabasePersistenceTest.*',
@@ -540,17 +547,6 @@ _test_env_ld_library_path = ':'.join(_test_ld_library_path)
     timeout: bench_timeout,
   )
 
-  test('unit_isolated_repair_coordinator', unit_exe,
-    suite: ['bench', 'isolated', 'perf'],
-    args: ['--gtest_filter=RepairCoordinatorTest.*'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'GTEST_BRIEF': '1',
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-    },
-    timeout: bench_timeout,
-  )
-
   test('unit_isolated_service_manager', unit_exe,
     suite: ['bench', 'isolated', 'perf'],
     args: ['--gtest_filter=ServiceManagerTest.*'],
@@ -717,25 +713,27 @@ if get_option('enable-integration-tests') or get_option('enable-integration-serv
 endif
 
 # Benchmarks (standalone executables). Register bench test target only when enabled.
-subdir('benchmarks')
+if get_option('build-benchmarks')
+  subdir('benchmarks')
 
-# Standalone, minimal daemon warm-latency bench (does not depend on unit object lib)
-daemon_warm_bench = executable('yams_bench_daemon_warm',
-  files('benchmarks/daemon_warm_latency_main.cpp'),
-  include_directories: incs,
-  dependencies: [test_deps],
-  install: false,
-)
-
-if get_option('enable-bench-tests')
-  test('bench_daemon_warm_latency', daemon_warm_bench,
-    suite: ['bench', 'perf'],
-    env: {
-      'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
-      'LD_LIBRARY_PATH': _test_env_ld_library_path,
-    },
-    timeout: bench_timeout,
+  # Standalone, minimal daemon warm-latency bench (does not depend on unit object lib)
+  daemon_warm_bench = executable('yams_bench_daemon_warm',
+    files('benchmarks/daemon_warm_latency_main.cpp'),
+    include_directories: incs,
+    dependencies: [test_deps],
+    install: false,
   )
+
+  if get_option('enable-bench-tests')
+    test('bench_daemon_warm_latency', daemon_warm_bench,
+      suite: ['bench', 'perf'],
+      env: {
+        'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      },
+      timeout: bench_timeout,
+    )
+  endif
 endif
 
 # Acceptance tests (E2E validation)
@@ -883,16 +881,6 @@ if catch2_dep.found()
     install: false,
   )
 
-  # PostIngestQueue Taskflow integration tests
-  # catch2_post_ingest_taskflow_exe = executable('catch2_post_ingest_taskflow',
-  #   files('unit/daemon/post_ingest_taskflow_catch2_test.cpp'),
-  #   include_directories: incs,
-  #   dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-  #   cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-  #   build_rpath: ':'.join(_test_rpaths),
-  #   install: false,
-  # )
-
   # Metrics consistency tests (migrated from GTest)
   catch2_metrics_consistency_exe = executable('catch2_metrics_consistency',
     files('unit/daemon/metrics_consistency_catch2_test.cpp'),
@@ -1033,18 +1021,6 @@ if catch2_dep.found()
     build_rpath: ':'.join(_test_rpaths),
     install: false,
   )
-
-  # Daemon repair and service manager tests (Catch2)
-  # Migrated from GTest as part of yams-3s4
-  # RepairCoordinator tests disabled — replaced by RepairService (port pending)
-  # catch2_repair_coordinator_exe = executable('catch2_repair_coordinator',
-  #   files('unit/daemon/repair_coordinator_catch2_test.cpp'),
-  #   include_directories: incs,
-  #   dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-  #   cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-  #   build_rpath: ':'.join(_test_rpaths),
-  #   install: false,
-  # )
 
   catch2_repair_scheduling_exe = executable('catch2_repair_scheduling',
     files('unit/daemon/repair_scheduling_adapter_catch2_test.cpp'),
@@ -2725,12 +2701,6 @@ if catch2_dep.found()
     timeout: 60
   )
 
-  # test('post_ingest_taskflow', catch2_post_ingest_taskflow_exe,
-  #   suite: ['catch2', 'unit', 'daemon', 'post-ingest', 'taskflow'],
-  #   env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-  #   timeout: 60
-  # )
-
   test('metrics_consistency', catch2_metrics_consistency_exe,
     suite: ['catch2', 'unit', 'daemon', 'metrics'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -2820,13 +2790,6 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
-
-  # test('repair_coordinator', catch2_repair_coordinator_exe,
-  #   suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],
-  #   env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-  #   timeout: 60,
-  #   is_parallel: false
-  # )
 
   test('repair_scheduling_adapter', catch2_repair_scheduling_exe,
     suite: ['catch2', 'unit', 'daemon', 'repair', 'yams-3s4'],

@@ -35,7 +35,7 @@ public:
     void start();
     void stop();
 
-    // Optional hook: invoked to adjust RepairCoordinator tokens/batch
+    // Optional hook: invoked to adjust repair scheduling tokens/batch
     void setRepairControlHook(std::function<void(uint32_t tokens, uint32_t batch)> cb) {
         setRepair_ = std::move(cb);
     }

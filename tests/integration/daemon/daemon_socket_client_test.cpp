@@ -297,6 +297,89 @@ TEST_CASE("Daemon client request execution", "[daemon][socket][requests]") {
     }
 }
 
+TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][model]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    DaemonHarness harness;
+    startHarnessWithRetry(harness);
+    std::this_thread::sleep_for(200ms);
+
+    auto client = createClient(harness.socketPath());
+
+    yams::Result<void> connectResult;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        connectResult = yams::cli::run_sync(client.connect(), 5s);
+        if (connectResult.has_value())
+            break;
+        std::this_thread::sleep_for(200ms);
+    }
+    REQUIRE(connectResult.has_value());
+
+    ModelStatusRequest statusReq;
+    auto statusResult = yams::cli::run_sync(client.executeRequest(Request{statusReq}), 5s);
+
+    REQUIRE(statusResult.has_value());
+    REQUIRE(std::holds_alternative<ModelStatusResponse>(statusResult.value()));
+
+    LoadModelRequest loadReq;
+    loadReq.modelName = "test-model-that-does-not-exist";
+    auto loadResult = yams::cli::run_sync(client.executeRequest(Request{loadReq}), 10s);
+
+    REQUIRE(loadResult.has_value());
+    REQUIRE(std::holds_alternative<ErrorResponse>(loadResult.value()));
+
+    UnloadModelRequest unloadReq;
+    unloadReq.modelName = "test-model-that-does-not-exist";
+    auto unloadResult = yams::cli::run_sync(client.executeRequest(Request{unloadReq}), 5s);
+
+    REQUIRE(unloadResult.has_value());
+    REQUIRE((std::holds_alternative<SuccessResponse>(unloadResult.value()) ||
+             std::holds_alternative<ErrorResponse>(unloadResult.value())));
+}
+
+TEST_CASE("Daemon client plugin request execution", "[daemon][socket][requests][plugin]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    DaemonHarness harness;
+    startHarnessWithRetry(harness);
+    std::this_thread::sleep_for(200ms);
+
+    auto client = createClient(harness.socketPath());
+
+    yams::Result<void> connectResult;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        connectResult = yams::cli::run_sync(client.connect(), 5s);
+        if (connectResult.has_value())
+            break;
+        std::this_thread::sleep_for(200ms);
+    }
+    REQUIRE(connectResult.has_value());
+
+    PluginScanRequest scanReq;
+    auto scanResult = yams::cli::run_sync(client.executeRequest(Request{scanReq}), 10s);
+
+    REQUIRE(scanResult.has_value());
+    REQUIRE((std::holds_alternative<PluginScanResponse>(scanResult.value()) ||
+             std::holds_alternative<ErrorResponse>(scanResult.value())));
+
+    PluginLoadRequest loadReq;
+    loadReq.pathOrName = "definitely_missing_plugin_for_dispatcher_coverage";
+    loadReq.dryRun = true;
+    auto loadResult = yams::cli::run_sync(client.executeRequest(Request{loadReq}), 10s);
+
+    REQUIRE(loadResult.has_value());
+    REQUIRE((std::holds_alternative<PluginLoadResponse>(loadResult.value()) ||
+             std::holds_alternative<ErrorResponse>(loadResult.value())));
+
+    PluginUnloadRequest unloadReq;
+    unloadReq.name = "definitely_missing_plugin_for_dispatcher_coverage";
+    auto unloadResult = yams::cli::run_sync(client.executeRequest(Request{unloadReq}), 5s);
+
+    REQUIRE(unloadResult.has_value());
+    REQUIRE((std::holds_alternative<SuccessResponse>(unloadResult.value()) ||
+             std::holds_alternative<ErrorResponse>(unloadResult.value())));
+}
+
 TEST_CASE("Daemon client error handling", "[daemon][socket][errors]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 

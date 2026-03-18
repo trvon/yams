@@ -1798,7 +1798,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     metadataRepo_->warmValueCountsCache(); // Pre-warm common queries
                     spdlog::info("Metadata repository initialized successfully");
 
-                    // Note: RepairManager initialization deferred to RepairCoordinator
+                    // Note: RepairManager initialization remains deferred
                     // since it needs access to storage engine which is not directly
                     // exposed by IContentStore interface
 

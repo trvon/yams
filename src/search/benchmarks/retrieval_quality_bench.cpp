@@ -1538,10 +1538,17 @@ static bool benchCacheMatches(const BenchCacheMetadata& expected, const BenchCac
         return false;
     };
 
+    const auto datasetPathMatches = [&]() {
+        if (expected.datasetPath.empty() || actual.datasetPath.empty()) {
+            return true;
+        }
+        return expected.datasetPath == actual.datasetPath;
+    };
+
     if (expected.dataset != actual.dataset) {
         return mismatch("dataset mismatch");
     }
-    if (expected.datasetPath != actual.datasetPath) {
+    if (!datasetPathMatches()) {
         return mismatch("dataset_path mismatch");
     }
     if (expected.corpusSize != actual.corpusSize) {
@@ -3525,11 +3532,12 @@ struct BenchFixture {
             return (it == initialStatusResult.value().requestCounts.end()) ? 0ULL : it->second;
         };
 
-        const bool trustWarmCacheMetadata =
-            warmCacheMetadata.has_value() && warmCacheMetadata->status == "primed";
+        const bool warmCacheMetadataReusable =
+            warmCacheMetadata.has_value() &&
+            (warmCacheMetadata->status == "primed" || warmCacheMetadata->status == "partial");
 
         const uint64_t initialIndexedDocCount = [&]() -> uint64_t {
-            if (trustWarmCacheMetadata) {
+            if (warmCacheMetadataReusable) {
                 return static_cast<uint64_t>(warmCacheMetadata->expectedDocs);
             }
             if (!initialStatusResult) {
@@ -3545,15 +3553,15 @@ struct BenchFixture {
         }();
 
         const uint64_t initialDocsEmbedded =
-            trustWarmCacheMetadata ? static_cast<uint64_t>(warmCacheMetadata->embeddedDocs)
-                                   : getInitialCount("documents_embedded");
+            warmCacheMetadataReusable ? static_cast<uint64_t>(warmCacheMetadata->embeddedDocs)
+                                      : getInitialCount("documents_embedded");
         const uint64_t initialVectorCount =
-            trustWarmCacheMetadata ? static_cast<uint64_t>(warmCacheMetadata->vectorCount)
-                                   : getInitialCount("vector_count");
+            warmCacheMetadataReusable ? static_cast<uint64_t>(warmCacheMetadata->vectorCount)
+                                      : getInitialCount("vector_count");
         const uint64_t initialEmbedQueued =
-            trustWarmCacheMetadata ? 0 : getInitialCount("embed_svc_queued");
+            warmCacheMetadataReusable ? 0 : getInitialCount("embed_svc_queued");
         const uint64_t initialEmbedInFlight =
-            trustWarmCacheMetadata ? 0 : getInitialCount("embed_in_flight");
+            warmCacheMetadataReusable ? 0 : getInitialCount("embed_in_flight");
         const bool cacheHasIndexedCorpus =
             usingExternalBenchDataDir &&
             initialIndexedDocCount >= static_cast<uint64_t>(corpusSize);
@@ -3567,7 +3575,7 @@ struct BenchFixture {
                          "vector_count={} embed_queue={} embed_in_flight={}{}",
                          initialIndexedDocCount, initialDocsEmbedded, initialVectorCount,
                          initialEmbedQueued, initialEmbedInFlight,
-                         trustWarmCacheMetadata ? " (trusted metadata)" : "");
+                         warmCacheMetadataReusable ? " (trusted metadata)" : "");
         }
 
         if (!cacheHasFullEmbeddings) {
@@ -4348,6 +4356,10 @@ struct BenchFixture {
             }
             finalCacheMetadata =
                 preferStrongerBenchCacheMetadata(finalCacheMetadata, warmCacheMetadata);
+            if (!expectedCacheMetadata.datasetPath.empty() &&
+                finalCacheMetadata.datasetPath.empty()) {
+                finalCacheMetadata.datasetPath = expectedCacheMetadata.datasetPath;
+            }
 
             const auto metadataWrite = writeBenchCacheMetadata(warmDataDirPath, finalCacheMetadata);
             if (!metadataWrite) {

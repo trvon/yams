@@ -230,7 +230,7 @@ yams_daemon_lib = static_library('yams_daemon',
     dependency('yams_metadata'),
     yams_daemon_client_dep,
     yams_onnx_resource_dep,
-    # Direct Boost dependency required because daemon sources (e.g. RepairCoordinator,
+    # Direct Boost dependency required because daemon sources
     # various IPC components) include boost/asio headers directly. Relying on the
     # daemon_client's transitive usage isn't sufficient for include paths at compile time.
     dependency('boost'),
