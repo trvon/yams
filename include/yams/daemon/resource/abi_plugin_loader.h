@@ -56,7 +56,7 @@ public:
         std::filesystem::path path;
         std::string reason;
     };
-    std::vector<SkipInfo> getLastSkips() const { return lastSkips_; }
+    const std::vector<SkipInfo>& getLastSkips() const { return lastSkips_; }
 
 private:
     struct HandleInfo {

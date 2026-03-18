@@ -292,13 +292,10 @@ Result<T> from_optional(const std::optional<T>& opt,
  * @endcode
  */
 template <typename... Ts> Result<std::tuple<Ts...>> combine(Result<Ts>&&... results) {
-    // Check for first error
-    Error* firstError = nullptr;
-    ((results.has_value() ? void()
-                          : (firstError == nullptr ? firstError = &results.error() : void())),
-     ...);
+    std::optional<Error> firstError;
+    ((results.has_value() || firstError ? void() : firstError = results.error()), ...);
 
-    if (firstError != nullptr) {
+    if (firstError) {
         return *firstError;
     }
 

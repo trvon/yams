@@ -58,7 +58,7 @@ void startHarnessWithRetry(DaemonHarness& harness, int maxRetries = 3,
     SKIP("Skipping shutdown integration section due to daemon startup instability");
 }
 
-bool waitForLifecycleState(YamsDaemon& daemon, LifecycleState state,
+bool waitForLifecycleState(const YamsDaemon& daemon, LifecycleState state,
                            std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -70,7 +70,7 @@ bool waitForLifecycleState(YamsDaemon& daemon, LifecycleState state,
     return daemon.getLifecycle().snapshot().state == state;
 }
 
-bool waitForDaemonToStop(YamsDaemon& daemon, std::chrono::milliseconds timeout) {
+bool waitForDaemonToStop(const YamsDaemon& daemon, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
         if (!daemon.isRunning()) {
@@ -413,7 +413,7 @@ TEST_CASE("Daemon graceful shutdown behavior", "[daemon][shutdown][graceful]") {
         REQUIRE(shutdownResult.has_value());
 
         // Verify daemon actually stops
-        auto* daemon = harness.daemon();
+        const auto* daemon = harness.daemon();
         REQUIRE(daemon != nullptr);
 
         // Wait for daemon to stop (max 5 seconds)

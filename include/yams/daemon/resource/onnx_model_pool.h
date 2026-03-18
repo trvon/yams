@@ -65,7 +65,7 @@ public:
 
     // Model information
     const OnnxModelInfo& getInfo() const { return info_; }
-    std::string getName() const { return info_.name; }
+    const std::string& getName() const { return info_.name; }
     size_t getEmbeddingDim() const { return info_.embeddingDim; }
     size_t getMaxSequenceLength() const { return info_.maxSequenceLength; }
     std::string getExecutionProvider() const;

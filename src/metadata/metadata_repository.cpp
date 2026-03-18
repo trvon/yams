@@ -184,8 +184,8 @@ beginTransactionWithRetry(Database& db, int maxRetries = 5,
         const auto& errMsg = result.error().message;
         if (errMsg.find("locked") == std::string::npos &&
             errMsg.find("busy") == std::string::npos) {
-            // Not a lock error, don't retry
-            return result;
+            // Not a lock error, don't retry.
+            return Error{result.error().code, result.error().message};
         }
         if (attempt + 1 < maxRetries) {
             std::this_thread::sleep_for(backoff);
@@ -204,7 +204,7 @@ std::vector<float> blobToFloatVector(const std::vector<std::byte>& blob) {
     return out;
 }
 
-PathTreeNode mapPathTreeNodeRow(Statement& stmt) {
+PathTreeNode mapPathTreeNodeRow(const Statement& stmt) {
     PathTreeNode node;
     node.id = stmt.getInt64(0);
     node.parentId = stmt.isNull(1) ? kPathTreeNullParent : stmt.getInt64(1);
@@ -2461,8 +2461,8 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& options) {
             }
 
             auto execResult = executePreparedVectorQuery<DocumentInfo>(
-                db, sql, params, [&](Statement& stmt) { return mapDocumentRow(stmt); },
-                [&](DocumentInfo& doc) { storePathCache(doc); });
+                db, sql, params, [&](const Statement& stmt) { return mapDocumentRow(stmt); },
+                [&](const DocumentInfo& doc) { storePathCache(doc); });
             if (!execResult) {
                 if (joinFtsForContains && options.containsUsesFts) {
                     spdlog::debug("MetadataRepository::queryDocuments prepare failed (falling back "
@@ -2763,7 +2763,7 @@ MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& 
             }
 
             auto execResult = executePreparedVectorQuery<ListDocumentProjection>(
-                db, sql, params, [&](Statement& stmt) { return mapListProjectionRow(stmt); });
+                db, sql, params, [&](const Statement& stmt) { return mapListProjectionRow(stmt); });
             if (!execResult) {
                 if (joinFtsForContains && options.containsUsesFts) {
                     auto fallbackOpts = options;
@@ -2824,7 +2824,7 @@ MetadataRepository::queryDocumentsForGrepCandidates(const DocumentQueryOptions& 
             }
 
             auto execResult = executePreparedVectorQuery<GrepCandidateProjection>(
-                db, sql, params, [&](Statement& stmt) {
+                db, sql, params, [&](const Statement& stmt) {
                     GrepCandidateProjection p;
                     p.id = stmt.getInt64(0);
                     p.filePath = stmt.getString(1);
@@ -4408,10 +4408,9 @@ Result<void> MetadataRepository::removePathTreeForDocument(const DocumentInfo& i
                     return update.execute();
                 }
 
-                // Recalculate centroid: subtract the removed embedding
-                int64_t newWeight = currentWeight - 1;
                 if (centroid.size() == embeddingValues.size()) {
                     const double oldWeightFactor = static_cast<double>(currentWeight);
+                    const int64_t newWeight = currentWeight - 1;
                     const double newWeightFactor = static_cast<double>(newWeight);
                     for (std::size_t i = 0; i < embeddingValues.size(); ++i) {
                         double updated =
@@ -4929,7 +4928,7 @@ Result<void> MetadataRepository::finalizeTreeDiff(int64_t diffId, std::size_t ch
 }
 
 // Helper methods for row mapping
-DocumentInfo MetadataRepository::mapDocumentRow(Statement& stmt) const {
+DocumentInfo MetadataRepository::mapDocumentRow(const Statement& stmt) const {
     DocumentInfo info;
     info.id = stmt.getInt64(0);
     info.filePath = stmt.getString(1);
@@ -4957,7 +4956,7 @@ DocumentInfo MetadataRepository::mapDocumentRow(Statement& stmt) const {
     return info;
 }
 
-ListDocumentProjection MetadataRepository::mapListProjectionRow(Statement& stmt) const {
+ListDocumentProjection MetadataRepository::mapListProjectionRow(const Statement& stmt) const {
     ListDocumentProjection info;
     info.id = stmt.getInt64(0);
     info.filePath = stmt.getString(1);
@@ -5152,7 +5151,7 @@ std::string MetadataQueryBuilder::buildQuery() const {
     return query;
 }
 
-std::vector<std::string> MetadataQueryBuilder::getParameters() const {
+const std::vector<std::string>& MetadataQueryBuilder::getParameters() const {
     return parameters_;
 }
 
@@ -5816,10 +5815,9 @@ MetadataRepository::batchGetDocumentTags(std::span<const int64_t> documentIds) {
                 if (!stepResult.value())
                     break;
 
-                int64_t docId = stmt.getInt64(0);
                 std::string fullKey = stmt.getString(1);
                 if (fullKey.starts_with("tag:")) {
-                    out[docId].push_back(fullKey.substr(4));
+                    out[stmt.getInt64(0)].push_back(fullKey.substr(4));
                 }
             }
 

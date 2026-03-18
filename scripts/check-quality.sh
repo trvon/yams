@@ -28,6 +28,7 @@ INCLUDE_DIRS=""
 SUPPRESSIONS_FILE=""
 BASELINE_FILE=""
 GENERATE_BASELINE=false
+CPPCHECK_BUILD_DIR=""
 
 # Script directory and project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -297,6 +298,15 @@ if [[ -z "$SUPPRESSIONS_FILE" ]]; then
     SUPPRESSIONS_FILE="$PROJECT_ROOT/.cppcheck-suppressions"
 fi
 
+if [[ -z "$CPPCHECK_BUILD_DIR" ]]; then
+    if [[ -n "$BUILD_DIR" ]]; then
+        CPPCHECK_BUILD_DIR="$BUILD_DIR/.cppcheck"
+    else
+        CPPCHECK_BUILD_DIR="$PROJECT_ROOT/.cppcheck"
+    fi
+fi
+mkdir -p "$CPPCHECK_BUILD_DIR"
+
 # Create output directory if specified
 if [[ -n "$OUTPUT_DIR" ]]; then
     mkdir -p "$OUTPUT_DIR"
@@ -309,6 +319,7 @@ print_progress "Output format: $OUTPUT_FORMAT"
 [[ -n "$BUILD_DIR" ]] && print_progress "Build directory: $BUILD_DIR"
 [[ -n "$COMPILE_COMMANDS" ]] && print_progress "Compile commands: $COMPILE_COMMANDS"
 [[ -f "$SUPPRESSIONS_FILE" ]] && print_progress "Suppressions file: $SUPPRESSIONS_FILE"
+[[ -n "$CPPCHECK_BUILD_DIR" ]] && print_progress "Cppcheck build dir: $CPPCHECK_BUILD_DIR"
 print_progress "Git only: $GIT_ONLY"
 print_progress "Parallel: $PARALLEL"
 print_progress "Fix format: $FIX_FORMAT"
@@ -409,7 +420,14 @@ CPPCHECK_ARGS+=(
     "--language=c++"
     "--inline-suppr"
     "--quiet"
+    "--cppcheck-build-dir=$CPPCHECK_BUILD_DIR"
 )
+
+# In this repo/environment, system header resolution is noisy and drowns out
+# actionable findings. compile_commands.json still provides project include paths.
+CPPCHECK_ARGS+=("--suppress=missingIncludeSystem")
+CPPCHECK_ARGS+=("--suppress=unmatchedSuppression")
+CPPCHECK_ARGS+=("--suppress=checkersReport")
 
 # Add suppressions file if it exists
 if [[ -f "$SUPPRESSIONS_FILE" ]]; then
@@ -417,6 +435,8 @@ if [[ -f "$SUPPRESSIONS_FILE" ]]; then
 fi
 
 # Add include directories
+CPPCHECK_ARGS+=("-I" ".")
+CPPCHECK_ARGS+=("-I" "tests")
 CPPCHECK_ARGS+=("-I" "include")
 CPPCHECK_ARGS+=("-I" "src")
 if [[ -n "$INCLUDE_DIRS" ]]; then

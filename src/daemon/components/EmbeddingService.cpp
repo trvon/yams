@@ -770,6 +770,13 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         }
     };
 
+    auto hnswCheckpointThresholdForLog = [&]() -> std::string {
+        if (const char* env = std::getenv("YAMS_HNSW_CHECKPOINT_THRESHOLD")) {
+            return env;
+        }
+        return "default";
+    };
+
     spdlog::debug(
         "[EmbeddingService] processEmbedJob job={} hashes={} skipExisting={} modelHint='{}'",
         jobTag, job.hashes.size(), job.skipExisting ? "true" : "false", job.modelName);
@@ -1476,13 +1483,13 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         }
     }
     if (timingEnabled || poolDebug) {
-        spdlog::info("[EmbeddingService] job={} adaptive_sub_batch_start={} default_start={} "
-                     "max_sub_batch={} adaptive_max_cap={} grow_after_successes={} "
-                     "gpu_provider='{}' memory_model='{}'",
-                     jobTag, adaptiveBatchCap, defaultAdaptiveStartCap, kMaxBatchSize,
-                     adaptiveMaxCap, adaptiveGrowthSuccessTarget,
-                     gpuInfo.provider.empty() ? "unknown" : gpuInfo.provider,
-                     gpuInfo.unifiedMemory ? "unified" : "dedicated");
+        spdlog::info(
+            "[EmbeddingService] job={} adaptive_sub_batch_start={} default_start={} "
+            "max_sub_batch={} adaptive_max_cap={} grow_after_successes={} "
+            "gpu_provider='{}' memory_model='{}' hnsw_checkpoint_threshold={}",
+            jobTag, adaptiveBatchCap, defaultAdaptiveStartCap, kMaxBatchSize, adaptiveMaxCap,
+            adaptiveGrowthSuccessTarget, gpuInfo.provider.empty() ? "unknown" : gpuInfo.provider,
+            gpuInfo.unifiedMemory ? "unified" : "dedicated", hnswCheckpointThresholdForLog());
     }
 
     // ============================================================

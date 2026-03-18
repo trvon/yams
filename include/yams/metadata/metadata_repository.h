@@ -904,8 +904,8 @@ private:
     mutable std::atomic<uint64_t> globalSeq_{0};
 
     // Helper methods for row mapping
-    DocumentInfo mapDocumentRow(Statement& stmt) const;
-    ListDocumentProjection mapListProjectionRow(Statement& stmt) const;
+    DocumentInfo mapDocumentRow(const Statement& stmt) const;
+    ListDocumentProjection mapListProjectionRow(const Statement& stmt) const;
     const char* documentColumnList(bool qualified) const;
 
     Result<std::optional<DocumentInfo>>
@@ -1209,7 +1209,7 @@ public:
 
     // Build the query
     [[nodiscard]] std::string buildQuery() const;
-    [[nodiscard]] std::vector<std::string> getParameters() const;
+    [[nodiscard]] const std::vector<std::string>& getParameters() const;
 
 private:
     std::vector<std::string> conditions_;

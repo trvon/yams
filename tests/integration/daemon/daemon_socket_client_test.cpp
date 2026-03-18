@@ -559,9 +559,9 @@ TEST_CASE("Daemon client tree diff request execution", "[daemon][socket][request
     }
     REQUIRE(connectResult.has_value());
 
-    auto* daemon = harness.daemon();
+    const auto* daemon = harness.daemon();
     REQUIRE(daemon != nullptr);
-    auto* serviceManager = daemon->getServiceManager();
+    const auto* serviceManager = daemon->getServiceManager();
     REQUIRE(serviceManager != nullptr);
     auto metadataRepo = serviceManager->getMetadataRepo();
     REQUIRE(metadataRepo != nullptr);
@@ -636,14 +636,33 @@ TEST_CASE("Daemon client tree diff request execution", "[daemon][socket][request
         metadataRepo->finalizeTreeDiff(diffIdResult.value(), changes.size(), "complete");
     REQUIRE(finalizeResult.has_value());
 
+    yams::metadata::TreeDiffQuery directQuery;
+    directQuery.baseSnapshotId = baseSnapshotId;
+    directQuery.targetSnapshotId = targetSnapshotId;
+    directQuery.limit = 20000;
+    auto directListResult = metadataRepo->listTreeChanges(directQuery);
+    if (!directListResult.has_value()) {
+        INFO("direct listTreeChanges error: " << directListResult.error().message);
+    }
+    REQUIRE(directListResult.has_value());
+    CHECK(directListResult.value().size() == 4);
+
     ListTreeDiffRequest listReq;
     listReq.baseSnapshotId = baseSnapshotId;
     listReq.targetSnapshotId = targetSnapshotId;
     listReq.limit = 20000;
-    auto listResult = yams::cli::run_sync(client.call<ListTreeDiffRequest>(listReq), 10s);
+    auto listResult = yams::cli::run_sync(client.executeRequest(Request{listReq}), 10s);
 
+    INFO("listTreeDiff has_value=" << listResult.has_value());
+    if (!listResult.has_value()) {
+        INFO("listTreeDiff transport error: " << listResult.error().message);
+    }
     REQUIRE(listResult.has_value());
-    const auto& listResp = listResult.value();
+    if (std::holds_alternative<ErrorResponse>(listResult.value())) {
+        INFO("listTreeDiff daemon error: " << std::get<ErrorResponse>(listResult.value()).message);
+    }
+    REQUIRE(std::holds_alternative<ListTreeDiffResponse>(listResult.value()));
+    const auto& listResp = std::get<ListTreeDiffResponse>(listResult.value());
     CHECK(listResp.totalCount == 4);
     REQUIRE(listResp.changes.size() == 4);
     CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
@@ -669,10 +688,19 @@ TEST_CASE("Daemon client tree diff request execution", "[daemon][socket][request
     filteredReq.pathPrefix = "src/new";
     filteredReq.typeFilter = "renamed";
     filteredReq.limit = 10;
-    auto filteredResult = yams::cli::run_sync(client.call<ListTreeDiffRequest>(filteredReq), 10s);
+    auto filteredResult = yams::cli::run_sync(client.executeRequest(Request{filteredReq}), 10s);
 
+    INFO("filteredTreeDiff has_value=" << filteredResult.has_value());
+    if (!filteredResult.has_value()) {
+        INFO("filteredTreeDiff transport error: " << filteredResult.error().message);
+    }
     REQUIRE(filteredResult.has_value());
-    const auto& filteredResp = filteredResult.value();
+    if (std::holds_alternative<ErrorResponse>(filteredResult.value())) {
+        INFO("filteredTreeDiff daemon error: "
+             << std::get<ErrorResponse>(filteredResult.value()).message);
+    }
+    REQUIRE(std::holds_alternative<ListTreeDiffResponse>(filteredResult.value()));
+    const auto& filteredResp = std::get<ListTreeDiffResponse>(filteredResult.value());
     CHECK(filteredResp.totalCount == 1);
     REQUIRE(filteredResp.changes.size() == 1);
     CHECK(filteredResp.changes.front().changeType == "renamed");
@@ -931,8 +959,7 @@ TEST_CASE("Daemon client move semantics", "[daemon][socket][move]") {
         REQUIRE(client1.isConnected());
 
         // Move assign
-        auto client2 = createClient(harness.socketPath(), 2s, false);
-        client2 = std::move(client1);
+        DaemonClient client2(std::move(client1));
         REQUIRE(client2.isConnected());
 
         // Can make request with moved-to client

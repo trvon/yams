@@ -78,6 +78,21 @@ inline size_t hnswParallelBuildThreshold() {
     return kDefaultThreshold;
 }
 
+inline size_t hnswCheckpointThreshold(size_t configuredThreshold) {
+    const size_t fallback = configuredThreshold > 0 ? configuredThreshold : size_t{100};
+    if (const char* env = std::getenv("YAMS_HNSW_CHECKPOINT_THRESHOLD")) {
+        try {
+            const auto parsed = static_cast<long long>(std::stoll(env));
+            if (parsed <= 0) {
+                return std::numeric_limits<size_t>::max();
+            }
+            return static_cast<size_t>(parsed);
+        } catch (...) {
+        }
+    }
+    return fallback;
+}
+
 // ============================================================================
 // Libsql-aware database helpers
 // ============================================================================
@@ -591,7 +606,7 @@ public:
             hnsw_dirty_[dim] = true;
             pending_inserts_++;
 
-            if (pending_inserts_ >= config_.checkpoint_threshold) {
+            if (pending_inserts_ >= hnswCheckpointThreshold(config_.checkpoint_threshold)) {
                 saveHnswCheckpointUnlocked();
             }
         }
@@ -809,7 +824,7 @@ public:
         }
 
         pending_inserts_ += hnsw_adds;
-        if (pending_inserts_ >= config_.checkpoint_threshold) {
+        if (pending_inserts_ >= hnswCheckpointThreshold(config_.checkpoint_threshold)) {
             saveHnswCheckpointUnlocked();
         }
 

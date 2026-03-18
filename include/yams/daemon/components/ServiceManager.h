@@ -139,7 +139,7 @@ public:
     }
     std::shared_ptr<IModelProvider> getModelProvider() const { return loadModelProvider(); }
     std::shared_ptr<yams::search::SearchEngine> getSearchEngineSnapshot() const;
-    std::string getEmbeddingModelName() const { return embeddingModelName_; }
+    const std::string& getEmbeddingModelName() const { return embeddingModelName_; }
     std::shared_ptr<vector::VectorDatabase> getVectorDatabase() const {
         if (vectorSystemManager_) {
             auto db = vectorSystemManager_->getVectorDatabase();
@@ -328,7 +328,7 @@ public:
     std::shared_ptr<GraphComponent> getGraphComponent() const { return graphComponent_; }
 
     // ContentStore diagnostics
-    std::string getContentStoreError() const { return contentStoreError_; }
+    const std::string& getContentStoreError() const { return contentStoreError_; }
 
     // WAL metrics provider (may return zeros until a WALManager is attached)
     std::shared_ptr<WalMetricsProvider> getWalMetricsProvider() const {

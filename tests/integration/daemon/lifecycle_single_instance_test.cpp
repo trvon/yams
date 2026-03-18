@@ -54,7 +54,7 @@ private:
     bool hadPrevious_{false};
 };
 
-bool waitForLifecycleState(YamsDaemon& daemon, LifecycleState state,
+bool waitForLifecycleState(const YamsDaemon& daemon, LifecycleState state,
                            std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -66,21 +66,21 @@ bool waitForLifecycleState(YamsDaemon& daemon, LifecycleState state,
     return daemon.getLifecycle().snapshot().state == state;
 }
 
-bool reachesLifecycleStateWithin(YamsDaemon& daemon, LifecycleState state,
+bool reachesLifecycleStateWithin(const YamsDaemon& daemon, LifecycleState state,
                                  std::chrono::milliseconds timeout) {
     return waitForLifecycleState(daemon, state, timeout);
 }
 
-bool waitForRepairService(YamsDaemon& daemon, std::chrono::milliseconds timeout) {
+bool waitForRepairService(const YamsDaemon& daemon, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-        auto* serviceManager = daemon.getServiceManager();
+        const auto* serviceManager = daemon.getServiceManager();
         if (serviceManager && serviceManager->getRepairServiceShared()) {
             return true;
         }
         std::this_thread::sleep_for(10ms);
     }
-    auto* serviceManager = daemon.getServiceManager();
+    const auto* serviceManager = daemon.getServiceManager();
     return serviceManager && serviceManager->getRepairServiceShared();
 }
 
