@@ -36,6 +36,25 @@ alignas(yams::daemon::GlobalIOContext) char g_global_io_context_storage[sizeof(
     yams::daemon::GlobalIOContext)];
 yams::daemon::GlobalIOContext* g_global_io_context_ptr = nullptr;
 
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+constexpr bool kTsanBuild = true;
+#else
+constexpr bool kTsanBuild = false;
+#endif
+#elif defined(__SANITIZE_THREAD__)
+constexpr bool kTsanBuild = true;
+#else
+constexpr bool kTsanBuild = false;
+#endif
+
+unsigned int sanitize_thread_count_for_tsan(unsigned int thread_count) {
+    if constexpr (kTsanBuild) {
+        return 1;
+    }
+    return thread_count;
+}
+
 } // namespace
 
 namespace yams {
@@ -147,6 +166,15 @@ void GlobalIOContext::restart() {
     unsigned int thread_count = static_cast<unsigned int>(TuneAdvisor::recommendedThreads());
     thread_count = std::max(thread_count, 2u);
     thread_count = std::min(thread_count, 16u);
+    const auto configured_thread_count = thread_count;
+    thread_count = sanitize_thread_count_for_tsan(thread_count);
+    if constexpr (kTsanBuild) {
+        if (configured_thread_count > thread_count) {
+            spdlog::info(
+                "[GlobalIOContext] TSAN build detected, clamping worker threads from {} to {}",
+                configured_thread_count, thread_count);
+        }
+    }
 
     this->io_threads_.reserve(thread_count);
     std::vector<std::thread> new_threads;
@@ -223,6 +251,15 @@ void GlobalIOContext::ensure_initialized() {
         unsigned int thread_count = static_cast<unsigned int>(TuneAdvisor::recommendedThreads());
         thread_count = std::max(thread_count, 2u);
         thread_count = std::min(thread_count, 16u);
+        const auto configured_thread_count = thread_count;
+        thread_count = sanitize_thread_count_for_tsan(thread_count);
+        if constexpr (kTsanBuild) {
+            if (configured_thread_count > thread_count) {
+                spdlog::info(
+                    "[GlobalIOContext] TSAN build detected, clamping worker threads from {} to {}",
+                    configured_thread_count, thread_count);
+            }
+        }
 
         io_threads_.reserve(thread_count);
         try {

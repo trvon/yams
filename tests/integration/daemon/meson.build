@@ -166,6 +166,24 @@ else
       args: ['Daemon client tree diff request execution', '--allow-running-no-tests'],
     )
 
+    test('daemon_socket_session_request_execution',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon client session request execution', '--allow-running-no-tests'],
+    )
+
+    test('daemon_socket_repair_request_execution',
+      daemon_catch2_exe,
+      suite: ['integration', 'daemon', 'catch2', 'socket'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: ['Daemon client repair request execution', '--allow-running-no-tests'],
+    )
+
     test('daemon_socket_error_handling',
       daemon_catch2_exe,
       suite: ['integration', 'daemon', 'catch2', 'socket'],

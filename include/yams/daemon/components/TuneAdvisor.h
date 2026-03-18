@@ -123,10 +123,12 @@ public:
     }
     static unsigned getEmbedPauseMs() { return embedPauseMs(); }
     static uint32_t getEmbedMaxConcurrency() { return embedMaxConcurrency(); }
-
-public:
     static inline std::atomic<int> tuningProfileOverride_{0};
 
+private:
+    static void ignoreInvalidEnvParseFailure() noexcept {}
+
+public:
     // -------- Runtime-tunable policy (defaults chosen conservatively) --------
     static AutoEmbedPolicy autoEmbedPolicy() {
         return autoEmbedPolicy_.load(std::memory_order_relaxed);
@@ -151,7 +153,8 @@ public:
                 double v = std::stod(s);
                 if (v >= 10.0 && v <= 100.0)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 50.0 + profileScale() * 35.0;
@@ -169,7 +172,8 @@ public:
                 double v = std::stod(s);
                 if (v >= 10.0 && v <= 50.0)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 40.0;
@@ -187,7 +191,8 @@ public:
                 auto v = static_cast<uint64_t>(std::stoull(s));
                 if (v <= 60000)
                     return static_cast<uint32_t>(v);
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -199,7 +204,8 @@ public:
                 auto v = static_cast<uint64_t>(std::stoull(s));
                 if (v <= 60000)
                     return static_cast<uint32_t>(v);
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -248,7 +254,8 @@ public:
                 std::size_t v = static_cast<std::size_t>(std::stoull(s));
                 if (v >= 1 && v <= 4096)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 0;
@@ -266,7 +273,8 @@ public:
                 std::size_t v = static_cast<std::size_t>(std::stoull(s));
                 if (v >= 1 && v <= 4096)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 0;
@@ -285,7 +293,8 @@ public:
                 auto v = static_cast<uint64_t>(std::stoull(cs));
                 if (v >= 4ull * 1024ull && v <= 8ull * 1024ull * 1024ull)
                     return static_cast<uint32_t>(v);
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -299,7 +308,8 @@ public:
                 auto v = static_cast<uint64_t>(std::stoull(wb));
                 if (v >= 64ull * 1024ull && v <= 64ull * 1024ull * 1024ull)
                     return static_cast<uint32_t>(v);
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -314,7 +324,8 @@ public:
                 std::size_t v = static_cast<std::size_t>(std::stoul(s));
                 if (v > 0)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return static_cast<std::size_t>(64);
@@ -327,7 +338,8 @@ public:
                 std::size_t v = static_cast<std::size_t>(std::stoul(s));
                 if (v > 0)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return static_cast<std::size_t>(1024);
@@ -340,7 +352,8 @@ public:
                 std::size_t v = static_cast<std::size_t>(std::stoul(s));
                 if (v >= 1024)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return static_cast<std::size_t>(128ull * 1024ull * 1024ull);
@@ -354,7 +367,8 @@ public:
                 std::size_t v = static_cast<std::size_t>(std::stoul(s));
                 if (v >= 4096)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return static_cast<std::size_t>(8ull * 1024ull * 1024ull);
@@ -369,7 +383,8 @@ public:
                 auto v = static_cast<std::size_t>(std::stoul(mb));
                 if (v >= 4096)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -381,7 +396,8 @@ public:
         if (const char* s = std::getenv("YAMS_MAX_WORKER_QUEUE")) {
             try {
                 return static_cast<uint64_t>(std::stoull(s));
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         if (workerThreads == 0)
@@ -410,7 +426,8 @@ public:
         if (const char* s = std::getenv("YAMS_MAX_MUX_BYTES")) {
             try {
                 return static_cast<uint64_t>(std::stoull(s));
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -421,7 +438,8 @@ public:
         if (const char* s = std::getenv("YAMS_MAX_ACTIVE_CONN")) {
             try {
                 return static_cast<uint64_t>(std::stoull(s));
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 0;
@@ -437,7 +455,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v > 0 && v < 10000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -453,7 +472,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v > 0 && v < 60000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 1000;
@@ -473,7 +493,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v > 0 && v <= 1000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         // Profile-scaled: Efficient=8, Balanced=20, Aggressive=32
@@ -491,7 +512,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v > 0 && v <= 1000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         // Profile-scaled: Efficient=25, Balanced=62, Aggressive=100
@@ -516,7 +538,8 @@ public:
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -533,7 +556,8 @@ public:
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -545,7 +569,8 @@ public:
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -559,7 +584,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 1000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -573,7 +599,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 48)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -586,7 +613,8 @@ public:
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -598,7 +626,8 @@ public:
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -612,7 +641,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 1440)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -625,7 +655,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 1440)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -638,7 +669,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 168)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -651,7 +683,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 720)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -666,7 +699,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 60000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -681,7 +715,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 10 && v <= 1000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -693,7 +728,8 @@ public:
         if (const char* s = std::getenv("YAMS_METRICS_CACHE_MS")) {
             try {
                 return static_cast<uint32_t>(std::stoul(s));
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -707,7 +743,8 @@ public:
                 size_t v = static_cast<size_t>(std::stoul(s));
                 if (v > 0)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -722,7 +759,8 @@ public:
                 int v = std::stoi(s);
                 if (v >= 10 && v <= 100)
                     return static_cast<uint32_t>(v);
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -735,7 +773,8 @@ public:
                 int v = std::stoi(s);
                 if (v >= 1 && v <= 1024)
                     return static_cast<uint32_t>(v);
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 0;
@@ -757,7 +796,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 512)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return std::max(12u, recommendedThreads(1.0));
@@ -810,7 +850,8 @@ public:
                 int v = std::stoi(s);
                 if (v >= 1 && v <= 1024)
                     return static_cast<uint32_t>(v);
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         // Use a conservative fraction (25% of budgeted threads) for embeddings
@@ -846,7 +887,8 @@ public:
                 int v = std::stoi(s);
                 if (v >= 1 && v <= 64)
                     return static_cast<uint32_t>(v);
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         // 3) Conservative default: single background worker; users can raise via config/env
@@ -865,7 +907,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 10 && v <= 1'000'000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 1000;
@@ -885,7 +928,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 10 && v <= 1'000'000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 256;
@@ -905,7 +949,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 1024)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 4;
@@ -935,7 +980,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 256)
                     baseBatchSize = v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
 
@@ -970,7 +1016,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 500 && v <= 600000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -993,7 +1040,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1000 && v <= 600000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1044,7 +1092,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 1000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1063,7 +1112,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 50 && v <= 2000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1084,7 +1134,8 @@ public:
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 return (v >= 50 && v <= 2000);
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return false;
@@ -1101,7 +1152,8 @@ public:
                 double v = std::stod(s);
                 if (v >= 0.0 && v <= 100.0)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1117,7 +1169,8 @@ public:
         if (const char* s = std::getenv("YAMS_IDLE_MUX_LOW_BYTES")) {
             try {
                 return static_cast<std::uint64_t>(std::stoull(s));
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1135,7 +1188,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 500 && v <= 60000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1181,7 +1235,8 @@ public:
                 // v is unsigned; the lower-bound check is redundant on some compilers
                 if (v <= 60000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1199,7 +1254,8 @@ public:
                 int v = std::stoi(s);
                 if (v >= 1 && v <= 16)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1219,7 +1275,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 1024)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1237,7 +1294,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 4096)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1255,7 +1313,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 1024)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1273,7 +1332,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 4096)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1291,7 +1351,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 100)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1309,7 +1370,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 100)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1331,7 +1393,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 1024)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1352,7 +1415,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 64 && v <= 16384)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1373,7 +1437,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 128)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1420,7 +1485,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 512)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         auto derived = std::max<uint32_t>(2, recommendedThreads(0.5));
@@ -1547,7 +1613,8 @@ public:
         if (const char* s = std::getenv("YAMS_MUX_HIGH_FALLBACK_BYTES")) {
             try {
                 return static_cast<std::uint64_t>(std::stoull(s));
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1565,7 +1632,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 1024)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                return def;
             }
         }
         return def;
@@ -1601,7 +1669,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         uint32_t hw = static_cast<uint32_t>(std::thread::hardware_concurrency());
@@ -1622,7 +1691,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 0;
@@ -1640,7 +1710,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 32;
@@ -1678,7 +1749,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 16 && v <= 65536)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 4096;
@@ -1698,7 +1770,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 10 && v <= 99)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 80;
@@ -1718,7 +1791,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 50)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 20;
@@ -1738,7 +1812,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1000 && v <= 300000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 30000;
@@ -1758,7 +1833,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 16)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 10;
@@ -1779,7 +1855,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 86400)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 300;
@@ -1823,7 +1900,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 100)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 12;
@@ -1855,7 +1933,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 10 && v <= 3600)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 300;
@@ -1873,7 +1952,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 100000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 1000;
@@ -1942,7 +2022,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 256)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         uint32_t hw = hardwareConcurrency();
@@ -2135,7 +2216,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 32)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         // GPU-aware default sizing
@@ -2166,7 +2248,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 512)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
 
@@ -2201,7 +2284,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(val));
                 if (v >= 256 && v <= 65536)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 8192; // Increased from 2048 to handle bulk ingest
@@ -2223,7 +2307,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 64 && v <= 1'000'000)
                     base = v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
 
@@ -2269,7 +2354,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 64)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 4;
@@ -2289,7 +2375,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 128)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 20;
@@ -2309,7 +2396,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1000 && v <= 120000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 30000;
@@ -2330,7 +2418,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 100)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 5;
@@ -2420,7 +2509,8 @@ private:
                     uint32_t v = static_cast<uint32_t>(std::stoul(s));
                     if (v >= 1 && v <= maxCap)
                         return v;
-                } catch (...) {
+                } catch (const std::exception&) {
+                    ignoreInvalidEnvParseFailure();
                 }
             }
             return std::nullopt;
@@ -2872,7 +2962,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 10 && v <= 100)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 85;
@@ -2903,7 +2994,8 @@ public:
                 uint64_t v = static_cast<uint64_t>(std::stoull(s));
                 if (v >= 64ull * 1024ull * 1024ull) // min 64 MiB
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         // Auto-detect based on profile
@@ -2935,7 +3027,8 @@ public:
                 double v = std::stod(s) / 100.0;
                 if (v >= 0.5 && v <= 0.99)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 0.70 + profileScale() * 0.10;
@@ -2958,7 +3051,8 @@ public:
                 double v = std::stod(s) / 100.0;
                 if (v >= 0.5 && v <= 0.99)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 0.85 + profileScale() * 0.07;
@@ -2981,7 +3075,8 @@ public:
                 double v = std::stod(s) / 100.0;
                 if (v >= 0.5 && v <= 0.99)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 0.92 + profileScale() * 0.05;
@@ -3002,7 +3097,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 20)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 2;
@@ -3023,7 +3119,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 10 && v <= 10000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 500; // 500ms default
@@ -3041,7 +3138,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 10 && v <= 10000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 150;
@@ -3061,7 +3159,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 100 && v <= 10000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 500;
@@ -3107,7 +3206,8 @@ public:
                 double v = std::stod(s);
                 if (v >= 0.01 && v <= 0.99)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 0.2;
@@ -3128,7 +3228,8 @@ public:
                 double v = std::stod(s);
                 if (v >= 0.01 && v <= 0.5)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 0.05;
@@ -3149,7 +3250,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 100)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 10;
@@ -3170,7 +3272,8 @@ public:
                 double v = std::stod(s);
                 if (v >= 1.0 && v <= 5.0)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 1.5;
@@ -3191,7 +3294,8 @@ public:
                 double v = std::stod(s);
                 if (v >= 1.0 && v <= 128.0)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 4.0;
@@ -3212,7 +3316,8 @@ public:
                 double v = std::stod(s);
                 if (v >= 0.0 && v <= 64.0)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 1.0;
@@ -3233,7 +3338,8 @@ public:
                 double v = std::stod(s);
                 if (v >= 1.0 && v <= 256.0)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 32.0;
@@ -3258,7 +3364,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 64)
                     return static_cast<uint32_t>(v * profileScale());
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         uint32_t hw = hardwareConcurrency();
@@ -3289,7 +3396,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 8)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 1;
@@ -3310,7 +3418,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 8)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         return 1;
@@ -3330,7 +3439,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 8)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         // Efficient profile with tight budget: reranker gets no reserved slot
@@ -3358,7 +3468,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 100)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         switch (tuningProfile()) {
@@ -3386,7 +3497,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 100)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         switch (tuningProfile()) {
@@ -3414,7 +3526,8 @@ public:
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 10000)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         switch (tuningProfile()) {
@@ -3446,7 +3559,8 @@ public:
                 double v = std::stod(s);
                 if (v > 0.0 && v < 1.0)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         switch (tuningProfile()) {
@@ -3475,7 +3589,8 @@ public:
                 double v = std::stod(s);
                 if (v > 0.0 && v < 1.0)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         switch (tuningProfile()) {
@@ -3504,7 +3619,8 @@ public:
                 double v = std::stod(s);
                 if (v > 0.0 && v < 1.0)
                     return v;
-            } catch (...) {
+            } catch (const std::exception&) {
+                ignoreInvalidEnvParseFailure();
             }
         }
         switch (tuningProfile()) {

@@ -36,7 +36,7 @@ class SqliteKnowledgeGraphStore final : public KnowledgeGraphStore {
 public:
     // Construct with an external pool (non-owning)
     SqliteKnowledgeGraphStore(ConnectionPool& pool, KnowledgeGraphStoreConfig cfg)
-        : cfg_(std::move(cfg)), pool_(&pool) {}
+        : cfg_(cfg), pool_(&pool) {}
 
     // Construct with owned pool created from dbPath
     static Result<std::unique_ptr<SqliteKnowledgeGraphStore>>

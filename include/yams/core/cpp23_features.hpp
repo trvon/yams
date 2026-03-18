@@ -386,12 +386,12 @@ inline const char* get_feature_summary() {
  */
 #if YAMS_HAS_STRING_CONTAINS
 template <typename StringT, typename SubstrT>
-inline constexpr bool string_contains(const StringT& str, const SubstrT& substr) {
+constexpr bool string_contains(const StringT& str, const SubstrT& substr) {
     return str.contains(substr);
 }
 #else
 template <typename StringT, typename SubstrT>
-inline bool string_contains(const StringT& str, const SubstrT& substr) {
+bool string_contains(const StringT& str, const SubstrT& substr) {
     return std::string_view(str).find(std::string_view(substr)) != std::string_view::npos;
 }
 #endif

@@ -40,7 +40,8 @@ int sqlite_profile_min_ms() {
             if (parsed > 0) {
                 value = parsed;
             }
-        } catch (...) {
+        } catch (const std::exception&) {
+            spdlog::debug("Ignoring invalid YAMS_SQL_TRACE_MIN_MS value");
         }
     }
     cached.store(value, std::memory_order_relaxed);
@@ -221,7 +222,7 @@ Result<std::unique_ptr<PooledConnection>> ConnectionPool::acquire(std::chrono::m
         ConnectionPool& pool_;
         bool active_{false};
         bool timeout_{false};
-        std::chrono::steady_clock::time_point startedAt_{};
+        std::chrono::steady_clock::time_point startedAt_;
     } waitingGuard(*this);
 
     const size_t reservedConns =
@@ -477,7 +478,8 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
             auto v = std::stoul(envBusy);
             if (v > 0)
                 effectiveBusyTimeout = std::chrono::milliseconds(v);
-        } catch (...) {
+        } catch (const std::exception&) {
+            spdlog::debug("Ignoring invalid YAMS_DB_BUSY_TIMEOUT_MS value");
         }
     }
 
@@ -553,7 +555,8 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
             int mb = std::stoi(envCache);
             if (mb > 0)
                 defaultCacheMB = mb;
-        } catch (...) {
+        } catch (const std::exception&) {
+            spdlog::debug("Ignoring invalid {} value", envName);
         }
     }
     // Also check the generic env var as fallback for read pool
@@ -565,7 +568,8 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
                     int mb = std::stoi(envGeneric);
                     if (mb > 0)
                         defaultCacheMB = mb;
-                } catch (...) {
+                } catch (const std::exception&) {
+                    spdlog::debug("Ignoring invalid YAMS_DB_CACHE_SIZE_MB value");
                 }
             }
         }

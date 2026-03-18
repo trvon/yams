@@ -4848,7 +4848,15 @@ MetadataRepository::listTreeChanges(const TreeDiffQuery& query) {
 
             std::vector<TreeChangeRecord> results;
 
-            while (stmt.step()) {
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult) {
+                    return stepResult.error();
+                }
+                if (!stepResult.value()) {
+                    break;
+                }
+
                 TreeChangeRecord record;
                 record.type = stringToChangeType(stmt.getString(0));
                 record.oldPath = stmt.getString(1);

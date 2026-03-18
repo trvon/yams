@@ -13,6 +13,7 @@
 
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
+#include <yams/app/services/session_service.hpp>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/ServiceManager.h>
@@ -541,6 +542,155 @@ TEST_CASE("Daemon client collection request execution", "[daemon][socket][reques
           std::string::npos);
 }
 
+TEST_CASE("Daemon client session request execution", "[daemon][socket][requests][session]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    DaemonHarness harness({.isolateState = true});
+    startHarnessWithRetry(harness);
+    std::this_thread::sleep_for(200ms);
+
+    auto client = createClient(harness.socketPath());
+
+    yams::Result<void> connectResult;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        connectResult = yams::cli::run_sync(client.connect(), 5s);
+        if (connectResult.has_value())
+            break;
+        std::this_thread::sleep_for(200ms);
+    }
+    REQUIRE(connectResult.has_value());
+
+    const auto* daemon = harness.daemon();
+    REQUIRE(daemon != nullptr);
+    const auto* serviceManager = daemon->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+
+    auto appContext = serviceManager->getAppContext();
+    auto sessionService = yams::app::services::makeSessionService(&appContext);
+    REQUIRE(sessionService);
+
+    const std::string sessionA = "dispatcher-session-a";
+    const std::string sessionB = "dispatcher-session-b";
+    const std::string selectorPath = "src/**/*.cpp";
+
+    sessionService->init(sessionA, "dispatcher coverage session A");
+    sessionService->create(sessionB, "dispatcher coverage session B");
+
+    auto listResult =
+        yams::cli::run_sync(client.executeRequest(Request{ListSessionsRequest{}}), 10s);
+    REQUIRE(listResult.has_value());
+    REQUIRE(std::holds_alternative<ListSessionsResponse>(listResult.value()));
+    const auto& listResp = std::get<ListSessionsResponse>(listResult.value());
+    std::set<std::string> sessionNames(listResp.session_names.begin(),
+                                       listResp.session_names.end());
+    CHECK(sessionNames.contains(sessionA));
+    CHECK(sessionNames.contains(sessionB));
+    CHECK(listResp.current_session == sessionA);
+
+    UseSessionRequest missingReq;
+    missingReq.session_name = "dispatcher-session-missing";
+    auto missingResult = yams::cli::run_sync(client.executeRequest(Request{missingReq}), 10s);
+    REQUIRE(missingResult.has_value());
+    REQUIRE(std::holds_alternative<ErrorResponse>(missingResult.value()));
+    CHECK(std::get<ErrorResponse>(missingResult.value()).code == yams::ErrorCode::NotFound);
+
+    sessionService->close();
+
+    AddPathSelectorRequest noCurrentReq;
+    noCurrentReq.path = selectorPath;
+    auto noCurrentResult = yams::cli::run_sync(client.executeRequest(Request{noCurrentReq}), 10s);
+    REQUIRE(noCurrentResult.has_value());
+    REQUIRE(std::holds_alternative<ErrorResponse>(noCurrentResult.value()));
+    CHECK(std::get<ErrorResponse>(noCurrentResult.value()).code == yams::ErrorCode::InvalidState);
+
+    UseSessionRequest useReq;
+    useReq.session_name = sessionB;
+    auto useResult = yams::cli::run_sync(client.executeRequest(Request{useReq}), 10s);
+    REQUIRE(useResult.has_value());
+    REQUIRE(std::holds_alternative<SuccessResponse>(useResult.value()));
+    CHECK(std::get<SuccessResponse>(useResult.value()).message == "OK");
+    REQUIRE(sessionService->current().has_value());
+    CHECK(sessionService->current().value() == sessionB);
+
+    AddPathSelectorRequest addReq;
+    addReq.path = selectorPath;
+    addReq.tags = {"pinned", "coverage"};
+    addReq.metadata = {{"team", "daemon"}, {"task", "dispatcher-session"}};
+    auto addResult = yams::cli::run_sync(client.executeRequest(Request{addReq}), 10s);
+    REQUIRE(addResult.has_value());
+    REQUIRE(std::holds_alternative<SuccessResponse>(addResult.value()));
+    CHECK(std::get<SuccessResponse>(addResult.value()).message == "OK");
+    auto selectors = sessionService->listPathSelectors(sessionB);
+    REQUIRE(selectors.size() == 1);
+    CHECK(selectors.front() == selectorPath);
+
+    RemovePathSelectorRequest removeReq;
+    removeReq.path = selectorPath;
+    auto removeResult = yams::cli::run_sync(client.executeRequest(Request{removeReq}), 10s);
+    REQUIRE(removeResult.has_value());
+    REQUIRE(std::holds_alternative<SuccessResponse>(removeResult.value()));
+    CHECK(std::get<SuccessResponse>(removeResult.value()).message == "OK");
+    CHECK(sessionService->listPathSelectors(sessionB).empty());
+}
+
+TEST_CASE("Daemon client repair request execution", "[daemon][socket][requests][repair]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+
+    DaemonHarness harness({.enableModelProvider = false, .useMockModelProvider = false});
+    startHarnessWithRetry(harness);
+    std::this_thread::sleep_for(200ms);
+
+    auto client = createClient(harness.socketPath());
+
+    yams::Result<void> connectResult;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        connectResult = yams::cli::run_sync(client.connect(), 5s);
+        if (connectResult.has_value())
+            break;
+        std::this_thread::sleep_for(200ms);
+    }
+    REQUIRE(connectResult.has_value());
+
+    const auto* daemon = harness.daemon();
+    REQUIRE(daemon != nullptr);
+    const auto* serviceManager = daemon->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+
+    std::shared_ptr<yams::daemon::RepairService> repairService;
+    for (int attempt = 0; attempt < 30; ++attempt) {
+        repairService = serviceManager->getRepairServiceShared();
+        if (repairService) {
+            break;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    REQUIRE(repairService != nullptr);
+
+    RepairRequest repairReq;
+    repairReq.repairOrphans = true;
+    repairReq.dryRun = true;
+    repairReq.verbose = true;
+
+    std::vector<RepairEvent> events;
+    auto repairResult = yams::cli::run_sync(
+        client.callRepair(repairReq,
+                          [&events](const RepairEvent& event) { events.push_back(event); }),
+        30s);
+
+    REQUIRE(repairResult.has_value());
+    CHECK(repairResult.value().success);
+    CHECK(repairResult.value().totalOperations == 1);
+    CHECK(repairResult.value().operationResults.size() == 1);
+    CHECK(repairResult.value().operationResults.front().operation == "orphans");
+    CHECK_FALSE(events.empty());
+    CHECK(std::any_of(events.begin(), events.end(), [](const RepairEvent& event) {
+        return event.phase == "repairing" && event.operation == "orphans";
+    }));
+    CHECK(std::any_of(events.begin(), events.end(), [](const RepairEvent& event) {
+        return event.phase == "completed" && event.operation == "orphans";
+    }));
+}
+
 TEST_CASE("Daemon client tree diff request execution", "[daemon][socket][requests][tree-diff]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
@@ -558,7 +708,6 @@ TEST_CASE("Daemon client tree diff request execution", "[daemon][socket][request
         std::this_thread::sleep_for(200ms);
     }
     REQUIRE(connectResult.has_value());
-
     const auto* daemon = harness.daemon();
     REQUIRE(daemon != nullptr);
     const auto* serviceManager = daemon->getServiceManager();

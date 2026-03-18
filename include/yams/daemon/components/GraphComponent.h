@@ -50,7 +50,7 @@ public:
         std::string filePath;
         std::optional<std::string> snapshotId = std::nullopt;
         std::optional<std::string> rootTreeHash = std::nullopt;
-        std::vector<std::string> tags = {};
+        std::vector<std::string> tags;
         int64_t documentDbId = 0;
         std::shared_ptr<std::vector<std::byte>> contentBytes = nullptr;
         bool skipEntityExtraction{false};

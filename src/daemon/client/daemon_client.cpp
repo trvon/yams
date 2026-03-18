@@ -731,12 +731,6 @@ static bool socketPingCached(const std::filesystem::path& socketPath,
     return reachable;
 }
 
-static bool proxyLooksReachable(const std::filesystem::path& socketPath) {
-    constexpr auto kHealthyTtl = std::chrono::seconds(10);
-    constexpr auto kUnhealthyTtl = std::chrono::seconds(2);
-    return socketPingCached(socketPath, kHealthyTtl, kUnhealthyTtl);
-}
-
 static std::filesystem::path deriveMainSocketFromProxy(const std::filesystem::path& socketPath) {
     if (!isProxySocketPath(socketPath)) {
         return {};
@@ -770,36 +764,6 @@ static bool shouldRetryViaMainSocket(const Error& err) {
            msg.find("End of file") != std::string::npos ||
            msg.find("socket_missing") != std::string::npos ||
            msg.find("path_not_socket") != std::string::npos;
-}
-
-static std::filesystem::path
-selectMainSocketWhenProxyUnavailable(const std::filesystem::path& currentSocket) {
-    if (!isProxySocketPath(currentSocket)) {
-        return {};
-    }
-
-    if (proxyLooksReachable(currentSocket)) {
-        return {};
-    }
-
-    return deriveMainSocketFromProxy(currentSocket);
-}
-
-static bool maybeDemoteProxySocket(std::filesystem::path& currentSocket, TransportOptions& opts) {
-    if (!isProxySocketPath(opts.socketPath)) {
-        return false;
-    }
-
-    const auto mainSocket = selectMainSocketWhenProxyUnavailable(opts.socketPath);
-    if (mainSocket.empty()) {
-        return false;
-    }
-
-    spdlog::debug("DaemonClient: proxy socket unavailable, falling back to main socket: {}",
-                  mainSocket.string());
-    opts.socketPath = mainSocket;
-    currentSocket = mainSocket;
-    return true;
 }
 
 boost::asio::awaitable<Result<void>> DaemonClient::connect() {
@@ -1177,9 +1141,6 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
     }
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;
-    if (maybeDemoteProxySocket(impl->config_.socketPath, opts)) {
-        impl->refresh_transport();
-    }
     auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);
@@ -1250,9 +1211,6 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
     }
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;
-    if (maybeDemoteProxySocket(impl->config_.socketPath, opts)) {
-        impl->refresh_transport();
-    }
     auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);
@@ -1783,9 +1741,6 @@ DaemonClient::sendRequestStreaming(const Request& req,
 
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;
-    if (maybeDemoteProxySocket(impl->config_.socketPath, opts)) {
-        impl->refresh_transport();
-    }
     auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);

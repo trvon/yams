@@ -11,6 +11,20 @@
 
 namespace yams::daemon {
 
+namespace {
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+constexpr bool kTsanBuild = true;
+#else
+constexpr bool kTsanBuild = false;
+#endif
+#elif defined(__SANITIZE_THREAD__)
+constexpr bool kTsanBuild = true;
+#else
+constexpr bool kTsanBuild = false;
+#endif
+} // namespace
+
 IOCoordinator::IOCoordinator() : IOCoordinator(Config{}) {}
 
 IOCoordinator::IOCoordinator(Config config)
@@ -38,22 +52,31 @@ void IOCoordinator::start() {
         throw std::runtime_error("IOCoordinator already started");
     }
 
-    spdlog::debug("[IOCoordinator] Starting {} I/O threads...", config_.num_threads);
+    std::size_t threadCount = config_.num_threads;
+    if constexpr (kTsanBuild) {
+        if (threadCount > 1) {
+            spdlog::info("[IOCoordinator] TSAN build detected, clamping I/O threads from {} to 1",
+                         threadCount);
+        }
+        threadCount = 1;
+    }
+
+    spdlog::debug("[IOCoordinator] Starting {} I/O threads...", threadCount);
 
     // Create work guard to keep io_context alive
     work_guard_.emplace(boost::asio::make_work_guard(*io_context_));
 
     // Spawn I/O threads
-    threads_.reserve(config_.num_threads);
+    threads_.reserve(threadCount);
     try {
-        for (size_t i = 0; i < config_.num_threads; ++i) {
+        for (size_t i = 0; i < threadCount; ++i) {
             threads_.emplace_back([this, i]() {
                 spdlog::trace("[IOCoordinator] I/O thread {} starting", i);
                 io_context_->run();
                 spdlog::trace("[IOCoordinator] I/O thread {} exited", i);
             });
         }
-        spdlog::info("[IOCoordinator] Started with {} I/O threads", config_.num_threads);
+        spdlog::info("[IOCoordinator] Started with {} I/O threads", threadCount);
     } catch (const std::exception& e) {
         spdlog::error("[IOCoordinator] Failed to spawn I/O thread: {}", e.what());
 

@@ -65,7 +65,8 @@ std::optional<std::size_t> dim_from_model_config(const std::filesystem::path& mo
             if (j.contains("dim") && j["dim"].is_number_integer())
                 return static_cast<std::size_t>(j["dim"].get<int>());
         }
-    } catch (...) {
+    } catch (const std::exception&) {
+        return std::nullopt;
     }
     return std::nullopt;
 }
@@ -83,7 +84,8 @@ std::optional<std::size_t> read_dim_from_sentinel(const std::filesystem::path& d
         in >> j;
         if (j.contains("embedding_dim"))
             return j["embedding_dim"].get<std::size_t>();
-    } catch (...) {
+    } catch (const std::exception&) {
+        return std::nullopt;
     }
     return std::nullopt;
 }

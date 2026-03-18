@@ -1361,7 +1361,6 @@ private:
     std::unordered_map<size_t, std::string> label_to_id_;
     std::unordered_map<size_t, std::vector<float>> stored_vectors_;
     size_t next_label_;
-    ;
 };
 
 // =============================================================================

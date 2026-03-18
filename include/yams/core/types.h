@@ -148,7 +148,7 @@ struct Error {
     ErrorCode code;
     std::string message;
 
-    Error() : code(ErrorCode::Success), message("") {}
+    Error() : code(ErrorCode::Success) {}
     Error(ErrorCode c, std::string msg) : code(c), message(std::move(msg)) {}
     Error(ErrorCode c) : code(c), message(errorToString(c)) {}
     // Convenience constructor for message-only errors; defaults to Unknown code
@@ -217,7 +217,7 @@ private:
 // Specialization for void
 template <> class Result<void> {
 public:
-    Result() : error_() {}
+    Result() = default;
     Result(ErrorCode error) : error_(Error{error}) {}
     Result(Error error) : error_(std::move(error)) {}
 
@@ -239,7 +239,7 @@ public:
     }
 
 private:
-    Error error_{ErrorCode::Success, ""};
+    Error error_;
 };
 
 } // namespace yams
@@ -295,7 +295,7 @@ struct StorageStats {
     double dedupRatio = 0.0;
     uint64_t writeOperations = 0;
     uint64_t readOperations = 0;
-    TimePoint lastModified{}; // Initialize to epoch
+    TimePoint lastModified; // Initialize to epoch
 };
 
 // File information
@@ -303,7 +303,7 @@ struct FileInfo {
     Hash hash;
     uint64_t size;
     std::string mimeType;
-    TimePoint createdAt{}; // Initialize to epoch
+    TimePoint createdAt; // Initialize to epoch
     std::string originalName;
 };
 

@@ -172,9 +172,7 @@ void TreeDiffer::diffTrees(const TreeNode& baseTree, const TreeNode& targetTree,
                                                 baseEntry->hash, targetEntry->hash,
                                                 targetEntry->mode, false, targetEntry->size);
                 }
-            } else if (!options.includeUnchanged) {
-                // Hash matches, no change (skip unless includeUnchanged is true)
-            } else {
+            } else if (options.includeUnchanged) {
                 // Include unchanged entry for completeness
                 // (not adding to changes list for now)
             }
