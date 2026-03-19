@@ -55,6 +55,34 @@ unsigned int sanitize_thread_count_for_tsan(unsigned int thread_count) {
     return thread_count;
 }
 
+void log_noexcept_warning(const char* message) noexcept {
+    try {
+        spdlog::warn("{}", message);
+    } catch (...) {
+    }
+}
+
+void log_noexcept_warning(const char* message, const std::exception& e) noexcept {
+    try {
+        spdlog::warn("{}: {}", message, e.what());
+    } catch (...) {
+    }
+}
+
+void log_noexcept_error(const char* message) noexcept {
+    try {
+        spdlog::error("{}", message);
+    } catch (...) {
+    }
+}
+
+void log_noexcept_error(const char* message, const std::exception& e) noexcept {
+    try {
+        spdlog::error("{}: {}", message, e.what());
+    } catch (...) {
+    }
+}
+
 } // namespace
 
 namespace yams {
@@ -144,15 +172,9 @@ void GlobalIOContext::restart() {
             try {
                 t.join();
             } catch (const std::exception& e) {
-                try {
-                    spdlog::warn("[GlobalIOContext] restart join exception: {}", e.what());
-                } catch (...) {
-                }
+                log_noexcept_warning("[GlobalIOContext] restart join exception", e);
             } catch (...) {
-                try {
-                    spdlog::warn("[GlobalIOContext] restart join unknown exception");
-                } catch (...) {
-                }
+                log_noexcept_warning("[GlobalIOContext] restart join unknown exception");
             }
         }
     }
@@ -186,15 +208,9 @@ void GlobalIOContext::restart() {
                 try {
                     io_context_->run();
                 } catch (const std::exception& e) {
-                    try {
-                        spdlog::error("GlobalIOContext worker exception: {}", e.what());
-                    } catch (...) {
-                    }
+                    log_noexcept_error("GlobalIOContext worker exception", e);
                 } catch (...) {
-                    try {
-                        spdlog::error("GlobalIOContext worker unknown exception");
-                    } catch (...) {
-                    }
+                    log_noexcept_error("GlobalIOContext worker unknown exception");
                 }
             });
         }
@@ -209,7 +225,10 @@ void GlobalIOContext::restart() {
             if (worker.joinable()) {
                 try {
                     worker.join();
+                } catch (const std::exception& e) {
+                    log_noexcept_warning("[GlobalIOContext] failed to join startup worker", e);
                 } catch (...) {
+                    log_noexcept_warning("[GlobalIOContext] failed to join startup worker");
                 }
             }
         }
@@ -230,10 +249,7 @@ bool GlobalIOContext::safe_restart() noexcept {
         instance().restart();
         return true;
     } catch (...) {
-        try {
-            spdlog::warn("[GlobalIOContext] safe_restart caught exception");
-        } catch (...) {
-        }
+        log_noexcept_warning("[GlobalIOContext] safe_restart caught exception");
         return false;
     }
 }
@@ -268,15 +284,9 @@ void GlobalIOContext::ensure_initialized() {
                     try {
                         io_context_->run();
                     } catch (const std::exception& e) {
-                        try {
-                            spdlog::error("GlobalIOContext worker exception: {}", e.what());
-                        } catch (...) {
-                        }
+                        log_noexcept_error("GlobalIOContext worker exception", e);
                     } catch (...) {
-                        try {
-                            spdlog::error("GlobalIOContext worker unknown exception");
-                        } catch (...) {
-                        }
+                        log_noexcept_error("GlobalIOContext worker unknown exception");
                     }
                 });
             }
@@ -286,7 +296,10 @@ void GlobalIOContext::ensure_initialized() {
                 if (worker.joinable()) {
                     try {
                         worker.join();
+                    } catch (const std::exception& e) {
+                        log_noexcept_warning("[GlobalIOContext] failed to join init worker", e);
                     } catch (...) {
+                        log_noexcept_warning("[GlobalIOContext] failed to join init worker");
                     }
                 }
             }
@@ -318,11 +331,13 @@ GlobalIOContext::~GlobalIOContext() noexcept {
     try {
         ConnectionRegistry::instance().closeAll();
     } catch (...) {
+        log_noexcept_warning("[GlobalIOContext] closeAll threw during destruction");
     }
 
     try {
         AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
     } catch (...) {
+        log_noexcept_warning("[GlobalIOContext] shutdown_all threw during destruction");
     }
 
     // Now safe to stop the io_context
@@ -332,6 +347,7 @@ GlobalIOContext::~GlobalIOContext() noexcept {
             this->work_guard_.reset();
         }
     } catch (...) {
+        log_noexcept_warning("[GlobalIOContext] work_guard reset threw during destruction");
     }
 
     try {
@@ -339,13 +355,17 @@ GlobalIOContext::~GlobalIOContext() noexcept {
             io_context_->stop();
         }
     } catch (...) {
+        log_noexcept_warning("[GlobalIOContext] io_context stop threw during destruction");
     }
 
     for (auto& t : this->io_threads_) {
         if (t.joinable()) {
             try {
                 t.join();
+            } catch (const std::exception& e) {
+                log_noexcept_warning("[GlobalIOContext] destructor join exception", e);
             } catch (...) {
+                log_noexcept_warning("[GlobalIOContext] destructor join unknown exception");
             }
         }
     }

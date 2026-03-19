@@ -42,6 +42,27 @@
 namespace yams::daemon {
 
 namespace {
+void log_request_handler_debug(const char* message) noexcept {
+    try {
+        spdlog::debug("{}", message);
+    } catch (...) {
+    }
+}
+
+void log_request_handler_debug(const char* message, const std::exception& e) noexcept {
+    try {
+        spdlog::debug("{}: {}", message, e.what());
+    } catch (...) {
+    }
+}
+
+void log_request_handler_error(const char* message) noexcept {
+    try {
+        spdlog::error("{}", message);
+    } catch (...) {
+    }
+}
+
 bool is_client_disconnect(const std::string& msg) {
     return msg.find("Connection reset by peer") != std::string::npos ||
            msg.find("Broken pipe") != std::string::npos || msg.find("EPIPE") != std::string::npos ||
@@ -689,9 +710,11 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                                                       "(requestId={}): {}",
                                                       req_id, e.what());
                                     } catch (...) {
-                                        spdlog::error("Multiplexed request threw unknown exception "
-                                                      "(requestId={})",
-                                                      req_id);
+                                        log_request_handler_error(
+                                            ("Multiplexed request threw unknown exception "
+                                             "(requestId=" +
+                                             std::to_string(req_id) + ")")
+                                                .c_str());
                                     }
                                     co_return;
                                 },
@@ -769,10 +792,12 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
             std::chrono::duration_cast<std::chrono::milliseconds>(handler_end - handler_start)
                 .count();
         if (stream_trace) {
-            spdlog::error("stream-trace: [conn={}] handler_done (unknown exception) duration_ms={}",
-                          conn_token, duration_ms);
+            log_request_handler_error(
+                ("stream-trace: [conn=" + std::to_string(conn_token) +
+                 "] handler_done (unknown exception) duration_ms=" + std::to_string(duration_ms))
+                    .c_str());
         }
-        spdlog::error("RequestHandler::handle_connection unhandled unknown exception");
+        log_request_handler_error("RequestHandler::handle_connection unhandled unknown exception");
     }
 }
 
@@ -1152,7 +1177,9 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
             Response header_response;
             try {
                 header_response = response;
-            } catch (const std::exception&) {
+            } catch (const std::exception& ex) {
+                log_request_handler_debug(
+                    "handle_streaming_request: failed to copy response into streaming header", ex);
                 // If copy fails (e.g. variant holds non-copyable), create from scratch
                 if (std::holds_alternative<GetResponse>(response)) {
                     header_response = GetResponse{};
@@ -2240,11 +2267,12 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                       request_id, chunk_result.is_last_chunk);
         last_chunk_received = chunk_result.is_last_chunk;
         // Belt-and-suspenders: if the payload is an ErrorResponse, force this to be the last
-        try {
-            if (std::holds_alternative<ErrorResponse>(chunk_result.data)) {
-                last_chunk_received = true;
-            }
-        } catch (...) {
+        if (chunk_result.data.valueless_by_exception()) {
+            log_request_handler_debug(
+                "stream_chunks encountered valueless chunk variant; forcing last chunk");
+            last_chunk_received = true;
+        } else if (std::holds_alternative<ErrorResponse>(chunk_result.data)) {
+            last_chunk_received = true;
         }
 
         // Inspect chunk payload for common types to aid troubleshooting
@@ -2263,7 +2291,8 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                     }
                 },
                 chunk_result.data);
-        } catch (const std::exception&) {
+        } catch (const std::exception& ex) {
+            log_request_handler_debug("stream_chunks failed to inspect chunk payload", ex);
             // Defensive: treat unknown/valueless variants as keepalives
             item_count = 0;
         }

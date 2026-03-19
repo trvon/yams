@@ -103,12 +103,27 @@ bool ipc_wait_trace_enabled() {
     return enabled;
 }
 
+void log_pool_debug(const char* message) noexcept {
+    try {
+        spdlog::debug("{}", message);
+    } catch (...) {
+    }
+}
+
+void log_pool_debug(const char* message, const std::exception& e) noexcept {
+    try {
+        spdlog::debug("{}: {}", message, e.what());
+    } catch (...) {
+    }
+}
+
 int ipc_wait_warn_ms() {
     static const int warn_ms = [] {
         if (const char* raw = std::getenv("YAMS_IPC_WAIT_WARN_MS")) {
             try {
                 return std::max(1, std::stoi(raw));
-            } catch (...) {
+            } catch (const std::exception& e) {
+                log_pool_debug("Invalid YAMS_IPC_WAIT_WARN_MS value", e);
             }
         }
         return 250;
@@ -603,7 +618,10 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
                 try {
                     auto status = conn->read_loop_future.wait_for(effective_timeout);
                     (void)status;
+                } catch (const std::exception& e) {
+                    log_pool_debug("Timed wait on read loop future threw", e);
                 } catch (...) {
+                    log_pool_debug("Timed wait on read loop future threw unknown exception");
                 }
             }
         }
@@ -698,7 +716,10 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
             conn->socket->set_option(send_sz);
             conn->socket->set_option(recv_sz);
         }
+    } catch (const std::exception& e) {
+        log_pool_debug("Failed to tune socket buffer sizes", e);
     } catch (...) {
+        log_pool_debug("Failed to tune socket buffer sizes");
     }
 
     {
@@ -743,7 +764,10 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                std::future_status::ready) {
         try {
             conn->read_loop_future.get();
+        } catch (const std::exception& e) {
+            log_pool_debug("Previous read loop exited with exception", e);
         } catch (...) {
+            log_pool_debug("Previous read loop exited with unknown exception");
         }
         need_start = true;
     }
@@ -991,7 +1015,10 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                 msg.version, PROTOCOL_VERSION);
                             warned.store(true);
                         }
+                    } catch (const std::exception& e) {
+                        log_pool_debug("Failed to emit protocol version warning", e);
                     } catch (...) {
+                        log_pool_debug("Failed to emit protocol version warning");
                     }
                 }
                 uint64_t reqId = msg.requestId;
@@ -1028,7 +1055,10 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                 "the request timed out.",
                                 reqId);
                         }
+                    } catch (const std::exception& e) {
+                        log_pool_debug("Failed to log missing handler response", e);
                     } catch (...) {
+                        log_pool_debug("Failed to log missing handler response");
                     }
                     continue;
                 }

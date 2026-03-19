@@ -75,6 +75,20 @@ inline std::string sanitize_for_terminal(std::string_view in) {
     return out;
 }
 
+void log_client_debug(const char* message) noexcept {
+    try {
+        spdlog::debug("{}", message);
+    } catch (...) {
+    }
+}
+
+void log_client_debug(const char* message, const std::exception& e) noexcept {
+    try {
+        spdlog::debug("{}: {}", message, e.what());
+    } catch (...) {
+    }
+}
+
 // Request timeout categories for snappier UI on fast operations
 enum class TimeoutCategory { Fast, Medium, Slow };
 
@@ -288,7 +302,11 @@ std::filesystem::path resolveDataDirCached() {
                 if (line.empty())
                     return std::nullopt;
                 return fs::path(line);
+            } catch (const std::exception& e) {
+                log_client_debug("resolveDataDirCached: cache read failed", e);
+                return std::nullopt;
             } catch (...) {
+                log_client_debug("resolveDataDirCached: cache read failed");
                 return std::nullopt;
             }
         };
@@ -307,7 +325,10 @@ std::filesystem::path resolveDataDirCached() {
                 }
                 (void)::flock(fd, LOCK_UN);
                 ::close(fd);
+            } catch (const std::exception& e) {
+                log_client_debug("resolveDataDirCached: cache write failed", e);
             } catch (...) {
+                log_client_debug("resolveDataDirCached: cache write failed");
             }
         };
 
@@ -663,7 +684,11 @@ static bool pingDaemonSync(const std::filesystem::path& socketPath) {
                           path.string());
         }
         return false;
+    } catch (const std::exception& e) {
+        log_client_debug("DaemonClient::pingDaemonSync probe threw", e);
+        return false;
     } catch (...) {
+        log_client_debug("DaemonClient::pingDaemonSync probe threw");
         return false;
     }
 }

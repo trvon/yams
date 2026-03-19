@@ -6,8 +6,11 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include <array>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <random>
+#include <stdexcept>
 
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
@@ -43,12 +46,33 @@ public:
     }
 
     LifecycleSnapshot getLifecycleSnapshot() const override { return snapshot_; }
-    void setSubsystemDegraded(const std::string&, bool, const std::string&) override {}
+    void setSubsystemDegraded(const std::string& subsystem, bool degraded,
+                              const std::string& reason) override {
+        lastSubsystem_ = subsystem;
+        lastDegraded_ = degraded;
+        lastReason_ = reason;
+        setSubsystemDegradedCalls_++;
+    }
     void onDocumentRemoved(const std::string&) override {}
     void requestShutdown(bool, bool) override {}
 
+    const std::string& lastSubsystem() const { return lastSubsystem_; }
+    bool lastDegraded() const { return lastDegraded_; }
+    const std::string& lastReason() const { return lastReason_; }
+    int setSubsystemDegradedCalls() const { return setSubsystemDegradedCalls_; }
+    void resetDegradedState() {
+        lastSubsystem_.clear();
+        lastDegraded_ = false;
+        lastReason_.clear();
+        setSubsystemDegradedCalls_ = 0;
+    }
+
 private:
     LifecycleSnapshot snapshot_{};
+    std::string lastSubsystem_;
+    bool lastDegraded_{false};
+    std::string lastReason_;
+    int setSubsystemDegradedCalls_{0};
 };
 
 // Minimal stub provider for embedding tests
@@ -73,6 +97,9 @@ public:
         return ErrorCode::NotImplemented;
     }
     Result<void> loadModel(const std::string& modelName) override {
+        if (loadError_) {
+            return *loadError_;
+        }
         lastOptionsModel_.clear();
         lastOptionsJson_.clear();
         loaded_.push_back(modelName);
@@ -80,18 +107,31 @@ public:
     }
     Result<void> loadModelWithOptions(const std::string& modelName,
                                       const std::string& optionsJson) override {
+        if (loadError_) {
+            return *loadError_;
+        }
         lastOptionsModel_ = modelName;
         lastOptionsJson_ = optionsJson;
         loaded_.push_back(modelName);
         return Result<void>();
     }
-    Result<void> unloadModel(const std::string&) override { return Result<void>(); }
+    Result<void> unloadModel(const std::string& modelName) override {
+        auto it = std::find(loaded_.begin(), loaded_.end(), modelName);
+        if (it == loaded_.end()) {
+            return ErrorCode::NotFound;
+        }
+        loaded_.erase(it);
+        return Result<void>();
+    }
     bool isModelLoaded(const std::string& modelName) const override {
         return std::find(loaded_.begin(), loaded_.end(), modelName) != loaded_.end();
     }
     std::vector<std::string> getLoadedModels() const override { return loaded_; }
     size_t getLoadedModelCount() const override { return loaded_.size(); }
     Result<ModelInfo> getModelInfo(const std::string& modelName) const override {
+        if (failModelInfo_) {
+            return ErrorCode::NotFound;
+        }
         if (!isModelLoaded(modelName))
             return ErrorCode::NotFound;
         ModelInfo mi;
@@ -108,12 +148,21 @@ public:
     std::string getProviderName() const override { return "StubProvider"; }
     std::string getProviderVersion() const override { return "vtest"; }
     bool isAvailable() const override { return available_; }
-    size_t getMemoryUsage() const override { return 0; }
+    size_t getMemoryUsage() const override {
+        if (throwOnMemoryUsage_) {
+            throw std::runtime_error("memory boom");
+        }
+        return 0;
+    }
     void releaseUnusedResources() override {}
     void shutdown() override {}
     void setAvailable(bool available) { available_ = available; }
     const std::string& lastOptionsModel() const { return lastOptionsModel_; }
     const std::string& lastOptionsJson() const { return lastOptionsJson_; }
+    void setLoadError(Error error) { loadError_ = std::move(error); }
+    void clearLoadError() { loadError_.reset(); }
+    void setThrowOnMemoryUsage(bool enabled) { throwOnMemoryUsage_ = enabled; }
+    void setFailModelInfo(bool enabled) { failModelInfo_ = enabled; }
 
 private:
     size_t dim_;
@@ -122,6 +171,35 @@ private:
     std::vector<std::string> loaded_;
     std::string lastOptionsModel_;
     std::string lastOptionsJson_;
+    std::optional<Error> loadError_;
+    bool throwOnMemoryUsage_{false};
+    bool failModelInfo_{false};
+};
+
+class EnvGuard {
+public:
+    EnvGuard(const char* name, const char* value) : name_(name) {
+        if (const char* current = std::getenv(name_)) {
+            original_ = current;
+        }
+        if (value) {
+            ::setenv(name_, value, 1);
+        } else {
+            ::unsetenv(name_);
+        }
+    }
+
+    ~EnvGuard() {
+        if (original_) {
+            ::setenv(name_, original_->c_str(), 1);
+        } else {
+            ::unsetenv(name_);
+        }
+    }
+
+private:
+    const char* name_;
+    std::optional<std::string> original_;
 };
 
 std::filesystem::path makeTempDir(const std::string& prefix) {
@@ -511,6 +589,57 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         CHECK(provider->lastOptionsJson() == req.optionsJson);
     }
 
+    SECTION("load model failure marks embedding degraded") {
+        auto provider = std::make_shared<StubModelProvider>(384, "/tmp/failing-model.onnx");
+        provider->setLoadError(Error{ErrorCode::InvalidState, "provider refused load"});
+        svc.__test_setModelProvider(provider);
+        lifecycle.resetDegradedState();
+
+        LoadModelRequest req;
+        req.modelName = "failing-model";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidState);
+        CHECK(err.message == "provider refused load");
+        CHECK(lifecycle.setSubsystemDegradedCalls() == 1);
+        CHECK(lifecycle.lastSubsystem() == "embedding");
+        CHECK(lifecycle.lastDegraded());
+        CHECK(lifecycle.lastReason() == "provider_load_failed");
+    }
+
+    SECTION("load model honors timeout env floor") {
+        auto provider = std::make_shared<StubModelProvider>(384, "/tmp/timeout-model.onnx");
+        svc.__test_setModelProvider(provider);
+        EnvGuard timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "5");
+
+        LoadModelRequest req;
+        req.modelName = "timeout-clamped-model";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ModelLoadResponse>(resp));
+        CHECK(std::get<ModelLoadResponse>(resp).success);
+        CHECK(provider->isModelLoaded("timeout-clamped-model"));
+    }
+
+    SECTION("load model survives invalid timeout env value") {
+        auto provider = std::make_shared<StubModelProvider>(384, "/tmp/timeout-invalid.onnx");
+        svc.__test_setModelProvider(provider);
+        EnvGuard timeoutGuard("YAMS_MODEL_LOAD_TIMEOUT_MS", "not-a-number");
+
+        LoadModelRequest req;
+        req.modelName = "timeout-invalid-model";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ModelLoadResponse>(resp));
+        CHECK(std::get<ModelLoadResponse>(resp).success);
+        CHECK(provider->isModelLoaded("timeout-invalid-model"));
+    }
+
     SECTION("unload model rejects missing name") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
         svc.__test_setModelProvider(provider);
@@ -522,6 +651,20 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::InvalidData);
         CHECK(err.message == "modelName is required");
+    }
+
+    SECTION("unload model propagates provider missing-model error") {
+        auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
+        svc.__test_setModelProvider(provider);
+
+        UnloadModelRequest req;
+        req.modelName = "missing-model";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotFound);
     }
 
     SECTION("model status returns loaded model details and filters by name") {
@@ -542,6 +685,23 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         CHECK(statusResp.models.front().embeddingDim == 512);
     }
 
+    SECTION("model status handles model info lookup failure") {
+        auto provider = std::make_shared<StubModelProvider>(256, "/tmp/status-fallback.onnx");
+        REQUIRE(provider->loadModel("status-fallback").has_value());
+        provider->setFailModelInfo(true);
+        svc.__test_setModelProvider(provider);
+
+        auto resp = dispatchRequest(dispatcher, Request{ModelStatusRequest{}});
+
+        REQUIRE(std::holds_alternative<ModelStatusResponse>(resp));
+        const auto& statusResp = std::get<ModelStatusResponse>(resp);
+        REQUIRE(statusResp.models.size() == 1);
+        CHECK(statusResp.models.front().name == "status-fallback");
+        CHECK(statusResp.models.front().memoryMb == 0);
+        CHECK(statusResp.models.front().maxSequenceLength == 0);
+        CHECK(statusResp.models.front().embeddingDim == 256);
+    }
+
     SECTION("model status returns empty response when provider unavailable") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
         provider->setAvailable(false);
@@ -553,6 +713,20 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         const auto& statusResp = std::get<ModelStatusResponse>(resp);
         CHECK(statusResp.models.empty());
         CHECK(statusResp.totalMemoryMb == 0);
+    }
+
+    SECTION("model status converts provider exceptions into internal errors") {
+        auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
+        REQUIRE(provider->loadModel("status-throw").has_value());
+        provider->setThrowOnMemoryUsage(true);
+        svc.__test_setModelProvider(provider);
+
+        auto resp = dispatchRequest(dispatcher, Request{ModelStatusRequest{}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("memory boom") != std::string::npos);
     }
 }
 
@@ -588,6 +762,110 @@ TEST_CASE("RequestDispatcher: graph maintenance handlers report missing graph co
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::InternalError);
         CHECK(err.message.find("GraphComponent not available") != std::string::npos);
+    }
+}
+
+TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches",
+          "[daemon][plugin][dispatcher]") {
+    auto makeReadyService = []() {
+        DaemonConfig cfg;
+        cfg.dataDir = makeTempDir("yams_plugin_dispatcher_");
+
+        auto state = std::make_unique<StateComponent>();
+        state->readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state->readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+
+        auto lifecycleFsm = std::make_unique<DaemonLifecycleFsm>();
+        auto svc = std::make_unique<ServiceManager>(cfg, *state, *lifecycleFsm);
+        svc->__test_pluginScanComplete(0);
+        REQUIRE(svc->getPluginHostFsmSnapshot().state == PluginHostState::Ready);
+
+        return std::tuple{std::move(state), std::move(lifecycleFsm), std::move(svc)};
+    };
+
+    SECTION("plugin handlers reject non-ready host state") {
+        auto [state, lifecycleFsm, svc] = makeReadyService();
+        StubLifecycle lifecycle;
+        RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
+
+        svc->__test_pluginLoadFailed("simulated plugin init failure");
+
+        auto resp = dispatchRequest(dispatcher, Request{PluginTrustListRequest{}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidState);
+        CHECK(err.message == "Plugin subsystem not ready (state=failed)");
+    }
+
+    SECTION("plugin load dry run reports missing plugin") {
+        auto [state, lifecycleFsm, svc] = makeReadyService();
+        StubLifecycle lifecycle;
+        RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
+
+        PluginLoadRequest req;
+        req.pathOrName = (svc->getResolvedDataDir() / "missing_plugin.py").string();
+        req.dryRun = true;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotFound);
+        CHECK(err.message == "Plugin not found");
+    }
+
+    SECTION("plugin scan and load search default directories") {
+        auto homeDir = makeTempDir("yams_plugin_home_");
+        auto homeText = homeDir.string();
+        EnvGuard homeGuard("HOME", homeText.c_str());
+
+        auto [state, lifecycleFsm, svc] = makeReadyService();
+        StubLifecycle lifecycle;
+        RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
+
+        auto abiDir = homeDir / ".local" / "lib" / "yams" / "plugins";
+        std::filesystem::create_directories(abiDir);
+
+        auto fakePlugin = abiDir / "yams_default_scan.so";
+        {
+            std::ofstream out(fakePlugin, std::ios::binary);
+            out << "not a valid plugin";
+        }
+
+        auto missingResp = dispatchRequest(
+            dispatcher, Request{PluginLoadRequest{"missing_default_plugin.so", "", false}});
+        REQUIRE(std::holds_alternative<ErrorResponse>(missingResp));
+        const auto& missingErr = std::get<ErrorResponse>(missingResp);
+        CHECK(missingErr.code == ErrorCode::NotFound);
+        CHECK(missingErr.message == "Plugin not found");
+
+        auto scanResp = dispatchRequest(dispatcher, Request{PluginScanRequest{}});
+        REQUIRE(std::holds_alternative<PluginScanResponse>(scanResp));
+        const auto& scan = std::get<PluginScanResponse>(scanResp);
+
+        bool foundDefaultPlugin = false;
+        for (const auto& record : scan.plugins) {
+            if (record.path == fakePlugin.string()) {
+                foundDefaultPlugin = true;
+                CHECK(record.name == "yams_default_scan");
+            }
+        }
+        CHECK(foundDefaultPlugin);
+
+        auto trustResp =
+            dispatchRequest(dispatcher, Request{PluginTrustAddRequest{abiDir.string()}});
+        REQUIRE(std::holds_alternative<SuccessResponse>(trustResp));
+
+        PluginLoadRequest req;
+        req.pathOrName = fakePlugin.filename().string();
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message == "Plugin load failed for: " + fakePlugin.string());
     }
 }
 
