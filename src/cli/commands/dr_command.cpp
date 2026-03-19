@@ -56,9 +56,15 @@ private:
             boost::asio::co_spawn(
                 getExecutor(),
                 [leaseHandle, req, &prom]() mutable -> boost::asio::awaitable<void> {
-                    auto& client = **leaseHandle;
-                    auto r = co_await client.call(req);
-                    prom.set_value(std::move(r));
+                    try {
+                        auto& client = **leaseHandle;
+                        auto r = co_await client.call(req);
+                        prom.set_value(std::move(r));
+                    } catch (const std::exception& e) {
+                        prom.set_value(Error{ErrorCode::InternalError, e.what()});
+                    } catch (...) {
+                        prom.set_value(Error{ErrorCode::InternalError, "unknown daemon error"});
+                    }
                     co_return;
                 },
                 boost::asio::detached);
@@ -89,7 +95,8 @@ private:
                     }
                 }
             }
-        } catch (...) {
+        } catch (const std::exception& e) {
+            spdlog::warn("DR gate probe failed: {}", e.what());
         }
 
         if (hasObj && hasDr) {

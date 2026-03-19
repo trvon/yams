@@ -492,8 +492,16 @@ public:
             try {
                 co_return fallback ? fallback()
                                    : Error{ErrorCode::ResourceBusy, "Pool unavailable"};
+            } catch (const std::exception& e) {
+                spdlog::warn("[PooledRequestManager] Fallback threw after pool acquire failure: {}",
+                             e.what());
+                co_return Error{ErrorCode::InternalError,
+                                std::string("Fallback threw: ") + e.what()};
             } catch (...) {
-                co_return Error{ErrorCode::InternalError, "Fallback threw an exception"};
+                spdlog::warn(
+                    "[PooledRequestManager] Fallback threw unknown exception after pool acquire "
+                    "failure");
+                co_return Error{ErrorCode::InternalError, "Fallback threw unknown exception"};
             }
         }
 
@@ -617,9 +625,17 @@ public:
                 "[PooledRequestManager/async] Fallback path failed after daemon error: {}",
                 fb.error().message);
             co_return fb;
+        } catch (const std::exception& e) {
+            fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
+            spdlog::warn("[PooledRequestManager/async] Fallback threw after daemon failure: {}",
+                         e.what());
+            co_return Error{ErrorCode::InternalError, std::string("Fallback threw: ") + e.what()};
         } catch (...) {
             fallbacks_failed_.fetch_add(1, std::memory_order_relaxed);
-            co_return Error{ErrorCode::InternalError, "Fallback threw an exception"};
+            spdlog::warn(
+                "[PooledRequestManager/async] Fallback threw unknown exception after daemon "
+                "failure");
+            co_return Error{ErrorCode::InternalError, "Fallback threw unknown exception"};
         }
     }
 

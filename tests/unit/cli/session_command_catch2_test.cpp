@@ -8,7 +8,9 @@
 #include <yams/cli/yams_cli.h>
 
 #include <filesystem>
+#include <iostream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -67,31 +69,48 @@ struct CliTestHelper {
     }
 };
 
+class CaptureStdout {
+public:
+    CaptureStdout() : oldCout_(std::cout.rdbuf(buffer_.rdbuf())) {}
+    ~CaptureStdout() { std::cout.rdbuf(oldCout_); }
+
+    std::string str() const { return buffer_.str(); }
+
+    CaptureStdout(const CaptureStdout&) = delete;
+    CaptureStdout& operator=(const CaptureStdout&) = delete;
+
+private:
+    std::ostringstream buffer_;
+    std::streambuf* oldCout_;
+};
+
 } // namespace
 
 TEST_CASE("SessionCommand - diff subcommand parses", "[cli][session][catch2][.daemon_required]") {
-    // SKIP: This test causes process cleanup crash on Windows due to daemon client
-    // state not being properly cleaned up when daemon is not running.
-    SKIP("Causes cleanup crash on Windows - daemon client state issue");
-
     CliTestHelper helper;
+    CaptureStdout capture;
 
-    // Parsing should succeed (command may fail if no daemon, but should not crash)
-    (void)helper.runCommand({"yams", "session", "diff", "--json"});
-    SUCCEED();
+    const int rc = helper.runCommand({"yams", "session", "diff", "--json"});
+
+    CHECK(rc == 0);
+    CHECK(capture.str().find("terminate") == std::string::npos);
 }
 
 TEST_CASE("SessionCommand - warm parses with budgets", "[cli][session][catch2][.daemon_required]") {
-    // SKIP: This test causes process cleanup crash on Windows due to daemon client
-    // state not being properly cleaned up when daemon is not running.
-    // The test itself passes, but the cleanup causes access violation.
-    SKIP("Causes cleanup crash on Windows - daemon client state issue");
-
     CliTestHelper helper;
+    CaptureStdout capture;
 
-    // Ensure CLI constructs and registers commands without throwing
-    // Return code may be non-zero due to environment (no daemon)
-    (void)helper.runCommand(
+    const int startRc = helper.runCommand({"yams", "session", "start", "warm-test"});
+    REQUIRE(startRc == 0);
+
+    const int useRc = helper.runCommand({"yams", "session", "use", "warm-test"});
+    REQUIRE(useRc == 0);
+
+    const int warmRc = helper.runCommand(
         {"yams", "session", "warm", "--limit", "10", "--cores", "2", "--snippet-len", "80"});
-    SUCCEED();
+
+    CHECK(warmRc == 0);
+    const auto output = capture.str();
+    CHECK((output.find("Warming (daemon) requested.") != std::string::npos ||
+           output.find("Warmed (local)") != std::string::npos));
 }

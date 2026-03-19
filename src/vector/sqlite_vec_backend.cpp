@@ -93,6 +93,16 @@ inline size_t hnswCheckpointThreshold(size_t configuredThreshold) {
     return fallback;
 }
 
+inline bool hnswDeferUpdatesEnabled() {
+    if (const char* env = std::getenv("YAMS_HNSW_DEFER_UPDATES")) {
+        std::string value(env);
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }
+    return false;
+}
+
 // ============================================================================
 // Libsql-aware database helpers
 // ============================================================================
@@ -584,6 +594,15 @@ public:
 
         int64_t rowid = rowid_result.value();
 
+        if (hnswDeferUpdatesEnabled()) {
+            hnsw_indices_.clear();
+            hnsw_dirty_.clear();
+            hnsw_loaded_ = false;
+            hnsw_needs_rebuild_ = true;
+            pending_inserts_ = 0;
+            return Result<void>{};
+        }
+
         // Skip HNSW insertion for zero-norm vectors (they become dead-ends in the graph)
         if (isZeroNormEmbedding(record.embedding)) {
             spdlog::warn("[HNSW] Skipping zero-norm vector for chunk_id={} (stored in SQLite only)",
@@ -700,6 +719,21 @@ public:
         // Commit transaction with retry
         if (!execWithRetry(db_, "COMMIT")) {
             return Error{ErrorCode::DatabaseError, "Failed to commit transaction"};
+        }
+
+        if (hnswDeferUpdatesEnabled()) {
+            hnsw_indices_.clear();
+            hnsw_dirty_.clear();
+            hnsw_loaded_ = false;
+            hnsw_needs_rebuild_ = true;
+            pending_inserts_ = 0;
+            if (skipped_existing > 0 || skipped_duplicates > 0 || updated_existing > 0) {
+                spdlog::warn("[HNSW] Batch summary (deferred): inserted={}, updated_existing={}, "
+                             "skipped_existing={}, skipped_duplicates={}",
+                             inserted_count, updated_existing, skipped_existing,
+                             skipped_duplicates);
+            }
+            return Result<void>{};
         }
 
         // Insert into HNSW (dimension-specific indices)
@@ -879,6 +913,15 @@ public:
         auto rowid_result = insertVectorUnlocked(record);
         if (!rowid_result) {
             return rowid_result.error();
+        }
+
+        if (hnswDeferUpdatesEnabled()) {
+            hnsw_indices_.clear();
+            hnsw_dirty_.clear();
+            hnsw_loaded_ = false;
+            hnsw_needs_rebuild_ = true;
+            pending_inserts_ = 0;
+            return Result<void>{};
         }
 
         int64_t new_rowid = rowid_result.value();
@@ -2357,6 +2400,7 @@ private:
     // Discovers existing dimension-specific tables and loads each index
     // If force_rebuild is true, skips loading from persisted tables and rebuilds from vectors table
     void ensureHnswLoadedUnlocked(bool force_rebuild = false) {
+        force_rebuild = force_rebuild || hnsw_needs_rebuild_;
         if (hnsw_loaded_ && !force_rebuild) {
             // Already loaded - log occasionally for diagnostics
             static std::atomic<uint64_t> skip_counter{0};
@@ -2516,6 +2560,7 @@ private:
         }
 
         hnsw_loaded_ = true;
+        hnsw_needs_rebuild_ = false;
     }
 
     // Save all HNSW indices to disk
@@ -2646,6 +2691,7 @@ private:
     std::unordered_map<size_t, std::unique_ptr<HNSWIndex>> hnsw_indices_;
     std::unordered_map<size_t, bool> hnsw_dirty_; // Track dirty state per dimension
     bool hnsw_loaded_ = false;
+    bool hnsw_needs_rebuild_ = false;
     size_t pending_inserts_ = 0;
 
     // Helper to get table prefix for dimension-specific HNSW tables

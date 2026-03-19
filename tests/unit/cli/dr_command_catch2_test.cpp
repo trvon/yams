@@ -1,11 +1,5 @@
-// CLI Model Command tests
-// Catch2 migration from GTest (yams-3s4 / yams-cli)
-//
-// Tests for model command CLI parsing.
-
 #include <catch2/catch_test_macros.hpp>
 
-#include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
 
 #include <filesystem>
@@ -15,16 +9,12 @@
 #include <string>
 #include <vector>
 
-// Include test helpers for ScopedEnvVar
 #include "../../common/test_helpers_catch2.h"
 
 namespace fs = std::filesystem;
 
 namespace {
 
-/**
- * RAII helper for CLI tests with proper isolation and cleanup.
- */
 struct CliTestHelper {
     fs::path tempDir;
     std::optional<yams::test::ScopedEnvVar> configEnv;
@@ -33,14 +23,13 @@ struct CliTestHelper {
     std::optional<yams::test::ScopedEnvVar> disableDaemonEnv;
 
     CliTestHelper() {
-        tempDir = yams::test::make_temp_dir("yams_cli_catch2_test_");
+        tempDir = yams::test::make_temp_dir("yams_cli_dr_catch2_test_");
         fs::create_directories(tempDir);
 
         configEnv.emplace("YAMS_CONFIG", (tempDir / "config.toml").string());
         dataEnv.emplace("YAMS_DATA_DIR", (tempDir / "data").string());
         nonInteractiveEnv.emplace(std::string("YAMS_NON_INTERACTIVE"),
                                   std::optional<std::string>("1"));
-        // Disable daemon autostart to prevent cleanup crashes
         disableDaemonEnv.emplace(std::string("YAMS_CLI_DISABLE_DAEMON_AUTOSTART"),
                                  std::optional<std::string>("1"));
     }
@@ -55,12 +44,8 @@ struct CliTestHelper {
         fs::remove_all(tempDir, ec);
     }
 
-    std::unique_ptr<yams::cli::YamsCLI> makeCli() const {
-        return std::make_unique<yams::cli::YamsCLI>();
-    }
-
     int runCommand(const std::vector<std::string>& args) {
-        auto cli = makeCli();
+        auto cli = std::make_unique<yams::cli::YamsCLI>();
         std::vector<char*> argv;
         argv.reserve(args.size());
         for (const auto& arg : args) {
@@ -87,42 +72,13 @@ private:
 
 } // namespace
 
-TEST_CASE("ModelCommand - list flag parses and runs", "[cli][model][catch2]") {
-    CliTestHelper helper;
-
-    // Test --list flag
-    int rc = helper.runCommand({"yams", "model", "--list"});
-    CHECK(rc == 0);
-}
-
-TEST_CASE("ModelCommand - info flag parses without crash", "[cli][model][catch2]") {
-    CliTestHelper helper;
-
-    // Test --info flag (may return non-zero if model not installed, but should not crash)
-    (void)helper.runCommand({"yams", "model", "--info", "all-MiniLM-L6-v2"});
-    SUCCEED();
-}
-
-TEST_CASE("ModelCommand - provider handles unavailable daemon without crashing",
-          "[cli][model][catch2]") {
+TEST_CASE("DrCommand - status shows plugin gate guidance without daemon", "[cli][dr][catch2]") {
     CliTestHelper helper;
     CaptureStdout capture;
 
-    const int rc = helper.runCommand({"yams", "model", "provider"});
+    const int rc = helper.runCommand({"yams", "dr", "status"});
 
     CHECK(rc == 0);
-    CHECK(capture.str().find("Model Provider") != std::string::npos);
-}
-
-TEST_CASE("ModelCommand - list with daemon details enabled falls back cleanly",
-          "[cli][model][catch2]") {
-    CliTestHelper helper;
-    yams::test::ScopedEnvVar daemonListEnv("YAMS_MODEL_LIST_WITH_DAEMON",
-                                           std::optional<std::string>("1"));
-    CaptureStdout capture;
-
-    const int rc = helper.runCommand({"yams", "model", "--list"});
-
-    CHECK(rc == 0);
-    CHECK(capture.str().find("Available ONNX Models:") != std::string::npos);
+    CHECK(capture.str().find("Requires dr_provider_v1 + object_storage_v1 plugin.") !=
+          std::string::npos);
 }

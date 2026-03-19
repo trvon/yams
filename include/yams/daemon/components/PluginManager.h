@@ -7,6 +7,7 @@
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/IComponent.h>
 #include <yams/daemon/components/PluginHostFsm.h>
+#include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/plugin_host.h>
 
 #include <boost/asio/any_io_executor.hpp>
@@ -35,7 +36,6 @@ class AbiPluginHost;
 class AbiEntityExtractorAdapter;
 class AbiSymbolExtractorAdapter;
 class DaemonLifecycleFsm;
-class ExternalPluginHost;
 class IModelProvider;
 class PostIngestQueue;
 struct StateComponent;
@@ -317,6 +317,26 @@ public:
         }
     }
 
+    void dispatchPluginScanStarted(std::size_t directoryCount) {
+        try {
+            pluginHostFsm_.dispatch(PluginScanStartedEvent{directoryCount});
+        } catch (const std::exception&) {
+            ignoreFsmDispatchFailure();
+        } catch (...) {
+            ignoreFsmDispatchFailure();
+        }
+    }
+
+    void dispatchPluginLoaded(const std::string& name) {
+        try {
+            pluginHostFsm_.dispatch(PluginLoadedEvent{name});
+        } catch (const std::exception&) {
+            ignoreFsmDispatchFailure();
+        } catch (...) {
+            ignoreFsmDispatchFailure();
+        }
+    }
+
     /**
      * @brief Set cached model count (for status snapshot).
      */
@@ -330,6 +350,10 @@ public:
     void __test_setModelProvider(std::shared_ptr<IModelProvider> provider) {
         modelProvider_ = std::move(provider);
     }
+    void __test_setExternalPluginHost(std::unique_ptr<ExternalPluginHost> host) {
+        externalHost_ = std::move(host);
+    }
+    void __test_setSharedPluginHost(AbiPluginHost* host) { sharedPluginHost_ = host; }
     void __test_pluginLoadFailed(const std::string& error);
     void __test_pluginScanComplete(std::size_t count);
 #endif

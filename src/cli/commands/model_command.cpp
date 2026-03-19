@@ -475,9 +475,15 @@ public:
                 boost::asio::co_spawn(
                     getExecutor(),
                     [leaseHandle, msr, &prom]() mutable -> boost::asio::awaitable<void> {
-                        auto& client = **leaseHandle;
-                        auto r = co_await client.call(msr);
-                        prom.set_value(std::move(r));
+                        try {
+                            auto& client = **leaseHandle;
+                            auto r = co_await client.call(msr);
+                            prom.set_value(std::move(r));
+                        } catch (const std::exception& e) {
+                            prom.set_value(Error{ErrorCode::InternalError, e.what()});
+                        } catch (...) {
+                            prom.set_value(Error{ErrorCode::InternalError, "unknown daemon error"});
+                        }
                         co_return;
                     },
                     boost::asio::detached);
@@ -606,9 +612,16 @@ private:
                     boost::asio::co_spawn(
                         getExecutor(),
                         [leaseHandle, msr, &prom]() mutable -> boost::asio::awaitable<void> {
-                            auto& client = **leaseHandle;
-                            auto r = co_await client.getModelStatus(msr);
-                            prom.set_value(std::move(r));
+                            try {
+                                auto& client = **leaseHandle;
+                                auto r = co_await client.getModelStatus(msr);
+                                prom.set_value(std::move(r));
+                            } catch (const std::exception& e) {
+                                prom.set_value(Error{ErrorCode::InternalError, e.what()});
+                            } catch (...) {
+                                prom.set_value(
+                                    Error{ErrorCode::InternalError, "unknown daemon error"});
+                            }
                             co_return;
                         },
                         boost::asio::detached);
@@ -630,7 +643,10 @@ private:
                             activeLines.push_back(ln.str());
                         }
                     }
-                } catch (...) {
+                } catch (const std::exception& e) {
+                    spdlog::warn("model list: daemon path threw, continuing without active model "
+                                 "details: {}",
+                                 e.what());
                 }
             }
         }
@@ -685,7 +701,10 @@ private:
                             }
                         }
                     }
-                } catch (...) {
+                } catch (const std::exception& e) {
+                    spdlog::warn(
+                        "model status: daemon query threw, continuing with local state: {}",
+                        e.what());
                 }
                 std::cout << "  " << m.name << " (installed";
                 if (m.size_mb)

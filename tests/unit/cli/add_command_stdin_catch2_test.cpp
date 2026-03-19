@@ -23,11 +23,32 @@
 
 namespace fs = std::filesystem;
 
-TEST_CASE("AddCommand - reads from piped stdin and stores content",
-          "[cli][add][stdin][catch2][!mayfail]") {
+namespace {
+
+auto findBuiltYamsCli() -> fs::path {
+    const fs::path cwd = fs::current_path();
+    const std::vector<fs::path> candidates = {
+        cwd / "build" / "coverage" / "tools" / "yams-cli" / "yams-cli",
+        cwd / "build" / "release" / "tools" / "yams-cli" / "yams-cli",
+        cwd / "build" / "debug" / "tools" / "yams-cli" / "yams-cli",
+    };
+    for (const auto& candidate : candidates) {
+        if (fs::exists(candidate)) {
+            return candidate;
+        }
+    }
+    return {};
+}
+
+} // namespace
+
+TEST_CASE("AddCommand - reads from piped stdin and stores content", "[cli][add][stdin][catch2]") {
 #ifdef _WIN32
     SKIP("Test requires Unix shell with 'cat' and pipe support");
 #else
+    const fs::path yamsCli = findBuiltYamsCli();
+    REQUIRE_FALSE(yamsCli.empty());
+
     const std::string payload = "line1\nline2\n\tindent\n";
 
     fs::path tmp = fs::temp_directory_path() / ("yams_add_stdin_" + std::to_string(::getpid()));
@@ -42,21 +63,10 @@ TEST_CASE("AddCommand - reads from piped stdin and stores content",
         o << payload;
     }
 
-    // Prefer the freshly built yams-cli when available; fall back to PATH.
     fs::path out = tmp / "out.json";
-    const fs::path builtYams =
-        fs::current_path() / "build" / "release" / "tools" / "yams-cli" / "yams-cli";
-    const std::string yamsBin = fs::exists(builtYams) ? builtYams.string() : std::string("yams");
-    std::string cmd = "cat '" + in.string() + "' | '" + yamsBin +
+    std::string cmd = "cat '" + in.string() + "' | '" + yamsCli.string() +
                       "' --json add - --name piped.txt > '" + out.string() + "'";
     int rc = std::system(cmd.c_str());
-
-    if (rc == -1 || (WIFEXITED(rc) && WEXITSTATUS(rc) == 127)) {
-        // Cleanup temp directory
-        std::error_code ec;
-        fs::remove_all(tmp, ec);
-        SKIP("yams binary not available in PATH for CLI test");
-    }
     REQUIRE(WIFEXITED(rc));
     CHECK(WEXITSTATUS(rc) == 0);
 
@@ -67,10 +77,13 @@ TEST_CASE("AddCommand - reads from piped stdin and stores content",
         std::string content((std::istreambuf_iterator<char>(i)), std::istreambuf_iterator<char>());
         REQUIRE(!content.empty());
 
-        // Some invocations might print non-JSON lines; ensure we parse from the first '{'.
-        auto pos = content.find('{');
-        REQUIRE(pos != std::string::npos);
-        content = content.substr(pos);
+        // Some invocations may prepend or append non-JSON lines; isolate the JSON object.
+        const auto first = content.find('{');
+        const auto last = content.rfind('}');
+        REQUIRE(first != std::string::npos);
+        REQUIRE(last != std::string::npos);
+        REQUIRE(last >= first);
+        content = content.substr(first, last - first + 1);
 
         nlohmann::json j;
         REQUIRE_NOTHROW(j = nlohmann::json::parse(content));

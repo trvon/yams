@@ -430,6 +430,11 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         spdlog::debug("[Startup] deferring vector DB init to async phase");
 
         if (abiHost_) {
+            bool strictPluginDirMode = config_.pluginDirStrict;
+            if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
+                strictPluginDirMode = ConfigResolver::envTruthy(envStrict);
+            }
+
             // Trust from env
             if (const char* env = std::getenv("YAMS_PLUGIN_DIR")) {
                 try {
@@ -488,22 +493,27 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             }
 
             // Trust explicit entries from config ([plugins].trusted_paths or daemon.trusted_paths)
-            for (const auto& p : config_.trustedPluginPaths) {
-                if (auto tr = abiHost_->trustAdd(p); !tr) {
-                    spdlog::warn("Failed to trust configured plugin path {}: {}", p.string(),
-                                 tr.error().message);
-                } else {
-                    spdlog::debug("Trusted configured plugin path {}", p.string());
+            // unless strict plugin-dir mode is enabled, in which case only the explicit pluginDir
+            // / YAMS_PLUGIN_DIR roots should be trusted.
+            if (!strictPluginDirMode) {
+                for (const auto& p : config_.trustedPluginPaths) {
+                    if (auto tr = abiHost_->trustAdd(p); !tr) {
+                        spdlog::warn("Failed to trust configured plugin path {}: {}", p.string(),
+                                     tr.error().message);
+                    } else {
+                        spdlog::debug("Trusted configured plugin path {}", p.string());
+                    }
                 }
+            } else if (!config_.trustedPluginPaths.empty()) {
+                spdlog::info(
+                    "Strict plugin-dir mode enabled; skipping {} configured trusted plugin "
+                    "path(s)",
+                    config_.trustedPluginPaths.size());
             }
 
             // Trust system install location unless strict plugin-dir mode is enabled.
 #ifdef YAMS_INSTALL_PREFIX
             namespace fs = std::filesystem;
-            bool strictPluginDirMode = config_.pluginDirStrict;
-            if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
-                strictPluginDirMode = ConfigResolver::envTruthy(envStrict);
-            }
             if (!strictPluginDirMode) {
                 fs::path system_plugins =
                     fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins";

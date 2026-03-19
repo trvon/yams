@@ -15,8 +15,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <optional>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "../../common/test_helpers_catch2.h"
 
@@ -116,6 +119,36 @@ struct ConfigCommandFixture {
     }
 };
 
+class CaptureStdout {
+public:
+    CaptureStdout() : oldCout_(std::cout.rdbuf(buffer_.rdbuf())) {}
+    ~CaptureStdout() { std::cout.rdbuf(oldCout_); }
+
+    std::string str() const { return buffer_.str(); }
+
+    CaptureStdout(const CaptureStdout&) = delete;
+    CaptureStdout& operator=(const CaptureStdout&) = delete;
+
+private:
+    std::ostringstream buffer_;
+    std::streambuf* oldCout_;
+};
+
+auto findBuiltYamsCli() -> fs::path {
+    const fs::path cwd = fs::current_path();
+    const std::vector<fs::path> candidates = {
+        cwd / "build" / "coverage" / "tools" / "yams-cli" / "yams-cli",
+        cwd / "build" / "release" / "tools" / "yams-cli" / "yams-cli",
+        cwd / "build" / "debug" / "tools" / "yams-cli" / "yams-cli",
+    };
+    for (const auto& candidate : candidates) {
+        if (fs::exists(candidate)) {
+            return candidate;
+        }
+    }
+    return {};
+}
+
 } // namespace
 
 TEST_CASE("ConfigCommand - set model finds model in XDG data home",
@@ -132,19 +165,24 @@ TEST_CASE("ConfigCommand - set model finds model in XDG data home",
 
 TEST_CASE("ConfigCommand - set model fails for missing model",
           "[cli][config][embeddings][catch2][.death_test]") {
-    // SKIP: This test cannot be run in Catch2 because the CLI command calls std::exit(1)
-    // on failure, which terminates the entire test process. The original GTest test used
-    // ASSERT_EXIT which forks a new process. Catch2 doesn't have a direct equivalent.
-    // Tagged with [.death_test] to exclude from default runs.
-    SKIP("Death test - CLI calls std::exit() which terminates test process");
-
     ConfigCommandFixture fixture;
-    // Don't create any models
+    const fs::path yamsCli = findBuiltYamsCli();
+    REQUIRE_FALSE(yamsCli.empty());
 
-    // Run the config embeddings model command
-    // This will call std::exit(1) which terminates the test process
-    int rc = fixture.runCommand({"yams", "config", "embeddings", "model", "no-model-here"});
-    CHECK(rc != 0); // Should fail with non-zero exit
+    const fs::path out = fixture.testHome / "missing-model.out";
+    const std::string cmd = "'" + yamsCli.string() + "' config embeddings model no-model-here > '" +
+                            out.string() + "' 2>&1";
+
+    const int rc = std::system(cmd.c_str());
+    REQUIRE(rc != 0);
+
+    std::ifstream input(out);
+    REQUIRE(input.good());
+    const std::string output((std::istreambuf_iterator<char>(input)),
+                             std::istreambuf_iterator<char>());
+    CHECK((output.find("not found") != std::string::npos ||
+           output.find("No local embedding model directories were found") != std::string::npos));
+    CHECK(output.find("Available models:") != std::string::npos);
 }
 
 TEST_CASE("ConfigCommand - config command parses without crash", "[cli][config][catch2]") {
@@ -251,4 +289,95 @@ TEST_CASE("ConfigCommand - storage command writes explicit R2 temp credential se
     CHECK(cfg.at("storage.s3.r2.permission") == "object-read-only");
     REQUIRE(cfg.count("storage.s3.r2.ttl_seconds") == 1);
     CHECK(cfg.at("storage.s3.r2.ttl_seconds") == "1800");
+}
+
+TEST_CASE("ConfigCommand - tuning profile persists and status reports it",
+          "[cli][config][tuning][catch2]") {
+    ConfigCommandFixture fixture;
+
+    const int setRc = fixture.runCommand({"yams", "config", "tuning", "profile", "aggressive"});
+    REQUIRE(setRc == 0);
+
+    const auto cfg = yams::config::parse_simple_toml(fixture.testConfigHome / "config.toml");
+    REQUIRE(cfg.count("tuning.profile") == 1);
+    CHECK(cfg.at("tuning.profile") == "aggressive");
+
+    CaptureStdout capture;
+    const int statusRc = fixture.runCommand({"yams", "config", "tuning", "status"});
+    REQUIRE(statusRc == 0);
+
+    const std::string output = capture.str();
+    CHECK(output.find("Tuning Configuration") != std::string::npos);
+    CHECK(output.find("Profile: aggressive") != std::string::npos);
+}
+
+TEST_CASE("ConfigCommand - path-tree enable and mode update config",
+          "[cli][config][search][path-tree][catch2]") {
+    ConfigCommandFixture fixture;
+
+    const int enableRc = fixture.runCommand(
+        {"yams", "config", "search", "path-tree", "enable", "--mode", "preferred"});
+    REQUIRE(enableRc == 0);
+
+    auto cfg = yams::config::parse_simple_toml(fixture.testConfigHome / "config.toml");
+    REQUIRE(cfg.count("search.path_tree.enable") == 1);
+    CHECK(cfg.at("search.path_tree.enable") == "true");
+    REQUIRE(cfg.count("search.path_tree.mode") == 1);
+    CHECK(cfg.at("search.path_tree.mode") == "preferred");
+
+    const int modeRc =
+        fixture.runCommand({"yams", "config", "search", "path-tree", "mode", "fallback"});
+    REQUIRE(modeRc == 0);
+
+    cfg = yams::config::parse_simple_toml(fixture.testConfigHome / "config.toml");
+    REQUIRE(cfg.count("search.path_tree.mode") == 1);
+    CHECK(cfg.at("search.path_tree.mode") == "fallback");
+
+    CaptureStdout capture;
+    const int statusRc = fixture.runCommand({"yams", "config", "search", "path-tree", "status"});
+    REQUIRE(statusRc == 0);
+
+    const std::string output = capture.str();
+    CHECK(output.find("Path-tree traversal configuration") != std::string::npos);
+    CHECK(output.find("Mode       : fallback") != std::string::npos);
+}
+
+TEST_CASE("ConfigCommand - grammar auto download flags update config",
+          "[cli][config][grammar][catch2]") {
+    ConfigCommandFixture fixture;
+
+    const int enableRc = fixture.runCommand({"yams", "config", "grammar", "auto-enable"});
+    REQUIRE(enableRc == 0);
+
+    auto cfg = yams::config::parse_simple_toml(fixture.testConfigHome / "config.toml");
+    REQUIRE(cfg.count("plugins.symbol_extraction.auto_download_grammars") == 1);
+    CHECK(cfg.at("plugins.symbol_extraction.auto_download_grammars") == "true");
+
+    CaptureStdout pathCapture;
+    const int pathRc = fixture.runCommand({"yams", "config", "grammar", "path"});
+    REQUIRE(pathRc == 0);
+    CHECK(pathCapture.str().find((fixture.testDataHome / "grammars").string()) !=
+          std::string::npos);
+
+    const int disableRc = fixture.runCommand({"yams", "config", "grammar", "auto-disable"});
+    REQUIRE(disableRc == 0);
+
+    cfg = yams::config::parse_simple_toml(fixture.testConfigHome / "config.toml");
+    REQUIRE(cfg.count("plugins.symbol_extraction.auto_download_grammars") == 1);
+    CHECK(cfg.at("plugins.symbol_extraction.auto_download_grammars") == "false");
+}
+
+TEST_CASE("ConfigCommand - plugins status reports trust and defaults",
+          "[cli][config][plugins][catch2]") {
+    ConfigCommandFixture fixture;
+
+    CaptureStdout capture;
+    const int rc = fixture.runCommand({"yams", "config", "plugins", "status"});
+    REQUIRE(rc == 0);
+
+    const std::string output = capture.str();
+    CHECK(output.find("Daemon Plugin Configuration") != std::string::npos);
+    CHECK(output.find("Trust file: ") != std::string::npos);
+    CHECK(output.find("Default plugin roots") != std::string::npos);
+    CHECK(output.find("plugin_dir_strict: false") != std::string::npos);
 }

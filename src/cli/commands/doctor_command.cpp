@@ -195,8 +195,8 @@ public:
         }
         // Only run default doctor if no subcommand was invoked
         // Subcommands set their own flags and handle execution themselves
-        if (!fixEmbeddings_ && !fixFts5_ && !fixGraph_ && !validateGraph_ && !fixAll_ &&
-            !fixAllTop_ && !dedupeApply_ && !pruneInvoked_ && !benchmarkInvoked_ &&
+        if (!subcommandInvoked_ && !fixEmbeddings_ && !fixFts5_ && !fixGraph_ && !validateGraph_ &&
+            !fixAll_ && !fixAllTop_ && !dedupeApply_ && !pruneInvoked_ && !benchmarkInvoked_ &&
             pluginArg_.empty() && !fixConfigDims_ && !recreateVectors_) {
             // No subcommand flags set, run default doctor summary
             try {
@@ -1591,7 +1591,33 @@ private:
     }
 
     static std::optional<std::filesystem::path> resolveByName(const std::string& name) {
-        return plugin::resolvePlugin(name);
+        namespace fs = std::filesystem;
+        std::error_code ec;
+
+        for (const auto& dir : plugin::getPluginSearchDirs()) {
+            if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
+                continue;
+            }
+
+            for (const auto& entry : fs::directory_iterator(dir, ec)) {
+                if (!entry.is_regular_file(ec)) {
+                    continue;
+                }
+
+                const auto& path = entry.path();
+                if (!plugin::hasPluginExtension(path)) {
+                    continue;
+                }
+
+                const std::string stem = path.stem().string();
+                const std::string filename = path.filename().string();
+                if (stem == name || filename == name || filename.find(name) != std::string::npos) {
+                    return path;
+                }
+            }
+        }
+
+        return std::nullopt;
     }
 
     // Perform local dlopen + symbol/iface probes
@@ -2673,6 +2699,8 @@ private:
     std::optional<size_t> recreateDim_;
     bool stopDaemon_{false};
     bool vectorsFix_{false}; // --vectors flag: detect and fix dimension mismatch
+    bool subcommandInvoked_{false};
+    bool immediateSubcommandHandled_{false};
     // Dedupe state
     bool dedupeApply_{false};
     std::string dedupeMode_{"path"};
@@ -2730,10 +2758,16 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     doctor->add_flag("--vectors", vectorsFix_,
                      "Detect and fix embedding dimension mismatch (updates config to match DB)");
 
-    doctor->callback([this]() { cli_->setPendingCommand(this); });
+    doctor->callback([this]() {
+        if (!immediateSubcommandHandled_) {
+            cli_->setPendingCommand(this);
+        }
+    });
 
     auto* dsub = doctor->add_subcommand("daemon", "Check daemon socket and status");
     dsub->callback([this]() {
+        subcommandInvoked_ = true;
+        immediateSubcommandHandled_ = true;
         std::optional<yams::daemon::StatusResponse> status;
         checkDaemon(status);
     });
@@ -2744,6 +2778,8 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     psub->add_option("--iface-version", ifaceVersion_, "Interface version (default: 1)");
     psub->add_flag("--no-daemon", noDaemonProbe_, "Skip daemon dry-run load");
     psub->callback([this]() {
+        subcommandInvoked_ = true;
+        immediateSubcommandHandled_ = true;
         if (pluginArg_.empty()) {
             std::cout
                 << "target is optional now. Examples:\n"
@@ -2756,6 +2792,8 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     });
 
     doctor->add_subcommand("plugins", "Show plugin summary (loaded + scan)")->callback([this]() {
+        subcommandInvoked_ = true;
+        immediateSubcommandHandled_ = true;
         runAll();
     });
 
@@ -2763,7 +2801,11 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     emb->require_subcommand();
     emb->add_subcommand("clear-degraded",
                         "Attempt to clear embedding degraded state (reloads preferred model)")
-        ->callback([this]() { clearEmbeddingDegraded(); });
+        ->callback([this]() {
+            subcommandInvoked_ = true;
+            immediateSubcommandHandled_ = true;
+            clearEmbeddingDegraded();
+        });
 
     auto* rsub = doctor->add_subcommand("repair", "Repair common issues (embeddings, FTS5, graph)");
     rsub->add_flag("--embeddings", fixEmbeddings_, "Generate missing vector embeddings");
@@ -2772,14 +2814,22 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     rsub->add_flag("--all", fixAll_, "Run all repair operations");
     rsub->add_flag("--no-daemon", noDaemonRepair_,
                    "Skip daemon RPC and run local repair only (best-effort)");
-    rsub->callback([this]() { runRepair(); });
+    rsub->callback([this]() {
+        subcommandInvoked_ = true;
+        immediateSubcommandHandled_ = true;
+        runRepair();
+    });
 
     auto* vsub = doctor->add_subcommand("validate", "Validate knowledge graph health");
     vsub->add_flag("--graph", validateGraph_, "Validate knowledge graph integrity");
     vsub->callback([this]() {
+        subcommandInvoked_ = true;
+        immediateSubcommandHandled_ = true;
         if (validateGraph_) {
             returnOnError(validateGraph(), "Validation");
+            return;
         }
+        std::cout << "Nothing to validate. Use --graph.\n";
     });
 
     auto* dd = doctor->add_subcommand(
@@ -2795,7 +2845,11 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     dd->add_flag("--force", dedupeForce_,
                  "Allow deletion even when differing hashes (treat as duplicates)");
     dd->add_flag("-v,--verbose", dedupeVerbose_, "Verbose listing of each group");
-    dd->callback([this]() { runDedupe(); });
+    dd->callback([this]() {
+        subcommandInvoked_ = true;
+        immediateSubcommandHandled_ = true;
+        runDedupe();
+    });
 
     // Prune subcommand
     auto* prune =
@@ -2819,6 +2873,8 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
                       "Only prune files smaller than size (e.g., 1KB)");
     prune->add_flag("-v,--verbose", pruneVerbose_, "Verbose output");
     prune->callback([this]() {
+        subcommandInvoked_ = true;
+        immediateSubcommandHandled_ = true;
         pruneInvoked_ = true;
         runPrune();
     });
@@ -2835,6 +2891,8 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     bench->add_option("--compare-baseline", benchmarkCompareBaseline_,
                       "Compare against saved baseline results");
     bench->callback([this]() {
+        subcommandInvoked_ = true;
+        immediateSubcommandHandled_ = true;
         benchmarkInvoked_ = true;
         runBenchmark();
     });
@@ -2845,6 +2903,8 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
     bool apply = false;
     tsub->add_flag("--apply", apply, "Write suggestions to config.toml [tuning] section");
     tsub->callback([this, &apply]() {
+        subcommandInvoked_ = true;
+        immediateSubcommandHandled_ = true;
         auto r = applyTuningBaseline(apply);
         if (!r) {
             spdlog::error("Doctor tuning failed: {}", r.error().message);

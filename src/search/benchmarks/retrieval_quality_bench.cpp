@@ -52,6 +52,7 @@
 #include <yams/cli/search_runner.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/ServiceManager.h>
 
 #include <algorithm>
 #include <cctype>
@@ -3360,11 +3361,25 @@ struct BenchFixture {
         }
 
         if (!vectorsDisabled) {
+            bool resetPluginTrustFile = false;
+            bool useIsolatedBenchmarkConfig = false;
+            auto envTruthy = [](const char* value) {
+                if (!value || !*value) {
+                    return false;
+                }
+                std::string v(value);
+                std::transform(v.begin(), v.end(), v.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                return v == "1" || v == "true" || v == "yes" || v == "on";
+            };
             const char* envPluginDir = std::getenv("YAMS_PLUGIN_DIR");
             if (envPluginDir) {
                 harnessOptions.pluginDir = fs::path(envPluginDir);
             } else {
                 const fs::path cwd = fs::current_path();
+                const fs::path installedPluginDir = fs::path("/opt/homebrew/lib/yams/plugins");
+                const fs::path installedOnnxPlugin =
+                    installedPluginDir / "libyams_onnx_plugin.dylib";
                 const fs::path localPluginDir = cwd / "plugins";
                 const fs::path localOnnxPlugin =
                     localPluginDir / "onnx" / "libyams_onnx_plugin.dylib";
@@ -3377,7 +3392,41 @@ struct BenchFixture {
                 const fs::path defaultOnnxPlugin =
                     defaultPluginDir / "onnx" / "libyams_onnx_plugin.dylib";
 
-                if (fs::exists(localOnnxPlugin)) {
+                if (fs::exists(installedOnnxPlugin)) {
+                    const fs::path stagedPluginDir =
+                        fs::temp_directory_path() / "yams_retrieval_bench_plugins";
+                    const fs::path stagedOnnxPlugin =
+                        stagedPluginDir / installedOnnxPlugin.filename();
+                    std::error_code ec;
+                    fs::path installedOnnxSource = fs::weakly_canonical(installedOnnxPlugin, ec);
+                    if (ec || installedOnnxSource.empty()) {
+                        ec.clear();
+                        installedOnnxSource = installedOnnxPlugin;
+                    }
+                    fs::create_directories(stagedPluginDir, ec);
+                    if (ec) {
+                        spdlog::warn("Failed to create staged plugin dir {}: {}",
+                                     stagedPluginDir.string(), ec.message());
+                        harnessOptions.pluginDir = installedPluginDir;
+                    } else {
+                        fs::remove(stagedOnnxPlugin, ec);
+                        ec.clear();
+                        fs::copy_file(installedOnnxSource, stagedOnnxPlugin,
+                                      fs::copy_options::overwrite_existing, ec);
+                        if (ec) {
+                            spdlog::warn("Failed to stage installed ONNX plugin {} -> {}: {}",
+                                         installedOnnxSource.string(), stagedOnnxPlugin.string(),
+                                         ec.message());
+                            harnessOptions.pluginDir = installedPluginDir;
+                        } else {
+                            harnessOptions.pluginDir = stagedPluginDir;
+                            resetPluginTrustFile = true;
+                            useIsolatedBenchmarkConfig = true;
+                            spdlog::info("Using isolated installed ONNX plugin dir: {}",
+                                         stagedPluginDir.string());
+                        }
+                    }
+                } else if (fs::exists(localOnnxPlugin)) {
                     harnessOptions.pluginDir = localOnnxPlugin.parent_path();
                 } else if (fs::exists(nosanOnnxPlugin)) {
                     harnessOptions.pluginDir = nosanOnnxPlugin.parent_path();
@@ -3391,9 +3440,18 @@ struct BenchFixture {
                     harnessOptions.pluginDir = defaultPluginDir;
                 }
             }
-            // Use system config for model settings - no hardcoded overrides
-            // The benchmark will use whatever preferred_model is set in ~/.config/yams/config.toml
-            spdlog::info("Using system config for embedding model (no benchmark override)");
+
+            json onnxPluginConfig;
+            onnxPluginConfig["preferred_model"] = "embeddinggemma-300m";
+            harnessOptions.pluginConfigs["onnx_plugin"] = onnxPluginConfig.dump();
+            spdlog::info("Configured ONNX plugin preferred model: embeddinggemma-300m");
+
+            if (!std::getenv("YAMS_HNSW_DEFER_UPDATES")) {
+                setenv("YAMS_HNSW_DEFER_UPDATES", "1", 1);
+                spdlog::info("Enabled deferred HNSW updates for benchmark warm-cache priming");
+            } else if (envTruthy(std::getenv("YAMS_HNSW_DEFER_UPDATES"))) {
+                spdlog::info("Deferred HNSW updates already enabled via environment");
+            }
 
             // Configure Glint plugin with GLiNER model path for NL entity extraction
             std::string glinerModelPath = discoverGlinerModelPath();
@@ -3403,6 +3461,34 @@ struct BenchFixture {
                 glintConfig["threshold"] = 0.5; // Default confidence threshold
                 harnessOptions.pluginConfigs["glint"] = glintConfig.dump();
                 spdlog::info("Configured Glint plugin with model: {}", glinerModelPath);
+            }
+
+            if (resetPluginTrustFile && harnessOptions.dataDir) {
+                const fs::path trustFile = *harnessOptions.dataDir / "plugins.trust";
+                std::error_code ec;
+                fs::remove(trustFile, ec);
+                if (ec && ec != std::errc::no_such_file_or_directory) {
+                    spdlog::warn("Failed to reset plugin trust file {}: {}", trustFile.string(),
+                                 ec.message());
+                } else if (!ec) {
+                    spdlog::info("Reset plugin trust file for isolated benchmark plugins: {}",
+                                 trustFile.string());
+                }
+            }
+
+            if (useIsolatedBenchmarkConfig) {
+                const fs::path configPath =
+                    fs::temp_directory_path() / "yams_retrieval_bench_config.toml";
+                std::ofstream configOut(configPath, std::ios::trunc);
+                if (!configOut) {
+                    spdlog::warn("Failed to write isolated benchmark config: {}",
+                                 configPath.string());
+                } else {
+                    configOut << "# Isolated benchmark config\n";
+                    configOut.close();
+                    harnessOptions.configPath = configPath;
+                    spdlog::info("Using isolated benchmark config: {}", configPath.string());
+                }
             }
         } else {
             spdlog::info("Using mock model provider (YAMS_DISABLE_VECTORS=1)");
@@ -4242,6 +4328,34 @@ struct BenchFixture {
                         }
                     }
                     std::this_thread::sleep_for(500ms);
+                }
+
+                if (const char* deferHnsw = std::getenv("YAMS_HNSW_DEFER_UPDATES");
+                    deferHnsw && envTruthy(deferHnsw)) {
+                    if (auto* daemon = harness->daemon()) {
+                        if (auto* serviceManager = daemon->getServiceManager()) {
+                            auto vectorDb = serviceManager->getVectorDatabase();
+                            if (vectorDb) {
+                                spdlog::info("Rebuilding deferred HNSW index before benchmark "
+                                             "queries...");
+                                const auto rebuildStart = std::chrono::steady_clock::now();
+                                if (!vectorDb->buildIndex()) {
+                                    throw std::runtime_error(
+                                        "Deferred HNSW rebuild failed before benchmark queries");
+                                }
+                                const auto rebuildMs =
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - rebuildStart)
+                                        .count();
+                                spdlog::info("Deferred HNSW rebuild completed in {} ms", rebuildMs);
+                                if (summaryLog) {
+                                    summaryLog << "Deferred HNSW rebuild: " << rebuildMs << "ms"
+                                               << std::endl;
+                                    summaryLog.flush();
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Final status check

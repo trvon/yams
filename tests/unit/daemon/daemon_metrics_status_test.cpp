@@ -25,7 +25,9 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/proto_serializer.h>
 #include <yams/daemon/metric_keys.h>
+#include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/daemon/resource/plugin_host.h>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
@@ -207,6 +209,72 @@ std::filesystem::path makeTempDir(const std::string& prefix) {
     auto dir = base / (prefix + std::to_string(std::random_device{}()));
     std::filesystem::create_directories(dir);
     return dir;
+}
+
+std::filesystem::path createMockExternalPlugin(const std::filesystem::path& baseDir,
+                                               const std::string& name) {
+    auto pluginDir = baseDir / name;
+    std::filesystem::create_directories(pluginDir);
+
+    {
+        std::ofstream pluginFile(pluginDir / "plugin.py");
+        pluginFile << R"PY(#!/usr/bin/env python3
+import json
+import sys
+
+
+def handle_request(req):
+    method = req.get("method", "")
+    if method == "handshake.manifest":
+        return {
+            "name": "dispatcher_external_plugin",
+            "version": "1.0.0",
+            "interfaces": ["content_extractor_v1"]
+        }
+    if method == "plugin.init":
+        return {"status": "initialized"}
+    if method == "plugin.health":
+        return {"status": "ok"}
+    if method == "plugin.shutdown":
+        return {"status": "ok"}
+    raise ValueError(f"Method not found: {method}")
+
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req_id = None
+    try:
+        req = json.loads(line)
+        req_id = req.get("id")
+        response = {"jsonrpc": "2.0", "id": req_id, "result": handle_request(req)}
+    except Exception as exc:
+        response = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32603, "message": str(exc)}
+        }
+    print(json.dumps(response), flush=True)
+)PY";
+    }
+
+    {
+        std::ofstream manifestFile(pluginDir / "yams-plugin.json");
+        manifestFile << R"JSON({
+  "name": "dispatcher_external_plugin",
+  "version": "1.0.0",
+  "interfaces": ["content_extractor_v1"],
+  "entry": {
+    "fallback_cmd": ["/usr/bin/env", "python3", "-u", "${plugin_dir}/plugin.py"],
+    "env": {
+      "PYTHONUNBUFFERED": "1"
+    }
+  }
+})JSON";
+    }
+
+    return pluginDir;
 }
 
 Response dispatchRequest(RequestDispatcher& dispatcher, const Request& req) {
@@ -798,6 +866,97 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         CHECK(err.message == "Plugin subsystem not ready (state=failed)");
     }
 
+    SECTION("plugin handlers reject missing service manager and non-ready FSM states") {
+        auto state = std::make_unique<StateComponent>();
+        state->readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        state->readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+
+        StubLifecycle lifecycle;
+
+        {
+            RequestDispatcher dispatcher(&lifecycle, nullptr, state.get());
+            auto resp = dispatchRequest(dispatcher, Request{PluginTrustListRequest{}});
+
+            REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+            const auto& err = std::get<ErrorResponse>(resp);
+            CHECK(err.code == ErrorCode::InvalidState);
+            CHECK(err.message == "Plugin host unavailable");
+        }
+
+        {
+            auto [readyState, lifecycleFsm, svc] = makeReadyService();
+            RequestDispatcher dispatcher(&lifecycle, svc.get(), readyState.get());
+
+            svc->__test_pluginScanStarted(1);
+
+            auto resp = dispatchRequest(dispatcher, Request{PluginTrustListRequest{}});
+
+            REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+            const auto& err = std::get<ErrorResponse>(resp);
+            CHECK(err.code == ErrorCode::InvalidState);
+            CHECK(err.message == "Plugin subsystem not ready (state=scanning)");
+        }
+
+        {
+            auto [readyState, lifecycleFsm, svc] = makeReadyService();
+            RequestDispatcher dispatcher(&lifecycle, svc.get(), readyState.get());
+
+            svc->__test_pluginLoaded("mock-loaded-plugin");
+
+            auto resp = dispatchRequest(dispatcher, Request{PluginTrustListRequest{}});
+
+            REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+            const auto& err = std::get<ErrorResponse>(resp);
+            CHECK(err.code == ErrorCode::InvalidState);
+            CHECK(err.message == "Plugin subsystem not ready (state=loading)");
+        }
+    }
+
+    SECTION("plugin handlers report missing hosts and trust failures") {
+        auto [state, lifecycleFsm, svc] = makeReadyService();
+        StubLifecycle lifecycle;
+        RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
+
+        svc->__test_setAbiHost({});
+        svc->__test_setExternalPluginHost({});
+
+        auto scanResp = dispatchRequest(dispatcher, Request{PluginScanRequest{}});
+        REQUIRE(std::holds_alternative<ErrorResponse>(scanResp));
+        const auto& scanErr = std::get<ErrorResponse>(scanResp);
+        CHECK(scanErr.code == ErrorCode::NotImplemented);
+        CHECK(scanErr.message == "No plugin host available");
+
+        PluginLoadRequest loadReq;
+        loadReq.pathOrName = "missing-plugin";
+        auto loadResp = dispatchRequest(dispatcher, Request{loadReq});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(loadResp));
+        const auto& loadErr = std::get<ErrorResponse>(loadResp);
+        CHECK(loadErr.code == ErrorCode::NotImplemented);
+        CHECK(loadErr.message == "No plugin host available");
+
+        auto unloadResp =
+            dispatchRequest(dispatcher, Request{PluginUnloadRequest{"missing-plugin"}});
+        REQUIRE(std::holds_alternative<ErrorResponse>(unloadResp));
+        const auto& unloadErr = std::get<ErrorResponse>(unloadResp);
+        CHECK(unloadErr.code == ErrorCode::NotFound);
+        CHECK(unloadErr.message == "Plugin not found or unload failed");
+
+        auto trustAddResp =
+            dispatchRequest(dispatcher, Request{PluginTrustAddRequest{"/tmp/missing-host"}});
+        REQUIRE(std::holds_alternative<ErrorResponse>(trustAddResp));
+        const auto& trustAddErr = std::get<ErrorResponse>(trustAddResp);
+        CHECK(trustAddErr.code == ErrorCode::Unknown);
+        CHECK(trustAddErr.message == "Trust add failed");
+
+        auto trustRemoveResp =
+            dispatchRequest(dispatcher, Request{PluginTrustRemoveRequest{"/tmp/missing-host"}});
+        REQUIRE(std::holds_alternative<ErrorResponse>(trustRemoveResp));
+        const auto& trustRemoveErr = std::get<ErrorResponse>(trustRemoveResp);
+        CHECK(trustRemoveErr.code == ErrorCode::Unknown);
+        CHECK(trustRemoveErr.message == "Trust remove failed");
+    }
+
     SECTION("plugin load dry run reports missing plugin") {
         auto [state, lifecycleFsm, svc] = makeReadyService();
         StubLifecycle lifecycle;
@@ -866,6 +1025,58 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::InternalError);
         CHECK(err.message == "Plugin load failed for: " + fakePlugin.string());
+    }
+
+    SECTION("plugin handlers route external plugins when ABI host is absent") {
+        auto [state, lifecycleFsm, svc] = makeReadyService();
+        StubLifecycle lifecycle;
+        RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
+
+        svc->__test_setAbiHost({});
+
+        auto pluginDir = createMockExternalPlugin(svc->getResolvedDataDir(), "dispatcher_external");
+
+        PluginScanRequest scanReq;
+        scanReq.target = pluginDir.string();
+        auto scanResp = dispatchRequest(dispatcher, Request{scanReq});
+
+        REQUIRE(std::holds_alternative<PluginScanResponse>(scanResp));
+        const auto& scan = std::get<PluginScanResponse>(scanResp);
+        REQUIRE(scan.plugins.size() == 1);
+        CHECK(scan.plugins.front().name == "dispatcher_external_plugin");
+
+        PluginLoadRequest dryRunReq;
+        dryRunReq.pathOrName = pluginDir.string();
+        dryRunReq.dryRun = true;
+        auto dryRunResp = dispatchRequest(dispatcher, Request{dryRunReq});
+
+        REQUIRE(std::holds_alternative<PluginLoadResponse>(dryRunResp));
+        const auto& dryRun = std::get<PluginLoadResponse>(dryRunResp);
+        CHECK_FALSE(dryRun.loaded);
+        CHECK(dryRun.message == "dry-run");
+        CHECK(dryRun.record.name == "dispatcher_external_plugin");
+
+        auto* external = svc->getExternalPluginHost();
+        REQUIRE(external != nullptr);
+        REQUIRE(external->trustAdd(pluginDir).has_value());
+
+        PluginLoadRequest loadReq;
+        loadReq.pathOrName = pluginDir.string();
+        auto loadResp = dispatchRequest(dispatcher, Request{loadReq});
+
+        REQUIRE(std::holds_alternative<PluginLoadResponse>(loadResp));
+        const auto& load = std::get<PluginLoadResponse>(loadResp);
+        CHECK(load.loaded);
+        CHECK(load.message == "loaded");
+        CHECK(load.record.name == "dispatcher_external_plugin");
+        CHECK(external->listLoaded().size() == 1);
+
+        auto unloadResp =
+            dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
+
+        REQUIRE(std::holds_alternative<SuccessResponse>(unloadResp));
+        CHECK(std::get<SuccessResponse>(unloadResp).message == "unloaded");
+        CHECK(external->listLoaded().empty());
     }
 }
 

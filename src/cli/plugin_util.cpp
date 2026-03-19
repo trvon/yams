@@ -176,7 +176,9 @@ std::optional<fs::path> resolvePlugin(const std::string& nameOrPath) {
         }
     }
 
-    // Strategy 2: ABI name match via dlopen + yams_plugin_get_name
+    // Strategy 2: Heuristic - filename contains the token
+    // Keep this cheap pass ahead of ABI probing so obviously-missing names do not
+    // require dlopen() across every installed plugin.
     for (const auto& dir : searchDirs) {
         if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
             continue;
@@ -188,6 +190,34 @@ std::optional<fs::path> resolvePlugin(const std::string& nameOrPath) {
             }
 
             const auto& path = entry.path();
+            if (!hasPluginExtension(path)) {
+                continue;
+            }
+
+            std::string filename = path.filename().string();
+            if (filename.find(nameOrPath) != std::string::npos) {
+                return path;
+            }
+        }
+    }
+
+    // Strategy 3: ABI name match via dlopen + yams_plugin_get_name
+    for (const auto& dir : searchDirs) {
+        if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
+            continue;
+        }
+
+        for (const auto& entry : fs::directory_iterator(dir, ec)) {
+            if (!entry.is_regular_file(ec)) {
+                continue;
+            }
+
+            const auto& path = entry.path();
+            if (!hasPluginExtension(path)) {
+                continue;
+            }
+
+            std::string filename = path.filename().string();
             std::string ext = path.extension().string();
             if (ext != ".so" && ext != ".dylib" && ext != ".dll") {
                 continue; // Skip WASM for ABI probing
@@ -206,29 +236,6 @@ std::optional<fs::path> resolvePlugin(const std::string& nameOrPath) {
             dlclose(handle);
 
             if (match) {
-                return path;
-            }
-        }
-    }
-
-    // Strategy 3: Heuristic - filename contains the token
-    for (const auto& dir : searchDirs) {
-        if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
-            continue;
-        }
-
-        for (const auto& entry : fs::directory_iterator(dir, ec)) {
-            if (!entry.is_regular_file(ec)) {
-                continue;
-            }
-
-            const auto& path = entry.path();
-            if (!hasPluginExtension(path)) {
-                continue;
-            }
-
-            std::string filename = path.filename().string();
-            if (filename.find(nameOrPath) != std::string::npos) {
                 return path;
             }
         }

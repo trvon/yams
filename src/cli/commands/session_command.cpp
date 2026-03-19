@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -876,19 +877,45 @@ private:
                 dreq.aggressive = budgetAggressive_;
                 dreq.limit = static_cast<std::size_t>(warmLimit_);
                 dreq.snippetLen = static_cast<std::size_t>(snippetLen_ > 0 ? snippetLen_ : 160);
+
+                std::promise<Result<yams::daemon::PrepareSessionResponse>> prom;
+                auto fut = prom.get_future();
                 boost::asio::co_spawn(
                     getExecutor(),
-                    [leaseHandle, dreq]() mutable -> boost::asio::awaitable<void> {
-                        auto& client = **leaseHandle;
-                        (void)co_await client.call<yams::daemon::PrepareSessionRequest>(dreq);
+                    [leaseHandle, dreq, &prom]() mutable -> boost::asio::awaitable<void> {
+                        try {
+                            auto& client = **leaseHandle;
+                            auto result =
+                                co_await client.call<yams::daemon::PrepareSessionRequest>(dreq);
+                            prom.set_value(std::move(result));
+                        } catch (const std::exception& e) {
+                            prom.set_value(
+                                Error{ErrorCode::InternalError,
+                                      std::string("session warm daemon call threw: ") + e.what()});
+                        } catch (...) {
+                            prom.set_value(
+                                Error{ErrorCode::InternalError, "session warm daemon call threw"});
+                        }
                         co_return;
                     },
                     boost::asio::detached);
-                std::cout << "Warming (daemon) requested." << std::endl;
-                return Result<void>();
+                if (fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+                    auto result = fut.get();
+                    if (result) {
+                        std::cout << "Warming (daemon) requested." << std::endl;
+                        return Result<void>();
+                    }
+                    if (yams::cli::is_transport_failure(result.error())) {
+                        return result.error();
+                    }
+                    spdlog::warn("session warm: daemon request failed, using local path: {}",
+                                 result.error().message);
+                } else {
+                    spdlog::warn("session warm: daemon request timed out, using local path");
+                }
             }
-        } catch (...) {
-            // ignore and fallback
+        } catch (const std::exception& e) {
+            spdlog::warn("session warm: daemon path threw, using local path: {}", e.what());
         }
         auto svc = sessionSvc();
         if (!svc)

@@ -83,8 +83,14 @@ public:
         boost::asio::co_spawn(
             getExecutor(),
             [this, &prom]() -> boost::asio::awaitable<void> {
-                auto r = co_await this->executeAsync();
-                prom.set_value(std::move(r));
+                try {
+                    auto r = co_await this->executeAsync();
+                    prom.set_value(std::move(r));
+                } catch (const std::exception& e) {
+                    prom.set_value(Error{ErrorCode::InternalError, e.what()});
+                } catch (...) {
+                    prom.set_value(Error{ErrorCode::InternalError, "unknown delete error"});
+                }
                 co_return;
             },
             boost::asio::detached);

@@ -6,6 +6,9 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <CLI/CLI.hpp>
+
+#include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
 
 #include <filesystem>
@@ -20,6 +23,10 @@
 
 namespace fs = std::filesystem;
 using namespace yams::cli;
+
+namespace yams::cli {
+std::unique_ptr<ICommand> createRepairCommand();
+}
 
 namespace {
 
@@ -87,6 +94,30 @@ private:
     std::streambuf* oldCout_;
 };
 
+void parseRepairCommandWithHelp(const std::vector<const char*>& argv) {
+    CLI::App app{"yams"};
+    auto repairCmd = yams::cli::createRepairCommand();
+    repairCmd->registerCommand(app, /*cli*/ nullptr);
+
+    bool gotHelp = false;
+    bool gotParseError = false;
+    std::string parseErrorMsg;
+
+    try {
+        app.parse(static_cast<int>(argv.size()), const_cast<char**>(argv.data()));
+    } catch (const CLI::CallForHelp&) {
+        gotHelp = true;
+    } catch (const CLI::ParseError& e) {
+        gotParseError = true;
+        parseErrorMsg = e.what();
+    }
+
+    CHECK(gotHelp);
+    if (gotParseError) {
+        FAIL("Unexpected parse error: " << parseErrorMsg);
+    }
+}
+
 } // namespace
 
 TEST_CASE("RepairCommand - help displays without errors", "[cli][repair][catch2]") {
@@ -125,34 +156,59 @@ TEST_CASE("RepairCommand - verbose flag is documented correctly", "[cli][repair]
     CHECK(output.find("-v") != std::string::npos);
 }
 
-TEST_CASE("RepairCommand - option flags parse correctly", "[cli][repair][catch2][.slow]") {
-    // SKIP: This test actually runs repair operations which require database/daemon
-    // and can hang in test environment. Tagged with [.slow] to exclude from default runs.
-    SKIP("Repair operations require database access - use integration tests");
+TEST_CASE("RepairCommand - option flags parse correctly", "[cli][repair][catch2]") {
+    parseRepairCommandWithHelp({"yams", "repair", "--orphans", "--mime", "--chunks", "--downloads",
+                                "--path-tree", "--stuck", "--help"});
 }
 
 // Note: Tests that actually run repair operations (--fts5, --embeddings, --all, etc.)
 // are skipped because they require database access and can hang in unit test environment.
 // Integration tests should cover these scenarios with proper daemon/database setup.
 
-TEST_CASE("RepairCommand - fts5 flag parses correctly", "[cli][repair][catch2][.slow]") {
-    SKIP("Repair operations require database access - use integration tests");
+TEST_CASE("RepairCommand - fts5 flag parses correctly", "[cli][repair][catch2]") {
+    parseRepairCommandWithHelp({"yams", "repair", "--fts5", "--help"});
 }
 
 TEST_CASE("RepairCommand - embeddings flag with verbose parses correctly",
-          "[cli][repair][catch2][.slow]") {
-    SKIP("Repair operations require database access - use integration tests");
+          "[cli][repair][catch2]") {
+    parseRepairCommandWithHelp(
+        {"yams", "repair", "--embeddings", "--verbose", "--foreground", "--help"});
 }
 
-TEST_CASE("RepairCommand - all flag enables all repair operations",
-          "[cli][repair][catch2][.slow]") {
-    SKIP("Repair operations require database access - use integration tests");
+TEST_CASE("RepairCommand - all flag and refs parse correctly", "[cli][repair][catch2]") {
+    parseRepairCommandWithHelp({"yams", "repair", "--all", "--refs", "--graph", "--help"});
 }
 
-TEST_CASE("RepairCommand - model option accepts value", "[cli][repair][catch2][.slow]") {
-    SKIP("Repair operations require database access - use integration tests");
+TEST_CASE("RepairCommand - model option accepts value", "[cli][repair][catch2]") {
+    parseRepairCommandWithHelp(
+        {"yams", "repair", "--embeddings", "--model", "test-embed-model", "--help"});
 }
 
-TEST_CASE("RepairCommand - timeout option accepts value", "[cli][repair][catch2][.slow]") {
-    SKIP("Repair operations require database access - use integration tests");
+TEST_CASE("RepairCommand - max retries option accepts value", "[cli][repair][catch2]") {
+    parseRepairCommandWithHelp({"yams", "repair", "--stuck", "--max-retries", "5", "--help"});
+}
+
+TEST_CASE("RepairCommand - complex flag set parses with help", "[cli][repair][catch2]") {
+    CLI::App app{"yams"};
+    auto repairCmd = yams::cli::createRepairCommand();
+    repairCmd->registerCommand(app, /*cli*/ nullptr);
+
+    std::vector<const char*> argv = {"yams",           "repair",
+                                     "--all",          "--refs",
+                                     "--graph",        "--foreground",
+                                     "--dry-run",      "--force",
+                                     "--max-retries",  "5",
+                                     "--model",        "test-embed-model",
+                                     "--include-mime", "application/pdf",
+                                     "--include-mime", "text/markdown",
+                                     "--help"};
+
+    parseRepairCommandWithHelp(argv);
+}
+
+TEST_CASE("RepairCommand - default invocation reaches callback without throwing",
+          "[cli][repair][catch2]") {
+    RepairTestHelper helper;
+
+    REQUIRE_NOTHROW((void)helper.runCommand({"yams", "repair", "--help"}));
 }

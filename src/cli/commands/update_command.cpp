@@ -159,9 +159,18 @@ Result<void> UpdateCommand::execute() {
                     boost::asio::co_spawn(
                         getExecutor(),
                         [leaseHandle, dreq, &prom]() mutable -> boost::asio::awaitable<void> {
-                            auto& client = **leaseHandle;
-                            auto r = co_await client.call(dreq);
-                            prom.set_value(std::move(r));
+                            try {
+                                auto& client = **leaseHandle;
+                                auto r = co_await client.call(dreq);
+                                prom.set_value(std::move(r));
+                            } catch (const std::exception& e) {
+                                prom.set_value(
+                                    Error{ErrorCode::InternalError,
+                                          std::string("Update daemon call threw: ") + e.what()});
+                            } catch (...) {
+                                prom.set_value(
+                                    Error{ErrorCode::InternalError, "Update daemon call threw"});
+                            }
                             co_return;
                         },
                         boost::asio::detached);
@@ -190,8 +199,8 @@ Result<void> UpdateCommand::execute() {
                 if (yams::cli::is_transport_failure(last_err)) {
                     return last_err;
                 }
-            } catch (...) {
-                // fall through to local execution
+            } catch (const std::exception& e) {
+                spdlog::warn("Update: daemon path threw ({}); using local path.", e.what());
             }
         }
 

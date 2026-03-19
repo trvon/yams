@@ -50,15 +50,14 @@ public:
             plugin->require_subcommand(1);
 
             // plugin search (catalog)
-            std::string indexPath;
             auto* search =
                 plugin->add_subcommand("search", "Search plugin catalog (local index.json)");
-            search->add_option("--index", indexPath,
+            search->add_option("--index", searchIndexPath_,
                                "Path to catalog JSON (default: docs/plugins/index.json)");
-            search->callback([&indexPath]() {
+            search->callback([this]() {
                 namespace fs = std::filesystem;
-                fs::path idx =
-                    indexPath.empty() ? fs::path("docs/plugins/index.json") : fs::path(indexPath);
+                fs::path idx = searchIndexPath_.empty() ? fs::path("docs/plugins/index.json")
+                                                        : fs::path(searchIndexPath_);
                 if (!fs::exists(idx)) {
                     std::cout << "Catalog not found: " << idx << "\n";
                     return;
@@ -249,6 +248,7 @@ private:
 
     YamsCLI* cli_{nullptr};
     // Persistent option storage to avoid dangling references in callbacks
+    std::string searchIndexPath_;
     std::string scanDir_;
     std::string scanTarget_;
     std::string infoName_;
@@ -315,7 +315,7 @@ void PluginCommand::listPlugins() {
         }
         cfg.enableChunkedResponses = false;
         cfg.requestTimeout = std::chrono::milliseconds(5000); // Fast timeout for simple list
-        cfg.autoStart = true;
+        cfg.autoStart = false;
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
             cfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
         if (!leaseRes) {

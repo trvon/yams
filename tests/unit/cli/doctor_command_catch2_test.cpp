@@ -197,6 +197,19 @@ TEST_CASE("DoctorCommand - repair subcommand help displays correctly", "[cli][do
     CHECK(output.find("--fts5") != std::string::npos);
 }
 
+TEST_CASE("DoctorCommand - repair with no flags does not fall through to full diagnostics",
+          "[cli][doctor][catch2]") {
+    CliTestHelper helper;
+    CaptureStdout capture;
+
+    const int rc = helper.runCommand({"yams", "doctor", "repair"});
+    const std::string output = capture.str();
+
+    CHECK(rc == 0);
+    CHECK(output.find("Nothing to repair.") != std::string::npos);
+    CHECK(output.find("Collecting system information") == std::string::npos);
+}
+
 TEST_CASE("DoctorCommand - validate help displays correctly", "[cli][doctor][catch2]") {
     CliTestHelper helper;
 
@@ -210,6 +223,19 @@ TEST_CASE("DoctorCommand - validate help displays correctly", "[cli][doctor][cat
 
     // Should show validate options
     CHECK(output.find("--graph") != std::string::npos);
+}
+
+TEST_CASE("DoctorCommand - validate with no flags does not run full doctor",
+          "[cli][doctor][catch2]") {
+    CliTestHelper helper;
+    CaptureStdout capture;
+
+    const int rc = helper.runCommand({"yams", "doctor", "validate"});
+    const std::string output = capture.str();
+
+    CHECK(rc == 0);
+    CHECK(output.find("Nothing to validate. Use --graph.") != std::string::npos);
+    CHECK(output.find("Collecting system information") == std::string::npos);
 }
 
 TEST_CASE("DoctorCommand - tuning help displays correctly", "[cli][doctor][catch2]") {
@@ -242,4 +268,18 @@ TEST_CASE("DoctorCommand - top-level help displays all subcommands", "[cli][doct
     CHECK(output.find("prune") != std::string::npos);
     CHECK(output.find("dedupe") != std::string::npos);
     CHECK(output.find("repair") != std::string::npos);
+}
+
+TEST_CASE("DoctorCommand - plugin missing target fails cleanly without full doctor fallback",
+          "[cli][doctor][catch2]") {
+    CliTestHelper helper;
+    CaptureStdout capture;
+
+    const int rc = helper.runCommand({"yams", "doctor", "plugin", "definitely-not-a-real-plugin"});
+    const std::string output = capture.str();
+
+    CHECK(rc == 0);
+    CHECK(output.find("Plugin Doctor: definitely-not-a-real-plugin") != std::string::npos);
+    CHECK(output.find("Not found as path or name in default dirs") != std::string::npos);
+    CHECK(output.find("Collecting system information") == std::string::npos);
 }

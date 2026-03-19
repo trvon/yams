@@ -1180,11 +1180,17 @@ private:
             std::promise<Result<yams::daemon::StatusResponse>> promProbe;
             auto futProbe = promProbe.get_future();
             auto workProbe = [leaseHandle, &promProbe]() mutable -> boost::asio::awaitable<void> {
-                auto& client = **leaseHandle;
-                yams::daemon::StatusRequest sreq;
-                sreq.detailed = false;
-                auto sr = co_await client.call(sreq);
-                promProbe.set_value(std::move(sr));
+                try {
+                    auto& client = **leaseHandle;
+                    yams::daemon::StatusRequest sreq;
+                    sreq.detailed = false;
+                    auto sr = co_await client.call(sreq);
+                    promProbe.set_value(std::move(sr));
+                } catch (const std::exception& e) {
+                    promProbe.set_value(Error{ErrorCode::InternalError, e.what()});
+                } catch (...) {
+                    promProbe.set_value(Error{ErrorCode::InternalError, "unknown daemon error"});
+                }
                 co_return;
             };
             boost::asio::co_spawn(getExecutor(), workProbe(), boost::asio::detached);

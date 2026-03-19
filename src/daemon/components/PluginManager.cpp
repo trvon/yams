@@ -413,8 +413,8 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
         spdlog::info("[PluginManager] autoload: {} roots to scan", roots.size());
         pluginHostFsm_.dispatch(PluginScanStartedEvent{roots.size()});
 
-        // Collect load tasks
-        std::vector<boost::asio::awaitable<Result<PluginDescriptor>>> loadTasks;
+        // Load ABI plugins serially. Native plugin load is a synchronous dlopen/init path, and
+        // serializing it avoids overlapping dynamic-loader work during startup.
         std::unordered_set<std::string> scheduledPluginNames;
 
         for (const auto& root : roots) {
@@ -502,29 +502,19 @@ PluginManager::autoloadPlugins(boost::asio::any_io_executor executor) {
                     spdlog::info("[PluginManager] enforcing ONNX model pool max_loaded_models");
                 }
 
-                loadTasks.push_back(boost::asio::co_spawn(
-                    executor,
-                    [host, path, configJson]() -> boost::asio::awaitable<Result<PluginDescriptor>> {
-                        co_return host->load(path, configJson);
-                    },
-                    boost::asio::use_awaitable));
-            }
-        }
-
-        // Execute load tasks
-        for (auto& task : loadTasks) {
-            try {
-                auto res = co_await std::move(task);
-                if (res) {
-                    ++loadedCount;
-                    spdlog::info("[PluginManager] loaded: '{}'", res.value().name);
-                    pluginHostFsm_.dispatch(PluginLoadedEvent{res.value().name});
-                } else {
-                    spdlog::warn("[PluginManager] load failed: {}", res.error().message);
-                    pluginHostFsm_.dispatch(PluginLoadFailedEvent{res.error().message});
+                try {
+                    auto res = host->load(path, configJson);
+                    if (res) {
+                        ++loadedCount;
+                        spdlog::info("[PluginManager] loaded: '{}'", res.value().name);
+                        pluginHostFsm_.dispatch(PluginLoadedEvent{res.value().name});
+                    } else {
+                        spdlog::warn("[PluginManager] load failed: {}", res.error().message);
+                        pluginHostFsm_.dispatch(PluginLoadFailedEvent{res.error().message});
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("[PluginManager] load exception: {}", e.what());
                 }
-            } catch (const std::exception& e) {
-                spdlog::warn("[PluginManager] load exception: {}", e.what());
             }
         }
 
