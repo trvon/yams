@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <span>
 #include <stdexcept>
 
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
@@ -678,6 +679,78 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         CHECK(lifecycle.lastReason() == "provider_load_failed");
     }
 
+    SECTION("load model sanitizes invalid utf8 in provider errors") {
+        auto provider = std::make_shared<StubModelProvider>(384, "/tmp/utf8-model.onnx");
+        std::string invalidMessage = "prefix ";
+        invalidMessage.push_back(static_cast<char>(0xC2));
+        invalidMessage.push_back(static_cast<char>(0xA9));
+        invalidMessage.push_back(static_cast<char>(0xE2));
+        invalidMessage.push_back(static_cast<char>(0x82));
+        invalidMessage.push_back(static_cast<char>(0xAC));
+        invalidMessage.push_back(static_cast<char>(0xF0));
+        invalidMessage.push_back(static_cast<char>(0x9F));
+        invalidMessage.push_back(static_cast<char>(0x92));
+        invalidMessage.push_back(static_cast<char>(0xA9));
+        invalidMessage.push_back(static_cast<char>(0xC0));
+        invalidMessage.push_back(static_cast<char>(0xFF));
+        provider->setLoadError(Error{ErrorCode::InvalidState, invalidMessage});
+        svc.__test_setModelProvider(provider);
+
+        LoadModelRequest req;
+        req.modelName = "utf8-model";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        std::string expected = "prefix ";
+        expected.push_back(static_cast<char>(0xC2));
+        expected.push_back(static_cast<char>(0xA9));
+        expected.push_back(static_cast<char>(0xE2));
+        expected.push_back(static_cast<char>(0x82));
+        expected.push_back(static_cast<char>(0xAC));
+        expected.push_back(static_cast<char>(0xF0));
+        expected.push_back(static_cast<char>(0x9F));
+        expected.push_back(static_cast<char>(0x92));
+        expected.push_back(static_cast<char>(0xA9));
+        expected += "\xEF\xBF\xBD\xEF\xBF\xBD";
+        CHECK(err.code == ErrorCode::InvalidState);
+        CHECK(err.message == expected);
+    }
+
+    SECTION("load model returns internal error when provider throws after load") {
+        auto provider = std::make_shared<StubModelProvider>(384, "/tmp/throwing-model.onnx");
+        provider->setThrowOnMemoryUsage(true);
+        svc.__test_setModelProvider(provider);
+
+        LoadModelRequest req;
+        req.modelName = "throwing-model";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("Load model failed: memory boom") != std::string::npos);
+    }
+
+    SECTION("load model skips rebuild when model is already loaded") {
+        auto provider = std::make_shared<StubModelProvider>(384, "/tmp/already-loaded-model.onnx");
+        REQUIRE(provider->loadModel("already-loaded-model").has_value());
+        svc.__test_setModelProvider(provider);
+
+        LoadModelRequest req;
+        req.modelName = "already-loaded-model";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ModelLoadResponse>(resp));
+        const auto& loadResp = std::get<ModelLoadResponse>(resp);
+        CHECK(loadResp.success);
+        CHECK(loadResp.modelName == "already-loaded-model");
+        CHECK(provider->getLoadedModelCount() == 1);
+    }
+
     SECTION("load model honors timeout env floor") {
         auto provider = std::make_shared<StubModelProvider>(384, "/tmp/timeout-model.onnx");
         svc.__test_setModelProvider(provider);
@@ -733,6 +806,15 @@ TEST_CASE("RequestDispatcher: model handlers cover validation and status branche
         REQUIRE(std::holds_alternative<ErrorResponse>(resp));
         const auto& err = std::get<ErrorResponse>(resp);
         CHECK(err.code == ErrorCode::NotFound);
+    }
+
+    SECTION("unload model reports provider not ready when no provider is available") {
+        auto resp = dispatchRequest(dispatcher, Request{UnloadModelRequest{"missing-provider"}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidState);
+        CHECK(err.message.find("Plugin system") != std::string::npos);
     }
 
     SECTION("model status returns loaded model details and filters by name") {
@@ -1123,6 +1205,77 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
     ServiceManager svc(cfg, state, lifecycleFsm);
     RequestDispatcher dispatcher(&lifecycle, &svc, &state);
 
+    struct SeededDocument {
+        int64_t id{0};
+        std::string hash;
+        std::string relativePath;
+    };
+
+    auto makeReadyService = [&](StateComponent& readyState, DaemonLifecycleFsm& readyLifecycleFsm,
+                                const std::string& prefix) {
+        EnvGuard disableVectors("YAMS_DISABLE_VECTORS", "1");
+        EnvGuard disableVectorDb("YAMS_DISABLE_VECTOR_DB", "1");
+        EnvGuard skipModelLoading("YAMS_SKIP_MODEL_LOADING", "1");
+        EnvGuard safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE", "1");
+
+        DaemonConfig readyCfg = cfg;
+        readyCfg.dataDir = makeTempDir(prefix);
+
+        auto readySvc = std::make_shared<ServiceManager>(readyCfg, readyState, readyLifecycleFsm);
+        auto initResult = readySvc->initialize();
+        REQUIRE(initResult.has_value());
+
+        readySvc->startAsyncInit();
+        auto serviceSnap = readySvc->waitForServiceManagerTerminalState(30);
+        REQUIRE(serviceSnap.state == ServiceManagerState::Ready);
+        REQUIRE(readySvc->getMetadataRepo() != nullptr);
+        REQUIRE(readySvc->getContentStore() != nullptr);
+
+        return readySvc;
+    };
+
+    auto seedDocument = [&](const std::shared_ptr<ServiceManager>& readySvc,
+                            const std::string& relativePath, const std::string& text,
+                            const std::string& collectionName, const std::string& snapshotId) {
+        auto meta = readySvc->getMetadataRepo();
+        auto store = readySvc->getContentStore();
+        REQUIRE(meta != nullptr);
+        REQUIRE(store != nullptr);
+
+        const auto textBytes = std::as_bytes(std::span<const char>(text.data(), text.size()));
+        auto storeRes = store->storeBytes(textBytes);
+        REQUIRE(storeRes.has_value());
+
+        std::filesystem::path relativeDocPath(relativePath);
+        std::string extension = relativeDocPath.extension().string();
+        if (!extension.empty() && extension.front() == '.') {
+            extension.erase(0, 1);
+        }
+
+        metadata::DocumentInfo doc{};
+        doc.fileName = relativeDocPath.filename().string();
+        doc.filePath = relativePath;
+        doc.fileExtension = extension;
+        doc.fileSize = static_cast<int64_t>(text.size());
+        doc.sha256Hash = storeRes.value().contentHash;
+        doc.mimeType = "text/plain";
+        const auto now =
+            std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+        doc.createdTime = now;
+        doc.modifiedTime = now;
+        doc.indexedTime = now;
+
+        auto idRes = meta->insertDocument(doc);
+        REQUIRE(idRes.has_value());
+        REQUIRE(
+            meta->setMetadata(idRes.value(), "collection", metadata::MetadataValue(collectionName))
+                .has_value());
+        REQUIRE(meta->setMetadata(idRes.value(), "snapshot_id", metadata::MetadataValue(snapshotId))
+                    .has_value());
+
+        return SeededDocument{idRes.value(), storeRes.value().contentHash, relativePath};
+    };
+
     SECTION("list snapshots returns internal error when metadata repo is unavailable") {
         auto resp = dispatchRequest(dispatcher, Request{ListSnapshotsRequest{}});
 
@@ -1177,6 +1330,275 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
               ErrorCode::NotImplemented);
         CHECK(batchResp.items[1].sequenceId == 8);
         CHECK_FALSE(batchResp.items[1].success);
+    }
+
+    SECTION("restore collection exercises regex, layout, and io branches") {
+        StubLifecycle readyLifecycle;
+        StateComponent readyState;
+        DaemonLifecycleFsm readyLifecycleFsm;
+        auto readySvc =
+            makeReadyService(readyState, readyLifecycleFsm, "yams_collections_live_dispatcher_");
+        RequestDispatcher readyDispatcher(&readyLifecycle, readySvc.get(), &readyState);
+
+        const std::string collectionName = "dispatcher-live-collection";
+        const std::string snapshotId = "dispatcher-live-snapshot";
+        const auto seeded = seedDocument(readySvc, "nested/alpha.txt", "alpha collection text\n",
+                                         collectionName, snapshotId);
+
+        auto includeOut = makeTempDir("yams_collection_include_");
+        RestoreCollectionRequest includeReq;
+        includeReq.collection = collectionName;
+        includeReq.outputDirectory = includeOut.string();
+        includeReq.includePatterns = {"*alpha.txt"};
+        includeReq.dryRun = true;
+
+        auto includeResp = dispatchRequest(readyDispatcher, Request{includeReq});
+
+        REQUIRE(std::holds_alternative<RestoreCollectionResponse>(includeResp));
+        const auto& included = std::get<RestoreCollectionResponse>(includeResp);
+        REQUIRE(included.files.size() == 1);
+        CHECK(included.filesRestored == 1);
+        CHECK(included.files.front().path == (includeOut / seeded.relativePath).string());
+
+        RestoreCollectionRequest invalidPatternReq;
+        invalidPatternReq.collection = collectionName;
+        invalidPatternReq.outputDirectory = includeOut.string();
+        invalidPatternReq.includePatterns = {"["};
+        invalidPatternReq.dryRun = true;
+
+        auto invalidPatternResp = dispatchRequest(readyDispatcher, Request{invalidPatternReq});
+
+        REQUIRE(std::holds_alternative<RestoreCollectionResponse>(invalidPatternResp));
+        const auto& invalidPattern = std::get<RestoreCollectionResponse>(invalidPatternResp);
+        CHECK(invalidPattern.filesRestored == 0);
+        CHECK(invalidPattern.files.empty());
+
+        RestoreCollectionRequest excludeReq;
+        excludeReq.collection = collectionName;
+        excludeReq.outputDirectory = includeOut.string();
+        excludeReq.excludePatterns = {"*alpha.txt"};
+        excludeReq.dryRun = true;
+
+        auto excludeResp = dispatchRequest(readyDispatcher, Request{excludeReq});
+
+        REQUIRE(std::holds_alternative<RestoreCollectionResponse>(excludeResp));
+        const auto& excluded = std::get<RestoreCollectionResponse>(excludeResp);
+        CHECK(excluded.filesRestored == 0);
+        CHECK(excluded.files.empty());
+
+        auto writeOut = makeTempDir("yams_collection_write_");
+        RestoreCollectionRequest writeReq;
+        writeReq.collection = collectionName;
+        writeReq.outputDirectory = writeOut.string();
+        writeReq.layoutTemplate = "deep/{hash}{ext}";
+        writeReq.overwrite = true;
+        writeReq.dryRun = false;
+
+        auto writeResp = dispatchRequest(readyDispatcher, Request{writeReq});
+
+        REQUIRE(std::holds_alternative<RestoreCollectionResponse>(writeResp));
+        const auto& written = std::get<RestoreCollectionResponse>(writeResp);
+        REQUIRE(written.files.size() == 1);
+        CHECK(written.filesRestored == 1);
+        const auto writtenPath = writeOut / "deep" / (seeded.hash + ".txt");
+        CHECK(written.files.front().path == writtenPath.string());
+        REQUIRE(std::filesystem::exists(writtenPath));
+        std::ifstream writtenFile(writtenPath, std::ios::binary);
+        REQUIRE(writtenFile.good());
+        std::string writtenText((std::istreambuf_iterator<char>(writtenFile)),
+                                std::istreambuf_iterator<char>());
+        CHECK(writtenText == "alpha collection text\n");
+
+        auto createDirBlocker = makeTempDir("yams_collection_create_dir_blocker_") / "blocked";
+        {
+            std::ofstream blocker(createDirBlocker);
+            REQUIRE(blocker.good());
+            blocker << "blocker";
+        }
+        RestoreCollectionRequest createDirFailReq;
+        createDirFailReq.collection = collectionName;
+        createDirFailReq.outputDirectory = createDirBlocker.string();
+        createDirFailReq.createDirs = true;
+        createDirFailReq.overwrite = true;
+        createDirFailReq.dryRun = false;
+
+        auto createDirFailResp = dispatchRequest(readyDispatcher, Request{createDirFailReq});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(createDirFailResp));
+        CHECK(std::get<ErrorResponse>(createDirFailResp).code == ErrorCode::IOError);
+        CHECK(std::get<ErrorResponse>(createDirFailResp)
+                  .message.find("Failed to create output directory") != std::string::npos);
+
+        auto parentFailOut = makeTempDir("yams_collection_parent_fail_");
+        auto occupiedParent = parentFailOut / "occupied";
+        {
+            std::ofstream blocker(occupiedParent);
+            REQUIRE(blocker.good());
+            blocker << "occupied";
+        }
+        RestoreCollectionRequest parentFailReq;
+        parentFailReq.collection = collectionName;
+        parentFailReq.outputDirectory = parentFailOut.string();
+        parentFailReq.layoutTemplate = "occupied/restored.txt";
+        parentFailReq.overwrite = true;
+        parentFailReq.dryRun = false;
+
+        auto parentFailResp = dispatchRequest(readyDispatcher, Request{parentFailReq});
+
+        REQUIRE(std::holds_alternative<RestoreCollectionResponse>(parentFailResp));
+        const auto& parentFailed = std::get<RestoreCollectionResponse>(parentFailResp);
+        REQUIRE(parentFailed.files.size() == 1);
+        CHECK(parentFailed.filesRestored == 0);
+        CHECK(parentFailed.files.front().skipped);
+        CHECK(parentFailed.files.front().skipReason.find("Failed to create parent directory") !=
+              std::string::npos);
+
+        auto openFailOut = makeTempDir("yams_collection_open_fail_");
+        RestoreCollectionRequest openFailReq;
+        openFailReq.collection = collectionName;
+        openFailReq.outputDirectory = openFailOut.string();
+        openFailReq.layoutTemplate = ".";
+        openFailReq.overwrite = true;
+        openFailReq.dryRun = false;
+
+        auto openFailResp = dispatchRequest(readyDispatcher, Request{openFailReq});
+
+        REQUIRE(std::holds_alternative<RestoreCollectionResponse>(openFailResp));
+        const auto& openFailed = std::get<RestoreCollectionResponse>(openFailResp);
+        REQUIRE(openFailed.files.size() == 1);
+        CHECK(openFailed.filesRestored == 0);
+        CHECK(openFailed.files.front().skipped);
+        CHECK(openFailed.files.front().skipReason == "Failed to open output file");
+
+        readySvc->shutdown();
+    }
+
+    SECTION("restore snapshot exercises regex, layout, and io branches") {
+        StubLifecycle readyLifecycle;
+        StateComponent readyState;
+        DaemonLifecycleFsm readyLifecycleFsm;
+        auto readySvc =
+            makeReadyService(readyState, readyLifecycleFsm, "yams_snapshots_live_dispatcher_");
+        RequestDispatcher readyDispatcher(&readyLifecycle, readySvc.get(), &readyState);
+
+        const std::string collectionName = "dispatcher-live-collection";
+        const std::string snapshotId = "dispatcher-live-snapshot";
+        const auto seeded = seedDocument(readySvc, "nested/alpha.txt", "alpha snapshot text\n",
+                                         collectionName, snapshotId);
+
+        auto defaultOut = makeTempDir("yams_snapshot_default_");
+        RestoreSnapshotRequest defaultReq;
+        defaultReq.snapshotId = snapshotId;
+        defaultReq.outputDirectory = defaultOut.string();
+        defaultReq.includePatterns = {"*alpha.txt"};
+        defaultReq.dryRun = true;
+
+        auto defaultResp = dispatchRequest(readyDispatcher, Request{defaultReq});
+
+        REQUIRE(std::holds_alternative<RestoreSnapshotResponse>(defaultResp));
+        const auto& defaultRestore = std::get<RestoreSnapshotResponse>(defaultResp);
+        REQUIRE(defaultRestore.files.size() == 1);
+        CHECK(defaultRestore.filesRestored == 1);
+        CHECK(defaultRestore.files.front().path == (defaultOut / seeded.relativePath).string());
+
+        RestoreSnapshotRequest invalidPatternReq;
+        invalidPatternReq.snapshotId = snapshotId;
+        invalidPatternReq.outputDirectory = defaultOut.string();
+        invalidPatternReq.includePatterns = {"["};
+        invalidPatternReq.dryRun = true;
+
+        auto invalidPatternResp = dispatchRequest(readyDispatcher, Request{invalidPatternReq});
+
+        REQUIRE(std::holds_alternative<RestoreSnapshotResponse>(invalidPatternResp));
+        const auto& invalidPattern = std::get<RestoreSnapshotResponse>(invalidPatternResp);
+        CHECK(invalidPattern.filesRestored == 0);
+        CHECK(invalidPattern.files.empty());
+
+        auto writeOut = makeTempDir("yams_snapshot_write_");
+        RestoreSnapshotRequest writeReq;
+        writeReq.snapshotId = snapshotId;
+        writeReq.outputDirectory = writeOut.string();
+        writeReq.layoutTemplate = "deep/{name}{ext}";
+        writeReq.overwrite = true;
+        writeReq.dryRun = false;
+
+        auto writeResp = dispatchRequest(readyDispatcher, Request{writeReq});
+
+        REQUIRE(std::holds_alternative<RestoreSnapshotResponse>(writeResp));
+        const auto& written = std::get<RestoreSnapshotResponse>(writeResp);
+        REQUIRE(written.files.size() == 1);
+        CHECK(written.filesRestored == 1);
+        const auto writtenPath = writeOut / "deep" / "alpha.txt";
+        CHECK(written.files.front().path == writtenPath.string());
+        REQUIRE(std::filesystem::exists(writtenPath));
+        std::ifstream writtenFile(writtenPath, std::ios::binary);
+        REQUIRE(writtenFile.good());
+        std::string writtenText((std::istreambuf_iterator<char>(writtenFile)),
+                                std::istreambuf_iterator<char>());
+        CHECK(writtenText == "alpha snapshot text\n");
+
+        auto createDirBlocker = makeTempDir("yams_snapshot_create_dir_blocker_") / "blocked";
+        {
+            std::ofstream blocker(createDirBlocker);
+            REQUIRE(blocker.good());
+            blocker << "blocker";
+        }
+        RestoreSnapshotRequest createDirFailReq;
+        createDirFailReq.snapshotId = snapshotId;
+        createDirFailReq.outputDirectory = createDirBlocker.string();
+        createDirFailReq.createDirs = true;
+        createDirFailReq.overwrite = true;
+        createDirFailReq.dryRun = false;
+
+        auto createDirFailResp = dispatchRequest(readyDispatcher, Request{createDirFailReq});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(createDirFailResp));
+        CHECK(std::get<ErrorResponse>(createDirFailResp).code == ErrorCode::IOError);
+        CHECK(std::get<ErrorResponse>(createDirFailResp)
+                  .message.find("Failed to create output directory") != std::string::npos);
+
+        auto parentFailOut = makeTempDir("yams_snapshot_parent_fail_");
+        auto occupiedParent = parentFailOut / "occupied";
+        {
+            std::ofstream blocker(occupiedParent);
+            REQUIRE(blocker.good());
+            blocker << "occupied";
+        }
+        RestoreSnapshotRequest parentFailReq;
+        parentFailReq.snapshotId = snapshotId;
+        parentFailReq.outputDirectory = parentFailOut.string();
+        parentFailReq.layoutTemplate = "occupied/restored.txt";
+        parentFailReq.overwrite = true;
+        parentFailReq.dryRun = false;
+
+        auto parentFailResp = dispatchRequest(readyDispatcher, Request{parentFailReq});
+
+        REQUIRE(std::holds_alternative<RestoreSnapshotResponse>(parentFailResp));
+        const auto& parentFailed = std::get<RestoreSnapshotResponse>(parentFailResp);
+        REQUIRE(parentFailed.files.size() == 1);
+        CHECK(parentFailed.filesRestored == 0);
+        CHECK(parentFailed.files.front().skipped);
+        CHECK(parentFailed.files.front().skipReason.find("Failed to create parent directory") !=
+              std::string::npos);
+
+        auto openFailOut = makeTempDir("yams_snapshot_open_fail_");
+        RestoreSnapshotRequest openFailReq;
+        openFailReq.snapshotId = snapshotId;
+        openFailReq.outputDirectory = openFailOut.string();
+        openFailReq.layoutTemplate = ".";
+        openFailReq.overwrite = true;
+        openFailReq.dryRun = false;
+
+        auto openFailResp = dispatchRequest(readyDispatcher, Request{openFailReq});
+
+        REQUIRE(std::holds_alternative<RestoreSnapshotResponse>(openFailResp));
+        const auto& openFailed = std::get<RestoreSnapshotResponse>(openFailResp);
+        REQUIRE(openFailed.files.size() == 1);
+        CHECK(openFailed.filesRestored == 0);
+        CHECK(openFailed.files.front().skipped);
+        CHECK(openFailed.files.front().skipReason == "Failed to open output file");
+
+        readySvc->shutdown();
     }
 }
 

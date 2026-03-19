@@ -20,6 +20,72 @@
 
 namespace fs = std::filesystem;
 
+namespace {
+
+size_t rerankerMaxSubBatchSize() {
+    constexpr size_t kDefault = 64;
+    if (const char* env = std::getenv("YAMS_RERANK_MAX_SUBBATCH_SIZE")) {
+        try {
+            const auto parsed = static_cast<long long>(std::stoll(env));
+            if (parsed > 0) {
+                return static_cast<size_t>(parsed);
+            }
+        } catch (...) {
+        }
+    }
+    return kDefault;
+}
+
+double rerankerMaxPaddingOverhead() {
+    constexpr double kDefault = 1.5;
+    if (const char* env = std::getenv("YAMS_RERANK_MAX_PADDING_OVERHEAD")) {
+        try {
+            const double parsed = std::stod(env);
+            if (parsed >= 1.0 && parsed <= 8.0) {
+                return parsed;
+            }
+        } catch (...) {
+        }
+    }
+    return kDefault;
+}
+
+bool rerankerDebugTimingsEnabled() {
+    if (const char* env = std::getenv("YAMS_RERANK_DEBUG_TIMINGS")) {
+        std::string value(env);
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }
+    return false;
+}
+
+bool rerankerForceCpu() {
+    if (const char* env = std::getenv("YAMS_ONNX_RERANK_FORCE_CPU")) {
+        std::string value(env);
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }
+#ifdef __APPLE__
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool rerankerForceGpu() {
+    if (const char* env = std::getenv("YAMS_ONNX_RERANK_FORCE_GPU")) {
+        std::string value(env);
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }
+    return false;
+}
+
+} // namespace
+
 // Global ONNX Runtime environment - shared singleton (same pattern as onnx_model_pool.cpp)
 // Using leaking singleton to avoid static destruction issues with ONNX Runtime
 static std::recursive_mutex* g_reranker_onnx_mutex = new std::recursive_mutex();
@@ -99,12 +165,18 @@ public:
 
         // Attach GPU provider only if GPU is detected
         const auto& gpuInfo = resource::detectGpu();
-        if (gpuInfo.detected) {
+        const bool preferCpu = rerankerForceCpu() && !rerankerForceGpu();
+        if (gpuInfo.detected && !preferCpu) {
             std::string ep = onnx_util::appendGpuProvider(*sessionOptions_);
             spdlog::info("[Reranker] GPU detected ({}), using {} execution provider", gpuInfo.name,
                          ep);
         } else {
-            spdlog::debug("[Reranker] No GPU detected, using CPU execution provider");
+            if (gpuInfo.detected && preferCpu) {
+                spdlog::info("[Reranker] GPU detected ({}), using CPU execution provider",
+                             gpuInfo.name);
+            } else {
+                spdlog::debug("[Reranker] No GPU detected, using CPU execution provider");
+            }
         }
 
         spdlog::info("[Reranker] SessionOptions configured: intra-op={}", intra);
@@ -388,8 +460,8 @@ private:
         // Phase 3: Split into sub-batches by length buckets.
         // Strategy: each sub-batch allows at most 50% padding overhead relative
         // to its shortest sequence, capped at maxSubBatchSize docs.
-        static constexpr size_t kMaxSubBatchSize = 64;
-        static constexpr double kMaxPaddingOverhead = 1.5; // 50% overhead max
+        const size_t kMaxSubBatchSize = rerankerMaxSubBatchSize();
+        const double kMaxPaddingOverhead = rerankerMaxPaddingOverhead();
 
         struct SubBatch {
             size_t startIdx;
@@ -419,8 +491,9 @@ private:
             batchStart = batchEnd;
         }
 
-        spdlog::debug("[Reranker] Length-bucket chunking: {} docs -> {} sub-batches", batchSize,
-                      subBatches.size());
+        spdlog::debug("[Reranker] Length-bucket chunking: {} docs -> {} sub-batches (max_batch={} "
+                      "padding_overhead={:.2f})",
+                      batchSize, subBatches.size(), kMaxSubBatchSize, kMaxPaddingOverhead);
 
         // Phase 4: Run ONNX inference per sub-batch and collect scores.
         std::vector<float> scores(batchSize, 0.0f);
@@ -438,6 +511,7 @@ private:
         }
 
         for (const auto& sb : subBatches) {
+            const auto subBatchStart = std::chrono::steady_clock::now();
             const size_t sbSize = sb.count;
             const size_t sbMaxLen = std::max(sb.maxLen, size_t{1});
 
@@ -496,6 +570,14 @@ private:
             } catch (const Ort::Exception& e) {
                 return Error{ErrorCode::InternalError,
                              std::string("ONNX batch error: ") + e.what()};
+            }
+
+            if (rerankerDebugTimingsEnabled()) {
+                const auto durMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now() - subBatchStart)
+                                       .count();
+                spdlog::info("[Reranker] sub-batch start={} size={} max_len={} dur_ms={}",
+                             sb.startIdx, sbSize, sbMaxLen, durMs);
             }
         }
 

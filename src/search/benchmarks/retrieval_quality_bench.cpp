@@ -3443,14 +3443,22 @@ struct BenchFixture {
 
             json onnxPluginConfig;
             onnxPluginConfig["preferred_model"] = "embeddinggemma-300m";
+            onnxPluginConfig["reranker_model"] = "bge-reranker-base";
             harnessOptions.pluginConfigs["onnx_plugin"] = onnxPluginConfig.dump();
-            spdlog::info("Configured ONNX plugin preferred model: embeddinggemma-300m");
+            spdlog::info("Configured ONNX plugin models: embedding=embeddinggemma-300m "
+                         "reranker=bge-reranker-base");
 
             if (!std::getenv("YAMS_HNSW_DEFER_UPDATES")) {
                 setenv("YAMS_HNSW_DEFER_UPDATES", "1", 1);
                 spdlog::info("Enabled deferred HNSW updates for benchmark warm-cache priming");
             } else if (envTruthy(std::getenv("YAMS_HNSW_DEFER_UPDATES"))) {
                 spdlog::info("Deferred HNSW updates already enabled via environment");
+            }
+
+            if (!std::getenv("YAMS_ONNX_RERANK_FORCE_CPU") &&
+                !std::getenv("YAMS_ONNX_RERANK_FORCE_GPU")) {
+                setenv("YAMS_ONNX_RERANK_FORCE_CPU", "1", 1);
+                spdlog::info("Enabled CPU-preferred ONNX reranker for benchmark evaluation");
             }
 
             // Configure Glint plugin with GLiNER model path for NL entity extraction

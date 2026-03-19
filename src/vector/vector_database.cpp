@@ -725,7 +725,11 @@ public:
         }
 
         try {
-            // TODO: Build actual LanceDB index (IVF_PQ)
+            auto result = backend_->buildIndex();
+            if (!result) {
+                setError("Backend buildIndex failed: " + result.error().message);
+                return false;
+            }
             has_error_ = false;
             return true;
 

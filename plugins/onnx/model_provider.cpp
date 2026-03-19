@@ -1714,7 +1714,7 @@ struct ProviderSingleton {
                     }
                 }
 
-                if (!c->reranker || !c->reranker->isValid()) {
+                if (!c->reranker) {
                     return YAMS_ERR_UNSUPPORTED;
                 }
 
