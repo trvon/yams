@@ -4,6 +4,22 @@
 
 namespace yams::app::services {
 
+namespace {
+
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+constexpr bool kDisableRe2UnderAsan = true;
+#else
+constexpr bool kDisableRe2UnderAsan = false;
+#endif
+#elif defined(__SANITIZE_ADDRESS__)
+constexpr bool kDisableRe2UnderAsan = true;
+#else
+constexpr bool kDisableRe2UnderAsan = false;
+#endif
+
+} // namespace
+
 // ---------------------------------------------------------------------------
 // Pattern translation: ECMAScript → RE2-compatible
 // ---------------------------------------------------------------------------
@@ -33,8 +49,10 @@ std::optional<GrepRegex> GrepRegex::compile(std::string_view pattern, bool ignor
     GrepRegex result;
 
 #if YAMS_HAS_RE2
-    // Try RE2 first — 10-50x faster for most patterns.
-    {
+    // RE2 trips ASan container-overflow reports in libc++ vector relocation on this toolchain.
+    // Keep sanitizer builds on the std::regex path so the grep stack remains testable.
+    if (!kDisableRe2UnderAsan) {
+        // Try RE2 first — 10-50x faster for most patterns.
         re2::RE2::Options opts;
         opts.set_case_sensitive(!ignoreCase);
         opts.set_log_errors(false); // Don't spam stderr on unsupported patterns.
@@ -55,6 +73,9 @@ std::optional<GrepRegex> GrepRegex::compile(std::string_view pattern, bool ignor
         result.fallbackReason_ = re->error();
         spdlog::debug("[GrepRegex] RE2 rejected '{}': {}; falling back to std::regex", pattern,
                       result.fallbackReason_);
+    } else {
+        result.fallbackReason_ = "RE2 disabled under AddressSanitizer";
+        spdlog::debug("[GrepRegex] Skipping RE2 under ASan for '{}'", pattern);
     }
 #endif
 

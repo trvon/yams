@@ -242,6 +242,9 @@ private:
     // On-demand repair serialization (only one RPC repair at a time)
     std::mutex repairMutex_;
     std::atomic<bool> repairInProgress_{false};
+    std::mutex activeRepairMutex_;
+    std::condition_variable activeRepairCv_;
+    std::uint32_t activeRepairExecutions_{0};
 };
 
 } // namespace yams::daemon

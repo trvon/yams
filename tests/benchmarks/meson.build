@@ -140,12 +140,17 @@ if benchmark_dep.found()
 
   # RAG retrieval quality benchmark
   retrieval_quality_bench_deps = search_bench_deps + [test_deps, dependency('libcurl'), dependency('nlohmann_json')]
+  retrieval_quality_bench_rpath = []
+  if host_machine.system() == 'darwin'
+    retrieval_quality_bench_rpath += ['/opt/homebrew/lib']
+  endif
 
   retrieval_quality_bench = executable('retrieval_quality_bench',
     files('../../src/search/benchmarks/retrieval_quality_bench.cpp'),
     include_directories: incs,
     dependencies: retrieval_quality_bench_deps,
     cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+    build_rpath: ':'.join(retrieval_quality_bench_rpath),
     install: false,
   )
 

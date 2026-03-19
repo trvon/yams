@@ -73,6 +73,15 @@ public:
         return ErrorCode::NotImplemented;
     }
     Result<void> loadModel(const std::string& modelName) override {
+        lastOptionsModel_.clear();
+        lastOptionsJson_.clear();
+        loaded_.push_back(modelName);
+        return Result<void>();
+    }
+    Result<void> loadModelWithOptions(const std::string& modelName,
+                                      const std::string& optionsJson) override {
+        lastOptionsModel_ = modelName;
+        lastOptionsJson_ = optionsJson;
         loaded_.push_back(modelName);
         return Result<void>();
     }
@@ -102,12 +111,17 @@ public:
     size_t getMemoryUsage() const override { return 0; }
     void releaseUnusedResources() override {}
     void shutdown() override {}
+    void setAvailable(bool available) { available_ = available; }
+    const std::string& lastOptionsModel() const { return lastOptionsModel_; }
+    const std::string& lastOptionsJson() const { return lastOptionsJson_; }
 
 private:
     size_t dim_;
     std::string path_;
     bool available_;
     std::vector<std::string> loaded_;
+    std::string lastOptionsModel_;
+    std::string lastOptionsJson_;
 };
 
 std::filesystem::path makeTempDir(const std::string& prefix) {
@@ -450,6 +464,201 @@ TEST_CASE("RequestDispatcher: prune handler reports missing metadata repo",
     const auto& err = std::get<ErrorResponse>(resp);
     CHECK(err.code == ErrorCode::InternalError);
     CHECK(err.message.find("Metadata repository unavailable") != std::string::npos);
+}
+
+TEST_CASE("RequestDispatcher: model handlers cover validation and status branches",
+          "[daemon][model][dispatcher]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_model_dispatcher_");
+
+    StubLifecycle lifecycle;
+    StateComponent state;
+    state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+    state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+    SECTION("load model rejects missing name when provider exists") {
+        auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
+        svc.__test_setModelProvider(provider);
+
+        LoadModelRequest req;
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidData);
+        CHECK(err.message == "modelName is required");
+    }
+
+    SECTION("load model with options succeeds and records provider state") {
+        auto provider = std::make_shared<StubModelProvider>(768, "/tmp/provider-model.onnx");
+        svc.__test_setModelProvider(provider);
+
+        LoadModelRequest req;
+        req.modelName = "dispatcher-model";
+        req.optionsJson = R"({"mode":"offline"})";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ModelLoadResponse>(resp));
+        const auto& loadResp = std::get<ModelLoadResponse>(resp);
+        CHECK(loadResp.success);
+        CHECK(loadResp.modelName == "dispatcher-model");
+        CHECK(provider->isModelLoaded("dispatcher-model"));
+        CHECK(provider->lastOptionsModel() == "dispatcher-model");
+        CHECK(provider->lastOptionsJson() == req.optionsJson);
+    }
+
+    SECTION("unload model rejects missing name") {
+        auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
+        svc.__test_setModelProvider(provider);
+
+        UnloadModelRequest req;
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidData);
+        CHECK(err.message == "modelName is required");
+    }
+
+    SECTION("model status returns loaded model details and filters by name") {
+        auto provider = std::make_shared<StubModelProvider>(512, "/tmp/status-model.onnx");
+        svc.__test_setModelProvider(provider);
+        REQUIRE(provider->loadModel("status-model").has_value());
+
+        ModelStatusRequest req;
+        req.modelName = "status-model";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ModelStatusResponse>(resp));
+        const auto& statusResp = std::get<ModelStatusResponse>(resp);
+        REQUIRE(statusResp.models.size() == 1);
+        CHECK(statusResp.models.front().name == "status-model");
+        CHECK(statusResp.models.front().loaded);
+        CHECK(statusResp.models.front().embeddingDim == 512);
+    }
+
+    SECTION("model status returns empty response when provider unavailable") {
+        auto provider = std::make_shared<StubModelProvider>(384, "/tmp/model.onnx");
+        provider->setAvailable(false);
+        svc.__test_setModelProvider(provider);
+
+        auto resp = dispatchRequest(dispatcher, Request{ModelStatusRequest{}});
+
+        REQUIRE(std::holds_alternative<ModelStatusResponse>(resp));
+        const auto& statusResp = std::get<ModelStatusResponse>(resp);
+        CHECK(statusResp.models.empty());
+        CHECK(statusResp.totalMemoryMb == 0);
+    }
+}
+
+TEST_CASE("RequestDispatcher: graph maintenance handlers report missing graph component",
+          "[daemon][graph][dispatcher]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_graph_dispatcher_");
+
+    StubLifecycle lifecycle;
+    StateComponent state;
+    state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+    state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+    SECTION("graph repair returns internal error when graph component is unavailable") {
+        GraphRepairRequest req;
+        req.dryRun = true;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("GraphComponent not available") != std::string::npos);
+    }
+
+    SECTION("graph validate returns internal error when graph component is unavailable") {
+        auto resp = dispatchRequest(dispatcher, Request{GraphValidateRequest{}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("GraphComponent not available") != std::string::npos);
+    }
+}
+
+TEST_CASE("RequestDispatcher: collection handlers report missing dependencies and batch defaults",
+          "[daemon][collections][dispatcher]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_collections_dispatcher_");
+
+    StubLifecycle lifecycle;
+    StateComponent state;
+    state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+    state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+    SECTION("list snapshots returns internal error when metadata repo is unavailable") {
+        auto resp = dispatchRequest(dispatcher, Request{ListSnapshotsRequest{}});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("Metadata repository unavailable") != std::string::npos);
+    }
+
+    SECTION("restore collection returns internal error before dependencies are initialized") {
+        RestoreCollectionRequest req;
+        req.collection = "dispatcher-collection";
+        req.outputDirectory = "out";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("Metadata repository unavailable") != std::string::npos);
+    }
+
+    SECTION("metadata value counts returns internal error when metadata repo is unavailable") {
+        MetadataValueCountsRequest req;
+        req.keys = {"collection"};
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("Metadata repository unavailable") != std::string::npos);
+    }
+
+    SECTION("batch request returns not implemented items for each sequence") {
+        BatchRequest req;
+        req.items.push_back(BatchItem{.sequenceId = 7, .request = SearchRequest{.query = "one"}});
+        req.items.push_back(BatchItem{.sequenceId = 8, .request = ListRequest{}});
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<BatchResponse>(resp));
+        const auto& batchResp = std::get<BatchResponse>(resp);
+        CHECK(batchResp.totalCount == 2);
+        CHECK(batchResp.successCount == 0);
+        CHECK(batchResp.errorCount == 2);
+        REQUIRE(batchResp.items.size() == 2);
+        CHECK(batchResp.items[0].sequenceId == 7);
+        CHECK_FALSE(batchResp.items[0].success);
+        REQUIRE(std::holds_alternative<ErrorResponse>(batchResp.items[0].response));
+        CHECK(std::get<ErrorResponse>(batchResp.items[0].response).code ==
+              ErrorCode::NotImplemented);
+        CHECK(batchResp.items[1].sequenceId == 8);
+        CHECK_FALSE(batchResp.items[1].success);
+    }
 }
 
 TEST_CASE("DaemonMetrics: snapshot includes canonical readiness flags",

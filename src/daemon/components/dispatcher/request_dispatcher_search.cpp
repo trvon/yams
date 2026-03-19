@@ -129,9 +129,14 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         const auto& serviceResp = result.value();
 
         const auto mapSortStart = std::chrono::steady_clock::now();
-        const size_t limit = req.limit > 0 ? req.limit : serviceResp.results.size();
-        auto results = yams::daemon::dispatch::SearchResultMapper::mapToSearchResults(
-            serviceResp.results, limit);
+        const size_t limit =
+            req.limit > 0 ? req.limit
+                          : (req.pathsOnly ? serviceResp.paths.size() : serviceResp.results.size());
+        auto results = req.pathsOnly
+                           ? yams::daemon::dispatch::SearchResultMapper::mapPathsToSearchResults(
+                                 serviceResp.paths, limit)
+                           : yams::daemon::dispatch::SearchResultMapper::mapToSearchResults(
+                                 serviceResp.results, limit);
 
         std::stable_sort(
             results.begin(), results.end(),

@@ -67,9 +67,24 @@ public:
     }
 
     yams::Result<void> loadModel(const std::string& modelName) override {
+        lastLoadWithOptionsModel_.clear();
+        lastLoadWithOptionsJson_.clear();
         if (!isAvailable()) {
             return yams::Error{yams::ErrorCode::InvalidState, "Provider unavailable"};
         }
+        if (!isModelLoaded(modelName)) {
+            loadedModels_.push_back(modelName);
+        }
+        return yams::Result<void>();
+    }
+
+    yams::Result<void> loadModelWithOptions(const std::string& modelName,
+                                            const std::string& optionsJson) override {
+        if (!isAvailable()) {
+            return yams::Error{yams::ErrorCode::InvalidState, "Provider unavailable"};
+        }
+        lastLoadWithOptionsModel_ = modelName;
+        lastLoadWithOptionsJson_ = optionsJson;
         if (!isModelLoaded(modelName)) {
             loadedModels_.push_back(modelName);
         }
@@ -119,10 +134,15 @@ public:
     size_t getMemoryUsage() const override { return loadedModels_.size() * 32 * 1024 * 1024; }
     void releaseUnusedResources() override {}
     void shutdown() override { available_ = false; }
+    void setAvailable(bool available) { available_ = available; }
+    const std::string& lastLoadWithOptionsModel() const { return lastLoadWithOptionsModel_; }
+    const std::string& lastLoadWithOptionsJson() const { return lastLoadWithOptionsJson_; }
 
 private:
     bool available_{true};
     std::vector<std::string> loadedModels_;
+    std::string lastLoadWithOptionsModel_;
+    std::string lastLoadWithOptionsJson_;
 };
 
 // Helper to create a client with custom config
@@ -530,6 +550,13 @@ TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][m
     REQUIRE(std::holds_alternative<ModelStatusResponse>(statusResult.value()));
     CHECK(std::get<ModelStatusResponse>(statusResult.value()).models.empty());
 
+    LoadModelRequest emptyLoadReq;
+    auto emptyLoadResult = yams::cli::run_sync(client.executeRequest(Request{emptyLoadReq}), 10s);
+
+    REQUIRE(emptyLoadResult.has_value());
+    REQUIRE(std::holds_alternative<ErrorResponse>(emptyLoadResult.value()));
+    CHECK(std::get<ErrorResponse>(emptyLoadResult.value()).code == yams::ErrorCode::InvalidState);
+
     LoadModelRequest loadReq;
     loadReq.modelName = "test-model-that-does-not-exist";
     auto loadResult = yams::cli::run_sync(client.executeRequest(Request{loadReq}), 10s);
@@ -541,6 +568,27 @@ TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][m
     auto injectedProvider = std::make_shared<StubModelProvider>();
     REQUIRE(injectedProvider != nullptr);
     serviceManager->__test_setModelProvider(injectedProvider);
+
+    LoadModelRequest emptyLoadWithProviderReq;
+    auto emptyLoadWithProviderResult =
+        yams::cli::run_sync(client.executeRequest(Request{emptyLoadWithProviderReq}), 10s);
+
+    REQUIRE(emptyLoadWithProviderResult.has_value());
+    REQUIRE(std::holds_alternative<ErrorResponse>(emptyLoadWithProviderResult.value()));
+    CHECK(std::get<ErrorResponse>(emptyLoadWithProviderResult.value()).code ==
+          yams::ErrorCode::InvalidData);
+
+    LoadModelRequest optionsLoadReq;
+    optionsLoadReq.modelName = "dispatcher-model-with-options";
+    optionsLoadReq.optionsJson = R"({"revision":"test","offline":true})";
+    auto optionsLoadResult = yams::cli::run_sync(client.loadModel(optionsLoadReq), 10s);
+
+    REQUIRE(optionsLoadResult.has_value());
+    CHECK(optionsLoadResult.value().success);
+    CHECK(optionsLoadResult.value().modelName == "dispatcher-model-with-options");
+    CHECK(injectedProvider->isModelLoaded("dispatcher-model-with-options"));
+    CHECK(injectedProvider->lastLoadWithOptionsModel() == "dispatcher-model-with-options");
+    CHECK(injectedProvider->lastLoadWithOptionsJson() == optionsLoadReq.optionsJson);
 
     LoadModelRequest successLoadReq;
     successLoadReq.modelName = "dispatcher-model";
@@ -560,6 +608,13 @@ TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][m
     CHECK(loadedStatusResult.value().models.front().name == "dispatcher-model");
     CHECK(loadedStatusResult.value().models.front().loaded);
 
+    ModelStatusRequest missingStatusReq;
+    missingStatusReq.modelName = "missing-dispatcher-model";
+    auto missingStatusResult = yams::cli::run_sync(client.getModelStatus(missingStatusReq), 5s);
+
+    REQUIRE(missingStatusResult.has_value());
+    CHECK(missingStatusResult.value().models.empty());
+
     UnloadModelRequest unloadReq;
     unloadReq.modelName = "test-model-that-does-not-exist";
     auto unloadResult = yams::cli::run_sync(client.executeRequest(Request{unloadReq}), 5s);
@@ -575,6 +630,25 @@ TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][m
     REQUIRE(successUnloadResult.has_value());
     CHECK(successUnloadResult.value().message == "Model unloaded");
     CHECK_FALSE(injectedProvider->isModelLoaded("dispatcher-model"));
+
+    UnloadModelRequest successOptionsUnloadReq;
+    successOptionsUnloadReq.modelName = "dispatcher-model-with-options";
+    auto successOptionsUnloadResult =
+        yams::cli::run_sync(client.unloadModel(successOptionsUnloadReq), 5s);
+
+    REQUIRE(successOptionsUnloadResult.has_value());
+    CHECK(successOptionsUnloadResult.value().message == "Model unloaded");
+    CHECK_FALSE(injectedProvider->isModelLoaded("dispatcher-model-with-options"));
+
+    injectedProvider->setAvailable(false);
+
+    ModelStatusRequest unavailableStatusReq;
+    auto unavailableStatusResult =
+        yams::cli::run_sync(client.getModelStatus(unavailableStatusReq), 5s);
+
+    REQUIRE(unavailableStatusResult.has_value());
+    CHECK(unavailableStatusResult.value().models.empty());
+    CHECK(unavailableStatusResult.value().totalMemoryMb == 0);
 }
 
 TEST_CASE("Daemon client plugin request execution", "[daemon][socket][requests][plugin]") {
@@ -864,6 +938,9 @@ TEST_CASE("Daemon client graph maintenance request execution",
     REQUIRE(graphRepairResult.has_value());
     CHECK(graphRepairResult.value().dryRun);
     CHECK(graphRepairResult.value().errors == 0);
+    CHECK(std::any_of(
+        graphRepairResult.value().issues.begin(), graphRepairResult.value().issues.end(),
+        [](const auto& issue) { return issue.find("dry-run") != std::string::npos; }));
 
     GraphValidateRequest validateReq;
     auto graphValidateResult = yams::cli::run_sync(client.graphValidate(validateReq), 30s);
@@ -872,6 +949,32 @@ TEST_CASE("Daemon client graph maintenance request execution",
     CHECK(graphValidateResult.value().totalNodes >= 0);
     CHECK(graphValidateResult.value().totalEdges >= 0);
     CHECK(graphValidateResult.value().issues.empty());
+
+    AddDocumentRequest addReq;
+    addReq.name = "graph_dispatcher_coverage.txt";
+    addReq.content = "graph maintenance coverage content\n";
+    addReq.tags = {"graph-coverage", "dispatcher"};
+    auto addResult = yams::cli::run_sync(client.streamingAddDocument(addReq), 10s);
+
+    REQUIRE(addResult.has_value());
+    REQUIRE_FALSE(addResult.value().hash.empty());
+    REQUIRE(getWithRetry(client, addResult.value().hash).has_value());
+
+    GraphRepairRequest applyRepairReq;
+    applyRepairReq.dryRun = false;
+    auto applyRepairResult = yams::cli::run_sync(client.graphRepair(applyRepairReq), 30s);
+
+    REQUIRE(applyRepairResult.has_value());
+    CHECK_FALSE(applyRepairResult.value().dryRun);
+    CHECK(applyRepairResult.value().errors == 0);
+    CHECK(applyRepairResult.value().nodesCreated >= 1);
+    CHECK(applyRepairResult.value().edgesCreated >= 1);
+
+    auto postRepairValidateResult = yams::cli::run_sync(client.graphValidate(validateReq), 30s);
+
+    REQUIRE(postRepairValidateResult.has_value());
+    CHECK(postRepairValidateResult.value().totalNodes >= 1);
+    CHECK(postRepairValidateResult.value().totalEdges >= 1);
 }
 
 TEST_CASE("Daemon client collection request execution", "[daemon][socket][requests][collections]") {
@@ -891,6 +994,11 @@ TEST_CASE("Daemon client collection request execution", "[daemon][socket][reques
         std::this_thread::sleep_for(200ms);
     }
     REQUIRE(connectResult.has_value());
+
+    const auto* daemon = harness.daemon();
+    REQUIRE(daemon != nullptr);
+    auto* serviceManager = daemon->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
 
     const std::string collectionName = "dispatcher-coverage-collection";
     const std::string snapshotId = "dispatcher-coverage-snapshot";
@@ -970,6 +1078,63 @@ TEST_CASE("Daemon client collection request execution", "[daemon][socket][reques
     CHECK(restoreCollectionResult.value().files.front().path.find(
               "dispatcher_collection_coverage") != std::string::npos);
 
+    const auto existingCollectionOut =
+        std::filesystem::temp_directory_path() / "yams_dispatcher_collection_existing.txt";
+    {
+        std::ofstream existing(existingCollectionOut);
+        REQUIRE(existing.good());
+        existing << "existing collection content";
+    }
+
+    RestoreCollectionRequest existingCollectionReq;
+    existingCollectionReq.collection = collectionName;
+    existingCollectionReq.outputDirectory = existingCollectionOut.parent_path().string();
+    existingCollectionReq.layoutTemplate = existingCollectionOut.filename().string();
+    existingCollectionReq.dryRun = false;
+    auto existingCollectionResult =
+        yams::cli::run_sync(client.call<RestoreCollectionRequest>(existingCollectionReq), 30s);
+
+    REQUIRE(existingCollectionResult.has_value());
+    REQUIRE(existingCollectionResult.value().files.size() == 1);
+    CHECK(existingCollectionResult.value().filesRestored == 0);
+    CHECK(existingCollectionResult.value().files.front().skipped);
+    CHECK(existingCollectionResult.value().files.front().skipReason ==
+          "File exists (overwrite=false)");
+
+    auto metadataRepo = serviceManager->getMetadataRepo();
+    REQUIRE(metadataRepo != nullptr);
+
+    auto originalCollectionDocResult = metadataRepo->getDocumentByHash(addResult.value().hash);
+    REQUIRE(originalCollectionDocResult.has_value());
+    REQUIRE(originalCollectionDocResult.value().has_value());
+    const auto originalCollectionDoc = *originalCollectionDocResult.value();
+
+    auto missingCollectionDoc = originalCollectionDoc;
+    missingCollectionDoc.sha256Hash = std::string(64, 'a');
+    REQUIRE(metadataRepo->updateDocument(missingCollectionDoc).has_value());
+
+    const auto missingCollectionOut = std::filesystem::temp_directory_path() /
+                                      "yams_dispatcher_missing_collection_root" /
+                                      "missing_collection" / "restored.txt";
+    RestoreCollectionRequest missingContentCollectionReq;
+    missingContentCollectionReq.collection = collectionName;
+    missingContentCollectionReq.outputDirectory =
+        (missingCollectionOut.parent_path().parent_path()).string();
+    missingContentCollectionReq.layoutTemplate = "missing_collection/restored.txt";
+    missingContentCollectionReq.overwrite = true;
+    missingContentCollectionReq.dryRun = false;
+    auto missingContentCollectionResult = yams::cli::run_sync(
+        client.call<RestoreCollectionRequest>(missingContentCollectionReq), 30s);
+
+    REQUIRE(missingContentCollectionResult.has_value());
+    REQUIRE(missingContentCollectionResult.value().files.size() == 1);
+    CHECK(missingContentCollectionResult.value().filesRestored == 0);
+    CHECK(missingContentCollectionResult.value().files.front().skipped);
+    CHECK(missingContentCollectionResult.value().files.front().skipReason.find(
+              "Failed to retrieve content") != std::string::npos);
+
+    REQUIRE(metadataRepo->updateDocument(originalCollectionDoc).has_value());
+
     RestoreCollectionRequest filteredCollectionReq;
     filteredCollectionReq.collection = collectionName;
     filteredCollectionReq.outputDirectory = "collection-restore-filtered";
@@ -1009,6 +1174,60 @@ TEST_CASE("Daemon client collection request execution", "[daemon][socket][reques
     CHECK_FALSE(restoreSnapshotResult.value().files.front().skipped);
     CHECK(restoreSnapshotResult.value().files.front().path.find(addResult.value().hash) !=
           std::string::npos);
+
+    const auto existingSnapshotOut =
+        std::filesystem::temp_directory_path() / "yams_dispatcher_snapshot_existing.txt";
+    {
+        std::ofstream existing(existingSnapshotOut);
+        REQUIRE(existing.good());
+        existing << "existing snapshot content";
+    }
+
+    RestoreSnapshotRequest existingSnapshotReq;
+    existingSnapshotReq.snapshotId = snapshotId;
+    existingSnapshotReq.outputDirectory = existingSnapshotOut.parent_path().string();
+    existingSnapshotReq.layoutTemplate = existingSnapshotOut.filename().string();
+    existingSnapshotReq.dryRun = false;
+    auto existingSnapshotResult =
+        yams::cli::run_sync(client.call<RestoreSnapshotRequest>(existingSnapshotReq), 30s);
+
+    REQUIRE(existingSnapshotResult.has_value());
+    REQUIRE(existingSnapshotResult.value().files.size() == 1);
+    CHECK(existingSnapshotResult.value().filesRestored == 0);
+    CHECK(existingSnapshotResult.value().files.front().skipped);
+    CHECK(existingSnapshotResult.value().files.front().skipReason ==
+          "File exists (overwrite=false)");
+
+    auto originalSnapshotDocResult = metadataRepo->getDocumentByHash(addResult.value().hash);
+    REQUIRE(originalSnapshotDocResult.has_value());
+    REQUIRE(originalSnapshotDocResult.value().has_value());
+    const auto originalSnapshotDoc = *originalSnapshotDocResult.value();
+
+    auto missingSnapshotDoc = originalSnapshotDoc;
+    missingSnapshotDoc.sha256Hash = std::string(64, 'b');
+    REQUIRE(metadataRepo->updateDocument(missingSnapshotDoc).has_value());
+
+    const auto missingSnapshotOut = std::filesystem::temp_directory_path() /
+                                    "yams_dispatcher_missing_snapshot_root" / "missing_snapshot" /
+                                    "restored.txt";
+    RestoreSnapshotRequest missingContentSnapshotReq;
+    missingContentSnapshotReq.snapshotId = snapshotId;
+    missingContentSnapshotReq.outputDirectory =
+        (missingSnapshotOut.parent_path().parent_path()).string();
+    missingContentSnapshotReq.layoutTemplate = "missing_snapshot/restored.txt";
+    missingContentSnapshotReq.overwrite = true;
+    missingContentSnapshotReq.dryRun = false;
+    auto missingContentSnapshotResult =
+        yams::cli::run_sync(client.call<RestoreSnapshotRequest>(missingContentSnapshotReq), 30s);
+
+    REQUIRE(missingContentSnapshotResult.has_value());
+    REQUIRE(missingContentSnapshotResult.value().files.size() == 1);
+    CHECK(missingContentSnapshotResult.value().filesRestored == 0);
+    CHECK(missingContentSnapshotResult.value().files.front().skipped);
+    CHECK(missingContentSnapshotResult.value().files.front().skipReason.find(
+              "Failed to retrieve content") != std::string::npos);
+
+    REQUIRE(metadataRepo->updateDocument(originalSnapshotDoc).has_value());
 
     RestoreSnapshotRequest filteredSnapshotReq;
     filteredSnapshotReq.snapshotId = snapshotId;
@@ -1099,12 +1318,27 @@ TEST_CASE("Daemon client session request execution", "[daemon][socket][requests]
 
     sessionService->close();
 
+    auto noCurrentListResult =
+        yams::cli::run_sync(client.executeRequest(Request{ListSessionsRequest{}}), 10s);
+    REQUIRE(noCurrentListResult.has_value());
+    REQUIRE(std::holds_alternative<ListSessionsResponse>(noCurrentListResult.value()));
+    CHECK(std::get<ListSessionsResponse>(noCurrentListResult.value()).current_session.empty());
+
     AddPathSelectorRequest noCurrentReq;
     noCurrentReq.path = selectorPath;
     auto noCurrentResult = yams::cli::run_sync(client.executeRequest(Request{noCurrentReq}), 10s);
     REQUIRE(noCurrentResult.has_value());
     REQUIRE(std::holds_alternative<ErrorResponse>(noCurrentResult.value()));
     CHECK(std::get<ErrorResponse>(noCurrentResult.value()).code == yams::ErrorCode::InvalidState);
+
+    RemovePathSelectorRequest noCurrentRemoveReq;
+    noCurrentRemoveReq.path = selectorPath;
+    auto noCurrentRemoveResult =
+        yams::cli::run_sync(client.executeRequest(Request{noCurrentRemoveReq}), 10s);
+    REQUIRE(noCurrentRemoveResult.has_value());
+    REQUIRE(std::holds_alternative<ErrorResponse>(noCurrentRemoveResult.value()));
+    CHECK(std::get<ErrorResponse>(noCurrentRemoveResult.value()).code ==
+          yams::ErrorCode::InvalidState);
 
     UseSessionRequest useReq;
     useReq.session_name = sessionB;
@@ -1114,6 +1348,16 @@ TEST_CASE("Daemon client session request execution", "[daemon][socket][requests]
     CHECK(std::get<SuccessResponse>(useResult.value()).message == "OK");
     REQUIRE(sessionService->current().has_value());
     CHECK(sessionService->current().value() == sessionB);
+
+    AddPathSelectorRequest missingSessionAddReq;
+    missingSessionAddReq.session_name = "dispatcher-session-missing";
+    missingSessionAddReq.path = "missing/**/*.txt";
+    auto missingSessionAddResult =
+        yams::cli::run_sync(client.executeRequest(Request{missingSessionAddReq}), 10s);
+    REQUIRE(missingSessionAddResult.has_value());
+    REQUIRE(std::holds_alternative<ErrorResponse>(missingSessionAddResult.value()));
+    CHECK(std::get<ErrorResponse>(missingSessionAddResult.value()).code ==
+          yams::ErrorCode::NotFound);
 
     AddPathSelectorRequest addReq;
     addReq.path = selectorPath;
@@ -1126,6 +1370,37 @@ TEST_CASE("Daemon client session request execution", "[daemon][socket][requests]
     auto selectors = sessionService->listPathSelectors(sessionB);
     REQUIRE(selectors.size() == 1);
     CHECK(selectors.front() == selectorPath);
+
+    AddPathSelectorRequest explicitSessionAddReq;
+    explicitSessionAddReq.session_name = sessionB;
+    explicitSessionAddReq.path = "include/**/*.hpp";
+    explicitSessionAddReq.tags = {"explicit"};
+    auto explicitSessionAddResult =
+        yams::cli::run_sync(client.executeRequest(Request{explicitSessionAddReq}), 10s);
+    REQUIRE(explicitSessionAddResult.has_value());
+    REQUIRE(std::holds_alternative<SuccessResponse>(explicitSessionAddResult.value()));
+
+    selectors = sessionService->listPathSelectors(sessionB);
+    REQUIRE(selectors.size() == 2);
+    CHECK(std::find(selectors.begin(), selectors.end(), "include/**/*.hpp") != selectors.end());
+
+    RemovePathSelectorRequest missingSessionRemoveReq;
+    missingSessionRemoveReq.session_name = "dispatcher-session-missing";
+    missingSessionRemoveReq.path = selectorPath;
+    auto missingSessionRemoveResult =
+        yams::cli::run_sync(client.executeRequest(Request{missingSessionRemoveReq}), 10s);
+    REQUIRE(missingSessionRemoveResult.has_value());
+    REQUIRE(std::holds_alternative<ErrorResponse>(missingSessionRemoveResult.value()));
+    CHECK(std::get<ErrorResponse>(missingSessionRemoveResult.value()).code ==
+          yams::ErrorCode::NotFound);
+
+    RemovePathSelectorRequest explicitRemoveReq;
+    explicitRemoveReq.session_name = sessionB;
+    explicitRemoveReq.path = "include/**/*.hpp";
+    auto explicitRemoveResult =
+        yams::cli::run_sync(client.executeRequest(Request{explicitRemoveReq}), 10s);
+    REQUIRE(explicitRemoveResult.has_value());
+    REQUIRE(std::holds_alternative<SuccessResponse>(explicitRemoveResult.value()));
 
     RemovePathSelectorRequest removeReq;
     removeReq.path = selectorPath;

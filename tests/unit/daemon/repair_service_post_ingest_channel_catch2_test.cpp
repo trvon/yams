@@ -197,6 +197,85 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     sm->shutdown();
 }
 
+TEST_CASE_METHOD(ServiceManagerFixture, "RepairService: stop waits for in-flight executeRepair",
+                 "[daemon][repair][shutdown][regression]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+
+    auto smSnap = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE(smSnap.state == ServiceManagerState::Ready);
+
+    RepairService::Config cfg;
+    cfg.enable = true;
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 0; }, cfg);
+    repair.start();
+
+    std::mutex progressMutex;
+    std::condition_variable progressCv;
+    bool progressEntered = false;
+    bool allowProgress = false;
+    std::atomic<bool> stopReturned{false};
+    std::atomic<bool> repairCompleted{false};
+
+    RepairRequest req;
+    req.repairOrphans = true;
+    req.dryRun = true;
+    req.verbose = true;
+
+    std::thread repairThread([&] {
+        auto resp = repair.executeRepair(req, [&](const RepairEvent& event) {
+            if (event.phase == "repairing" && event.operation == "orphans") {
+                std::unique_lock<std::mutex> lk(progressMutex);
+                progressEntered = true;
+                progressCv.notify_all();
+                progressCv.wait(lk, [&] { return allowProgress; });
+            }
+        });
+        CHECK(resp.totalOperations == 1);
+        CHECK(resp.operationResults.size() == 1);
+        CHECK(resp.operationResults.front().operation == "orphans");
+        repairCompleted.store(true, std::memory_order_release);
+    });
+
+    {
+        std::unique_lock<std::mutex> lk(progressMutex);
+        REQUIRE(progressCv.wait_for(lk, std::chrono::seconds(5), [&] { return progressEntered; }));
+    }
+
+    std::thread stopThread([&] {
+        repair.stop();
+        stopReturned.store(true, std::memory_order_release);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK_FALSE(stopReturned.load(std::memory_order_acquire));
+    CHECK_FALSE(repairCompleted.load(std::memory_order_acquire));
+
+    {
+        std::lock_guard<std::mutex> lk(progressMutex);
+        allowProgress = true;
+    }
+    progressCv.notify_all();
+
+    repairThread.join();
+    stopThread.join();
+
+    CHECK(stopReturned.load(std::memory_order_acquire));
+    CHECK(repairCompleted.load(std::memory_order_acquire));
+
+    sm->shutdown();
+}
+
 TEST_CASE_METHOD(ServiceManagerFixture,
                  "RepairService: post-ingest success should mark repair status completed",
                  "[daemon][repair][regression][post-ingest]") {

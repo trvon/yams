@@ -147,6 +147,15 @@ struct SearchResultMapper {
         return resultItem;
     }
 
+    static SearchResult fromServicePath(const std::string& path) {
+        SearchResult resultItem;
+        resultItem.path = path;
+        resultItem.title = path;
+        resultItem.metadata["path"] = path;
+        resultItem.metadata["title"] = path;
+        return resultItem;
+    }
+
     template <typename ServiceItem>
     static std::vector<SearchResult> mapToSearchResults(const std::vector<ServiceItem>& items,
                                                         size_t limit = 0) {
@@ -157,6 +166,21 @@ struct SearchResultMapper {
             if (results.size() >= effectiveLimit)
                 break;
             results.push_back(fromServiceItem(item));
+        }
+
+        return results;
+    }
+
+    static std::vector<SearchResult> mapPathsToSearchResults(const std::vector<std::string>& paths,
+                                                             size_t limit = 0) {
+        std::vector<SearchResult> results;
+        const size_t effectiveLimit = (limit > 0) ? limit : paths.size();
+        results.reserve(std::min(paths.size(), effectiveLimit));
+
+        for (const auto& path : paths) {
+            if (results.size() >= effectiveLimit)
+                break;
+            results.push_back(fromServicePath(path));
         }
 
         return results;

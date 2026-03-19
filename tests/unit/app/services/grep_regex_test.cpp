@@ -10,6 +10,16 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/app/services/grep_regex.hpp>
 
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define YAMS_GREP_REGEX_TEST_ASAN 1
+#endif
+#endif
+
+#if !defined(YAMS_GREP_REGEX_TEST_ASAN) && defined(__SANITIZE_ADDRESS__)
+#define YAMS_GREP_REGEX_TEST_ASAN 1
+#endif
+
 using namespace yams::app::services;
 
 // ---------------------------------------------------------------------------
@@ -224,8 +234,13 @@ TEST_CASE("GrepRegex::usesRe2: reflects backend", "[grep_regex]") {
     // When built without RE2, it should use std::regex.
     // We can't know at test-compile time, but the flag should be consistent.
 #if YAMS_HAS_RE2
+#if defined(YAMS_GREP_REGEX_TEST_ASAN)
+    REQUIRE(re->usesRe2() == false);
+    REQUIRE(re->fallbackReason() == "RE2 disabled under AddressSanitizer");
+#else
     REQUIRE(re->usesRe2() == true);
     REQUIRE(re->fallbackReason().empty());
+#endif
 #else
     REQUIRE(re->usesRe2() == false);
 #endif

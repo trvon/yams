@@ -342,6 +342,10 @@ void RepairService::stop() {
         shutdownState_->cv.wait_for(lk, std::chrono::milliseconds(2000),
                                     [this] { return shutdownState_->finished.load(); });
     }
+    {
+        std::unique_lock<std::mutex> lk(activeRepairMutex_);
+        activeRepairCv_.wait(lk, [this] { return activeRepairExecutions_ == 0; });
+    }
     spdlog::debug("RepairService stopped");
 }
 
@@ -1019,8 +1023,13 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
     if (state_) {
         state_->stats.repairInProgress.store(true, std::memory_order_relaxed);
     }
+    {
+        std::lock_guard<std::mutex> lk(activeRepairMutex_);
+        ++activeRepairExecutions_;
+    }
     // RAII guard to clear the flag when we leave this scope.
     struct InProgressGuard {
+        RepairService* self;
         std::atomic<bool>& flag;
         std::atomic<bool>* statsFlag;
         ~InProgressGuard() {
@@ -1028,8 +1037,15 @@ RepairResponse RepairService::executeRepair(const RepairRequest& request, Progre
             if (statsFlag) {
                 statsFlag->store(false, std::memory_order_relaxed);
             }
+            if (self) {
+                std::lock_guard<std::mutex> lk(self->activeRepairMutex_);
+                if (self->activeRepairExecutions_ > 0) {
+                    --self->activeRepairExecutions_;
+                }
+                self->activeRepairCv_.notify_all();
+            }
         }
-    } inProgressGuard{repairInProgress_, state_ ? &state_->stats.repairInProgress : nullptr};
+    } inProgressGuard{this, repairInProgress_, state_ ? &state_->stats.repairInProgress : nullptr};
 
     RepairResponse response;
     std::vector<RepairOperationResult> results;
