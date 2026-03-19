@@ -39,6 +39,7 @@ struct DaemonHarnessOptions {
     bool enableModelProvider = true;
     bool useMockModelProvider = true;
     bool autoLoadPlugins = false;
+    bool pluginDirStrict = false;
     bool enableAutoRepair = true;
     bool isolateState = false;
     bool skipSocketVerificationOnReady = false;
@@ -136,6 +137,7 @@ public:
         cfg.logFile = log_;
         cfg.enableModelProvider = options_.enableModelProvider;
         cfg.autoLoadPlugins = options_.autoLoadPlugins;
+        cfg.pluginDirStrict = options_.pluginDirStrict;
         cfg.useMockModelProvider = options_.useMockModelProvider;
         cfg.enableAutoRepair = options_.enableAutoRepair;
         if (options_.pluginDir) {

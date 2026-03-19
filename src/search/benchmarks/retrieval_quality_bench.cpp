@@ -3281,6 +3281,7 @@ struct BenchFixture {
         harnessOptions.autoLoadPlugins = !vectorsDisabled;
         harnessOptions.configureModelPool = !vectorsDisabled;
         harnessOptions.modelPoolLazyLoading = false;
+        harnessOptions.pluginDirStrict = !vectorsDisabled;
 
         // YAMS_BENCH_DATA_DIR: reuse a pre-ingested data directory to skip
         // corpus ingestion + embedding wait on repeated benchmark runs.

@@ -77,6 +77,25 @@ if host_machine.system() == 'windows'
   )
   # Extract just the import library for linking
   zpdf_import_lib = zpdf_lib[1]
+elif host_machine.system() == 'darwin'
+  zpdf_build_command = (
+    'cd "@0@" && "@1@" build -Doptimize=ReleaseFast -Dtarget=@2@-macos.${MACOSX_DEPLOYMENT_TARGET:-26.0} && cp "@3@" "@4@/@5@"'
+  ).format(
+    zpdf_src_dir,
+    zig.full_path(),
+    host_machine.cpu_family(),
+    zpdf_lib_src,
+    zpdf_build_dir,
+    zpdf_lib_name
+  )
+  zpdf_lib = custom_target('zpdf_shared',
+    command: [
+      'sh', '-c', zpdf_build_command
+    ],
+    output: [zpdf_lib_name],
+    build_by_default: true,
+    console: true,
+  )
 else
   # Unix (Linux/macOS): Use shell
   zpdf_lib = custom_target('zpdf_shared',

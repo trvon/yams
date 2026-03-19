@@ -98,6 +98,11 @@ public:
     void setEngine(const std::shared_ptr<yams::search::SearchEngine>& engine, bool vectorEnabled);
 
     /**
+     * Clear any owned engine and cached raw pointer during shutdown.
+     */
+    void clearEngine();
+
+    /**
      * Check if engine is currently building.
      */
     bool isBuilding() const { return fsm_.isBuilding(); }

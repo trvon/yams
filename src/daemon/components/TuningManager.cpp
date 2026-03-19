@@ -1235,14 +1235,6 @@ bool TuningManager::tick_once() {
 
             uint32_t tokens = TuneAdvisor::repairTokensIdle();
             if (busyHeld) {
-                // Check if PostIngestQueue is actively processing — if so, allow
-                // cooperative repair tokens instead of fully halting.
-                bool piqActive = false;
-                if (sm_) {
-                    if (auto pq = sm_->getPostIngestQueue()) {
-                        piqActive = pq->started() && (pq->size() > 0 || pq->totalInFlight() > 0);
-                    }
-                }
                 // Under Critical/Emergency pressure the governor has already
                 // paused stages and blocked admission; halt repair entirely.
                 if (govSnap.level >= ResourcePressureLevel::Critical) {

@@ -723,6 +723,13 @@ TEST_CASE("Daemon client prune request execution", "[daemon][socket][requests][p
     }
     REQUIRE(connectResult.has_value());
 
+    const auto* daemon = harness.daemon();
+    REQUIRE(daemon != nullptr);
+    const auto* serviceManager = daemon->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+    auto metadataRepo = serviceManager->getMetadataRepo();
+    REQUIRE(metadataRepo != nullptr);
+
     AddDocumentRequest addReq;
     addReq.name = "dispatcher_coverage.log";
     addReq.content = "prune coverage content\n";
@@ -733,6 +740,28 @@ TEST_CASE("Daemon client prune request execution", "[daemon][socket][requests][p
 
     auto getResult = getWithRetry(client, addResult.value().hash);
     REQUIRE(getResult.has_value());
+
+    AddDocumentRequest largeReq;
+    largeReq.name = "dispatcher_coverage_large.log";
+    largeReq.content = std::string(4096, 'L');
+    auto largeResult = yams::cli::run_sync(client.streamingAddDocument(largeReq), 10s);
+
+    REQUIRE(largeResult.has_value());
+    REQUIRE_FALSE(largeResult.value().hash.empty());
+    REQUIRE(getWithRetry(client, largeResult.value().hash).has_value());
+
+    auto smallDocResult = metadataRepo->getDocumentByHash(addResult.value().hash);
+    REQUIRE(smallDocResult.has_value());
+    REQUIRE(smallDocResult.value().has_value());
+    const auto smallDoc = *smallDocResult.value();
+
+    auto largeDocResult = metadataRepo->getDocumentByHash(largeResult.value().hash);
+    REQUIRE(largeDocResult.has_value());
+    REQUIRE(largeDocResult.value().has_value());
+    auto largeDoc = *largeDocResult.value();
+    largeDoc.modifiedTime = std::chrono::time_point_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now() - std::chrono::hours(48));
+    REQUIRE(metadataRepo->updateDocument(largeDoc).has_value());
 
     PruneRequest pruneReq;
     pruneReq.extensions = {"log"};
@@ -745,8 +774,68 @@ TEST_CASE("Daemon client prune request execution", "[daemon][socket][requests][p
     REQUIRE(pruneResult.has_value());
     CHECK(pruneResult.value().filesDeleted == 0);
     CHECK(pruneResult.value().filesFailed == 0);
-    CHECK(pruneResult.value().totalBytesFreed >= addReq.content.size());
+    CHECK(pruneResult.value().totalBytesFreed >=
+          static_cast<uint64_t>(smallDoc.fileSize + largeDoc.fileSize));
     CHECK_FALSE(pruneResult.value().categoryCounts.empty());
+
+    PruneRequest olderThanReq;
+    olderThanReq.extensions = {"log"};
+    olderThanReq.olderThan = "1d";
+    olderThanReq.dryRun = true;
+
+    auto olderThanResult = yams::cli::run_sync(client.call<PruneRequest>(olderThanReq), 30s);
+
+    REQUIRE(olderThanResult.has_value());
+    CHECK(olderThanResult.value().filesDeleted == 0);
+    CHECK(olderThanResult.value().filesFailed == 0);
+    CHECK(olderThanResult.value().totalBytesFreed == static_cast<uint64_t>(largeDoc.fileSize));
+
+    PruneRequest unknownAgeUnitReq;
+    unknownAgeUnitReq.extensions = {"log"};
+    unknownAgeUnitReq.olderThan = "1q";
+    unknownAgeUnitReq.dryRun = true;
+
+    auto unknownAgeUnitResult =
+        yams::cli::run_sync(client.call<PruneRequest>(unknownAgeUnitReq), 30s);
+
+    REQUIRE(unknownAgeUnitResult.has_value());
+    CHECK(unknownAgeUnitResult.value().filesDeleted == 0);
+    CHECK(unknownAgeUnitResult.value().filesFailed == 0);
+    CHECK(unknownAgeUnitResult.value().totalBytesFreed >=
+          static_cast<uint64_t>(smallDoc.fileSize + largeDoc.fileSize));
+
+    PruneRequest largerThanReq;
+    largerThanReq.extensions = {"log"};
+    largerThanReq.largerThan = "1KB";
+    largerThanReq.dryRun = true;
+
+    auto largerThanResult = yams::cli::run_sync(client.call<PruneRequest>(largerThanReq), 30s);
+
+    REQUIRE(largerThanResult.has_value());
+    CHECK(largerThanResult.value().filesDeleted == 0);
+    CHECK(largerThanResult.value().filesFailed == 0);
+    CHECK(largerThanResult.value().totalBytesFreed == static_cast<uint64_t>(largeDoc.fileSize));
+
+    PruneRequest applyReq;
+    applyReq.extensions = {"log"};
+    applyReq.olderThan = "1d";
+    applyReq.largerThan = "1KB";
+    applyReq.dryRun = false;
+
+    auto applyResult = yams::cli::run_sync(client.call<PruneRequest>(applyReq), 30s);
+
+    REQUIRE(applyResult.has_value());
+    CHECK(applyResult.value().filesDeleted == 1);
+    CHECK(applyResult.value().filesFailed == 0);
+    CHECK(applyResult.value().totalBytesFreed == static_cast<uint64_t>(largeDoc.fileSize));
+
+    auto largeDocAfterPrune = metadataRepo->getDocumentByHash(largeResult.value().hash);
+    REQUIRE(largeDocAfterPrune.has_value());
+    CHECK_FALSE(largeDocAfterPrune.value().has_value());
+
+    auto smallDocAfterPrune = metadataRepo->getDocumentByHash(addResult.value().hash);
+    REQUIRE(smallDocAfterPrune.has_value());
+    CHECK(smallDocAfterPrune.value().has_value());
 }
 
 TEST_CASE("Daemon client graph maintenance request execution",
@@ -1192,6 +1281,15 @@ TEST_CASE("Daemon client tree diff request execution", "[daemon][socket][request
     deleted.mode = 0644;
     changes.push_back(deleted);
 
+    yams::metadata::TreeChangeRecord moved;
+    moved.type = yams::metadata::TreeChangeType::Moved;
+    moved.oldPath = "include/old_header.hpp";
+    moved.newPath = "include/new_header.hpp";
+    moved.oldHash = "hash-moved";
+    moved.newHash = "hash-moved";
+    moved.mode = 0644;
+    changes.push_back(moved);
+
     auto appendResult = metadataRepo->appendTreeChanges(diffIdResult.value(), changes);
     REQUIRE(appendResult.has_value());
 
@@ -1208,7 +1306,7 @@ TEST_CASE("Daemon client tree diff request execution", "[daemon][socket][request
         INFO("direct listTreeChanges error: " << directListResult.error().message);
     }
     REQUIRE(directListResult.has_value());
-    CHECK(directListResult.value().size() == 4);
+    CHECK(directListResult.value().size() == 5);
 
     ListTreeDiffRequest listReq;
     listReq.baseSnapshotId = baseSnapshotId;
@@ -1226,8 +1324,8 @@ TEST_CASE("Daemon client tree diff request execution", "[daemon][socket][request
     }
     REQUIRE(std::holds_alternative<ListTreeDiffResponse>(listResult.value()));
     const auto& listResp = std::get<ListTreeDiffResponse>(listResult.value());
-    CHECK(listResp.totalCount == 4);
-    REQUIRE(listResp.changes.size() == 4);
+    CHECK(listResp.totalCount == 5);
+    REQUIRE(listResp.changes.size() == 5);
     CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
         return entry.changeType == "added" && entry.path == "src/new_file.cpp" &&
                entry.oldPath.empty();
@@ -1243,6 +1341,10 @@ TEST_CASE("Daemon client tree diff request execution", "[daemon][socket][request
     CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
         return entry.changeType == "deleted" && entry.path.empty() &&
                entry.oldPath == "src/removed.cpp";
+    }));
+    CHECK(std::any_of(listResp.changes.begin(), listResp.changes.end(), [](const auto& entry) {
+        return entry.changeType == "unknown" && entry.path == "include/new_header.hpp" &&
+               entry.oldPath == "include/old_header.hpp";
     }));
 
     ListTreeDiffRequest filteredReq;
@@ -1269,6 +1371,48 @@ TEST_CASE("Daemon client tree diff request execution", "[daemon][socket][request
     CHECK(filteredResp.changes.front().changeType == "renamed");
     CHECK(filteredResp.changes.front().path == "src/new_name.cpp");
     CHECK(filteredResp.changes.front().oldPath == "src/old_name.cpp");
+
+    ListTreeDiffRequest unknownFilterReq;
+    unknownFilterReq.baseSnapshotId = baseSnapshotId;
+    unknownFilterReq.targetSnapshotId = targetSnapshotId;
+    unknownFilterReq.pathPrefix = "include/new";
+    unknownFilterReq.typeFilter = "moved";
+    unknownFilterReq.limit = 10;
+    auto unknownFilterResult =
+        yams::cli::run_sync(client.executeRequest(Request{unknownFilterReq}), 10s);
+
+    REQUIRE(unknownFilterResult.has_value());
+    REQUIRE(std::holds_alternative<ListTreeDiffResponse>(unknownFilterResult.value()));
+    const auto& unknownFilterResp = std::get<ListTreeDiffResponse>(unknownFilterResult.value());
+    CHECK(unknownFilterResp.totalCount == 1);
+    REQUIRE(unknownFilterResp.changes.size() == 1);
+    CHECK(unknownFilterResp.changes.front().changeType == "unknown");
+    CHECK(unknownFilterResp.changes.front().path == "include/new_header.hpp");
+    CHECK(unknownFilterResp.changes.front().oldPath == "include/old_header.hpp");
+
+    ListTreeDiffRequest pagedReq;
+    pagedReq.baseSnapshotId = baseSnapshotId;
+    pagedReq.targetSnapshotId = targetSnapshotId;
+    pagedReq.limit = 1;
+    pagedReq.offset = 1;
+    auto pagedResult = yams::cli::run_sync(client.executeRequest(Request{pagedReq}), 10s);
+
+    REQUIRE(pagedResult.has_value());
+    REQUIRE(std::holds_alternative<ListTreeDiffResponse>(pagedResult.value()));
+    const auto& pagedResp = std::get<ListTreeDiffResponse>(pagedResult.value());
+    CHECK(pagedResp.totalCount == 1);
+    REQUIRE(pagedResp.changes.size() == 1);
+    CHECK(pagedResp.changes.front().changeType == "modified");
+    CHECK(pagedResp.changes.front().path == "src/existing.cpp");
+    CHECK(pagedResp.changes.front().contentDeltaHash == "delta-existing");
+
+    ListTreeDiffRequest invalidReq;
+    invalidReq.targetSnapshotId = targetSnapshotId;
+    auto invalidResult = yams::cli::run_sync(client.executeRequest(Request{invalidReq}), 10s);
+
+    REQUIRE(invalidResult.has_value());
+    REQUIRE(std::holds_alternative<ErrorResponse>(invalidResult.value()));
+    CHECK(std::get<ErrorResponse>(invalidResult.value()).code == yams::ErrorCode::InvalidArgument);
 }
 
 TEST_CASE("Daemon client error handling", "[daemon][socket][errors]") {

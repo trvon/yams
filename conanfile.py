@@ -71,6 +71,12 @@ class YamsConan(ConanFile):
         self.requires("tl-expected/1.1.0")
         self.requires("boost/1.85.0")
 
+        if self.options.build_tests:  # type: ignore
+            self.requires("gtest/1.15.0")
+            # Catch2 must be a regular requirement so Meson dependency()
+            # can resolve catch2/catch2-with-main via generated deps.
+            self.requires("catch2/3.5.2")
+
         if self.options.enable_symbol_extraction:  # type: ignore
             try:
                 self.requires("tree-sitter/0.25.9")
@@ -109,10 +115,6 @@ class YamsConan(ConanFile):
         self.tool_requires("meson/[>=1.2.2 <2]")
         self.tool_requires("ninja/[>=1.10.2 <2]")
 
-        if self.options.build_tests:  # type: ignore
-            self.requires("gtest/1.15.0")
-            # Add Catch2 for modern test framework migration (PBI-050)
-            self.requires("catch2/3.5.2")
         if self.options.build_benchmarks:  # type: ignore
             self.requires("benchmark/1.8.3")
         if self.settings.build_type == "Debug":  # type: ignore

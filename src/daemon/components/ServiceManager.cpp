@@ -993,20 +993,22 @@ void ServiceManager::shutdown() {
     // Embedding jobs run on WorkCoordinator executors; stopping/joining workers first can leave
     // in-flight embed tasks stranded and trigger shutdown detaches/timeouts.
     spdlog::info("[ServiceManager] Phase 3.7: Quiescing embedding service");
-    auto embeddingService =
-        std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
-    if (embeddingService) {
-        try {
-            embeddingService->shutdown();
-            spdlog::info("[ServiceManager] Phase 3.7: Embedding service quiesced");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 3.7: Embedding service quiesce failed: {}",
-                         e.what());
-        } catch (...) {
-            spdlog::warn("[ServiceManager] Phase 3.7: Embedding service quiesce failed");
+    {
+        auto embeddingService =
+            std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
+        if (embeddingService) {
+            try {
+                embeddingService->shutdown();
+                spdlog::info("[ServiceManager] Phase 3.7: Embedding service quiesced");
+            } catch (const std::exception& e) {
+                spdlog::warn("[ServiceManager] Phase 3.7: Embedding service quiesce failed: {}",
+                             e.what());
+            } catch (...) {
+                spdlog::warn("[ServiceManager] Phase 3.7: Embedding service quiesce failed");
+            }
+        } else {
+            spdlog::info("[ServiceManager] Phase 3.7: No embedding service to quiesce");
         }
-    } else {
-        spdlog::info("[ServiceManager] Phase 3.7: No embedding service to quiesce");
     }
 
     // Phase 3.8: Stop ingest service before WorkCoordinator shutdown.
@@ -1109,13 +1111,15 @@ void ServiceManager::shutdown() {
     }
 
     spdlog::info("[ServiceManager] Phase 6.3.5: Resetting embedding service");
-    auto embeddingServiceHold = std::atomic_exchange_explicit(
-        &embeddingService_, std::shared_ptr<EmbeddingService>{}, std::memory_order_acq_rel);
-    if (embeddingServiceHold) {
-        embeddingServiceHold.reset();
-        spdlog::info("[ServiceManager] Phase 6.3.5: Embedding service reset complete");
-    } else {
-        spdlog::info("[ServiceManager] Phase 6.3.5: No embedding service to reset");
+    {
+        auto embeddingServiceHold = std::atomic_exchange_explicit(
+            &embeddingService_, std::shared_ptr<EmbeddingService>{}, std::memory_order_acq_rel);
+        if (embeddingServiceHold) {
+            embeddingServiceHold.reset();
+            spdlog::info("[ServiceManager] Phase 6.3.5: Embedding service reset complete");
+        } else {
+            spdlog::info("[ServiceManager] Phase 6.3.5: No embedding service to reset");
+        }
     }
 
     spdlog::info("[ServiceManager] Phase 6.3.6: Shutting down KG write queue");
@@ -1162,14 +1166,18 @@ void ServiceManager::shutdown() {
 
     // Shutdown search engine
     spdlog::info("[ServiceManager] Phase 6.7: Resetting search engine");
-    auto currentEngine = std::atomic_load_explicit(&searchEngine_, std::memory_order_acquire);
-    if (currentEngine) {
-        std::atomic_store_explicit(&searchEngine_, std::shared_ptr<search::SearchEngine>{},
-                                   std::memory_order_release);
-        spdlog::info("[ServiceManager] Phase 6.7: Search engine reset");
-    } else {
-        spdlog::info("[ServiceManager] Phase 6.7: No search engine to reset");
+    {
+        auto currentEngine = std::atomic_load_explicit(&searchEngine_, std::memory_order_acquire);
+        if (currentEngine) {
+            std::atomic_store_explicit(&searchEngine_, std::shared_ptr<search::SearchEngine>{},
+                                       std::memory_order_release);
+            currentEngine.reset();
+            spdlog::info("[ServiceManager] Phase 6.7: Search engine reset");
+        } else {
+            spdlog::info("[ServiceManager] Phase 6.7: No search engine to reset");
+        }
     }
+    searchEngineManager_.clearEngine();
 
     // Shutdown retrieval sessions
     spdlog::info("[ServiceManager] Phase 6.8: Resetting retrieval sessions");
@@ -1230,14 +1238,13 @@ void ServiceManager::shutdown() {
     spdlog::info("[ServiceManager] Phase 8.3: Vector search uses VectorDatabase directly");
     contentStore_.reset();
     spdlog::info("[ServiceManager] Phase 8.4: Content store reset");
+    searchComponent_.reset();
+    spdlog::info("[ServiceManager] Phase 8.4.1: Search component reset");
 
     spdlog::info("[ServiceManager] Phase 8.4.5: Releasing async strands");
     initStrand_.reset();
     pluginStrand_.reset();
     modelStrand_.reset();
-
-    spdlog::info("[ServiceManager] Phase 8.5: Releasing WorkCoordinator");
-    workCoordinator_.reset(); // WorkCoordinator destructor will join threads
 
 #ifdef __APPLE__
     malloc_zone_pressure_relief(nullptr, 0);
@@ -1301,6 +1308,9 @@ void ServiceManager::shutdown() {
     } catch (...) {
         spdlog::warn("[ServiceManager] Phase 10.2: Exception resetting ABI host");
     }
+
+    spdlog::info("[ServiceManager] Phase 10.5: Releasing WorkCoordinator");
+    workCoordinator_.reset(); // WorkCoordinator destructor will join threads
 
     auto shutdownDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - shutdownStart);

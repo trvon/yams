@@ -13,6 +13,7 @@
 *:*/third_party/*
 *:*/external/*
 *:*/vendor/*
+*:*/.conan2/*
 
 # Generated protobuf files
 *:*.pb.h
@@ -45,6 +46,8 @@ unusedStructMember:*include/yams/core/types.h
 unusedStructMember:*include/yams/metadata/*
 unusedStructMember:*include/yams/vector/*
 unusedStructMember:*include/yams/content/*_content_handler.h
+unusedStructMember:*include/yams/daemon/resource/*
+unusedStructMember:*include/yams/daemon/components/ServiceManager.h
 
 # Various headers intentionally include private impl/rolling-window state.
 unusedStructMember:*include/yams/chunking/chunker.h
@@ -175,6 +178,21 @@ nullPointerRedundantCheck:*IngestService.cpp
 nullPointerRedundantCheck:*mcp_server.cpp
 nullPointerRedundantCheck:*session_command.cpp
 nullPointer:*dispatch_utils.hpp
+
+# Result-returning retry loops can confuse cppcheck's control-flow model.
+identicalConditionAfterEarlyExit:*metadata_repository.cpp
+
+# Third-party dependency parser noise from Conan-managed headers.
+missingInclude:*\.conan2/*
+preprocessorErrorDirective:*\.conan2/*
+
+# Test/helper relative includes that compile correctly but cppcheck project mode
+# fails to resolve consistently.
+missingInclude:*tests/integration/vector/hnsw_retrieval_diagnostic.cpp
+missingInclude:*tests/integration/search/hybrid_search_integration_test.cpp
+missingInclude:*tests/integration/search/fsm_tuning_benchmark_integration_test.cpp
+missingInclude:*tests/unit/metadata/repository_foundation_test.cpp
+missingInclude:*tests/unit/plugins/plugin_installer_test.cpp
 
 # Iterator validity after early-exit
 derefInvalidIteratorRedundantCheck:*request_handler.cpp

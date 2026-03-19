@@ -388,6 +388,70 @@ TEST_CASE("RequestDispatcher: repair handler surfaces missing service states",
     }
 }
 
+TEST_CASE("RequestDispatcher: tree diff handler validates inputs and missing metadata repo",
+          "[daemon][tree-diff][dispatcher]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_tree_diff_dispatcher_");
+
+    StubLifecycle lifecycle;
+    StateComponent state;
+    state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+    state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+    SECTION("returns invalid argument when snapshot ids are missing") {
+        ListTreeDiffRequest req;
+        req.targetSnapshotId = "target-only";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidArgument);
+        CHECK(err.message.find("baseSnapshotId") != std::string::npos);
+    }
+
+    SECTION("returns internal error when metadata repository is unavailable") {
+        ListTreeDiffRequest req;
+        req.baseSnapshotId = "base";
+        req.targetSnapshotId = "target";
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InternalError);
+        CHECK(err.message.find("Metadata repository not available") != std::string::npos);
+    }
+}
+
+TEST_CASE("RequestDispatcher: prune handler reports missing metadata repo",
+          "[daemon][prune][dispatcher]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_prune_dispatcher_");
+
+    StubLifecycle lifecycle;
+    StateComponent state;
+    state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+    state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+    PruneRequest req;
+    req.dryRun = true;
+    req.extensions = {"log"};
+
+    auto resp = dispatchRequest(dispatcher, Request{req});
+
+    REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+    const auto& err = std::get<ErrorResponse>(resp);
+    CHECK(err.code == ErrorCode::InternalError);
+    CHECK(err.message.find("Metadata repository unavailable") != std::string::npos);
+}
+
 TEST_CASE("DaemonMetrics: snapshot includes canonical readiness flags",
           "[daemon][metrics][readiness]") {
     StateComponent state;

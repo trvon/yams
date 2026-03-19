@@ -49,6 +49,14 @@ void SearchEngineManager::setEngine(const std::shared_ptr<yams::search::SearchEn
     refreshSnapshot();
 }
 
+void SearchEngineManager::clearEngine() {
+    {
+        std::unique_lock lock(engineMutex_);
+        engine_.reset();
+    }
+    refreshSnapshot();
+}
+
 void SearchEngineManager::refreshSnapshot() {
     std::shared_ptr<yams::search::SearchEngine> eng;
     {

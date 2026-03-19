@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <thread>
@@ -132,7 +133,8 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
                 spdlog::info("Daemon shutdown complete, exiting process");
             } catch (...) {
             }
-            std::exit(0);
+            std::fflush(nullptr);
+            std::_Exit(0);
         } else {
             try {
                 spdlog::info("Daemon shutdown complete (test mode, not exiting)");
