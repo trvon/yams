@@ -296,7 +296,10 @@ public:
     void dispatchPluginLoadFailed(const std::string& error) {
         try {
             pluginHostFsm_.dispatch(PluginLoadFailedEvent{error});
+        } catch (const std::exception&) {
+            ignoreFsmDispatchFailure();
         } catch (...) {
+            ignoreFsmDispatchFailure();
         }
     }
 
@@ -307,7 +310,10 @@ public:
     void dispatchAllPluginsLoaded(std::size_t count) {
         try {
             pluginHostFsm_.dispatch(AllPluginsLoadedEvent{count});
+        } catch (const std::exception&) {
+            ignoreFsmDispatchFailure();
         } catch (...) {
+            ignoreFsmDispatchFailure();
         }
     }
 
@@ -329,6 +335,8 @@ public:
 #endif
 
 private:
+    static void ignoreFsmDispatchFailure() noexcept {}
+
     AbiPluginHost* getActivePluginHost() const {
         return sharedPluginHost_ ? sharedPluginHost_ : pluginHost_.get();
     }

@@ -556,7 +556,9 @@ TEST_CASE("DocumentService - Integration", "[document][service][integration]") {
     SECTION("Inline extensionless binary content is not forced to text") {
         StoreDocumentRequest request;
         request.name = "88f051b8c01feda0b07cc00112233445";
-        request.content = "?<<??Y??<[o+?g?<R`g=?#!={?;=?t?:}?";
+        request.content = "?<<?"
+                          "?Y?"
+                          "?<[o+?g?<R`g=?#!={?;=?t?:}?";
 
         auto stored = fixture.documentService_->store(request);
 

@@ -61,7 +61,8 @@ std::string normalizeGraphPath(const std::string& path) {
         if (!derived.normalizedPath.empty()) {
             return derived.normalizedPath;
         }
-    } catch (...) {
+    } catch (const std::exception&) {
+        return path;
     }
     return path;
 }
@@ -931,7 +932,10 @@ PostIngestQueue::prepareMetadataEntry(
                 break;
             }
         }
+    } catch (const std::exception& e) {
+        spdlog::debug("Failed to inspect document tags for embedding opt-out: {}", e.what());
     } catch (...) {
+        spdlog::debug("Failed to inspect document tags for embedding opt-out");
     }
 
     // Determine dispatch flags that depend only on document metadata (not extracted text).
@@ -1618,7 +1622,14 @@ void PostIngestQueue::processEntityExtractionStage(
                             edge.properties = props.dump();
                             resolvedEdges.push_back(std::move(edge));
                         }
+                    } catch (const std::exception& e) {
+                        spdlog::debug("Skipping unparsable KG edge during version resolution: {}",
+                                      e.what());
+                        // Skip edges we can't parse
                     } catch (...) {
+                        spdlog::debug(
+                            "Skipping unparsable KG edge during version resolution: unknown "
+                            "exception");
                         // Skip edges we can't parse
                     }
                 }

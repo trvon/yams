@@ -36,6 +36,21 @@ using namespace yams::daemon;
 // =============================================================================
 
 namespace {
+class StubLifecycle : public IDaemonLifecycle {
+public:
+    explicit StubLifecycle(LifecycleState state = LifecycleState::Ready) {
+        snapshot_.state = state;
+    }
+
+    LifecycleSnapshot getLifecycleSnapshot() const override { return snapshot_; }
+    void setSubsystemDegraded(const std::string&, bool, const std::string&) override {}
+    void onDocumentRemoved(const std::string&) override {}
+    void requestShutdown(bool, bool) override {}
+
+private:
+    LifecycleSnapshot snapshot_{};
+};
+
 // Minimal stub provider for embedding tests
 class StubModelProvider : public IModelProvider {
 public:
@@ -100,6 +115,13 @@ std::filesystem::path makeTempDir(const std::string& prefix) {
     auto dir = base / (prefix + std::to_string(std::random_device{}()));
     std::filesystem::create_directories(dir);
     return dir;
+}
+
+Response dispatchRequest(RequestDispatcher& dispatcher, const Request& req) {
+    boost::asio::io_context ioc;
+    auto fut = boost::asio::co_spawn(ioc, dispatcher.dispatch(req), boost::asio::use_future);
+    ioc.run();
+    return fut.get();
 }
 } // namespace
 
@@ -299,6 +321,71 @@ TEST_CASE("RequestDispatcher: status responds even when lifecycle not ready",
     auto resp = fut.get();
 
     REQUIRE(std::holds_alternative<StatusResponse>(resp));
+}
+
+TEST_CASE("RequestDispatcher: repair handler surfaces missing service states",
+          "[daemon][repair][dispatcher]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_repair_dispatcher_");
+
+    StubLifecycle lifecycle;
+    StateComponent state;
+    state.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+    state.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&lifecycle, &svc, &state);
+
+    RepairRequest repairReq;
+    repairReq.repairOrphans = true;
+    repairReq.dryRun = true;
+
+    SECTION("returns not initialized when ServiceManager is absent") {
+        RequestDispatcher noServiceDispatcher(&lifecycle, nullptr, &state);
+        Request req = repairReq;
+
+        auto resp = dispatchRequest(noServiceDispatcher, req);
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotInitialized);
+        CHECK(err.message.find("ServiceManager") != std::string::npos);
+    }
+
+    SECTION("returns not initialized when RepairService is not running") {
+        Request req = repairReq;
+
+        auto resp = dispatchRequest(dispatcher, req);
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::NotInitialized);
+        CHECK(err.message.find("RepairService not running") != std::string::npos);
+        CHECK(state.stats.repairInProgress.load(std::memory_order_relaxed) == false);
+    }
+
+    SECTION("delegates to RepairService and toggles worker metrics") {
+        svc.startRepairService([] { return size_t{0}; });
+        auto repairService = svc.getRepairServiceShared();
+        REQUIRE(repairService != nullptr);
+
+        Request req = repairReq;
+        auto resp = dispatchRequest(dispatcher, req);
+
+        REQUIRE(std::holds_alternative<RepairResponse>(resp));
+        const auto& repairResp = std::get<RepairResponse>(resp);
+        CHECK(repairResp.success);
+        CHECK(repairResp.totalOperations == 1);
+        REQUIRE(repairResp.operationResults.size() == 1);
+        CHECK(repairResp.operationResults.front().operation == "orphans");
+        CHECK_FALSE(repairResp.operationResults.front().message.empty());
+        CHECK(svc.getWorkerPosted() == 1);
+        CHECK(svc.getWorkerCompleted() == 1);
+        CHECK(svc.getWorkerActive() == 0);
+        CHECK(state.stats.repairInProgress.load(std::memory_order_relaxed) == false);
+
+        svc.stopRepairService();
+    }
 }
 
 TEST_CASE("DaemonMetrics: snapshot includes canonical readiness flags",

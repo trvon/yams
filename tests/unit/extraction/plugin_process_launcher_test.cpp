@@ -93,15 +93,6 @@ fs::path getCompiledPluginPath() {
 #endif
 }
 
-// Get platform-specific executable extension
-std::string getExecutableExtension() {
-#ifdef _WIN32
-    return ".exe";
-#else
-    return "";
-#endif
-}
-
 // Helper: read stdout with timeout, return string
 std::string readStdoutWithTimeout(PluginProcess& process,
                                   std::chrono::milliseconds timeout = RPC_TIMEOUT) {

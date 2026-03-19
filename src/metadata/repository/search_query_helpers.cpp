@@ -67,11 +67,6 @@ std::string stripPunctuation(std::string term) {
     return term;
 }
 
-// Backwards compatibility alias
-static std::string stripTrailingPunctuation(std::string term) {
-    return stripPunctuation(std::move(term));
-}
-
 static bool isFts5BarewordChar(unsigned char c) {
     return std::isalnum(c) || c == '_' || c == 0x1A || c >= 0x80;
 }
@@ -413,76 +408,6 @@ std::vector<std::string> splitFTS5Terms(const std::string& trimmed) {
     return terms;
 }
 
-static std::vector<std::string> stripPunctuationTokens(const std::vector<std::string>& tokens) {
-    std::vector<std::string> stripped;
-    stripped.reserve(tokens.size());
-    for (const auto& tok : tokens) {
-        auto s = stripTrailingPunctuation(tok);
-        if (!s.empty()) {
-            stripped.push_back(s);
-        }
-    }
-    return stripped;
-}
-
-static std::string joinPreview(const std::vector<std::string>& tokens) {
-    std::string joined;
-    joined.reserve(tokens.size() * 8);
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        if (i > 0)
-            joined += ", ";
-        if (tokens[i].size() > 64) {
-            joined += tokens[i].substr(0, 64);
-            joined += "…";
-        } else {
-            joined += tokens[i];
-        }
-    }
-    return joined;
-}
-
-std::string buildDiagnosticAltOrQuery(const std::vector<std::string>& tokens) {
-    std::vector<std::string> stripped = stripPunctuationTokens(tokens);
-
-    std::vector<std::string> altTerms;
-    for (const auto& t : stripped) {
-        if (t.size() >= 4) {
-            altTerms.push_back(t);
-        }
-        if (altTerms.size() >= 5)
-            break;
-    }
-
-    std::string altQuery;
-    if (!altTerms.empty()) {
-        for (size_t i = 0; i < altTerms.size(); ++i) {
-            if (i > 0)
-                altQuery += " OR ";
-            altQuery += quoteFTS5Term(altTerms[i]);
-        }
-    }
-    return altQuery;
-}
-
-static void logFtsTokensIfEnabled(const std::string& rawQuery,
-                                  const std::vector<std::string>& tokens) {
-    if (const char* env = std::getenv("YAMS_FTS_DEBUG_QUERY"); env && std::string(env) == "1") {
-        if (hasAdvancedFts5Operators(rawQuery)) {
-            return;
-        }
-        std::vector<std::string> stripped = stripPunctuationTokens(tokens);
-        std::string previewRaw = joinPreview(tokens);
-        std::string previewStripped = joinPreview(stripped);
-        std::string altQuery = buildDiagnosticAltOrQuery(tokens);
-
-        spdlog::warn(
-            "[FTS5] tokens count={} raw='{}' tokens=[{}] stripped=[{}] stripped_dropped={} "
-            "diag_alt_or=\"{}\"",
-            tokens.size(), rawQuery, previewRaw, previewStripped, tokens.size() - stripped.size(),
-            altQuery);
-    }
-}
-
 // Common English stopwords that add noise to FTS5 AND queries.
 // These are filtered out for natural language queries to improve recall.
 static const std::unordered_set<std::string>& getStopwords() {
@@ -556,3 +481,26 @@ bool includeSearchSnippets() {
 }
 
 } // namespace yams::metadata
+
+std::string yams::metadata::buildDiagnosticAltOrQuery(const std::vector<std::string>& tokens) {
+    std::vector<std::string> altTerms;
+    altTerms.reserve(tokens.size());
+    for (const auto& token : tokens) {
+        auto stripped = stripPunctuation(token);
+        if (stripped.size() >= 4) {
+            altTerms.push_back(std::move(stripped));
+        }
+        if (altTerms.size() >= 5)
+            break;
+    }
+
+    std::string altQuery;
+    if (!altTerms.empty()) {
+        for (size_t i = 0; i < altTerms.size(); ++i) {
+            if (i > 0)
+                altQuery += " OR ";
+            altQuery += quoteFTS5Term(altTerms[i]);
+        }
+    }
+    return altQuery;
+}

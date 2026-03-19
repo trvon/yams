@@ -2044,10 +2044,6 @@ private:
                 const bool daemonUsesEphemeralData =
                     hasDaemonDataDir && isEphemeralDataDir(*daemonDataDir);
 
-                bool degraded = status.overallStatus == "degraded" || !waiting.empty();
-                if (!status.lastError.empty())
-                    degraded = true;
-
                 std::string lifecycle = !status.lifecycleState.empty()
                                             ? humanizeToken(status.lifecycleState)
                                             : (!status.overallStatus.empty()

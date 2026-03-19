@@ -170,7 +170,6 @@ private:
 
     // Legacy helper declarations removed after dispatcher split
 
-private:
     IDaemonLifecycle* lifecycle_;
     ServiceManager* serviceManager_;
     StateComponent* state_;

@@ -23,6 +23,10 @@ using stop_source = std::stop_source;
 
 #else
 
+namespace detail {
+inline void ignoreJoinOnDestructionFailure() noexcept {}
+} // namespace detail
+
 // Fallback stop_token: always reports no stop requested
 struct stop_token {
     constexpr bool stop_requested() const noexcept { return false; }
@@ -62,6 +66,7 @@ public:
                 try {
                     t_.join();
                 } catch (const std::system_error&) {
+                    detail::ignoreJoinOnDestructionFailure();
                 }
             }
             t_ = std::move(other.t_);
@@ -74,6 +79,7 @@ public:
             try {
                 t_.join();
             } catch (const std::system_error&) {
+                detail::ignoreJoinOnDestructionFailure();
             }
         }
     }

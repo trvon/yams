@@ -210,7 +210,6 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
     }
 
     auto startTime = std::chrono::steady_clock::now();
-    std::size_t processed = 0;
     std::size_t skipped = 0;
 
     // Collect all extraction jobs for batch submission
@@ -325,7 +324,6 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
         job.language = std::move(language);
 
         extractionJobs.push_back(std::move(job));
-        processed++;
     }
 
     // Submit all extraction jobs in batch

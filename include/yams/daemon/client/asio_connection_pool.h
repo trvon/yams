@@ -40,6 +40,7 @@ public:
 private:
     boost::asio::awaitable<Result<std::shared_ptr<AsioConnection>>> create_connection();
     void cleanup_stale_connections();
+    void widen_timeouts(const TransportOptions& opts);
 
     TransportOptions opts_;
     bool shared_{true};

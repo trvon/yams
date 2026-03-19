@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <set>
 #include <thread>
 
@@ -18,6 +19,7 @@
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/resource/model_provider.h>
 #include <yams/metadata/metadata_repository.h>
 
 using namespace yams::daemon;
@@ -25,6 +27,104 @@ using namespace yams::test;
 using namespace std::chrono_literals;
 
 namespace {
+class StubModelProvider : public yams::daemon::IModelProvider {
+public:
+    yams::Result<std::vector<float>> generateEmbedding(const std::string& text) override {
+        return std::vector<float>(getEmbeddingDim(""), static_cast<float>(text.size()));
+    }
+
+    yams::Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddings(const std::vector<std::string>& texts) override {
+        std::vector<std::vector<float>> out;
+        out.reserve(texts.size());
+        for (const auto& text : texts) {
+            auto one = generateEmbedding(text);
+            if (!one) {
+                return one.error();
+            }
+            out.push_back(std::move(one.value()));
+        }
+        return out;
+    }
+
+    yams::Result<std::vector<float>> generateEmbeddingFor(const std::string& modelName,
+                                                          const std::string& text) override {
+        if (!isModelLoaded(modelName)) {
+            return yams::Error{yams::ErrorCode::NotFound,
+                               "Requested model not loaded: " + modelName};
+        }
+        return generateEmbedding(text);
+    }
+
+    yams::Result<std::vector<std::vector<float>>>
+    generateBatchEmbeddingsFor(const std::string& modelName,
+                               const std::vector<std::string>& texts) override {
+        if (!isModelLoaded(modelName)) {
+            return yams::Error{yams::ErrorCode::NotFound,
+                               "Requested model not loaded: " + modelName};
+        }
+        return generateBatchEmbeddings(texts);
+    }
+
+    yams::Result<void> loadModel(const std::string& modelName) override {
+        if (!isAvailable()) {
+            return yams::Error{yams::ErrorCode::InvalidState, "Provider unavailable"};
+        }
+        if (!isModelLoaded(modelName)) {
+            loadedModels_.push_back(modelName);
+        }
+        return yams::Result<void>();
+    }
+
+    yams::Result<void> unloadModel(const std::string& modelName) override {
+        auto it = std::find(loadedModels_.begin(), loadedModels_.end(), modelName);
+        if (it == loadedModels_.end()) {
+            return yams::Error{yams::ErrorCode::NotFound, "Model not loaded: " + modelName};
+        }
+        loadedModels_.erase(it);
+        return yams::Result<void>();
+    }
+
+    bool isModelLoaded(const std::string& modelName) const override {
+        return std::find(loadedModels_.begin(), loadedModels_.end(), modelName) !=
+               loadedModels_.end();
+    }
+
+    std::vector<std::string> getLoadedModels() const override { return loadedModels_; }
+    size_t getLoadedModelCount() const override { return loadedModels_.size(); }
+
+    yams::Result<yams::daemon::ModelInfo>
+    getModelInfo(const std::string& modelName) const override {
+        if (!isModelLoaded(modelName)) {
+            return yams::Error{yams::ErrorCode::NotFound, "Model not loaded: " + modelName};
+        }
+        yams::daemon::ModelInfo info;
+        info.name = modelName;
+        info.embeddingDim = 384;
+        info.maxSequenceLength = 512;
+        info.memoryUsageBytes = 32 * 1024 * 1024;
+        return info;
+    }
+
+    size_t getEmbeddingDim(const std::string&) const override { return 384; }
+
+    std::shared_ptr<yams::vector::EmbeddingGenerator>
+    getEmbeddingGenerator(const std::string& = "") override {
+        return nullptr;
+    }
+
+    std::string getProviderName() const override { return "StubModelProvider"; }
+    std::string getProviderVersion() const override { return "1.0-test"; }
+    bool isAvailable() const override { return available_; }
+    size_t getMemoryUsage() const override { return loadedModels_.size() * 32 * 1024 * 1024; }
+    void releaseUnusedResources() override {}
+    void shutdown() override { available_ = false; }
+
+private:
+    bool available_{true};
+    std::vector<std::string> loadedModels_;
+};
+
 // Helper to create a client with custom config
 // Increased default timeouts to handle thread resource pressure from repeated daemon restarts
 DaemonClient createClient(const std::filesystem::path& socketPath,
@@ -68,6 +168,105 @@ yams::Result<GetResponse> getWithRetry(Client& client, const std::string& hash, 
     }
     // Return last attempt's result
     return yams::cli::run_sync(client.get(getReq), 5s);
+}
+
+std::filesystem::path createMockExternalPlugin(const std::filesystem::path& baseDir) {
+    auto pluginDir = baseDir / "socket_mock_plugin";
+    std::filesystem::create_directories(pluginDir);
+
+    {
+        std::ofstream pluginFile(pluginDir / "plugin.py");
+        pluginFile << R"PY(#!/usr/bin/env python3
+import json
+import sys
+
+
+def handle_request(req):
+    method = req.get("method", "")
+    if method == "handshake.manifest":
+        return {
+            "name": "socket_mock_plugin",
+            "version": "1.0.0",
+            "interfaces": ["content_extractor_v1"],
+            "capabilities": {
+                "content_extraction": {
+                    "formats": ["text/plain"],
+                    "extensions": [".txt"]
+                }
+            }
+        }
+    if method == "plugin.init":
+        return {"status": "initialized"}
+    if method == "plugin.health":
+        return {"status": "ok"}
+    if method == "plugin.shutdown":
+        return {"status": "ok"}
+    raise ValueError(f"Method not found: {method}")
+
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req_id = None
+    try:
+        req = json.loads(line)
+        req_id = req.get("id")
+        response = {"jsonrpc": "2.0", "id": req_id, "result": handle_request(req)}
+    except Exception as exc:
+        response = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32603, "message": str(exc)}
+        }
+    print(json.dumps(response), flush=True)
+)PY";
+    }
+
+    {
+        std::ofstream manifestFile(pluginDir / "yams-plugin.json");
+        manifestFile << R"JSON({
+  "name": "socket_mock_plugin",
+  "version": "1.0.0",
+  "interfaces": ["content_extractor_v1"],
+  "capabilities": {
+    "content_extraction": {
+      "formats": ["text/plain"],
+      "extensions": [".txt"]
+    }
+  },
+  "entry": {
+    "fallback_cmd": ["/usr/bin/env", "python3", "-u", "${plugin_dir}/plugin.py"],
+    "env": {
+      "PYTHONUNBUFFERED": "1"
+    }
+  }
+})JSON";
+    }
+
+    return pluginDir;
+}
+
+bool containsCanonicalPath(const std::vector<std::string>& paths,
+                           const std::filesystem::path& target) {
+    std::error_code ec;
+    auto targetCanonical = std::filesystem::weakly_canonical(target, ec);
+    if (ec) {
+        targetCanonical = target.lexically_normal();
+    }
+
+    for (const auto& path : paths) {
+        std::error_code itemEc;
+        auto itemCanonical = std::filesystem::weakly_canonical(path, itemEc);
+        if (itemEc) {
+            itemCanonical = std::filesystem::path(path).lexically_normal();
+        }
+        if (itemCanonical == targetCanonical) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 } // namespace
@@ -319,11 +518,17 @@ TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][m
     }
     REQUIRE(connectResult.has_value());
 
+    const auto* daemon = harness.daemon();
+    REQUIRE(daemon != nullptr);
+    auto* serviceManager = daemon->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+
     ModelStatusRequest statusReq;
     auto statusResult = yams::cli::run_sync(client.executeRequest(Request{statusReq}), 5s);
 
     REQUIRE(statusResult.has_value());
     REQUIRE(std::holds_alternative<ModelStatusResponse>(statusResult.value()));
+    CHECK(std::get<ModelStatusResponse>(statusResult.value()).models.empty());
 
     LoadModelRequest loadReq;
     loadReq.modelName = "test-model-that-does-not-exist";
@@ -331,20 +536,63 @@ TEST_CASE("Daemon client model request execution", "[daemon][socket][requests][m
 
     REQUIRE(loadResult.has_value());
     REQUIRE(std::holds_alternative<ErrorResponse>(loadResult.value()));
+    CHECK(std::get<ErrorResponse>(loadResult.value()).code == yams::ErrorCode::InvalidState);
+
+    auto injectedProvider = std::make_shared<StubModelProvider>();
+    REQUIRE(injectedProvider != nullptr);
+    serviceManager->__test_setModelProvider(injectedProvider);
+
+    LoadModelRequest successLoadReq;
+    successLoadReq.modelName = "dispatcher-model";
+    auto successLoadResult = yams::cli::run_sync(client.loadModel(successLoadReq), 10s);
+
+    REQUIRE(successLoadResult.has_value());
+    CHECK(successLoadResult.value().success);
+    CHECK(successLoadResult.value().modelName == "dispatcher-model");
+    CHECK(injectedProvider->isModelLoaded("dispatcher-model"));
+
+    ModelStatusRequest loadedStatusReq;
+    loadedStatusReq.modelName = "dispatcher-model";
+    auto loadedStatusResult = yams::cli::run_sync(client.getModelStatus(loadedStatusReq), 5s);
+
+    REQUIRE(loadedStatusResult.has_value());
+    REQUIRE(loadedStatusResult.value().models.size() == 1);
+    CHECK(loadedStatusResult.value().models.front().name == "dispatcher-model");
+    CHECK(loadedStatusResult.value().models.front().loaded);
 
     UnloadModelRequest unloadReq;
     unloadReq.modelName = "test-model-that-does-not-exist";
     auto unloadResult = yams::cli::run_sync(client.executeRequest(Request{unloadReq}), 5s);
 
     REQUIRE(unloadResult.has_value());
-    REQUIRE((std::holds_alternative<SuccessResponse>(unloadResult.value()) ||
-             std::holds_alternative<ErrorResponse>(unloadResult.value())));
+    REQUIRE(std::holds_alternative<ErrorResponse>(unloadResult.value()));
+    CHECK(std::get<ErrorResponse>(unloadResult.value()).code == yams::ErrorCode::NotFound);
+
+    UnloadModelRequest successUnloadReq;
+    successUnloadReq.modelName = "dispatcher-model";
+    auto successUnloadResult = yams::cli::run_sync(client.unloadModel(successUnloadReq), 5s);
+
+    REQUIRE(successUnloadResult.has_value());
+    CHECK(successUnloadResult.value().message == "Model unloaded");
+    CHECK_FALSE(injectedProvider->isModelLoaded("dispatcher-model"));
 }
 
 TEST_CASE("Daemon client plugin request execution", "[daemon][socket][requests][plugin]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
-    DaemonHarness harness;
+    const auto uniqueId =
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto pluginRoot =
+        std::filesystem::temp_directory_path() / ("yams_socket_plugin_" + uniqueId);
+    const auto emptyTrustedDir = pluginRoot / "trusted_empty";
+    std::filesystem::create_directories(emptyTrustedDir);
+    const auto pluginDir = createMockExternalPlugin(pluginRoot);
+
+    DaemonHarnessOptions options;
+    options.isolateState = true;
+    options.trustedPluginPaths = {pluginDir};
+
+    DaemonHarness harness(options);
     startHarnessWithRetry(harness);
     std::this_thread::sleep_for(200ms);
 
@@ -360,28 +608,101 @@ TEST_CASE("Daemon client plugin request execution", "[daemon][socket][requests][
     REQUIRE(connectResult.has_value());
 
     PluginScanRequest scanReq;
-    auto scanResult = yams::cli::run_sync(client.executeRequest(Request{scanReq}), 10s);
+    scanReq.target = pluginDir.string();
+    auto scanResult = yams::cli::run_sync(client.call<PluginScanRequest>(scanReq), 10s);
 
     REQUIRE(scanResult.has_value());
-    REQUIRE((std::holds_alternative<PluginScanResponse>(scanResult.value()) ||
-             std::holds_alternative<ErrorResponse>(scanResult.value())));
+    REQUIRE(scanResult.value().plugins.size() == 1);
+    CHECK(scanResult.value().plugins.front().name == "socket_mock_plugin");
+    CHECK(scanResult.value().plugins.front().path == pluginDir.string());
+
+    PluginScanRequest dirScanReq;
+    dirScanReq.dir = pluginRoot.string();
+    auto dirScanResult = yams::cli::run_sync(client.call<PluginScanRequest>(dirScanReq), 10s);
+
+    REQUIRE(dirScanResult.has_value());
+    REQUIRE(dirScanResult.value().plugins.size() == 1);
+    CHECK(dirScanResult.value().plugins.front().name == "socket_mock_plugin");
+
+    auto initialTrustList =
+        yams::cli::run_sync(client.call<PluginTrustListRequest>(PluginTrustListRequest{}), 5s);
+
+    REQUIRE(initialTrustList.has_value());
+    CHECK(containsCanonicalPath(initialTrustList.value().paths, pluginDir));
+
+    PluginTrustAddRequest trustAddReq;
+    trustAddReq.path = emptyTrustedDir.string();
+    auto trustAddResult = yams::cli::run_sync(client.executeRequest(Request{trustAddReq}), 5s);
+
+    REQUIRE(trustAddResult.has_value());
+    REQUIRE(std::holds_alternative<SuccessResponse>(trustAddResult.value()));
+    CHECK(std::get<SuccessResponse>(trustAddResult.value()).message == "ok");
+
+    auto trustListAfterAdd =
+        yams::cli::run_sync(client.call<PluginTrustListRequest>(PluginTrustListRequest{}), 5s);
+
+    REQUIRE(trustListAfterAdd.has_value());
+    CHECK(containsCanonicalPath(trustListAfterAdd.value().paths, emptyTrustedDir));
+
+    PluginLoadRequest dryRunReq;
+    dryRunReq.pathOrName = pluginDir.string();
+    dryRunReq.dryRun = true;
+    auto dryRunResult = yams::cli::run_sync(client.call<PluginLoadRequest>(dryRunReq), 10s);
+
+    REQUIRE(dryRunResult.has_value());
+    CHECK_FALSE(dryRunResult.value().loaded);
+    CHECK(dryRunResult.value().message == "dry-run");
+    CHECK(dryRunResult.value().record.name == "socket_mock_plugin");
 
     PluginLoadRequest loadReq;
-    loadReq.pathOrName = "definitely_missing_plugin_for_dispatcher_coverage";
-    loadReq.dryRun = true;
-    auto loadResult = yams::cli::run_sync(client.executeRequest(Request{loadReq}), 10s);
+    loadReq.pathOrName = pluginDir.string();
+    auto loadResult = yams::cli::run_sync(client.call<PluginLoadRequest>(loadReq), 10s);
 
     REQUIRE(loadResult.has_value());
-    REQUIRE((std::holds_alternative<PluginLoadResponse>(loadResult.value()) ||
-             std::holds_alternative<ErrorResponse>(loadResult.value())));
+    CHECK(loadResult.value().loaded);
+    CHECK(loadResult.value().message == "loaded");
+    CHECK(loadResult.value().record.name == "socket_mock_plugin");
+
+    PluginUnloadRequest unloadLoadedReq;
+    unloadLoadedReq.name = loadResult.value().record.name;
+    auto unloadLoadedResult =
+        yams::cli::run_sync(client.executeRequest(Request{unloadLoadedReq}), 5s);
+
+    REQUIRE(unloadLoadedResult.has_value());
+    REQUIRE(std::holds_alternative<SuccessResponse>(unloadLoadedResult.value()));
+    CHECK(std::get<SuccessResponse>(unloadLoadedResult.value()).message == "unloaded");
 
     PluginUnloadRequest unloadReq;
     unloadReq.name = "definitely_missing_plugin_for_dispatcher_coverage";
     auto unloadResult = yams::cli::run_sync(client.executeRequest(Request{unloadReq}), 5s);
 
     REQUIRE(unloadResult.has_value());
-    REQUIRE((std::holds_alternative<SuccessResponse>(unloadResult.value()) ||
-             std::holds_alternative<ErrorResponse>(unloadResult.value())));
+    REQUIRE(std::holds_alternative<SuccessResponse>(unloadResult.value()));
+    CHECK(std::get<SuccessResponse>(unloadResult.value()).message == "unloaded");
+
+    PluginScanRequest missingScanReq;
+    missingScanReq.target = (pluginRoot / "missing_plugin_dir").string();
+    auto missingScanResult =
+        yams::cli::run_sync(client.executeRequest(Request{missingScanReq}), 10s);
+
+    REQUIRE(missingScanResult.has_value());
+    REQUIRE(std::holds_alternative<ErrorResponse>(missingScanResult.value()));
+    CHECK(std::get<ErrorResponse>(missingScanResult.value()).code == yams::ErrorCode::NotFound);
+
+    PluginTrustRemoveRequest trustRemoveReq;
+    trustRemoveReq.path = emptyTrustedDir.string();
+    auto trustRemoveResult =
+        yams::cli::run_sync(client.executeRequest(Request{trustRemoveReq}), 5s);
+
+    REQUIRE(trustRemoveResult.has_value());
+    REQUIRE(std::holds_alternative<SuccessResponse>(trustRemoveResult.value()));
+    CHECK(std::get<SuccessResponse>(trustRemoveResult.value()).message == "ok");
+
+    auto trustListAfterRemove =
+        yams::cli::run_sync(client.call<PluginTrustListRequest>(PluginTrustListRequest{}), 5s);
+
+    REQUIRE(trustListAfterRemove.has_value());
+    CHECK_FALSE(containsCanonicalPath(trustListAfterRemove.value().paths, emptyTrustedDir));
 }
 
 TEST_CASE("Daemon client prune request execution", "[daemon][socket][requests][prune]") {
@@ -507,6 +828,42 @@ TEST_CASE("Daemon client collection request execution", "[daemon][socket][reques
     CHECK(std::any_of(listResult.value().snapshots.begin(), listResult.value().snapshots.end(),
                       [&](const SnapshotInfo& info) { return info.id == snapshotId; }));
 
+    MetadataValueCountsRequest countsReq;
+    countsReq.keys = {"collection", "snapshot_id"};
+    auto countsResult =
+        yams::cli::run_sync(client.call<MetadataValueCountsRequest>(countsReq), 10s);
+
+    REQUIRE(countsResult.has_value());
+    REQUIRE(countsResult.value().valueCounts.count("collection") == 1);
+    REQUIRE(countsResult.value().valueCounts.count("snapshot_id") == 1);
+    CHECK(std::any_of(
+        countsResult.value().valueCounts.at("collection").begin(),
+        countsResult.value().valueCounts.at("collection").end(),
+        [&](const auto& entry) { return entry.first == collectionName && entry.second >= 1; }));
+    CHECK(std::any_of(
+        countsResult.value().valueCounts.at("snapshot_id").begin(),
+        countsResult.value().valueCounts.at("snapshot_id").end(),
+        [&](const auto& entry) { return entry.first == snapshotId && entry.second >= 1; }));
+
+    MetadataValueCountsRequest emptyCountsReq;
+    auto emptyCountsResult =
+        yams::cli::run_sync(client.call<MetadataValueCountsRequest>(emptyCountsReq), 10s);
+
+    REQUIRE(emptyCountsResult.has_value());
+    CHECK(emptyCountsResult.value().valueCounts.empty());
+
+    RestoreCollectionRequest missingCollectionReq;
+    missingCollectionReq.collection = "dispatcher-missing-collection";
+    missingCollectionReq.outputDirectory = "collection-restore-missing";
+    missingCollectionReq.dryRun = true;
+    auto missingCollectionResult =
+        yams::cli::run_sync(client.call<RestoreCollectionRequest>(missingCollectionReq), 30s);
+
+    REQUIRE(missingCollectionResult.has_value());
+    CHECK(missingCollectionResult.value().dryRun);
+    CHECK(missingCollectionResult.value().filesRestored == 0);
+    CHECK(missingCollectionResult.value().files.empty());
+
     RestoreCollectionRequest restoreCollectionReq;
     restoreCollectionReq.collection = collectionName;
     restoreCollectionReq.outputDirectory = "collection-restore-out";
@@ -524,6 +881,29 @@ TEST_CASE("Daemon client collection request execution", "[daemon][socket][reques
     CHECK(restoreCollectionResult.value().files.front().path.find(
               "dispatcher_collection_coverage") != std::string::npos);
 
+    RestoreCollectionRequest filteredCollectionReq;
+    filteredCollectionReq.collection = collectionName;
+    filteredCollectionReq.outputDirectory = "collection-restore-filtered";
+    filteredCollectionReq.includePatterns = {"*.md"};
+    filteredCollectionReq.dryRun = true;
+    auto filteredCollectionResult =
+        yams::cli::run_sync(client.call<RestoreCollectionRequest>(filteredCollectionReq), 30s);
+
+    REQUIRE(filteredCollectionResult.has_value());
+    CHECK(filteredCollectionResult.value().filesRestored == 0);
+    CHECK(filteredCollectionResult.value().files.empty());
+
+    RestoreCollectionRequest invalidCollectionReq;
+    invalidCollectionReq.outputDirectory = "collection-restore-invalid";
+    invalidCollectionReq.dryRun = true;
+    auto invalidCollectionResult =
+        yams::cli::run_sync(client.executeRequest(Request{invalidCollectionReq}), 30s);
+
+    REQUIRE(invalidCollectionResult.has_value());
+    REQUIRE(std::holds_alternative<ErrorResponse>(invalidCollectionResult.value()));
+    CHECK(std::get<ErrorResponse>(invalidCollectionResult.value()).code ==
+          yams::ErrorCode::InvalidArgument);
+
     RestoreSnapshotRequest restoreSnapshotReq;
     restoreSnapshotReq.snapshotId = snapshotId;
     restoreSnapshotReq.outputDirectory = "snapshot-restore-out";
@@ -540,6 +920,40 @@ TEST_CASE("Daemon client collection request execution", "[daemon][socket][reques
     CHECK_FALSE(restoreSnapshotResult.value().files.front().skipped);
     CHECK(restoreSnapshotResult.value().files.front().path.find(addResult.value().hash) !=
           std::string::npos);
+
+    RestoreSnapshotRequest filteredSnapshotReq;
+    filteredSnapshotReq.snapshotId = snapshotId;
+    filteredSnapshotReq.outputDirectory = "snapshot-restore-filtered";
+    filteredSnapshotReq.excludePatterns = {"*coverage.txt"};
+    filteredSnapshotReq.dryRun = true;
+    auto filteredSnapshotResult =
+        yams::cli::run_sync(client.call<RestoreSnapshotRequest>(filteredSnapshotReq), 30s);
+
+    REQUIRE(filteredSnapshotResult.has_value());
+    CHECK(filteredSnapshotResult.value().filesRestored == 0);
+    CHECK(filteredSnapshotResult.value().files.empty());
+
+    RestoreSnapshotRequest missingSnapshotReq;
+    missingSnapshotReq.snapshotId = "dispatcher-missing-snapshot";
+    missingSnapshotReq.outputDirectory = "snapshot-restore-missing";
+    missingSnapshotReq.dryRun = true;
+    auto missingSnapshotResult =
+        yams::cli::run_sync(client.call<RestoreSnapshotRequest>(missingSnapshotReq), 30s);
+
+    REQUIRE(missingSnapshotResult.has_value());
+    CHECK(missingSnapshotResult.value().filesRestored == 0);
+    CHECK(missingSnapshotResult.value().files.empty());
+
+    RestoreSnapshotRequest invalidSnapshotReq;
+    invalidSnapshotReq.outputDirectory = "snapshot-restore-invalid";
+    invalidSnapshotReq.dryRun = true;
+    auto invalidSnapshotResult =
+        yams::cli::run_sync(client.executeRequest(Request{invalidSnapshotReq}), 30s);
+
+    REQUIRE(invalidSnapshotResult.has_value());
+    REQUIRE(std::holds_alternative<ErrorResponse>(invalidSnapshotResult.value()));
+    CHECK(std::get<ErrorResponse>(invalidSnapshotResult.value()).code ==
+          yams::ErrorCode::InvalidArgument);
 }
 
 TEST_CASE("Daemon client session request execution", "[daemon][socket][requests][session]") {

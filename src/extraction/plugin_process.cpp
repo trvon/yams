@@ -33,11 +33,6 @@ std::string_view span_to_string_view(std::span<const std::byte> data) {
     return {reinterpret_cast<const char*>(data.data()), data.size()};
 }
 
-// Helper: convert string to byte span
-std::span<const std::byte> string_to_span(std::string_view str) {
-    return std::as_bytes(std::span{str.data(), str.size()});
-}
-
 #ifdef _WIN32
 std::wstring escape_arg(const std::string& arg) {
     std::wstring warg = std::wstring(arg.begin(), arg.end());

@@ -70,6 +70,33 @@ yams::Result<void> validate_socket_path_preflight(const std::filesystem::path& s
 #endif
     return yams::Result<void>();
 }
+
+void logIgnoredDaemonException(const char* context, const std::exception& e) {
+    spdlog::debug("{}: {}", context, e.what());
+}
+
+void logIgnoredDaemonException(const char* context) {
+    spdlog::debug("{}: unknown exception", context);
+}
+
+void warnShutdownJoinFailure(const char* message) noexcept {
+    std::fprintf(stderr, "%s\n", message);
+}
+
+void warnShutdownJoinFailure(const char* context, const std::exception& e) noexcept {
+    std::fprintf(stderr, "%s: %s\n", context, e.what());
+}
+
+void updateRepairHysteresis(bool isBusy, std::chrono::steady_clock::time_point now,
+                            std::chrono::steady_clock::time_point& busySince,
+                            std::chrono::steady_clock::time_point& readySince) {
+    auto& activeSince = isBusy ? busySince : readySince;
+    auto& inactiveSince = isBusy ? readySince : busySince;
+    if (activeSince.time_since_epoch().count() == 0) {
+        activeSince = now;
+    }
+    inactiveSince = {};
+}
 } // namespace
 // IPC server implementation removed in PBI-007; client uses Boost.Asio path.
 
@@ -116,7 +143,10 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
                     rs->setMaintenanceTokens(tokens);
                     rs->setMaxBatch(batch);
                 }
+            } catch (const std::exception& e) {
+                logIgnoredDaemonException("Repair control hook failed", e);
             } catch (...) {
+                logIgnoredDaemonException("Repair control hook failed");
             }
         });
     } catch (const std::exception& e) {
@@ -235,10 +265,10 @@ Result<void> YamsDaemon::start() {
     lifecycleFsm_.reset();
 
     // Recreate ServiceManager and dependent components if they were destroyed during stop()
-    if (!serviceManager_ || !serviceManager_->getWorkCoordinator()) {
-        serviceManager_ = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    } else {
+    if (serviceManager_ && serviceManager_->getWorkCoordinator()) {
         serviceManager_->prepareForRestart();
+    } else {
+        serviceManager_ = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
     }
 
     // Recreate metrics if destroyed
@@ -273,7 +303,10 @@ Result<void> YamsDaemon::start() {
                         rs->setMaintenanceTokens(tokens);
                         rs->setMaxBatch(batch);
                     }
+                } catch (const std::exception& e) {
+                    logIgnoredDaemonException("Repair control hook recreation failed", e);
                 } catch (...) {
+                    logIgnoredDaemonException("Repair control hook recreation failed");
                 }
             });
         } catch (const std::exception& e) {
@@ -393,21 +426,30 @@ Result<void> YamsDaemon::start() {
         running_ = false;
         try {
             (void)socketServer_->stop();
+        } catch (const std::exception& e) {
+            logIgnoredDaemonException("SocketServer stop during startup failure", e);
         } catch (...) {
+            logIgnoredDaemonException("SocketServer stop during startup failure");
         }
         socketServer_.reset();
         if (ioCoordinator_) {
             try {
                 ioCoordinator_->stop();
                 ioCoordinator_->join();
+            } catch (const std::exception& e) {
+                logIgnoredDaemonException("IOCoordinator shutdown during startup failure", e);
             } catch (...) {
+                logIgnoredDaemonException("IOCoordinator shutdown during startup failure");
             }
             ioCoordinator_.reset();
         }
         if (tuningManager_) {
             try {
                 tuningManager_->stop();
+            } catch (const std::exception& e) {
+                logIgnoredDaemonException("TuningManager stop during startup failure", e);
             } catch (...) {
+                logIgnoredDaemonException("TuningManager stop during startup failure");
             }
             tuningManager_.reset();
         }
@@ -432,21 +474,30 @@ Result<void> YamsDaemon::start() {
         running_ = false;
         try {
             (void)socketServer_->stop();
+        } catch (const std::exception& e2) {
+            logIgnoredDaemonException("SocketServer stop after IOCoordinator start failure", e2);
         } catch (...) {
+            logIgnoredDaemonException("SocketServer stop after IOCoordinator start failure");
         }
         socketServer_.reset();
         if (ioCoordinator_) {
             try {
                 ioCoordinator_->stop();
                 ioCoordinator_->join();
+            } catch (const std::exception& e2) {
+                logIgnoredDaemonException("IOCoordinator stop after start failure", e2);
             } catch (...) {
+                logIgnoredDaemonException("IOCoordinator stop after start failure");
             }
             ioCoordinator_.reset();
         }
         if (tuningManager_) {
             try {
                 tuningManager_->stop();
+            } catch (const std::exception& e2) {
+                logIgnoredDaemonException("TuningManager stop after IOCoordinator failure", e2);
             } catch (...) {
+                logIgnoredDaemonException("TuningManager stop after IOCoordinator failure");
             }
             tuningManager_.reset();
         }
@@ -487,7 +538,10 @@ Result<void> YamsDaemon::start() {
             try {
                 if (socketServer_)
                     socketServer_->setWriterBudget(bytes);
+            } catch (const std::exception& e) {
+                logIgnoredDaemonException("Writer budget hook failed", e);
             } catch (...) {
+                logIgnoredDaemonException("Writer budget hook failed");
             }
         });
 
@@ -496,7 +550,10 @@ Result<void> YamsDaemon::start() {
             try {
                 if (socketServer_)
                     socketServer_->resizeConnectionSlots(n);
+            } catch (const std::exception& e) {
+                logIgnoredDaemonException("Connection slots hook failed", e);
             } catch (...) {
+                logIgnoredDaemonException("Connection slots hook failed");
             }
         });
     }
@@ -742,15 +799,7 @@ void YamsDaemon::runLoop() {
                 uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();
                 auto now = std::chrono::steady_clock::now();
                 bool isBusy = (active >= busyThresh);
-                if (isBusy) {
-                    if (repairBusySince_.time_since_epoch().count() == 0)
-                        repairBusySince_ = now;
-                    repairReadySince_ = {};
-                } else {
-                    if (repairReadySince_.time_since_epoch().count() == 0)
-                        repairReadySince_ = now;
-                    repairBusySince_ = {};
-                }
+                updateRepairHysteresis(isBusy, now, repairBusySince_, repairReadySince_);
                 uint32_t degradeHold = TuneAdvisor::repairDegradeHoldMs();
                 uint32_t readyHold = TuneAdvisor::repairReadyHoldMs();
                 bool busyHeld =
@@ -763,12 +812,19 @@ void YamsDaemon::runLoop() {
                             .count() >= readyHold;
                 bool pending = state_.stats.repairQueueDepth.load() > 0;
                 auto fsmSnap = lifecycleFsm_.snapshot();
-                if (fsmSnap.state == LifecycleState::Ready) {
-                    if (pending && busyHeld)
-                        lifecycleFsm_.dispatch(DegradedEvent{});
-                } else if (fsmSnap.state == LifecycleState::Degraded) {
-                    if (!pending || idleHeld)
-                        lifecycleFsm_.dispatch(HealthyEvent{});
+                switch (fsmSnap.state) {
+                    case LifecycleState::Ready:
+                        if (pending && busyHeld) {
+                            lifecycleFsm_.dispatch(DegradedEvent{});
+                        }
+                        break;
+                    case LifecycleState::Degraded:
+                        if (!pending || idleHeld) {
+                            lifecycleFsm_.dispatch(HealthyEvent{});
+                        }
+                        break;
+                    default:
+                        break;
                 }
             }
         }
@@ -806,6 +862,14 @@ void YamsDaemon::runLoop() {
 
 Result<void> YamsDaemon::stop() {
     if (!running_.exchange(false)) {
+        const auto snapshot = lifecycleFsm_.snapshot();
+        const bool shutdownInProgress = stopRequested_.load(std::memory_order_acquire) ||
+                                        snapshot.state == LifecycleState::Stopping ||
+                                        snapshot.state == LifecycleState::Stopped;
+        if (shutdownInProgress) {
+            spdlog::debug("stop() called while daemon shutdown is already in progress");
+            return Result<void>();
+        }
         return Error{ErrorCode::InvalidState, "Daemon not running"};
     }
 
@@ -1186,40 +1250,18 @@ void YamsDaemon::reapCompletedShutdownThread() {
         try {
             shutdownThread_.join();
         } catch (const std::exception& e) {
-            try {
-                spdlog::warn("[YamsDaemon] shutdown thread join exception: {}", e.what());
-            } catch (...) {
-                std::fprintf(stderr,
-                             "[YamsDaemon] shutdown thread join exception (logging failed)\n");
-            }
+            warnShutdownJoinFailure("[YamsDaemon] shutdown thread join exception", e);
         } catch (...) {
-            try {
-                spdlog::warn("[YamsDaemon] shutdown thread join unknown exception");
-            } catch (...) {
-                std::fprintf(
-                    stderr,
-                    "[YamsDaemon] shutdown thread join unknown exception (logging failed)\n");
-            }
+            warnShutdownJoinFailure("[YamsDaemon] shutdown thread join unknown exception");
         }
         return;
     }
     try {
         shutdownThread_.join();
     } catch (const std::exception& e) {
-        try {
-            spdlog::warn("[YamsDaemon] completed shutdown thread join exception: {}", e.what());
-        } catch (...) {
-            std::fprintf(
-                stderr, "[YamsDaemon] completed shutdown thread join exception (logging failed)\n");
-        }
+        warnShutdownJoinFailure("[YamsDaemon] completed shutdown thread join exception", e);
     } catch (...) {
-        try {
-            spdlog::warn("[YamsDaemon] completed shutdown thread join unknown exception");
-        } catch (...) {
-            std::fprintf(
-                stderr,
-                "[YamsDaemon] completed shutdown thread join unknown exception (logging failed)\n");
-        }
+        warnShutdownJoinFailure("[YamsDaemon] completed shutdown thread join unknown exception");
     }
 }
 

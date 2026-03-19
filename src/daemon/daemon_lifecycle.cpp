@@ -96,9 +96,19 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
             auto result = d->stop();
             finalizeWatchdog();
             if (!result) {
-                try {
-                    spdlog::error("Daemon shutdown encountered error: {}", result.error().message);
-                } catch (...) {
+                const bool alreadyStopped =
+                    result.error().code == ErrorCode::InvalidState && !d->isRunning();
+                if (alreadyStopped) {
+                    try {
+                        spdlog::debug("Daemon shutdown request observed daemon already stopping");
+                    } catch (...) {
+                    }
+                } else {
+                    try {
+                        spdlog::error("Daemon shutdown encountered error: {}",
+                                      result.error().message);
+                    } catch (...) {
+                    }
                 }
             }
         } catch (const std::exception& e) {

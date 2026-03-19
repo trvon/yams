@@ -802,7 +802,7 @@ boost::asio::awaitable<void> RepairService::processPathTreeRepair() {
         if (!docsResult || docsResult.value().empty())
             co_return;
 
-        uint64_t created = 0, errors = 0, scanned = 0;
+        uint64_t created = 0, errors = 0;
         const size_t batchSz = TuneAdvisor::repairStartupBatchSize();
 
         for (size_t i = 0; i < docsResult.value().size(); i += batchSz) {
@@ -826,7 +826,6 @@ boost::asio::awaitable<void> RepairService::processPathTreeRepair() {
                 } catch (...) {
                     ++errors;
                 }
-                ++scanned;
             }
             timer.expires_after(10ms);
             co_await timer.async_wait(boost::asio::use_awaitable);
@@ -2135,7 +2134,6 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
 
     // Find orphaned chunks
     std::vector<std::pair<std::string, fs::path>> orphanedChunks;
-    uint64_t bytesToReclaim = 0;
     size_t dirsScanned = 0;
     if (fs::exists(objectsPath)) {
         for (const auto& dirEntry : fs::directory_iterator(objectsPath)) {
@@ -2160,10 +2158,6 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
                 std::string fullHash = dirName + fn;
                 if (referencedHashes.find(fullHash) == referencedHashes.end()) {
                     orphanedChunks.push_back({fullHash, fileEntry.path()});
-                    try {
-                        bytesToReclaim += fs::file_size(fileEntry.path());
-                    } catch (...) {
-                    }
                 }
             }
         }
@@ -2184,12 +2178,9 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
         return result;
     }
 
-    uint64_t bytesReclaimed = 0;
     for (const auto& [hash, path] : orphanedChunks) {
         try {
-            auto size = fs::file_size(path);
             fs::remove(path);
-            bytesReclaimed += size;
             result.succeeded++;
         } catch (...) {
             result.failed++;

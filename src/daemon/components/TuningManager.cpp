@@ -33,6 +33,25 @@ std::atomic<uint8_t> gPostIngestScaleTestMode{
 // Wakeup flag for idle-to-active transition. Set by notifyWakeup(), cleared by tuningLoop().
 // When set, the timer is cancelled early so the loop can re-evaluate immediately.
 std::atomic<bool> gWakeupRequested{false};
+
+void logIgnoredTuningException(const char* context, const std::exception& e) {
+    spdlog::debug("{}: {}", context, e.what());
+}
+
+void logIgnoredTuningException(const char* context) {
+    spdlog::debug("{}: unknown exception", context);
+}
+
+void updateRepairHysteresis(bool isBusy, std::chrono::steady_clock::time_point now,
+                            std::chrono::steady_clock::time_point& busySince,
+                            std::chrono::steady_clock::time_point& readySince) {
+    auto& activeSince = isBusy ? busySince : readySince;
+    auto& inactiveSince = isBusy ? readySince : busySince;
+    if (activeSince.time_since_epoch().count() == 0) {
+        activeSince = now;
+    }
+    inactiveSince = {};
+}
 } // namespace
 
 TuningManager::TuningManager(ServiceManager* sm, StateComponent* state,
@@ -70,6 +89,7 @@ void TuningManager::start() {
     } catch (const std::exception& e) {
         spdlog::debug("TuningManager initial tick error: {}", e.what());
     } catch (...) {
+        logIgnoredTuningException("TuningManager initial tick error");
     }
 
     // Start seeding is no longer needed: UINT32_MAX sentinel means "unset" and
@@ -92,6 +112,7 @@ void TuningManager::stop() {
     } catch (const std::exception& e) {
         spdlog::debug("TuningManager loop stop wait error: {}", e.what());
     } catch (...) {
+        logIgnoredTuningException("TuningManager loop stop wait error");
     }
 }
 
@@ -111,6 +132,7 @@ boost::asio::awaitable<void> TuningManager::tuningLoop() {
         } catch (const std::exception& e) {
             spdlog::debug("TuningManager tick error: {}", e.what());
         } catch (...) {
+            logIgnoredTuningException("TuningManager tick error");
         }
 
         // Choose cadence: active mode uses the fast 5ms tick, idle mode backs off
@@ -400,7 +422,10 @@ bool TuningManager::tick_once() {
             lastOnnxMax_ = desiredMax;
             spdlog::info("[TuningManager] ONNX slots set to {}", desiredMax);
         }
+    } catch (const std::exception& e) {
+        logIgnoredTuningException("ONNX slot tuning failed", e);
     } catch (...) {
+        logIgnoredTuningException("ONNX slot tuning failed");
     }
 
 #if defined(TRACY_ENABLE)
@@ -469,7 +494,10 @@ bool TuningManager::tick_once() {
     std::uint64_t maxWorkerQ = 0;
     try {
         maxWorkerQ = TuneAdvisor::maxWorkerQueue(static_cast<size_t>(workerThreads));
+    } catch (const std::exception& e) {
+        logIgnoredTuningException("maxWorkerQueue probe failed", e);
     } catch (...) {
+        logIgnoredTuningException("maxWorkerQueue probe failed");
     }
 
     (void)activeConns;
@@ -490,7 +518,10 @@ bool TuningManager::tick_once() {
             try {
                 std::uint64_t muxCap = TuneAdvisor::maxMuxBytes();
                 muxHigh = (muxCap > 0 && muxQueuedBytes >= muxCap);
+            } catch (const std::exception& e) {
+                logIgnoredTuningException("maxMuxBytes probe failed", e);
             } catch (...) {
+                logIgnoredTuningException("maxMuxBytes probe failed");
             }
             bool busy = (nonHealthConns > 0) || workerQHigh || muxHigh;
             bool idle = (nonHealthConns == 0) && (workerQueued == 0) && (muxQueuedBytes == 0);
@@ -506,7 +537,10 @@ bool TuningManager::tick_once() {
                 }
             }
         }
+    } catch (const std::exception& e) {
+        logIgnoredTuningException("Adaptive worker poll tuning failed", e);
     } catch (...) {
+        logIgnoredTuningException("Adaptive worker poll tuning failed");
     }
 
     // PBI-05a: PostIngestQueue dynamic concurrency scaling
@@ -602,12 +636,8 @@ bool TuningManager::tick_once() {
             const bool healthyWindow =
                 (waitingRequests == 0 && waitMicrosDelta <= 1000 && timeoutDelta == 0 &&
                  failedDelta == 0 && processedDelta >= 4);
-            if (healthyWindow) {
-                contentionHealthyTicks_ =
-                    std::min<std::uint32_t>(contentionHealthyTicks_ + 1, 1000u);
-            } else {
-                contentionHealthyTicks_ = 0;
-            }
+            contentionHealthyTicks_ =
+                healthyWindow ? std::min<std::uint32_t>(contentionHealthyTicks_ + 1, 1000u) : 0;
 
             const int32_t contentionAdjust = computeContentionBudgetAdjustment(
                 waitingRequests, waitMicrosDelta, timeoutDelta, failedDelta, processedDelta,
@@ -932,7 +962,10 @@ bool TuningManager::tick_once() {
             TracyPlot("db.lock_errors_window", static_cast<double>(dbLockErrors));
 #endif
         }
+    } catch (const std::exception& e) {
+        logIgnoredTuningException("Post-ingest dynamic scaling failed", e);
     } catch (...) {
+        logIgnoredTuningException("Post-ingest dynamic scaling failed");
     }
 
     // Writer budget observability: ensure a non-zero budget is published
@@ -943,7 +976,10 @@ bool TuningManager::tick_once() {
         if (setWriterBudget_) {
             try {
                 setWriterBudget_(writerBudget);
+            } catch (const std::exception& e) {
+                logIgnoredTuningException("Writer budget hook failed", e);
             } catch (...) {
+                logIgnoredTuningException("Writer budget hook failed");
             }
         } else {
             MuxMetricsRegistry::instance().setWriterBudget(writerBudget);
@@ -1061,7 +1097,10 @@ bool TuningManager::tick_once() {
             ioHighTicks_ = 0;
             ioLowTicks_ = 0;
         }
+    } catch (const std::exception& e) {
+        logIgnoredTuningException("Dynamic pool resizing failed", e);
     } catch (...) {
+        logIgnoredTuningException("Dynamic pool resizing failed");
     }
 
     // Dynamic connection slot resizing based on utilization (PBI-085)
@@ -1126,7 +1165,10 @@ bool TuningManager::tick_once() {
                 }
             }
         }
+    } catch (const std::exception& e) {
+        logIgnoredTuningException("Connection slot resizing failed", e);
     } catch (...) {
+        logIgnoredTuningException("Connection slot resizing failed");
     }
 
     // Expose pool sizes and writer budget to FSM metrics for downstream visibility
@@ -1145,7 +1187,10 @@ bool TuningManager::tick_once() {
         TracyPlot("active.conns", static_cast<double>(activeConns));
         TracyPlot("mux.queued.bytes", static_cast<double>(muxQueuedBytes));
 #endif
+    } catch (const std::exception& e) {
+        logIgnoredTuningException("FSM metrics publish failed", e);
     } catch (...) {
+        logIgnoredTuningException("FSM metrics publish failed");
     }
 
     // Publish a precomputed tuning snapshot for hot-path consumers
@@ -1164,7 +1209,10 @@ bool TuningManager::tick_once() {
         s->poolIoMax = TuneAdvisor::poolMaxSizeIpcIo();
         s->writerBudgetBytesPerTurn = writerBudget;
         TuningSnapshotRegistry::instance().set(std::move(s));
+    } catch (const std::exception& e) {
+        logIgnoredTuningException("Tuning snapshot publish failed", e);
     } catch (...) {
+        logIgnoredTuningException("Tuning snapshot publish failed");
     }
 
     try {
@@ -1173,15 +1221,7 @@ bool TuningManager::tick_once() {
             auto now = clock::now();
             const uint32_t busyThresh = TuneAdvisor::repairBusyConnThreshold();
             const bool isBusy = (activeConns >= busyThresh);
-            if (isBusy) {
-                if (repairBusySince_.time_since_epoch().count() == 0)
-                    repairBusySince_ = now;
-                repairReadySince_ = {};
-            } else {
-                if (repairReadySince_.time_since_epoch().count() == 0)
-                    repairReadySince_ = now;
-                repairBusySince_ = {};
-            }
+            updateRepairHysteresis(isBusy, now, repairBusySince_, repairReadySince_);
             const uint32_t degradeHold = TuneAdvisor::repairDegradeHoldMs();
             const uint32_t readyHold = TuneAdvisor::repairReadyHoldMs();
             const bool busyHeld =
@@ -1207,8 +1247,6 @@ bool TuningManager::tick_once() {
                 // paused stages and blocked admission; halt repair entirely.
                 if (govSnap.level >= ResourcePressureLevel::Critical) {
                     tokens = 0;
-                } else if (piqActive) {
-                    tokens = TuneAdvisor::repairTokensBusy();
                 } else {
                     tokens = TuneAdvisor::repairTokensBusy();
                 }
@@ -1227,7 +1265,10 @@ bool TuningManager::tick_once() {
                 uint64_t curBatches = 0;
                 try {
                     curBatches = state_->stats.repairBatchesAttempted.load();
+                } catch (const std::exception& e) {
+                    logIgnoredTuningException("Repair batch counter read failed", e);
                 } catch (...) {
+                    logIgnoredTuningException("Repair batch counter read failed");
                 }
                 if (repairRateWindowStart_.time_since_epoch().count() == 0) {
                     repairRateWindowStart_ = now;
@@ -1251,7 +1292,10 @@ bool TuningManager::tick_once() {
 
             setRepair_(tokens, batch);
         }
+    } catch (const std::exception& e) {
+        logIgnoredTuningException("Repair tuning failed", e);
     } catch (...) {
+        logIgnoredTuningException("Repair tuning failed");
     }
 
     // Idle model maintenance: unload models that have been idle past their timeout
@@ -1292,7 +1336,10 @@ bool TuningManager::tick_once() {
                               embedQueued, embedInFlight);
             }
         }
+    } catch (const std::exception& e) {
+        logIgnoredTuningException("Model maintenance check failed", e);
     } catch (...) {
+        logIgnoredTuningException("Model maintenance check failed");
     }
 
     // Return idle hint for tuning loop cadence: true when no real work is pending.

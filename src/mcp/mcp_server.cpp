@@ -99,28 +99,6 @@ inline int setenv(const char* name, const char* value, int overwrite) {
 namespace yams::mcp {
 
 namespace {
-bool isInteractiveStream(FILE* stream) noexcept {
-    if (!stream) {
-        return false;
-    }
-#if defined(_WIN32)
-    int fd = _fileno(stream);
-    if (fd == -1) {
-        return false;
-    }
-    return _isatty(fd) != 0;
-#elif defined(YAMS_WASI)
-    // WASI runtimes vary; treat stdio as non-interactive.
-    return false;
-#else
-    int fd = fileno(stream);
-    if (fd == -1) {
-        return false;
-    }
-    return ::isatty(fd) != 0;
-#endif
-}
-
 static bool envTruthy(const char* val) {
     if (!val || !*val)
         return false;

@@ -51,6 +51,8 @@ public:
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             return snap_;
+        } catch (const std::exception&) {
+            return snap_;
         } catch (...) {
             return snap_;
         }
@@ -61,49 +63,70 @@ public:
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             transitionTo(ServiceManagerState::OpeningDatabase);
+        } catch (const std::exception&) {
+            ignoreNoexceptFsmFailure();
         } catch (...) {
+            ignoreNoexceptFsmFailure();
         }
     }
     void dispatch(const DatabaseOpenedEvent&) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             transitionTo(ServiceManagerState::DatabaseReady);
+        } catch (const std::exception&) {
+            ignoreNoexceptFsmFailure();
         } catch (...) {
+            ignoreNoexceptFsmFailure();
         }
     }
     void dispatch(const MigrationStartedEvent&) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             transitionTo(ServiceManagerState::MigratingSchema);
+        } catch (const std::exception&) {
+            ignoreNoexceptFsmFailure();
         } catch (...) {
+            ignoreNoexceptFsmFailure();
         }
     }
     void dispatch(const MigrationCompletedEvent&) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             transitionTo(ServiceManagerState::SchemaReady);
+        } catch (const std::exception&) {
+            ignoreNoexceptFsmFailure();
         } catch (...) {
+            ignoreNoexceptFsmFailure();
         }
     }
     void dispatch(const VectorsInitializedEvent&) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             transitionTo(ServiceManagerState::VectorsReady);
+        } catch (const std::exception&) {
+            ignoreNoexceptFsmFailure();
         } catch (...) {
+            ignoreNoexceptFsmFailure();
         }
     }
     void dispatch(const SearchEngineBuildStartedEvent&) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             transitionTo(ServiceManagerState::BuildingSearchEngine);
+        } catch (const std::exception&) {
+            ignoreNoexceptFsmFailure();
         } catch (...) {
+            ignoreNoexceptFsmFailure();
         }
     }
     void dispatch(const SearchEngineBuiltEvent&) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             transitionTo(ServiceManagerState::Ready);
+        } catch (const std::exception&) {
+            ignoreNoexceptFsmFailure();
         } catch (...) {
+            ignoreNoexceptFsmFailure();
         }
     }
     void dispatch(const InitializationFailedEvent& ev) noexcept {
@@ -111,21 +134,30 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             snap_.lastError = ev.error;
             transitionTo(ServiceManagerState::Failed);
+        } catch (const std::exception&) {
+            ignoreNoexceptFsmFailure();
         } catch (...) {
+            ignoreNoexceptFsmFailure();
         }
     }
     void dispatch(const ShutdownEvent&) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             transitionTo(ServiceManagerState::ShuttingDown);
+        } catch (const std::exception&) {
+            ignoreNoexceptFsmFailure();
         } catch (...) {
+            ignoreNoexceptFsmFailure();
         }
     }
     void dispatch(const ServiceManagerStoppedEvent&) noexcept {
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             transitionTo(ServiceManagerState::Stopped);
+        } catch (const std::exception&) {
+            ignoreNoexceptFsmFailure();
         } catch (...) {
+            ignoreNoexceptFsmFailure();
         }
     }
 
@@ -134,6 +166,8 @@ public:
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             return snap_.state == ServiceManagerState::SchemaReady;
+        } catch (const std::exception&) {
+            return false;
         } catch (...) {
             return false;
         }
@@ -143,6 +177,8 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             return snap_.state == ServiceManagerState::VectorsReady ||
                    snap_.state == ServiceManagerState::SchemaReady;
+        } catch (const std::exception&) {
+            return false;
         } catch (...) {
             return false;
         }
@@ -151,6 +187,8 @@ public:
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             return snap_.state == ServiceManagerState::Ready;
+        } catch (const std::exception&) {
+            return false;
         } catch (...) {
             return false;
         }
@@ -160,6 +198,8 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             return snap_.state == ServiceManagerState::Stopped ||
                    snap_.state == ServiceManagerState::ShuttingDown;
+        } catch (const std::exception&) {
+            return true;
         } catch (...) {
             return true;
         }
@@ -171,6 +211,8 @@ public:
             return snap_.state == ServiceManagerState::Ready ||
                    snap_.state == ServiceManagerState::Failed ||
                    snap_.state == ServiceManagerState::Stopped;
+        } catch (const std::exception&) {
+            return true;
         } catch (...) {
             return true;
         }
@@ -190,9 +232,14 @@ public:
                     spdlog::warn("[ServiceManagerFSM] waitForTerminalState timed out after {}s, "
                                  "current state={}",
                                  timeoutSeconds, static_cast<int>(snap_.state));
+                } catch (const std::exception&) {
+                    ignoreNoexceptFsmFailure();
                 } catch (...) {
+                    ignoreNoexceptFsmFailure();
                 }
             }
+            return snap_;
+        } catch (const std::exception&) {
             return snap_;
         } catch (...) {
             return snap_;
@@ -203,7 +250,10 @@ public:
         try {
             std::lock_guard<std::mutex> lock(mutex_);
             cv_.notify_all();
+        } catch (const std::exception&) {
+            ignoreNoexceptFsmFailure();
         } catch (...) {
+            ignoreNoexceptFsmFailure();
         }
     }
 
@@ -213,11 +263,16 @@ public:
             snap_.state = ServiceManagerState::Uninitialized;
             snap_.lastError.clear();
             snap_.lastTransition = std::chrono::steady_clock::now();
+        } catch (const std::exception&) {
+            ignoreNoexceptFsmFailure();
         } catch (...) {
+            ignoreNoexceptFsmFailure();
         }
     }
 
 private:
+    static void ignoreNoexceptFsmFailure() noexcept {}
+
     void transitionTo(ServiceManagerState next) {
         auto prev = snap_.state;
         snap_.state = next;
@@ -225,7 +280,10 @@ private:
         try {
             spdlog::info("[ServiceManagerFSM] {} -> {}", static_cast<int>(prev),
                          static_cast<int>(next));
+        } catch (const std::exception&) {
+            ignoreNoexceptFsmFailure();
         } catch (...) {
+            ignoreNoexceptFsmFailure();
         }
         if (next == ServiceManagerState::Ready || next == ServiceManagerState::Failed ||
             next == ServiceManagerState::Stopped) {

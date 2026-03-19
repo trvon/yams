@@ -20,17 +20,7 @@ std::unique_ptr<ICommand> createDaemonCommand();
 
 using yams::cli::ICommand;
 
-namespace {
-
-CLI::App* getSub(CLI::App& app, const std::string& name) {
-    for (auto* sub : app.get_subcommands()) {
-        if (sub->get_name() == name)
-            return sub;
-    }
-    return nullptr;
-}
-
-} // namespace
+namespace {} // namespace
 
 TEST_CASE("DaemonCommand - parses unordered flags with help without executing",
           "[cli][daemon][catch2]") {

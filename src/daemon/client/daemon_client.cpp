@@ -1084,7 +1084,8 @@ boost::asio::awaitable<Result<StatusResponse>> DaemonClient::status() {
 }
 
 boost::asio::awaitable<Result<Response>> DaemonClient::executeRequest(const Request& req) {
-    co_return co_await sendRequest(req);
+    Request ownedReq = req;
+    co_return co_await sendRequest(std::move(ownedReq));
 }
 
 boost::asio::awaitable<Result<void>> DaemonClient::shutdown(bool graceful) {
@@ -1115,13 +1116,15 @@ boost::asio::awaitable<Result<void>> DaemonClient::ping() {
 }
 
 boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request& req) {
+    Request ownedReq = req;
+
     // Capture shared_ptr to extend Impl lifetime across co_await suspension points
     auto impl = pImpl;
     if (!impl || impl->isShuttingDown()) {
         co_return Error{ErrorCode::InvalidState, "DaemonClient is shutting down"};
     }
-    spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'", getRequestName(req),
-                  false, impl->config_.socketPath.string());
+    spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'",
+                  getRequestName(ownedReq), false, impl->config_.socketPath.string());
     if (impl->resolvedTransportMode_ == ClientTransportMode::InProcess) {
         if (!impl->embeddedHost_) {
             auto host = ensure_embedded_host(impl->config_);
@@ -1131,7 +1134,7 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
             impl->embeddedHost_ = host.value();
         }
         InProcessTransport transport(impl->embeddedHost_);
-        auto r = co_await transport.send_request(req);
+        auto r = co_await transport.send_request(std::move(ownedReq));
         if (impl->isShuttingDown()) {
             co_return Error{ErrorCode::InvalidState, "DaemonClient destroyed during request"};
         }
@@ -1141,30 +1144,31 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
     }
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;
-    auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
+    auto timeout = getTimeoutForCategory(getTimeoutCategory(ownedReq));
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);
     opts.bodyTimeout = std::max(opts.bodyTimeout, timeout);
     // Prune and other long maintenance ops get fresh sockets to avoid stale pooled fds
-    if (requires_single_use_connection(req)) {
+    if (requires_single_use_connection(ownedReq)) {
         opts.poolEnabled = false;
     }
     // Force single-use connection for long maintenance ops (e.g., prune)
-    if (requires_single_use_connection(req)) {
+    if (requires_single_use_connection(ownedReq)) {
         opts.poolEnabled = false;
     }
     AsioTransportAdapter adapter(opts);
-    auto r = co_await adapter.send_request(req);
+    auto r = co_await adapter.send_request(std::move(ownedReq));
 
     if (!r && isProxySocketPath(opts.socketPath) && shouldRetryViaMainSocket(r.error())) {
         const auto fallbackSocket = deriveMainSocketFromProxy(opts.socketPath);
         if (!fallbackSocket.empty()) {
+            Request retryReq = req;
             auto retryOpts = opts;
             retryOpts.socketPath = fallbackSocket;
             spdlog::debug("DaemonClient: retrying request on main socket {}",
                           fallbackSocket.string());
             AsioTransportAdapter retryAdapter(retryOpts);
-            auto retryRes = co_await retryAdapter.send_request(req);
+            auto retryRes = co_await retryAdapter.send_request(std::move(retryReq));
             if (retryRes) {
                 impl->config_.socketPath = fallbackSocket;
                 impl->refresh_transport();
@@ -1684,6 +1688,8 @@ boost::asio::awaitable<Result<GrepResponse>> DaemonClient::streamingGrep(const G
 boost::asio::awaitable<Result<void>>
 DaemonClient::sendRequestStreaming(const Request& req,
                                    std::shared_ptr<ChunkedResponseHandler> handler) {
+    Request ownedReq = req;
+
     // Capture shared_ptr to extend Impl lifetime across co_await suspension points
     auto impl = pImpl;
     if (!impl || impl->isShuttingDown()) {
@@ -1729,8 +1735,8 @@ DaemonClient::sendRequestStreaming(const Request& req,
             impl->embeddedHost_ = host.value();
         }
         InProcessTransport transport(impl->embeddedHost_);
-        auto res =
-            co_await transport.send_request_streaming(req, onHeader, onChunk, onError, onComplete);
+        auto res = co_await transport.send_request_streaming(ownedReq, onHeader, onChunk, onError,
+                                                             onComplete);
         if (impl->isShuttingDown()) {
             co_return Error{ErrorCode::InvalidState, "DaemonClient destroyed during request"};
         }
@@ -1741,27 +1747,29 @@ DaemonClient::sendRequestStreaming(const Request& req,
 
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;
-    auto timeout = getTimeoutForCategory(getTimeoutCategory(req));
+    auto timeout = getTimeoutForCategory(getTimeoutCategory(ownedReq));
     opts.requestTimeout = std::max(opts.requestTimeout, timeout);
     opts.headerTimeout = std::max(opts.headerTimeout, timeout);
     opts.bodyTimeout = std::max(opts.bodyTimeout, timeout);
     // Only disable pooling for long-running maintenance ops that might outlive connections
-    if (requires_single_use_connection(req)) {
+    if (requires_single_use_connection(ownedReq)) {
         opts.poolEnabled = false;
     }
     AsioTransportAdapter adapter(opts);
-    auto res = co_await adapter.send_request_streaming(req, onHeader, onChunk, onError, onComplete);
+    auto res =
+        co_await adapter.send_request_streaming(ownedReq, onHeader, onChunk, onError, onComplete);
 
     if (!res && isProxySocketPath(opts.socketPath) && shouldRetryViaMainSocket(res.error())) {
         const auto fallbackSocket = deriveMainSocketFromProxy(opts.socketPath);
         if (!fallbackSocket.empty()) {
+            Request retryReq = req;
             auto retryOpts = opts;
             retryOpts.socketPath = fallbackSocket;
             spdlog::debug("DaemonClient: retrying streaming request on main socket {}",
                           fallbackSocket.string());
             AsioTransportAdapter retryAdapter(retryOpts);
-            auto retryRes = co_await retryAdapter.send_request_streaming(req, onHeader, onChunk,
-                                                                         onError, onComplete);
+            auto retryRes = co_await retryAdapter.send_request_streaming(
+                retryReq, onHeader, onChunk, onError, onComplete);
             if (retryRes) {
                 impl->config_.socketPath = fallbackSocket;
                 impl->refresh_transport();

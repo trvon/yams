@@ -146,7 +146,6 @@ private:
     [[nodiscard]] bool meetsSizeCriteria(const metadata::DocumentInfo& doc, int64_t minSize,
                                          int64_t maxSize) const noexcept;
 
-private:
     storage::IStorageEngine* storage_{nullptr};
     RepairManagerConfig config_;
     metadata::MetadataRepository* repo_{nullptr};

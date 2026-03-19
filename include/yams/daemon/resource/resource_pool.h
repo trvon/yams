@@ -165,8 +165,10 @@ public:
     ~ResourcePool() noexcept {
         try {
             shutdown();
+        } catch (const std::exception&) {
+            ignoreResourcePoolTeardownFailure();
         } catch (...) {
-            // Ignore exceptions during destruction - may happen during static destruction
+            ignoreResourcePoolTeardownFailure();
         }
     }
 
@@ -337,17 +339,25 @@ public:
         } catch (const std::exception& e) {
             try {
                 spdlog::warn("[ResourcePool] shutdown exception: {}", e.what());
+            } catch (const std::exception&) {
+                ignoreResourcePoolTeardownFailure();
             } catch (...) {
+                ignoreResourcePoolTeardownFailure();
             }
         } catch (...) {
             try {
                 spdlog::warn("[ResourcePool] shutdown unknown exception");
+            } catch (const std::exception&) {
+                ignoreResourcePoolTeardownFailure();
             } catch (...) {
+                ignoreResourcePoolTeardownFailure();
             }
         }
     }
 
 private:
+    static void ignoreResourcePoolTeardownFailure() noexcept {}
+
     std::string generateResourceId() { return "resource_" + std::to_string(nextId_++); }
 
     PoolConfig<ResourceType> config_;

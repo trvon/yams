@@ -218,7 +218,6 @@ private:
     inline Shard& shard() noexcept { return shards_[shard_index()]; }
     inline const Shard& shard() const noexcept { return shards_[shard_index()]; }
 
-private:
     std::atomic<bool> enabled_;
     std::array<Shard, kDefaultShards> shards_{};
     std::atomic<uint32_t> ipcPoolSize_{0};

@@ -185,5 +185,12 @@ TEST_CASE("Deprecation macro compiles without errors", "[core][cpp23]") {
     YAMS_CPP23_DEPRECATED("test message")
     auto old_function = []() { return 42; };
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
     REQUIRE(old_function() == 42);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 }

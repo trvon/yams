@@ -93,6 +93,8 @@ boost::asio::awaitable<Result<Response>> InProcessTransport::send_request(const 
 }
 
 boost::asio::awaitable<Result<Response>> InProcessTransport::send_request(Request&& req) {
+    Request ownedReq = std::move(req);
+
     if (!host_) {
         co_return Error{ErrorCode::NotInitialized, "Embedded service host unavailable"};
     }
@@ -107,7 +109,8 @@ boost::asio::awaitable<Result<Response>> InProcessTransport::send_request(Reques
 
     boost::asio::co_spawn(
         host_->getExecutor(),
-        [dispatcher, request = std::move(req), promise]() mutable -> boost::asio::awaitable<void> {
+        [dispatcher, request = std::move(ownedReq),
+         promise]() mutable -> boost::asio::awaitable<void> {
             try {
                 auto response = co_await dispatcher->dispatch(request);
                 promise->set_value(std::move(response));

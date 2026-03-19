@@ -382,6 +382,8 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(cons
 }
 
 boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Request&& req) {
+    Request ownedReq = std::move(req);
+
     // Check cancellation before proceeding
     auto cs = co_await this_coro::cancellation_state;
     if (cs.cancelled() != boost::asio::cancellation_type::none) {
@@ -411,13 +413,13 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
                                           opts_.socketPath.string()))};
     }
 
-    const auto req_type = getMessageType(req);
+    const auto req_type = getMessageType(ownedReq);
 
     Message msg;
     msg.version = PROTOCOL_VERSION;
     msg.requestId = next_request_id();
     msg.timestamp = std::chrono::steady_clock::now();
-    msg.payload = std::move(req);
+    msg.payload = std::move(ownedReq);
     msg.clientVersion = "yams-client-0.3.4";
     msg.expectsStreamingResponse = false;
 
@@ -546,6 +548,8 @@ boost::asio::awaitable<Result<void>>
 AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback onHeader,
                                              ChunkCallback onChunk, ErrorCallback onError,
                                              CompleteCallback onComplete) {
+    Request ownedReq = req;
+
     // Check cancellation before proceeding
     auto cs = co_await this_coro::cancellation_state;
     if (cs.cancelled() != boost::asio::cancellation_type::none) {
@@ -601,7 +605,7 @@ AsioTransportAdapter::send_request_streaming(const Request& req, HeaderCallback 
         msg.version = PROTOCOL_VERSION;
         msg.requestId = next_request_id();
         msg.timestamp = std::chrono::steady_clock::now();
-        msg.payload = req;
+        msg.payload = ownedReq;
         msg.clientVersion = "yams-client-0.3.4";
         msg.expectsStreamingResponse = true;
 

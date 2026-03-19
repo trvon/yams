@@ -24,17 +24,6 @@ using namespace yams::compression;
 
 namespace {
 
-std::vector<std::byte> generateRandomBytes(size_t size) {
-    std::vector<std::byte> data(size);
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<int> dis(0, 255);
-    for (auto& b : data) {
-        b = static_cast<std::byte>(dis(gen));
-    }
-    return data;
-}
-
 std::vector<std::byte> generateCompressibleData(size_t size) {
     std::vector<std::byte> data(size);
     std::random_device rd;

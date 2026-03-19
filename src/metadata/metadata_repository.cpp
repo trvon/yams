@@ -149,15 +149,6 @@ Result<std::vector<RowT>> executePreparedVectorQuery(Database& db, const std::st
                                             [](RowT&) {});
 }
 
-Result<void> bindIdList(Statement& stmt, int startIndex, const std::vector<int64_t>& ids) {
-    for (size_t i = 0; i < ids.size(); ++i) {
-        if (auto bindResult = stmt.bind(static_cast<int>(i + startIndex), ids[i]); !bindResult) {
-            return bindResult.error();
-        }
-    }
-    return {};
-}
-
 // Transaction begin helper with backend-appropriate semantics.
 // - libsql (MVCC): Uses regular BEGIN since concurrent writers are supported.
 // - SQLite: Uses BEGIN IMMEDIATE with retry/backoff for lock contention.

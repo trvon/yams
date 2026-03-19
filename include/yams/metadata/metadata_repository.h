@@ -783,7 +783,6 @@ public:
     /// Uses a single efficient LEFT JOIN anti-join query. Limited to `limit` rows (0 = no limit).
     Result<std::vector<DocumentInfo>> findDocsMissingPathTree(int limit = 0);
 
-public:
     void setKnowledgeGraphStore(std::shared_ptr<KnowledgeGraphStore> kgStore) {
         kgStore_ = std::move(kgStore);
     }

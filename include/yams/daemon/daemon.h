@@ -184,7 +184,6 @@ public:
     // Atomic pointer to avoid data race between setter and runLoop reader.
     std::atomic<std::atomic<bool>*> externalShutdownFlag_{nullptr};
 
-public:
     // On-demand plugin autoload bridge
     Result<size_t> autoloadPluginsNow();
     ServiceManager* getServiceManager() const { return serviceManager_.get(); }
@@ -203,7 +202,6 @@ public:
 
     void spawnShutdownThread(std::function<void()> shutdownFn);
 
-private:
     void reapCompletedShutdownThread();
 };
 
